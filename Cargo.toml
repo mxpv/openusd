@@ -2,5 +2,9 @@
 name = "openusd"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/mxpv/openusd"
+license-file = "LICENSE"
+exclude = ["/extern"]
+description = "Rust native USD library"
 
 [dependencies]
