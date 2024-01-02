@@ -1,0 +1,3 @@
+[submodule "extern/usd-wg-assets"]
+	path = extern/usd-wg-assets
+	url = https://github.com/usd-wg/assets
