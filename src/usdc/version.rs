@@ -18,11 +18,7 @@ impl fmt::Display for Version {
 
 /// Make version helper.
 pub const fn version(major: u8, minor: u8, patch: u8) -> Version {
-    Version {
-        major,
-        minor,
-        patch,
-    }
+    Version { major, minor, patch }
 }
 
 impl Version {

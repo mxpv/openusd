@@ -115,9 +115,6 @@ mod tests {
 
         let input = decode32::<u32>(&output, 7).expect("Failed to decode integers");
 
-        assert_eq!(
-            input.as_slice(),
-            &[123_u32, 124, 125, 100125, 100125, 100126, 100126]
-        )
+        assert_eq!(input.as_slice(), &[123_u32, 124, 125, 100125, 100125, 100126, 100126])
     }
 }

@@ -13,9 +13,9 @@ use openusd::usdc::{CrateFile, Version};
 fn main() -> Result<()> {
     let args = env::args().collect::<Vec<_>>();
 
-    let path = args.get(1).context(
-        "Missing path to usdc file, use: cargo run --example dump_usdc {PATH_TO_FILE}.usdc",
-    )?;
+    let path = args
+        .get(1)
+        .context("Missing path to usdc file, use: cargo run --example dump_usdc {PATH_TO_FILE}.usdc")?;
 
     let reader = fs::File::open(path).context("Failed to read crate file")?;
     let file = CrateFile::from_reader(reader).context("Failed to read crate file")?;
@@ -58,12 +58,9 @@ fn main() -> Result<()> {
     println!();
 
     println!("-- Field sets: ");
-    file.fieldsets
-        .iter()
-        .enumerate()
-        .for_each(|(index, fieldset)| {
-            println!("#{}:\t{:?}", index, fieldset);
-        });
+    file.fieldsets.iter().enumerate().for_each(|(index, fieldset)| {
+        println!("#{}:\t{:?}", index, fieldset);
+    });
 
     println!("-- Paths: ");
     file.paths.iter().enumerate().for_each(|(index, path)| {
@@ -75,10 +72,7 @@ fn main() -> Result<()> {
     file.specs.iter().enumerate().for_each(|(index, spec)| {
         let path = &file.paths[spec.path_index];
 
-        println!(
-            "#{}:\t{} -> {} ({})",
-            index, spec.fieldset_index, path, spec.spec_type
-        );
+        println!("#{}:\t{} -> {} ({})", index, spec.fieldset_index, path, spec.spec_type);
     });
     println!();
 

@@ -95,26 +95,21 @@ impl CrateFile {
             ..Default::default()
         };
 
-        file.read_sections(&mut reader)
-            .context("Unable to read sections")?;
+        file.read_sections(&mut reader).context("Unable to read sections")?;
 
-        file.read_tokens(&mut reader)
-            .context("Unable to read TOKENS section")?;
+        file.read_tokens(&mut reader).context("Unable to read TOKENS section")?;
 
         file.read_strings(&mut reader)
             .context("Unable to read STRINGS section")?;
 
-        file.read_fields(&mut reader)
-            .context("Unable to read FIELDS section")?;
+        file.read_fields(&mut reader).context("Unable to read FIELDS section")?;
 
         file.read_fieldsets(&mut reader)
             .context("Unable to read FIELDSETS section")?;
 
-        file.read_paths(&mut reader)
-            .context("Unable to read PATHS section")?;
+        file.read_paths(&mut reader).context("Unable to read PATHS section")?;
 
-        file.read_specs(&mut reader)
-            .context("Unable to read SPECS section")?;
+        file.read_specs(&mut reader).context("Unable to read SPECS section")?;
 
         Ok(file)
     }
@@ -123,16 +118,13 @@ impl CrateFile {
     /// Roughly corresponds to `PXR_PREFER_SAFETY_OVER_SPEED` define in USD.
     pub fn validate(&self) -> Result<()> {
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3268
-        self.fields
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, field)| {
-                self.tokens.get(field.token_index).with_context(|| {
-                    format!("Invalid field token index {}: {}", index, field.token_index)
-                })?;
+        self.fields.iter().enumerate().try_for_each(|(index, field)| {
+            self.tokens
+                .get(field.token_index)
+                .with_context(|| format!("Invalid field token index {}: {}", index, field.token_index))?;
 
-                anyhow::Ok(())
-            })?;
+            anyhow::Ok(())
+        })?;
 
         self.fieldsets
             .iter()
@@ -146,41 +138,32 @@ impl CrateFile {
                 anyhow::Ok(())
             })?;
 
-        self.specs
-            .iter()
-            .enumerate()
-            .try_for_each(|(index, spec)| {
-                self.paths.get(spec.path_index).with_context(|| {
-                    format!("Invalid spec {} path index: {}", index, spec.path_index)
-                })?;
+        self.specs.iter().enumerate().try_for_each(|(index, spec)| {
+            self.paths
+                .get(spec.path_index)
+                .with_context(|| format!("Invalid spec {} path index: {}", index, spec.path_index))?;
 
-                self.fieldsets.get(spec.fieldset_index).with_context(|| {
-                    format!(
-                        "Invalid spec {} fieldset index: {}",
-                        index, spec.fieldset_index
-                    )
-                })?;
+            self.fieldsets
+                .get(spec.fieldset_index)
+                .with_context(|| format!("Invalid spec {} fieldset index: {}", index, spec.fieldset_index))?;
 
-                // Additionally, a fieldSetIndex must either be 0, or the element at
-                // the prior index must be a default-constructed FieldIndex.
-                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3289
+            // Additionally, a fieldSetIndex must either be 0, or the element at
+            // the prior index must be a default-constructed FieldIndex.
+            // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3289
 
-                if spec.fieldset_index > 0 {
-                    ensure!(
-                        self.fieldsets[spec.fieldset_index - 1].is_none(),
-                        "Invalid spec {}, the element at the prior index {} must be a default-constructed field index",
-                        index,
-                        spec.fieldset_index);
-                }
-
+            if spec.fieldset_index > 0 {
                 ensure!(
-                    spec.spec_type != sdf::SpecType::Unknown,
-                    "Invalid spec {} type",
-                    index
+                    self.fieldsets[spec.fieldset_index - 1].is_none(),
+                    "Invalid spec {}, the element at the prior index {} must be a default-constructed field index",
+                    index,
+                    spec.fieldset_index
                 );
+            }
 
-                anyhow::Ok(())
-            })?;
+            ensure!(spec.spec_type != sdf::SpecType::Unknown, "Invalid spec {} type", index);
+
+            anyhow::Ok(())
+        })?;
 
         Ok(())
     }
@@ -195,10 +178,7 @@ impl CrateFile {
     fn read_header(mut reader: impl io::Read + io::Seek) -> Result<Bootstrap> {
         let header = reader.read_pod::<Bootstrap>()?;
 
-        ensure!(
-            header.ident.eq(b"PXR-USDC"),
-            "Usd crate bootstrap section corrupt"
-        );
+        ensure!(header.ident.eq(b"PXR-USDC"), "Usd crate bootstrap section corrupt");
 
         ensure!(header.toc_offset > 0, "Invalid TOC offset");
 
@@ -284,10 +264,7 @@ impl CrateFile {
         let strings = reader.read_vec::<u32>()?;
 
         // These are indices, so convert to usize for convenience.
-        self.strings = strings
-            .into_iter()
-            .map(|offset| offset as usize)
-            .collect::<Vec<_>>();
+        self.strings = strings.into_iter().map(|offset| offset as usize).collect::<Vec<_>>();
 
         Ok(())
     }
@@ -346,13 +323,7 @@ impl CrateFile {
 
             let sets = decoded
                 .into_iter()
-                .map(|i| {
-                    if i == INVALID_INDEX {
-                        None
-                    } else {
-                        Some(i as usize)
-                    }
-                })
+                .map(|i| if i == INVALID_INDEX { None } else { Some(i as usize) })
                 .collect::<Vec<_>>();
 
             debug_assert_eq!(sets.len(), count);

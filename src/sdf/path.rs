@@ -28,9 +28,7 @@ impl FromStr for Path {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> result::Result<Path, Self::Err> {
-        Ok(Path {
-            path: s.to_string(),
-        })
+        Ok(Path { path: s.to_string() })
     }
 }
 
@@ -40,9 +38,7 @@ impl Path {
     }
 
     fn from_str_unchecked(path: &str) -> Path {
-        Path {
-            path: path.to_string(),
-        }
+        Path { path: path.to_string() }
     }
 
     #[inline]
@@ -58,10 +54,7 @@ impl Path {
     pub fn append_property(&self, property: &str) -> Result<Path> {
         // TODO: Validate property name more carefully here.
         ensure!(!property.is_empty(), "Property name cannot be empty");
-        ensure!(
-            !self.is_property_path(),
-            "Cannot append property to property path"
-        );
+        ensure!(!self.is_property_path(), "Cannot append property to property path");
         ensure!(property != ".", "Property name cannot be '.'");
 
         let mut new_path = self.path.clone();
@@ -78,10 +71,7 @@ impl Path {
             bail!("Cannot append absolute path to absolute path");
         }
 
-        ensure!(
-            !self.is_property_path(),
-            "Cannot append path to property path"
-        );
+        ensure!(!self.is_property_path(), "Cannot append path to property path");
 
         if append.as_str() == "." {
             return Ok(self.clone());
@@ -186,31 +176,19 @@ mod tests {
     fn test_append_path() -> Result<()> {
         assert_eq!(Path::new("/prim")?.append_path(".")?.as_str(), "/prim");
 
+        assert_eq!(Path::new("/")?.append_path("foo/bar.attr")?.as_str(), "/foo/bar.attr");
         assert_eq!(
-            Path::new("/")?.append_path("foo/bar.attr")?.as_str(),
-            "/foo/bar.attr"
-        );
-        assert_eq!(
-            Path::new("/")?
-                .append_path("foo/bar.attr:argle:bargle")?
-                .as_str(),
+            Path::new("/")?.append_path("foo/bar.attr:argle:bargle")?.as_str(),
             "/foo/bar.attr:argle:bargle"
         );
 
+        assert_eq!(Path::new("/foo")?.append_path("bar.attr")?.as_str(), "/foo/bar.attr");
         assert_eq!(
-            Path::new("/foo")?.append_path("bar.attr")?.as_str(),
-            "/foo/bar.attr"
-        );
-        assert_eq!(
-            Path::new("/foo")?
-                .append_path("bar.attr:argle:bargle")?
-                .as_str(),
+            Path::new("/foo")?.append_path("bar.attr:argle:bargle")?.as_str(),
             "/foo/bar.attr:argle:bargle"
         );
         assert_eq!(
-            Path::new("/foo")?
-                .append_path("bar.rel[/target].attr")?
-                .as_str(),
+            Path::new("/foo")?.append_path("bar.rel[/target].attr")?.as_str(),
             "/foo/bar.rel[/target].attr"
         );
 
@@ -222,9 +200,7 @@ mod tests {
         );
 
         assert_eq!(
-            Path::new("/foo")?
-                .append_path("bar.attr[/target.attr]")?
-                .as_str(),
+            Path::new("/foo")?.append_path("bar.attr[/target.attr]")?.as_str(),
             "/foo/bar.attr[/target.attr]"
         );
 
@@ -236,9 +212,7 @@ mod tests {
         );
 
         assert_eq!(
-            Path::new("/foo")?
-                .append_path("bar.attr.mapper[/target].arg")?
-                .as_str(),
+            Path::new("/foo")?.append_path("bar.attr.mapper[/target].arg")?.as_str(),
             "/foo/bar.attr.mapper[/target].arg"
         );
 

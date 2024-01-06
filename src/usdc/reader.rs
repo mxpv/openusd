@@ -27,10 +27,7 @@ pub trait CrateReader {
     ///
     /// # Arguments:
     /// - `estimated_size`: Size enough to hold uncompressed data.
-    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(
-        &mut self,
-        estimated_size: usize,
-    ) -> Result<Vec<T>>;
+    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(&mut self, estimated_size: usize) -> Result<Vec<T>>;
 
     /// Reads sequence of compressed integers.
     fn read_encoded_ints<T: Int>(&mut self, count: usize) -> Result<Vec<T>>;
@@ -66,10 +63,7 @@ impl<R: io::Read> CrateReader for R {
         Ok(vec)
     }
 
-    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(
-        &mut self,
-        estimated_count: usize,
-    ) -> Result<Vec<T>> {
+    fn read_compressed<T: Default + NoUninit + AnyBitPattern>(&mut self, estimated_count: usize) -> Result<Vec<T>> {
         // Read data to memory.
         let compressed_size = self.read_count()?;
         let mut input = vec![0_u8; compressed_size];
@@ -196,13 +190,10 @@ fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize> {
     // Check first byte for # chunks.
     // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/base/tf/fastCompression.cpp#L108
 
-    let chunks = input
-        .read_pod::<u8>()
-        .context("Unable to read lz4 chunk count")? as usize;
+    let chunks = input.read_pod::<u8>().context("Unable to read lz4 chunk count")? as usize;
 
     if chunks == 0 {
-        let size = lz4_flex::decompress_into(input, output)
-            .context("Failed to decompress data, possibly corrupt?")?;
+        let size = lz4_flex::decompress_into(input, output).context("Failed to decompress data, possibly corrupt?")?;
 
         Ok(size)
     } else {
