@@ -1,0 +1,27 @@
+name: CI
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '0 0 * * 0' # Run weekly on Sundays
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        os: [macos-13, ubuntu-20.04, windows-2019]
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - run: cargo check --examples --tests
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo fmt --all -- --check --files-with-diff
+      - run: cargo doc --no-deps
+      - run: cargo test --all-targets --all-features
