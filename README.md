@@ -1,7 +1,8 @@
 # openusd
 
-![Crates.io Version](https://img.shields.io/crates/v/openusd)
-![docs.rs](https://img.shields.io/docsrs/openusd)
+[![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)
+[![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest)
+[![CI](https://github.com/mxpv/openusd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mxpv/openusd/actions/workflows/ci.yml)
 
 [USD](https://openusd.org/release/index.html) is an efficient, scalable system for authoring, reading, and streaming time-sampled scene description for interchange between graphics applications.
 
