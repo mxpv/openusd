@@ -1,8 +1,10 @@
 //! Scene description foundations.
 
-use std::fmt;
-
 use strum::{Display, EnumCount, FromRepr};
+
+mod path;
+
+pub use path::Path;
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.
@@ -25,50 +27,4 @@ pub enum SpecType {
     RelationshipTarget = 9,
     Variant = 10,
     VariantSet = 11,
-}
-
-/// Placeholder for SdfPath.
-// TODO: reimplement this properly.
-#[derive(Default, Clone)]
-pub struct Path {
-    path: String,
-    props: Vec<String>,
-}
-
-impl fmt::Display for Path {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.path)?;
-        if !self.props.is_empty() {
-            write!(f, ".{}", self.props.join(","))?;
-        }
-
-        Ok(())
-    }
-}
-
-impl Path {
-    pub fn abs_root_path() -> Self {
-        Path {
-            path: "/".into(),
-            props: Vec::new(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.path.is_empty()
-    }
-
-    pub fn append_property(&self, name: &str) -> Self {
-        let mut p = self.clone();
-        p.props.push(name.to_string());
-        p
-    }
-
-    pub fn append_element_token(&self, name: &str) -> Self {
-        let mut p = self.clone();
-        p.path.push('/');
-        p.path.push_str(name);
-
-        p
-    }
 }

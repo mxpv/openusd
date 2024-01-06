@@ -121,7 +121,7 @@ impl<R: io::Read> CrateReader for R {
             0,
             sdf::Path::default(),
             &mut paths,
-        );
+        )?;
 
         Ok(paths)
     }
@@ -135,7 +135,7 @@ fn build_compressed_paths(
     mut current_index: usize,
     mut parent_path: sdf::Path,
     paths: &mut [sdf::Path],
-) {
+) -> Result<()> {
     // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
 
     let mut has_child;
@@ -146,7 +146,7 @@ fn build_compressed_paths(
         current_index += 1;
 
         if parent_path.is_empty() {
-            parent_path = sdf::Path::abs_root_path();
+            parent_path = sdf::Path::new("/")?;
             paths[this_index] = parent_path.clone();
         } else {
             let token_index = element_token_indexes[this_index];
@@ -155,9 +155,9 @@ fn build_compressed_paths(
             let element_token = tokens[token_index].as_str();
 
             paths[path_indexes[this_index] as usize] = if is_prim_property_path {
-                parent_path.append_property(element_token)
+                parent_path.append_property(element_token)?
             } else {
-                parent_path.append_element_token(element_token)
+                parent_path.append_path(element_token)?
             };
         }
 
@@ -176,7 +176,7 @@ fn build_compressed_paths(
                     sibling_index,
                     parent_path,
                     paths,
-                );
+                )?;
             }
 
             // Have a child (may have also had a sibling).
@@ -188,6 +188,8 @@ fn build_compressed_paths(
             break;
         }
     }
+
+    Ok(())
 }
 
 fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize> {
