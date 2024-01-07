@@ -16,6 +16,10 @@ The following list of docs was used during crate development:
 - [Book of USD](https://remedy-entertainment.github.io/USDBook/)
 - [API Documentation](https://openusd.org/release/api/index.html)
 
+## Supported features
+
+The USD library is a fairly large project to replicate. For the most up-to-date information on what features are currently supported by the crate, follow issue https://github.com/mxpv/openusd/issues/1 in our repository.
+
 ## Getting started
 
 To begin, simply clone the repository including its submodules.
