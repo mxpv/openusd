@@ -1,0 +1,16 @@
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "deny"
+notice = "deny"
+
+[bans]
+# Lint level for when multiple versions of the same crate are detected
+multiple-versions = "deny"
+
+[licenses]
+unlicensed = "deny"
+allow = ["MIT", "Apache-2.0", "Unicode-DFS-2016"]
+
+[sources]
+unknown-registry = "warn"

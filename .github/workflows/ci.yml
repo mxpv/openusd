@@ -25,3 +25,14 @@ jobs:
       - run: cargo fmt --all -- --check --files-with-diff
       - run: cargo doc --no-deps
       - run: cargo test --all-targets --all-features
+
+  deny:
+    name: Deny
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - uses: EmbarkStudios/cargo-deny-action@v1
