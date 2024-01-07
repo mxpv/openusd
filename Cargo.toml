@@ -1,11 +1,13 @@
 [package]
 name = "openusd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 repository = "https://github.com/mxpv/openusd"
 license-file = "LICENSE"
 exclude = ["/extern"]
 description = "Rust native USD library"
+categories = ["graphics", "rendering", "rendering::data-formats"]
+keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
 [dependencies]
 anyhow = "1.0.79"
