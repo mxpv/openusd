@@ -18,7 +18,7 @@ fn main() -> Result<()> {
         .context("Missing path to usdc file, use: cargo run --example dump_usdc {PATH_TO_FILE}.usdc")?;
 
     let reader = fs::File::open(path).context("Failed to read crate file")?;
-    let file = CrateFile::from_reader(reader).context("Failed to read crate file")?;
+    let file = CrateFile::open(reader).context("Failed to read crate file")?;
 
     println!("-- Bootrap header");
     println!("Magic: {:?}", file.bootstrap.ident);
