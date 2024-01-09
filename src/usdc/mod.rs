@@ -40,7 +40,7 @@ impl Spec {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CrateData {
     data: HashMap<sdf::Path, Spec>,
 }

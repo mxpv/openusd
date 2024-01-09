@@ -414,20 +414,100 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         let file_ver = self.version();
 
-        self.paths = if file_ver == version(0, 0, 1) {
+        if file_ver == version(0, 0, 1) {
             todo!("Support PATHS reader for == 0.0.1 files");
         } else if file_ver < version(0, 4, 0) {
             todo!("Support PATHS reader for < 0.4.0 files");
         } else {
             // Read # of paths.
             let path_count = self.reader.read_count()?;
+            self.paths = vec![sdf::Path::default(); path_count];
 
-            // Read compressed paths.
-            let paths = self.reader.read_compressed_paths(&self.tokens)?;
-            debug_assert_eq!(paths.len(), path_count);
-
-            paths
+            self.read_compressed_paths()?;
         };
+
+        Ok(())
+    }
+
+    /// Read compressed paths.
+    fn read_compressed_paths(&mut self) -> Result<()> {
+        // Read number of encoded paths.
+        let count: usize = self.reader.read_count()?;
+
+        // Read compressed data.
+
+        let path_indexes = self.reader.read_encoded_ints::<u32>(count)?;
+        debug_assert_eq!(path_indexes.len(), count);
+
+        let element_token_indexes = self.reader.read_encoded_ints::<i32>(count)?;
+        debug_assert_eq!(element_token_indexes.len(), count);
+
+        let jumps = self.reader.read_encoded_ints::<i32>(count)?;
+        debug_assert_eq!(jumps.len(), count);
+
+        self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps, 0, sdf::Path::default())?;
+
+        Ok(())
+    }
+
+    fn build_compressed_paths(
+        &mut self,
+        path_indexes: &[u32],
+        element_token_indexes: &[i32],
+        jumps: &[i32],
+        mut current_index: usize,
+        mut parent_path: sdf::Path,
+    ) -> Result<()> {
+        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
+
+        let mut has_child;
+        let mut has_sibling;
+
+        loop {
+            let this_index = current_index;
+            current_index += 1;
+
+            if parent_path.is_empty() {
+                parent_path = sdf::Path::new("/")?;
+                self.paths[this_index] = parent_path.clone();
+            } else {
+                let token_index = element_token_indexes[this_index];
+                let is_prim_property_path = token_index < 0;
+                let token_index = token_index.unsigned_abs() as usize;
+                let element_token = self.tokens[token_index].as_str();
+
+                self.paths[path_indexes[this_index] as usize] = if is_prim_property_path {
+                    parent_path.append_property(element_token)?
+                } else {
+                    parent_path.append_path(element_token)?
+                };
+            }
+
+            has_child = jumps[this_index] > 0 || jumps[this_index] == -1;
+            has_sibling = jumps[this_index] >= 0;
+
+            if has_child {
+                if has_sibling {
+                    let sibling_index = this_index + jumps[this_index] as usize;
+
+                    self.build_compressed_paths(
+                        path_indexes,
+                        element_token_indexes,
+                        jumps,
+                        sibling_index,
+                        parent_path,
+                    )?;
+                }
+
+                // Have a child (may have also had a sibling).
+                // Reset parent path.
+                parent_path = self.paths[path_indexes[this_index] as usize].clone();
+            }
+
+            if !has_child && !has_sibling {
+                break;
+            }
+        }
 
         Ok(())
     }

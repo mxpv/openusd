@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use bytemuck::{bytes_of_mut, cast_slice_mut, AnyBitPattern, NoUninit, Pod};
 
 use super::coding::{self, Int};
-use crate::sdf;
 
 pub trait CrateReader {
     /// Read a single "size" or "count" value encoded as `u64`.
@@ -31,8 +30,6 @@ pub trait CrateReader {
 
     /// Reads sequence of compressed integers.
     fn read_encoded_ints<T: Int>(&mut self, count: usize) -> Result<Vec<T>>;
-
-    fn read_compressed_paths(&mut self, tokens: &[String]) -> Result<Vec<sdf::Path>>;
 }
 
 impl<R: io::Read> CrateReader for R {
@@ -92,98 +89,6 @@ impl<R: io::Read> CrateReader for R {
 
         Ok(ints)
     }
-
-    fn read_compressed_paths(&mut self, tokens: &[String]) -> Result<Vec<sdf::Path>> {
-        let encoded_path_count: usize = self.read_count()?;
-
-        let path_indexes = self.read_encoded_ints::<u32>(encoded_path_count)?;
-        debug_assert_eq!(path_indexes.len(), encoded_path_count);
-
-        let element_token_indexes = self.read_encoded_ints::<i32>(encoded_path_count)?;
-        debug_assert_eq!(element_token_indexes.len(), encoded_path_count);
-
-        let jumps = self.read_encoded_ints::<i32>(encoded_path_count)?;
-        debug_assert_eq!(jumps.len(), encoded_path_count);
-
-        let mut paths = vec![sdf::Path::default(); encoded_path_count];
-
-        build_compressed_paths(
-            &path_indexes,
-            &element_token_indexes,
-            &jumps,
-            tokens,
-            0,
-            sdf::Path::default(),
-            &mut paths,
-        )?;
-
-        Ok(paths)
-    }
-}
-
-fn build_compressed_paths(
-    path_indexes: &[u32],
-    element_token_indexes: &[i32],
-    jumps: &[i32],
-    tokens: &[String],
-    mut current_index: usize,
-    mut parent_path: sdf::Path,
-    paths: &mut [sdf::Path],
-) -> Result<()> {
-    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
-
-    let mut has_child;
-    let mut has_sibling;
-
-    loop {
-        let this_index = current_index;
-        current_index += 1;
-
-        if parent_path.is_empty() {
-            parent_path = sdf::Path::new("/")?;
-            paths[this_index] = parent_path.clone();
-        } else {
-            let token_index = element_token_indexes[this_index];
-            let is_prim_property_path = token_index < 0;
-            let token_index = token_index.unsigned_abs() as usize;
-            let element_token = tokens[token_index].as_str();
-
-            paths[path_indexes[this_index] as usize] = if is_prim_property_path {
-                parent_path.append_property(element_token)?
-            } else {
-                parent_path.append_path(element_token)?
-            };
-        }
-
-        has_child = jumps[this_index] > 0 || jumps[this_index] == -1;
-        has_sibling = jumps[this_index] >= 0;
-
-        if has_child {
-            if has_sibling {
-                let sibling_index = this_index + jumps[this_index] as usize;
-
-                build_compressed_paths(
-                    path_indexes,
-                    element_token_indexes,
-                    jumps,
-                    tokens,
-                    sibling_index,
-                    parent_path,
-                    paths,
-                )?;
-            }
-
-            // Have a child (may have also had a sibling).
-            // Reset parent path.
-            parent_path = paths[path_indexes[this_index] as usize].clone();
-        }
-
-        if !has_child && !has_sibling {
-            break;
-        }
-    }
-
-    Ok(())
 }
 
 fn decompress_lz4(mut input: &[u8], output: &mut [u8]) -> Result<usize> {
