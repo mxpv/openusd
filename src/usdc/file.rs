@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{bail, ensure, Context, Result};
-use bytemuck::{bytes_of, Pod, Zeroable};
+use bytemuck::{bytes_of, AnyBitPattern, NoUninit, Pod, Zeroable};
 
 use crate::{
     sdf::{self, Variant},
@@ -138,13 +138,6 @@ impl ListOpHeader {
     pub fn has_appended(self) -> bool {
         self.bits & Self::HAS_APPENDED_ITEMS != 0
     }
-}
-
-enum ArrayKind {
-    Ints,
-    #[allow(dead_code)]
-    Floats,
-    Other,
 }
 
 /// Crate file represents structural data loaded from a USDC file on disk.
@@ -737,6 +730,20 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(vec)
     }
 
+    // Read an array of vectors.
+    fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
+        &mut self,
+        value: Value,
+    ) -> Result<Vec<T>> {
+        debug_assert!(value.is_array());
+        debug_assert!(!value.is_compressed());
+
+        let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+        let value = self.reader.read_raw(count * N)?;
+
+        Ok(value)
+    }
+
     pub fn value(&mut self, value: Value) -> Result<sdf::Variant> {
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
@@ -811,23 +818,44 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Vectors
             //
-            Type::Vec3f if value.is_array() => {
-                let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-                ensure!(count > 0, "Vec3f array is empty");
+            Type::Vec2f if value.is_array() => Variant::Vec2f(self.read_vec_array::<f32, 2>(value)?),
+            Type::Vec2d if value.is_array() => Variant::Vec2d(self.read_vec_array::<f64, 2>(value)?),
+            Type::Vec2i if value.is_array() => Variant::Vec2i(self.read_vec_array::<i32, 2>(value)?),
 
-                let value = self.reader.read_raw(count * 3)?;
-                Variant::Vec3f(value)
-            }
+            Type::Vec3f if value.is_array() => Variant::Vec3f(self.read_vec_array::<f32, 3>(value)?),
+            Type::Vec3d if value.is_array() => Variant::Vec3d(self.read_vec_array::<f64, 3>(value)?),
+            Type::Vec3i if value.is_array() => Variant::Vec3i(self.read_vec_array::<i32, 3>(value)?),
+
+            Type::Vec4f if value.is_array() => Variant::Vec4f(self.read_vec_array::<f32, 4>(value)?),
+            Type::Vec4d if value.is_array() => Variant::Vec4d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Vec4i if value.is_array() => Variant::Vec4i(self.read_vec_array::<i32, 4>(value)?),
+
+            Type::Vec2f => sdf::Variant::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
+            Type::Vec2d => sdf::Variant::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
+            Type::Vec2i => sdf::Variant::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
+
+            Type::Vec3f => sdf::Variant::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
+            Type::Vec3d => sdf::Variant::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
+            Type::Vec3i => sdf::Variant::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
+
+            Type::Vec4f => sdf::Variant::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
+            Type::Vec4d => sdf::Variant::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
+            Type::Vec4i => sdf::Variant::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
 
             //
             // Matrices
             //
-            Type::Matrix4d if value.is_array() => sdf::Variant::Unimplemented,
-            Type::Matrix4d if value.is_inlined() => sdf::Variant::Unimplemented,
-            Type::Matrix4d => {
-                let value: [f64; 16] = self.unpack_value(value)?;
-                sdf::Variant::Matrix4d(Vec::from(value))
-            }
+            Type::Matrix2d if value.is_array() => Variant::Matrix2d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Matrix3d if value.is_array() => Variant::Matrix3d(self.read_vec_array::<f64, 9>(value)?),
+            Type::Matrix4d if value.is_array() => Variant::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
+
+            Type::Matrix2d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
+            Type::Matrix3d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
+            Type::Matrix4d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<4>(self.unpack_value(value)?)),
+
+            Type::Matrix2d => sdf::Variant::Matrix2d(Vec::from(self.unpack_value::<[f64; 4]>(value)?)),
+            Type::Matrix3d => sdf::Variant::Matrix3d(Vec::from(self.unpack_value::<[f64; 9]>(value)?)),
+            Type::Matrix4d => sdf::Variant::Matrix4d(Vec::from(self.unpack_value::<[f64; 16]>(value)?)),
 
             //
             // SDF types
@@ -871,6 +899,25 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         Ok(variant)
     }
+}
+
+enum ArrayKind {
+    Ints,
+    #[allow(dead_code)]
+    Floats,
+    Other,
+}
+
+fn to_vec<T: From<i8>, const N: usize>(data: [i8; N]) -> Vec<T> {
+    data.map(T::from).into()
+}
+
+fn to_mat_diag<const N: usize>(data: [i8; N]) -> Vec<f64> {
+    let mut matrix = vec![0_f64; N * N];
+    for i in 0..N {
+        matrix[i * N + i] = data[i] as f64;
+    }
+    matrix
 }
 
 #[cfg(test)]
