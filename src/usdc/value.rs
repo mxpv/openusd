@@ -1,5 +1,7 @@
 //! Types read from the usdc file.
 
+use core::fmt;
+
 use anyhow::{Context as _, Result};
 use strum::{Display, EnumCount, FromRepr};
 
@@ -16,6 +18,20 @@ use strum::{Display, EnumCount, FromRepr};
 /// the start of the file to the value's location.
 #[derive(Debug, Copy, Clone)]
 pub struct Value(pub u64);
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ValueRep {} (ty={}, inlined={}, array={}, compressed={})",
+            self.payload(),
+            self.ty().unwrap_or_default(),
+            self.is_inlined(),
+            self.is_array(),
+            self.is_compressed()
+        )
+    }
+}
 
 impl Value {
     const ARRAY_BIT: u64 = 1 << 63;
@@ -63,9 +79,9 @@ pub enum Type {
     Bool = 1,
     UChar = 2,
     Int = 3,
-    UInt = 4,
+    Uint = 4,
     Int64 = 5,
-    UInt64 = 6,
+    Uint64 = 6,
     Half = 7,
     Float = 8,
     Double = 9,

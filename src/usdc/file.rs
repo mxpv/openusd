@@ -6,12 +6,17 @@ use std::{
     mem, str,
 };
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use bytemuck::{bytes_of, Pod, Zeroable};
 
-use crate::{sdf, usdc};
+use crate::{
+    sdf::{self, Variant},
+    usdc,
+};
 
 use usdc::{version, CrateReader, Type, Value, Version};
+
+use super::coding::Int;
 
 // Currently supported USDC version.
 // See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L340>
@@ -133,6 +138,13 @@ impl ListOpHeader {
     pub fn has_appended(self) -> bool {
         self.bits & Self::HAS_APPENDED_ITEMS != 0
     }
+}
+
+enum ArrayKind {
+    Ints,
+    #[allow(dead_code)]
+    Floats,
+    Other,
 }
 
 /// Crate file represents structural data loaded from a USDC file on disk.
@@ -570,6 +582,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn unpack_value<T: Default + Pod>(&mut self, value: Value) -> Result<T> {
+        ensure!(!value.is_array(), "Can't unpack array {} as inline value", value);
+
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
 
@@ -593,6 +607,77 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let value = self.tokens[index as usize].clone();
 
         Ok(value)
+    }
+
+    const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
+
+    fn unpack_int_array<T: Int>(&mut self, value: Value) -> Result<Vec<T>> {
+        let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
+
+        if count == 0 {
+            return Ok(Vec::default());
+        }
+
+        if compressed {
+            self.reader.read_encoded_ints(count)
+        } else {
+            self.reader.read_raw(count)
+        }
+    }
+
+    // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
+    fn unpack_array_len(&mut self, value: Value, kind: ArrayKind) -> Result<(usize, bool)> {
+        debug_assert!(value.is_array());
+
+        // Empty array.
+        if value.payload() == 0 {
+            return Ok((0, false));
+        }
+
+        self.set_position(value.payload())?;
+
+        if self.version() < version(0, 5, 0) {
+            // Read and discard shape size.
+            let _ = self.reader.read_pod::<u32>()?;
+        }
+
+        // Detect compression.
+        let mut compressed = true;
+        match kind {
+            ArrayKind::Ints => {
+                // Version 0.5.0 introduced compressed int arrays.
+                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1935
+                if self.version() < version(0, 5, 0) || !value.is_compressed() {
+                    compressed = false;
+                }
+            }
+            ArrayKind::Floats => {
+                // Version 0.6.0 introduced compressed floating point arrays.
+                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1961C5-L1961C66
+                if self.version() < version(0, 6, 0) || !value.is_compressed() {
+                    compressed = false;
+                }
+            }
+            ArrayKind::Other => {
+                // Fallback to uncompressed.
+                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1868
+                debug_assert!(!value.is_compressed());
+                compressed = false;
+            }
+        }
+
+        // Read the number of elements.
+        let count = if self.version() < version(0, 7, 0) {
+            self.reader.read_pod::<u32>()? as usize
+        } else {
+            self.reader.read_pod::<u64>()? as usize
+        };
+
+        if count < Self::MIN_COMPRESSED_ARRAY_SIZE {
+            compressed = false;
+        }
+
+        Ok((count, compressed))
     }
 
     fn read_list_op<T: Default>(
@@ -653,8 +738,6 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     pub fn value(&mut self, value: Value) -> Result<sdf::Variant> {
-        use glam::*;
-
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
 
@@ -667,43 +750,88 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let value = self.unpack_value(value)?;
                 sdf::Variant::Uchar(value)
             }
-            Type::Int => {
-                let value = self.unpack_value(value)?;
-                sdf::Variant::Int(value)
-            }
-            Type::UInt => {
-                let value = self.unpack_value(value)?;
-                sdf::Variant::Uint(value)
-            }
-            Type::Int64 => {
-                let value = self.unpack_value(value)?;
-                sdf::Variant::Int64(value)
-            }
-            Type::UInt64 => {
-                let value = self.unpack_value(value)?;
-                sdf::Variant::Uint64(value)
-            }
+
+            //
+            // Int
+            //
+            Type::Int if value.is_array() => sdf::Variant::Int(self.unpack_int_array(value)?),
+            Type::Int => sdf::Variant::Int(vec![self.unpack_value(value)?]),
+
+            //
+            // UInt
+            //
+            Type::Uint if value.is_array() => sdf::Variant::Uint(self.unpack_int_array(value)?),
+            Type::Uint => sdf::Variant::Uint(vec![self.unpack_value(value)?]),
+
+            // Int64
+            Type::Int64 if value.is_array() => bail!("Int64 array not supported"), // Need to implement int64 integer decoding.
+            Type::Int64 => sdf::Variant::Int64(self.unpack_value(value)?),
+
+            // UInt64
+            Type::Uint64 if value.is_array() => bail!("Uint64 array not supported"), // Need to implement uint64 integer decoding.
+            Type::Uint64 => sdf::Variant::Uint64(self.unpack_value(value)?),
+
             Type::Float => {
-                let value = self.unpack_value(value)?;
-                sdf::Variant::Float(value)
+                if value.is_array() {
+                    sdf::Variant::Unimplemented
+                } else {
+                    sdf::Variant::Float(self.unpack_value(value)?)
+                }
             }
             Type::Double => {
+                ensure!(!value.is_array());
+
                 // Stored as float.
                 let value: f32 = self.unpack_value(value)?;
                 sdf::Variant::Double(value as f64)
             }
-            Type::String => {
-                let value = self.unpack_token(value)?;
-                sdf::Variant::String(value)
+
+            //
+            // Tokens, strings, asset paths
+            //
+            Type::String => sdf::Variant::String(self.unpack_token(value)?),
+            Type::AssetPath => sdf::Variant::AssetPath(self.unpack_token(value)?),
+
+            Type::Token if value.is_array() => {
+                let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+                let mut tokens = Vec::with_capacity(count);
+
+                if count > 0 {
+                    let indices = self.reader.read_raw::<u32>(count)?;
+
+                    for index in indices {
+                        tokens.push(self.tokens[index as usize].clone());
+                    }
+                }
+
+                sdf::Variant::Token(tokens)
             }
-            Type::Token => {
-                let value = self.unpack_token(value)?;
-                sdf::Variant::Token(value)
+            Type::Token => sdf::Variant::Token(vec![self.unpack_token(value)?]),
+
+            //
+            // Vectors
+            //
+            Type::Vec3f if value.is_array() => {
+                let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+                ensure!(count > 0, "Vec3f array is empty");
+
+                let value = self.reader.read_raw(count * 3)?;
+                Variant::Vec3f(value)
             }
-            Type::AssetPath => {
-                let value = self.unpack_token(value)?;
-                sdf::Variant::AssetPath(value)
+
+            //
+            // Matrices
+            //
+            Type::Matrix4d if value.is_array() => sdf::Variant::Unimplemented,
+            Type::Matrix4d if value.is_inlined() => sdf::Variant::Unimplemented,
+            Type::Matrix4d => {
+                let value: [f64; 16] = self.unpack_value(value)?;
+                sdf::Variant::Matrix4d(Vec::from(value))
             }
+
+            //
+            // SDF types
+            //
             Type::TokenListOp => {
                 let list_op = self.read_token_list_op(value)?;
                 sdf::Variant::TokenListOp(list_op)

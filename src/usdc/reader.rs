@@ -18,6 +18,8 @@ pub trait CrateReader {
 
     fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>>;
 
+    fn read_raw<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>>;
+
     /// Reads a lz4 compressed data and returns decompressed raw bytes.
     ///
     /// Format expected:
@@ -53,6 +55,14 @@ impl<R: io::Read> CrateReader for R {
     fn read_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>> {
         let count = self.read_count()?;
 
+        let mut vec = vec![T::default(); count];
+        self.read_exact(cast_slice_mut(&mut vec))
+            .context("Unable to read vec")?;
+
+        Ok(vec)
+    }
+
+    fn read_raw<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>> {
         let mut vec = vec![T::default(); count];
         self.read_exact(cast_slice_mut(&mut vec))
             .context("Unable to read vec")?;

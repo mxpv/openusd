@@ -75,8 +75,8 @@ impl CrateData {
 
                 let field = &file.fields[current];
 
-                let name = dbg!(file.tokens[field.token_index].clone());
-                let value = dbg!(file.value(field.value_rep)?);
+                let name = file.tokens[field.token_index].clone();
+                let value = file.value(field.value_rep)?;
 
                 fields.insert(name, value);
             }
@@ -140,5 +140,70 @@ mod tests {
             .expect("Failed to get Materials");
 
         assert_eq!(materials.prim_children(), &["Elefant_Mat_68050", "Monochord_Mat_68062"]);
+    }
+
+    #[test]
+    fn test_read_arrays() {
+        let file = fs::File::open("fixtures/matrix_transform.usdc").unwrap();
+        let data = dbg!(CrateData::open(file, true).unwrap());
+
+        let vertex_counts = data
+            .field(&sdf::Path::new("/World/mesh.faceVertexCounts").unwrap(), "default")
+            .expect("Failed to query: /World/mesh.faceVertexCounts");
+
+        assert_eq!(vertex_counts.as_int_slice(), Some([4, 4, 4, 4, 4, 4].as_slice()));
+
+        let vertex_indices = data
+            .field(&sdf::Path::new("/World/mesh.faceVertexIndices").unwrap(), "default")
+            .unwrap();
+
+        assert_eq!(
+            vertex_indices.as_int_slice(),
+            Some([0, 4, 6, 2, 0, 1, 5, 4, 4, 5, 7, 6, 3, 7, 5, 1, 6, 7, 3, 2, 2, 3, 1, 0].as_slice())
+        );
+
+        let transforms = data
+            .field(&sdf::Path::new("/World/mesh.xformOp:transform").unwrap(), "default")
+            .unwrap();
+
+        assert_eq!(
+            transforms.as_f64_slice(),
+            Some(
+                [
+                    0_f64,
+                    0.5,
+                    -0.8660254037844386,
+                    0.0,
+                    -1.7320508075688772,
+                    0.8660254037844388,
+                    0.5,
+                    0.0,
+                    1.5,
+                    2.25,
+                    1.2990381056766584,
+                    0.0,
+                    4.0,
+                    5.0,
+                    6.0,
+                    1.0
+                ]
+                .as_slice()
+            )
+        );
+
+        let points = data
+            .field(&sdf::Path::new("/World/mesh.points").unwrap(), "default")
+            .unwrap();
+
+        assert_eq!(
+            points.as_f32_slice(),
+            Some(
+                [
+                    -0.5_f32, -0.5, -0.5, 0.5, -0.5, -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, -0.5, 0.5, 0.5, -0.5,
+                    0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5
+                ]
+                .as_slice()
+            )
+        )
     }
 }

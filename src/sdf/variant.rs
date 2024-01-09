@@ -1,5 +1,3 @@
-use glam::*;
-
 use super::*;
 
 /// Variant is a type that can hold any of the SDF types.
@@ -15,8 +13,8 @@ use super::*;
 pub enum Variant {
     Bool(bool),
     Uchar(u8),
-    Int(i32),
-    Uint(u32),
+    Int(Vec<i32>),
+    Uint(Vec<u32>),
     Int64(i64),
     Uint64(u64),
 
@@ -25,27 +23,27 @@ pub enum Variant {
     Double(f64),
 
     String(String),
-    Token(String),
+    Token(Vec<String>),
     AssetPath(String),
 
-    Quatd(DQuat),
-    Quatf(Quat),
+    Quatd(Vec<f64>),
+    Quatf(Vec<f32>),
 
-    Vec2d(DVec2),
-    Vec2f(Vec2),
-    Vec2i(IVec2),
+    Vec2d(Vec<f64>),
+    Vec2f(Vec<f32>),
+    Vec2i(Vec<i32>),
 
-    Vec3d(DVec3),
-    Vec3f(Vec3),
-    Vec3i(IVec3),
+    Vec3d(Vec<f64>),
+    Vec3f(Vec<f32>),
+    Vec3i(Vec<i32>),
 
-    Vec4d(DVec4),
-    Vec4f(Vec4),
-    Vec4i(IVec4),
+    Vec4d(Vec<f64>),
+    Vec4f(Vec<f32>),
+    Vec4i(Vec<i32>),
 
-    Matrix2d(DMat2),
-    Matrix3d(DMat3),
-    Matrix4d(DMat4),
+    Matrix2d(Vec<f64>),
+    Matrix3d(Vec<f64>),
+    Matrix4d(Vec<f64>),
 
     Dictionary,
     TokenListOp(TokenListOp),
@@ -81,4 +79,36 @@ pub enum Variant {
 
     /// Values not yet supported.
     Unimplemented,
+}
+
+impl Variant {
+    pub fn as_int_slice(&self) -> Option<&[i32]> {
+        match self {
+            Variant::Int(vec) => Some(vec.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64_slice(&self) -> Option<&[f64]> {
+        let slice = match self {
+            Variant::Vec2d(vec)
+            | Variant::Vec3d(vec)
+            | Variant::Vec4d(vec)
+            | Variant::Matrix2d(vec)
+            | Variant::Matrix3d(vec)
+            | Variant::Matrix4d(vec) => vec.as_slice(),
+            _ => return None,
+        };
+
+        Some(slice)
+    }
+
+    pub fn as_f32_slice(&self) -> Option<&[f32]> {
+        let slice = match self {
+            Variant::Vec2f(vec) | Variant::Vec3f(vec) | Variant::Vec4f(vec) => vec.as_slice(),
+            _ => return None,
+        };
+
+        Some(slice)
+    }
 }

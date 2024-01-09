@@ -5,6 +5,7 @@
 use std::{io, mem};
 
 use anyhow::{bail, Result};
+use bytemuck::{AnyBitPattern, NoUninit};
 
 use super::CrateReader;
 
@@ -13,7 +14,7 @@ const SMALL: u8 = 1;
 const MEDIUM: u8 = 2;
 const LARGE: u8 = 3;
 
-pub trait Int<T = Self>: Sized {
+pub trait Int<T = Self>: Sized + Default + NoUninit + AnyBitPattern {
     const SIZE: usize = mem::size_of::<Self>();
 
     fn from(from: i32) -> T;
