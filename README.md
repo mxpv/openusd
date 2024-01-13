@@ -3,6 +3,7 @@
 [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)
 [![docs.rs](https://img.shields.io/docsrs/openusd)](https://docs.rs/crate/openusd/latest)
 [![CI](https://github.com/mxpv/openusd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mxpv/openusd/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/mxpv/openusd/graph/badge.svg?token=LAPV2T3AI8)](https://codecov.io/gh/mxpv/openusd)
 
 [USD](https://openusd.org/release/index.html) is an open-source framework developed by `Pixar` for the efficient interchange of 3D computer graphics data across different software applications.
 
