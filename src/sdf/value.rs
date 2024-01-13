@@ -78,9 +78,6 @@ pub enum Value {
 
     TimeCode(f64),
     PathExpression,
-
-    /// Values not yet supported.
-    Unimplemented,
 }
 
 impl Value {
@@ -126,6 +123,18 @@ impl Value {
             Value::String(string) => string.as_str(),
             Value::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
             _ => panic!("Expected string"),
+        }
+    }
+}
+
+impl From<Value> for Vec<String> {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::String(str) => vec![str],
+            Value::Token(tokens) => tokens,
+            Value::TokenVector(tokens) => tokens,
+            Value::AssetPath(path) => vec![path],
+            _ => Vec::new(),
         }
     }
 }

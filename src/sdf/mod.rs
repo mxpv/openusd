@@ -1,5 +1,8 @@
 //! Scene description foundations.
 
+use std::fmt::Debug;
+
+use anyhow::Result;
 use strum::{Display, EnumCount, FromRepr};
 
 mod path;
@@ -134,3 +137,25 @@ pub type Uint64ListOp = ListOp<u64>;
 pub type StringListOp = ListOp<String>;
 pub type TokenListOp = ListOp<String>;
 pub type PathListOp = ListOp<Path>;
+
+/// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
+///
+/// `AbstractData` is an anonymous container that owns scene description values.
+///
+/// For now holds read-only portion of the API.
+pub trait AbstractData {
+    /// Returns `true` if this data has a spec for the given path.
+    fn has_spec(&self, path: &Path) -> bool;
+
+    /// Returns `true` if this data has a field for the given path.
+    fn has_field(&self, path: &Path, field: &str) -> bool;
+
+    /// Returns the type of the spec at the given path.
+    fn spec_type(&self, path: &Path) -> Option<SpecType>;
+
+    /// Returns the underlying value for the given path.
+    fn get(&mut self, path: &Path, field: &str) -> Result<Value>;
+
+    /// Returns the names of the fields for the given path.
+    fn list(&self, path: &Path) -> Option<Vec<String>>;
+}

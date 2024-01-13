@@ -22,7 +22,8 @@ use usdc::{version, CrateReader, Version};
 const SW_VERSION: Version = version(0, 10, 0);
 
 /// Crate file represents structural data loaded from a USDC file on disk.
-pub struct CrateFile<R: io::Read + io::Seek> {
+#[derive(Debug)]
+pub struct CrateFile<R> {
     /// File reader.
     reader: R,
 
@@ -42,6 +43,14 @@ pub struct CrateFile<R: io::Read + io::Seek> {
     pub paths: Vec<sdf::Path>,
     // All specs.
     pub specs: Vec<Spec>,
+}
+
+impl<R> CrateFile<R> {
+    /// Returns file's version extracted from bootstrap header.
+    #[inline]
+    pub fn version(&self) -> Version {
+        Version::from(self.bootstrap)
+    }
 }
 
 impl<R: io::Read + io::Seek> CrateFile<R> {
@@ -124,12 +133,6 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         })?;
 
         Ok(())
-    }
-
-    /// Returns file's version extracted from bootstrap header.
-    #[inline]
-    pub fn version(&self) -> Version {
-        Version::from(self.bootstrap)
     }
 
     /// Read and verify bootstrap header, retrieve offset to TOC.
@@ -670,16 +673,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Uint64 if value.is_array() => bail!("Uint64 array not supported"), // Need to implement uint64 integer decoding.
             Type::Uint64 => sdf::Value::Uint64(self.unpack_value(value)?),
 
-            Type::Float => {
-                if value.is_array() {
-                    sdf::Value::Unimplemented
-                } else {
-                    sdf::Value::Float(self.unpack_value(value)?)
-                }
-            }
-            Type::Double => {
-                ensure!(!value.is_array());
+            Type::Float if value.is_array() => bail!("Float arrays are not supported"), // Need to implement float decompression.
+            Type::Float => sdf::Value::Float(self.unpack_value(value)?),
 
+            Type::Double if value.is_array() => bail!("Double arrays are not supported"), // Need to implement double decompression.
+            Type::Double => {
                 // Stored as float.
                 let value: f32 = self.unpack_value(value)?;
                 sdf::Value::Double(value as f64)
@@ -688,9 +686,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Tokens, strings, asset paths
             //
-            Type::String if value.is_array() => {
-                todo!()
-            }
+            Type::String if value.is_array() => bail!("String arrays are not yet supported"),
 
             Type::String => {
                 let string_index = self.unpack_value::<u32>(value)?;
@@ -857,7 +853,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::Dictionary(dict)
             }
 
-            _ => sdf::Value::Unimplemented,
+            _ => bail!("Unsupported value type: {}", ty),
         };
 
         Ok(variant)

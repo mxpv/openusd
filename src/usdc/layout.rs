@@ -12,7 +12,7 @@ use crate::sdf;
 
 /// Appears at start of file, houses version, file identifier string and offset to TOC.
 #[repr(C)]
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
+#[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Bootstrap {
     /// "PXR-USDC"
     pub ident: [u8; 8],
@@ -34,7 +34,7 @@ impl From<Bootstrap> for Version {
 const SECTION_NAME_MAX_LENGTH: usize = 15;
 
 #[repr(C)]
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
+#[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Section {
     /// Section name bytes (e.g. "TOKENS"), use [Section::name] to retrieve as string.
     name: [u8; SECTION_NAME_MAX_LENGTH + 1],
@@ -61,6 +61,7 @@ impl Section {
     }
 }
 
+#[derive(Debug)]
 pub struct Field {
     pub token_index: usize,
     pub value_rep: ValueRep,
@@ -76,7 +77,7 @@ impl Field {
 }
 
 /// Spec data loaded from file.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct Spec {
     pub path_index: usize,
     pub fieldset_index: usize,

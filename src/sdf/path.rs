@@ -37,6 +37,11 @@ impl Path {
         Path::from_str(path)
     }
 
+    #[inline]
+    pub fn abs_root() -> Path {
+        Path::from_str_unchecked("/")
+    }
+
     fn from_str_unchecked(path: &str) -> Path {
         Path { path: path.to_string() }
     }
