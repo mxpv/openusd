@@ -65,7 +65,7 @@ pub enum Value {
     Permission(Permission),
     Variability(Variability),
 
-    VariantSelectionMap,
+    VariantSelectionMap(HashMap<String, String>),
     TimeSamples,
     Payload(Payload),
     DoubleVector(Vec<f32>),
@@ -149,6 +149,28 @@ impl TryFrom<Value> for LayerOffset {
         match value {
             Value::LayerOffsetVector(vec) if vec.len() == 1 => Ok(vec[0]),
             _ => bail!("Unable to unpack layer offset"),
+        }
+    }
+}
+
+impl TryFrom<Value> for StringListOp {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::StringListOp(list) => Ok(list),
+            _ => bail!("Unable to unpack string list op"),
+        }
+    }
+}
+
+impl TryFrom<Value> for HashMap<String, String> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::VariantSelectionMap(map) => Ok(map),
+            _ => bail!("Unable to unpack variant selection map"),
         }
     }
 }

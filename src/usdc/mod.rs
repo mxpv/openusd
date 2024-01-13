@@ -191,6 +191,31 @@ mod tests {
     }
 
     #[test]
+    fn test_read_variant_selection() -> Result<()> {
+        let mut data = read_file("fixtures/expressions.usdc")?;
+
+        // prepend variantSets = "displayVariantSet"
+        let variant_set_names = {
+            let value = data.get(&sdf::path("/asset1")?, "variantSetNames")?;
+            sdf::StringListOp::try_from(value)?
+        };
+        assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
+
+        let variant_selection = {
+            let value = data.get(&sdf::path("/asset1")?, "variantSelection")?;
+            HashMap::<String, String>::try_from(value)?
+        };
+
+        assert_eq!(variant_selection.len(), 1);
+        assert_eq!(
+            variant_selection.get("displayVariantSet").unwrap(),
+            "`${VARIANT_CHOICE}`"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_read_array_fields() -> Result<()> {
         let mut data = read_file("fixtures/fields.usdc")?;
 

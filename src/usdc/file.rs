@@ -789,12 +789,33 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Matrix4d => sdf::Value::Matrix4d(self.unpack_value::<[f64; 16]>(value)?.into()),
 
             //
-            // SDF types
+            // ListOp
             //
             Type::TokenListOp => {
                 let list_op = self.read_token_list_op(value)?;
                 sdf::Value::TokenListOp(list_op)
             }
+            Type::StringListOp => {
+                ensure!(!value.is_inlined());
+
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    let strings = file
+                        .reader
+                        .read_vec::<u32>(count)?
+                        .into_iter()
+                        .map(|index| file.find_string(index))
+                        .collect();
+
+                    Ok(strings)
+                })?;
+
+                sdf::Value::StringListOp(list)
+            }
+
+            //
+            // SDF types
+            //
             Type::TokenVector => {
                 ensure!(!value.is_inlined(), "{} can't be inlined", ty);
 
@@ -839,9 +860,36 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::LayerOffsetVector(vec)
             }
 
+            Type::VariantSelectionMap => {
+                ensure!(!value.is_inlined());
+                ensure!(!value.is_array());
+                ensure!(!value.is_compressed());
+
+                self.set_position(value.payload())?;
+
+                let mut count = self.reader.read_count()?;
+                let mut map = HashMap::with_capacity(count);
+
+                while count > 0 {
+                    let key = {
+                        let index = self.reader.read_pod::<u32>()?;
+                        self.find_string(index)
+                    };
+
+                    let value = {
+                        let index = self.reader.read_pod::<u32>()?;
+                        self.find_string(index)
+                    };
+
+                    map.insert(key, value);
+                    count -= 1;
+                }
+
+                sdf::Value::VariantSelectionMap(map)
+            }
+
             // Empty dictionary.
             Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
-
             Type::Dictionary => {
                 ensure!(!value.is_compressed(), "Dictionary {} can't be compressed", ty);
                 ensure!(!value.is_array(), "Dictionary {} can't be inlined", ty);
