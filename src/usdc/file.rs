@@ -464,7 +464,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T> {
-        ensure!(!value.is_array(), "Can't unpack array {} as inline value", value);
+        ensure!(!value.is_array(), "Can't unpack array {:?} as inline value", value);
 
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
@@ -620,10 +620,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     // Read an array of vectors.
-    fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
-        &mut self,
-        value: ValueRep,
-    ) -> Result<Vec<T>> {
+    fn read_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(&mut self, value: ValueRep) -> Result<Vec<T>> {
         debug_assert!(value.is_array());
         debug_assert!(!value.is_compressed());
 
@@ -686,9 +683,22 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Tokens, strings, asset paths
             //
-            Type::String if value.is_array() => bail!("String arrays are not yet supported"),
+            Type::StringVector => {
+                ensure!(!value.is_inlined());
+
+                self.set_position(value.payload())?;
+
+                let count = self.reader.read_count()?;
+                let indices = self.reader.read_raw::<u32>(count)?;
+
+                let vec = indices.into_iter().map(|index| self.find_string(index)).collect();
+
+                sdf::Value::StringVector(vec)
+            }
 
             Type::String => {
+                ensure!(!value.is_array());
+
                 let string_index = self.unpack_value::<u32>(value)?;
                 sdf::Value::String(self.find_string(string_index))
             }
@@ -713,17 +723,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Vectors
             //
-            Type::Vec2f if value.is_array() => Value::Vec2f(self.read_vec_array::<f32, 2>(value)?),
-            Type::Vec2d if value.is_array() => Value::Vec2d(self.read_vec_array::<f64, 2>(value)?),
-            Type::Vec2i if value.is_array() => Value::Vec2i(self.read_vec_array::<i32, 2>(value)?),
+            Type::Vec2f if value.is_array() => Value::Vec2f(self.read_array::<f32, 2>(value)?),
+            Type::Vec2d if value.is_array() => Value::Vec2d(self.read_array::<f64, 2>(value)?),
+            Type::Vec2i if value.is_array() => Value::Vec2i(self.read_array::<i32, 2>(value)?),
 
-            Type::Vec3f if value.is_array() => Value::Vec3f(self.read_vec_array::<f32, 3>(value)?),
-            Type::Vec3d if value.is_array() => Value::Vec3d(self.read_vec_array::<f64, 3>(value)?),
-            Type::Vec3i if value.is_array() => Value::Vec3i(self.read_vec_array::<i32, 3>(value)?),
+            Type::Vec3f if value.is_array() => Value::Vec3f(self.read_array::<f32, 3>(value)?),
+            Type::Vec3d if value.is_array() => Value::Vec3d(self.read_array::<f64, 3>(value)?),
+            Type::Vec3i if value.is_array() => Value::Vec3i(self.read_array::<i32, 3>(value)?),
 
-            Type::Vec4f if value.is_array() => Value::Vec4f(self.read_vec_array::<f32, 4>(value)?),
-            Type::Vec4d if value.is_array() => Value::Vec4d(self.read_vec_array::<f64, 4>(value)?),
-            Type::Vec4i if value.is_array() => Value::Vec4i(self.read_vec_array::<i32, 4>(value)?),
+            Type::Vec4f if value.is_array() => Value::Vec4f(self.read_array::<f32, 4>(value)?),
+            Type::Vec4d if value.is_array() => Value::Vec4d(self.read_array::<f64, 4>(value)?),
+            Type::Vec4i if value.is_array() => Value::Vec4i(self.read_array::<i32, 4>(value)?),
 
             Type::Vec2f if value.is_inlined() => sdf::Value::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
             Type::Vec2d if value.is_inlined() => sdf::Value::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
@@ -752,9 +762,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Value::Matrix2d(self.read_vec_array::<f64, 4>(value)?),
-            Type::Matrix3d if value.is_array() => Value::Matrix3d(self.read_vec_array::<f64, 9>(value)?),
-            Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
+            Type::Matrix2d if value.is_array() => Value::Matrix2d(self.read_array::<f64, 4>(value)?),
+            Type::Matrix3d if value.is_array() => Value::Matrix3d(self.read_array::<f64, 9>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_array::<f64, 16>(value)?),
 
             Type::Matrix2d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
             Type::Matrix3d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
@@ -800,6 +810,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     .with_context(|| format!("Unable to parse variability: {}", tmp))?;
 
                 sdf::Value::Variability(variability)
+            }
+
+            Type::LayerOffsetVector => {
+                ensure!(!value.is_inlined());
+                ensure!(!value.is_array());
+                ensure!(!value.is_compressed());
+
+                self.set_position(value.payload())?;
+
+                let count = self.reader.read_count()?;
+                let vec = self.reader.read_raw(count)?;
+
+                sdf::Value::LayerOffsetVector(vec)
             }
 
             // Empty dictionary.

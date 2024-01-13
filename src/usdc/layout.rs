@@ -147,10 +147,10 @@ impl ListOpHeader {
 /// For values that aren't stored inline, the 6 data bytes are the offset from
 /// the start of the file to the value's location.
 #[repr(transparent)]
-#[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
+#[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct ValueRep(pub u64);
 
-impl fmt::Display for ValueRep {
+impl fmt::Debug for ValueRep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,

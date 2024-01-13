@@ -2,7 +2,7 @@
 
 use std::{any::type_name, io, mem};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result};
 use bytemuck::{bytes_of_mut, cast_slice_mut, AnyBitPattern, NoUninit, Pod};
 
 use super::coding::{self, Int};
@@ -63,7 +63,9 @@ impl<R: io::Read> CrateReader for R {
     }
 
     fn read_raw<T: Default + NoUninit + AnyBitPattern>(&mut self, count: usize) -> Result<Vec<T>> {
-        ensure!(count > 0, "Raw block has no elements to read: {}", count);
+        if count == 0 {
+            return Ok(Vec::new());
+        }
 
         let mut vec = vec![T::default(); count];
         self.read_exact(cast_slice_mut(&mut vec))

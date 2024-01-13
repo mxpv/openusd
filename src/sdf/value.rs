@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, vec};
+
+use anyhow::bail;
 
 use super::*;
 
@@ -131,10 +133,22 @@ impl From<Value> for Vec<String> {
     fn from(value: Value) -> Self {
         match value {
             Value::String(str) => vec![str],
+            Value::StringVector(vec) => vec,
             Value::Token(tokens) => tokens,
             Value::TokenVector(tokens) => tokens,
             Value::AssetPath(path) => vec![path],
             _ => Vec::new(),
+        }
+    }
+}
+
+impl TryFrom<Value> for LayerOffset {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::LayerOffsetVector(vec) if vec.len() == 1 => Ok(vec[0]),
+            _ => bail!("Unable to unpack layer offset"),
         }
     }
 }

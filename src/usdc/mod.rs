@@ -71,7 +71,7 @@ where
             data.insert(path, Spec { ty, fields });
         }
 
-        Ok(Self { file, data })
+        Ok(Self { file, data: dbg!(data) })
     }
 }
 
@@ -124,24 +124,22 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::sdf::LayerOffset;
+
     use super::*;
 
     #[test]
-    fn test_crate_hierarchy() {
+    fn test_crate_hierarchy() -> Result<()> {
         let mut data =
-            read_file("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")
-                .unwrap();
+            read_file("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
 
-        let prim_children = data.get(&sdf::Path::abs_root(), "primChildren").unwrap();
+        let prim_children = data.get(&sdf::Path::abs_root(), "primChildren")?;
         assert_eq!(
             Vec::<String>::from(prim_children),
             vec!["SoC_ElephantWithMonochord".to_string()]
         );
 
-        let elephant = data
-            .get(&sdf::Path::new("/SoC_ElephantWithMonochord").unwrap(), "primChildren")
-            .expect("Failed to get SoC_ElephantWithMonochord");
-
+        let elephant = data.get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?;
         assert_eq!(
             Vec::<String>::from(elephant),
             vec![
@@ -151,17 +149,13 @@ mod tests {
             ]
         );
 
-        let materials = data
-            .get(
-                &sdf::Path::new("/SoC_ElephantWithMonochord/Materials").unwrap(),
-                "primChildren",
-            )
-            .expect("Failed to get Materials");
-
+        let materials = data.get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?;
         assert_eq!(
             Vec::<String>::from(materials),
             vec!["Elefant_Mat_68050".to_string(), "Monochord_Mat_68062".to_string()]
         );
+
+        Ok(())
     }
 
     #[test]
@@ -179,43 +173,53 @@ mod tests {
     }
 
     #[test]
-    fn test_read_array_fields() {
-        let mut data = read_file("fixtures/fields.usdc").unwrap();
+    fn test_read_sub_layers() -> Result<()> {
+        let mut data = read_file("fixtures/expressions.usdc")?;
+
+        let value = data.get(&sdf::path("/")?, "subLayerOffsets")?;
+        let sub_layer_offsets = LayerOffset::try_from(value)?;
+
+        assert_eq!(sub_layer_offsets.offset, 0.0);
+        assert_eq!(sub_layer_offsets.scale, 1.0);
+
+        let value = data.get(&sdf::path("/")?, "subLayers")?;
+        let sub_layers = Vec::<String>::from(value);
+
+        assert_eq!(sub_layers, vec!["`\"render_pass_${RENDER_PASS}.usd\"`"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_array_fields() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
 
         // defaultPrim = "World"
-        let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim").unwrap();
+        let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;
         assert_eq!(default_prim.as_str(), "World");
 
         // float4[] clippingPlanes = []
-        let clipping_planes = data
-            .get(&sdf::Path::new("/World.clippingPlanes").unwrap(), "default")
-            .unwrap();
+        let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;
         assert!(matches!(clipping_planes, sdf::Value::Vec4f(..)));
         assert_eq!(clipping_planes.as_f32_slice(), Some([].as_slice()));
 
         // float2 clippingRange = (1, 10000000)
-        let clipping_range = data
-            .get(&sdf::Path::new("/World.clippingRange").unwrap(), "default")
-            .unwrap();
+        let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
         assert!(matches!(clipping_range, sdf::Value::Vec2f(..)));
         assert_eq!(clipping_range.as_f32_slice(), Some([1.0, 10000000.0].as_slice()));
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
-        let diffuse_color = data
-            .get(&sdf::Path::new("/World.diffuseColor").unwrap(), "default")
-            .unwrap();
+        let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
         assert!(matches!(diffuse_color, sdf::Value::Vec3f(..)));
         assert_eq!(diffuse_color.as_f32_slice(), Some([0.18, 0.18, 0.18].as_slice()));
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
-        let face_vertex_counts = data
-            .get(&sdf::Path::new("/World.faceVertexCounts").unwrap(), "default")
-            .unwrap();
+        let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
         assert!(matches!(face_vertex_counts, sdf::Value::Int(..)));
         assert_eq!(face_vertex_counts.as_int_slice(), Some([1, 2, 3, 4, 5, 6].as_slice()));
 
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
-        let normals = data.get(&sdf::Path::new("/World.normals").unwrap(), "default").unwrap();
+        let normals = data.get(&sdf::path("/World.normals")?, "default")?;
         assert!(matches!(normals, sdf::Value::Vec3f(..)));
         assert_eq!(
             normals.as_f32_slice(),
@@ -229,24 +233,20 @@ mod tests {
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)
-        let xform_op_rotate_xyz = data
-            .get(&sdf::Path::new("/World.xformOp:rotateXYZ").unwrap(), "default")
-            .unwrap();
+        let xform_op_rotate_xyz = data.get(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
         assert!(matches!(xform_op_rotate_xyz, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_rotate_xyz.as_f64_slice(), Some([0.0, 0.0, 0.0].as_slice()));
 
         // double3 xformOp:scale = (1, 1, 1)
-        let xform_op_scale = data
-            .get(&sdf::Path::new("/World.xformOp:scale").unwrap(), "default")
-            .unwrap();
+        let xform_op_scale = data.get(&sdf::path("/World.xformOp:scale")?, "default")?;
         assert!(matches!(xform_op_scale, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_scale.as_f64_slice(), Some([1.0, 1.0, 1.0].as_slice()));
 
         // double3 xformOp:translate = (0, 1, 0)
-        let xform_op_translate = data
-            .get(&sdf::Path::new("/World.xformOp:translate").unwrap(), "default")
-            .unwrap();
+        let xform_op_translate = data.get(&sdf::path("/World.xformOp:translate")?, "default")?;
         assert!(matches!(xform_op_translate, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_translate.as_f64_slice(), Some([0.0, 1.0, 0.0].as_slice()));
+
+        Ok(())
     }
 }

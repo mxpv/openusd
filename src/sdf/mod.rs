@@ -3,12 +3,13 @@
 use std::fmt::Debug;
 
 use anyhow::Result;
+use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 mod path;
 mod value;
 
-pub use path::Path;
+pub use path::{path, Path};
 pub use value::Value;
 
 /// An enum that specifies the type of an object.
@@ -67,7 +68,8 @@ pub enum Variability {
 }
 
 /// Represents a time offset and scale between layers.
-#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct LayerOffset {
     /// Time offset.
     pub offset: f64,

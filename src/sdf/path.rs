@@ -2,6 +2,12 @@ use std::{fmt, result, str::FromStr};
 
 use anyhow::{bail, ensure, Result};
 
+#[inline]
+pub fn path(str: impl AsRef<str>) -> Result<Path> {
+    let path = str.as_ref();
+    Path::new(path)
+}
+
 /// `SdfPath` implementation.
 ///
 /// # Syntax
