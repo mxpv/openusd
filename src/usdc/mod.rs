@@ -216,6 +216,35 @@ mod tests {
     }
 
     #[test]
+    fn test_read_connection() -> Result<()> {
+        let mut data = read_file("fixtures/connection.usdc")?;
+
+        let conn = {
+            let value = data.get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?;
+            sdf::PathListOp::try_from(value)?
+        };
+
+        assert!(conn.explicit);
+        assert_eq!(
+            conn.explicit_items,
+            vec![sdf::path("/TexModel/boardMat.inputs:frame:stPrimvarName")?]
+        );
+
+        let conn = {
+            let value = data.get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?;
+            sdf::PathListOp::try_from(value)?
+        };
+
+        assert!(conn.explicit);
+        assert_eq!(
+            conn.explicit_items,
+            vec![sdf::path("/TexModel/boardMat/PBRShader.outputs:surface")?]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_read_array_fields() -> Result<()> {
         let mut data = read_file("fixtures/fields.usdc")?;
 

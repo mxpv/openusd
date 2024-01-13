@@ -164,6 +164,17 @@ impl TryFrom<Value> for StringListOp {
     }
 }
 
+impl TryFrom<Value> for PathListOp {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::PathListOp(list) => Ok(list),
+            _ => bail!("Unable to unpack path list op"),
+        }
+    }
+}
+
 impl TryFrom<Value> for HashMap<String, String> {
     type Error = anyhow::Error;
 

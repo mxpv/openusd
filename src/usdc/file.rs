@@ -470,6 +470,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         self.tokens[token].clone()
     }
 
+    fn find_path(&self, path_index: u32) -> sdf::Path {
+        self.paths[path_index as usize].clone()
+    }
+
     fn set_position(&mut self, position: u64) -> Result<()> {
         self.reader.seek(io::SeekFrom::Start(position))?;
         Ok(())
@@ -811,6 +815,23 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 })?;
 
                 sdf::Value::StringListOp(list)
+            }
+            Type::PathListOp => {
+                ensure!(!value.is_inlined());
+
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    let paths = file
+                        .reader
+                        .read_vec::<u32>(count)?
+                        .into_iter()
+                        .map(|index| file.find_path(index))
+                        .collect();
+
+                    Ok(paths)
+                })?;
+
+                sdf::Value::PathListOp(list)
             }
 
             //
