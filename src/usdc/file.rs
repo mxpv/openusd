@@ -2,144 +2,24 @@
 
 use std::{
     collections::HashMap,
-    ffi::CStr,
     io::{self, Cursor},
     mem, str,
 };
 
 use anyhow::{bail, ensure, Context, Result};
-use bytemuck::{bytes_of, AnyBitPattern, NoUninit, Pod, Zeroable};
+use bytemuck::{bytes_of, AnyBitPattern, NoUninit, Pod};
 
 use crate::{
-    sdf::{self, Variant},
+    sdf::{self, Value},
     usdc,
 };
 
-use usdc::{version, CrateReader, Type, Value, Version};
-
-use super::coding::Int;
+use super::{coding::Int, layout::*};
+use usdc::{version, CrateReader, Version};
 
 // Currently supported USDC version.
 // See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L340>
 const SW_VERSION: Version = version(0, 10, 0);
-
-/// Appears at start of file, houses version, file identifier string and offset to TOC.
-#[repr(C)]
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
-pub struct Bootstrap {
-    /// "PXR-USDC"
-    pub ident: [u8; 8],
-    /// 0: major, 1: minor, 2: patch, rest unused.
-    pub version: [u8; 8],
-    /// Offset to TOC.
-    pub toc_offset: u64,
-    /// Unused.
-    reserved: [u8; 8],
-}
-
-/// Max section's name length.
-const SECTION_NAME_MAX_LENGTH: usize = 15;
-
-#[repr(C)]
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
-pub struct Section {
-    /// Section name bytes (e.g. "TOKENS"), use [Section::name] to retrieve as string.
-    name: [u8; SECTION_NAME_MAX_LENGTH + 1],
-    /// Section start offset.
-    pub start: u64,
-    /// Section size.
-    pub size: u64,
-}
-
-impl Section {
-    pub const TOKENS: &'static str = "TOKENS";
-    pub const STRINGS: &'static str = "STRINGS";
-    pub const FIELDS: &'static str = "FIELDS";
-    pub const FIELDSETS: &'static str = "FIELDSETS";
-    pub const PATHS: &'static str = "PATHS";
-    pub const SPECS: &'static str = "SPECS";
-
-    /// Convert array of bytes to a human-readable string.
-    pub fn name(&self) -> &str {
-        CStr::from_bytes_until_nul(&self.name)
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default()
-    }
-}
-
-pub struct Field {
-    pub token_index: usize,
-    pub value_rep: Value,
-}
-
-impl Field {
-    pub fn new(index: u32, value: u64) -> Self {
-        Self {
-            token_index: index as usize,
-            value_rep: Value(value),
-        }
-    }
-}
-
-/// Spec data loaded from file.
-#[derive(Default, Clone, Copy)]
-pub struct Spec {
-    pub path_index: usize,
-    pub fieldset_index: usize,
-    pub spec_type: sdf::SpecType,
-}
-
-#[repr(C)]
-#[derive(Default, Clone, Copy, Pod, Zeroable)]
-pub struct ListOpHeader {
-    bits: u8,
-}
-
-impl ListOpHeader {
-    const IS_EXPLICIT: u8 = 1 << 0;
-    const HAS_EXPLICIT_ITEMS: u8 = 1 << 1;
-    const HAS_ADDED_ITEMS: u8 = 1 << 2;
-    const HAS_DELETED_ITEMS: u8 = 1 << 3;
-    const HAS_ORDERED_ITEMS: u8 = 1 << 4;
-    const HAS_PREPEND_ITEMS: u8 = 1 << 5;
-    const HAS_APPENDED_ITEMS: u8 = 1 << 6;
-
-    #[inline]
-    pub fn is_explicit(self) -> bool {
-        self.bits & Self::IS_EXPLICIT != 0
-    }
-
-    #[inline]
-    pub fn has_explicit(self) -> bool {
-        self.bits & Self::HAS_EXPLICIT_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_added(self) -> bool {
-        self.bits & Self::HAS_ADDED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_deleted(self) -> bool {
-        self.bits & Self::HAS_DELETED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_ordered(self) -> bool {
-        self.bits & Self::HAS_ORDERED_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_prepend(self) -> bool {
-        self.bits & Self::HAS_PREPEND_ITEMS != 0
-    }
-
-    #[inline]
-    pub fn has_appended(self) -> bool {
-        self.bits & Self::HAS_APPENDED_ITEMS != 0
-    }
-}
 
 /// Crate file represents structural data loaded from a USDC file on disk.
 pub struct CrateFile<R: io::Read + io::Seek> {
@@ -246,7 +126,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    /// Returns file's version extracted from [Bootstrap::version].
+    /// Returns file's version extracted from bootstrap header.
     #[inline]
     pub fn version(&self) -> Version {
         Version::from(self.bootstrap)
@@ -580,7 +460,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
-    fn unpack_value<T: Default + Pod>(&mut self, value: Value) -> Result<T> {
+    fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T> {
         ensure!(!value.is_array(), "Can't unpack array {} as inline value", value);
 
         let ty = value.ty()?;
@@ -601,7 +481,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(value)
     }
 
-    fn unpack_token(&mut self, value: Value) -> Result<String> {
+    fn unpack_token(&mut self, value: ValueRep) -> Result<String> {
         let index: u64 = self.unpack_value(value)?;
         let value = self.tokens[index as usize].clone();
 
@@ -610,7 +490,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
-    fn unpack_int_array<T: Int>(&mut self, value: Value) -> Result<Vec<T>> {
+    fn unpack_int_array<T: Int>(&mut self, value: ValueRep) -> Result<Vec<T>> {
         let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
 
         if count == 0 {
@@ -625,7 +505,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
-    fn unpack_array_len(&mut self, value: Value, kind: ArrayKind) -> Result<(usize, bool)> {
+    fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool)> {
         debug_assert!(value.is_array());
 
         // Empty array.
@@ -681,7 +561,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     fn read_list_op<T: Default>(
         &mut self,
-        value: Value,
+        value: ValueRep,
         mut read: impl FnMut(&mut Self) -> Result<Vec<T>>,
     ) -> Result<sdf::ListOp<T>> {
         self.set_position(value.payload())?;
@@ -721,7 +601,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(out)
     }
 
-    fn read_token_list_op(&mut self, value: Value) -> Result<sdf::TokenListOp> {
+    fn read_token_list_op(&mut self, value: ValueRep) -> Result<sdf::TokenListOp> {
         self.read_list_op(value, |file: &mut Self| file.read_token_vec())
     }
 
@@ -739,7 +619,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     // Read an array of vectors.
     fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
         &mut self,
-        value: Value,
+        value: ValueRep,
     ) -> Result<Vec<T>> {
         debug_assert!(value.is_array());
         debug_assert!(!value.is_compressed());
@@ -756,45 +636,45 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(value)
     }
 
-    pub fn value(&mut self, value: Value) -> Result<sdf::Variant> {
+    pub fn value(&mut self, value: ValueRep) -> Result<sdf::Value> {
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
 
         let variant = match ty {
             Type::Bool => {
                 let value: i32 = self.unpack_value(value)?;
-                sdf::Variant::Bool(value != 0)
+                sdf::Value::Bool(value != 0)
             }
             Type::UChar => {
                 let value = self.unpack_value(value)?;
-                sdf::Variant::Uchar(value)
+                sdf::Value::Uchar(value)
             }
 
             //
             // Int
             //
-            Type::Int if value.is_array() => sdf::Variant::Int(self.unpack_int_array(value)?),
-            Type::Int => sdf::Variant::Int(vec![self.unpack_value(value)?]),
+            Type::Int if value.is_array() => sdf::Value::Int(self.unpack_int_array(value)?),
+            Type::Int => sdf::Value::Int(vec![self.unpack_value(value)?]),
 
             //
             // UInt
             //
-            Type::Uint if value.is_array() => sdf::Variant::Uint(self.unpack_int_array(value)?),
-            Type::Uint => sdf::Variant::Uint(vec![self.unpack_value(value)?]),
+            Type::Uint if value.is_array() => sdf::Value::Uint(self.unpack_int_array(value)?),
+            Type::Uint => sdf::Value::Uint(vec![self.unpack_value(value)?]),
 
             // Int64
             Type::Int64 if value.is_array() => bail!("Int64 array not supported"), // Need to implement int64 integer decoding.
-            Type::Int64 => sdf::Variant::Int64(self.unpack_value(value)?),
+            Type::Int64 => sdf::Value::Int64(self.unpack_value(value)?),
 
             // UInt64
             Type::Uint64 if value.is_array() => bail!("Uint64 array not supported"), // Need to implement uint64 integer decoding.
-            Type::Uint64 => sdf::Variant::Uint64(self.unpack_value(value)?),
+            Type::Uint64 => sdf::Value::Uint64(self.unpack_value(value)?),
 
             Type::Float => {
                 if value.is_array() {
-                    sdf::Variant::Unimplemented
+                    sdf::Value::Unimplemented
                 } else {
-                    sdf::Variant::Float(self.unpack_value(value)?)
+                    sdf::Value::Float(self.unpack_value(value)?)
                 }
             }
             Type::Double => {
@@ -802,7 +682,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 // Stored as float.
                 let value: f32 = self.unpack_value(value)?;
-                sdf::Variant::Double(value as f64)
+                sdf::Value::Double(value as f64)
             }
 
             //
@@ -814,9 +694,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::String => {
                 let string_index = self.unpack_value::<u32>(value)?;
-                sdf::Variant::String(self.find_string(string_index))
+                sdf::Value::String(self.find_string(string_index))
             }
-            Type::AssetPath => sdf::Variant::AssetPath(self.unpack_token(value)?),
+            Type::AssetPath => sdf::Value::AssetPath(self.unpack_token(value)?),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
@@ -830,70 +710,70 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     }
                 }
 
-                sdf::Variant::Token(tokens)
+                sdf::Value::Token(tokens)
             }
-            Type::Token => sdf::Variant::Token(vec![self.unpack_token(value)?]),
+            Type::Token => sdf::Value::Token(vec![self.unpack_token(value)?]),
 
             //
             // Vectors
             //
-            Type::Vec2f if value.is_array() => Variant::Vec2f(self.read_vec_array::<f32, 2>(value)?),
-            Type::Vec2d if value.is_array() => Variant::Vec2d(self.read_vec_array::<f64, 2>(value)?),
-            Type::Vec2i if value.is_array() => Variant::Vec2i(self.read_vec_array::<i32, 2>(value)?),
+            Type::Vec2f if value.is_array() => Value::Vec2f(self.read_vec_array::<f32, 2>(value)?),
+            Type::Vec2d if value.is_array() => Value::Vec2d(self.read_vec_array::<f64, 2>(value)?),
+            Type::Vec2i if value.is_array() => Value::Vec2i(self.read_vec_array::<i32, 2>(value)?),
 
-            Type::Vec3f if value.is_array() => Variant::Vec3f(self.read_vec_array::<f32, 3>(value)?),
-            Type::Vec3d if value.is_array() => Variant::Vec3d(self.read_vec_array::<f64, 3>(value)?),
-            Type::Vec3i if value.is_array() => Variant::Vec3i(self.read_vec_array::<i32, 3>(value)?),
+            Type::Vec3f if value.is_array() => Value::Vec3f(self.read_vec_array::<f32, 3>(value)?),
+            Type::Vec3d if value.is_array() => Value::Vec3d(self.read_vec_array::<f64, 3>(value)?),
+            Type::Vec3i if value.is_array() => Value::Vec3i(self.read_vec_array::<i32, 3>(value)?),
 
-            Type::Vec4f if value.is_array() => Variant::Vec4f(self.read_vec_array::<f32, 4>(value)?),
-            Type::Vec4d if value.is_array() => Variant::Vec4d(self.read_vec_array::<f64, 4>(value)?),
-            Type::Vec4i if value.is_array() => Variant::Vec4i(self.read_vec_array::<i32, 4>(value)?),
+            Type::Vec4f if value.is_array() => Value::Vec4f(self.read_vec_array::<f32, 4>(value)?),
+            Type::Vec4d if value.is_array() => Value::Vec4d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Vec4i if value.is_array() => Value::Vec4i(self.read_vec_array::<i32, 4>(value)?),
 
-            Type::Vec2f if value.is_inlined() => sdf::Variant::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
-            Type::Vec2d if value.is_inlined() => sdf::Variant::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
-            Type::Vec2i if value.is_inlined() => sdf::Variant::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
+            Type::Vec2f if value.is_inlined() => sdf::Value::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
+            Type::Vec2d if value.is_inlined() => sdf::Value::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
+            Type::Vec2i if value.is_inlined() => sdf::Value::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
 
-            Type::Vec3f if value.is_inlined() => sdf::Variant::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
-            Type::Vec3d if value.is_inlined() => sdf::Variant::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
-            Type::Vec3i if value.is_inlined() => sdf::Variant::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
+            Type::Vec3f if value.is_inlined() => sdf::Value::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
+            Type::Vec3d if value.is_inlined() => sdf::Value::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
+            Type::Vec3i if value.is_inlined() => sdf::Value::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
 
-            Type::Vec4f if value.is_inlined() => sdf::Variant::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
-            Type::Vec4d if value.is_inlined() => sdf::Variant::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
-            Type::Vec4i if value.is_inlined() => sdf::Variant::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
+            Type::Vec4f if value.is_inlined() => sdf::Value::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
+            Type::Vec4d if value.is_inlined() => sdf::Value::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
+            Type::Vec4i if value.is_inlined() => sdf::Value::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
 
-            Type::Vec2f => sdf::Variant::Vec2f(self.unpack_value::<[f32; 2]>(value)?.into()),
-            Type::Vec2d => sdf::Variant::Vec2d(self.unpack_value::<[f64; 2]>(value)?.into()),
-            Type::Vec2i => sdf::Variant::Vec2i(self.unpack_value::<[i32; 2]>(value)?.into()),
+            Type::Vec2f => sdf::Value::Vec2f(self.unpack_value::<[f32; 2]>(value)?.into()),
+            Type::Vec2d => sdf::Value::Vec2d(self.unpack_value::<[f64; 2]>(value)?.into()),
+            Type::Vec2i => sdf::Value::Vec2i(self.unpack_value::<[i32; 2]>(value)?.into()),
 
-            Type::Vec3f => sdf::Variant::Vec3f(self.unpack_value::<[f32; 3]>(value)?.into()),
-            Type::Vec3d => sdf::Variant::Vec3d(self.unpack_value::<[f64; 3]>(value)?.into()),
-            Type::Vec3i => sdf::Variant::Vec3i(self.unpack_value::<[i32; 3]>(value)?.into()),
+            Type::Vec3f => sdf::Value::Vec3f(self.unpack_value::<[f32; 3]>(value)?.into()),
+            Type::Vec3d => sdf::Value::Vec3d(self.unpack_value::<[f64; 3]>(value)?.into()),
+            Type::Vec3i => sdf::Value::Vec3i(self.unpack_value::<[i32; 3]>(value)?.into()),
 
-            Type::Vec4f => sdf::Variant::Vec4f(self.unpack_value::<[f32; 4]>(value)?.into()),
-            Type::Vec4d => sdf::Variant::Vec4d(self.unpack_value::<[f64; 4]>(value)?.into()),
-            Type::Vec4i => sdf::Variant::Vec4i(self.unpack_value::<[i32; 4]>(value)?.into()),
+            Type::Vec4f => sdf::Value::Vec4f(self.unpack_value::<[f32; 4]>(value)?.into()),
+            Type::Vec4d => sdf::Value::Vec4d(self.unpack_value::<[f64; 4]>(value)?.into()),
+            Type::Vec4i => sdf::Value::Vec4i(self.unpack_value::<[i32; 4]>(value)?.into()),
 
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Variant::Matrix2d(self.read_vec_array::<f64, 4>(value)?),
-            Type::Matrix3d if value.is_array() => Variant::Matrix3d(self.read_vec_array::<f64, 9>(value)?),
-            Type::Matrix4d if value.is_array() => Variant::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
+            Type::Matrix2d if value.is_array() => Value::Matrix2d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Matrix3d if value.is_array() => Value::Matrix3d(self.read_vec_array::<f64, 9>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
 
-            Type::Matrix2d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
-            Type::Matrix3d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
-            Type::Matrix4d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<4>(self.unpack_value(value)?)),
+            Type::Matrix2d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
+            Type::Matrix3d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
+            Type::Matrix4d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<4>(self.unpack_value(value)?)),
 
-            Type::Matrix2d => sdf::Variant::Matrix2d(self.unpack_value::<[f64; 4]>(value)?.into()),
-            Type::Matrix3d => sdf::Variant::Matrix3d(self.unpack_value::<[f64; 9]>(value)?.into()),
-            Type::Matrix4d => sdf::Variant::Matrix4d(self.unpack_value::<[f64; 16]>(value)?.into()),
+            Type::Matrix2d => sdf::Value::Matrix2d(self.unpack_value::<[f64; 4]>(value)?.into()),
+            Type::Matrix3d => sdf::Value::Matrix3d(self.unpack_value::<[f64; 9]>(value)?.into()),
+            Type::Matrix4d => sdf::Value::Matrix4d(self.unpack_value::<[f64; 16]>(value)?.into()),
 
             //
             // SDF types
             //
             Type::TokenListOp => {
                 let list_op = self.read_token_list_op(value)?;
-                sdf::Variant::TokenListOp(list_op)
+                sdf::Value::TokenListOp(list_op)
             }
             Type::TokenVector => {
                 ensure!(!value.is_inlined(), "{} can't be inlined", ty);
@@ -902,32 +782,32 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 let tokens = self.read_token_vec()?;
 
-                sdf::Variant::TokenVector(tokens)
+                sdf::Value::TokenVector(tokens)
             }
             Type::Specifier => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let specifier = sdf::Specifier::from_repr(tmp)
                     .with_context(|| format!("Unable to parse SDF specifier: {}", tmp))?;
 
-                sdf::Variant::Specifier(specifier)
+                sdf::Value::Specifier(specifier)
             }
             Type::Permission => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let permission =
                     sdf::Permission::from_repr(tmp).with_context(|| format!("Unable to parse permission: {}", tmp))?;
 
-                sdf::Variant::Permission(permission)
+                sdf::Value::Permission(permission)
             }
             Type::Variability => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let variability = sdf::Variability::from_repr(tmp)
                     .with_context(|| format!("Unable to parse variability: {}", tmp))?;
 
-                sdf::Variant::Variability(variability)
+                sdf::Value::Variability(variability)
             }
 
             // Empty dictionary.
-            Type::Dictionary if value.is_inlined() => sdf::Variant::Dictionary(HashMap::default()),
+            Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
 
             Type::Dictionary => {
                 ensure!(!value.is_compressed(), "Dictionary {} can't be compressed", ty);
@@ -954,7 +834,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                         // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
                         self.reader.seek(io::SeekFrom::Current(offset - 8))?;
 
-                        let value = dbg!(self.reader.read_pod::<Value>()?);
+                        let value = dbg!(self.reader.read_pod::<ValueRep>()?);
 
                         ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
                         ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
@@ -974,10 +854,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     count -= 1;
                 }
 
-                sdf::Variant::Dictionary(dict)
+                sdf::Value::Dictionary(dict)
             }
 
-            _ => sdf::Variant::Unimplemented,
+            _ => sdf::Value::Unimplemented,
         };
 
         Ok(variant)

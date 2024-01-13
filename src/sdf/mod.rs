@@ -3,10 +3,10 @@
 use strum::{Display, EnumCount, FromRepr};
 
 mod path;
-mod variant;
+mod value;
 
 pub use path::Path;
-pub use variant::Variant;
+pub use value::Value;
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.

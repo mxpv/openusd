@@ -6,13 +6,12 @@ use anyhow::Result;
 
 mod coding;
 mod file;
+mod layout;
 mod reader;
-mod value;
 mod version;
 
-pub use file::{Bootstrap, CrateFile};
+pub use file::CrateFile;
 use reader::CrateReader;
-pub use value::*;
 pub use version::{version, Version};
 
 use crate::sdf;
@@ -22,17 +21,17 @@ pub struct Spec {
     /// Specifies the type of an object.
     pub ty: sdf::SpecType,
     /// Spec properties.
-    pub fields: HashMap<String, sdf::Variant>,
+    pub fields: HashMap<String, sdf::Value>,
 }
 
 impl Spec {
     #[inline]
-    pub fn field(&self, field: &str) -> Option<&sdf::Variant> {
+    pub fn field(&self, field: &str) -> Option<&sdf::Value> {
         self.fields.get(field)
     }
 
     pub fn prim_children(&self) -> &[String] {
-        if let Some(sdf::Variant::TokenVector(tokens)) = self.field("primChildren") {
+        if let Some(sdf::Value::TokenVector(tokens)) = self.field("primChildren") {
             tokens
         } else {
             &[]
@@ -95,7 +94,7 @@ impl CrateData {
 
     /// Retrieve spec and field.
     #[inline]
-    pub fn field(&self, path: &sdf::Path, field: &str) -> Option<&sdf::Variant> {
+    pub fn field(&self, path: &sdf::Path, field: &str) -> Option<&sdf::Value> {
         self.spec(path).and_then(|spec| spec.field(field))
     }
 
@@ -185,35 +184,35 @@ mod tests {
         let clipping_planes = data
             .field(&sdf::Path::new("/World.clippingPlanes").unwrap(), "default")
             .unwrap();
-        assert!(matches!(clipping_planes, sdf::Variant::Vec4f(..)));
+        assert!(matches!(clipping_planes, sdf::Value::Vec4f(..)));
         assert_eq!(clipping_planes.as_f32_slice(), Some([].as_slice()));
 
         // float2 clippingRange = (1, 10000000)
         let clipping_range = data
             .field(&sdf::Path::new("/World.clippingRange").unwrap(), "default")
             .unwrap();
-        assert!(matches!(clipping_range, sdf::Variant::Vec2f(..)));
+        assert!(matches!(clipping_range, sdf::Value::Vec2f(..)));
         assert_eq!(clipping_range.as_f32_slice(), Some([1.0, 10000000.0].as_slice()));
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
         let diffuse_color = data
             .field(&sdf::Path::new("/World.diffuseColor").unwrap(), "default")
             .unwrap();
-        assert!(matches!(diffuse_color, sdf::Variant::Vec3f(..)));
+        assert!(matches!(diffuse_color, sdf::Value::Vec3f(..)));
         assert_eq!(diffuse_color.as_f32_slice(), Some([0.18, 0.18, 0.18].as_slice()));
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
         let face_vertex_counts = data
             .field(&sdf::Path::new("/World.faceVertexCounts").unwrap(), "default")
             .unwrap();
-        assert!(matches!(face_vertex_counts, sdf::Variant::Int(..)));
+        assert!(matches!(face_vertex_counts, sdf::Value::Int(..)));
         assert_eq!(face_vertex_counts.as_int_slice(), Some([1, 2, 3, 4, 5, 6].as_slice()));
 
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
         let normals = data
             .field(&sdf::Path::new("/World.normals").unwrap(), "default")
             .unwrap();
-        assert!(matches!(normals, sdf::Variant::Vec3f(..)));
+        assert!(matches!(normals, sdf::Value::Vec3f(..)));
         assert_eq!(
             normals.as_f32_slice(),
             Some(
@@ -229,21 +228,21 @@ mod tests {
         let xform_op_rotate_xyz = data
             .field(&sdf::Path::new("/World.xformOp:rotateXYZ").unwrap(), "default")
             .unwrap();
-        assert!(matches!(xform_op_rotate_xyz, sdf::Variant::Vec3d(..)));
+        assert!(matches!(xform_op_rotate_xyz, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_rotate_xyz.as_f64_slice(), Some([0.0, 0.0, 0.0].as_slice()));
 
         // double3 xformOp:scale = (1, 1, 1)
         let xform_op_scale = data
             .field(&sdf::Path::new("/World.xformOp:scale").unwrap(), "default")
             .unwrap();
-        assert!(matches!(xform_op_scale, sdf::Variant::Vec3d(..)));
+        assert!(matches!(xform_op_scale, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_scale.as_f64_slice(), Some([1.0, 1.0, 1.0].as_slice()));
 
         // double3 xformOp:translate = (0, 1, 0)
         let xform_op_translate = data
             .field(&sdf::Path::new("/World.xformOp:translate").unwrap(), "default")
             .unwrap();
-        assert!(matches!(xform_op_translate, sdf::Variant::Vec3d(..)));
+        assert!(matches!(xform_op_translate, sdf::Value::Vec3d(..)));
         assert_eq!(xform_op_translate.as_f64_slice(), Some([0.0, 1.0, 0.0].as_slice()));
     }
 }

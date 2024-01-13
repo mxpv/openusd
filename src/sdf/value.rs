@@ -12,7 +12,7 @@ use super::*;
 ///
 /// NOTE: Halfs are not supported in Rust by default, so floats are used instead.
 #[derive(Debug)]
-pub enum Variant {
+pub enum Value {
     Bool(bool),
     Uchar(u8),
     Int(Vec<i32>),
@@ -47,7 +47,7 @@ pub enum Variant {
     Matrix3d(Vec<f64>),
     Matrix4d(Vec<f64>),
 
-    Dictionary(HashMap<String, Variant>),
+    Dictionary(HashMap<String, Value>),
     TokenListOp(TokenListOp),
     StringListOp(StringListOp),
     PathListOp(PathListOp),
@@ -83,22 +83,22 @@ pub enum Variant {
     Unimplemented,
 }
 
-impl Variant {
+impl Value {
     pub fn as_int_slice(&self) -> Option<&[i32]> {
         match self {
-            Variant::Int(vec) => Some(vec.as_slice()),
+            Value::Int(vec) => Some(vec.as_slice()),
             _ => None,
         }
     }
 
     pub fn as_f64_slice(&self) -> Option<&[f64]> {
         let slice = match self {
-            Variant::Vec2d(vec)
-            | Variant::Vec3d(vec)
-            | Variant::Vec4d(vec)
-            | Variant::Matrix2d(vec)
-            | Variant::Matrix3d(vec)
-            | Variant::Matrix4d(vec) => vec.as_slice(),
+            Value::Vec2d(vec)
+            | Value::Vec3d(vec)
+            | Value::Vec4d(vec)
+            | Value::Matrix2d(vec)
+            | Value::Matrix3d(vec)
+            | Value::Matrix4d(vec) => vec.as_slice(),
             _ => return None,
         };
 
@@ -107,24 +107,24 @@ impl Variant {
 
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         let slice = match self {
-            Variant::Vec2f(vec) | Variant::Vec3f(vec) | Variant::Vec4f(vec) => vec.as_slice(),
+            Value::Vec2f(vec) | Value::Vec3f(vec) | Value::Vec4f(vec) => vec.as_slice(),
             _ => return None,
         };
 
         Some(slice)
     }
 
-    pub fn as_dict(&self) -> Option<&HashMap<String, Variant>> {
+    pub fn as_dict(&self) -> Option<&HashMap<String, Value>> {
         match self {
-            Variant::Dictionary(dict) => Some(dict),
+            Value::Dictionary(dict) => Some(dict),
             _ => None,
         }
     }
 
     pub fn as_str(&self) -> &str {
         match self {
-            Variant::String(string) => string.as_str(),
-            Variant::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
+            Value::String(string) => string.as_str(),
+            Value::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
             _ => panic!("Expected string"),
         }
     }

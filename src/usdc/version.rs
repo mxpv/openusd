@@ -48,14 +48,6 @@ impl PartialOrd for Version {
     }
 }
 
-use super::Bootstrap;
-
-impl From<Bootstrap> for Version {
-    fn from(boot: Bootstrap) -> Self {
-        version(boot.version[0], boot.version[1], boot.version[2])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,16 +57,6 @@ mod tests {
         assert!(version(0, 4, 0) != version(0, 4, 1));
         assert!(version(0, 4, 0) == version(0, 4, 0));
         assert!(version(0, 4, 0) < version(0, 10, 0));
-    }
-
-    #[test]
-    fn test_from_bootstrap() {
-        let mut boot = Bootstrap::default();
-        boot.version[0] = 1;
-        boot.version[1] = 2;
-        boot.version[2] = 3;
-
-        assert_eq!(Version::from(boot), version(1, 2, 3));
     }
 
     #[test]
