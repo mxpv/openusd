@@ -157,7 +157,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     fn read_sections(&mut self) -> Result<()> {
         self.set_position(self.bootstrap.toc_offset)?;
-        self.sections = self.reader.read_vec::<Section>()?;
+
+        let count = self.reader.read_count()?;
+        ensure!(count > 0, "Crate file has no sections");
+        ensure!(count < 64, "Suspiciously large number of sections: {}", count);
+
+        self.sections = self.reader.read_vec::<Section>(count)?;
 
         Ok(())
     }
@@ -221,7 +226,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         self.set_position(section.start)?;
 
-        let strings = self.reader.read_vec::<u32>()?;
+        let count = self.reader.read_count()?;
+        ensure!(
+            count < 128 * 1024 * 1024,
+            "Suspiciously large number of strings: {}",
+            count
+        );
+
+        let strings = self.reader.read_vec::<u32>(count)?;
 
         // These are indices, so convert to usize for convenience.
         self.strings = strings.into_iter().map(|offset| offset as usize).collect::<Vec<_>>();
@@ -503,7 +515,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         if compressed {
             self.reader.read_encoded_ints(count)
         } else {
-            self.reader.read_raw(count)
+            self.reader.read_vec(count)
         }
     }
 
@@ -609,7 +621,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<String>> {
-        let indices = self.reader.read_vec::<u32>()?;
+        let count = self.reader.read_count()?;
+
+        let indices = self.reader.read_vec::<u32>(count)?;
 
         let vec = indices
             .into_iter()
@@ -631,7 +645,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             return Ok(Vec::default());
         }
 
-        let value = self.reader.read_raw(count * N)?;
+        let value = self.reader.read_vec(count * N)?;
 
         Ok(value)
     }
@@ -689,7 +703,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.set_position(value.payload())?;
 
                 let count = self.reader.read_count()?;
-                let indices = self.reader.read_raw::<u32>(count)?;
+                let indices = self.reader.read_vec::<u32>(count)?;
 
                 let vec = indices.into_iter().map(|index| self.find_string(index)).collect();
 
@@ -709,7 +723,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let mut tokens = Vec::with_capacity(count);
 
                 if count > 0 {
-                    let indices = self.reader.read_raw::<u32>(count)?;
+                    let indices = self.reader.read_vec::<u32>(count)?;
 
                     for index in indices {
                         tokens.push(self.tokens[index as usize].clone());
@@ -820,7 +834,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.set_position(value.payload())?;
 
                 let count = self.reader.read_count()?;
-                let vec = self.reader.read_raw(count)?;
+                let vec = self.reader.read_vec(count)?;
 
                 sdf::Value::LayerOffsetVector(vec)
             }
