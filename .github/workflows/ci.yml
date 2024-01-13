@@ -36,3 +36,46 @@ jobs:
         with:
           submodules: true
       - uses: EmbarkStudios/cargo-deny-action@v1
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: ${{ github.event_name != 'schedule' && github.ref_name == 'main' }}
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - run: cargo install grcov
+      - run: grcov --version
+
+      - run: cargo test --all-features
+        env:
+          RUSTFLAGS: "-Cinstrument-coverage"
+          LLVM_PROFILE_FILE: "target/coverage/%p-%m.profraw"
+
+      - name: Collect coverage data
+        run: |
+          grcov . \
+            --source-dir . \
+            --binary-path ./target/debug/ \
+            --branch \
+            --ignore-not-existing \
+            --output-types markdown,lcov \
+            --keep-only 'src/*' \
+            --output-path ./target/coverage/
+
+      - name: Upload coverage data
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unittests
+          files: ./target/coverage/lcov
+          verbose: true
+
+      - name: Publish job summary
+        run: |
+          echo "# Coverage" >> $GITHUB_STEP_SUMMARY
+          cat target/coverage/markdown.md >> $GITHUB_STEP_SUMMARY
