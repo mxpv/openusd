@@ -143,67 +143,107 @@ mod tests {
     }
 
     #[test]
-    fn test_read_arrays() {
-        let file = fs::File::open("fixtures/matrix_transform.usdc").unwrap();
+    fn test_read_custom_layer_data() {
+        let file = fs::File::open("fixtures/fields.usdc").unwrap();
         let data = dbg!(CrateData::open(file, true).unwrap());
 
-        let vertex_counts = data
-            .field(&sdf::Path::new("/World/mesh.faceVertexCounts").unwrap(), "default")
-            .expect("Failed to query: /World/mesh.faceVertexCounts");
+        let pseudo_root = data
+            .specs_iter()
+            .find(|spec| spec.ty == sdf::SpecType::PseudoRoot)
+            .expect("Unable to find pseudo root");
 
-        assert_eq!(vertex_counts.as_int_slice(), Some([4, 4, 4, 4, 4, 4].as_slice()));
+        //  customLayerData = {
+        //      string test = "Test string"
+        //  }
+        let copyright = pseudo_root
+            .field("customLayerData")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("test")
+            .unwrap()
+            .as_str();
 
-        let vertex_indices = data
-            .field(&sdf::Path::new("/World/mesh.faceVertexIndices").unwrap(), "default")
+        assert_eq!(copyright, "Test string");
+    }
+
+    #[test]
+    fn test_read_array_fields() {
+        let file = fs::File::open("fixtures/fields.usdc").unwrap();
+        let data = dbg!(CrateData::open(file, true).unwrap());
+
+        let pseudo_root = data
+            .specs_iter()
+            .find(|spec| spec.ty == sdf::SpecType::PseudoRoot)
+            .expect("Unable to find pseudo root");
+
+        //  defaultPrim = "World"
+        let default_prim = pseudo_root.field("defaultPrim").unwrap().as_str();
+        assert_eq!(default_prim, "World");
+
+        // float4[] clippingPlanes = []
+        let clipping_planes = data
+            .field(&sdf::Path::new("/World.clippingPlanes").unwrap(), "default")
             .unwrap();
+        assert!(matches!(clipping_planes, sdf::Variant::Vec4f(..)));
+        assert_eq!(clipping_planes.as_f32_slice(), Some([].as_slice()));
 
-        assert_eq!(
-            vertex_indices.as_int_slice(),
-            Some([0, 4, 6, 2, 0, 1, 5, 4, 4, 5, 7, 6, 3, 7, 5, 1, 6, 7, 3, 2, 2, 3, 1, 0].as_slice())
-        );
-
-        let transforms = data
-            .field(&sdf::Path::new("/World/mesh.xformOp:transform").unwrap(), "default")
+        // float2 clippingRange = (1, 10000000)
+        let clipping_range = data
+            .field(&sdf::Path::new("/World.clippingRange").unwrap(), "default")
             .unwrap();
+        assert!(matches!(clipping_range, sdf::Variant::Vec2f(..)));
+        assert_eq!(clipping_range.as_f32_slice(), Some([1.0, 10000000.0].as_slice()));
 
+        // float3 diffuseColor = (0.18, 0.18, 0.18)
+        let diffuse_color = data
+            .field(&sdf::Path::new("/World.diffuseColor").unwrap(), "default")
+            .unwrap();
+        assert!(matches!(diffuse_color, sdf::Variant::Vec3f(..)));
+        assert_eq!(diffuse_color.as_f32_slice(), Some([0.18, 0.18, 0.18].as_slice()));
+
+        // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
+        let face_vertex_counts = data
+            .field(&sdf::Path::new("/World.faceVertexCounts").unwrap(), "default")
+            .unwrap();
+        assert!(matches!(face_vertex_counts, sdf::Variant::Int(..)));
+        assert_eq!(face_vertex_counts.as_int_slice(), Some([1, 2, 3, 4, 5, 6].as_slice()));
+
+        // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
+        let normals = data
+            .field(&sdf::Path::new("/World.normals").unwrap(), "default")
+            .unwrap();
+        assert!(matches!(normals, sdf::Variant::Vec3f(..)));
         assert_eq!(
-            transforms.as_f64_slice(),
+            normals.as_f32_slice(),
             Some(
                 [
-                    0_f64,
-                    0.5,
-                    -0.8660254037844386,
-                    0.0,
-                    -1.7320508075688772,
-                    0.8660254037844388,
-                    0.5,
-                    0.0,
-                    1.5,
-                    2.25,
-                    1.2990381056766584,
-                    0.0,
-                    4.0,
-                    5.0,
-                    6.0,
-                    1.0
+                    0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+                    0.0
                 ]
                 .as_slice()
             )
         );
 
-        let points = data
-            .field(&sdf::Path::new("/World/mesh.points").unwrap(), "default")
+        // double3 xformOp:rotateXYZ = (0, 0, 0)
+        let xform_op_rotate_xyz = data
+            .field(&sdf::Path::new("/World.xformOp:rotateXYZ").unwrap(), "default")
             .unwrap();
+        assert!(matches!(xform_op_rotate_xyz, sdf::Variant::Vec3d(..)));
+        assert_eq!(xform_op_rotate_xyz.as_f64_slice(), Some([0.0, 0.0, 0.0].as_slice()));
 
-        assert_eq!(
-            points.as_f32_slice(),
-            Some(
-                [
-                    -0.5_f32, -0.5, -0.5, 0.5, -0.5, -0.5, -0.5, 0.5, -0.5, 0.5, 0.5, -0.5, -0.5, -0.5, 0.5, 0.5, -0.5,
-                    0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5
-                ]
-                .as_slice()
-            )
-        )
+        // double3 xformOp:scale = (1, 1, 1)
+        let xform_op_scale = data
+            .field(&sdf::Path::new("/World.xformOp:scale").unwrap(), "default")
+            .unwrap();
+        assert!(matches!(xform_op_scale, sdf::Variant::Vec3d(..)));
+        assert_eq!(xform_op_scale.as_f64_slice(), Some([1.0, 1.0, 1.0].as_slice()));
+
+        // double3 xformOp:translate = (0, 1, 0)
+        let xform_op_translate = data
+            .field(&sdf::Path::new("/World.xformOp:translate").unwrap(), "default")
+            .unwrap();
+        assert!(matches!(xform_op_translate, sdf::Variant::Vec3d(..)));
+        assert_eq!(xform_op_translate.as_f64_slice(), Some([0.0, 1.0, 0.0].as_slice()));
     }
 }

@@ -3,6 +3,7 @@
 use core::fmt;
 
 use anyhow::{Context as _, Result};
+use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 /// Value in file representation.
@@ -16,7 +17,8 @@ use strum::{Display, EnumCount, FromRepr};
 ///
 /// For values that aren't stored inline, the 6 data bytes are the offset from
 /// the start of the file to the value's location.
-#[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
+#[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
 pub struct Value(pub u64);
 
 impl fmt::Display for Value {

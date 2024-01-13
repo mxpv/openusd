@@ -1,6 +1,7 @@
 //! Binary crate file reader.
 
 use std::{
+    collections::HashMap,
     ffi::CStr,
     io::{self, Cursor},
     mem, str,
@@ -569,6 +570,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         self.sections.iter().find(|s| s.name() == name)
     }
 
+    fn find_string(&self, string_index: u32) -> String {
+        let token = self.strings[string_index as usize];
+        self.tokens[token].clone()
+    }
+
     fn set_position(&mut self, position: u64) -> Result<()> {
         self.reader.seek(io::SeekFrom::Start(position))?;
         Ok(())
@@ -739,6 +745,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         debug_assert!(!value.is_compressed());
 
         let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+
+        // Array allowed to be empty.
+        if count == 0 {
+            return Ok(Vec::default());
+        }
+
         let value = self.reader.read_raw(count * N)?;
 
         Ok(value)
@@ -796,7 +808,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Tokens, strings, asset paths
             //
-            Type::String => sdf::Variant::String(self.unpack_token(value)?),
+            Type::String if value.is_array() => {
+                todo!()
+            }
+
+            Type::String => {
+                let string_index = self.unpack_value::<u32>(value)?;
+                sdf::Variant::String(self.find_string(string_index))
+            }
             Type::AssetPath => sdf::Variant::AssetPath(self.unpack_token(value)?),
 
             Type::Token if value.is_array() => {
@@ -830,17 +849,29 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Vec4d if value.is_array() => Variant::Vec4d(self.read_vec_array::<f64, 4>(value)?),
             Type::Vec4i if value.is_array() => Variant::Vec4i(self.read_vec_array::<i32, 4>(value)?),
 
-            Type::Vec2f => sdf::Variant::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
-            Type::Vec2d => sdf::Variant::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
-            Type::Vec2i => sdf::Variant::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
+            Type::Vec2f if value.is_inlined() => sdf::Variant::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
+            Type::Vec2d if value.is_inlined() => sdf::Variant::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
+            Type::Vec2i if value.is_inlined() => sdf::Variant::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
 
-            Type::Vec3f => sdf::Variant::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
-            Type::Vec3d => sdf::Variant::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
-            Type::Vec3i => sdf::Variant::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
+            Type::Vec3f if value.is_inlined() => sdf::Variant::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
+            Type::Vec3d if value.is_inlined() => sdf::Variant::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
+            Type::Vec3i if value.is_inlined() => sdf::Variant::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
 
-            Type::Vec4f => sdf::Variant::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
-            Type::Vec4d => sdf::Variant::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
-            Type::Vec4i => sdf::Variant::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
+            Type::Vec4f if value.is_inlined() => sdf::Variant::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
+            Type::Vec4d if value.is_inlined() => sdf::Variant::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
+            Type::Vec4i if value.is_inlined() => sdf::Variant::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
+
+            Type::Vec2f => sdf::Variant::Vec2f(self.unpack_value::<[f32; 2]>(value)?.into()),
+            Type::Vec2d => sdf::Variant::Vec2d(self.unpack_value::<[f64; 2]>(value)?.into()),
+            Type::Vec2i => sdf::Variant::Vec2i(self.unpack_value::<[i32; 2]>(value)?.into()),
+
+            Type::Vec3f => sdf::Variant::Vec3f(self.unpack_value::<[f32; 3]>(value)?.into()),
+            Type::Vec3d => sdf::Variant::Vec3d(self.unpack_value::<[f64; 3]>(value)?.into()),
+            Type::Vec3i => sdf::Variant::Vec3i(self.unpack_value::<[i32; 3]>(value)?.into()),
+
+            Type::Vec4f => sdf::Variant::Vec4f(self.unpack_value::<[f32; 4]>(value)?.into()),
+            Type::Vec4d => sdf::Variant::Vec4d(self.unpack_value::<[f64; 4]>(value)?.into()),
+            Type::Vec4i => sdf::Variant::Vec4i(self.unpack_value::<[i32; 4]>(value)?.into()),
 
             //
             // Matrices
@@ -853,9 +884,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Matrix3d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
             Type::Matrix4d if value.is_inlined() => sdf::Variant::Matrix2d(to_mat_diag::<4>(self.unpack_value(value)?)),
 
-            Type::Matrix2d => sdf::Variant::Matrix2d(Vec::from(self.unpack_value::<[f64; 4]>(value)?)),
-            Type::Matrix3d => sdf::Variant::Matrix3d(Vec::from(self.unpack_value::<[f64; 9]>(value)?)),
-            Type::Matrix4d => sdf::Variant::Matrix4d(Vec::from(self.unpack_value::<[f64; 16]>(value)?)),
+            Type::Matrix2d => sdf::Variant::Matrix2d(self.unpack_value::<[f64; 4]>(value)?.into()),
+            Type::Matrix3d => sdf::Variant::Matrix3d(self.unpack_value::<[f64; 9]>(value)?.into()),
+            Type::Matrix4d => sdf::Variant::Matrix4d(self.unpack_value::<[f64; 16]>(value)?.into()),
 
             //
             // SDF types
@@ -894,6 +925,58 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 sdf::Variant::Variability(variability)
             }
+
+            // Empty dictionary.
+            Type::Dictionary if value.is_inlined() => sdf::Variant::Dictionary(HashMap::default()),
+
+            Type::Dictionary => {
+                ensure!(!value.is_compressed(), "Dictionary {} can't be compressed", ty);
+                ensure!(!value.is_array(), "Dictionary {} can't be inlined", ty);
+
+                self.set_position(value.payload())?;
+                let mut count = self.reader.read_count()?;
+
+                let mut dict = HashMap::default();
+
+                while count > 0 {
+                    // Read key string
+                    let key = {
+                        let string_index = self.reader.read_pod::<u32>()?;
+                        self.find_string(string_index)
+                    };
+
+                    let value = {
+                        // Read recursive offset.
+                        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
+                        let offset = self.reader.read_pod::<i64>()?;
+
+                        // -8 to compensate sizeof(offset)
+                        // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
+                        self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+
+                        let value = dbg!(self.reader.read_pod::<Value>()?);
+
+                        ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
+                        ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
+
+                        // Save current position.
+                        let saved_position = self.reader.stream_position()?;
+
+                        let value = self.value(value)?;
+
+                        // Restore position
+                        self.set_position(saved_position)?;
+
+                        value
+                    };
+
+                    dict.insert(key, value);
+                    count -= 1;
+                }
+
+                sdf::Variant::Dictionary(dict)
+            }
+
             _ => sdf::Variant::Unimplemented,
         };
 

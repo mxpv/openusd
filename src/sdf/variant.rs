@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::*;
 
 /// Variant is a type that can hold any of the SDF types.
@@ -45,7 +47,7 @@ pub enum Variant {
     Matrix3d(Vec<f64>),
     Matrix4d(Vec<f64>),
 
-    Dictionary,
+    Dictionary(HashMap<String, Variant>),
     TokenListOp(TokenListOp),
     StringListOp(StringListOp),
     PathListOp(PathListOp),
@@ -110,5 +112,20 @@ impl Variant {
         };
 
         Some(slice)
+    }
+
+    pub fn as_dict(&self) -> Option<&HashMap<String, Variant>> {
+        match self {
+            Variant::Dictionary(dict) => Some(dict),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Variant::String(string) => string.as_str(),
+            Variant::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
+            _ => panic!("Expected string"),
+        }
     }
 }

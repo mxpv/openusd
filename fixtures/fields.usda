@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    doc = """test string"""
+    customLayerData = {
+        string test = "Test string"
+    }
+
+    upAxis = "Y"
+    metersPerUnit = 0.01
+
+    defaultPrim = "World"
+)
+
+def "World"
+{
+    float2 clippingRange = (1, 10000000)
+    float3 diffuseColor = (0.18, 0.18, 0.18)
+    float4[] clippingPlanes = []
+
+    int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
+    point3f[] points = [(1.0, -2.0, 3.0), (3.0, 5.0, 6.0)]
+
+    normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
+
+    double3 xformOp:rotateXYZ = (0, 0, 0)
+	double3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (0, 1, 0)
+
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
