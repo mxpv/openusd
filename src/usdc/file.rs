@@ -465,13 +465,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         self.sections.iter().find(|s| s.name() == name)
     }
 
-    fn find_string(&self, string_index: u32) -> String {
+    fn resolve_string(&self, string_index: u32) -> String {
         let token = self.strings[string_index as usize];
         self.tokens[token].clone()
-    }
-
-    fn find_path(&self, path_index: u32) -> sdf::Path {
-        self.paths[path_index as usize].clone()
     }
 
     fn set_position(&mut self, position: u64) -> Result<()> {
@@ -526,6 +522,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
     fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool)> {
         debug_assert!(value.is_array());
+        debug_assert!(!value.is_inlined());
 
         // Empty array.
         if value.payload() == 0 {
@@ -620,13 +617,23 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(out)
     }
 
-    fn read_token_list_op(&mut self, value: ValueRep) -> Result<sdf::TokenListOp> {
-        self.read_list_op(value, |file: &mut Self| file.read_token_vec())
+    fn read_string_vec(&mut self) -> Result<Vec<String>> {
+        let count = self.reader.read_count()?;
+        let indices = self.reader.read_vec::<u32>(count)?;
+
+        let vec = indices
+            .into_iter()
+            .map(|string_index| {
+                let token_index = self.strings[string_index as usize];
+                self.tokens[token_index].clone()
+            })
+            .collect();
+
+        Ok(vec)
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<String>> {
         let count = self.reader.read_count()?;
-
         let indices = self.reader.read_vec::<u32>(count)?;
 
         let vec = indices
@@ -637,8 +644,69 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(vec)
     }
 
+    fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>> {
+        let count = self.reader.read_count()?;
+        let indices = self.reader.read_vec::<u32>(count)?;
+
+        let vec = indices
+            .into_iter()
+            .map(|index| self.paths[index as usize].clone())
+            .collect();
+
+        Ok(vec)
+    }
+
+    fn read_string(&mut self) -> Result<String> {
+        let index = self.reader.read_pod::<u32>()?;
+        let string = self.resolve_string(index);
+
+        Ok(string)
+    }
+
+    fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
+        let mut count = self.reader.read_count()?;
+        let mut dict = HashMap::default();
+
+        while count > 0 {
+            let key = self.read_string()?;
+
+            let value = {
+                // Read recursive offset.
+                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
+                let offset = self.reader.read_pod::<i64>()?;
+
+                // -8 to compensate sizeof(offset)
+                // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
+                self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+
+                let value = dbg!(self.reader.read_pod::<ValueRep>()?);
+
+                ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
+                ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
+
+                // Save current position.
+                let saved_position = self.reader.stream_position()?;
+
+                let value = self.value(value)?;
+
+                // Restore position
+                self.set_position(saved_position)?;
+
+                value
+            };
+
+            dict.insert(key, value);
+            count -= 1;
+        }
+
+        Ok(dict)
+    }
+
     // Read an array of vectors.
-    fn read_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(&mut self, value: ValueRep) -> Result<Vec<T>> {
+    fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
+        &mut self,
+        value: ValueRep,
+    ) -> Result<Vec<T>> {
         debug_assert!(value.is_array());
         debug_assert!(!value.is_compressed());
 
@@ -705,20 +773,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 ensure!(!value.is_inlined());
 
                 self.set_position(value.payload())?;
-
-                let count = self.reader.read_count()?;
-                let indices = self.reader.read_vec::<u32>(count)?;
-
-                let vec = indices.into_iter().map(|index| self.find_string(index)).collect();
-
-                sdf::Value::StringVector(vec)
+                sdf::Value::StringVector(self.read_string_vec()?)
             }
 
             Type::String => {
                 ensure!(!value.is_array());
 
                 let string_index = self.unpack_value::<u32>(value)?;
-                sdf::Value::String(self.find_string(string_index))
+                sdf::Value::String(self.resolve_string(string_index))
             }
             Type::AssetPath => sdf::Value::AssetPath(self.unpack_token(value)?),
 
@@ -741,17 +803,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Vectors
             //
-            Type::Vec2f if value.is_array() => Value::Vec2f(self.read_array::<f32, 2>(value)?),
-            Type::Vec2d if value.is_array() => Value::Vec2d(self.read_array::<f64, 2>(value)?),
-            Type::Vec2i if value.is_array() => Value::Vec2i(self.read_array::<i32, 2>(value)?),
+            Type::Vec2f if value.is_array() => Value::Vec2f(self.read_vec_array::<f32, 2>(value)?),
+            Type::Vec2d if value.is_array() => Value::Vec2d(self.read_vec_array::<f64, 2>(value)?),
+            Type::Vec2i if value.is_array() => Value::Vec2i(self.read_vec_array::<i32, 2>(value)?),
 
-            Type::Vec3f if value.is_array() => Value::Vec3f(self.read_array::<f32, 3>(value)?),
-            Type::Vec3d if value.is_array() => Value::Vec3d(self.read_array::<f64, 3>(value)?),
-            Type::Vec3i if value.is_array() => Value::Vec3i(self.read_array::<i32, 3>(value)?),
+            Type::Vec3f if value.is_array() => Value::Vec3f(self.read_vec_array::<f32, 3>(value)?),
+            Type::Vec3d if value.is_array() => Value::Vec3d(self.read_vec_array::<f64, 3>(value)?),
+            Type::Vec3i if value.is_array() => Value::Vec3i(self.read_vec_array::<i32, 3>(value)?),
 
-            Type::Vec4f if value.is_array() => Value::Vec4f(self.read_array::<f32, 4>(value)?),
-            Type::Vec4d if value.is_array() => Value::Vec4d(self.read_array::<f64, 4>(value)?),
-            Type::Vec4i if value.is_array() => Value::Vec4i(self.read_array::<i32, 4>(value)?),
+            Type::Vec4f if value.is_array() => Value::Vec4f(self.read_vec_array::<f32, 4>(value)?),
+            Type::Vec4d if value.is_array() => Value::Vec4d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Vec4i if value.is_array() => Value::Vec4i(self.read_vec_array::<i32, 4>(value)?),
 
             Type::Vec2f if value.is_inlined() => sdf::Value::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
             Type::Vec2d if value.is_inlined() => sdf::Value::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
@@ -780,9 +842,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Value::Matrix2d(self.read_array::<f64, 4>(value)?),
-            Type::Matrix3d if value.is_array() => Value::Matrix3d(self.read_array::<f64, 9>(value)?),
-            Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_array::<f64, 16>(value)?),
+            Type::Matrix2d if value.is_array() => Value::Matrix2d(self.read_vec_array::<f64, 4>(value)?),
+            Type::Matrix3d if value.is_array() => Value::Matrix3d(self.read_vec_array::<f64, 9>(value)?),
+            Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
 
             Type::Matrix2d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
             Type::Matrix3d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
@@ -796,41 +858,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // ListOp
             //
             Type::TokenListOp => {
-                let list_op = self.read_token_list_op(value)?;
-                sdf::Value::TokenListOp(list_op)
+                ensure!(!value.is_inlined());
+
+                let list = self.read_list_op(value, |file: &mut Self| file.read_token_vec())?;
+                sdf::Value::TokenListOp(list)
             }
             Type::StringListOp => {
                 ensure!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    let strings = file
-                        .reader
-                        .read_vec::<u32>(count)?
-                        .into_iter()
-                        .map(|index| file.find_string(index))
-                        .collect();
-
-                    Ok(strings)
-                })?;
-
+                let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
                 sdf::Value::StringListOp(list)
             }
             Type::PathListOp => {
                 ensure!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    let paths = file
-                        .reader
-                        .read_vec::<u32>(count)?
-                        .into_iter()
-                        .map(|index| file.find_path(index))
-                        .collect();
-
-                    Ok(paths)
-                })?;
-
+                let list = self.read_list_op(value, |file: &mut Self| file.read_path_vec())?;
                 sdf::Value::PathListOp(list)
             }
 
@@ -838,12 +880,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // SDF types
             //
             Type::TokenVector => {
-                ensure!(!value.is_inlined(), "{} can't be inlined", ty);
+                ensure!(!value.is_inlined());
 
                 self.set_position(value.payload())?;
 
                 let tokens = self.read_token_vec()?;
-
                 sdf::Value::TokenVector(tokens)
             }
             Type::Specifier => {
@@ -853,6 +894,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 sdf::Value::Specifier(specifier)
             }
+
             Type::Permission => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let permission =
@@ -860,6 +902,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 sdf::Value::Permission(permission)
             }
+
             Type::Variability => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let variability = sdf::Variability::from_repr(tmp)
@@ -892,15 +935,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let mut map = HashMap::with_capacity(count);
 
                 while count > 0 {
-                    let key = {
-                        let index = self.reader.read_pod::<u32>()?;
-                        self.find_string(index)
-                    };
-
-                    let value = {
-                        let index = self.reader.read_pod::<u32>()?;
-                        self.find_string(index)
-                    };
+                    let key = self.read_string()?;
+                    let value = self.read_string()?;
 
                     map.insert(key, value);
                     count -= 1;
@@ -916,47 +952,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 ensure!(!value.is_array(), "Dictionary {} can't be inlined", ty);
 
                 self.set_position(value.payload())?;
-                let mut count = self.reader.read_count()?;
 
-                let mut dict = HashMap::default();
-
-                while count > 0 {
-                    // Read key string
-                    let key = {
-                        let string_index = self.reader.read_pod::<u32>()?;
-                        self.find_string(string_index)
-                    };
-
-                    let value = {
-                        // Read recursive offset.
-                        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
-                        let offset = self.reader.read_pod::<i64>()?;
-
-                        // -8 to compensate sizeof(offset)
-                        // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
-                        self.reader.seek(io::SeekFrom::Current(offset - 8))?;
-
-                        let value = dbg!(self.reader.read_pod::<ValueRep>()?);
-
-                        ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
-                        ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
-
-                        // Save current position.
-                        let saved_position = self.reader.stream_position()?;
-
-                        let value = self.value(value)?;
-
-                        // Restore position
-                        self.set_position(saved_position)?;
-
-                        value
-                    };
-
-                    dict.insert(key, value);
-                    count -= 1;
-                }
-
-                sdf::Value::Dictionary(dict)
+                sdf::Value::Dictionary(self.read_custom_data()?)
             }
 
             _ => bail!("Unsupported value type: {}", ty),
