@@ -1,6 +1,6 @@
 //! Scene description foundations.
 
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug};
 
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -115,6 +115,24 @@ pub struct Payload {
     pub layer_offset: LayerOffset,
 }
 
+/// Represents a reference and all its meta data.
+///
+/// A reference is expressed on a prim in a given layer and it identifies a
+/// prim in a layer stack. All opinions in the namespace hierarchy
+/// under the referenced prim will be composed with the opinions in the
+/// namespace hierarchy under the referencing prim.
+#[derive(Debug, Default)]
+pub struct Reference {
+    /// The asset path to the external layer.
+    pub asset_path: String,
+    /// The path to the referenced prim in the external layer.
+    pub prim_path: Path,
+    /// The layer offset to transform time.
+    pub layer_offset: LayerOffset,
+    /// The custom data associated with the reference.
+    pub custom_data: HashMap<String, Value>,
+}
+
 /// Value type representing a list-edit operation.
 ///
 /// `ListOp`` is a value type representing an operation that edits a list.
@@ -139,6 +157,7 @@ pub type Uint64ListOp = ListOp<u64>;
 pub type StringListOp = ListOp<String>;
 pub type TokenListOp = ListOp<String>;
 pub type PathListOp = ListOp<Path>;
+pub type ReferenceListOp = ListOp<Reference>;
 
 /// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
 ///

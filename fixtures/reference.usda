@@ -1,0 +1,21 @@
+#usda 1.0
+
+# From https://openusd.org/release/glossary.html#usdglossary-references
+
+def Xform "MarbleCollection" (
+    kind = "assembly"
+)
+{
+    def "Marble_Red" (
+        references = @Marble.usd@</Foo/Bar>
+    )
+    {
+        double3 xformOp:translate = (5, 0, 0)
+        uniform token[] xformOpOrder = [ "xformOp:translate" ]
+
+        over "marble_geom"
+        {
+            color3f[] primvars:displayColor = [ (1, 0, 0) ]
+        }
+    }
+}

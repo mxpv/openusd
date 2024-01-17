@@ -496,7 +496,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(value)
     }
 
-    fn unpack_token(&mut self, value: ValueRep) -> Result<String> {
+    fn read_token(&mut self, value: ValueRep) -> Result<String> {
         let index: u64 = self.unpack_value(value)?;
         let value = self.tokens[index as usize].clone();
 
@@ -663,6 +663,27 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(string)
     }
 
+    fn read_path(&mut self) -> Result<sdf::Path> {
+        let index = self.reader.read_pod::<u32>()?;
+        let path = self.paths[index as usize].clone();
+
+        Ok(path)
+    }
+
+    fn read_reference(&mut self) -> Result<sdf::Reference> {
+        let asset_path = self.read_string()?;
+        let prim_path = self.read_path()?;
+        let layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
+        let custom_data = self.read_custom_data()?;
+
+        Ok(sdf::Reference {
+            asset_path,
+            prim_path,
+            layer_offset,
+            custom_data,
+        })
+    }
+
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
@@ -782,7 +803,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let string_index = self.unpack_value::<u32>(value)?;
                 sdf::Value::String(self.resolve_string(string_index))
             }
-            Type::AssetPath => sdf::Value::AssetPath(self.unpack_token(value)?),
+            Type::AssetPath => sdf::Value::AssetPath(self.read_token(value)?),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
@@ -798,7 +819,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 sdf::Value::Token(tokens)
             }
-            Type::Token => sdf::Value::Token(vec![self.unpack_token(value)?]),
+            Type::Token => sdf::Value::Token(vec![self.read_token(value)?]),
 
             //
             // Vectors
@@ -874,6 +895,23 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 let list = self.read_list_op(value, |file: &mut Self| file.read_path_vec())?;
                 sdf::Value::PathListOp(list)
+            }
+            Type::ReferenceListOp => {
+                ensure!(!value.is_inlined());
+
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    let mut vec = Vec::with_capacity(count);
+
+                    for _ in 0..count {
+                        let reference = file.read_reference()?;
+                        vec.push(reference);
+                    }
+
+                    Ok(vec)
+                })?;
+
+                sdf::Value::ReferenceListOp(list)
             }
 
             //

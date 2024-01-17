@@ -124,7 +124,7 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sdf::LayerOffset;
+    use crate::sdf::{LayerOffset, ReferenceListOp};
 
     use super::*;
 
@@ -240,6 +240,26 @@ mod tests {
             conn.explicit_items,
             vec![sdf::path("/TexModel/boardMat/PBRShader.outputs:surface")?]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_reference() -> Result<()> {
+        let mut data = read_file("fixtures/reference.usdc")?;
+
+        let value = data.get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?;
+        let references = ReferenceListOp::try_from(value)?;
+
+        assert!(references.appended_items.is_empty());
+        assert!(references.deleted_items.is_empty());
+        assert!(references.ordered_items.is_empty());
+
+        assert!(references.explicit);
+        assert_eq!(references.explicit_items.len(), 1);
+
+        assert_eq!(references.explicit_items[0].asset_path, "Marble.usd");
+        assert_eq!(references.explicit_items[0].prim_path, sdf::path("/Foo/Bar")?);
 
         Ok(())
     }

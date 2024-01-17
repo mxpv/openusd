@@ -53,7 +53,7 @@ pub enum Value {
     TokenListOp(TokenListOp),
     StringListOp(StringListOp),
     PathListOp(PathListOp),
-    ReferenceListOp,
+    ReferenceListOp(ReferenceListOp),
     IntListOp(IntListOp),
     Int64ListOp(Int64ListOp),
     UIntListOp(UintListOp),
@@ -182,6 +182,17 @@ impl TryFrom<Value> for HashMap<String, String> {
         match value {
             Value::VariantSelectionMap(map) => Ok(map),
             _ => bail!("Unable to unpack variant selection map"),
+        }
+    }
+}
+
+impl TryFrom<Value> for ReferenceListOp {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::ReferenceListOp(list) => Ok(list),
+            _ => bail!("Unable to unpack reference list op"),
         }
     }
 }
