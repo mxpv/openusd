@@ -684,6 +684,27 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         })
     }
 
+    fn read_payload(&mut self) -> Result<sdf::Payload> {
+        let asset_path = self.read_string()?;
+        let prim_path = self.read_path()?;
+
+        let mut payload = sdf::Payload {
+            asset_path,
+            prim_path,
+            layer_offset: None,
+        };
+
+        // Layer offsets were added to SdfPayload starting in 0.8.0. Files
+        // before that cannot have them.
+        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1214C41-L1214C41
+        if self.version() >= version(0, 8, 0) {
+            let layer_offset = self.reader.read_pod::<sdf::LayerOffset>()?;
+            payload.layer_offset = Some(layer_offset);
+        }
+
+        Ok(payload)
+    }
+
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
@@ -925,6 +946,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let tokens = self.read_token_vec()?;
                 sdf::Value::TokenVector(tokens)
             }
+
             Type::Specifier => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let specifier = sdf::Specifier::from_repr(tmp)
@@ -960,6 +982,32 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let vec = self.reader.read_vec(count)?;
 
                 sdf::Value::LayerOffsetVector(vec)
+            }
+
+            Type::Payload => {
+                ensure!(!value.is_inlined());
+                ensure!(!value.is_array());
+                ensure!(!value.is_compressed());
+
+                self.set_position(value.payload())?;
+
+                let payload = self.read_payload()?;
+                sdf::Value::Payload(payload)
+            }
+
+            Type::PayloadListOp => {
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    let mut vec = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let payload = file.read_payload()?;
+                        vec.push(payload);
+                    }
+
+                    Ok(vec)
+                })?;
+
+                sdf::Value::PayloadListOp(list)
             }
 
             Type::VariantSelectionMap => {

@@ -76,7 +76,7 @@ pub enum Value {
 
     UnregisteredValue,
     UnregisteredValueListOp,
-    PayloadListOp,
+    PayloadListOp(PayloadListOp),
 
     TimeCode(f64),
     PathExpression,
@@ -193,6 +193,28 @@ impl TryFrom<Value> for ReferenceListOp {
         match value {
             Value::ReferenceListOp(list) => Ok(list),
             _ => bail!("Unable to unpack reference list op"),
+        }
+    }
+}
+
+impl TryFrom<Value> for Payload {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Payload(payload) => Ok(payload),
+            _ => bail!("Unable to unpack payload"),
+        }
+    }
+}
+
+impl TryFrom<Value> for PayloadListOp {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::PayloadListOp(list) => Ok(list),
+            _ => bail!("Unable to unpack payload list op"),
         }
     }
 }

@@ -107,12 +107,14 @@ impl LayerOffset {
 /// Unloaded payloads represent a boundary that lazy composition and
 /// system behaviors will not traverse across, providing a user-visible
 /// way to manage the working set of the scene.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Payload {
     /// The asset path to the external layer.
     pub asset_path: String,
+    /// The root prim path to the referenced prim in the external layer.
     pub prim_path: Path,
-    pub layer_offset: LayerOffset,
+    /// The layer offset to transform time.
+    pub layer_offset: Option<LayerOffset>,
 }
 
 /// Represents a reference and all its meta data.
@@ -158,6 +160,7 @@ pub type StringListOp = ListOp<String>;
 pub type TokenListOp = ListOp<String>;
 pub type PathListOp = ListOp<Path>;
 pub type ReferenceListOp = ListOp<Reference>;
+pub type PayloadListOp = ListOp<Payload>;
 
 /// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
 ///

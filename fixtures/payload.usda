@@ -1,0 +1,13 @@
+#usda 1.0
+
+def Sphere "MySphere1" (
+    payload = @./payload.usda@</MySphere>
+)
+{
+}
+
+def Sphere "MySphere2" (
+    prepend payload = @./cube_payload.usda@</PayloadCube>
+)
+{
+}

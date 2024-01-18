@@ -265,6 +265,44 @@ mod tests {
     }
 
     #[test]
+    fn test_read_payload() -> Result<()> {
+        let mut data = read_file("fixtures/payload.usdc")?;
+
+        let payload = {
+            let value = data.get(&sdf::path("/MySphere1")?, "payload")?;
+            sdf::Payload::try_from(value)?
+        };
+
+        assert_eq!(payload.asset_path, "./payload.usda");
+        assert_eq!(payload.prim_path, sdf::path("/MySphere")?);
+
+        assert!(payload.layer_offset.is_some());
+
+        let layer_offset = payload.layer_offset.unwrap();
+        assert_eq!(layer_offset.offset, 0.0);
+        assert_eq!(layer_offset.scale, 1.0);
+
+        let payload_list_op = {
+            let value = data.get(&sdf::path("/MySphere2")?, "payload")?;
+            sdf::PayloadListOp::try_from(value)?
+        };
+
+        assert!(!payload_list_op.explicit);
+
+        assert!(payload_list_op.explicit_items.is_empty());
+        assert!(payload_list_op.added_items.is_empty());
+        assert!(payload_list_op.appended_items.is_empty());
+        assert!(payload_list_op.deleted_items.is_empty());
+        assert!(payload_list_op.ordered_items.is_empty());
+
+        assert_eq!(payload_list_op.prepended_items.len(), 1);
+        assert_eq!(payload_list_op.prepended_items[0].asset_path, "./cube_payload.usda");
+        assert_eq!(payload_list_op.prepended_items[0].prim_path, sdf::path("/PayloadCube")?);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_read_array_fields() -> Result<()> {
         let mut data = read_file("fixtures/fields.usdc")?;
 
