@@ -1,0 +1,9 @@
+#usda 1.0
+
+def Xform "Prim"
+{
+    double prop.timeSamples = {
+        4: 40,
+        5: None,
+    }
+}

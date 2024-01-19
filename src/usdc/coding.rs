@@ -6,6 +6,7 @@ use std::{io, mem};
 
 use anyhow::{bail, Result};
 use bytemuck::{AnyBitPattern, NoUninit};
+use num_traits::PrimInt;
 
 use super::CrateReader;
 
@@ -17,30 +18,33 @@ const LARGE: u8 = 3;
 pub trait Int<T = Self>: Sized + Default + NoUninit + AnyBitPattern {
     const SIZE: usize = mem::size_of::<Self>();
 
-    fn from(from: i32) -> T;
+    fn from_i32(from: i32) -> T;
 }
 
 impl Int for u32 {
-    fn from(from: i32) -> Self {
+    fn from_i32(from: i32) -> Self {
         from as u32
     }
 }
 
 impl Int for i32 {
-    fn from(from: i32) -> Self {
+    fn from_i32(from: i32) -> Self {
         from
     }
 }
 
-pub fn encoded_buffer_size<T: Int>(count: usize) -> usize {
+pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
     if count == 0 {
         0
     } else {
-        T::SIZE + ((count * 2 + 7) / 8) + (T::SIZE * count)
+        let sz = mem::size_of::<T>();
+        sz + ((count * 2 + 7) / 8) + (sz * count)
     }
 }
 
-pub fn decode32<T: Int>(data: &[u8], count: usize) -> Result<Vec<T>> {
+// TODO: remove Int trait.
+// TODO: mae this generic to read 64 bit integers as well.
+pub fn decode32<T: PrimInt + Int>(data: &[u8], count: usize) -> Result<Vec<T>> {
     debug_assert_eq!(mem::size_of::<T>(), 4);
 
     let mut codes_reader = io::Cursor::new(&data[0..]);
@@ -66,23 +70,17 @@ pub fn decode32<T: Int>(data: &[u8], count: usize) -> Result<Vec<T>> {
 
         for i in 0..n {
             let ty = (code_byte >> (2 * i)) & 3;
-            match ty {
-                COMMON => {
-                    prev += common_value;
-                }
-                SMALL => {
-                    prev += ints_reader.read_pod::<i8>()? as i32;
-                }
-                MEDIUM => {
-                    prev += ints_reader.read_pod::<i16>()? as i32;
-                }
-                LARGE => {
-                    prev += ints_reader.read_pod::<i32>()?;
-                }
+            let delta = match ty {
+                COMMON => common_value,
+                SMALL => ints_reader.read_pod::<i8>()? as i32,
+                MEDIUM => ints_reader.read_pod::<i16>()? as i32,
+                LARGE => ints_reader.read_pod::<i32>()?,
                 _ => bail!("Unexpected index: {}", ty),
-            }
+            };
 
-            output.push(T::from(prev));
+            prev += delta;
+
+            output.push(T::from_i32(prev));
         }
     }
 

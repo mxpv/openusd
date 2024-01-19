@@ -1,10 +1,11 @@
 use std::{collections::HashMap, vec};
 
 use anyhow::bail;
+use half::f16;
 
 use super::*;
 
-/// Variant is a type that can hold any of the SDF types.
+/// `Value` is a type that can hold data type loaded from USD file.
 ///
 /// Suffixes:
 /// - d: double
@@ -22,14 +23,15 @@ pub enum Value {
     Int64(i64),
     Uint64(u64),
 
-    Half(f32),
-    Float(f32),
-    Double(f64),
+    Half(Vec<f16>),
+    Float(Vec<f32>),
+    Double(Vec<f64>),
 
     String(String),
     Token(Vec<String>),
     AssetPath(String),
 
+    Quath(Vec<f16>),
     Quatd(Vec<f64>),
     Quatf(Vec<f32>),
 
@@ -66,9 +68,9 @@ pub enum Value {
     Variability(Variability),
 
     VariantSelectionMap(HashMap<String, String>),
-    TimeSamples,
+    TimeSamples(TimeSampleMap),
     Payload(Payload),
-    DoubleVector(Vec<f32>),
+    DoubleVector(Vec<f64>),
     LayerOffsetVector(Vec<LayerOffset>),
     StringVector(Vec<String>),
     ValueBlock,
@@ -125,6 +127,51 @@ impl Value {
             Value::String(string) => string.as_str(),
             Value::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
             _ => panic!("Expected string"),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<f16> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
+        match value {
+            Value::Half(vec) | Value::Quath(vec) => Ok(vec),
+            _ => bail!("Unable to unpack half"),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<f32> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
+        match value {
+            Value::Float(vec) | Value::Quatf(vec) | Value::Vec2f(vec) | Value::Vec3f(vec) | Value::Vec4f(vec) => {
+                Ok(vec)
+            }
+
+            _ => bail!("Unable to unpack float"),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<f64> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
+        match value {
+            Value::Double(vec)
+            | Value::Quatd(vec)
+            | Value::Vec2d(vec)
+            | Value::Vec3d(vec)
+            | Value::Vec4d(vec)
+            | Value::Matrix2d(vec)
+            | Value::Matrix3d(vec)
+            | Value::Matrix4d(vec)
+            | Value::DoubleVector(vec) => Ok(vec),
+
+            _ => bail!("Unable to unpack double"),
         }
     }
 }
@@ -215,6 +262,17 @@ impl TryFrom<Value> for PayloadListOp {
         match value {
             Value::PayloadListOp(list) => Ok(list),
             _ => bail!("Unable to unpack payload list op"),
+        }
+    }
+}
+
+impl TryFrom<Value> for TimeSampleMap {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
+        match value {
+            Value::TimeSamples(samples) => Ok(samples),
+            _ => bail!("Unable to unpack time samples"),
         }
     }
 }

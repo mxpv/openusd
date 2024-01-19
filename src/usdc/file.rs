@@ -3,11 +3,12 @@
 use std::{
     collections::HashMap,
     io::{self, Cursor},
-    mem, str,
+    mem, str, vec,
 };
 
 use anyhow::{bail, ensure, Context, Result};
 use bytemuck::{bytes_of, AnyBitPattern, NoUninit, Pod};
+use num_traits::{Float, PrimInt};
 
 use crate::{
     sdf::{self, Value},
@@ -505,23 +506,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
     const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
-    fn unpack_int_array<T: Int>(&mut self, value: ValueRep) -> Result<Vec<T>> {
-        let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
-
-        if count == 0 {
-            return Ok(Vec::default());
-        }
-
-        if compressed {
-            self.reader.read_encoded_ints(count)
-        } else {
-            self.reader.read_vec(count)
-        }
-    }
-
     // Implements various logic and compatibility checks to figure out the array length and whether it's compressed.
     fn unpack_array_len(&mut self, value: ValueRep, kind: ArrayKind) -> Result<(usize, bool)> {
-        debug_assert!(value.is_array());
         debug_assert!(!value.is_inlined());
 
         // Empty array.
@@ -573,6 +559,62 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         }
 
         Ok((count, compressed))
+    }
+
+    fn read_ints<T: PrimInt + Int>(&mut self, value: ValueRep) -> Result<Vec<T>> {
+        let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
+
+        if count == 0 {
+            return Ok(Vec::default());
+        }
+
+        if compressed {
+            self.reader.read_encoded_ints(count)
+        } else {
+            self.reader.read_vec(count)
+        }
+    }
+
+    fn read_floats<T: Float + Default + Pod>(&mut self, value: ValueRep) -> Result<Vec<T>> {
+        use num_traits::cast;
+        ensure!(!value.is_inlined());
+
+        let (count, compressed) = self.unpack_array_len(value, ArrayKind::Floats)?;
+
+        let vec = if compressed {
+            let code = self.reader.read_pod::<u8>()?;
+
+            match code {
+                // Compressed integers
+                b'i' => {
+                    let ints: Vec<i32> = self.reader.read_compressed(count)?;
+                    ints.into_iter().map(|i| cast(i).unwrap()).collect()
+                }
+                // Lookup table and indexes
+                b't' => {
+                    let lut_size = self.reader.read_pod::<u32>()? as usize;
+                    let lut: Vec<T> = self.reader.read_vec(lut_size)?;
+
+                    let indexes: Vec<u32> = self.reader.read_encoded_ints(count)?;
+                    ensure!(
+                        indexes.len() == count,
+                        "Read invalid number of indexes to decompress doubles array"
+                    );
+
+                    let mut output = vec![T::zero(); count];
+                    for (i, index) in indexes.into_iter().enumerate() {
+                        output[i] = lut[index as usize];
+                    }
+
+                    output
+                }
+                _ => bail!("Invalid compressed double array code: {}", code),
+            }
+        } else {
+            self.reader.read_vec(count)?
+        };
+
+        Ok(vec)
     }
 
     fn read_list_op<T: Default>(
@@ -781,13 +823,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Int
             //
-            Type::Int if value.is_array() => sdf::Value::Int(self.unpack_int_array(value)?),
+            Type::Int if value.is_array() => sdf::Value::Int(self.read_ints(value)?),
             Type::Int => sdf::Value::Int(vec![self.unpack_value(value)?]),
 
             //
             // UInt
             //
-            Type::Uint if value.is_array() => sdf::Value::Uint(self.unpack_int_array(value)?),
+            Type::Uint if value.is_array() => sdf::Value::Uint(self.read_ints(value)?),
             Type::Uint => sdf::Value::Uint(vec![self.unpack_value(value)?]),
 
             // Int64
@@ -798,15 +840,24 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Uint64 if value.is_array() => bail!("Uint64 array not supported"), // Need to implement uint64 integer decoding.
             Type::Uint64 => sdf::Value::Uint64(self.unpack_value(value)?),
 
-            Type::Float if value.is_array() => bail!("Float arrays are not supported"), // Need to implement float decompression.
-            Type::Float => sdf::Value::Float(self.unpack_value(value)?),
+            //
+            // Float types (half, float, double)
+            //
+            Type::Half if value.is_array() => sdf::Value::Half(self.read_floats(value)?),
+            Type::Half => sdf::Value::Half(vec![self.unpack_value(value)?]),
 
-            Type::Double if value.is_array() => bail!("Double arrays are not supported"), // Need to implement double decompression.
-            Type::Double => {
-                // Stored as float.
-                let value: f32 = self.unpack_value(value)?;
-                sdf::Value::Double(value as f64)
+            Type::Float if value.is_array() => sdf::Value::Float(self.read_floats(value)?),
+            Type::Float => sdf::Value::Float(vec![self.unpack_value(value)?]),
+
+            Type::Double if value.is_array() => sdf::Value::Double(self.read_floats(value)?),
+            Type::Double if value.is_inlined() => {
+                // Stored as f32
+                let value = self.unpack_value::<f32>(value)?;
+                sdf::Value::Double(vec![value as f64])
             }
+            Type::Double => sdf::Value::Double(vec![self.unpack_value(value)?]),
+
+            Type::DoubleVector => sdf::Value::Double(self.read_floats(value)?),
 
             //
             // Tokens, strings, asset paths
@@ -1031,6 +1082,64 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::VariantSelectionMap(map)
             }
 
+            Type::TimeSamples => {
+                ensure!(!value.is_inlined());
+                ensure!(!value.is_compressed());
+
+                self.set_position(value.payload())?;
+
+                {
+                    // Read recursive offset.
+                    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
+                    let offset = self.reader.read_pod::<i64>()?;
+
+                    // -8 to compensate sizeof(offset)
+                    // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
+                    self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+                }
+
+                let times_rep = dbg!(self.reader.read_pod::<ValueRep>()?);
+
+                let ty = times_rep.ty()?;
+                ensure!(
+                    ty == Type::DoubleVector || (ty == Type::Double && times_rep.is_array()),
+                    "Invalid time samples type: expected either double vector or double array"
+                );
+
+                // Save current position.
+                let saved_position = self.reader.stream_position()?;
+
+                let times: Vec<f64> = self.value(times_rep)?.try_into()?;
+
+                // Restore position
+                self.set_position(saved_position)?;
+
+                {
+                    // Read recursive offset.
+                    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
+                    let offset = self.reader.read_pod::<i64>()?;
+
+                    // -8 to compensate sizeof(offset)
+                    // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
+                    self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+                }
+
+                let count = self.reader.read_count()?;
+                ensure!(count == times.len(), "Invalid time samples count");
+
+                let value_reps = self.reader.read_vec::<ValueRep>(count)?;
+                debug_assert_eq!(value_reps.len(), count);
+
+                let values = value_reps
+                    .into_iter()
+                    .map(|value| self.value(value))
+                    .collect::<Result<Vec<_>>>()?;
+
+                let samples = times.into_iter().zip(values).collect();
+
+                sdf::Value::TimeSamples(samples)
+            }
+
             // Empty dictionary.
             Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
             Type::Dictionary => {
@@ -1041,6 +1150,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 sdf::Value::Dictionary(self.read_custom_data()?)
             }
+
+            Type::ValueBlock => sdf::Value::ValueBlock,
 
             _ => bail!("Unsupported value type: {}", ty),
         };

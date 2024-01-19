@@ -162,6 +162,8 @@ pub type PathListOp = ListOp<Path>;
 pub type ReferenceListOp = ListOp<Reference>;
 pub type PayloadListOp = ListOp<Payload>;
 
+pub type TimeSampleMap = Vec<(f64, Value)>;
+
 /// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
 ///
 /// `AbstractData` is an anonymous container that owns scene description values.

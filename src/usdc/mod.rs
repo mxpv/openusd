@@ -124,24 +124,23 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::sdf::{LayerOffset, ReferenceListOp};
-
     use super::*;
+    use half::f16;
 
     #[test]
     fn test_crate_hierarchy() -> Result<()> {
         let mut data =
             read_file("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
 
-        let prim_children = data.get(&sdf::Path::abs_root(), "primChildren")?;
-        assert_eq!(
-            Vec::<String>::from(prim_children),
-            vec!["SoC_ElephantWithMonochord".to_string()]
-        );
+        let prim_children: Vec<String> = data.get(&sdf::Path::abs_root(), "primChildren")?.try_into()?;
+        assert_eq!(prim_children, vec!["SoC_ElephantWithMonochord".to_string()]);
 
-        let elephant = data.get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?;
+        let elephant: Vec<String> = data
+            .get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
+            .try_into()?;
+
         assert_eq!(
-            Vec::<String>::from(elephant),
+            elephant,
             vec![
                 "Materials".to_string(),
                 "Object".to_string(),
@@ -149,9 +148,12 @@ mod tests {
             ]
         );
 
-        let materials = data.get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?;
+        let materials: Vec<String> = data
+            .get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
+            .try_into()?;
+
         assert_eq!(
-            Vec::<String>::from(materials),
+            materials,
             vec!["Elefant_Mat_68050".to_string(), "Monochord_Mat_68062".to_string()]
         );
 
@@ -176,15 +178,12 @@ mod tests {
     fn test_read_sub_layers() -> Result<()> {
         let mut data = read_file("fixtures/expressions.usdc")?;
 
-        let value = data.get(&sdf::path("/")?, "subLayerOffsets")?;
-        let sub_layer_offsets = LayerOffset::try_from(value)?;
+        let sub_layer_offsets: sdf::LayerOffset = data.get(&sdf::path("/")?, "subLayerOffsets")?.try_into()?;
 
         assert_eq!(sub_layer_offsets.offset, 0.0);
         assert_eq!(sub_layer_offsets.scale, 1.0);
 
-        let value = data.get(&sdf::path("/")?, "subLayers")?;
-        let sub_layers = Vec::<String>::from(value);
-
+        let sub_layers: Vec<String> = data.get(&sdf::path("/")?, "subLayers")?.try_into()?;
         assert_eq!(sub_layers, vec!["`\"render_pass_${RENDER_PASS}.usd\"`"]);
 
         Ok(())
@@ -195,10 +194,7 @@ mod tests {
         let mut data = read_file("fixtures/expressions.usdc")?;
 
         // prepend variantSets = "displayVariantSet"
-        let variant_set_names = {
-            let value = data.get(&sdf::path("/asset1")?, "variantSetNames")?;
-            sdf::StringListOp::try_from(value)?
-        };
+        let variant_set_names: sdf::StringListOp = data.get(&sdf::path("/asset1")?, "variantSetNames")?.try_into()?;
         assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
 
         let variant_selection = {
@@ -219,10 +215,9 @@ mod tests {
     fn test_read_connection() -> Result<()> {
         let mut data = read_file("fixtures/connection.usdc")?;
 
-        let conn = {
-            let value = data.get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?;
-            sdf::PathListOp::try_from(value)?
-        };
+        let conn: sdf::PathListOp = data
+            .get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
+            .try_into()?;
 
         assert!(conn.explicit);
         assert_eq!(
@@ -230,10 +225,9 @@ mod tests {
             vec![sdf::path("/TexModel/boardMat.inputs:frame:stPrimvarName")?]
         );
 
-        let conn = {
-            let value = data.get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?;
-            sdf::PathListOp::try_from(value)?
-        };
+        let conn: sdf::PathListOp = data
+            .get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?
+            .try_into()?;
 
         assert!(conn.explicit);
         assert_eq!(
@@ -248,8 +242,9 @@ mod tests {
     fn test_read_reference() -> Result<()> {
         let mut data = read_file("fixtures/reference.usdc")?;
 
-        let value = data.get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?;
-        let references = ReferenceListOp::try_from(value)?;
+        let references: sdf::ReferenceListOp = data
+            .get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
+            .try_into()?;
 
         assert!(references.appended_items.is_empty());
         assert!(references.deleted_items.is_empty());
@@ -298,6 +293,102 @@ mod tests {
         assert_eq!(payload_list_op.prepended_items.len(), 1);
         assert_eq!(payload_list_op.prepended_items[0].asset_path, "./cube_payload.usda");
         assert_eq!(payload_list_op.prepended_items[0].prim_path, sdf::path("/PayloadCube")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_doubles() -> Result<()> {
+        let mut data = read_file("fixtures/floats.usdc")?;
+
+        let single: Vec<f64> = data.get(&sdf::path("/PrimD.single")?, "default")?.try_into()?;
+        assert_eq!(single, vec![4.3]);
+
+        let array: Vec<f64> = data.get(&sdf::path("/PrimD.simple")?, "default")?.try_into()?;
+        assert_eq!(array, vec![0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3]);
+
+        let compressed: Vec<f64> = data.get(&sdf::path("/PrimD.copressed")?, "default")?.try_into()?;
+        assert_eq!(
+            compressed,
+            vec![
+                0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3, 5.3, 6.2, 7.8, 8.6, 9.3, 0.5, 1.7, 2.4, 3.5, 4.9,
+                0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3, 5.3, 6.2, 7.8, 8.6, 9.3, 0.5, 1.7, 2.4, 3.5, 4.9,
+                0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3, 5.3, 6.2, 7.8, 8.6, 9.3, 0.5, 1.7, 2.4, 3.5, 4.9,
+                0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3, 5.3, 6.2, 7.8, 8.6, 9.3, 0.5, 1.7, 2.4, 3.5, 4.9,
+                0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3, 5.3, 6.2, 7.8, 8.6, 9.3, 0.5, 1.7, 2.4, 3.5, 4.9,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_floats() -> Result<()> {
+        let mut data = read_file("fixtures/floats.usdc")?;
+
+        let single: Vec<f32> = data.get(&sdf::path("/PrimF.single")?, "default")?.try_into()?;
+        assert_eq!(single, vec![3.5]);
+
+        let array: Vec<f32> = data.get(&sdf::path("/PrimF.simple")?, "default")?.try_into()?;
+        assert_eq!(array, vec![9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7]);
+
+        let compressed: Vec<f32> = data.get(&sdf::path("/PrimF.copressed")?, "default")?.try_into()?;
+        assert_eq!(
+            compressed,
+            vec![
+                9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7,
+                8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3,
+                5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6, 4.3,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_halfs() -> Result<()> {
+        let mut data = read_file("fixtures/floats.usdc")?;
+
+        let single: Vec<f16> = data.get(&sdf::path("/PrimH.single")?, "default")?.try_into()?;
+        assert_eq!(single, vec![f16::from_f32(2.9)]);
+
+        let array: Vec<f16> = data.get(&sdf::path("/PrimH.simple")?, "default")?.try_into()?;
+        assert_eq!(
+            array,
+            [4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6]
+                .into_iter()
+                .map(f16::from_f32)
+                .collect::<Vec<_>>()
+        );
+
+        let compressed: Vec<f16> = data.get(&sdf::path("/PrimH.copressed")?, "default")?.try_into()?;
+        assert_eq!(
+            compressed,
+            [
+                4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4,
+                7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3,
+                2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7, 9.1,
+            ]
+            .into_iter()
+            .map(f16::from_f32)
+            .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_time_series() -> Result<()> {
+        let mut data = read_file("fixtures/timesamples.usdc")?;
+
+        let samples: sdf::TimeSampleMap = dbg!(data.get(&sdf::path("/Prim.prop")?, "timeSamples")?.try_into()?);
+        assert_eq!(samples.len(), 2);
+
+        let keys = samples.iter().map(|(d, _)| d).copied().collect::<Vec<_>>();
+        assert_eq!(keys, vec![4.0, 5.0]);
+
+        assert!(matches!(&samples[0].1, sdf::Value::Double(x) if x.len() == 1 && x[0] == 40.0));
+        assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
 
         Ok(())
     }
