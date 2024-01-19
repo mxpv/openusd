@@ -8,14 +8,14 @@ use std::{
 
 use anyhow::{bail, ensure, Context, Result};
 use bytemuck::{bytes_of, AnyBitPattern, NoUninit, Pod};
-use num_traits::{Float, PrimInt};
+use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{
     sdf::{self, Value},
     usdc,
 };
 
-use super::{coding::Int, layout::*};
+use super::layout::*;
 use usdc::{version, CrateReader, Version};
 
 // Currently supported USDC version.
@@ -561,7 +561,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok((count, compressed))
     }
 
-    fn read_ints<T: PrimInt + Int>(&mut self, value: ValueRep) -> Result<Vec<T>> {
+    fn read_ints<T: PrimInt + Pod + Default>(&mut self, value: ValueRep) -> Result<Vec<T>>
+    where
+        i64: AsPrimitive<T>,
+    {
         let (count, compressed) = self.unpack_array_len(value, ArrayKind::Ints)?;
 
         if count == 0 {
@@ -821,24 +824,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             //
-            // Int
+            // Ints (int, uint, int64, uint64)
             //
             Type::Int if value.is_array() => sdf::Value::Int(self.read_ints(value)?),
             Type::Int => sdf::Value::Int(vec![self.unpack_value(value)?]),
 
-            //
-            // UInt
-            //
             Type::Uint if value.is_array() => sdf::Value::Uint(self.read_ints(value)?),
             Type::Uint => sdf::Value::Uint(vec![self.unpack_value(value)?]),
 
-            // Int64
-            Type::Int64 if value.is_array() => bail!("Int64 array not supported"), // Need to implement int64 integer decoding.
-            Type::Int64 => sdf::Value::Int64(self.unpack_value(value)?),
+            Type::Int64 if value.is_array() => sdf::Value::Int64(self.read_ints(value)?),
+            Type::Int64 => sdf::Value::Int64(vec![self.unpack_value(value)?]),
 
-            // UInt64
-            Type::Uint64 if value.is_array() => bail!("Uint64 array not supported"), // Need to implement uint64 integer decoding.
-            Type::Uint64 => sdf::Value::Uint64(self.unpack_value(value)?),
+            Type::Uint64 if value.is_array() => sdf::Value::Uint64(self.read_ints(value)?),
+            Type::Uint64 => sdf::Value::Uint64(vec![self.unpack_value(value)?]),
 
             //
             // Float types (half, float, double)

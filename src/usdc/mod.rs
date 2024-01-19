@@ -178,7 +178,13 @@ mod tests {
     fn test_read_sub_layers() -> Result<()> {
         let mut data = read_file("fixtures/expressions.usdc")?;
 
-        let sub_layer_offsets: sdf::LayerOffset = data.get(&sdf::path("/")?, "subLayerOffsets")?.try_into()?;
+        let sub_layer_offsets = data
+            .get(&sdf::path("/")?, "subLayerOffsets")?
+            .try_as_layer_offset_vector()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
 
         assert_eq!(sub_layer_offsets.offset, 0.0);
         assert_eq!(sub_layer_offsets.scale, 1.0);
@@ -242,9 +248,10 @@ mod tests {
     fn test_read_reference() -> Result<()> {
         let mut data = read_file("fixtures/reference.usdc")?;
 
-        let references: sdf::ReferenceListOp = data
+        let references = data
             .get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
-            .try_into()?;
+            .try_as_reference_list_op()
+            .unwrap();
 
         assert!(references.appended_items.is_empty());
         assert!(references.deleted_items.is_empty());
@@ -263,10 +270,10 @@ mod tests {
     fn test_read_payload() -> Result<()> {
         let mut data = read_file("fixtures/payload.usdc")?;
 
-        let payload = {
-            let value = data.get(&sdf::path("/MySphere1")?, "payload")?;
-            sdf::Payload::try_from(value)?
-        };
+        let payload = data
+            .get(&sdf::path("/MySphere1")?, "payload")?
+            .try_as_payload()
+            .unwrap();
 
         assert_eq!(payload.asset_path, "./payload.usda");
         assert_eq!(payload.prim_path, sdf::path("/MySphere")?);
@@ -277,10 +284,10 @@ mod tests {
         assert_eq!(layer_offset.offset, 0.0);
         assert_eq!(layer_offset.scale, 1.0);
 
-        let payload_list_op = {
-            let value = data.get(&sdf::path("/MySphere2")?, "payload")?;
-            sdf::PayloadListOp::try_from(value)?
-        };
+        let payload_list_op = data
+            .get(&sdf::path("/MySphere2")?, "payload")?
+            .try_as_payload_list_op()
+            .unwrap();
 
         assert!(!payload_list_op.explicit);
 
@@ -349,10 +356,18 @@ mod tests {
     fn test_read_halfs() -> Result<()> {
         let mut data = read_file("fixtures/floats.usdc")?;
 
-        let single: Vec<f16> = data.get(&sdf::path("/PrimH.single")?, "default")?.try_into()?;
+        let single = data
+            .get(&sdf::path("/PrimH.single")?, "default")?
+            .try_as_half()
+            .unwrap();
+
         assert_eq!(single, vec![f16::from_f32(2.9)]);
 
-        let array: Vec<f16> = data.get(&sdf::path("/PrimH.simple")?, "default")?.try_into()?;
+        let array = data
+            .get(&sdf::path("/PrimH.simple")?, "default")?
+            .try_as_half()
+            .unwrap();
+
         assert_eq!(
             array,
             [4.3, 5.3, 5.6, 8.7, 4.7, 9.1, 2.3, 6.4, 7.4, 3.6]
@@ -394,6 +409,102 @@ mod tests {
     }
 
     #[test]
+    fn test_read_ints_i32() -> Result<()> {
+        let mut data = read_file("fixtures/ints.usdc")?;
+
+        assert_eq!(
+            data.get(&sdf::path("/Prim32.single")?, "default")?
+                .try_as_int()
+                .unwrap(),
+            vec![12938]
+        );
+
+        assert_eq!(
+            data.get(&sdf::path("/Prim32.compressed")?, "default")?
+                .try_as_int()
+                .unwrap(),
+            vec![
+                1, 2, 4, 5, -3, 4, 5, -2, 3, -0, 3, 2, 4, -2, 4, 1, 8, -1, 5, -5, 2, 6, -3, 4, 6, 3, -7, 2, -3, 3, 6,
+                2, 6, 6, -4, 2, -4, 6, -2, 4
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_ints_i64() -> Result<()> {
+        let mut data = read_file("fixtures/ints.usdc")?;
+
+        assert_eq!(
+            data.get(&sdf::path("/Prim64.single")?, "default")?
+                .try_as_int_64()
+                .unwrap(),
+            vec![1234567890]
+        );
+
+        assert_eq!(
+            data.get(&sdf::path("/Prim64.compressed")?, "default")?
+                .try_as_int_64()
+                .unwrap(),
+            vec![
+                10, 23, 48, 45, -23, 43, 65, -23, 23, -10, 34, 23, 45, -12, 34, 16, 18, -12, 65, -65, 21, 67, -43, 34,
+                36, 34, -67, 25, -23, 63, 65, 23, 65, 63, -54, 23, -44, 65, -62, 54
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_ints_u32() -> Result<()> {
+        let mut data = read_file("fixtures/ints.usdc")?;
+
+        assert_eq!(
+            data.get(&sdf::path("/PrimU32.single")?, "default")?
+                .try_as_uint()
+                .unwrap(),
+            vec![80129]
+        );
+
+        assert_eq!(
+            data.get(&sdf::path("/PrimU32.compressed")?, "default")?
+                .try_as_uint()
+                .unwrap(),
+            vec![
+                1, 2, 4, 5, 3, 4, 5, 2, 3, 0, 3, 2, 4, 2, 4, 1, 8, 1, 5, 5, 2, 6, 3, 4, 6, 3, 7, 2, 3, 3, 6, 2, 6, 6,
+                4, 2, 4, 6, 2, 4
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_ints_u64() -> Result<()> {
+        let mut data = read_file("fixtures/ints.usdc")?;
+
+        assert_eq!(
+            data.get(&sdf::path("/PrimU64.single")?, "default")?
+                .try_as_uint_64()
+                .unwrap(),
+            vec![432423654]
+        );
+
+        assert_eq!(
+            data.get(&sdf::path("/PrimU64.compressed")?, "default")?
+                .try_as_uint_64()
+                .unwrap(),
+            vec![
+                34, 23, 45, 12, 34, 16, 18, 12, 65, 65, 10, 23, 48, 45, 23, 43, 65, 23, 23, 10, 65, 23, 65, 63, 54, 23,
+                44, 65, 62, 54, 21, 67, 43, 34, 36, 34, 67, 25, 23, 63,
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_read_array_fields() -> Result<()> {
         let mut data = read_file("fixtures/fields.usdc")?;
 
@@ -425,14 +536,9 @@ mod tests {
         let normals = data.get(&sdf::path("/World.normals")?, "default")?;
         assert!(matches!(normals, sdf::Value::Vec3f(..)));
         assert_eq!(
-            normals.as_f32_slice(),
-            Some(
-                [
-                    0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-                    0.0
-                ]
+            normals.try_as_vec_3f_ref().unwrap().as_slice(),
+            [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
                 .as_slice()
-            )
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)

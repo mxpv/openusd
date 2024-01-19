@@ -5,8 +5,7 @@
 use std::{io, mem};
 
 use anyhow::{bail, Result};
-use bytemuck::{AnyBitPattern, NoUninit};
-use num_traits::PrimInt;
+use num_traits::{AsPrimitive, PrimInt};
 
 use super::CrateReader;
 
@@ -14,24 +13,6 @@ const COMMON: u8 = 0;
 const SMALL: u8 = 1;
 const MEDIUM: u8 = 2;
 const LARGE: u8 = 3;
-
-pub trait Int<T = Self>: Sized + Default + NoUninit + AnyBitPattern {
-    const SIZE: usize = mem::size_of::<Self>();
-
-    fn from_i32(from: i32) -> T;
-}
-
-impl Int for u32 {
-    fn from_i32(from: i32) -> Self {
-        from as u32
-    }
-}
-
-impl Int for i32 {
-    fn from_i32(from: i32) -> Self {
-        from
-    }
-}
 
 pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
     if count == 0 {
@@ -42,22 +23,28 @@ pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
     }
 }
 
-// TODO: remove Int trait.
-// TODO: mae this generic to read 64 bit integers as well.
-pub fn decode32<T: PrimInt + Int>(data: &[u8], count: usize) -> Result<Vec<T>> {
-    debug_assert_eq!(mem::size_of::<T>(), 4);
+pub fn decode_ints<T: PrimInt + 'static>(data: &[u8], count: usize) -> Result<Vec<T>>
+where
+    i64: AsPrimitive<T>,
+{
+    let is_64_bit = mem::size_of::<T>() == 8;
 
     let mut codes_reader = io::Cursor::new(&data[0..]);
 
-    let common_value = codes_reader.read_pod::<i32>()?;
+    let common_value = if is_64_bit {
+        codes_reader.read_pod::<i64>()?
+    } else {
+        codes_reader.read_pod::<i32>()? as i64
+    };
+
     let num_code_bytes = (count * 2 + 7) / 8;
 
     let mut ints_reader = {
-        let offset = mem::size_of::<i32>() + num_code_bytes;
+        let offset = mem::size_of::<T>() + num_code_bytes;
         io::Cursor::new(&data[offset..])
     };
 
-    let mut prev = 0_i32;
+    let mut prev = 0_i64;
     let mut ints_left = count as isize;
     let mut output = Vec::new();
 
@@ -72,15 +59,23 @@ pub fn decode32<T: PrimInt + Int>(data: &[u8], count: usize) -> Result<Vec<T>> {
             let ty = (code_byte >> (2 * i)) & 3;
             let delta = match ty {
                 COMMON => common_value,
-                SMALL => ints_reader.read_pod::<i8>()? as i32,
-                MEDIUM => ints_reader.read_pod::<i16>()? as i32,
-                LARGE => ints_reader.read_pod::<i32>()?,
+
+                // 64 bits targets
+                SMALL if is_64_bit => ints_reader.read_pod::<i16>()? as i64,
+                MEDIUM if is_64_bit => ints_reader.read_pod::<i32>()? as i64,
+                LARGE if is_64_bit => ints_reader.read_pod::<i64>()?,
+
+                // 32 bits
+                SMALL => ints_reader.read_pod::<i8>()? as i64,
+                MEDIUM => ints_reader.read_pod::<i16>()? as i64,
+                LARGE => ints_reader.read_pod::<i32>()? as i64,
+
                 _ => bail!("Unexpected index: {}", ty),
             };
 
             prev += delta;
 
-            output.push(T::from_i32(prev));
+            output.push(prev.as_());
         }
     }
 
@@ -112,7 +107,7 @@ mod tests {
         output.extend_from_slice(&100000_i32.to_le_bytes());
         output.extend_from_slice(&0_i16.to_le_bytes());
 
-        let input = decode32::<u32>(&output, 7).expect("Failed to decode integers");
+        let input = decode_ints::<u32>(&output, 7).expect("Failed to decode integers");
 
         assert_eq!(input.as_slice(), &[123_u32, 124, 125, 100125, 100125, 100126, 100126])
     }

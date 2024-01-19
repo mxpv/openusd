@@ -2,6 +2,7 @@ use std::{collections::HashMap, vec};
 
 use anyhow::bail;
 use half::f16;
+use strum::{EnumIs, EnumTryAs};
 
 use super::*;
 
@@ -14,14 +15,14 @@ use super::*;
 /// - i: int
 ///
 /// NOTE: Halfs are not supported in Rust by default, so floats are used instead.
-#[derive(Debug)]
+#[derive(Debug, EnumIs, EnumTryAs)]
 pub enum Value {
     Bool(bool),
     Uchar(u8),
     Int(Vec<i32>),
     Uint(Vec<u32>),
-    Int64(i64),
-    Uint64(u64),
+    Int64(Vec<i64>),
+    Uint64(Vec<u64>),
 
     Half(Vec<f16>),
     Float(Vec<f32>),
@@ -189,17 +190,6 @@ impl From<Value> for Vec<String> {
     }
 }
 
-impl TryFrom<Value> for LayerOffset {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::LayerOffsetVector(vec) if vec.len() == 1 => Ok(vec[0]),
-            _ => bail!("Unable to unpack layer offset"),
-        }
-    }
-}
-
 impl TryFrom<Value> for StringListOp {
     type Error = anyhow::Error;
 
@@ -229,39 +219,6 @@ impl TryFrom<Value> for HashMap<String, String> {
         match value {
             Value::VariantSelectionMap(map) => Ok(map),
             _ => bail!("Unable to unpack variant selection map"),
-        }
-    }
-}
-
-impl TryFrom<Value> for ReferenceListOp {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::ReferenceListOp(list) => Ok(list),
-            _ => bail!("Unable to unpack reference list op"),
-        }
-    }
-}
-
-impl TryFrom<Value> for Payload {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::Payload(payload) => Ok(payload),
-            _ => bail!("Unable to unpack payload"),
-        }
-    }
-}
-
-impl TryFrom<Value> for PayloadListOp {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::PayloadListOp(list) => Ok(list),
-            _ => bail!("Unable to unpack payload list op"),
         }
     }
 }

@@ -4,9 +4,9 @@ use std::{any::type_name, io, mem};
 
 use anyhow::{Context, Result};
 use bytemuck::{bytes_of_mut, cast_slice_mut, AnyBitPattern, NoUninit, Pod};
-use num_traits::PrimInt;
+use num_traits::{AsPrimitive, PrimInt};
 
-use super::coding::{self, Int};
+use super::coding;
 
 pub trait CrateReader {
     /// Read a single "size" or "count" value encoded as `u64`.
@@ -30,7 +30,9 @@ pub trait CrateReader {
     fn read_compressed<T: Default + NoUninit + AnyBitPattern>(&mut self, estimated_size: usize) -> Result<Vec<T>>;
 
     /// Reads sequence of compressed integers.
-    fn read_encoded_ints<T: PrimInt + Int>(&mut self, count: usize) -> Result<Vec<T>>;
+    fn read_encoded_ints<T: PrimInt + 'static>(&mut self, count: usize) -> Result<Vec<T>>
+    where
+        i64: AsPrimitive<T>;
 }
 
 impl<R: io::Read> CrateReader for R {
@@ -82,12 +84,15 @@ impl<R: io::Read> CrateReader for R {
         Ok(output)
     }
 
-    fn read_encoded_ints<T: PrimInt + Int>(&mut self, count: usize) -> Result<Vec<T>> {
+    fn read_encoded_ints<T: PrimInt + 'static>(&mut self, count: usize) -> Result<Vec<T>>
+    where
+        i64: AsPrimitive<T>,
+    {
         let estimated_size = coding::encoded_buffer_size::<u32>(count);
 
         let buffer = self.read_compressed::<u8>(estimated_size)?;
 
-        let ints = coding::decode32(buffer.as_slice(), count)?;
+        let ints = coding::decode_ints(buffer.as_slice(), count)?;
         debug_assert_eq!(ints.len(), count);
 
         Ok(ints)
