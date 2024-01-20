@@ -132,12 +132,16 @@ mod tests {
         let mut data =
             read_file("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc")?;
 
-        let prim_children: Vec<String> = data.get(&sdf::Path::abs_root(), "primChildren")?.try_into()?;
+        let prim_children: Vec<String> = data
+            .get(&sdf::Path::abs_root(), "primChildren")?
+            .try_as_token_vec()
+            .unwrap();
         assert_eq!(prim_children, vec!["SoC_ElephantWithMonochord".to_string()]);
 
         let elephant: Vec<String> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
-            .try_into()?;
+            .try_as_token_vec()
+            .unwrap();
 
         assert_eq!(
             elephant,
@@ -150,7 +154,8 @@ mod tests {
 
         let materials: Vec<String> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
-            .try_into()?;
+            .try_as_token_vec()
+            .unwrap();
 
         assert_eq!(
             materials,
@@ -169,9 +174,145 @@ mod tests {
         // customLayerData = {
         //  string test = "Test string"
         // }
-        let copyright = custom_layer_data.as_dict().unwrap().get("test").unwrap().as_str();
+        let copyright = custom_layer_data
+            .try_as_dictionary_ref()
+            .unwrap()
+            .get("test")
+            .unwrap()
+            .try_as_string_ref()
+            .unwrap();
 
         assert_eq!(copyright, "Test string");
+    }
+
+    #[test]
+    fn test_read_bool() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
+
+        let single = data
+            .get(&sdf::path("/World.flipNormals")?, "default")?
+            .try_as_bool()
+            .unwrap();
+
+        assert!(single);
+
+        let bool_array = data
+            .get(&sdf::path("/World.boolArray")?, "default")?
+            .try_as_bool_vec()
+            .unwrap();
+
+        assert_eq!(bool_array, vec![true, true, false, false, true, false]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_chars() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
+
+        let single_char = data
+            .get(&sdf::path("/World.singleChar")?, "default")?
+            .try_as_uchar()
+            .unwrap();
+
+        assert_eq!(single_char, 128);
+
+        let char_array = data
+            .get(&sdf::path("/World.chars")?, "default")?
+            .try_as_uchar_vec()
+            .unwrap();
+
+        assert_eq!(char_array, vec![128, 129, 130, 131, 132, 133, 134, 135, 136, 137]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_quat_floats() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
+
+        let quat = data
+            .get(&sdf::path("/World.quatfSingle")?, "default")?
+            .try_as_quatf()
+            .unwrap();
+
+        assert_eq!(quat, vec![2.9, 8.5, 4.6, 1.4]);
+
+        let quat = data
+            .get(&sdf::path("/World.quatfArr")?, "default")?
+            .try_as_quatf()
+            .unwrap();
+
+        assert_eq!(
+            quat,
+            vec![
+                3.5, 2.6, 3.6, 4.2, // 1
+                5.3, 6.3, 5.2, 2.4, // 2
+                4.3, 2.4, 6.4, 7.1, // 3
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_quat_doubles() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
+
+        let quat = data
+            .get(&sdf::path("/World.quatdSingle")?, "default")?
+            .try_as_quatd()
+            .unwrap();
+
+        assert_eq!(quat, vec![5.3, 6.3, 5.2, 2.4]);
+
+        let quat = data
+            .get(&sdf::path("/World.quatdArr")?, "default")?
+            .try_as_quatd()
+            .unwrap();
+
+        assert_eq!(
+            quat,
+            vec![
+                3.5, 2.6, 3.6, 4.2, // 1
+                4.3, 2.4, 6.4, 7.1, // 2
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_quat_half() -> Result<()> {
+        let mut data = read_file("fixtures/fields.usdc")?;
+
+        let quat = data
+            .get(&sdf::path("/World.quathSingle")?, "default")?
+            .try_as_quath()
+            .unwrap();
+
+        assert_eq!(
+            quat,
+            [4.6, 2.5, 7.6, 3.5].into_iter().map(f16::from_f32).collect::<Vec<_>>()
+        );
+
+        let quat = data
+            .get(&sdf::path("/World.quathArr")?, "default")?
+            .try_as_quath()
+            .unwrap();
+
+        assert_eq!(
+            quat,
+            [
+                2.4, 7.8, 8.5, 4.7, // 1
+                6.7, 5.6, 5.3, 4.6, // 2
+            ]
+            .into_iter()
+            .map(f16::from_f32)
+            .collect::<Vec<_>>()
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -180,7 +321,7 @@ mod tests {
 
         let sub_layer_offsets = data
             .get(&sdf::path("/")?, "subLayerOffsets")?
-            .try_as_layer_offset_vector()
+            .try_as_layer_offset_vec()
             .unwrap()
             .into_iter()
             .next()
@@ -189,7 +330,7 @@ mod tests {
         assert_eq!(sub_layer_offsets.offset, 0.0);
         assert_eq!(sub_layer_offsets.scale, 1.0);
 
-        let sub_layers: Vec<String> = data.get(&sdf::path("/")?, "subLayers")?.try_into()?;
+        let sub_layers = data.get(&sdf::path("/")?, "subLayers")?.try_as_string_vec().unwrap();
         assert_eq!(sub_layers, vec!["`\"render_pass_${RENDER_PASS}.usd\"`"]);
 
         Ok(())
@@ -200,13 +341,16 @@ mod tests {
         let mut data = read_file("fixtures/expressions.usdc")?;
 
         // prepend variantSets = "displayVariantSet"
-        let variant_set_names: sdf::StringListOp = data.get(&sdf::path("/asset1")?, "variantSetNames")?.try_into()?;
+        let variant_set_names = data
+            .get(&sdf::path("/asset1")?, "variantSetNames")?
+            .try_as_string_list_op()
+            .unwrap();
         assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
 
-        let variant_selection = {
-            let value = data.get(&sdf::path("/asset1")?, "variantSelection")?;
-            HashMap::<String, String>::try_from(value)?
-        };
+        let variant_selection = data
+            .get(&sdf::path("/asset1")?, "variantSelection")?
+            .try_as_variant_selection_map()
+            .unwrap();
 
         assert_eq!(variant_selection.len(), 1);
         assert_eq!(
@@ -221,9 +365,10 @@ mod tests {
     fn test_read_connection() -> Result<()> {
         let mut data = read_file("fixtures/connection.usdc")?;
 
-        let conn: sdf::PathListOp = data
+        let conn = data
             .get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
-            .try_into()?;
+            .try_as_path_list_op()
+            .unwrap();
 
         assert!(conn.explicit);
         assert_eq!(
@@ -231,9 +376,10 @@ mod tests {
             vec![sdf::path("/TexModel/boardMat.inputs:frame:stPrimvarName")?]
         );
 
-        let conn: sdf::PathListOp = data
+        let conn = data
             .get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?
-            .try_into()?;
+            .try_as_path_list_op()
+            .unwrap();
 
         assert!(conn.explicit);
         assert_eq!(
@@ -308,13 +454,22 @@ mod tests {
     fn test_read_doubles() -> Result<()> {
         let mut data = read_file("fixtures/floats.usdc")?;
 
-        let single: Vec<f64> = data.get(&sdf::path("/PrimD.single")?, "default")?.try_into()?;
-        assert_eq!(single, vec![4.3]);
+        let single = data
+            .get(&sdf::path("/PrimD.single")?, "default")?
+            .try_as_double()
+            .unwrap();
+        assert_eq!(single, 4.3_f64);
 
-        let array: Vec<f64> = data.get(&sdf::path("/PrimD.simple")?, "default")?.try_into()?;
+        let array = data
+            .get(&sdf::path("/PrimD.simple")?, "default")?
+            .try_as_double_vec()
+            .unwrap();
         assert_eq!(array, vec![0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3]);
 
-        let compressed: Vec<f64> = data.get(&sdf::path("/PrimD.copressed")?, "default")?.try_into()?;
+        let compressed = data
+            .get(&sdf::path("/PrimD.copressed")?, "default")?
+            .try_as_double_vec()
+            .unwrap();
         assert_eq!(
             compressed,
             vec![
@@ -333,13 +488,23 @@ mod tests {
     fn test_read_floats() -> Result<()> {
         let mut data = read_file("fixtures/floats.usdc")?;
 
-        let single: Vec<f32> = data.get(&sdf::path("/PrimF.single")?, "default")?.try_into()?;
-        assert_eq!(single, vec![3.5]);
+        let single = data
+            .get(&sdf::path("/PrimF.single")?, "default")?
+            .try_as_float()
+            .unwrap();
+        assert_eq!(single, 3.5);
 
-        let array: Vec<f32> = data.get(&sdf::path("/PrimF.simple")?, "default")?.try_into()?;
+        let array = data
+            .get(&sdf::path("/PrimF.simple")?, "default")?
+            .try_as_float_vec()
+            .unwrap();
         assert_eq!(array, vec![9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7]);
 
-        let compressed: Vec<f32> = data.get(&sdf::path("/PrimF.copressed")?, "default")?.try_into()?;
+        let compressed = data
+            .get(&sdf::path("/PrimF.copressed")?, "default")?
+            .try_as_float_vec()
+            .unwrap();
+
         assert_eq!(
             compressed,
             vec![
@@ -361,11 +526,11 @@ mod tests {
             .try_as_half()
             .unwrap();
 
-        assert_eq!(single, vec![f16::from_f32(2.9)]);
+        assert_eq!(single, f16::from_f32(2.9));
 
         let array = data
             .get(&sdf::path("/PrimH.simple")?, "default")?
-            .try_as_half()
+            .try_as_half_vec()
             .unwrap();
 
         assert_eq!(
@@ -376,7 +541,11 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let compressed: Vec<f16> = data.get(&sdf::path("/PrimH.copressed")?, "default")?.try_into()?;
+        let compressed = data
+            .get(&sdf::path("/PrimH.copressed")?, "default")?
+            .try_as_half_vec()
+            .unwrap();
+
         assert_eq!(
             compressed,
             [
@@ -396,13 +565,16 @@ mod tests {
     fn test_read_time_series() -> Result<()> {
         let mut data = read_file("fixtures/timesamples.usdc")?;
 
-        let samples: sdf::TimeSampleMap = dbg!(data.get(&sdf::path("/Prim.prop")?, "timeSamples")?.try_into()?);
+        let samples = dbg!(data
+            .get(&sdf::path("/Prim.prop")?, "timeSamples")?
+            .try_as_time_samples()
+            .unwrap());
         assert_eq!(samples.len(), 2);
 
         let keys = samples.iter().map(|(d, _)| d).copied().collect::<Vec<_>>();
         assert_eq!(keys, vec![4.0, 5.0]);
 
-        assert!(matches!(&samples[0].1, sdf::Value::Double(x) if x.len() == 1 && x[0] == 40.0));
+        assert!(matches!(&samples[0].1, sdf::Value::Double(x) if *x == 40.0_f64));
         assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
 
         Ok(())
@@ -416,12 +588,12 @@ mod tests {
             data.get(&sdf::path("/Prim32.single")?, "default")?
                 .try_as_int()
                 .unwrap(),
-            vec![12938]
+            12938
         );
 
         assert_eq!(
             data.get(&sdf::path("/Prim32.compressed")?, "default")?
-                .try_as_int()
+                .try_as_int_vec()
                 .unwrap(),
             vec![
                 1, 2, 4, 5, -3, 4, 5, -2, 3, -0, 3, 2, 4, -2, 4, 1, 8, -1, 5, -5, 2, 6, -3, 4, 6, 3, -7, 2, -3, 3, 6,
@@ -440,12 +612,12 @@ mod tests {
             data.get(&sdf::path("/Prim64.single")?, "default")?
                 .try_as_int_64()
                 .unwrap(),
-            vec![1234567890]
+            1234567890
         );
 
         assert_eq!(
             data.get(&sdf::path("/Prim64.compressed")?, "default")?
-                .try_as_int_64()
+                .try_as_int_64_vec()
                 .unwrap(),
             vec![
                 10, 23, 48, 45, -23, 43, 65, -23, 23, -10, 34, 23, 45, -12, 34, 16, 18, -12, 65, -65, 21, 67, -43, 34,
@@ -464,12 +636,12 @@ mod tests {
             data.get(&sdf::path("/PrimU32.single")?, "default")?
                 .try_as_uint()
                 .unwrap(),
-            vec![80129]
+            80129
         );
 
         assert_eq!(
             data.get(&sdf::path("/PrimU32.compressed")?, "default")?
-                .try_as_uint()
+                .try_as_uint_vec()
                 .unwrap(),
             vec![
                 1, 2, 4, 5, 3, 4, 5, 2, 3, 0, 3, 2, 4, 2, 4, 1, 8, 1, 5, 5, 2, 6, 3, 4, 6, 3, 7, 2, 3, 3, 6, 2, 6, 6,
@@ -488,12 +660,12 @@ mod tests {
             data.get(&sdf::path("/PrimU64.single")?, "default")?
                 .try_as_uint_64()
                 .unwrap(),
-            vec![432423654]
+            432423654
         );
 
         assert_eq!(
             data.get(&sdf::path("/PrimU64.compressed")?, "default")?
-                .try_as_uint_64()
+                .try_as_uint_64_vec()
                 .unwrap(),
             vec![
                 34, 23, 45, 12, 34, 16, 18, 12, 65, 65, 10, 23, 48, 45, 23, 43, 65, 23, 23, 10, 65, 23, 65, 63, 54, 23,
@@ -510,51 +682,50 @@ mod tests {
 
         // defaultPrim = "World"
         let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;
-        assert_eq!(default_prim.as_str(), "World");
+        assert_eq!(default_prim.try_as_token().unwrap(), "World");
 
         // float4[] clippingPlanes = []
         let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;
         assert!(matches!(clipping_planes, sdf::Value::Vec4f(..)));
-        assert_eq!(clipping_planes.as_f32_slice(), Some([].as_slice()));
+        assert!(clipping_planes.try_as_vec_4f().unwrap().is_empty());
 
         // float2 clippingRange = (1, 10000000)
         let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
         assert!(matches!(clipping_range, sdf::Value::Vec2f(..)));
-        assert_eq!(clipping_range.as_f32_slice(), Some([1.0, 10000000.0].as_slice()));
+        assert_eq!(&clipping_range.try_as_vec_2f().unwrap(), &[1.0, 10000000.0]);
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
         let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
         assert!(matches!(diffuse_color, sdf::Value::Vec3f(..)));
-        assert_eq!(diffuse_color.as_f32_slice(), Some([0.18, 0.18, 0.18].as_slice()));
+        assert_eq!(&diffuse_color.try_as_vec_3f().unwrap(), &[0.18, 0.18, 0.18]);
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
         let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
-        assert!(matches!(face_vertex_counts, sdf::Value::Int(..)));
-        assert_eq!(face_vertex_counts.as_int_slice(), Some([1, 2, 3, 4, 5, 6].as_slice()));
+        assert!(matches!(face_vertex_counts, sdf::Value::IntVec(..)));
+        assert_eq!(&face_vertex_counts.try_as_int_vec().unwrap(), &[1, 2, 3, 4, 5, 6]);
 
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
         let normals = data.get(&sdf::path("/World.normals")?, "default")?;
         assert!(matches!(normals, sdf::Value::Vec3f(..)));
         assert_eq!(
-            normals.try_as_vec_3f_ref().unwrap().as_slice(),
-            [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
-                .as_slice()
+            &normals.try_as_vec_3f().unwrap(),
+            &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)
         let xform_op_rotate_xyz = data.get(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
         assert!(matches!(xform_op_rotate_xyz, sdf::Value::Vec3d(..)));
-        assert_eq!(xform_op_rotate_xyz.as_f64_slice(), Some([0.0, 0.0, 0.0].as_slice()));
+        assert_eq!(&xform_op_rotate_xyz.try_as_vec_3d().unwrap(), &[0.0, 0.0, 0.0]);
 
         // double3 xformOp:scale = (1, 1, 1)
         let xform_op_scale = data.get(&sdf::path("/World.xformOp:scale")?, "default")?;
         assert!(matches!(xform_op_scale, sdf::Value::Vec3d(..)));
-        assert_eq!(xform_op_scale.as_f64_slice(), Some([1.0, 1.0, 1.0].as_slice()));
+        assert_eq!(&xform_op_scale.try_as_vec_3d().unwrap(), &[1.0, 1.0, 1.0]);
 
         // double3 xformOp:translate = (0, 1, 0)
         let xform_op_translate = data.get(&sdf::path("/World.xformOp:translate")?, "default")?;
         assert!(matches!(xform_op_translate, sdf::Value::Vec3d(..)));
-        assert_eq!(xform_op_translate.as_f64_slice(), Some([0.0, 1.0, 0.0].as_slice()));
+        assert_eq!(&xform_op_translate.try_as_vec_3d().unwrap(), &[0.0, 1.0, 0.0]);
 
         Ok(())
     }

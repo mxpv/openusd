@@ -13,6 +13,12 @@
 
 def "World"
 {
+    bool flipNormals = true
+    bool[] boolArray = [true, true, false, false, true, false]
+
+    uchar singleChar = 128
+    uchar[] chars = [128, 129, 130, 131, 132, 133, 134, 135, 136, 137]
+
     float2 clippingRange = (1, 10000000)
     float3 diffuseColor = (0.18, 0.18, 0.18)
     float4[] clippingPlanes = []
@@ -27,4 +33,13 @@ def "World"
     double3 xformOp:translate = (0, 1, 0)
 
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+    quath quathSingle = (3.5, 4.6, 2.5, 7.6)
+    quath[] quathArr = [(4.7, 2.4, 7.8, 8.5), (4.6, 6.7, 5.6, 5.3)]
+
+    quatf quatfSingle = (1.4, 2.9, 8.5, 4.6)
+    quatf[] quatfArr = [(4.2, 3.5, 2.6, 3.6), (2.4, 5.3, 6.3, 5.2), (7.1, 4.3, 2.4, 6.4)]
+
+    quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
+    quatd[] quatdArr = [(4.2, 3.5, 2.6, 3.6), (7.1, 4.3, 2.4, 6.4)]
 }

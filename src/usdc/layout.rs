@@ -208,7 +208,7 @@ pub enum Type {
     Invalid = 0,
 
     Bool = 1,
-    UChar = 2,
+    Uchar = 2,
     Int = 3,
     Uint = 4,
     Int64 = 5,

@@ -1,6 +1,5 @@
-use std::{collections::HashMap, vec};
+use std::collections::HashMap;
 
-use anyhow::bail;
 use half::f16;
 use strum::{EnumIs, EnumTryAs};
 
@@ -14,45 +13,72 @@ use super::*;
 /// - h: half
 /// - i: int
 ///
-/// NOTE: Halfs are not supported in Rust by default, so floats are used instead.
 #[derive(Debug, EnumIs, EnumTryAs)]
 pub enum Value {
     Bool(bool),
-    Uchar(u8),
-    Int(Vec<i32>),
-    Uint(Vec<u32>),
-    Int64(Vec<i64>),
-    Uint64(Vec<u64>),
+    BoolVec(Vec<bool>),
 
-    Half(Vec<f16>),
-    Float(Vec<f32>),
-    Double(Vec<f64>),
+    Uchar(u8),
+    UcharVec(Vec<u8>),
+
+    Int(i32),
+    IntVec(Vec<i32>),
+
+    Uint(u32),
+    UintVec(Vec<u32>),
+
+    Int64(i64),
+    Int64Vec(Vec<i64>),
+
+    Uint64(u64),
+    Uint64Vec(Vec<u64>),
+
+    Half(f16),
+    HalfVec(Vec<f16>),
+
+    Float(f32),
+    FloatVec(Vec<f32>),
+
+    Double(f64),
+    DoubleVec(Vec<f64>),
 
     String(String),
-    Token(Vec<String>),
+    StringVec(Vec<String>),
+
+    Token(String),
+    TokenVec(Vec<String>),
+
     AssetPath(String),
 
     Quath(Vec<f16>),
-    Quatd(Vec<f64>),
     Quatf(Vec<f32>),
+    Quatd(Vec<f64>),
 
-    Vec2d(Vec<f64>),
+    Vec2h(Vec<f16>),
     Vec2f(Vec<f32>),
+    Vec2d(Vec<f64>),
     Vec2i(Vec<i32>),
 
-    Vec3d(Vec<f64>),
+    Vec3h(Vec<f16>),
     Vec3f(Vec<f32>),
+    Vec3d(Vec<f64>),
     Vec3i(Vec<i32>),
 
-    Vec4d(Vec<f64>),
+    Vec4h(Vec<f16>),
     Vec4f(Vec<f32>),
+    Vec4d(Vec<f64>),
     Vec4i(Vec<i32>),
 
     Matrix2d(Vec<f64>),
     Matrix3d(Vec<f64>),
     Matrix4d(Vec<f64>),
 
+    Specifier(Specifier),
+    Permission(Permission),
+    Variability(Variability),
+
     Dictionary(HashMap<String, Value>),
+
     TokenListOp(TokenListOp),
     StringListOp(StringListOp),
     PathListOp(PathListOp),
@@ -61,175 +87,40 @@ pub enum Value {
     Int64ListOp(Int64ListOp),
     UIntListOp(UintListOp),
     UInt64ListOp(Uint64ListOp),
+    PayloadListOp(PayloadListOp),
 
-    PathVector,
-    TokenVector(Vec<String>),
-    Specifier(Specifier),
-    Permission(Permission),
-    Variability(Variability),
-
+    Payload(Payload),
+    PathVec,
     VariantSelectionMap(HashMap<String, String>),
     TimeSamples(TimeSampleMap),
-    Payload(Payload),
-    DoubleVector(Vec<f64>),
-    LayerOffsetVector(Vec<LayerOffset>),
-    StringVector(Vec<String>),
+
+    LayerOffsetVec(Vec<LayerOffset>),
+
     ValueBlock,
     Value,
 
     UnregisteredValue,
     UnregisteredValueListOp,
-    PayloadListOp(PayloadListOp),
 
     TimeCode(f64),
     PathExpression,
 }
 
-impl Value {
-    pub fn as_int_slice(&self) -> Option<&[i32]> {
-        match self {
-            Value::Int(vec) => Some(vec.as_slice()),
-            _ => None,
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    pub fn as_f64_slice(&self) -> Option<&[f64]> {
-        let slice = match self {
-            Value::Vec2d(vec)
-            | Value::Vec3d(vec)
-            | Value::Vec4d(vec)
-            | Value::Matrix2d(vec)
-            | Value::Matrix3d(vec)
-            | Value::Matrix4d(vec) => vec.as_slice(),
-            _ => return None,
-        };
+    #[test]
+    fn test_is() {
+        // Basic sanity checks
+        assert!(Value::Bool(true).is_bool());
+        assert!(!Value::Bool(true).is_bool_vec());
 
-        Some(slice)
-    }
+        assert!(Value::Float(1.44).is_float());
+        assert!(!Value::Float(1.44).is_bool());
+        assert!(!Value::Float(1.44).is_float_vec());
 
-    pub fn as_f32_slice(&self) -> Option<&[f32]> {
-        let slice = match self {
-            Value::Vec2f(vec) | Value::Vec3f(vec) | Value::Vec4f(vec) => vec.as_slice(),
-            _ => return None,
-        };
-
-        Some(slice)
-    }
-
-    pub fn as_dict(&self) -> Option<&HashMap<String, Value>> {
-        match self {
-            Value::Dictionary(dict) => Some(dict),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        match self {
-            Value::String(string) => string.as_str(),
-            Value::Token(tokens) if tokens.len() == 1 => tokens[0].as_str(),
-            _ => panic!("Expected string"),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<f16> {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
-        match value {
-            Value::Half(vec) | Value::Quath(vec) => Ok(vec),
-            _ => bail!("Unable to unpack half"),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<f32> {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
-        match value {
-            Value::Float(vec) | Value::Quatf(vec) | Value::Vec2f(vec) | Value::Vec3f(vec) | Value::Vec4f(vec) => {
-                Ok(vec)
-            }
-
-            _ => bail!("Unable to unpack float"),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<f64> {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
-        match value {
-            Value::Double(vec)
-            | Value::Quatd(vec)
-            | Value::Vec2d(vec)
-            | Value::Vec3d(vec)
-            | Value::Vec4d(vec)
-            | Value::Matrix2d(vec)
-            | Value::Matrix3d(vec)
-            | Value::Matrix4d(vec)
-            | Value::DoubleVector(vec) => Ok(vec),
-
-            _ => bail!("Unable to unpack double"),
-        }
-    }
-}
-
-impl From<Value> for Vec<String> {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::String(str) => vec![str],
-            Value::StringVector(vec) => vec,
-            Value::Token(tokens) => tokens,
-            Value::TokenVector(tokens) => tokens,
-            Value::AssetPath(path) => vec![path],
-            _ => Vec::new(),
-        }
-    }
-}
-
-impl TryFrom<Value> for StringListOp {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::StringListOp(list) => Ok(list),
-            _ => bail!("Unable to unpack string list op"),
-        }
-    }
-}
-
-impl TryFrom<Value> for PathListOp {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::PathListOp(list) => Ok(list),
-            _ => bail!("Unable to unpack path list op"),
-        }
-    }
-}
-
-impl TryFrom<Value> for HashMap<String, String> {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
-        match value {
-            Value::VariantSelectionMap(map) => Ok(map),
-            _ => bail!("Unable to unpack variant selection map"),
-        }
-    }
-}
-
-impl TryFrom<Value> for TimeSampleMap {
-    type Error = anyhow::Error;
-
-    fn try_from(value: Value) -> std::prelude::v1::Result<Self, Self::Error> {
-        match value {
-            Value::TimeSamples(samples) => Ok(samples),
-            _ => bail!("Unable to unpack time samples"),
-        }
+        assert!(Value::PayloadListOp(Default::default()).is_payload_list_op());
+        assert!(Value::UnregisteredValue.is_unregistered_value());
     }
 }

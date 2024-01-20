@@ -1,4 +1,4 @@
-//! Example that dumps the contents of a usdc file.
+//! Example that dumps structural data of a usdc file.
 //!
 //! # Usage:
 //! ```bash
