@@ -39,6 +39,8 @@ impl FromStr for Path {
 }
 
 impl Path {
+    pub const NS_DELIMITER_CHAR: char = ':';
+
     pub fn new(path: &str) -> Result<Self> {
         Path::from_str(path)
     }
@@ -145,6 +147,28 @@ impl Path {
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.path
+    }
+
+    pub fn is_valid_identifier(name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+
+        name.chars().all(|c| c.is_alphabetic() || c == '.')
+    }
+
+    pub fn is_valid_namespace_identifier(name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+
+        for part in name.split(Self::NS_DELIMITER_CHAR) {
+            if !Self::is_valid_identifier(part) {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
