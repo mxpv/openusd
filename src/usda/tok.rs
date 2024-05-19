@@ -1,6 +1,8 @@
 //! Tokenizer receives usda file as input and outputs tokens for
 //! further analysis.
 
+use std::ops::Range;
+
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::sdf;
@@ -113,36 +115,45 @@ static KEYWORDS: &[(&str, Type)] = &[
 /// Punctuation characters. These will match `Type::Punctuation` token type.
 static PUN: &[&str] = &["=", ",", "(", ")", "{", "}", "[", "]"];
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct Token<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
     /// Token type.
     pub ty: Type,
-    /// Token substring.
-    pub token: &'a str,
+    /// Range in the owned buffer.
+    pub range: Range<usize>,
 }
 
-impl<'a> Token<'a> {
-    pub fn new(ty: Type, token: &'a str) -> Self {
-        Self { ty, token }
-    }
-
-    pub fn str(str: &'a str) -> Self {
-        Self::new(Type::String, str)
-    }
-
-    pub fn ty(ty: Type) -> Self {
-        Self::new(ty, "")
+impl Token {
+    pub fn new(ty: Type, range: Range<usize>) -> Self {
+        Self { ty, range }
     }
 }
 
+/// Tokenizer implements an iterator that yields a new token on each call.
+///
+/// Under the hood it borrows a string buffer with data.
+/// On each `next` call, the tokenizer extracts next token and advanced buffer pointer.
 pub struct Tokenizer<'a> {
+    /// Current buffer.
+    ///
+    /// This will be trimmed on every token request.
     buffer: &'a str,
+    /// Whether already seen header.
     header: bool,
+    /// Original buffer size.
+    total: usize,
+    /// Start of the current token.
+    start: usize,
 }
 
 impl<'a> Tokenizer<'a> {
     pub fn new(buffer: &'a str) -> Self {
-        Self { buffer, header: true }
+        Self {
+            buffer,
+            header: true,
+            total: buffer.len(),
+            start: 0,
+        }
     }
 
     /// Advance to next line
@@ -153,6 +164,15 @@ impl<'a> Tokenizer<'a> {
 
     fn trim_spaces(&mut self) {
         self.buffer = self.buffer.trim_start();
+    }
+
+    fn token(&self, ty: Type, tok: &str) -> Result<Token> {
+        let start = self.start;
+        let end = start + tok.len();
+
+        let token = Token::new(ty, start..end);
+
+        Ok(token)
     }
 
     pub(super) fn extract_quoted_string(&mut self) -> Result<&'a str> {
@@ -166,6 +186,7 @@ impl<'a> Tokenizer<'a> {
 
         if let Some(end) = end {
             if let Some((str, rem)) = self.buffer.trim_start_matches(end).split_once(end) {
+                self.start = self.total - rem.len() - str.len() - end.len();
                 self.buffer = rem;
 
                 return Ok(str);
@@ -205,6 +226,8 @@ impl<'a> Tokenizer<'a> {
                 bail!("Found newline inside of quoted string");
             } else if ch == end {
                 let (str, rem) = self.buffer.split_at(pos + 1);
+
+                self.start = self.total - rem.len() - str.len() + 1;
                 self.buffer = rem;
 
                 // Remove quotes
@@ -226,7 +249,7 @@ impl<'a> Tokenizer<'a> {
 }
 
 impl<'a> Iterator for Tokenizer<'a> {
-    type Item = Result<Token<'a>>;
+    type Item = Result<Token>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.trim_spaces();
@@ -245,7 +268,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             self.skip_line();
             self.header = false;
 
-            return Ok(Token::new(Type::Magic, line)).into();
+            return Some(self.token(Type::Magic, line));
         }
 
         // Skip comments
@@ -258,7 +281,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse quoted string")
-                .map(Token::str);
+                .and_then(|tok| self.token(Type::String, tok));
 
             return Some(token);
         }
@@ -268,7 +291,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse asset ref")
-                .map(|asset| Token::new(Type::AssetRef, asset));
+                .and_then(|asset| self.token(Type::AssetRef, asset));
 
             return Some(token);
         }
@@ -278,7 +301,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse path ref")
-                .map(|path| Token::new(Type::PathRef, path));
+                .and_then(|path| self.token(Type::PathRef, path));
 
             return Some(token);
         }
@@ -289,6 +312,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let next_word = iter.next()?;
 
             self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();
+            self.start = self.total - self.buffer.len() - next_word.len();
 
             next_word
         };
@@ -296,20 +320,20 @@ impl<'a> Iterator for Tokenizer<'a> {
         // Parse keywords.
         for (keyword, ty) in KEYWORDS {
             if keyword.eq(&word) {
-                return Ok(Token::new(*ty, "")).into();
+                return Some(self.token(*ty, keyword));
             }
         }
 
         // Parse punctuation.
         for ch in PUN {
             if ch.eq(&word) {
-                return Ok(Token::new(Type::Punctuation, ch)).into();
+                return Some(self.token(Type::Punctuation, ch));
             }
         }
 
         // Try parse as number.
         if word.parse::<f64>().is_ok() {
-            return Ok(Token::new(Type::Number, word)).into();
+            return Some(self.token(Type::Number, word));
         }
 
         // Namespace identifier
@@ -318,12 +342,12 @@ impl<'a> Iterator for Tokenizer<'a> {
                 return Err(anyhow!("Invalid ns identifier: {}", word)).into();
             }
 
-            return Some(Ok(Token::new(Type::NamespacedIdentifier, word)));
+            return Some(self.token(Type::NamespacedIdentifier, word));
         }
 
         // Identifier
         if sdf::Path::is_valid_identifier(word) {
-            return Ok(Token::new(Type::Identifier, word)).into();
+            return Some(self.token(Type::Identifier, word));
         }
 
         Err(anyhow!("Unable to parse token: {}", word)).into()
@@ -395,40 +419,41 @@ mod tests {
         let mut tok = Tokenizer::new(&f);
 
         let tokens = [
-            Token::new(Type::Magic, "#usda 1.0"),
+            (Type::Magic, "#usda 1.0"),
             // MySphere1
-            Token::ty(Type::Def),
-            Token::new(Type::Identifier, "Sphere"),
-            Token::str("MySphere1"),
-            Token::new(Type::Punctuation, "("),
-            Token::ty(Type::Payload),
-            Token::new(Type::Punctuation, "="),
-            Token::new(Type::AssetRef, "./payload.usda"),
-            Token::new(Type::PathRef, "/MySphere"),
-            Token::new(Type::Punctuation, ")"),
-            Token::new(Type::Punctuation, "{"),
-            Token::new(Type::Punctuation, "}"),
+            (Type::Def, "def"),
+            (Type::Identifier, "Sphere"),
+            (Type::String, "MySphere1"),
+            (Type::Punctuation, "("),
+            (Type::Payload, "payload"),
+            (Type::Punctuation, "="),
+            (Type::AssetRef, "./payload.usda"),
+            (Type::PathRef, "/MySphere"),
+            (Type::Punctuation, ")"),
+            (Type::Punctuation, "{"),
+            (Type::Punctuation, "}"),
             // MySphere2
-            Token::ty(Type::Def),
-            Token::new(Type::Identifier, "Sphere"),
-            Token::str("MySphere2"),
-            Token::new(Type::Punctuation, "("),
-            Token::ty(Type::Prepend),
-            Token::ty(Type::Payload),
-            Token::new(Type::Punctuation, "="),
-            Token::new(Type::AssetRef, "./cube_payload.usda"),
-            Token::new(Type::PathRef, "/PayloadCube"),
-            Token::new(Type::Punctuation, ")"),
-            Token::new(Type::Punctuation, "{"),
-            Token::new(Type::Punctuation, "}"),
+            (Type::Def, "def"),
+            (Type::Identifier, "Sphere"),
+            (Type::String, "MySphere2"),
+            (Type::Punctuation, "("),
+            (Type::Prepend, "prepend"),
+            (Type::Payload, "payload"),
+            (Type::Punctuation, "="),
+            (Type::AssetRef, "./cube_payload.usda"),
+            (Type::PathRef, "/PayloadCube"),
+            (Type::Punctuation, ")"),
+            (Type::Punctuation, "{"),
+            (Type::Punctuation, "}"),
         ];
 
-        for token in tokens {
-            let next = tok
+        for (ty, expected) in tokens {
+            let token = tok
                 .next()
-                .with_context(|| format!("Expected {:?}, got None", token))??;
+                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
 
-            assert_eq!(next, token);
+            assert_eq!(ty, token.ty);
+            assert_eq!(expected, &f[token.range]);
         }
 
         assert!(tok.next().is_none());
@@ -442,30 +467,31 @@ mod tests {
         let mut tok = Tokenizer::new(&f);
 
         let tokens = [
-            Token::new(Type::Magic, "#usda 1.0"),
+            (Type::Magic, "#usda 1.0"),
             // def Material "boardMat"
-            Token::ty(Type::Def),
-            Token::new(Type::Identifier, "Material"),
-            Token::str("boardMat"),
-            Token::new(Type::Punctuation, "{"),
+            (Type::Def, "def"),
+            (Type::Identifier, "Material"),
+            (Type::String, "boardMat"),
+            (Type::Punctuation, "{"),
             // token inputs:frame:stPrimvarName = "st"
-            Token::new(Type::Identifier, "token"),
-            Token::new(Type::NamespacedIdentifier, "inputs:frame:stPrimvarName"),
-            Token::new(Type::Punctuation, "="),
-            Token::str("st"),
+            (Type::Identifier, "token"),
+            (Type::NamespacedIdentifier, "inputs:frame:stPrimvarName"),
+            (Type::Punctuation, "="),
+            (Type::String, "st"),
             // token outputs:surface.connect = </TexModel/boardMat/PBRShader.outputs:surface>
-            Token::new(Type::Identifier, "token"),
-            Token::new(Type::NamespacedIdentifier, "outputs:surface.connect"),
-            Token::new(Type::Punctuation, "="),
-            Token::new(Type::PathRef, "/TexModel/boardMat/PBRShader.outputs:surface"),
+            (Type::Identifier, "token"),
+            (Type::NamespacedIdentifier, "outputs:surface.connect"),
+            (Type::Punctuation, "="),
+            (Type::PathRef, "/TexModel/boardMat/PBRShader.outputs:surface"),
         ];
 
-        for token in tokens {
-            let next = tok
+        for (ty, expected) in tokens {
+            let token = tok
                 .next()
-                .with_context(|| format!("Expected {:?}, got None", token))??;
+                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
 
-            assert_eq!(next, token);
+            assert_eq!(ty, token.ty);
+            assert_eq!(expected, &f[token.range]);
         }
 
         Ok(())
@@ -477,37 +503,38 @@ mod tests {
         let mut tok = Tokenizer::new(&f);
 
         let tokens = [
-            Token::new(Type::Magic, "#usda 1.0"),
-            Token::new(Type::Punctuation, "("),
+            (Type::Magic, "#usda 1.0"),
+            (Type::Punctuation, "("),
             // doc = """test string"""
-            Token::new(Type::Doc, ""),
-            Token::new(Type::Punctuation, "="),
-            Token::str("test string"),
+            (Type::Doc, "doc"),
+            (Type::Punctuation, "="),
+            (Type::String, "test string"),
             // customLayerData = { string test = "Test string" }
-            Token::new(Type::Identifier, "customLayerData"),
-            Token::new(Type::Punctuation, "="),
-            Token::new(Type::Punctuation, "{"),
-            Token::new(Type::Identifier, "string"),
-            Token::new(Type::Identifier, "test"),
-            Token::new(Type::Punctuation, "="),
-            Token::str("Test string"),
-            Token::new(Type::Punctuation, "}"),
+            (Type::Identifier, "customLayerData"),
+            (Type::Punctuation, "="),
+            (Type::Punctuation, "{"),
+            (Type::Identifier, "string"),
+            (Type::Identifier, "test"),
+            (Type::Punctuation, "="),
+            (Type::String, "Test string"),
+            (Type::Punctuation, "}"),
             // upAxis = "Y"
-            Token::new(Type::Identifier, "upAxis"),
-            Token::new(Type::Punctuation, "="),
-            Token::str("Y"),
+            (Type::Identifier, "upAxis"),
+            (Type::Punctuation, "="),
+            (Type::String, "Y"),
             // metersPerUnit = 0.01
-            Token::new(Type::Identifier, "metersPerUnit"),
-            Token::new(Type::Punctuation, "="),
-            Token::new(Type::Number, "0.01"),
+            (Type::Identifier, "metersPerUnit"),
+            (Type::Punctuation, "="),
+            (Type::Number, "0.01"),
         ];
 
-        for token in tokens {
-            let next = tok
+        for (ty, expected) in tokens {
+            let token = tok
                 .next()
-                .with_context(|| format!("Expected {:?}, got None", token))??;
+                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
 
-            assert_eq!(next, token);
+            assert_eq!(ty, token.ty);
+            assert_eq!(expected, &f[token.range]);
         }
 
         Ok(())
@@ -518,7 +545,7 @@ mod tests {
         let f = fs::read_to_string("fixtures/fields.usda").unwrap();
         let tok = Tokenizer::new(&f);
 
-        let expected = Token::new(Type::Magic, "#usda 1.0");
+        let expected = Token::new(Type::Magic, 0..9);
 
         let mut peekable = tok.peekable();
         assert_eq!(peekable.peek().unwrap().as_ref().unwrap().clone(), expected);
