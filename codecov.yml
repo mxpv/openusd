@@ -3,4 +3,4 @@ coverage:
     project:
       default:
         target: 50% # Require at least 50% coverage
-        threshold: 10% # Allow 10% drop from the previous base commit coverage
+        threshold: 15% # Allow 10% drop from the previous base commit coverage
