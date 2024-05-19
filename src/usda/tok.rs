@@ -1,7 +1,7 @@
 //! Tokenizer receives usda file as input and outputs tokens for
 //! further analysis.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::sdf;
 
@@ -113,7 +113,7 @@ static KEYWORDS: &[(&str, Type)] = &[
 /// Punctuation characters. These will match `Type::Punctuation` token type.
 static PUN: &[&str] = &["=", ",", "(", ")", "{", "}", "[", "]"];
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Token<'a> {
     /// Token type.
     pub ty: Type,
@@ -223,37 +223,29 @@ impl<'a> Tokenizer<'a> {
 
         bail!("Unable to find closing {}", end);
     }
+}
 
-    fn next_word(&mut self) -> Option<&str> {
-        if self.buffer.is_empty() {
-            return None;
-        }
+impl<'a> Iterator for Tokenizer<'a> {
+    type Item = Result<Token<'a>>;
 
-        let mut iter = self.buffer.split_whitespace();
-        let next_word = iter.next()?;
-
-        self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();
-
-        Some(next_word)
-    }
-
-    /// Attempts to extract next token from string.
-    pub fn parse_next(&mut self) -> Result<Option<Token>> {
+    fn next(&mut self) -> Option<Self::Item> {
         self.trim_spaces();
 
         if self.buffer.is_empty() {
-            return Ok(None);
+            return None;
         }
 
         // Parse header
         if self.header {
             let line = self.buffer.lines().next().unwrap_or_default();
-            ensure!(line.starts_with("#usda"), "Text files expected to start with #usda");
+            if !line.starts_with("#usda") {
+                return Err(anyhow!("Text files expected to start with #usda")).into();
+            }
 
             self.skip_line();
             self.header = false;
 
-            return Ok(Some(Token::new(Type::Magic, line)));
+            return Ok(Token::new(Type::Magic, line)).into();
         }
 
         // Skip comments
@@ -263,62 +255,78 @@ impl<'a> Tokenizer<'a> {
 
         // Parse quoted string.
         if self.buffer.starts_with('"') || self.buffer.starts_with('\'') {
-            let str = self.extract_quoted_string().context("Failed to parse quoted string")?;
-            return Ok(Token::str(str).into());
+            let token = self
+                .extract_quoted_string()
+                .context("Failed to parse quoted string")
+                .map(Token::str);
+
+            return Some(token);
         }
 
         // Asset reference.
         if self.buffer.starts_with('@') {
-            let asset = self.extract_quoted_string().context("Failed to parse asset ref")?;
-            return Ok(Token::new(Type::AssetRef, asset).into());
+            let token = self
+                .extract_quoted_string()
+                .context("Failed to parse asset ref")
+                .map(|asset| Token::new(Type::AssetRef, asset));
+
+            return Some(token);
         }
 
         // Path reference.
         if self.buffer.starts_with('<') {
-            let path = self.extract_quoted_string().context("Failed to parse path ref")?;
-            return Ok(Token::new(Type::PathRef, path).into());
+            let token = self
+                .extract_quoted_string()
+                .context("Failed to parse path ref")
+                .map(|path| Token::new(Type::PathRef, path));
+
+            return Some(token);
         }
 
         // It's not a quoted string at this point, so separate next word
-        let Some(word) = self.next_word() else {
-            return Ok(None);
+        let word = {
+            let mut iter = self.buffer.split_whitespace();
+            let next_word = iter.next()?;
+
+            self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();
+
+            next_word
         };
 
         // Parse keywords.
         for (keyword, ty) in KEYWORDS {
             if keyword.eq(&word) {
-                return Ok(Token::new(*ty, "").into());
+                return Ok(Token::new(*ty, "")).into();
             }
         }
 
         // Parse punctuation.
         for ch in PUN {
             if ch.eq(&word) {
-                return Ok(Token::new(Type::Punctuation, ch).into());
+                return Ok(Token::new(Type::Punctuation, ch)).into();
             }
         }
 
         // Try parse as number.
         if word.parse::<f64>().is_ok() {
-            return Ok(Token::new(Type::Number, word).into());
+            return Ok(Token::new(Type::Number, word)).into();
         }
 
         // Namespace identifier
         if word.contains(sdf::Path::NS_DELIMITER_CHAR) {
-            ensure!(
-                sdf::Path::is_valid_namespace_identifier(word),
-                "Invalid ns identifier: {}",
-                word
-            );
-            return Ok(Token::new(Type::NamespacedIdentifier, word).into());
+            if !sdf::Path::is_valid_namespace_identifier(word) {
+                return Err(anyhow!("Invalid ns identifier: {}", word)).into();
+            }
+
+            return Some(Ok(Token::new(Type::NamespacedIdentifier, word)));
         }
 
         // Identifier
         if sdf::Path::is_valid_identifier(word) {
-            return Ok(Token::new(Type::Identifier, word).into());
+            return Ok(Token::new(Type::Identifier, word)).into();
         }
 
-        bail!("Unable to parse token: {}", word);
+        Err(anyhow!("Unable to parse token: {}", word)).into()
     }
 }
 
@@ -330,18 +338,15 @@ mod tests {
 
     #[test]
     fn empty_file() {
-        assert_eq!(Tokenizer::new("").parse_next().unwrap(), None);
-        assert_eq!(Tokenizer::new(" ").parse_next().unwrap(), None);
-        assert_eq!(
-            Tokenizer::new(
-                "
+        assert!(Tokenizer::new("").next().is_none());
+        assert!(Tokenizer::new(" ").next().is_none());
+        assert!(Tokenizer::new(
+            "
 
             "
-            )
-            .parse_next()
-            .unwrap(),
-            None
-        );
+        )
+        .next()
+        .is_none());
     }
 
     #[test]
@@ -419,12 +424,14 @@ mod tests {
         ];
 
         for token in tokens {
-            let next = tok.parse_next()?;
+            let next = tok
+                .next()
+                .with_context(|| format!("Expected {:?}, got None", token))??;
 
-            assert_eq!(next, Some(token));
+            assert_eq!(next, token);
         }
 
-        assert!(tok.parse_next()?.is_none());
+        assert!(tok.next().is_none());
 
         Ok(())
     }
@@ -454,9 +461,11 @@ mod tests {
         ];
 
         for token in tokens {
-            let next = tok.parse_next()?;
+            let next = tok
+                .next()
+                .with_context(|| format!("Expected {:?}, got None", token))??;
 
-            assert_eq!(next, Some(token));
+            assert_eq!(next, token);
         }
 
         Ok(())
@@ -494,11 +503,27 @@ mod tests {
         ];
 
         for token in tokens {
-            let next = tok.parse_next()?;
+            let next = tok
+                .next()
+                .with_context(|| format!("Expected {:?}, got None", token))??;
 
-            assert_eq!(next, Some(token));
+            assert_eq!(next, token);
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn peekable_iter() {
+        let f = fs::read_to_string("fixtures/fields.usda").unwrap();
+        let tok = Tokenizer::new(&f);
+
+        let expected = Token::new(Type::Magic, "#usda 1.0");
+
+        let mut peekable = tok.peekable();
+        assert_eq!(peekable.peek().unwrap().as_ref().unwrap().clone(), expected);
+
+        let next = peekable.next().unwrap().unwrap();
+        assert_eq!(next, expected);
     }
 }
