@@ -8,12 +8,10 @@ mod coding;
 mod file;
 mod layout;
 mod reader;
-mod version;
-
 pub use file::CrateFile;
 use layout::ValueRep;
 use reader::CrateReader;
-pub use version::{version, Version};
+pub use layout::{version, Version};
 
 use crate::sdf;
 

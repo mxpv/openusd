@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::layout::*;
-use usdc::{version, CrateReader, Version};
+use usdc::{CrateReader};
 
 // Currently supported USDC version.
 // See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L340>
