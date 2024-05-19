@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 mod path;
+pub mod schema;
 mod value;
 
 pub use path::{path, Path};
