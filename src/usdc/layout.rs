@@ -28,7 +28,6 @@ impl From<Bootstrap> for Version {
     }
 }
 
-
 /// Helper structure to compare file versions.
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Version {
@@ -74,7 +73,6 @@ impl PartialOrd for Version {
         Some(self.as_u32().cmp(&other.as_u32()))
     }
 }
-
 
 /// Max section's name length.
 const SECTION_NAME_MAX_LENGTH: usize = 15;

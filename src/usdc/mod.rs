@@ -5,13 +5,11 @@ use std::{collections::HashMap, fmt::Debug, io, mem, path::Path};
 use anyhow::{bail, Result};
 
 mod coding;
-mod file;
 mod layout;
 mod reader;
-pub use file::CrateFile;
 use layout::ValueRep;
-use reader::CrateReader;
 pub use layout::{version, Version};
+pub use reader::{CrateFile, ReadExt};
 
 use crate::sdf;
 

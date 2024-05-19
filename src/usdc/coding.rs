@@ -7,7 +7,7 @@ use std::{io, mem};
 use anyhow::{bail, Result};
 use num_traits::{AsPrimitive, PrimInt};
 
-use super::CrateReader;
+use super::reader::ReadExt;
 
 const COMMON: u8 = 0;
 const SMALL: u8 = 1;
