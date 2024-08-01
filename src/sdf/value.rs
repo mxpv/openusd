@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use half::f16;
-use strum::{EnumIs, EnumTryAs};
+use strum::{EnumDiscriminants, EnumIs, EnumTryAs};
 
 use super::*;
 
@@ -13,7 +13,8 @@ use super::*;
 /// - h: half
 /// - i: int
 ///
-#[derive(Debug, EnumIs, EnumTryAs)]
+#[derive(Debug, Clone, EnumIs, EnumTryAs, EnumDiscriminants)]
+#[strum_discriminants(name(ValueType))]
 pub enum Value {
     Bool(bool),
     BoolVec(Vec<bool>),
@@ -22,7 +23,13 @@ pub enum Value {
     UcharVec(Vec<u8>),
 
     Int(i32),
+    Int2([i32; 2]),
+    Int3([i32; 3]),
+    Int4([i32; 4]),
     IntVec(Vec<i32>),
+    Int2Vec(Vec<[i32; 2]>),
+    Int3Vec(Vec<[i32; 3]>),
+    Int4Vec(Vec<[i32; 4]>),
 
     Uint(u32),
     UintVec(Vec<u32>),
@@ -33,14 +40,33 @@ pub enum Value {
     Uint64(u64),
     Uint64Vec(Vec<u64>),
 
+    // TODO: Consolidate this with binary reader.
     Half(f16),
+    Half2([f16; 2]),
+    Half3([f16; 3]),
+    Half4([f16; 4]),
     HalfVec(Vec<f16>),
+    Half2Vec(Vec<[f16; 2]>),
+    Half3Vec(Vec<[f16; 3]>),
+    Half4Vec(Vec<[f16; 4]>),
 
     Float(f32),
+    Float2([f32; 2]),
+    Float3([f32; 3]),
+    Float4([f32; 4]),
     FloatVec(Vec<f32>),
+    Float2Vec(Vec<[f32; 2]>),
+    Float3Vec(Vec<[f32; 3]>),
+    Float4Vec(Vec<[f32; 4]>),
 
     Double(f64),
+    Double2([f64; 2]),
+    Double3([f64; 3]),
+    Double4([f64; 4]),
     DoubleVec(Vec<f64>),
+    Double2Vec(Vec<[f64; 2]>),
+    Double3Vec(Vec<[f64; 3]>),
+    Double4Vec(Vec<[f64; 4]>),
 
     String(String),
     StringVec(Vec<String>),

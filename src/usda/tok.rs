@@ -1,8 +1,6 @@
 //! Tokenizer receives usda file as input and outputs tokens for
 //! further analysis.
 
-use std::ops::Range;
-
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::sdf;
@@ -116,16 +114,31 @@ static KEYWORDS: &[(&str, Type)] = &[
 static PUN: &[&str] = &["=", ",", "(", ")", "{", "}", "[", "]"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token {
+pub struct Token<'a> {
     /// Token type.
     pub ty: Type,
-    /// Range in the owned buffer.
-    pub range: Range<usize>,
+    /// Substring in the buffer.
+    pub str: &'a str,
 }
 
-impl Token {
-    pub fn new(ty: Type, range: Range<usize>) -> Self {
-        Self { ty, range }
+impl<'a> Token<'a> {
+    pub fn new(ty: Type, str: &'a str) -> Self {
+        Self { ty, str }
+    }
+
+    #[inline]
+    pub fn str(str: &'a str) -> Self {
+        Self { ty: Type::String, str }
+    }
+
+    #[inline]
+    pub fn is_punctuation(&self, p: &str) -> bool {
+        self.ty == Type::Punctuation && self.str == p
+    }
+
+    #[inline]
+    pub fn is_ident(&self, t: &str) -> bool {
+        self.ty == Type::Identifier && self.str == t
     }
 }
 
@@ -140,20 +153,11 @@ pub struct Tokenizer<'a> {
     buffer: &'a str,
     /// Whether already seen header.
     header: bool,
-    /// Original buffer size.
-    total: usize,
-    /// Start of the current token.
-    start: usize,
 }
 
 impl<'a> Tokenizer<'a> {
     pub fn new(buffer: &'a str) -> Self {
-        Self {
-            buffer,
-            header: true,
-            total: buffer.len(),
-            start: 0,
-        }
+        Self { buffer, header: true }
     }
 
     /// Advance to next line
@@ -164,15 +168,6 @@ impl<'a> Tokenizer<'a> {
 
     fn trim_spaces(&mut self) {
         self.buffer = self.buffer.trim_start();
-    }
-
-    fn token(&self, ty: Type, tok: &str) -> Result<Token> {
-        let start = self.start;
-        let end = start + tok.len();
-
-        let token = Token::new(ty, start..end);
-
-        Ok(token)
     }
 
     pub(super) fn extract_quoted_string(&mut self) -> Result<&'a str> {
@@ -186,7 +181,6 @@ impl<'a> Tokenizer<'a> {
 
         if let Some(end) = end {
             if let Some((str, rem)) = self.buffer.trim_start_matches(end).split_once(end) {
-                self.start = self.total - rem.len() - str.len() - end.len();
                 self.buffer = rem;
 
                 return Ok(str);
@@ -227,7 +221,6 @@ impl<'a> Tokenizer<'a> {
             } else if ch == end {
                 let (str, rem) = self.buffer.split_at(pos + 1);
 
-                self.start = self.total - rem.len() - str.len() + 1;
                 self.buffer = rem;
 
                 // Remove quotes
@@ -249,7 +242,7 @@ impl<'a> Tokenizer<'a> {
 }
 
 impl<'a> Iterator for Tokenizer<'a> {
-    type Item = Result<Token>;
+    type Item = Result<Token<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.trim_spaces();
@@ -260,15 +253,15 @@ impl<'a> Iterator for Tokenizer<'a> {
 
         // Parse header
         if self.header {
-            let line = self.buffer.lines().next().unwrap_or_default();
-            if !line.starts_with("#usda") {
-                return Err(anyhow!("Text files expected to start with #usda")).into();
-            }
-
-            self.skip_line();
             self.header = false;
 
-            return Some(self.token(Type::Magic, line));
+            let line = self.buffer.lines().next().unwrap_or_default();
+
+            // Extract magic token, but don't error if it's not there, leave it for the parser.
+            if line.starts_with("#usda") {
+                self.skip_line();
+                return Ok(Token::new(Type::Magic, line)).into();
+            }
         }
 
         // Skip comments
@@ -281,7 +274,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse quoted string")
-                .and_then(|tok| self.token(Type::String, tok));
+                .map(Token::str);
 
             return Some(token);
         }
@@ -291,7 +284,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse asset ref")
-                .and_then(|asset| self.token(Type::AssetRef, asset));
+                .map(|asset| Token::new(Type::AssetRef, asset));
 
             return Some(token);
         }
@@ -301,18 +294,41 @@ impl<'a> Iterator for Tokenizer<'a> {
             let token = self
                 .extract_quoted_string()
                 .context("Failed to parse path ref")
-                .and_then(|path| self.token(Type::PathRef, path));
+                .map(|path| Token::new(Type::PathRef, path));
 
             return Some(token);
         }
 
-        // It's not a quoted string at this point, so separate next word
+        // Parse punctuation.
+        // Note: there is a corner case with arrays like [1], where these are actually 3 different tokens.
+        for ch in PUN {
+            if let Some(buffer) = self.buffer.strip_prefix(ch) {
+                self.buffer = buffer;
+                return Ok(Token::new(Type::Punctuation, ch)).into();
+            }
+        }
+
+        // Try parse number
+        {
+            // Numbers require some special handling of cases like (1), [2, 3], etc.
+            let mut iter = self
+                .buffer
+                .split(|c: char| c.is_ascii_whitespace() || c == ',' || c == ']' || c == ')');
+
+            if let Some(num) = iter.next() {
+                if num.parse::<f32>().is_ok() {
+                    self.buffer = self.buffer.strip_prefix(num).unwrap_or_default();
+                    return Ok(Token::new(Type::Number, num)).into();
+                }
+            }
+        }
+
+        // It's not a quoted string and not a number at this point, so separate next word by space.
         let word = {
             let mut iter = self.buffer.split_whitespace();
             let next_word = iter.next()?;
 
             self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();
-            self.start = self.total - self.buffer.len() - next_word.len();
 
             next_word
         };
@@ -320,20 +336,8 @@ impl<'a> Iterator for Tokenizer<'a> {
         // Parse keywords.
         for (keyword, ty) in KEYWORDS {
             if keyword.eq(&word) {
-                return Some(self.token(*ty, keyword));
+                return Ok(Token::new(*ty, keyword)).into();
             }
-        }
-
-        // Parse punctuation.
-        for ch in PUN {
-            if ch.eq(&word) {
-                return Some(self.token(Type::Punctuation, ch));
-            }
-        }
-
-        // Try parse as number.
-        if word.parse::<f64>().is_ok() {
-            return Some(self.token(Type::Number, word));
         }
 
         // Namespace identifier
@@ -342,12 +346,12 @@ impl<'a> Iterator for Tokenizer<'a> {
                 return Err(anyhow!("Invalid ns identifier: {}", word)).into();
             }
 
-            return Some(self.token(Type::NamespacedIdentifier, word));
+            return Ok(Token::new(Type::NamespacedIdentifier, word)).into();
         }
 
         // Identifier
         if sdf::Path::is_valid_identifier(word) {
-            return Some(self.token(Type::Identifier, word));
+            return Ok(Token::new(Type::Identifier, word)).into();
         }
 
         Err(anyhow!("Unable to parse token: {}", word)).into()
@@ -414,9 +418,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_payload() -> Result<()> {
-        let f = fs::read_to_string("fixtures/payload.usda")?;
-        let mut tok = Tokenizer::new(&f);
+    fn parse_payload() {
+        let f = fs::read_to_string("fixtures/payload.usda").unwrap();
 
         let tokens = [
             (Type::Magic, "#usda 1.0"),
@@ -447,24 +450,12 @@ mod tests {
             (Type::Punctuation, "}"),
         ];
 
-        for (ty, expected) in tokens {
-            let token = tok
-                .next()
-                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
-
-            assert_eq!(ty, token.ty);
-            assert_eq!(expected, &f[token.range]);
-        }
-
-        assert!(tok.next().is_none());
-
-        Ok(())
+        assert_tokens(&f, &tokens);
     }
 
     #[test]
-    fn parse_connection() -> Result<()> {
-        let f = fs::read_to_string("fixtures/connection.usda")?;
-        let mut tok = Tokenizer::new(&f);
+    fn parse_connection() {
+        let f = fs::read_to_string("fixtures/connection.usda").unwrap();
 
         let tokens = [
             (Type::Magic, "#usda 1.0"),
@@ -485,22 +476,12 @@ mod tests {
             (Type::PathRef, "/TexModel/boardMat/PBRShader.outputs:surface"),
         ];
 
-        for (ty, expected) in tokens {
-            let token = tok
-                .next()
-                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
-
-            assert_eq!(ty, token.ty);
-            assert_eq!(expected, &f[token.range]);
-        }
-
-        Ok(())
+        assert_tokens(&f, &tokens);
     }
 
     #[test]
-    fn parse_fields() -> Result<()> {
-        let f = fs::read_to_string("fixtures/fields.usda")?;
-        let mut tok = Tokenizer::new(&f);
+    fn parse_fields() {
+        let f = fs::read_to_string("fixtures/fields.usda").expect("Failed to read fields.usda");
 
         let tokens = [
             (Type::Magic, "#usda 1.0"),
@@ -528,16 +509,24 @@ mod tests {
             (Type::Number, "0.01"),
         ];
 
-        for (ty, expected) in tokens {
-            let token = tok
-                .next()
-                .with_context(|| format!("Unexpected end of token stream, expected token of type {:?}", ty))??;
+        assert_tokens(&f, &tokens);
+    }
 
-            assert_eq!(ty, token.ty);
-            assert_eq!(expected, &f[token.range]);
-        }
+    #[test]
+    fn parse_empty_array() {
+        let mut tok = Tokenizer::new("[]");
 
-        Ok(())
+        let open = tok.next().unwrap().unwrap();
+        assert_eq!(open, Token::new(Type::Punctuation, "["));
+
+        let close = tok.next().unwrap().unwrap();
+        assert_eq!(close, Token::new(Type::Punctuation, "]"));
+    }
+
+    #[test]
+    fn parse_array_with_one_element() {
+        let tokens = [(Type::Punctuation, "["), (Type::Number, "1"), (Type::Punctuation, "]")];
+        assert_tokens("[1]", &tokens);
     }
 
     #[test]
@@ -545,12 +534,23 @@ mod tests {
         let f = fs::read_to_string("fixtures/fields.usda").unwrap();
         let tok = Tokenizer::new(&f);
 
-        let expected = Token::new(Type::Magic, 0..9);
+        let expected = Token::new(Type::Magic, "#usda 1.0");
 
         let mut peekable = tok.peekable();
         assert_eq!(peekable.peek().unwrap().as_ref().unwrap().clone(), expected);
 
         let next = peekable.next().unwrap().unwrap();
         assert_eq!(next, expected);
+    }
+
+    fn assert_tokens(input: &str, tokens: &[(Type, &str)]) {
+        let mut tok = Tokenizer::new(input);
+
+        for (ty, expected) in tokens {
+            let token = tok.next().expect("Unexpected end of tokens").unwrap();
+
+            assert_eq!(*ty, token.ty);
+            assert_eq!(*expected, token.str);
+        }
     }
 }

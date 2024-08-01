@@ -1,6 +1,9 @@
 //! Scene description foundations.
+//!
+//! This module contains common data types used by parsers.
+//! Roughly this correspond to C++ SDF module <https://openusd.org/dev/api/sdf_page_front.html>
 
-use std::{collections::HashMap, fmt::Debug};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 
 use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
@@ -11,7 +14,7 @@ pub mod schema;
 mod value;
 
 pub use path::{path, Path};
-pub use value::Value;
+pub use value::{Value, ValueType};
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.
@@ -108,7 +111,7 @@ impl LayerOffset {
 /// Unloaded payloads represent a boundary that lazy composition and
 /// system behaviors will not traverse across, providing a user-visible
 /// way to manage the working set of the scene.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Payload {
     /// The asset path to the external layer.
     pub asset_path: String,
@@ -124,7 +127,7 @@ pub struct Payload {
 /// prim in a layer stack. All opinions in the namespace hierarchy
 /// under the referenced prim will be composed with the opinions in the
 /// namespace hierarchy under the referencing prim.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Reference {
     /// The asset path to the external layer.
     pub asset_path: String,
@@ -140,8 +143,8 @@ pub struct Reference {
 ///
 /// `ListOp`` is a value type representing an operation that edits a list.
 /// It may add or remove items, reorder them, or replace the list entirely.
-#[derive(Default, Debug)]
-pub struct ListOp<T: Default> {
+#[derive(Default, Debug, Clone)]
+pub struct ListOp<T: Default + Clone> {
     pub explicit: bool,
     pub explicit_items: Vec<T>,
     pub added_items: Vec<T>,
@@ -181,8 +184,41 @@ pub trait AbstractData {
     fn spec_type(&self, path: &Path) -> Option<SpecType>;
 
     /// Returns the underlying value for the given path.
-    fn get(&mut self, path: &Path, field: &str) -> Result<Value>;
+    ///
+    /// # Return
+    /// Returns a [Value] enum that wraps possible field's values.
+    ///
+    /// The value can be either owned or borrowed depending on internals.
+    /// In the binary format, the data is typically compressed and/or encoded,
+    /// so memory allocation is required to store unpacked result, so
+    /// owned values are typically be expected.
+    ///
+    /// With test parsers, there is a data copy already stored, so
+    /// a borrowed value will be returned to avoid unnecessary copies.
+    fn get(&mut self, path: &Path, field: &str) -> Result<Cow<Value>>;
 
     /// Returns the names of the fields for the given path.
     fn list(&self, path: &Path) -> Option<Vec<String>>;
+}
+
+#[derive(Debug)]
+pub struct Spec {
+    /// Specifies the type of an object.
+    pub ty: SpecType,
+    /// Spec properties.
+    pub fields: HashMap<String, Value>,
+}
+
+impl Spec {
+    pub fn new(ty: SpecType) -> Self {
+        Self {
+            ty,
+            fields: Default::default(),
+        }
+    }
+
+    #[inline]
+    pub fn add(&mut self, key: &str, value: Value) {
+        self.fields.insert(key.to_owned(), value);
+    }
 }

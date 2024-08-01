@@ -1,13 +1,14 @@
 //! `usdc` file format support.
 
-use std::{collections::HashMap, fmt::Debug, io, mem, path::Path};
+use std::{borrow::Cow, collections::HashMap, fmt::Debug, io, mem, path::Path};
 
 use anyhow::{bail, Result};
+use layout::ValueRep;
 
 mod coding;
 mod layout;
 mod reader;
-use layout::ValueRep;
+
 pub use layout::{version, Version};
 pub use reader::{CrateFile, ReadExt};
 
@@ -67,7 +68,7 @@ where
             data.insert(path, Spec { ty, fields });
         }
 
-        Ok(Self { file, data: dbg!(data) })
+        Ok(Self { file, data })
     }
 }
 
@@ -92,7 +93,7 @@ where
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<sdf::Value> {
+    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<sdf::Value>> {
         let Some(spec) = self.data.get(path) else {
             bail!("No spec found for path: {}", path)
         };
@@ -101,7 +102,9 @@ where
             bail!("No field found for path '{}' and field '{}'", path, field)
         };
 
-        self.file.value(value_rep)
+        let value = self.file.value(value_rep)?;
+
+        Ok(Cow::Owned(value))
     }
 
     #[inline]
@@ -130,12 +133,14 @@ mod tests {
 
         let prim_children: Vec<String> = data
             .get(&sdf::Path::abs_root(), "primChildren")?
+            .into_owned()
             .try_as_token_vec()
             .unwrap();
         assert_eq!(prim_children, vec!["SoC_ElephantWithMonochord".to_string()]);
 
         let elephant: Vec<String> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
+            .into_owned()
             .try_as_token_vec()
             .unwrap();
 
@@ -150,6 +155,7 @@ mod tests {
 
         let materials: Vec<String> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
+            .into_owned()
             .try_as_token_vec()
             .unwrap();
 
@@ -187,6 +193,7 @@ mod tests {
 
         let single = data
             .get(&sdf::path("/World.flipNormals")?, "default")?
+            .into_owned()
             .try_as_bool()
             .unwrap();
 
@@ -194,6 +201,7 @@ mod tests {
 
         let bool_array = data
             .get(&sdf::path("/World.boolArray")?, "default")?
+            .into_owned()
             .try_as_bool_vec()
             .unwrap();
 
@@ -208,6 +216,7 @@ mod tests {
 
         let single_char = data
             .get(&sdf::path("/World.singleChar")?, "default")?
+            .into_owned()
             .try_as_uchar()
             .unwrap();
 
@@ -215,6 +224,7 @@ mod tests {
 
         let char_array = data
             .get(&sdf::path("/World.chars")?, "default")?
+            .into_owned()
             .try_as_uchar_vec()
             .unwrap();
 
@@ -229,6 +239,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quatfSingle")?, "default")?
+            .into_owned()
             .try_as_quatf()
             .unwrap();
 
@@ -236,6 +247,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quatfArr")?, "default")?
+            .into_owned()
             .try_as_quatf()
             .unwrap();
 
@@ -257,6 +269,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quatdSingle")?, "default")?
+            .into_owned()
             .try_as_quatd()
             .unwrap();
 
@@ -264,6 +277,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quatdArr")?, "default")?
+            .into_owned()
             .try_as_quatd()
             .unwrap();
 
@@ -284,6 +298,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quathSingle")?, "default")?
+            .into_owned()
             .try_as_quath()
             .unwrap();
 
@@ -294,6 +309,7 @@ mod tests {
 
         let quat = data
             .get(&sdf::path("/World.quathArr")?, "default")?
+            .into_owned()
             .try_as_quath()
             .unwrap();
 
@@ -317,6 +333,7 @@ mod tests {
 
         let sub_layer_offsets = data
             .get(&sdf::path("/")?, "subLayerOffsets")?
+            .into_owned()
             .try_as_layer_offset_vec()
             .unwrap()
             .into_iter()
@@ -326,7 +343,11 @@ mod tests {
         assert_eq!(sub_layer_offsets.offset, 0.0);
         assert_eq!(sub_layer_offsets.scale, 1.0);
 
-        let sub_layers = data.get(&sdf::path("/")?, "subLayers")?.try_as_string_vec().unwrap();
+        let sub_layers = data
+            .get(&sdf::path("/")?, "subLayers")?
+            .into_owned()
+            .try_as_string_vec()
+            .unwrap();
         assert_eq!(sub_layers, vec!["`\"render_pass_${RENDER_PASS}.usd\"`"]);
 
         Ok(())
@@ -339,12 +360,14 @@ mod tests {
         // prepend variantSets = "displayVariantSet"
         let variant_set_names = data
             .get(&sdf::path("/asset1")?, "variantSetNames")?
+            .into_owned()
             .try_as_string_list_op()
             .unwrap();
         assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
 
         let variant_selection = data
             .get(&sdf::path("/asset1")?, "variantSelection")?
+            .into_owned()
             .try_as_variant_selection_map()
             .unwrap();
 
@@ -363,6 +386,7 @@ mod tests {
 
         let conn = data
             .get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
+            .into_owned()
             .try_as_path_list_op()
             .unwrap();
 
@@ -374,6 +398,7 @@ mod tests {
 
         let conn = data
             .get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?
+            .into_owned()
             .try_as_path_list_op()
             .unwrap();
 
@@ -392,6 +417,7 @@ mod tests {
 
         let references = data
             .get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
+            .into_owned()
             .try_as_reference_list_op()
             .unwrap();
 
@@ -414,6 +440,7 @@ mod tests {
 
         let payload = data
             .get(&sdf::path("/MySphere1")?, "payload")?
+            .into_owned()
             .try_as_payload()
             .unwrap();
 
@@ -428,6 +455,7 @@ mod tests {
 
         let payload_list_op = data
             .get(&sdf::path("/MySphere2")?, "payload")?
+            .into_owned()
             .try_as_payload_list_op()
             .unwrap();
 
@@ -452,18 +480,21 @@ mod tests {
 
         let single = data
             .get(&sdf::path("/PrimD.single")?, "default")?
+            .into_owned()
             .try_as_double()
             .unwrap();
         assert_eq!(single, 4.3_f64);
 
         let array = data
             .get(&sdf::path("/PrimD.simple")?, "default")?
+            .into_owned()
             .try_as_double_vec()
             .unwrap();
         assert_eq!(array, vec![0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3]);
 
         let compressed = data
             .get(&sdf::path("/PrimD.copressed")?, "default")?
+            .into_owned()
             .try_as_double_vec()
             .unwrap();
         assert_eq!(
@@ -486,18 +517,21 @@ mod tests {
 
         let single = data
             .get(&sdf::path("/PrimF.single")?, "default")?
+            .into_owned()
             .try_as_float()
             .unwrap();
         assert_eq!(single, 3.5);
 
         let array = data
             .get(&sdf::path("/PrimF.simple")?, "default")?
+            .into_owned()
             .try_as_float_vec()
             .unwrap();
         assert_eq!(array, vec![9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7]);
 
         let compressed = data
             .get(&sdf::path("/PrimF.copressed")?, "default")?
+            .into_owned()
             .try_as_float_vec()
             .unwrap();
 
@@ -519,6 +553,7 @@ mod tests {
 
         let single = data
             .get(&sdf::path("/PrimH.single")?, "default")?
+            .into_owned()
             .try_as_half()
             .unwrap();
 
@@ -526,6 +561,7 @@ mod tests {
 
         let array = data
             .get(&sdf::path("/PrimH.simple")?, "default")?
+            .into_owned()
             .try_as_half_vec()
             .unwrap();
 
@@ -539,6 +575,7 @@ mod tests {
 
         let compressed = data
             .get(&sdf::path("/PrimH.copressed")?, "default")?
+            .into_owned()
             .try_as_half_vec()
             .unwrap();
 
@@ -561,10 +598,11 @@ mod tests {
     fn test_read_time_series() -> Result<()> {
         let mut data = read_file("fixtures/timesamples.usdc")?;
 
-        let samples = dbg!(data
+        let samples = data
             .get(&sdf::path("/Prim.prop")?, "timeSamples")?
+            .into_owned()
             .try_as_time_samples()
-            .unwrap());
+            .unwrap();
         assert_eq!(samples.len(), 2);
 
         let keys = samples.iter().map(|(d, _)| d).copied().collect::<Vec<_>>();
@@ -582,6 +620,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/Prim32.single")?, "default")?
+                .into_owned()
                 .try_as_int()
                 .unwrap(),
             12938
@@ -589,6 +628,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/Prim32.compressed")?, "default")?
+                .into_owned()
                 .try_as_int_vec()
                 .unwrap(),
             vec![
@@ -606,6 +646,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/Prim64.single")?, "default")?
+                .into_owned()
                 .try_as_int_64()
                 .unwrap(),
             1234567890
@@ -613,6 +654,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/Prim64.compressed")?, "default")?
+                .into_owned()
                 .try_as_int_64_vec()
                 .unwrap(),
             vec![
@@ -630,6 +672,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/PrimU32.single")?, "default")?
+                .into_owned()
                 .try_as_uint()
                 .unwrap(),
             80129
@@ -637,6 +680,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/PrimU32.compressed")?, "default")?
+                .into_owned()
                 .try_as_uint_vec()
                 .unwrap(),
             vec![
@@ -654,6 +698,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/PrimU64.single")?, "default")?
+                .into_owned()
                 .try_as_uint_64()
                 .unwrap(),
             432423654
@@ -661,6 +706,7 @@ mod tests {
 
         assert_eq!(
             data.get(&sdf::path("/PrimU64.compressed")?, "default")?
+                .into_owned()
                 .try_as_uint_64_vec()
                 .unwrap(),
             vec![
@@ -678,50 +724,51 @@ mod tests {
 
         // defaultPrim = "World"
         let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;
-        assert_eq!(default_prim.try_as_token().unwrap(), "World");
+        assert_eq!(default_prim.try_as_token_ref().unwrap(), "World");
 
         // float4[] clippingPlanes = []
         let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;
-        assert!(matches!(clipping_planes, sdf::Value::Vec4f(..)));
-        assert!(clipping_planes.try_as_vec_4f().unwrap().is_empty());
+        assert!(clipping_planes.into_owned().try_as_vec_4f_ref().unwrap().is_empty());
 
         // float2 clippingRange = (1, 10000000)
         let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
-        assert!(matches!(clipping_range, sdf::Value::Vec2f(..)));
-        assert_eq!(&clipping_range.try_as_vec_2f().unwrap(), &[1.0, 10000000.0]);
+        assert_eq!(
+            &clipping_range.into_owned().try_as_vec_2f().unwrap(),
+            &[1.0, 10000000.0]
+        );
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
         let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
-        assert!(matches!(diffuse_color, sdf::Value::Vec3f(..)));
-        assert_eq!(&diffuse_color.try_as_vec_3f().unwrap(), &[0.18, 0.18, 0.18]);
+        assert_eq!(
+            &diffuse_color.into_owned().try_as_vec_3f().unwrap(),
+            &[0.18, 0.18, 0.18]
+        );
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
         let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
-        assert!(matches!(face_vertex_counts, sdf::Value::IntVec(..)));
-        assert_eq!(&face_vertex_counts.try_as_int_vec().unwrap(), &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            &face_vertex_counts.into_owned().try_as_int_vec().unwrap(),
+            &[1, 2, 3, 4, 5, 6]
+        );
 
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
         let normals = data.get(&sdf::path("/World.normals")?, "default")?;
-        assert!(matches!(normals, sdf::Value::Vec3f(..)));
         assert_eq!(
-            &normals.try_as_vec_3f().unwrap(),
+            normals.try_as_vec_3f_ref().unwrap(),
             &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)
         let xform_op_rotate_xyz = data.get(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
-        assert!(matches!(xform_op_rotate_xyz, sdf::Value::Vec3d(..)));
-        assert_eq!(&xform_op_rotate_xyz.try_as_vec_3d().unwrap(), &[0.0, 0.0, 0.0]);
+        assert_eq!(xform_op_rotate_xyz.try_as_vec_3d_ref().unwrap(), &[0.0, 0.0, 0.0]);
 
         // double3 xformOp:scale = (1, 1, 1)
         let xform_op_scale = data.get(&sdf::path("/World.xformOp:scale")?, "default")?;
-        assert!(matches!(xform_op_scale, sdf::Value::Vec3d(..)));
-        assert_eq!(&xform_op_scale.try_as_vec_3d().unwrap(), &[1.0, 1.0, 1.0]);
+        assert_eq!(xform_op_scale.try_as_vec_3d_ref().unwrap(), &[1.0, 1.0, 1.0]);
 
         // double3 xformOp:translate = (0, 1, 0)
         let xform_op_translate = data.get(&sdf::path("/World.xformOp:translate")?, "default")?;
-        assert!(matches!(xform_op_translate, sdf::Value::Vec3d(..)));
-        assert_eq!(&xform_op_translate.try_as_vec_3d().unwrap(), &[0.0, 1.0, 0.0]);
+        assert_eq!(xform_op_translate.try_as_vec_3d_ref().unwrap(), &[0.0, 1.0, 0.0]);
 
         Ok(())
     }

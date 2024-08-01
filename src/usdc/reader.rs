@@ -663,7 +663,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(vec)
     }
 
-    fn read_list_op<T: Default>(
+    fn read_list_op<T: Default + Clone>(
         &mut self,
         value: ValueRep,
         mut read: impl FnMut(&mut Self) -> Result<Vec<T>>,
@@ -809,7 +809,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
                 self.reader.seek(io::SeekFrom::Current(offset - 8))?;
 
-                let value = dbg!(self.reader.read_pod::<ValueRep>()?);
+                let value = self.reader.read_pod::<ValueRep>()?;
 
                 ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
                 ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
@@ -1179,7 +1179,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                     self.reader.seek(io::SeekFrom::Current(offset - 8))?;
                 }
 
-                let times_rep = dbg!(self.reader.read_pod::<ValueRep>()?);
+                let times_rep = self.reader.read_pod::<ValueRep>()?;
 
                 let ty = times_rep.ty()?;
                 ensure!(
