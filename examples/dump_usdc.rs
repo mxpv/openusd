@@ -1,4 +1,6 @@
-//! Example that dumps structural data of a usdc file.
+//! This examples dumps binary USDC file.
+//!
+//! Mainly this will print binary's structural data, specs, and fields that belong to each spec.
 //!
 //! # Usage:
 //! ```bash
@@ -18,7 +20,7 @@ fn main() -> Result<()> {
         .context("Missing path to usdc file, use: cargo run --example dump_usdc {PATH_TO_FILE}.usdc")?;
 
     let reader = fs::File::open(path).context("Failed to read crate file")?;
-    let file = CrateFile::open(reader).context("Failed to read crate file")?;
+    let mut file = CrateFile::open(reader).context("Failed to read crate file")?;
 
     println!("-- Bootrap header");
     println!("Magic: {:?}", file.bootstrap.ident);
@@ -61,6 +63,7 @@ fn main() -> Result<()> {
     file.fieldsets.iter().enumerate().for_each(|(index, fieldset)| {
         println!("#{}:\t{:?}", index, fieldset);
     });
+    println!();
 
     println!("-- Paths: ");
     file.paths.iter().enumerate().for_each(|(index, path)| {
@@ -69,11 +72,32 @@ fn main() -> Result<()> {
     println!();
 
     println!("-- Specs: ");
-    file.specs.iter().enumerate().for_each(|(index, spec)| {
+    for i in 0..file.specs.len() {
+        let spec = file.specs[i];
         let path = &file.paths[spec.path_index];
+        println!("#{}:\t{} ({})", spec.fieldset_index, path, spec.spec_type);
 
-        println!("#{}:\t{} -> {} ({})", index, spec.fieldset_index, path, spec.spec_type);
-    });
+        let mut index = spec.fieldset_index;
+
+        while index < file.fieldsets.len() {
+            let current = match file.fieldsets[index] {
+                Some(value) => value,
+                None => break,
+            };
+
+            index += 1;
+
+            let field = file.fields[current];
+
+            let value = file
+                .value(field.value_rep)
+                .expect("Unable to retrieve value rep, please file an issue");
+
+            let name = &file.tokens[field.token_index];
+
+            println!("\t\t{} -> {:?}", name, value);
+        }
+    }
     println!();
 
     Ok(())

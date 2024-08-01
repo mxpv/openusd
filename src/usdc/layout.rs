@@ -105,7 +105,7 @@ impl Section {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Field {
     pub token_index: usize,
     pub value_rep: ValueRep,

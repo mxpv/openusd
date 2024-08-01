@@ -26,7 +26,7 @@ The USD library is a fairly large project to replicate. For the most up-to-date 
 ## Getting started
 
 To begin, simply clone the repository including its submodules.
-Make sure you have `Rust` already installed on your system.
+Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
 
 ```bash
 # Clone the project
@@ -36,6 +36,9 @@ cd openusd
 # Use cargo to build, test, lint, etc.
 cargo build
 cargo clippy
+
+# Run examples
+cargo run --example dump_usdc -- ~/caldera/layers/cameras.usd
 ```
 
 ## Minimum supported Rust version (MSRV)
