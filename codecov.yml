@@ -2,5 +2,14 @@ coverage:
   status:
     project:
       default:
-        target: 50% # Require at least 50% coverage
-        threshold: 15% # Allow 10% drop from the previous base commit coverage
+        # Require at least XY% coverage
+        target: 50%
+        # Allow a YX% drop from the previous base commit coverage
+        threshold: 15%
+
+    # Patch coverage refers to the coverage of the lines of code that were changed in a specific commit or pull request,
+    # whereas project coverage refers to the overall coverage of the entire codebase.
+    patch:
+      default:
+        target: 50%
+        threshold: 15%
