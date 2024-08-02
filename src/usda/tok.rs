@@ -308,30 +308,26 @@ impl<'a> Iterator for Tokenizer<'a> {
             }
         }
 
-        // Try parse number
-        {
-            // Numbers require some special handling of cases like (1), [2, 3], etc.
-            let mut iter = self
-                .buffer
-                .split(|c: char| c.is_ascii_whitespace() || c == ',' || c == ']' || c == ')');
-
-            if let Some(num) = iter.next() {
-                if num.parse::<f32>().is_ok() {
-                    self.buffer = self.buffer.strip_prefix(num).unwrap_or_default();
-                    return Ok(Token::new(Type::Number, num)).into();
-                }
-            }
-        }
-
-        // It's not a quoted string and not a number at this point, so separate next word by space.
+        // It's not a quoted string at this point, so separate next word by space.
         let word = {
             let mut iter = self.buffer.split_whitespace();
-            let next_word = iter.next()?;
+            let mut next_word = iter.next()?;
+
+            // Make sure "true," or "true)" recognized as two separate tokens: 'true' and ',' or ')'.
+            // But also that "bool[]" is recognized as one token.
+            if !next_word.ends_with("[]") {
+                next_word = next_word.trim_end_matches(&[',', ']', ')']);
+            }
 
             self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();
 
             next_word
         };
+
+        // Try parse number
+        if word.parse::<f32>().is_ok() {
+            return Ok(Token::new(Type::Number, word)).into();
+        }
 
         // Parse keywords.
         for (keyword, ty) in KEYWORDS {
@@ -341,7 +337,7 @@ impl<'a> Iterator for Tokenizer<'a> {
         }
 
         // Namespace identifier
-        if word.contains(sdf::Path::NS_DELIMITER_CHAR) {
+        if word.contains(':') {
             if !sdf::Path::is_valid_namespace_identifier(word) {
                 return Err(anyhow!("Invalid ns identifier: {}", word)).into();
             }
@@ -349,8 +345,13 @@ impl<'a> Iterator for Tokenizer<'a> {
             return Ok(Token::new(Type::NamespacedIdentifier, word)).into();
         }
 
-        // Identifier
-        if sdf::Path::is_valid_identifier(word) {
+        let mut ident = word;
+        // Array identifier (like "bool[]") is still valid identifier
+        // See https://github.com/PixarAnimationStudios/OpenUSD/blob/59992d2178afcebd89273759f2bddfe730e59aa8/pxr/usd/sdf/textFileFormat.yy#L2314
+        if ident.ends_with("[]") {
+            ident = ident.strip_suffix("[]").unwrap_or_default();
+        }
+        if sdf::Path::is_valid_identifier(ident) {
             return Ok(Token::new(Type::Identifier, word)).into();
         }
 
@@ -541,6 +542,45 @@ mod tests {
 
         let next = peekable.next().unwrap().unwrap();
         assert_eq!(next, expected);
+    }
+
+    #[test]
+    fn parse_bool_array() {
+        let str = "[true, false]";
+
+        let tokens = [
+            (Type::Punctuation, "["),
+            (Type::Identifier, "true"),
+            (Type::Punctuation, ","),
+            (Type::Identifier, "false"),
+            (Type::Punctuation, "]"),
+        ];
+
+        assert_tokens(str, &tokens);
+    }
+
+    #[test]
+    fn parse_array_type() {
+        let str = "bool[]";
+
+        let tokens = [(Type::Identifier, "bool[]")];
+
+        assert_tokens(str, &tokens);
+    }
+
+    #[test]
+    fn parse_float_tuple() {
+        let str = "(1.0, 2.0)";
+
+        let tokens = [
+            (Type::Punctuation, "("),
+            (Type::Number, "1.0"),
+            (Type::Punctuation, ","),
+            (Type::Number, "2.0"),
+            (Type::Punctuation, ")"),
+        ];
+
+        assert_tokens(str, &tokens);
     }
 
     fn assert_tokens(input: &str, tokens: &[(Type, &str)]) {

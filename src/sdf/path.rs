@@ -39,8 +39,6 @@ impl FromStr for Path {
 }
 
 impl Path {
-    pub const NS_DELIMITER_CHAR: char = ':';
-
     pub fn new(path: &str) -> Result<Self> {
         Path::from_str(path)
     }
@@ -149,26 +147,24 @@ impl Path {
         &self.path
     }
 
+    /// Validate identifier
+    ///
+    /// Rules are:
+    /// - Must be 1 char len
+    /// - Must start with a letter or underscore
+    /// - Must contain only letters, underscores, and numbers.
     pub fn is_valid_identifier(name: &str) -> bool {
         if name.is_empty() {
             return false;
         }
 
-        name.chars().all(|c| c.is_alphabetic() || c == '.')
+        name.chars().enumerate().all(|(i, c)| {
+            c == '_' || if i == 0 { c.is_alphabetic() } else { c.is_alphanumeric() }
+        })
     }
 
     pub fn is_valid_namespace_identifier(name: &str) -> bool {
-        if name.is_empty() {
-            return false;
-        }
-
-        for part in name.split(Self::NS_DELIMITER_CHAR) {
-            if !Self::is_valid_identifier(part) {
-                return false;
-            }
-        }
-
-        true
+        name.split(&[':', '.']).all(Self::is_valid_identifier)
     }
 }
 
@@ -341,5 +337,34 @@ mod tests {
         // Greater equal
         assert!(Path::from_str("aab").unwrap() >= Path::from_str("aaa").unwrap());
         assert!(Path::from_str("aaa").unwrap() >= Path::from_str("aaa").unwrap());
+    }
+
+    #[test]
+    fn validate_identifier() {
+        // Valid identifiers
+        assert!(Path::is_valid_identifier("_"));
+        assert!(Path::is_valid_identifier("x"));
+        assert!(Path::is_valid_identifier("_1"));
+        assert!(Path::is_valid_identifier("a1"));
+        assert!(Path::is_valid_identifier("test"));
+        assert!(Path::is_valid_identifier("_test"));
+        assert!(Path::is_valid_identifier("test123"));
+        assert!(Path::is_valid_identifier("Test"));
+        assert!(Path::is_valid_identifier("teST"));
+        assert!(Path::is_valid_identifier("TEST"));
+
+        // Invalid ones
+        assert!(!Path::is_valid_identifier(""));
+        assert!(!Path::is_valid_identifier(" "));
+        assert!(!Path::is_valid_identifier("?"));
+        assert!(!Path::is_valid_identifier("1"));
+        assert!(!Path::is_valid_identifier("x!"));
+        assert!(!Path::is_valid_identifier("_abc?"));
+        assert!(!Path::is_valid_identifier("_!"));
+        assert!(!Path::is_valid_identifier("test "));
+        assert!(!Path::is_valid_identifier(" test"));
+        assert!(!Path::is_valid_identifier("te st"));
+        assert!(!Path::is_valid_identifier("te.st"));
+        assert!(!Path::is_valid_identifier("te:st"));
     }
 }
