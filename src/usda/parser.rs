@@ -104,16 +104,16 @@ impl<'a> Parser<'a> {
         // Eat (
         self.ensure_next(tok::Type::Punctuation, "(")?;
 
-        const KNOWN_PROPS: &[(&str, sdf::ValueType)] = &[
-            ("defaultPrim", sdf::ValueType::Token),
-            ("doc", sdf::ValueType::String),
-            ("endTimeCode", sdf::ValueType::Uint64),
-            ("framesPerSecond", sdf::ValueType::Uint64),
-            ("metersPerUnit", sdf::ValueType::Double),
-            ("startTimeCode", sdf::ValueType::Uint64),
-            ("subLayers", sdf::ValueType::StringVec),
-            ("timeCodesPerSecond", sdf::ValueType::Uint64),
-            ("upAxis", sdf::ValueType::Token),
+        const KNOWN_PROPS: &[(&str, Type)] = &[
+            ("defaultPrim", Type::Token),
+            ("doc", Type::String),
+            ("endTimeCode", Type::Uint64),
+            ("framesPerSecond", Type::Uint64),
+            ("metersPerUnit", Type::Double),
+            ("startTimeCode", Type::Uint64),
+            ("subLayers", Type::StringVec),
+            ("timeCodesPerSecond", Type::Uint64),
+            ("upAxis", Type::Token),
         ];
 
         // Read pseudo root properties
@@ -302,68 +302,70 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_value(&mut self, ty: sdf::ValueType) -> Result<sdf::Value> {
+    fn parse_value(&mut self, ty: Type) -> Result<sdf::Value> {
         let value = match ty {
             // Bool
-            sdf::ValueType::Bool => sdf::Value::Bool(self.parse_token()?),
-            sdf::ValueType::BoolVec => sdf::Value::BoolVec(self.parse_array::<_, 1>()?),
+            Type::Bool => sdf::Value::Bool(self.parse_token()?),
+            Type::BoolVec => sdf::Value::BoolVec(self.parse_array::<_, 1>()?),
 
             // Ints
-            sdf::ValueType::Uchar => sdf::Value::Uchar(self.parse_token()?),
-            sdf::ValueType::UcharVec => sdf::Value::UcharVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::Int => sdf::Value::Int(self.parse_token()?),
-            sdf::ValueType::Int2 => sdf::Value::Int2(self.parse_tuple::<_, 2>()?),
-            sdf::ValueType::Int3 => sdf::Value::Int3(self.parse_tuple::<_, 3>()?),
-            sdf::ValueType::Int4 => sdf::Value::Int4(self.parse_tuple::<_, 4>()?),
-            sdf::ValueType::IntVec => sdf::Value::IntVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::Int2Vec => sdf::Value::Int2Vec(self.parse_tuple_array::<_, 2>()?),
-            sdf::ValueType::Int3Vec => sdf::Value::Int3Vec(self.parse_tuple_array::<_, 3>()?),
-            sdf::ValueType::Int4Vec => sdf::Value::Int4Vec(self.parse_tuple_array::<_, 4>()?),
-            sdf::ValueType::Uint => sdf::Value::Uint(self.parse_token()?),
-            sdf::ValueType::Int64 => sdf::Value::Int64(self.parse_token()?),
-            sdf::ValueType::Uint64 => sdf::Value::Uint64(self.parse_token()?),
+            Type::Uchar => sdf::Value::Uchar(self.parse_token()?),
+            Type::UcharVec => sdf::Value::UcharVec(self.parse_array::<_, 1>()?),
+
+            Type::Int => sdf::Value::Int(self.parse_token()?),
+            Type::Int2 => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?.into()),
+            Type::Int3 => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?.into()),
+            Type::Int4 => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?.into()),
+            Type::IntVec => sdf::Value::IntVec(self.parse_array::<_, 1>()?),
+            Type::Int2Vec => sdf::Value::Vec2i(self.parse_array::<_, 2>()?),
+            Type::Int3Vec => sdf::Value::Vec3i(self.parse_array::<_, 3>()?),
+            Type::Int4Vec => sdf::Value::Vec4i(self.parse_array::<_, 4>()?),
+            Type::Uint => sdf::Value::Uint(self.parse_token()?),
+            Type::Int64 => sdf::Value::Int64(self.parse_token()?),
+            Type::Uint64 => sdf::Value::Uint64(self.parse_token()?),
 
             // Half
-            sdf::ValueType::Half => sdf::Value::Half(self.parse_token()?),
-            sdf::ValueType::Half2 => sdf::Value::Half2(self.parse_tuple::<_, 2>()?),
-            sdf::ValueType::Half3 => sdf::Value::Half3(self.parse_tuple::<_, 3>()?),
-            sdf::ValueType::Half4 => sdf::Value::Half4(self.parse_tuple::<_, 4>()?),
+            Type::Half => sdf::Value::Half(self.parse_token()?),
+            Type::Half2 => sdf::Value::HalfVec(self.parse_tuple::<_, 2>()?.into()),
+            Type::Half3 => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?.into()),
+            Type::Half4 => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?.into()),
 
-            sdf::ValueType::HalfVec => sdf::Value::HalfVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::Half2Vec => sdf::Value::Half2Vec(self.parse_tuple_array::<_, 2>()?),
-            sdf::ValueType::Half3Vec => sdf::Value::Half3Vec(self.parse_tuple_array::<_, 3>()?),
-            sdf::ValueType::Half4Vec => sdf::Value::Half4Vec(self.parse_tuple_array::<_, 4>()?),
+            Type::HalfVec => sdf::Value::HalfVec(self.parse_array::<_, 1>()?),
+            Type::Half2Vec => sdf::Value::Vec2h(self.parse_array::<_, 2>()?),
+            Type::Half3Vec => sdf::Value::Vec3h(self.parse_array::<_, 3>()?),
+            Type::Half4Vec => sdf::Value::Vec4h(self.parse_array::<_, 4>()?),
 
             // Float
-            sdf::ValueType::Float => sdf::Value::Float(self.parse_token()?),
-            sdf::ValueType::Float2 => sdf::Value::Float2(self.parse_tuple::<_, 2>()?),
-            sdf::ValueType::Float3 => sdf::Value::Float3(self.parse_tuple::<_, 3>()?),
-            sdf::ValueType::Float4 => sdf::Value::Float4(self.parse_tuple::<_, 4>()?),
-            sdf::ValueType::FloatVec => sdf::Value::FloatVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::Float2Vec => sdf::Value::Float2Vec(self.parse_tuple_array::<_, 2>()?),
-            sdf::ValueType::Float3Vec => sdf::Value::Float3Vec(self.parse_tuple_array::<_, 3>()?),
-            sdf::ValueType::Float4Vec => sdf::Value::Float4Vec(self.parse_tuple_array::<_, 4>()?),
+            Type::Float => sdf::Value::Float(self.parse_token()?),
+            Type::Float2 => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?.into()),
+            Type::Float3 => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?.into()),
+            Type::Float4 => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?.into()),
+            Type::FloatVec => sdf::Value::FloatVec(self.parse_array::<_, 1>()?),
+            Type::Float2Vec => sdf::Value::Vec2f(self.parse_array::<_, 2>()?),
+            Type::Float3Vec => sdf::Value::Vec3f(self.parse_array::<_, 3>()?),
+            Type::Float4Vec => sdf::Value::Vec4f(self.parse_array::<_, 4>()?),
 
             // Double
-            sdf::ValueType::Double => sdf::Value::Double(self.parse_token()?),
-            sdf::ValueType::Double2 => sdf::Value::Double2(self.parse_tuple::<_, 2>()?),
-            sdf::ValueType::Double3 => sdf::Value::Double3(self.parse_tuple::<_, 3>()?),
-            sdf::ValueType::Double4 => sdf::Value::Double4(self.parse_tuple::<_, 4>()?),
-            sdf::ValueType::DoubleVec => sdf::Value::DoubleVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::Double2Vec => sdf::Value::Double2Vec(self.parse_tuple_array::<_, 2>()?),
-            sdf::ValueType::Double3Vec => sdf::Value::Double3Vec(self.parse_tuple_array::<_, 3>()?),
-            sdf::ValueType::Double4Vec => sdf::Value::Double4Vec(self.parse_tuple_array::<_, 4>()?),
+            Type::Double => sdf::Value::Double(self.parse_token()?),
+            Type::Double2 => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?.into()),
+            Type::Double3 => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?.into()),
+            Type::Double4 => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?.into()),
+            Type::DoubleVec => sdf::Value::DoubleVec(self.parse_array::<_, 1>()?),
+            Type::Double2Vec => sdf::Value::Vec2d(self.parse_array::<_, 2>()?),
+            Type::Double3Vec => sdf::Value::Vec3d(self.parse_array::<_, 3>()?),
+            Type::Double4Vec => sdf::Value::Vec4d(self.parse_array::<_, 4>()?),
 
             // Quats
-            sdf::ValueType::Quath => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
-            sdf::ValueType::Quatf => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?.into()),
-            sdf::ValueType::Quatd => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?.into()),
+            Type::Quath => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
+            Type::Quatf => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?.into()),
+            Type::Quatd => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?.into()),
 
             // String and tokens
-            sdf::ValueType::String => sdf::Value::String(self.fetch_str()?.to_owned()),
-            sdf::ValueType::Token => sdf::Value::Token(self.fetch_str()?.to_owned()),
-            sdf::ValueType::StringVec => sdf::Value::StringVec(self.parse_array::<_, 1>()?),
-            sdf::ValueType::TokenVec => sdf::Value::TokenVec(self.parse_array::<_, 1>()?),
+            Type::String => sdf::Value::String(self.fetch_str()?.to_owned()),
+            Type::Token => sdf::Value::Token(self.fetch_str()?.to_owned()),
+
+            Type::StringVec => sdf::Value::StringVec(self.parse_array::<_, 1>()?),
+            Type::TokenVec => sdf::Value::TokenVec(self.parse_array::<_, 1>()?),
 
             _ => bail!("Unimplemented data type: {:?}", ty),
         };
@@ -375,76 +377,70 @@ impl<'a> Parser<'a> {
     /// See
     /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Basic_Datatypes>
     /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Roles>
-    fn parse_data_type(ty: &str) -> Result<sdf::ValueType> {
+    fn parse_data_type(ty: &str) -> Result<Type> {
         let data_type = match ty {
             // Bool
-            "bool" => sdf::ValueType::Bool,
-            "bool[]" => sdf::ValueType::BoolVec,
+            "bool" => Type::Bool,
+            "bool[]" => Type::BoolVec,
 
             // Ints
-            "uchar" => sdf::ValueType::Uchar,
-            "uchar[]" => sdf::ValueType::UcharVec,
-            "int" => sdf::ValueType::Int,
-            "int2" => sdf::ValueType::Int2,
-            "int3" => sdf::ValueType::Int3,
-            "int4" => sdf::ValueType::Int4,
-            "int[]" => sdf::ValueType::IntVec,
-            "int2[]" => sdf::ValueType::Int2Vec,
-            "int3[]" => sdf::ValueType::Int3Vec,
-            "int4[]" => sdf::ValueType::Int4Vec,
-            "uint" => sdf::ValueType::Uint,
-            "int64" => sdf::ValueType::Int64,
-            "uint64" => sdf::ValueType::Uint64,
+            "uchar" => Type::Uchar,
+            "uchar[]" => Type::UcharVec,
+            "int" => Type::Int,
+            "int2" => Type::Int2,
+            "int3" => Type::Int3,
+            "int4" => Type::Int4,
+            "int[]" => Type::IntVec,
+            "int2[]" => Type::Int2Vec,
+            "int3[]" => Type::Int3Vec,
+            "int4[]" => Type::Int4Vec,
+            "uint" => Type::Uint,
+            "int64" => Type::Int64,
+            "uint64" => Type::Uint64,
 
             // Half
-            "half" => sdf::ValueType::Half,
-            "half2" | "texCoord2h" => sdf::ValueType::Half2,
-            "half3" | "point3h" | "normal3h" | "vector3h" | "color3h" | "texCoord3h" => sdf::ValueType::Half3,
-            "half4" | "color4h" => sdf::ValueType::Half4,
-            "half[]" => sdf::ValueType::HalfVec,
-            "half2[]" | "texCoord2h[]" => sdf::ValueType::Half2Vec,
-            "half3[]" | "point3h[]" | "normal3h[]" | "vector3h[]" | "color3h[]" | "texCoord3h[]" => {
-                sdf::ValueType::Half3Vec
-            }
-            "half4[]" | "color4h[]" => sdf::ValueType::Half4Vec,
+            "half" => Type::Half,
+            "half2" | "texCoord2h" => Type::Half2,
+            "half3" | "point3h" | "normal3h" | "vector3h" | "color3h" | "texCoord3h" => Type::Half3,
+            "half4" | "color4h" => Type::Half4,
+            "half[]" => Type::HalfVec,
+            "half2[]" | "texCoord2h[]" => Type::Half2Vec,
+            "half3[]" | "point3h[]" | "normal3h[]" | "vector3h[]" | "color3h[]" | "texCoord3h[]" => Type::Half3Vec,
+            "half4[]" | "color4h[]" => Type::Half4Vec,
 
             // Float
-            "float" => sdf::ValueType::Float,
-            "float2" | "texCoord2f" => sdf::ValueType::Float2,
-            "float3" | "point3f" | "normal3f" | "vector3f" | "color3f" | "texCoord3f" => sdf::ValueType::Float3,
-            "float4" | "color4f" => sdf::ValueType::Float4,
-            "float[]" => sdf::ValueType::FloatVec,
-            "float2[]" | "texCoord2f[]" => sdf::ValueType::Float2Vec,
-            "float3[]" | "point3f[]" | "normal3f[]" | "vector3f[]" | "color3f[]" | "texCoord3f[]" => {
-                sdf::ValueType::Float3Vec
-            }
-            "float4[]" | "color4f[]" => sdf::ValueType::Float4Vec,
+            "float" => Type::Float,
+            "float2" | "texCoord2f" => Type::Float2,
+            "float3" | "point3f" | "normal3f" | "vector3f" | "color3f" | "texCoord3f" => Type::Float3,
+            "float4" | "color4f" => Type::Float4,
+            "float[]" => Type::FloatVec,
+            "float2[]" | "texCoord2f[]" => Type::Float2Vec,
+            "float3[]" | "point3f[]" | "normal3f[]" | "vector3f[]" | "color3f[]" | "texCoord3f[]" => Type::Float3Vec,
+            "float4[]" | "color4f[]" => Type::Float4Vec,
 
             // Double
-            "double" => sdf::ValueType::Double,
-            "double2" | "texCoord2d" => sdf::ValueType::Double2,
-            "double3" | "point3d" | "normal3d" | "vector3d" | "color3d" | "texCoord3d" => sdf::ValueType::Double3,
-            "double4" | "color4d" => sdf::ValueType::Double4,
-            "double[]" => sdf::ValueType::DoubleVec,
-            "double2[]" | "texCoord2d[]" => sdf::ValueType::Double2Vec,
-            "double3[]" | "point3d[]" | "normal3d[]" | "vector3d[]" | "color3d[]" | "texCoord3d[]" => {
-                sdf::ValueType::Double3Vec
-            }
-            "double4[]" => sdf::ValueType::Double4Vec,
+            "double" => Type::Double,
+            "double2" | "texCoord2d" => Type::Double2,
+            "double3" | "point3d" | "normal3d" | "vector3d" | "color3d" | "texCoord3d" => Type::Double3,
+            "double4" | "color4d" => Type::Double4,
+            "double[]" => Type::DoubleVec,
+            "double2[]" | "texCoord2d[]" => Type::Double2Vec,
+            "double3[]" | "point3d[]" | "normal3d[]" | "vector3d[]" | "color3d[]" | "texCoord3d[]" => Type::Double3Vec,
+            "double4[]" => Type::Double4Vec,
 
             // Matrices
-            "matrix2d" => sdf::ValueType::Matrix2d,
-            "matrix3d" => sdf::ValueType::Matrix3d,
-            "matrix4d" | "frame4d" => sdf::ValueType::Matrix4d,
+            "matrix2d" => Type::Matrix2d,
+            "matrix3d" => Type::Matrix3d,
+            "matrix4d" | "frame4d" => Type::Matrix4d,
 
             // Quats
-            "quatd" => sdf::ValueType::Quatd,
-            "quatf" => sdf::ValueType::Quatf,
-            "quath" => sdf::ValueType::Quath,
+            "quatd" => Type::Quatd,
+            "quatf" => Type::Quatf,
+            "quath" => Type::Quath,
 
             // String, tokens
-            "string" | "token" => sdf::ValueType::String,
-            "string[]" | "token[]" => sdf::ValueType::TokenVec,
+            "string" | "token" => Type::String,
+            "string[]" | "token[]" => Type::TokenVec,
 
             _ => bail!("Unsupported data type: {}", ty),
         };
@@ -503,6 +499,7 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
+    /// Parse array or array of tuples.
     fn parse_array<T, const N: usize>(&mut self) -> Result<Vec<T>>
     where
         T: FromStr + Default,
@@ -540,37 +537,59 @@ impl<'a> Parser<'a> {
 
         Ok(result)
     }
+}
 
-    fn parse_tuple_array<T, const N: usize>(&mut self) -> Result<Vec<[T; N]>>
-    where
-        T: FromStr + Default + Copy,
-        <T as FromStr>::Err: Debug,
-    {
-        debug_assert!(N >= 1 && N <= 4);
-
-        self.ensure_next(tok::Type::Punctuation, "[")
-            .context("Array must start with [")?;
-
-        let mut result = Vec::new();
-
-        loop {
-            if self.peek_next() == Some((tok::Type::Punctuation, "]")) {
-                self.fetch_next()?; // Consume closing bracket
-                break;
-            }
-
-            let tuple = self.parse_tuple()?;
-            result.push(tuple);
-
-            match self.fetch_next()? {
-                (tok::Type::Punctuation, ",") => continue,
-                (tok::Type::Punctuation, "]") => break,
-                t => bail!("Unexpected token: {:?}", t),
-            }
-        }
-
-        Ok(result)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Type {
+    Bool,
+    BoolVec,
+    Uchar,
+    UcharVec,
+    Int,
+    Int2,
+    Int3,
+    Int4,
+    IntVec,
+    Int2Vec,
+    Int3Vec,
+    Int4Vec,
+    Uint,
+    Int64,
+    Uint64,
+    Half,
+    Half2,
+    Half3,
+    Half4,
+    HalfVec,
+    Half2Vec,
+    Half3Vec,
+    Half4Vec,
+    Float,
+    Float2,
+    Float3,
+    Float4,
+    FloatVec,
+    Float2Vec,
+    Float3Vec,
+    Float4Vec,
+    Double,
+    Double2,
+    Double3,
+    Double4,
+    DoubleVec,
+    Double2Vec,
+    Double3Vec,
+    Double4Vec,
+    Quath,
+    Quatf,
+    Quatd,
+    String,
+    Token,
+    StringVec,
+    TokenVec,
+    Matrix2d,
+    Matrix3d,
+    Matrix4d,
 }
 
 #[cfg(test)]
@@ -601,8 +620,8 @@ mod tests {
     #[test]
     fn parse_array_of_tuples() {
         let mut parser = Parser::new("[(1, 2), (3, 4)]");
-        let result = parser.parse_tuple_array::<u32, 2>().unwrap();
-        assert_eq!(result, vec![[1_u32, 2], [3, 4]]);
+        let result = parser.parse_array::<u32, 2>().unwrap();
+        assert_eq!(result, vec![1_u32, 2, 3, 4]);
     }
 
     #[test]
@@ -754,15 +773,10 @@ def Xform "World"
 
         assert_eq!(
             &[
-                [0_f32, 1.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 0.0]
+                0_f32, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+                0.0
             ],
-            value.try_as_float_3_vec_ref().unwrap().as_slice()
+            value.try_as_vec_3f_ref().unwrap().as_slice()
         );
 
         let order = data.get(&sdf::path("/World.xformOpOrder").unwrap()).unwrap();
