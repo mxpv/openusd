@@ -309,20 +309,20 @@ impl<'a> Parser<'a> {
         let value = match ty {
             // Bool
             Type::Bool => sdf::Value::Bool(self.parse_token()?),
-            Type::BoolVec => sdf::Value::BoolVec(self.parse_array::<_, 1>()?),
+            Type::BoolVec => sdf::Value::BoolVec(self.parse_array()?),
 
             // Ints
             Type::Uchar => sdf::Value::Uchar(self.parse_token()?),
-            Type::UcharVec => sdf::Value::UcharVec(self.parse_array::<_, 1>()?),
+            Type::UcharVec => sdf::Value::UcharVec(self.parse_array()?),
 
             Type::Int => sdf::Value::Int(self.parse_token()?),
             Type::Int2 => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?.into()),
             Type::Int3 => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?.into()),
             Type::Int4 => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?.into()),
-            Type::IntVec => sdf::Value::IntVec(self.parse_array::<_, 1>()?),
-            Type::Int2Vec => sdf::Value::Vec2i(self.parse_array::<_, 2>()?),
-            Type::Int3Vec => sdf::Value::Vec3i(self.parse_array::<_, 3>()?),
-            Type::Int4Vec => sdf::Value::Vec4i(self.parse_array::<_, 4>()?),
+            Type::IntVec => sdf::Value::IntVec(self.parse_array()?),
+            Type::Int2Vec => sdf::Value::Vec2i(self.parse_array_of_tuples::<_, 2>()?),
+            Type::Int3Vec => sdf::Value::Vec3i(self.parse_array_of_tuples::<_, 3>()?),
+            Type::Int4Vec => sdf::Value::Vec4i(self.parse_array_of_tuples::<_, 4>()?),
             Type::Uint => sdf::Value::Uint(self.parse_token()?),
             Type::Int64 => sdf::Value::Int64(self.parse_token()?),
             Type::Uint64 => sdf::Value::Uint64(self.parse_token()?),
@@ -333,30 +333,30 @@ impl<'a> Parser<'a> {
             Type::Half3 => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?.into()),
             Type::Half4 => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?.into()),
 
-            Type::HalfVec => sdf::Value::HalfVec(self.parse_array::<_, 1>()?),
-            Type::Half2Vec => sdf::Value::Vec2h(self.parse_array::<_, 2>()?),
-            Type::Half3Vec => sdf::Value::Vec3h(self.parse_array::<_, 3>()?),
-            Type::Half4Vec => sdf::Value::Vec4h(self.parse_array::<_, 4>()?),
+            Type::HalfVec => sdf::Value::HalfVec(self.parse_array()?),
+            Type::Half2Vec => sdf::Value::Vec2h(self.parse_array_of_tuples::<_, 2>()?),
+            Type::Half3Vec => sdf::Value::Vec3h(self.parse_array_of_tuples::<_, 3>()?),
+            Type::Half4Vec => sdf::Value::Vec4h(self.parse_array_of_tuples::<_, 4>()?),
 
             // Float
             Type::Float => sdf::Value::Float(self.parse_token()?),
             Type::Float2 => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?.into()),
             Type::Float3 => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?.into()),
             Type::Float4 => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?.into()),
-            Type::FloatVec => sdf::Value::FloatVec(self.parse_array::<_, 1>()?),
-            Type::Float2Vec => sdf::Value::Vec2f(self.parse_array::<_, 2>()?),
-            Type::Float3Vec => sdf::Value::Vec3f(self.parse_array::<_, 3>()?),
-            Type::Float4Vec => sdf::Value::Vec4f(self.parse_array::<_, 4>()?),
+            Type::FloatVec => sdf::Value::FloatVec(self.parse_array()?),
+            Type::Float2Vec => sdf::Value::Vec2f(self.parse_array_of_tuples::<_, 2>()?),
+            Type::Float3Vec => sdf::Value::Vec3f(self.parse_array_of_tuples::<_, 3>()?),
+            Type::Float4Vec => sdf::Value::Vec4f(self.parse_array_of_tuples::<_, 4>()?),
 
             // Double
             Type::Double => sdf::Value::Double(self.parse_token()?),
             Type::Double2 => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?.into()),
             Type::Double3 => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?.into()),
             Type::Double4 => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?.into()),
-            Type::DoubleVec => sdf::Value::DoubleVec(self.parse_array::<_, 1>()?),
-            Type::Double2Vec => sdf::Value::Vec2d(self.parse_array::<_, 2>()?),
-            Type::Double3Vec => sdf::Value::Vec3d(self.parse_array::<_, 3>()?),
-            Type::Double4Vec => sdf::Value::Vec4d(self.parse_array::<_, 4>()?),
+            Type::DoubleVec => sdf::Value::DoubleVec(self.parse_array()?),
+            Type::Double2Vec => sdf::Value::Vec2d(self.parse_array_of_tuples::<_, 2>()?),
+            Type::Double3Vec => sdf::Value::Vec3d(self.parse_array_of_tuples::<_, 3>()?),
+            Type::Double4Vec => sdf::Value::Vec4d(self.parse_array_of_tuples::<_, 4>()?),
 
             // Quats
             Type::Quath => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
@@ -367,8 +367,8 @@ impl<'a> Parser<'a> {
             Type::String => sdf::Value::String(self.fetch_str()?.to_owned()),
             Type::Token => sdf::Value::Token(self.fetch_str()?.to_owned()),
 
-            Type::StringVec => sdf::Value::StringVec(self.parse_array::<_, 1>()?),
-            Type::TokenVec => sdf::Value::TokenVec(self.parse_array::<_, 1>()?),
+            Type::StringVec => sdf::Value::StringVec(self.parse_array()?),
+            Type::TokenVec => sdf::Value::TokenVec(self.parse_array()?),
 
             _ => bail!("Unimplemented data type: {:?}", ty),
         };
@@ -472,7 +472,7 @@ impl<'a> Parser<'a> {
 
     fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
     where
-        T: FromStr + Default,
+        T: FromStr,
         <T as FromStr>::Err: Debug,
     {
         self.ensure_next(tok::Type::Punctuation, "(")
@@ -503,18 +503,42 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse array or array of tuples.
-    fn parse_array<T, const N: usize>(&mut self) -> Result<Vec<T>>
+    fn parse_array<T>(&mut self) -> Result<Vec<T>>
     where
         T: FromStr + Default,
         <T as FromStr>::Err: Debug,
     {
-        debug_assert!(N >= 1 && N <= 4);
+        self.parse_array_fn(|this, out| {
+            out.push(this.parse_token::<T>()?);
+            Ok(())
+        })
+    }
 
+    /// Parse array of tuples.
+    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<T>>
+    where
+        T: FromStr,
+        <T as FromStr>::Err: Debug,
+    {
+        self.parse_array_fn(|this, out| {
+            out.extend(this.parse_tuple::<T, N>()?);
+            Ok(())
+        })
+    }
+
+    /// Helper method to read array of elements.
+    ///
+    /// For each array element, `read_elements` is called to parse element.
+    /// Inner element can be a single value, tuple, sublayer, etc (up to callback function).
+    fn parse_array_fn<T>(
+        &mut self,
+        mut read_elements: impl FnMut(&mut Self, &mut Vec<T>) -> Result<()>,
+    ) -> Result<Vec<T>> {
         self.ensure_next(tok::Type::Punctuation, "[")
             .context("Array must start with [")?;
 
-        let is_tuple = N > 1;
         let mut result = Vec::new();
+        let mut index = 0;
 
         loop {
             // Special case - empty array like []
@@ -523,13 +547,9 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            if is_tuple {
-                let tuple = self.parse_tuple::<T, N>()?;
-                result.extend(tuple);
-            } else {
-                let value = self.parse_token::<T>()?;
-                result.push(value);
-            }
+            read_elements(self, &mut result).with_context(|| format!("Unable to read array element {}", index))?;
+
+            index += 1;
 
             match self.fetch_next()? {
                 (tok::Type::Punctuation, ",") => continue,
@@ -602,7 +622,7 @@ mod tests {
     #[test]
     fn parse_empty_array() {
         let mut parser = Parser::new("[]");
-        let array = parser.parse_array::<u32, 1>().unwrap();
+        let array = parser.parse_array::<u32>().unwrap();
         assert!(array.is_empty());
     }
 
@@ -616,14 +636,14 @@ mod tests {
     #[test]
     fn parse_array() {
         let mut parser = Parser::new("[1, 2, 3]");
-        let result = parser.parse_array::<u32, 1>().unwrap();
+        let result = parser.parse_array::<u32>().unwrap();
         assert_eq!(result, vec![1_u32, 2, 3]);
     }
 
     #[test]
     fn parse_array_of_tuples() {
         let mut parser = Parser::new("[(1, 2), (3, 4)]");
-        let result = parser.parse_array::<u32, 2>().unwrap();
+        let result = parser.parse_array_of_tuples::<u32, 2>().unwrap();
         assert_eq!(result, vec![1_u32, 2, 3, 4]);
     }
 
