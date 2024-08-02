@@ -2,7 +2,10 @@ use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::mem::MaybeUninit;
 use std::{any::type_name, collections::HashMap, fmt::Debug, iter::Peekable, str::FromStr};
 
-use crate::sdf::{self, schema::FieldKey};
+use crate::sdf::{
+    self,
+    schema::{ChildrenKey, FieldKey},
+};
 
 use super::tok;
 
@@ -75,7 +78,7 @@ impl<'a> Parser<'a> {
             self.read_prim(&current_path, &mut root_children, &mut data)?;
         }
 
-        pseudo_root_spec.add("primChildren", sdf::Value::TokenVec(root_children));
+        pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(root_children));
 
         data.insert(current_path.clone(), pseudo_root_spec);
         Ok(data)
@@ -105,13 +108,13 @@ impl<'a> Parser<'a> {
         self.ensure_next(tok::Type::Punctuation, "(")?;
 
         const KNOWN_PROPS: &[(&str, Type)] = &[
-            ("defaultPrim", Type::Token),
+            (FieldKey::DefaultPrim.as_str(), Type::Token),
+            (FieldKey::StartTimeCode.as_str(), Type::Uint64),
+            (FieldKey::HasOwnedSubLayers.as_str(), Type::StringVec),
             ("doc", Type::String),
             ("endTimeCode", Type::Uint64),
             ("framesPerSecond", Type::Uint64),
             ("metersPerUnit", Type::Double),
-            ("startTimeCode", Type::Uint64),
-            ("subLayers", Type::StringVec),
             ("timeCodesPerSecond", Type::Uint64),
             ("upAxis", Type::Token),
         ];
@@ -123,16 +126,16 @@ impl<'a> Parser<'a> {
             match next {
                 (tok::Type::Punctuation, ")") => break,
 
-                // String without doc = ?
+                // String without doc keyword
                 (tok::Type::String, str) => {
-                    root.add(FieldKey::Documentation.as_str(), sdf::Value::String(str.to_string()));
+                    root.add(FieldKey::Documentation, str);
                 }
 
                 // doc = "?"
                 (tok::Type::Doc, _) => {
                     self.ensure_pun("=")?;
                     let value = self.fetch_str()?;
-                    root.add("doc", sdf::Value::String(value.to_string()))
+                    root.add("doc", value);
                 }
 
                 // Known type
@@ -187,7 +190,7 @@ impl<'a> Parser<'a> {
             let (ty, prim_type) = self.fetch_next().context("Unable to read prim type")?;
             ensure!(ty == tok::Type::Identifier);
 
-            spec.add("typeName", sdf::Value::Token(prim_type.to_string()));
+            spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
         }
 
         // Read prim name.
@@ -231,7 +234,7 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                spec.add("primChildren", sdf::Value::TokenVec(children));
+                spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             }
             _ => bail!(
                 "Unexpected token after prim name, must be either () or {{}}, got: {:?}",
@@ -239,8 +242,8 @@ impl<'a> Parser<'a> {
             ),
         };
 
-        spec.add("specifier", sdf::Value::Specifier(specifier));
-        spec.add("properties", sdf::Value::TokenVec(properties));
+        spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
+        spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
 
         data.insert(prim_path, spec);
 
@@ -292,10 +295,10 @@ impl<'a> Parser<'a> {
 
         let value = self.parse_value(data_type)?;
 
-        spec.add("custom", sdf::Value::Bool(custom));
-        spec.add("variability", sdf::Value::Variability(variability));
-        spec.add("typeName", sdf::Value::Token(type_name.to_string()));
-        spec.add("default", value);
+        spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
+        spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+        spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+        spec.add(FieldKey::Default, value);
 
         data.insert(path, spec);
 

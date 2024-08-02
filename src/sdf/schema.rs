@@ -64,8 +64,14 @@ pub enum FieldKey {
     StartFrame,
 }
 
+impl From<FieldKey> for &'static str {
+    fn from(key: FieldKey) -> Self {
+        key.as_str()
+    }
+}
+
 impl FieldKey {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             FieldKey::Active => "active",
             FieldKey::AllowedTokens => "allowedTokens",
@@ -141,6 +147,12 @@ pub enum ChildrenKey {
     RelationshipTargetChildren,
     VariantChildren,
     VariantSetChildren,
+}
+
+impl From<ChildrenKey> for &'static str {
+    fn from(key: ChildrenKey) -> Self {
+        key.as_str()
+    }
 }
 
 impl ChildrenKey {

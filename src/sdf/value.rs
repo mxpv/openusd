@@ -106,6 +106,15 @@ pub enum Value {
     PathExpression,
 }
 
+/// Convert from `&str` to `Value`.
+///
+/// Used a lot in text parser since all tokens are basically strings.
+impl<'a> From<&'a str> for Value {
+    fn from(value: &'a str) -> Self {
+        Value::String(value.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
