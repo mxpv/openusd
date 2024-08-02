@@ -1,4 +1,4 @@
-//! `usdc` file format support.
+//! Binary file format (`usdc`) implementation.
 
 use std::{borrow::Cow, collections::HashMap, fmt::Debug, io, mem, path::Path};
 
@@ -22,6 +22,7 @@ struct Spec {
     fields: HashMap<String, ValueRep>,
 }
 
+/// High level interface to binary data.
 #[derive(Debug)]
 pub struct CrateData<R> {
     file: CrateFile<R>,
@@ -32,6 +33,7 @@ impl<R> CrateData<R>
 where
     R: io::Read + io::Seek,
 {
+    /// Read binary data from any reader.
     pub fn open(reader: R, safe: bool) -> Result<Self> {
         let mut file = CrateFile::open(reader)?;
 

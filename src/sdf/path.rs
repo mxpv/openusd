@@ -158,9 +158,9 @@ impl Path {
             return false;
         }
 
-        name.chars().enumerate().all(|(i, c)| {
-            c == '_' || if i == 0 { c.is_alphabetic() } else { c.is_alphanumeric() }
-        })
+        name.chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || if i == 0 { c.is_alphabetic() } else { c.is_alphanumeric() })
     }
 
     pub fn is_valid_namespace_identifier(name: &str) -> bool {

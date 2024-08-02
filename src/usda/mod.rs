@@ -1,4 +1,4 @@
-//! `usda` impelements text file parser.
+//! Text file format (`usda`) reader.
 
 use std::borrow::Cow;
 use std::{collections::HashMap, fs, path::Path};
@@ -13,11 +13,13 @@ use parser::Parser;
 
 use crate::sdf;
 
+/// High level interface to text data.
 pub struct TextReader {
     data: HashMap<sdf::Path, sdf::Spec>,
 }
 
 impl TextReader {
+    /// Read a file on disk.
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let data = fs::read_to_string(path).with_context(|| format!("Unable to read file: {}", path.display()))?;
