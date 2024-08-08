@@ -48,6 +48,7 @@ impl<'a> Parser<'a> {
     #[inline]
     fn ensure_pun(&mut self, value: &str) -> Result<()> {
         self.ensure_next(tok::Type::Punctuation, value)
+            .context("Punctuation token expected")
     }
 
     fn fetch_str(&mut self) -> Result<&str> {
@@ -475,26 +476,14 @@ impl<'a> Parser<'a> {
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
-        self.ensure_next(tok::Type::Punctuation, "(")
-            .context("Tuples must start with (")?;
-
         // TODO: array::try_map would be nice to have here once stable, see https://github.com/rust-lang/rust/issues/79711
         // or consider fixed vec crates.
         let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
-        for (i, element) in result.iter_mut().enumerate() {
-            if i > 0 {
-                self.ensure_next(tok::Type::Punctuation, ",")
-                    .context("Comma is expected between tuple values")?
-            }
-
-            *element = MaybeUninit::new(self.parse_token::<T>()?);
-
-            if i == N - 1 {
-                self.ensure_next(tok::Type::Punctuation, ")")
-                    .context("Tuples must be closed with )")?;
-            }
-        }
+        self.parse_seq_fn(",", |this, i| {
+            result[i] = MaybeUninit::new(this.parse_token::<T>()?);
+            Ok(())
+        })?;
 
         // SAFETY: All elements are initialized, so transmute the array to [T; N]
         let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
@@ -508,10 +497,13 @@ impl<'a> Parser<'a> {
         T: FromStr + Default,
         <T as FromStr>::Err: Debug,
     {
-        self.parse_array_fn(|this, out| {
+        let mut out = Vec::new();
+        self.parse_array_fn(|this| {
             out.push(this.parse_token::<T>()?);
             Ok(())
-        })
+        })?;
+
+        Ok(out)
     }
 
     /// Parse array of tuples.
@@ -520,24 +512,95 @@ impl<'a> Parser<'a> {
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
-        self.parse_array_fn(|this, out| {
+        let mut out = Vec::new();
+        self.parse_array_fn(|this| {
             out.extend(this.parse_tuple::<T, N>()?);
             Ok(())
-        })
+        })?;
+
+        Ok(out)
+    }
+
+    #[allow(dead_code)]
+    fn parse_sublayers(&mut self) -> Result<(sdf::Value, sdf::Value)> {
+        let mut sublayers = Vec::new();
+        let mut sublayer_offsets = Vec::new();
+
+        self.parse_array_fn(|this| {
+            // Parse path
+
+            let (t, asset_path) = this.fetch_next()?;
+            ensure!(t == tok::Type::AssetRef, "Asset ref expected, got {t:?}");
+            sublayers.push(asset_path.to_string());
+
+            // Parse optional layer offsets.
+            let mut layer_offset = sdf::LayerOffset::default();
+
+            let next = this.peek_next().context("Unexpected end of array")?;
+            match next {
+                (tok::Type::Punctuation, ",") => {}
+                (tok::Type::Punctuation, "(") => {
+                    // Read (offset = 10; scale = 0.5)
+
+                    let mut offset = None;
+                    let mut scale = None;
+
+                    this.parse_seq_fn(";", |this, _| {
+                        let (ty, _) = this.fetch_next()?;
+                        this.ensure_next(tok::Type::Punctuation, "=")?;
+                        let value = this.parse_value(Type::Double)?;
+
+                        match ty {
+                            tok::Type::Offset => {
+                                ensure!(offset.is_none(), "offset specified twice");
+                                offset = Some(value);
+                            }
+                            tok::Type::Scale => {
+                                ensure!(scale.is_none(), "scale specified twice");
+                                scale = Some(value);
+                            }
+                            _ => bail!("Unexpected token type: {ty:?}"),
+                        }
+
+                        Ok(())
+                    })?;
+
+                    if let Some(offset) = offset {
+                        layer_offset.offset = offset.try_as_double().context("Unexpected offset type, want double")?;
+                    }
+
+                    if let Some(scale) = scale {
+                        layer_offset.scale = scale.try_as_double().context("")?;
+                    }
+                }
+                _ => {}
+            };
+
+            sublayer_offsets.push(layer_offset);
+
+            Ok(())
+        })?;
+
+        debug_assert_eq!(sublayers.len(), sublayer_offsets.len());
+
+        Ok((
+            sdf::Value::StringVec(sublayers),
+            sdf::Value::LayerOffsetVec(sublayer_offsets),
+        ))
     }
 
     /// Helper method to read array of elements.
     ///
     /// For each array element, `read_elements` is called to parse element.
     /// Inner element can be a single value, tuple, sublayer, etc (up to callback function).
-    fn parse_array_fn<T>(
-        &mut self,
-        mut read_elements: impl FnMut(&mut Self, &mut Vec<T>) -> Result<()>,
-    ) -> Result<Vec<T>> {
+    ///
+    /// The callback must advance iterator or return an error to prevent infinite loop.
+    ///
+    /// Also, the callback accepts a mutable reference to the parser to satisfy the borrow checker.
+    fn parse_array_fn(&mut self, mut read_elements: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
         self.ensure_next(tok::Type::Punctuation, "[")
             .context("Array must start with [")?;
 
-        let mut result = Vec::new();
         let mut index = 0;
 
         loop {
@@ -547,7 +610,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            read_elements(self, &mut result).with_context(|| format!("Unable to read array element {}", index))?;
+            read_elements(self).with_context(|| format!("Unable to read array element {}", index))?;
 
             index += 1;
 
@@ -558,7 +621,39 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(result)
+        Ok(())
+    }
+
+    /// Parse sequence of elements inside of `()`.
+    /// This can be a tuple of number `(a, b, c)` or list of params `(a=b, c=d)`.
+    fn parse_seq_fn(
+        &mut self,
+        delim: &str,
+        mut read_element: impl FnMut(&mut Self, usize) -> Result<()>,
+    ) -> Result<()> {
+        self.ensure_next(tok::Type::Punctuation, "(")
+            .context("Open brace expected")?;
+
+        let mut index = 0;
+
+        loop {
+            if self.peek_next() == Some((tok::Type::Punctuation, ")")) {
+                self.fetch_next()?;
+                break;
+            }
+
+            read_element(self, index).with_context(|| format!("Unable to read element {}", index))?;
+
+            index += 1;
+
+            match self.fetch_next()? {
+                (tok::Type::Punctuation, ")") => break,
+                (tok::Type::Punctuation, d) if d == delim => continue,
+                t => bail!("Unexpected token between (): {:?}", t),
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -814,5 +909,34 @@ def Xform "World"
                 .unwrap(),
             vec![String::from("xformOp:translate"), String::from("xformOp:rotateXYZ")]
         )
+    }
+
+    #[test]
+    fn test_parse_layer_offsets() {
+        let mut parser = Parser::new(
+            r#"
+[
+    @./someAnimation.usd@ (offset = 10; scale = 0.5),
+    @./another.usd@
+]
+            "#,
+        );
+
+        let (sublayers, offsets) = parser.parse_sublayers().unwrap();
+
+        let sublayers = sublayers.try_as_string_vec().unwrap();
+        assert_eq!(
+            sublayers,
+            vec!["./someAnimation.usd".to_string(), "./another.usd".to_string()]
+        );
+
+        let offsets = offsets.try_as_layer_offset_vec().unwrap();
+
+        assert_eq!(offsets[0].offset, 10.0);
+        assert_eq!(offsets[0].scale, 0.5);
+
+        // Default one
+        assert_eq!(offsets[1].offset, 0.0);
+        assert_eq!(offsets[1].scale, 1.0);
     }
 }
