@@ -1083,8 +1083,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::Specifier => {
                 let tmp: i32 = self.unpack_value(value)?;
-                let specifier = sdf::Specifier::from_repr(tmp)
-                    .with_context(|| format!("Unable to parse SDF specifier: {tmp}"))?;
+                let specifier =
+                    sdf::Specifier::from_repr(tmp).with_context(|| format!("Unable to parse SDF specifier: {tmp}"))?;
 
                 sdf::Value::Specifier(specifier)
             }
@@ -1099,8 +1099,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::Variability => {
                 let tmp: i32 = self.unpack_value(value)?;
-                let variability = sdf::Variability::from_repr(tmp)
-                    .with_context(|| format!("Unable to parse variability: {tmp}"))?;
+                let variability =
+                    sdf::Variability::from_repr(tmp).with_context(|| format!("Unable to parse variability: {tmp}"))?;
 
                 sdf::Value::Variability(variability)
             }
