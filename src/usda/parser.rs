@@ -139,6 +139,14 @@ impl<'a> Parser<'a> {
                     root.add("doc", value);
                 }
 
+                // SubLayers handling
+                (tok::Type::SubLayers, _) => {
+                    self.ensure_pun("=")?;
+                    let (sublayers, sublayer_offsets) = self.parse_sublayers().context("Unable to parse subLayers")?;
+                    root.add(FieldKey::SubLayers, sublayers);
+                    root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
+                }
+
                 // Known type
                 (tok::Type::Identifier, name) => {
                     if let Some((name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
@@ -521,7 +529,6 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    #[allow(dead_code)]
     fn parse_sublayers(&mut self) -> Result<(sdf::Value, sdf::Value)> {
         let mut sublayers = Vec::new();
         let mut sublayer_offsets = Vec::new();
@@ -931,6 +938,51 @@ def Xform "World"
         );
 
         let offsets = offsets.try_as_layer_offset_vec().unwrap();
+
+        assert_eq!(offsets[0].offset, 10.0);
+        assert_eq!(offsets[0].scale, 0.5);
+
+        // Default one
+        assert_eq!(offsets[1].offset, 0.0);
+        assert_eq!(offsets[1].scale, 1.0);
+    }
+
+    #[test]
+    fn test_parse_sublayers_in_pseudo_root() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+(
+    subLayers = [
+        @./someAnimation.usd@ (offset = 10; scale = 0.5),
+        @./another.usd@
+    ]
+)
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let pseudo_root = data.get(&sdf::Path::abs_root()).unwrap();
+
+        let sublayers = pseudo_root
+            .fields
+            .get(FieldKey::SubLayers.as_str())
+            .unwrap()
+            .clone()
+            .try_as_string_vec()
+            .unwrap();
+        assert_eq!(
+            sublayers,
+            vec!["./someAnimation.usd".to_string(), "./another.usd".to_string()]
+        );
+
+        let offsets = pseudo_root
+            .fields
+            .get(FieldKey::SubLayerOffsets.as_str())
+            .unwrap()
+            .clone()
+            .try_as_layer_offset_vec()
+            .unwrap();
 
         assert_eq!(offsets[0].offset, 10.0);
         assert_eq!(offsets[0].scale, 0.5);
