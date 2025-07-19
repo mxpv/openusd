@@ -85,9 +85,7 @@ where
 
     #[inline]
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        self.data
-            .get(path)
-            .is_some_and(|spec| spec.fields.contains_key(field))
+        self.data.get(path).is_some_and(|spec| spec.fields.contains_key(field))
     }
 
     #[inline]

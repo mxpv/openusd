@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "BatchTool",
+      "GlobTool",
+      "GrepTool",
+      "mcp__github",
+      "View"
     ],
     "deny": []
   }
