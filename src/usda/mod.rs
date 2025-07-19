@@ -39,7 +39,7 @@ impl sdf::AbstractData for TextReader {
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
         self.data
             .get(path)
-            .map_or(false, |spec| spec.fields.contains_key(field))
+            .is_some_and(|spec| spec.fields.contains_key(field))
     }
 
     fn spec_type(&self, path: &sdf::Path) -> Option<sdf::SpecType> {

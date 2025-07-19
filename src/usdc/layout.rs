@@ -217,7 +217,7 @@ impl ValueRep {
     #[inline]
     pub fn ty(self) -> Result<Type> {
         let index = ((self.data() >> 48) & 0xFF) as u32;
-        Type::from_repr(index).with_context(|| format!("Unable to parse type enum {}", index))
+        Type::from_repr(index).with_context(|| format!("Unable to parse type enum {index}"))
     }
 
     #[inline]

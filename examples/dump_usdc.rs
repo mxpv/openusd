@@ -42,13 +42,13 @@ fn main() -> Result<()> {
 
     println!("-- Tokens:");
     for (index, token) in file.tokens.iter().enumerate() {
-        println!("#{}:\t{}", index, token);
+        println!("#{index}:\t{token}");
     }
     println!();
 
     println!("-- Strings:");
     for (index, string) in file.strings.iter().enumerate() {
-        println!("#{}:\t{}", index, string);
+        println!("#{index}:\t{string}");
     }
     println!();
 
@@ -61,13 +61,13 @@ fn main() -> Result<()> {
 
     println!("-- Field sets: ");
     file.fieldsets.iter().enumerate().for_each(|(index, fieldset)| {
-        println!("#{}:\t{:?}", index, fieldset);
+        println!("#{index}:\t{fieldset:?}");
     });
     println!();
 
     println!("-- Paths: ");
     file.paths.iter().enumerate().for_each(|(index, path)| {
-        println!("#{}:\t{}", index, path);
+        println!("#{index}:\t{path}");
     });
     println!();
 
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
 
             let name = &file.tokens[field.token_index];
 
-            println!("\t\t{} -> {:?}", name, value);
+            println!("\t\t{name} -> {value:?}");
         }
     }
     println!();

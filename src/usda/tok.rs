@@ -316,7 +316,7 @@ impl<'a> Iterator for Tokenizer<'a> {
             // Make sure "true," or "true)" recognized as two separate tokens: 'true' and ',' or ')'.
             // But also that "bool[]" is recognized as one token.
             if !next_word.ends_with("[]") {
-                next_word = next_word.trim_end_matches(&[',', ';', ']', ')']);
+                next_word = next_word.trim_end_matches([',', ';', ']', ')']);
             }
 
             self.buffer = self.buffer.strip_prefix(next_word).unwrap_or_default();

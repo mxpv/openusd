@@ -19,7 +19,7 @@ pub fn encoded_buffer_size<T: PrimInt>(count: usize) -> usize {
         0
     } else {
         let sz = mem::size_of::<T>();
-        sz + ((count * 2 + 7) / 8) + (sz * count)
+        sz + (count * 2).div_ceil(8) + (sz * count)
     }
 }
 
@@ -37,7 +37,7 @@ where
         codes_reader.read_pod::<i32>()? as i64
     };
 
-    let num_code_bytes = (count * 2 + 7) / 8;
+    let num_code_bytes = (count * 2).div_ceil(8);
 
     let mut ints_reader = {
         let offset = mem::size_of::<T>() + num_code_bytes;

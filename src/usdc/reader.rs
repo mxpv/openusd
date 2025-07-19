@@ -102,7 +102,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             .try_for_each(|(index, fieldset)| {
                 self.fields
                     .get(fieldset)
-                    .with_context(|| format!("Invalid fieldset index {}: {}", index, fieldset))?;
+                    .with_context(|| format!("Invalid fieldset index {index}: {fieldset}"))?;
 
                 anyhow::Ok(())
             })?;
@@ -453,7 +453,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             let tmp = self.read_encoded_ints::<u32>(spec_count)?;
             for (i, spec_type) in tmp.iter().enumerate() {
                 specs[i].spec_type = sdf::SpecType::from_repr(*spec_type)
-                    .with_context(|| format!("Unable to parse SDF spec type: {}", *spec_type))?;
+                    .with_context(|| format!("Unable to parse SDF spec type: {spec_type}"))?;
             }
 
             specs
@@ -1084,7 +1084,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Specifier => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let specifier = sdf::Specifier::from_repr(tmp)
-                    .with_context(|| format!("Unable to parse SDF specifier: {}", tmp))?;
+                    .with_context(|| format!("Unable to parse SDF specifier: {tmp}"))?;
 
                 sdf::Value::Specifier(specifier)
             }
@@ -1092,7 +1092,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Permission => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let permission =
-                    sdf::Permission::from_repr(tmp).with_context(|| format!("Unable to parse permission: {}", tmp))?;
+                    sdf::Permission::from_repr(tmp).with_context(|| format!("Unable to parse permission: {tmp}"))?;
 
                 sdf::Value::Permission(permission)
             }
@@ -1100,7 +1100,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Variability => {
                 let tmp: i32 = self.unpack_value(value)?;
                 let variability = sdf::Variability::from_repr(tmp)
-                    .with_context(|| format!("Unable to parse variability: {}", tmp))?;
+                    .with_context(|| format!("Unable to parse variability: {tmp}"))?;
 
                 sdf::Value::Variability(variability)
             }

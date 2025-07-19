@@ -146,7 +146,7 @@ impl<'a> Parser<'a> {
 
                         let value = self
                             .parse_value(ty)
-                            .with_context(|| format!("Unable to parse value for {}", name))?;
+                            .with_context(|| format!("Unable to parse value for {name}"))?;
                         root.add(name, value);
                     }
                 }
@@ -610,7 +610,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            read_elements(self).with_context(|| format!("Unable to read array element {}", index))?;
+            read_elements(self).with_context(|| format!("Unable to read array element {index}"))?;
 
             index += 1;
 
@@ -642,7 +642,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            read_element(self, index).with_context(|| format!("Unable to read element {}", index))?;
+            read_element(self, index).with_context(|| format!("Unable to read element {index}"))?;
 
             index += 1;
 

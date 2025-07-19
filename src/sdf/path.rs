@@ -12,13 +12,13 @@ pub fn path(str: impl AsRef<str>) -> Result<Path> {
 ///
 /// # Syntax
 /// - Two separators are used between parts of a path. A slash ("/")
-/// following an identifier is used to introduce a namespace child.
+///   following an identifier is used to introduce a namespace child.
 /// - A period (".") following an identifier is used to introduce a property.
 /// - A property may also have several non-sequential colons (':') in its name
-/// to provide a rudimentary namespace within properties but may not end or
-/// begin with a colon.
+///   to provide a rudimentary namespace within properties but may not end or
+///   begin with a colon.
 /// - Brackets ("[" and "]") are used to indicate relationship target paths for
-/// relational attributes.
+///   relational attributes.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Path {
     path: String,
@@ -108,7 +108,7 @@ impl Path {
 
         // Make sure path ends with a valid property name (e.g. "xyz.chars").
         let tail = &self.path[pos + 1..];
-        return tail.chars().all(char::is_alphanumeric);
+        tail.chars().all(char::is_alphanumeric)
     }
 
     pub fn prim_path(&self) -> Path {
@@ -287,8 +287,7 @@ mod tests {
             assert_eq!(
                 Path::new(path).unwrap().prim_path().as_str(),
                 expected,
-                "Unable to parse: {}",
-                path,
+                "Unable to parse: {path}",
             );
         }
     }
