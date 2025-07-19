@@ -39,6 +39,16 @@ jobs:
       - run: cargo install cargo-edit
       - run: cargo set-version ${{ inputs.version }}
 
+      - name: Generate Changelog
+        run: |
+          echo "## Changes" > CHANGELOG.md
+          if git describe --tags --abbrev=0 2>/dev/null; then
+            PREV_TAG=$(git describe --tags --abbrev=0)
+            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
+          else
+            git log --pretty=format:"- %s (%h)" >> CHANGELOG.md
+          fi
+
       - name: Setup Git
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -50,16 +60,6 @@ jobs:
           git add Cargo.toml
           git commit -m "Bump crate version to ${{ inputs.version }}"
           git tag $TAG
-
-      - name: Generate Changelog
-        run: |
-          echo "## Changes" > CHANGELOG.md
-          if git describe --tags --abbrev=0 HEAD^ 2>/dev/null; then
-            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^)
-            git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" >> CHANGELOG.md
-          else
-            git log --pretty=format:"- %s (%h)" >> CHANGELOG.md
-          fi
 
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
