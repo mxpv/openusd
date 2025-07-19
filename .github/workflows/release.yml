@@ -64,7 +64,7 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
-      - run: cargo publish $SKIP
+      - run: cargo publish $SKIP --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           SKIP: ${{ inputs.dryrun && '--dry-run' || '' }}
