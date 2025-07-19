@@ -48,7 +48,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 
 ## Code Standards
 
-- Project typically targets latest stable Rust (currently 1.77, see rust-toolchain.toml)
+- Project targets latest stable Rust (see rust-toolchain.toml)
 - Maximum line width: 120 characters (rustfmt.toml)
 - All warnings treated as errors in CI
 - Comprehensive test coverage (50% minimum) with grcov
