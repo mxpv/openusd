@@ -1,16 +1,15 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "deny"
-notice = "deny"
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []
 
 [bans]
 # Lint level for when multiple versions of the same crate are detected
 multiple-versions = "deny"
 
 [licenses]
-unlicensed = "deny"
-allow = ["MIT", "Apache-2.0", "Unicode-DFS-2016"]
+confidence-threshold = 0.8
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
 
 [sources]
 unknown-registry = "warn"
