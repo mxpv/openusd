@@ -6,7 +6,7 @@ use std::{collections::HashMap, fs, path::Path};
 use anyhow::{bail, Result};
 
 pub mod parser;
-pub mod tok;
+pub mod token;
 
 use anyhow::Context;
 use parser::Parser;

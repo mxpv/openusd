@@ -1,73 +1,69 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use logos::{Lexer, Logos};
+use std::iter::Peekable;
 use std::mem::MaybeUninit;
-use std::{any::type_name, collections::HashMap, fmt::Debug, iter::Peekable, str::FromStr};
+use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
 
 use crate::sdf::{
     self,
     schema::{ChildrenKey, FieldKey},
 };
 
-use super::tok;
+use super::token::Token;
 
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
-    iter: Peekable<tok::Tokenizer<'a>>,
+    iter: Peekable<Lexer<'a, Token<'a>>>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
-        let tok = tok::Tokenizer::new(data);
-        Self { iter: tok.peekable() }
+        Self {
+            iter: Token::lexer(data).peekable(),
+        }
     }
 
     #[inline]
-    fn fetch_next(&mut self) -> Result<(tok::Type, &'a str)> {
-        let next = self.iter.next().context("Unexpected end of tokens")?;
-        let token = next?;
-
-        Ok((token.ty, token.str))
-    }
-
-    #[inline]
-    fn peek_next(&mut self) -> Option<(tok::Type, &'a str)> {
+    fn fetch_next(&mut self) -> Result<Token<'a>> {
         self.iter
-            .peek()
-            .and_then(|result| result.as_ref().ok())
-            .map(|pair| (pair.ty, pair.str))
+            .next()
+            .context("Unexpected end of tokens")?
+            .map_err(|e| anyhow!("Logos error: {:?}", e))
     }
 
-    fn ensure_next(&mut self, ty: tok::Type, value: &str) -> Result<()> {
-        let (nty, str) = self.fetch_next()?;
+    #[inline]
+    fn peek_next(&mut self) -> Option<&Result<Token<'a>, ()>> {
+        self.iter.peek()
+    }
 
-        ensure!(nty == ty, "Unexpected token type (want: {:?}, got {:?})", ty, nty);
-        ensure!(str == value, "Unexpected token value (want: {}, got: {})", value, str);
-
+    fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
+        let token = self.fetch_next()?;
+        ensure!(
+            token == expected_token,
+            "Unexpected token (want: {:?}, got {:?})",
+            expected_token,
+            token
+        );
         Ok(())
     }
 
     #[inline]
-    fn ensure_pun(&mut self, value: &str) -> Result<()> {
-        self.ensure_next(tok::Type::Punctuation, value)
+    fn ensure_pun(&mut self, value: char) -> Result<()> {
+        self.ensure_next(Token::Punctuation(value))
             .context("Punctuation token expected")
     }
 
     fn fetch_str(&mut self) -> Result<&str> {
-        let (ty, str) = self.fetch_next()?;
-
-        ensure!(
-            ty == tok::Type::String,
-            "Unexpected token type {:?} (want {:?})",
-            ty,
-            tok::Type::String
-        );
-
-        Ok(str)
+        let token = self.fetch_next()?;
+        token
+            .clone()
+            .try_as_string()
+            .ok_or_else(|| anyhow!("Unexpected token {:?} (want String)", token))
     }
 
     /// Parse tokens to specs.
     pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::Spec>> {
         let mut data = HashMap::new();
-
         let current_path = sdf::Path::abs_root();
 
         // Read pseudo root.
@@ -80,33 +76,26 @@ impl<'a> Parser<'a> {
         }
 
         pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(root_children));
-
         data.insert(current_path.clone(), pseudo_root_spec);
         Ok(data)
     }
 
     fn read_pseudo_root(&mut self) -> Result<sdf::Spec> {
         // Make sure text file starts with #usda...
-        {
-            let (ty, str) = self.fetch_next().context("Unable to read first line")?;
-
-            ensure!(
-                ty == tok::Type::Magic,
-                "Text file must start with magic token, got {:?}",
-                ty
-            );
-
-            ensure!(str == "#usda 1.0", "File must start with '#usda 1.0', got: {:?}", str);
-        }
+        let version = self
+            .fetch_next()?
+            .try_as_magic()
+            .ok_or_else(|| anyhow!("Text file must start with magic token, got {:?}", self.peek_next()))?;
+        ensure!(version == "1.0", "File must start with '#usda 1.0', got: {:?}", version);
 
         let mut root = sdf::Spec::new(sdf::SpecType::PseudoRoot);
 
-        if self.peek_next() != Some((tok::Type::Punctuation, "(")) {
+        if self.peek_next().map(|r| r.as_ref().ok()) != Some(Some(&Token::Punctuation('('))) {
             return Ok(root);
         }
 
         // Eat (
-        self.ensure_next(tok::Type::Punctuation, "(")?;
+        self.ensure_pun('(')?;
 
         const KNOWN_PROPS: &[(&str, Type)] = &[
             (FieldKey::DefaultPrim.as_str(), Type::Token),
@@ -125,40 +114,30 @@ impl<'a> Parser<'a> {
             let next = self.fetch_next().context("Unable to fetch next pseudo root property")?;
 
             match next {
-                (tok::Type::Punctuation, ")") => break,
-
-                // String without doc keyword
-                (tok::Type::String, str) => {
+                Token::Punctuation(')') => break,
+                Token::String(str) => {
                     root.add(FieldKey::Documentation, str);
                 }
-
-                // doc = "?"
-                (tok::Type::Doc, _) => {
-                    self.ensure_pun("=")?;
+                Token::Doc => {
+                    self.ensure_pun('=')?;
                     let value = self.fetch_str()?;
                     root.add("doc", value);
                 }
-
-                // SubLayers handling
-                (tok::Type::SubLayers, _) => {
-                    self.ensure_pun("=")?;
+                Token::SubLayers => {
+                    self.ensure_pun('=')?;
                     let (sublayers, sublayer_offsets) = self.parse_sublayers().context("Unable to parse subLayers")?;
                     root.add(FieldKey::SubLayers, sublayers);
                     root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
                 }
-
-                // Known type
-                (tok::Type::Identifier, name) => {
+                Token::Identifier(name) => {
                     if let Some((name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
-                        self.ensure_pun("=")?;
-
+                        self.ensure_pun('=')?;
                         let value = self
                             .parse_value(ty)
                             .with_context(|| format!("Unable to parse value for {name}"))?;
                         root.add(name, value);
                     }
                 }
-
                 _ => bail!("Unexpected token {:?}", next),
             }
         }
@@ -177,72 +156,58 @@ impl<'a> Parser<'a> {
     ) -> Result<()> {
         let mut spec = sdf::Spec::new(sdf::SpecType::Prim);
 
-        // Each primitive starts with specifier.
-        // Possible options are:
-        //   def - a concrete, defined prim.
-        //   over - a speculative override.
-        //   class - prims from which other prims inherit.
-        //
-        // See https://openusd.org/release/usdfaq.html#what-s-the-difference-between-an-over-and-a-typeless-def
         let specifier = {
-            let (specifier, _) = self.fetch_next().context("Unable to read prim specifier")?;
-            match specifier {
-                tok::Type::Def => sdf::Specifier::Def,
-                tok::Type::Over => sdf::Specifier::Over,
-                tok::Type::Class => sdf::Specifier::Class,
-                _ => bail!("Unexpected prim specifier: {:?}", specifier),
+            let specifier_token = self.fetch_next().context("Unable to read prim specifier")?;
+            match specifier_token {
+                Token::Def => sdf::Specifier::Def,
+                Token::Over => sdf::Specifier::Over,
+                Token::Class => sdf::Specifier::Class,
+                _ => bail!("Unexpected prim specifier: {:?}", specifier_token),
             }
         };
 
-        // For "def", read prim schema.
         if specifier == sdf::Specifier::Def {
-            let (ty, prim_type) = self.fetch_next().context("Unable to read prim type")?;
-            ensure!(ty == tok::Type::Identifier);
-
+            let prim_type = self
+                .fetch_next()?
+                .try_as_identifier()
+                .ok_or_else(|| anyhow!("Unexpected token type for prim type, expected Identifier"))?;
             spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
         }
 
-        // Read prim name.
         let name = self.fetch_str().context("Prim name expected")?;
         parent_children.push(name.to_string());
         let prim_path = current_path.append_path(name)?;
 
         let mut properties = Vec::new();
 
-        // Either block with () or {}
         let brace = self.fetch_next()?;
         match brace {
-            (tok::Type::Punctuation, "(") => {
+            Token::Punctuation('(') => {
                 todo!("Parse prim properties")
             }
-            (tok::Type::Punctuation, "{") => {
-                // Parse prim body.
-
+            Token::Punctuation('{') => {
                 let mut children = Vec::new();
-
                 loop {
-                    // At this point we expect either nested primitives or properties.
-                    let next = self.peek_next().context("Unexpected end of prim body")?;
-
+                    let next = self
+                        .peek_next()
+                        .context("Unexpected end of prim body")?
+                        .as_ref()
+                        .map_err(|e| anyhow!("{:?}", e))?;
                     match next {
-                        // End of block (or empty block).
-                        (tok::Type::Punctuation, "}") => {
+                        Token::Punctuation('}') => {
                             self.fetch_next()?;
                             break;
                         }
-                        // Read nested primitive.
-                        (ty, _) if ty == tok::Type::Def || ty == tok::Type::Over || ty == tok::Type::Class => {
+                        Token::Def | Token::Over | Token::Class => {
                             self.read_prim(&prim_path, &mut children, data)
                                 .context("Unable to read nested primitive")?;
                         }
-                        // Otherwise read property.
                         _ => {
                             self.read_attribute(&prim_path, &mut properties, data)
                                 .context("Unable to read attribute")?;
                         }
                     }
                 }
-
                 spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             }
             _ => bail!(
@@ -253,7 +218,6 @@ impl<'a> Parser<'a> {
 
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
         spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
-
         data.insert(prim_path, spec);
 
         Ok(())
@@ -266,49 +230,37 @@ impl<'a> Parser<'a> {
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<()> {
         let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
-
-        // TODO: Handle 'custom' field.
         let custom = false;
-
         let mut variability = sdf::Variability::Varying;
-        match self.peek_next() {
-            Some((tok::Type::Varying, _)) => {
-                // Varying by default, just consume token.
-                self.fetch_next()?;
-            }
-            Some((tok::Type::Uniform, _)) => {
-                variability = sdf::Variability::Uniform;
-                self.fetch_next()?;
-            }
-            _ => {}
-        };
 
-        let (ty, type_name) = self.fetch_next().context("Unable to fetch data type token")?;
-        ensure!(
-            ty == tok::Type::Identifier,
-            "Unexpected token type for attribute type: {:?}",
-            ty
-        );
+        if let Some(Ok(Token::Varying)) = self.peek_next() {
+            self.fetch_next()?;
+        } else if let Some(Ok(Token::Uniform)) = self.peek_next() {
+            variability = sdf::Variability::Uniform;
+            self.fetch_next()?;
+        }
+
+        let type_name = self
+            .fetch_next()?
+            .try_as_identifier()
+            .ok_or_else(|| anyhow!("Unexpected token type for attribute type, expected Identifier"))?;
         let data_type = Self::parse_data_type(type_name)?;
 
-        let (ty, name) = self.fetch_next().context("Unable to parse attribute name")?;
-        ensure!(
-            ty == tok::Type::Identifier || ty == tok::Type::NamespacedIdentifier,
-            "Unexpected token type for attribute name: {:?}",
-            ty
-        );
+        let name_token = self.fetch_next()?;
+        let name = match name_token {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+            _ => bail!("Unexpected token type for attribute name: {:?}", name_token),
+        };
         let path = current_path.append_property(name)?;
         properties.push(name.to_string());
 
-        self.ensure_next(tok::Type::Punctuation, "=")?;
-
+        self.ensure_pun('=')?;
         let value = self.parse_value(data_type)?;
 
         spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
         spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
         spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
         spec.add(FieldKey::Default, value);
-
         data.insert(path, spec);
 
         Ok(())
@@ -465,16 +417,13 @@ impl<'a> Parser<'a> {
     where
         <T as FromStr>::Err: std::fmt::Debug,
     {
-        let (ty, value) = self.fetch_next()?;
-        let value = T::from_str(value).map_err(|err| {
-            anyhow!(
-                "Failed to parse {} from '{}' of type {:?}: {:?}",
-                type_name::<T>(),
-                value,
-                ty,
-                err
-            )
-        })?;
+        let token = self.fetch_next()?;
+        let value_str = match token {
+            Token::Number(s) | Token::Identifier(s) | Token::String(s) | Token::NamespacedIdentifier(s) => s,
+            _ => bail!("Expected a number, identifier, or string, got {:?}", token),
+        };
+        let value = T::from_str(value_str)
+            .map_err(|err| anyhow!("Failed to parse {} from '{}': {:?}", type_name::<T>(), value_str, err))?;
 
         Ok(value)
     }
@@ -484,18 +433,12 @@ impl<'a> Parser<'a> {
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
-        // TODO: array::try_map would be nice to have here once stable, see https://github.com/rust-lang/rust/issues/79711
-        // or consider fixed vec crates.
         let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        self.parse_seq_fn(",", |this, i| {
+        self.parse_seq_fn(',', |this, i| {
             result[i] = MaybeUninit::new(this.parse_token::<T>()?);
             Ok(())
         })?;
-
-        // SAFETY: All elements are initialized, so transmute the array to [T; N]
         let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
-
         Ok(result)
     }
 
@@ -510,7 +453,6 @@ impl<'a> Parser<'a> {
             out.push(this.parse_token::<T>()?);
             Ok(())
         })?;
-
         Ok(out)
     }
 
@@ -525,7 +467,6 @@ impl<'a> Parser<'a> {
             out.extend(this.parse_tuple::<T, N>()?);
             Ok(())
         })?;
-
         Ok(out)
     }
 
@@ -534,57 +475,43 @@ impl<'a> Parser<'a> {
         let mut sublayer_offsets = Vec::new();
 
         self.parse_array_fn(|this| {
-            // Parse path
-
-            let (t, asset_path) = this.fetch_next()?;
-            ensure!(t == tok::Type::AssetRef, "Asset ref expected, got {t:?}");
+            let asset_path = this
+                .fetch_next()?
+                .try_as_asset_ref()
+                .ok_or_else(|| anyhow!("Asset ref expected, got {:?}", this.peek_next()))?;
             sublayers.push(asset_path.to_string());
 
-            // Parse optional layer offsets.
             let mut layer_offset = sdf::LayerOffset::default();
+            if let Some(Ok(Token::Punctuation('('))) = this.peek_next() {
+                let mut offset = None;
+                let mut scale = None;
 
-            let next = this.peek_next().context("Unexpected end of array")?;
-            match next {
-                (tok::Type::Punctuation, ",") => {}
-                (tok::Type::Punctuation, "(") => {
-                    // Read (offset = 10; scale = 0.5)
-
-                    let mut offset = None;
-                    let mut scale = None;
-
-                    this.parse_seq_fn(";", |this, _| {
-                        let (ty, _) = this.fetch_next()?;
-                        this.ensure_next(tok::Type::Punctuation, "=")?;
-                        let value = this.parse_value(Type::Double)?;
-
-                        match ty {
-                            tok::Type::Offset => {
-                                ensure!(offset.is_none(), "offset specified twice");
-                                offset = Some(value);
-                            }
-                            tok::Type::Scale => {
-                                ensure!(scale.is_none(), "scale specified twice");
-                                scale = Some(value);
-                            }
-                            _ => bail!("Unexpected token type: {ty:?}"),
+                this.parse_seq_fn(';', |this, _| {
+                    let token = this.fetch_next()?;
+                    this.ensure_pun('=')?;
+                    let value = this.parse_value(Type::Double)?;
+                    match token {
+                        Token::Offset => {
+                            ensure!(offset.is_none(), "offset specified twice");
+                            offset = Some(value);
                         }
-
-                        Ok(())
-                    })?;
-
-                    if let Some(offset) = offset {
-                        layer_offset.offset = offset.try_as_double().context("Unexpected offset type, want double")?;
+                        Token::Scale => {
+                            ensure!(scale.is_none(), "scale specified twice");
+                            scale = Some(value);
+                        }
+                        _ => bail!("Unexpected token type: {:?}", token),
                     }
+                    Ok(())
+                })?;
 
-                    if let Some(scale) = scale {
-                        layer_offset.scale = scale.try_as_double().context("")?;
-                    }
+                if let Some(offset) = offset {
+                    layer_offset.offset = offset.try_as_double().context("Unexpected offset type, want double")?;
                 }
-                _ => {}
-            };
-
+                if let Some(scale) = scale {
+                    layer_offset.scale = scale.try_as_double().context("")?;
+                }
+            }
             sublayer_offsets.push(layer_offset);
-
             Ok(())
         })?;
 
@@ -596,70 +523,51 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// Helper method to read array of elements.
-    ///
-    /// For each array element, `read_elements` is called to parse element.
-    /// Inner element can be a single value, tuple, sublayer, etc (up to callback function).
-    ///
-    /// The callback must advance iterator or return an error to prevent infinite loop.
-    ///
-    /// Also, the callback accepts a mutable reference to the parser to satisfy the borrow checker.
     fn parse_array_fn(&mut self, mut read_elements: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
-        self.ensure_next(tok::Type::Punctuation, "[")
-            .context("Array must start with [")?;
+        self.ensure_pun('[').context("Array must start with [")?;
 
         let mut index = 0;
-
         loop {
-            // Special case - empty array like []
-            if self.peek_next() == Some((tok::Type::Punctuation, "]")) {
-                self.fetch_next()?; // Consume it.
+            if self.peek_next().map(|r| r.as_ref().ok()) == Some(Some(&Token::Punctuation(']'))) {
+                self.fetch_next()?;
                 break;
             }
 
             read_elements(self).with_context(|| format!("Unable to read array element {index}"))?;
-
             index += 1;
 
             match self.fetch_next()? {
-                (tok::Type::Punctuation, ",") => continue,
-                (tok::Type::Punctuation, "]") => break,
+                Token::Punctuation(',') => continue,
+                Token::Punctuation(']') => break,
                 t => bail!("Either comma or closing bracket expected after value, got: {:?}", t),
             }
         }
-
         Ok(())
     }
 
-    /// Parse sequence of elements inside of `()`.
-    /// This can be a tuple of number `(a, b, c)` or list of params `(a=b, c=d)`.
     fn parse_seq_fn(
         &mut self,
-        delim: &str,
+        delim: char,
         mut read_element: impl FnMut(&mut Self, usize) -> Result<()>,
     ) -> Result<()> {
-        self.ensure_next(tok::Type::Punctuation, "(")
-            .context("Open brace expected")?;
+        self.ensure_pun('(').context("Open brace expected")?;
 
         let mut index = 0;
-
         loop {
-            if self.peek_next() == Some((tok::Type::Punctuation, ")")) {
+            if self.peek_next().map(|r| r.as_ref().ok()) == Some(Some(&Token::Punctuation(')'))) {
                 self.fetch_next()?;
                 break;
             }
 
             read_element(self, index).with_context(|| format!("Unable to read element {index}"))?;
-
             index += 1;
 
             match self.fetch_next()? {
-                (tok::Type::Punctuation, ")") => break,
-                (tok::Type::Punctuation, d) if d == delim => continue,
+                Token::Punctuation(')') => break,
+                Token::Punctuation(d) if d == delim => continue,
                 t => bail!("Unexpected token between (): {:?}", t),
             }
         }
-
         Ok(())
     }
 }
