@@ -179,42 +179,53 @@ impl<'a> Parser<'a> {
         let prim_path = current_path.append_path(name)?;
 
         let mut properties = Vec::new();
+        let mut brace_consumed = false;
 
         let brace = self.fetch_next()?;
         match brace {
             Token::Punctuation('(') => {
-                todo!("Parse prim properties")
+                self.read_prim_metadata(&mut spec, None)
+                    .context("Unable to parse prim metadata")?;
+                self.ensure_pun(')').context("Prim metadata must end with )")?;
             }
             Token::Punctuation('{') => {
-                let mut children = Vec::new();
-                loop {
-                    let next = self
-                        .peek_next()
-                        .context("Unexpected end of prim body")?
-                        .as_ref()
-                        .map_err(|e| anyhow!("{:?}", e))?;
-                    match next {
-                        Token::Punctuation('}') => {
-                            self.fetch_next()?;
-                            break;
-                        }
-                        Token::Def | Token::Over | Token::Class => {
-                            self.read_prim(&prim_path, &mut children, data)
-                                .context("Unable to read nested primitive")?;
-                        }
-                        _ => {
-                            self.read_attribute(&prim_path, &mut properties, data)
-                                .context("Unable to read attribute")?;
-                        }
-                    }
-                }
-                spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+                brace_consumed = true;
             }
-            _ => bail!(
-                "Unexpected token after prim name, must be either () or {{}}, got: {:?}",
-                brace
-            ),
+            other => {
+                // Support metadata without wrapping parentheses.
+                self.read_prim_metadata(&mut spec, Some(other))
+                    .context("Unable to parse prim metadata")?;
+                brace_consumed = false;
+            }
         };
+
+        if !brace_consumed {
+            self.ensure_pun('{')?;
+        }
+
+        let mut children = Vec::new();
+        loop {
+            let next = self
+                .peek_next()
+                .context("Unexpected end of prim body")?
+                .as_ref()
+                .map_err(|e| anyhow!("{:?}", e))?;
+            match next {
+                Token::Punctuation('}') => {
+                    self.fetch_next()?;
+                    break;
+                }
+                Token::Def | Token::Over | Token::Class => {
+                    self.read_prim(&prim_path, &mut children, data)
+                        .context("Unable to read nested primitive")?;
+                }
+                _ => {
+                    self.read_attribute(&prim_path, &mut properties, data)
+                        .context("Unable to read attribute")?;
+                }
+            }
+        }
+        spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
 
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
         spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
@@ -264,6 +275,167 @@ impl<'a> Parser<'a> {
         data.insert(path, spec);
 
         Ok(())
+    }
+
+    /// Parse prim metadata contained either within parentheses or directly after the prim
+    /// declaration (until `{` is encountered).
+    fn read_prim_metadata(&mut self, spec: &mut sdf::Spec, first: Option<Token<'a>>) -> Result<()> {
+        let mut current = first;
+
+        loop {
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(')'))))
+                || matches!(self.peek_next(), Some(Ok(Token::Punctuation('{'))))
+            {
+                break;
+            }
+
+            let token = match current.take() {
+                Some(token) => token,
+                None => self.fetch_next()?,
+            };
+
+            self.read_prim_metadata_entry(token, spec)
+                .context("Unable to parse prim metadata entry")?;
+        }
+
+        Ok(())
+    }
+
+    fn read_prim_metadata_entry(&mut self, token: Token<'a>, spec: &mut sdf::Spec) -> Result<()> {
+        let (list_op, name_token) = match token {
+            Token::Add | Token::Append | Token::Delete | Token::Prepend | Token::Reorder => {
+                let name = self.fetch_next()?;
+                (Some(token), name)
+            }
+            _ => (None, token),
+        };
+
+        let name = match name_token {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+            Token::References => FieldKey::References.as_str(),
+            Token::Payload => FieldKey::Payload.as_str(),
+            other => bail!("Unexpected metadata name token: {:?}", other),
+        };
+
+        self.ensure_pun('=')?;
+
+        match name {
+            n if n == FieldKey::Active.as_str() => {
+                let value = self.parse_token::<bool>().context("Unable to parse active flag")?;
+                spec.add(FieldKey::Active, sdf::Value::Bool(value));
+            }
+            "apiSchemas" => {
+                let values = self.parse_token_list().context("Unable to parse apiSchemas list")?;
+                let list_op = self
+                    .apply_list_op(list_op, values)
+                    .context("Unable to build apiSchemas listOp")?;
+                spec.add("apiSchemas", sdf::Value::TokenListOp(list_op));
+            }
+            n if n == FieldKey::References.as_str() => {
+                let references = self.parse_reference_list().context("Unable to parse references")?;
+                let list_op = self
+                    .apply_list_op(list_op, references)
+                    .context("Unable to build references listOp")?;
+                spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
+            }
+            other => bail!("Unsupported prim metadata: {other}"),
+        }
+
+        Ok(())
+    }
+
+    fn parse_reference(&mut self) -> Result<sdf::Reference> {
+        let asset_path = self
+            .fetch_next()?
+            .try_as_asset_ref()
+            .ok_or_else(|| anyhow!("Asset reference expected"))?;
+
+        let mut reference = sdf::Reference {
+            asset_path: asset_path.to_string(),
+            prim_path: sdf::Path::default(),
+            layer_offset: sdf::LayerOffset::default(),
+            custom_data: HashMap::new(),
+        };
+
+        if matches!(self.peek_next(), Some(Ok(Token::PathRef(_)))) {
+            let path = self
+                .fetch_next()?
+                .try_as_path_ref()
+                .ok_or_else(|| anyhow!("Path reference expected"))?;
+            reference.prim_path = sdf::Path::new(path)?;
+        }
+
+        if let Some(Ok(Token::Punctuation('('))) = self.peek_next() {
+            self.parse_reference_layer_offset(&mut reference.layer_offset)
+                .context("Unable to parse reference layer offset")?;
+        }
+
+        Ok(reference)
+    }
+
+    fn parse_reference_layer_offset(&mut self, layer_offset: &mut sdf::LayerOffset) -> Result<()> {
+        self.ensure_pun('(')?;
+
+        self.parse_seq_fn(';', |this, _index| {
+            let token = this.fetch_next()?;
+            this.ensure_pun('=')?;
+            let value = this.parse_value(Type::Double)?;
+
+            match token {
+                Token::Offset => {
+                    layer_offset.offset = value.try_as_double().context("Expected double for offset")?;
+                }
+                Token::Scale => {
+                    layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
+                }
+                unexpected => bail!("Unexpected token in layer offset: {:?}", unexpected),
+            }
+
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    fn parse_reference_list(&mut self) -> Result<Vec<sdf::Reference>> {
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+            let mut out = Vec::new();
+            self.parse_array_fn(|this| {
+                out.push(this.parse_reference()?);
+                Ok(())
+            })?;
+            Ok(out)
+        } else {
+            Ok(vec![self.parse_reference()?])
+        }
+    }
+
+    fn parse_token_list(&mut self) -> Result<Vec<String>> {
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+            self.parse_array()
+        } else {
+            let value = self.parse_token::<String>()?;
+            Ok(vec![value])
+        }
+    }
+
+    fn apply_list_op<T: Default + Clone>(&mut self, op: Option<Token<'a>>, items: Vec<T>) -> Result<sdf::ListOp<T>> {
+        let mut list = sdf::ListOp::default();
+
+        match op {
+            None => {
+                list.explicit = true;
+                list.explicit_items = items;
+            }
+            Some(Token::Prepend) => list.prepended_items = items,
+            Some(Token::Append) => list.appended_items = items,
+            Some(Token::Add) => list.added_items = items,
+            Some(Token::Delete) => list.deleted_items = items,
+            Some(Token::Reorder) => list.ordered_items = items,
+            other => bail!("Unsupported list op: {:?}", other),
+        }
+
+        Ok(list)
     }
 
     fn parse_value(&mut self, ty: Type) -> Result<sdf::Value> {
@@ -898,5 +1070,78 @@ def Xform "World"
         // Default one
         assert_eq!(offsets[1].offset, 0.0);
         assert_eq!(offsets[1].scale, 1.0);
+    }
+
+    #[test]
+    fn parse_prim_metadata_api_schemas() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Mesh "Mesh_001" (
+    active = true
+    prepend apiSchemas = ["MaterialBindingAPI"]
+)
+{
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let mesh = data.get(&sdf::path("/Mesh_001").unwrap()).unwrap();
+
+        assert!(mesh
+            .fields
+            .get(FieldKey::Active.as_str())
+            .unwrap()
+            .to_owned()
+            .try_as_bool()
+            .unwrap());
+
+        let api = mesh
+            .fields
+            .get("apiSchemas")
+            .unwrap()
+            .to_owned()
+            .try_as_token_list_op()
+            .unwrap();
+
+        assert!(api.explicit_items.is_empty());
+        assert_eq!(api.prepended_items, vec![String::from("MaterialBindingAPI")]);
+    }
+
+    #[test]
+    fn parse_prim_metadata_references() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Mesh "visual" (
+    references = @./visual.usd@</visual>
+)
+{
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let mesh = data.get(&sdf::path("/visual").unwrap()).unwrap();
+
+        let references = mesh
+            .fields
+            .get(FieldKey::References.as_str())
+            .unwrap()
+            .to_owned()
+            .try_as_reference_list_op()
+            .unwrap();
+
+        assert!(references.explicit);
+        assert_eq!(references.explicit_items.len(), 1);
+
+        let reference = &references.explicit_items[0];
+        assert_eq!(reference.asset_path, "./visual.usd");
+        assert_eq!(reference.prim_path.as_str(), "/visual");
+        assert_eq!(reference.layer_offset.offset, 0.0);
+        assert_eq!(reference.layer_offset.scale, 1.0);
     }
 }
