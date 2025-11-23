@@ -62,6 +62,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse tokens to specs.
+    /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
     pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::Spec>> {
         let mut data = HashMap::new();
         let current_path = sdf::Path::abs_root();
@@ -80,6 +81,7 @@ impl<'a> Parser<'a> {
         Ok(data)
     }
 
+    /// Parse the file header/pseudo-root to populate layer-level metadata before prim traversal.
     fn read_pseudo_root(&mut self) -> Result<sdf::Spec> {
         // Make sure text file starts with #usda...
         let version = self
@@ -145,9 +147,7 @@ impl<'a> Parser<'a> {
         Ok(root)
     }
 
-    /// Reads a single primitive.
-    ///
-    /// This function is called recusrively for nested primitives.
+    /// Parse a prim declaration, capture its metadata, and recursively traverse nested prims/props.
     fn read_prim(
         &mut self,
         current_path: &sdf::Path,
@@ -241,6 +241,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse an attribute/property declaration, including variability, metadata, and default value.
     fn read_attribute(
         &mut self,
         current_path: &sdf::Path,
@@ -311,6 +312,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Skip over a relationship/connection value without interpreting its contents.
     fn skip_connection_value(&mut self) -> Result<()> {
         let token = self.fetch_next()?;
         match token {
@@ -330,6 +332,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse the metadata block attached to an attribute and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
         self.ensure_pun('(')?;
 
@@ -359,6 +362,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
         let token = self.fetch_next()?;
         match token {
@@ -401,6 +405,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Skip an entire relationship declaration so it does not register as a property.
     fn skip_relationship(&mut self) -> Result<()> {
         let target = self.fetch_next()?;
         match target {
@@ -438,6 +443,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse a single prim metadata assignment, honoring list ops for supported fields.
     fn read_prim_metadata_entry(&mut self, token: Token<'a>, spec: &mut sdf::Spec) -> Result<()> {
         let (list_op, name_token) = match token {
             Token::Add | Token::Append | Token::Delete | Token::Prepend | Token::Reorder => {
@@ -506,6 +512,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse one reference entry, including optional target prim path and layer offset.
     fn parse_reference(&mut self) -> Result<sdf::Reference> {
         let asset_path = self
             .fetch_next()?
@@ -535,6 +542,7 @@ impl<'a> Parser<'a> {
         Ok(reference)
     }
 
+    /// Parse `(offset = ...; scale = ...)` blocks attached to references or sublayers.
     fn parse_reference_layer_offset(&mut self, layer_offset: &mut sdf::LayerOffset) -> Result<()> {
         self.ensure_pun('(')?;
 
@@ -559,6 +567,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse a list-op friendly sequence of references.
     fn parse_reference_list(&mut self) -> Result<Vec<sdf::Reference>> {
         if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
             let mut out = Vec::new();
@@ -608,6 +617,7 @@ impl<'a> Parser<'a> {
         Ok(list)
     }
 
+    /// Decode a typed value based on USD's scalar/array/role type tables.
     fn parse_value(&mut self, ty: Type) -> Result<sdf::Value> {
         let value = match ty {
             // Bool
@@ -776,6 +786,7 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
+    /// Parse USD's flexible boolean literal forms (identifiers, numeric, or string).
     fn parse_bool(&mut self) -> Result<bool> {
         let token = self.fetch_next()?;
         match token {
@@ -803,6 +814,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse an array of booleans, reusing the permissive literal parsing rules.
     fn parse_bool_array(&mut self) -> Result<Vec<bool>> {
         let mut out = Vec::new();
         self.parse_array_fn(|this| {
@@ -829,6 +841,7 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
+    /// Parse `subLayers` entries along with their optional `(offset/scale)` metadata.
     fn parse_sublayers(&mut self) -> Result<(sdf::Value, sdf::Value)> {
         let mut sublayers = Vec::new();
         let mut sublayer_offsets = Vec::new();
@@ -882,6 +895,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    /// Generic array parser that delegates element parsing while handling delimiters.
     fn parse_array_fn(&mut self, mut read_elements: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
         self.ensure_pun('[').context("Array must start with [")?;
 
@@ -904,6 +918,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse delimiter-separated sequences like `(a, b)` or `(offset = ...; scale = ...)`.
     fn parse_seq_fn(
         &mut self,
         delim: char,
@@ -930,6 +945,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse fixed-size tuples, preserving order and surfacing contextual errors.
     fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
     where
         T: FromStr,
@@ -1061,6 +1077,7 @@ mod tests {
     }
 
     #[test]
+    // Verifies pseudo-root parsing captures doc strings and layer metadata from the header.
     fn parse_pseudo_root() {
         let mut parser = Parser::new(
             r#"
@@ -1094,6 +1111,7 @@ mod tests {
     }
 
     #[test]
+    // Confirms nested prim traversal builds the expected child hierarchy.
     fn parse_nested_prims() {
         let mut parser = Parser::new(
             r#"
@@ -1138,6 +1156,7 @@ def Xform "Forest_set"
     }
 
     #[test]
+    // Ensures attribute metadata blocks are captured on the owning spec.
     fn parse_attribute_metadata_interpolation() {
         let mut parser = Parser::new(
             r#"
@@ -1167,6 +1186,7 @@ def Mesh "M"
     }
 
     #[test]
+    // Verifies the parser tolerates custom/asset/connect syntax and filters unsanitized props.
     fn parse_unsanitized_attributes() {
         let mut parser = Parser::new(
             r#"
@@ -1223,6 +1243,7 @@ def Shader "Image_Texture"
     }
 
     #[test]
+    // Exercises a wide set of attribute types to validate scalar/array decoding.
     fn parse_attributes() {
         let mut parser = Parser::new(
             r#"
@@ -1315,6 +1336,7 @@ def Xform "World"
     }
 
     #[test]
+    // Validates sublayer parsing captures offsets, scales, and defaults when missing.
     fn test_parse_layer_offsets() {
         let mut parser = Parser::new(
             r#"
@@ -1344,6 +1366,7 @@ def Xform "World"
     }
 
     #[test]
+    // Ensures pseudo-root parsing records sublayer paths and their offsets.
     fn test_parse_sublayers_in_pseudo_root() {
         let mut parser = Parser::new(
             r#"
@@ -1389,6 +1412,7 @@ def Xform "World"
     }
 
     #[test]
+    // Checks prim metadata list ops for apiSchemas and the active flag.
     fn parse_prim_metadata_api_schemas() {
         let mut parser = Parser::new(
             r#"
@@ -1427,6 +1451,7 @@ def Mesh "Mesh_001" (
     }
 
     #[test]
+    // Ensures prim reference metadata is parsed with asset/prim path and default offsets.
     fn parse_prim_metadata_references() {
         let mut parser = Parser::new(
             r#"
