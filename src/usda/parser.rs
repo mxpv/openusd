@@ -166,15 +166,18 @@ impl<'a> Parser<'a> {
             }
         };
 
-        if specifier == sdf::Specifier::Def {
-            let prim_type = self
-                .fetch_next()?
-                .try_as_identifier()
-                .ok_or_else(|| anyhow!("Unexpected token type for prim type, expected Identifier"))?;
-            spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
+        let mut name_token = self.fetch_next()?;
+        if specifier == sdf::Specifier::Def || specifier == sdf::Specifier::Class {
+            if let Some(prim_type) = name_token.clone().try_as_identifier() {
+                spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
+                name_token = self.fetch_next()?;
+            }
         }
 
-        let name = self.fetch_str().context("Prim name expected")?;
+        let name = name_token
+            .clone()
+            .try_as_string()
+            .ok_or_else(|| anyhow!("Unexpected token {:?} (want String)", name_token))?;
         parent_children.push(name.to_string());
         let prim_path = current_path.append_path(name)?;
 
@@ -219,6 +222,10 @@ impl<'a> Parser<'a> {
                     self.read_prim(&prim_path, &mut children, data)
                         .context("Unable to read nested primitive")?;
                 }
+                Token::Rel => {
+                    self.fetch_next()?;
+                    self.skip_relationship()?;
+                }
                 _ => {
                     self.read_attribute(&prim_path, &mut properties, data)
                         .context("Unable to read attribute")?;
@@ -241,8 +248,13 @@ impl<'a> Parser<'a> {
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<()> {
         let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
-        let custom = false;
+        let mut custom = false;
         let mut variability = sdf::Variability::Varying;
+
+        if let Some(Ok(Token::Custom)) = self.peek_next() {
+            custom = true;
+            self.fetch_next()?;
+        }
 
         if let Some(Ok(Token::Varying)) = self.peek_next() {
             self.fetch_next()?;
@@ -251,10 +263,14 @@ impl<'a> Parser<'a> {
             self.fetch_next()?;
         }
 
-        let type_name = self
-            .fetch_next()?
-            .try_as_identifier()
-            .ok_or_else(|| anyhow!("Unexpected token type for attribute type, expected Identifier"))?;
+        let type_token = self.fetch_next()?;
+        let type_name = match type_token {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+            other => bail!(
+                "Unexpected token type for attribute type, expected Identifier, got {:?}",
+                other
+            ),
+        };
         let data_type = Self::parse_data_type(type_name)?;
 
         let name_token = self.fetch_next()?;
@@ -262,11 +278,29 @@ impl<'a> Parser<'a> {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
             _ => bail!("Unexpected token type for attribute name: {:?}", name_token),
         };
-        let path = current_path.append_property(name)?;
-        properties.push(name.to_string());
+
+        if name.contains(".connect") {
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+                self.fetch_next()?;
+                self.skip_connection_value()?;
+            }
+            return Ok(());
+        }
+
+        if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            return Ok(());
+        }
 
         self.ensure_pun('=')?;
         let value = self.parse_value(data_type)?;
+        let path = current_path.append_property(name)?;
+
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+            self.parse_property_metadata(&mut spec)
+                .context("Unable to parse attribute metadata")?;
+        }
+
+        properties.push(name.to_string());
 
         spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
         spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
@@ -274,6 +308,109 @@ impl<'a> Parser<'a> {
         spec.add(FieldKey::Default, value);
         data.insert(path, spec);
 
+        Ok(())
+    }
+
+    fn skip_connection_value(&mut self) -> Result<()> {
+        let token = self.fetch_next()?;
+        match token {
+            Token::Punctuation('[') => {
+                let mut depth = 1i32;
+                while depth > 0 {
+                    let next = self.fetch_next()?;
+                    match next {
+                        Token::Punctuation('[') => depth += 1,
+                        Token::Punctuation(']') => depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
+        self.ensure_pun('(')?;
+
+        loop {
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(')')))) {
+                self.fetch_next()?;
+                break;
+            }
+
+            let name_token = self.fetch_next()?;
+            let name = match name_token {
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+                other => bail!("Unexpected attribute metadata name token: {:?}", other),
+            };
+
+            self.ensure_pun('=')?;
+            let value = self
+                .parse_property_metadata_value()
+                .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
+            spec.fields.insert(name.to_owned(), value);
+
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(',')))) {
+                self.fetch_next()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
+        let token = self.fetch_next()?;
+        match token {
+            Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
+            Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::Token(value.to_owned())),
+            Token::Number(raw) => {
+                if let Ok(int) = raw.parse::<i64>() {
+                    Ok(sdf::Value::Int64(int))
+                } else if let Ok(float) = raw.parse::<f64>() {
+                    Ok(sdf::Value::Double(float))
+                } else {
+                    bail!("Unable to parse numeric metadata value: {}", raw);
+                }
+            }
+            Token::Punctuation('[') => {
+                let mut values = Vec::new();
+                loop {
+                    if matches!(self.peek_next(), Some(Ok(Token::Punctuation(']')))) {
+                        self.fetch_next()?;
+                        break;
+                    }
+
+                    let entry = self.fetch_next()?;
+                    let value = match entry {
+                        Token::String(v) => v.to_owned(),
+                        Token::Identifier(v) | Token::NamespacedIdentifier(v) | Token::Number(v) => v.to_owned(),
+                        other => bail!("Unsupported metadata array element: {:?}", other),
+                    };
+                    values.push(value);
+
+                    match self.fetch_next()? {
+                        Token::Punctuation(',') => continue,
+                        Token::Punctuation(']') => break,
+                        other => bail!("Unexpected token in metadata array: {:?}", other),
+                    }
+                }
+                Ok(sdf::Value::StringVec(values))
+            }
+            other => bail!("Unsupported property metadata value token: {:?}", other),
+        }
+    }
+
+    fn skip_relationship(&mut self) -> Result<()> {
+        let target = self.fetch_next()?;
+        match target {
+            Token::Identifier(_) | Token::NamespacedIdentifier(_) => {}
+            other => bail!("Unexpected token in relationship declaration: {:?}", other),
+        }
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            self.fetch_next()?;
+            self.skip_connection_value()?;
+        }
         Ok(())
     }
 
@@ -312,8 +449,10 @@ impl<'a> Parser<'a> {
 
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+            Token::Kind => FieldKey::Kind.as_str(),
             Token::References => FieldKey::References.as_str(),
             Token::Payload => FieldKey::Payload.as_str(),
+            Token::Inherits => FieldKey::InheritPaths.as_str(),
             other => bail!("Unexpected metadata name token: {:?}", other),
         };
 
@@ -337,6 +476,29 @@ impl<'a> Parser<'a> {
                     .apply_list_op(list_op, references)
                     .context("Unable to build references listOp")?;
                 spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
+            }
+            n if n == FieldKey::InheritPaths.as_str() => {
+                let paths = if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+                    let mut collected = Vec::new();
+                    self.parse_array_fn(|this| {
+                        collected.push(this.parse_inherit_path()?);
+                        Ok(())
+                    })?;
+                    collected
+                } else {
+                    vec![self.parse_inherit_path()?]
+                };
+                let list_op = self
+                    .apply_list_op(list_op, paths)
+                    .context("Unable to build inherits listOp")?;
+                spec.add(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
+            }
+            n if n == FieldKey::Kind.as_str() => {
+                ensure!(list_op.is_none(), "kind metadata does not support list ops");
+                let value = self
+                    .parse_token::<String>()
+                    .context("Unable to parse kind metadata")?;
+                spec.add(FieldKey::Kind, sdf::Value::Token(value));
             }
             other => bail!("Unsupported prim metadata: {other}"),
         }
@@ -410,6 +572,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_inherit_path(&mut self) -> Result<sdf::Path> {
+        let token = self.fetch_next()?;
+        let path_str = token
+            .try_as_path_ref()
+            .ok_or_else(|| anyhow!("Path reference expected for inherits metadata"))?;
+        Ok(sdf::Path::new(path_str)?)
+    }
+
     fn parse_token_list(&mut self) -> Result<Vec<String>> {
         if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
             self.parse_array()
@@ -441,8 +611,12 @@ impl<'a> Parser<'a> {
     fn parse_value(&mut self, ty: Type) -> Result<sdf::Value> {
         let value = match ty {
             // Bool
-            Type::Bool => sdf::Value::Bool(self.parse_token()?),
-            Type::BoolVec => sdf::Value::BoolVec(self.parse_array()?),
+            Type::Bool => sdf::Value::Bool(self.parse_bool()?),
+            Type::BoolVec => sdf::Value::BoolVec(self.parse_bool_array()?),
+
+            // Asset paths
+            Type::Asset => sdf::Value::AssetPath(self.parse_asset_path()?),
+            Type::AssetVec => sdf::Value::StringVec(self.parse_asset_path_array()?),
 
             // Ints
             Type::Uchar => sdf::Value::Uchar(self.parse_token()?),
@@ -577,6 +751,8 @@ impl<'a> Parser<'a> {
             // String, tokens
             "string" | "token" => Type::String,
             "string[]" | "token[]" => Type::TokenVec,
+            "asset" => Type::Asset,
+            "asset[]" => Type::AssetVec,
 
             _ => bail!("Unsupported data type: {}", ty),
         };
@@ -600,46 +776,57 @@ impl<'a> Parser<'a> {
         Ok(value)
     }
 
-    fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
-    where
-        T: FromStr,
-        <T as FromStr>::Err: Debug,
-    {
-        let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-        self.parse_seq_fn(',', |this, i| {
-            result[i] = MaybeUninit::new(this.parse_token::<T>()?);
+    fn parse_bool(&mut self) -> Result<bool> {
+        let token = self.fetch_next()?;
+        match token {
+            Token::Identifier(value) | Token::NamespacedIdentifier(value) => match value {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                other => bail!("Unexpected identifier for bool literal: {other}"),
+            },
+            Token::Number(value) => {
+                let parsed = value.parse::<f64>().context("Unable to parse numeric bool")?;
+                if parsed == 0.0 {
+                    Ok(false)
+                } else if parsed == 1.0 {
+                    Ok(true)
+                } else {
+                    bail!("Numeric bool literals must be 0 or 1, got {value}");
+                }
+            }
+            Token::String(value) => match value {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                other => bail!("Unexpected string for bool literal: {other}"),
+            },
+            other => bail!("Unexpected token for bool literal: {:?}", other),
+        }
+    }
+
+    fn parse_bool_array(&mut self) -> Result<Vec<bool>> {
+        let mut out = Vec::new();
+        self.parse_array_fn(|this| {
+            out.push(this.parse_bool()?);
             Ok(())
         })?;
-        let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
+        Ok(out)
+    }
+
+    fn parse_asset_path(&mut self) -> Result<String> {
+        let token = self.fetch_next()?;
+        token
+            .try_as_asset_ref()
+            .map(|value| value.to_owned())
+            .ok_or_else(|| anyhow!("Asset reference expected"))
+    }
+
+    fn parse_asset_path_array(&mut self) -> Result<Vec<String>> {
+        let mut result = Vec::new();
+        self.parse_array_fn(|this| {
+            result.push(this.parse_asset_path()?);
+            Ok(())
+        })?;
         Ok(result)
-    }
-
-    /// Parse array or array of tuples.
-    fn parse_array<T>(&mut self) -> Result<Vec<T>>
-    where
-        T: FromStr + Default,
-        <T as FromStr>::Err: Debug,
-    {
-        let mut out = Vec::new();
-        self.parse_array_fn(|this| {
-            out.push(this.parse_token::<T>()?);
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// Parse array of tuples.
-    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<T>>
-    where
-        T: FromStr,
-        <T as FromStr>::Err: Debug,
-    {
-        let mut out = Vec::new();
-        self.parse_array_fn(|this| {
-            out.extend(this.parse_tuple::<T, N>()?);
-            Ok(())
-        })?;
-        Ok(out)
     }
 
     fn parse_sublayers(&mut self) -> Result<(sdf::Value, sdf::Value)> {
@@ -742,6 +929,48 @@ impl<'a> Parser<'a> {
         }
         Ok(())
     }
+
+    fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
+    where
+        T: FromStr,
+        <T as FromStr>::Err: Debug,
+    {
+        let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+        self.parse_seq_fn(',', |this, i| {
+            result[i] = MaybeUninit::new(this.parse_token::<T>()?);
+            Ok(())
+        })?;
+        let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
+        Ok(result)
+    }
+
+    /// Parse array or array of tuples.
+    fn parse_array<T>(&mut self) -> Result<Vec<T>>
+    where
+        T: FromStr + Default,
+        <T as FromStr>::Err: Debug,
+    {
+        let mut out = Vec::new();
+        self.parse_array_fn(|this| {
+            out.push(this.parse_token::<T>()?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Parse array of tuples.
+    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<T>>
+    where
+        T: FromStr,
+        <T as FromStr>::Err: Debug,
+    {
+        let mut out = Vec::new();
+        self.parse_array_fn(|this| {
+            out.extend(this.parse_tuple::<T, N>()?);
+            Ok(())
+        })?;
+        Ok(out)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,8 +1019,10 @@ enum Type {
     Quatd,
     String,
     Token,
+    Asset,
     StringVec,
     TokenVec,
+    AssetVec,
     Matrix2d,
     Matrix3d,
     Matrix4d,
@@ -904,6 +1135,91 @@ def Xform "Forest_set"
 
         assert!(data.contains_key(&sdf::path("/Forest_set/Outskirts").unwrap()));
         assert!(data.contains_key(&sdf::path("/Forest_set/Glade").unwrap()));
+    }
+
+    #[test]
+    fn parse_attribute_metadata_interpolation() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+
+def Mesh "M"
+{
+    normal3f[] normals = [(0, 0, 1)] (
+        interpolation = "faceVarying"
+    )
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let normals = data.get(&sdf::path("/M.normals").unwrap()).unwrap();
+
+        let interpolation = normals
+            .fields
+            .get("interpolation")
+            .expect("missing interpolation metadata")
+            .try_as_string_ref()
+            .expect("interpolation metadata must be a string");
+
+        assert_eq!(interpolation, "faceVarying");
+    }
+
+    #[test]
+    fn parse_unsanitized_attributes() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Shader "Image_Texture"
+{
+    custom token info:id = "UsdUVTexture"
+    uniform bool doubleSided = 1
+    asset inputs:file = @./texture.png@
+    token outputs:surface.connect = </Image_Texture.outputs:surface>
+    token outputs:surface
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let shader = data.get(&sdf::path("/Image_Texture").unwrap()).unwrap();
+
+        let double_sided = data.get(&sdf::path("/Image_Texture.doubleSided").unwrap()).unwrap();
+        assert!(matches!(
+            double_sided.fields.get(sdf::schema::FieldKey::Default.as_str()),
+            Some(sdf::Value::Bool(true))
+        ));
+
+        let info_spec = data.get(&sdf::path("/Image_Texture.info:id").unwrap()).unwrap();
+        assert!(matches!(
+            info_spec.fields.get(sdf::schema::FieldKey::Custom.as_str()),
+            Some(sdf::Value::Bool(true))
+        ));
+
+        let file_spec = data.get(&sdf::path("/Image_Texture.inputs:file").unwrap()).unwrap();
+        assert!(matches!(
+            file_spec
+                .fields
+                .get(sdf::schema::FieldKey::Default.as_str()),
+            Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
+        ));
+
+        assert!(!data.contains_key(&sdf::path("/Image_Texture.outputs:surface.connect").unwrap()));
+        assert!(!data.contains_key(&sdf::path("/Image_Texture.outputs:surface").unwrap()));
+
+        let props = shader
+            .fields
+            .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
+            .and_then(|value| match value {
+                sdf::Value::TokenVec(tokens) => Some(tokens.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(props.contains(&"info:id".to_string()));
+        assert!(props.contains(&"doubleSided".to_string()));
+        assert!(props.contains(&"inputs:file".to_string()));
     }
 
     #[test]

@@ -124,14 +124,17 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use half::f16;
+    use std::path::Path;
 
     #[test]
     fn test_crate_hierarchy() -> Result<()> {
         let path = Path::new("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc");
         if !path.exists() {
-            eprintln!("Skipping test_crate_hierarchy: fixture not available at {}", path.display());
+            eprintln!(
+                "Skipping test_crate_hierarchy: fixture not available at {}",
+                path.display()
+            );
             return Ok(());
         }
 
