@@ -1334,8 +1334,8 @@ mod tests {
     #[test]
     fn test_read_crate_struct() {
         let path = "./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc";
-        if !fs::metadata(path).is_ok() {
-            eprintln!("Skipping test_read_crate_struct: fixture not available at {}", path);
+        if fs::metadata(path).is_err() {
+            eprintln!("Skipping test_read_crate_struct: fixture not available at {path}");
             return;
         }
 

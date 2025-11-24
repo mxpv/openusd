@@ -315,19 +315,16 @@ impl<'a> Parser<'a> {
     /// Skip over a relationship/connection value without interpreting its contents.
     fn skip_connection_value(&mut self) -> Result<()> {
         let token = self.fetch_next()?;
-        match token {
-            Token::Punctuation('[') => {
-                let mut depth = 1i32;
-                while depth > 0 {
-                    let next = self.fetch_next()?;
-                    match next {
-                        Token::Punctuation('[') => depth += 1,
-                        Token::Punctuation(']') => depth -= 1,
-                        _ => {}
-                    }
+        if let Token::Punctuation('[') = token {
+            let mut depth = 1i32;
+            while depth > 0 {
+                let next = self.fetch_next()?;
+                match next {
+                    Token::Punctuation('[') => depth += 1,
+                    Token::Punctuation(']') => depth -= 1,
+                    _ => {}
                 }
             }
-            _ => {}
         }
         Ok(())
     }
@@ -501,9 +498,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
-                let value = self
-                    .parse_token::<String>()
-                    .context("Unable to parse kind metadata")?;
+                let value = self.parse_token::<String>().context("Unable to parse kind metadata")?;
                 spec.add(FieldKey::Kind, sdf::Value::Token(value));
             }
             other => bail!("Unsupported prim metadata: {other}"),
@@ -586,7 +581,7 @@ impl<'a> Parser<'a> {
         let path_str = token
             .try_as_path_ref()
             .ok_or_else(|| anyhow!("Path reference expected for inherits metadata"))?;
-        Ok(sdf::Path::new(path_str)?)
+        sdf::Path::new(path_str)
     }
 
     fn parse_token_list(&mut self) -> Result<Vec<String>> {
