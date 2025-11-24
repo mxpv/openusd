@@ -48,7 +48,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 
 ## Code Standards
 
-- Project targets Rust 1.89 (see rust-toolchain.toml) with MSRV 1.74 (clippy.toml)
+- Project targets Rust version specified in `rust-toolchain.toml` with MSRV defined in `clippy.toml`
 - Maximum line width: 120 characters (rustfmt.toml)
 - All warnings treated as errors in CI
 - Comprehensive test coverage (50% minimum) with grcov
