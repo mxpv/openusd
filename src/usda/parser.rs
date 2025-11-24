@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use logos::{Lexer, Logos};
-use std::iter::Peekable;
 use std::mem::MaybeUninit;
+use std::ops::Range;
 use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
 
 use crate::sdf::{
@@ -11,29 +11,130 @@ use crate::sdf::{
 
 use super::token::Token;
 
+type LexResult<'source> = std::result::Result<Token<'source>, ()>;
+
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
-    iter: Peekable<Lexer<'a, Token<'a>>>,
+    lexer: Lexer<'a, Token<'a>>,
+    lookahead: Option<(LexResult<'a>, Range<usize>)>,
+    source: &'a str,
+    line_offsets: Vec<usize>,
+    last_span: Option<Range<usize>>,
+}
+
+/// Captures the line context for the most recent token consumed by the parser.
+#[derive(Debug, Clone)]
+pub struct ErrorHighlight {
+    pub line: usize,
+    pub column: usize,
+    pub line_text: String,
+    pub pointer_line: String,
+}
+
+impl ErrorHighlight {
+    /// Renders a human-readable representation of the highlighted line.
+    pub fn render(&self) -> String {
+        format!(
+            "line {} column {}\n{}\n{}",
+            self.line, self.column, self.line_text, self.pointer_line
+        )
+    }
 }
 
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
         Self {
-            iter: Token::lexer(data).peekable(),
+            lexer: Token::lexer(data),
+            lookahead: None,
+            source: data,
+            line_offsets: Self::compute_line_offsets(data),
+            last_span: None,
+        }
+    }
+
+    /// Returns a highlight for the most recent token span processed by the parser.
+    pub fn last_error_highlight(&self) -> Option<ErrorHighlight> {
+        self.last_span
+            .clone()
+            .and_then(|span| self.highlight_for_span(span))
+    }
+
+    fn highlight_for_span(&self, span: Range<usize>) -> Option<ErrorHighlight> {
+        if self.source.is_empty() {
+            return None;
+        }
+        let mut offset = span.start.min(self.source.len());
+        if offset == self.source.len() && offset > 0 {
+            offset -= 1;
+        }
+        let line_index = self.line_index_for_offset(offset);
+        let line_start = *self.line_offsets.get(line_index)?;
+        let line_end = self
+            .line_offsets
+            .get(line_index + 1)
+            .copied()
+            .unwrap_or_else(|| self.source.len());
+        let bounded_end = line_end.min(self.source.len());
+        let raw_line = &self.source[line_start..bounded_end];
+        let line_text = raw_line.trim_end_matches(['\r', '\n']).to_string();
+
+        let mut column_chars = 0usize;
+        for ch in self.source[line_start..offset].chars() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            column_chars += 1;
+        }
+        let column = column_chars + 1;
+
+        let mut pointer_line = String::new();
+        for ch in self.source[line_start..offset].chars() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            pointer_line.push(if ch == '\t' { '\t' } else { ' ' });
+        }
+        pointer_line.push('^');
+
+        Some(ErrorHighlight {
+            line: line_index + 1,
+            column,
+            line_text,
+            pointer_line,
+        })
+    }
+
+    fn line_index_for_offset(&self, offset: usize) -> usize {
+        match self.line_offsets.binary_search(&offset) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
         }
     }
 
     #[inline]
     fn fetch_next(&mut self) -> Result<Token<'a>> {
-        self.iter
-            .next()
-            .context("Unexpected end of tokens")?
-            .map_err(|e| anyhow!("Logos error: {e:?}"))
+        let (token, span) = if let Some((token, span)) = self.lookahead.take() {
+            (token, span)
+        } else {
+            let token = self
+                .lexer
+                .next()
+                .context("Unexpected end of tokens")?;
+            let span = self.lexer.span();
+            (token, span)
+        };
+        self.last_span = Some(span.clone());
+        token.map_err(|e| anyhow!("Logos error: {e:?}"))
     }
 
     #[inline]
-    fn peek_next(&mut self) -> Option<&Result<Token<'a>, ()>> {
-        self.iter.peek()
+    fn peek_next(&mut self) -> Option<&LexResult<'a>> {
+        if self.lookahead.is_none() {
+            let next = self.lexer.next()?;
+            let span = self.lexer.span();
+            self.lookahead = Some((next, span));
+        }
+        self.lookahead.as_ref().map(|(token, _)| token)
     }
 
     fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
@@ -977,6 +1078,20 @@ impl<'a> Parser<'a> {
         })?;
         Ok(out)
     }
+
+    fn compute_line_offsets(source: &str) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        offsets.push(0);
+        for (idx, ch) in source.char_indices() {
+            if ch == '\n' {
+                offsets.push(idx + ch.len_utf8());
+            }
+        }
+        if offsets.last().copied().unwrap_or_default() != source.len() {
+            offsets.push(source.len());
+        }
+        offsets
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1037,6 +1152,8 @@ enum Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_empty_array() {
@@ -1230,6 +1347,37 @@ def Shader "Image_Texture"
         assert!(props.contains(&"info:id".to_string()));
         assert!(props.contains(&"doubleSided".to_string()));
         assert!(props.contains(&"inputs:file".to_string()));
+    }
+
+    #[test]
+    fn parse_reports_error_span_for_invalid_pseudo_root() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_path = manifest_dir.join("fixtures/invalid_pseudo_root.usda");
+        let data =
+            fs::read_to_string(&fixture_path).expect("read invalid pseudo-root fixture content");
+
+        let mut parser = Parser::new(&data);
+        let err = parser.parse().expect_err("parser should fail for malformed pseudo-root");
+        let highlight = parser
+            .last_error_highlight()
+            .expect("parser should record error highlight");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Unable to parse pseudo root"),
+            "error should mention pseudo-root parse failure, got: {message}"
+        );
+        assert_eq!(highlight.line, 4, "unexpected error line");
+        assert_eq!(highlight.column, 5, "unexpected error column");
+        assert!(
+            highlight.line_text.trim_start().starts_with('='),
+            "line text should contain '=' token, got: {:?}",
+            highlight.line_text
+        );
+        assert_eq!(
+            highlight.pointer_line, "    ^",
+            "caret should align with offending token"
+        );
     }
 
     #[test]
