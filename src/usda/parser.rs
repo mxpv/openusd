@@ -54,9 +54,7 @@ impl<'a> Parser<'a> {
 
     /// Returns a highlight for the most recent token span processed by the parser.
     pub fn last_error_highlight(&self) -> Option<ErrorHighlight> {
-        self.last_span
-            .clone()
-            .and_then(|span| self.highlight_for_span(span))
+        self.last_span.clone().and_then(|span| self.highlight_for_span(span))
     }
 
     fn highlight_for_span(&self, span: Range<usize>) -> Option<ErrorHighlight> {
@@ -116,10 +114,7 @@ impl<'a> Parser<'a> {
         let (token, span) = if let Some((token, span)) = self.lookahead.take() {
             (token, span)
         } else {
-            let token = self
-                .lexer
-                .next()
-                .context("Unexpected end of tokens")?;
+            let token = self.lexer.next().context("Unexpected end of tokens")?;
             let span = self.lexer.span();
             (token, span)
         };
@@ -1353,11 +1348,12 @@ def Shader "Image_Texture"
     fn parse_reports_error_span_for_invalid_pseudo_root() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let fixture_path = manifest_dir.join("fixtures/invalid_pseudo_root.usda");
-        let data =
-            fs::read_to_string(&fixture_path).expect("read invalid pseudo-root fixture content");
+        let data = fs::read_to_string(&fixture_path).expect("read invalid pseudo-root fixture content");
 
         let mut parser = Parser::new(&data);
-        let err = parser.parse().expect_err("parser should fail for malformed pseudo-root");
+        let err = parser
+            .parse()
+            .expect_err("parser should fail for malformed pseudo-root");
         let highlight = parser
             .last_error_highlight()
             .expect("parser should record error highlight");
