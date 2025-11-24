@@ -12,7 +12,7 @@ The codebase is organized into three main modules:
 
 - **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions corresponding to USD's SDF module. Contains the `AbstractData` trait that defines the interface for accessing scene description data.
 
-- **`usda/`** - Text format (.usda) reader: Parser implementation for USD's ASCII text format using a custom tokenizer and recursive descent parser.
+- **`usda/`** - Text format (.usda) reader: Parser implementation for USD's ASCII text format using logos for tokenization and a recursive descent parser.
 
 - **`usdc/`** - Binary format (.usdc) reader: Implementation for USD's binary crate format, including compressed data handling and efficient memory layout parsing.
 
@@ -48,7 +48,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 
 ## Code Standards
 
-- Project targets latest stable Rust (see rust-toolchain.toml)
+- Project targets Rust 1.89 (see rust-toolchain.toml) with MSRV 1.74 (clippy.toml)
 - Maximum line width: 120 characters (rustfmt.toml)
 - All warnings treated as errors in CI
 - Comprehensive test coverage (50% minimum) with grcov
@@ -87,8 +87,10 @@ Test fixtures are small USD files covering specific format features and edge cas
 Key external dependencies:
 - `anyhow` - Error handling
 - `bytemuck` - Safe transmutation for binary data
-- `lz4_flex` - Compression for binary format
 - `half` - 16-bit floating point support
+- `logos` - Lexer generator for USDA tokenization
+- `lz4_flex` - Compression for binary format
+- `num-traits` - Numeric traits
 - `strum` - Enum utilities
 
 The project maintains a minimal dependency footprint and uses cargo-deny to prevent license conflicts and vulnerability introduction.
