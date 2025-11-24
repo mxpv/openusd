@@ -28,7 +28,7 @@ impl<'a> Parser<'a> {
         self.iter
             .next()
             .context("Unexpected end of tokens")?
-            .map_err(|e| anyhow!("Logos error: {:?}", e))
+            .map_err(|e| anyhow!("Logos error: {e:?}"))
     }
 
     #[inline]
@@ -40,9 +40,7 @@ impl<'a> Parser<'a> {
         let token = self.fetch_next()?;
         ensure!(
             token == expected_token,
-            "Unexpected token (want: {:?}, got {:?})",
-            expected_token,
-            token
+            "Unexpected token (want: {expected_token:?}, got {token:?})"
         );
         Ok(())
     }
@@ -58,7 +56,7 @@ impl<'a> Parser<'a> {
         token
             .clone()
             .try_as_string()
-            .ok_or_else(|| anyhow!("Unexpected token {:?} (want String)", token))
+            .ok_or_else(|| anyhow!("Unexpected token {token:?} (want String)"))
     }
 
     /// Parse tokens to specs.
@@ -88,7 +86,7 @@ impl<'a> Parser<'a> {
             .fetch_next()?
             .try_as_magic()
             .ok_or_else(|| anyhow!("Text file must start with magic token, got {:?}", self.peek_next()))?;
-        ensure!(version == "1.0", "File must start with '#usda 1.0', got: {:?}", version);
+        ensure!(version == "1.0", "File must start with '#usda 1.0', got: {version:?}");
 
         let mut root = sdf::Spec::new(sdf::SpecType::PseudoRoot);
 
@@ -140,7 +138,7 @@ impl<'a> Parser<'a> {
                         root.add(name, value);
                     }
                 }
-                _ => bail!("Unexpected token {:?}", next),
+                _ => bail!("Unexpected token {next:?}"),
             }
         }
 
@@ -162,7 +160,7 @@ impl<'a> Parser<'a> {
                 Token::Def => sdf::Specifier::Def,
                 Token::Over => sdf::Specifier::Over,
                 Token::Class => sdf::Specifier::Class,
-                _ => bail!("Unexpected prim specifier: {:?}", specifier_token),
+                _ => bail!("Unexpected prim specifier: {specifier_token:?}"),
             }
         };
 
@@ -177,7 +175,7 @@ impl<'a> Parser<'a> {
         let name = name_token
             .clone()
             .try_as_string()
-            .ok_or_else(|| anyhow!("Unexpected token {:?} (want String)", name_token))?;
+            .ok_or_else(|| anyhow!("Unexpected token {name_token:?} (want String)"))?;
         parent_children.push(name.to_string());
         let prim_path = current_path.append_path(name)?;
 
@@ -212,7 +210,7 @@ impl<'a> Parser<'a> {
                 .peek_next()
                 .context("Unexpected end of prim body")?
                 .as_ref()
-                .map_err(|e| anyhow!("{:?}", e))?;
+                .map_err(|e| anyhow!("{e:?}"))?;
             match next {
                 Token::Punctuation('}') => {
                     self.fetch_next()?;
@@ -267,17 +265,14 @@ impl<'a> Parser<'a> {
         let type_token = self.fetch_next()?;
         let type_name = match type_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            other => bail!(
-                "Unexpected token type for attribute type, expected Identifier, got {:?}",
-                other
-            ),
+            other => bail!("Unexpected token type for attribute type, expected Identifier, got {other:?}"),
         };
         let data_type = Self::parse_data_type(type_name)?;
 
         let name_token = self.fetch_next()?;
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            _ => bail!("Unexpected token type for attribute name: {:?}", name_token),
+            _ => bail!("Unexpected token type for attribute name: {name_token:?}"),
         };
 
         if name.contains(".connect") {
@@ -342,7 +337,7 @@ impl<'a> Parser<'a> {
             let name_token = self.fetch_next()?;
             let name = match name_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-                other => bail!("Unexpected attribute metadata name token: {:?}", other),
+                other => bail!("Unexpected attribute metadata name token: {other:?}"),
             };
 
             self.ensure_pun('=')?;
@@ -371,7 +366,7 @@ impl<'a> Parser<'a> {
                 } else if let Ok(float) = raw.parse::<f64>() {
                     Ok(sdf::Value::Double(float))
                 } else {
-                    bail!("Unable to parse numeric metadata value: {}", raw);
+                    bail!("Unable to parse numeric metadata value: {raw}");
                 }
             }
             Token::Punctuation('[') => {
@@ -386,19 +381,19 @@ impl<'a> Parser<'a> {
                     let value = match entry {
                         Token::String(v) => v.to_owned(),
                         Token::Identifier(v) | Token::NamespacedIdentifier(v) | Token::Number(v) => v.to_owned(),
-                        other => bail!("Unsupported metadata array element: {:?}", other),
+                        other => bail!("Unsupported metadata array element: {other:?}"),
                     };
                     values.push(value);
 
                     match self.fetch_next()? {
                         Token::Punctuation(',') => continue,
                         Token::Punctuation(']') => break,
-                        other => bail!("Unexpected token in metadata array: {:?}", other),
+                        other => bail!("Unexpected token in metadata array: {other:?}"),
                     }
                 }
                 Ok(sdf::Value::StringVec(values))
             }
-            other => bail!("Unsupported property metadata value token: {:?}", other),
+            other => bail!("Unsupported property metadata value token: {other:?}"),
         }
     }
 
@@ -407,7 +402,7 @@ impl<'a> Parser<'a> {
         let target = self.fetch_next()?;
         match target {
             Token::Identifier(_) | Token::NamespacedIdentifier(_) => {}
-            other => bail!("Unexpected token in relationship declaration: {:?}", other),
+            other => bail!("Unexpected token in relationship declaration: {other:?}"),
         }
         if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
             self.fetch_next()?;
@@ -456,7 +451,7 @@ impl<'a> Parser<'a> {
             Token::References => FieldKey::References.as_str(),
             Token::Payload => FieldKey::Payload.as_str(),
             Token::Inherits => FieldKey::InheritPaths.as_str(),
-            other => bail!("Unexpected metadata name token: {:?}", other),
+            other => bail!("Unexpected metadata name token: {other:?}"),
         };
 
         self.ensure_pun('=')?;
@@ -553,7 +548,7 @@ impl<'a> Parser<'a> {
                 Token::Scale => {
                     layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
                 }
-                unexpected => bail!("Unexpected token in layer offset: {:?}", unexpected),
+                unexpected => bail!("Unexpected token in layer offset: {unexpected:?}"),
             }
 
             Ok(())
@@ -606,7 +601,7 @@ impl<'a> Parser<'a> {
             Some(Token::Add) => list.added_items = items,
             Some(Token::Delete) => list.deleted_items = items,
             Some(Token::Reorder) => list.ordered_items = items,
-            other => bail!("Unsupported list op: {:?}", other),
+            other => bail!("Unsupported list op: {other:?}"),
         }
 
         Ok(list)
@@ -682,7 +677,7 @@ impl<'a> Parser<'a> {
             Type::StringVec => sdf::Value::StringVec(self.parse_array()?),
             Type::TokenVec => sdf::Value::TokenVec(self.parse_array()?),
 
-            _ => bail!("Unimplemented data type: {:?}", ty),
+            _ => bail!("Unimplemented data type: {ty:?}"),
         };
 
         Ok(value)
@@ -759,7 +754,7 @@ impl<'a> Parser<'a> {
             "asset" => Type::Asset,
             "asset[]" => Type::AssetVec,
 
-            _ => bail!("Unsupported data type: {}", ty),
+            _ => bail!("Unsupported data type: {ty}"),
         };
 
         Ok(data_type)
@@ -773,7 +768,7 @@ impl<'a> Parser<'a> {
         let token = self.fetch_next()?;
         let value_str = match token {
             Token::Number(s) | Token::Identifier(s) | Token::String(s) | Token::NamespacedIdentifier(s) => s,
-            _ => bail!("Expected a number, identifier, or string, got {:?}", token),
+            _ => bail!("Expected a number, identifier, or string, got {token:?}"),
         };
         let value = T::from_str(value_str)
             .map_err(|err| anyhow!("Failed to parse {} from '{}': {:?}", type_name::<T>(), value_str, err))?;
@@ -805,7 +800,7 @@ impl<'a> Parser<'a> {
                 "false" => Ok(false),
                 other => bail!("Unexpected string for bool literal: {other}"),
             },
-            other => bail!("Unexpected token for bool literal: {:?}", other),
+            other => bail!("Unexpected token for bool literal: {other:?}"),
         }
     }
 
@@ -866,7 +861,7 @@ impl<'a> Parser<'a> {
                             ensure!(scale.is_none(), "scale specified twice");
                             scale = Some(value);
                         }
-                        _ => bail!("Unexpected token type: {:?}", token),
+                        _ => bail!("Unexpected token type: {token:?}"),
                     }
                     Ok(())
                 })?;
@@ -907,7 +902,7 @@ impl<'a> Parser<'a> {
             match self.fetch_next()? {
                 Token::Punctuation(',') => continue,
                 Token::Punctuation(']') => break,
-                t => bail!("Either comma or closing bracket expected after value, got: {:?}", t),
+                t => bail!("Either comma or closing bracket expected after value, got: {t:?}"),
             }
         }
         Ok(())
@@ -934,7 +929,7 @@ impl<'a> Parser<'a> {
             match self.fetch_next()? {
                 Token::Punctuation(')') => break,
                 Token::Punctuation(d) if d == delim => continue,
-                t => bail!("Unexpected token between (): {:?}", t),
+                t => bail!("Unexpected token between (): {t:?}"),
             }
         }
         Ok(())

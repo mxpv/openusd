@@ -129,7 +129,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 );
             }
 
-            ensure!(spec.spec_type != sdf::SpecType::Unknown, "Invalid spec {} type", index);
+            ensure!(spec.spec_type != sdf::SpecType::Unknown, "Invalid spec {index} type");
 
             anyhow::Ok(())
         })?;
@@ -149,9 +149,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         ensure!(
             SW_VERSION.can_read(file_ver),
-            "Usd crate version mismatch, file is {}, library supports {}",
-            file_ver,
-            SW_VERSION,
+            "Usd crate version mismatch, file is {file_ver}, library supports {SW_VERSION}"
         );
 
         Ok(header)
@@ -162,7 +160,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         let count = self.reader.read_count()?;
         ensure!(count > 0, "Crate file has no sections");
-        ensure!(count < 64, "Suspiciously large number of sections: {}", count);
+        ensure!(count < 64, "Suspiciously large number of sections: {count}");
 
         self.sections = self.reader.read_vec::<Section>(count)?;
 
@@ -231,8 +229,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let count = self.reader.read_count()?;
         ensure!(
             count < 128 * 1024 * 1024,
-            "Suspiciously large number of strings: {}",
-            count
+            "Suspiciously large number of strings: {count}"
         );
 
         let strings = self.reader.read_vec::<u32>(count)?;
@@ -478,7 +475,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     fn unpack_value<T: Default + Pod>(&mut self, value: ValueRep) -> Result<T> {
-        ensure!(!value.is_array(), "Can't unpack array {:?} as inline value", value);
+        ensure!(!value.is_array(), "Can't unpack array {value:?} as inline value");
 
         let ty = value.ty()?;
         ensure!(ty != Type::Invalid, "Invalid value type");
@@ -654,7 +651,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                     output
                 }
-                _ => bail!("Invalid compressed double array code: {}", code),
+                _ => bail!("Invalid compressed double array code: {code}"),
             }
         } else {
             self.reader.read_vec(count)?
@@ -1229,8 +1226,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // Empty dictionary.
             Type::Dictionary if value.is_inlined() => sdf::Value::Dictionary(HashMap::default()),
             Type::Dictionary => {
-                ensure!(!value.is_compressed(), "Dictionary {} can't be compressed", ty);
-                ensure!(!value.is_array(), "Dictionary {} can't be inlined", ty);
+                ensure!(!value.is_compressed(), "Dictionary {ty} can't be compressed");
+                ensure!(!value.is_array(), "Dictionary {ty} can't be inlined");
 
                 self.set_position(value.payload())?;
 
@@ -1239,7 +1236,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::ValueBlock => sdf::Value::ValueBlock,
 
-            _ => bail!("Unsupported value type: {}", ty),
+            _ => bail!("Unsupported value type: {ty}"),
         };
 
         Ok(variant)

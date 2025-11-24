@@ -46,11 +46,11 @@ impl sdf::AbstractData for TextReader {
 
     fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
         let Some(spec) = self.data.get(path) else {
-            bail!("No spec found for path: {}", path)
+            bail!("No spec found for path: {path}")
         };
 
         let Some(field) = spec.fields.get(field) else {
-            bail!("No field found for path '{}' and field '{}'", path, field)
+            bail!("No field found for path '{path}' and field '{field}'")
         };
 
         Ok(Cow::Borrowed(field))

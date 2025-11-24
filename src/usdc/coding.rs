@@ -70,7 +70,7 @@ where
                 MEDIUM => ints_reader.read_pod::<i16>()? as i64,
                 LARGE => ints_reader.read_pod::<i32>()? as i64,
 
-                _ => bail!("Unexpected index: {}", ty),
+                _ => bail!("Unexpected index: {ty}"),
             };
 
             prev += delta;

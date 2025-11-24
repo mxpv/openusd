@@ -95,11 +95,11 @@ where
 
     fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
         let Some(spec) = self.data.get(path) else {
-            bail!("No spec found for path: {}", path)
+            bail!("No spec found for path: {path}")
         };
 
         let Some(value_rep) = spec.fields.get(field).cloned() else {
-            bail!("No field found for path '{}' and field '{}'", path, field)
+            bail!("No field found for path '{path}' and field '{field}'")
         };
 
         let value = self.file.value(value_rep)?;
