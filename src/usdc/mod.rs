@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_crate_hierarchy() -> Result<()> {
-        let path = Path::new("./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc");
+        let path = Path::new("./vendor/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc");
         if !path.exists() {
             eprintln!(
                 "Skipping test_crate_hierarchy: fixture not available at {}",

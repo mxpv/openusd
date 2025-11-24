@@ -4,7 +4,7 @@
 //!
 //! # Usage:
 //! ```bash
-//! cargo run --example dump_usdc ./extern/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc
+//! cargo run --example dump_usdc ./vendor/usd-wg-assets/full_assets/ElephantWithMonochord/SoC-ElephantWithMonochord.usdc
 //! ```
 
 use std::{env, fs};
