@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
             .line_offsets
             .get(line_index + 1)
             .copied()
-            .unwrap_or_else(|| self.source.len());
+            .unwrap_or(self.source.len());
         let bounded_end = line_end.min(self.source.len());
         let raw_line = &self.source[line_start..bounded_end];
         let line_text = raw_line.trim_end_matches(['\r', '\n']).to_string();
