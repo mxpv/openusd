@@ -1149,10 +1149,7 @@ impl<'a> Parser<'a> {
             Ok(())
         })?;
 
-        ensure!(
-            values.len() == N * N,
-            "matrix{N}d literal must contain {N} rows"
-        );
+        ensure!(values.len() == N * N, "matrix{N}d literal must contain {N} rows");
 
         Ok(values)
     }
