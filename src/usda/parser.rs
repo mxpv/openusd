@@ -307,6 +307,7 @@ impl<'a> Parser<'a> {
                 .context("Unexpected end of prim body")?
                 .as_ref()
                 .map_err(|e| anyhow!("{e:?}"))?;
+
             match next {
                 Token::Punctuation('}') => {
                     self.fetch_next()?;
@@ -373,6 +374,12 @@ impl<'a> Parser<'a> {
                 .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
         };
 
+        // Check for metadata before checking for assignment
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+            self.parse_property_metadata(&mut spec)
+                .context("Unable to parse attribute metadata")?;
+        }
+
         if name.contains(".connect") {
             if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
                 self.fetch_next()?;
@@ -401,6 +408,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
+        // Check if there's an assignment
         if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
             let path = current_path.append_property(name)?;
             properties.push(name.to_string());
@@ -416,6 +424,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_value(data_type)?;
         let path = current_path.append_property(name)?;
 
+        // Check for metadata after value (could appear here instead of before)
         if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
@@ -467,15 +476,24 @@ impl<'a> Parser<'a> {
 
             let name_token = self.fetch_next()?;
             let name = match name_token {
-                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-                other => bail!("Unexpected attribute metadata name token: {other:?}"),
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
+                Token::CustomData => "customData".to_owned(),
+                Token::Doc => FieldKey::Documentation.as_str().to_owned(),
+                // Allow other keywords as metadata keys
+                other => {
+                    if let Some(lexeme) = keyword_lexeme(&other) {
+                        lexeme.to_owned()
+                    } else {
+                        bail!("Unexpected attribute metadata name token: {other:?}")
+                    }
+                }
             };
 
             self.ensure_pun('=')?;
             let value = self
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
-            spec.fields.insert(name.to_owned(), value);
+            spec.fields.insert(name, value);
 
             if matches!(self.peek_next(), Some(Ok(Token::Punctuation(',')))) {
                 self.fetch_next()?;
@@ -524,8 +542,67 @@ impl<'a> Parser<'a> {
                 }
                 Ok(sdf::Value::StringVec(values))
             }
+            Token::Punctuation('{') => self.parse_dictionary(),
             other => bail!("Unsupported property metadata value token: {other:?}"),
         }
+    }
+
+    /// Parse a dictionary value from `{` to `}`.
+    fn parse_dictionary(&mut self) -> Result<sdf::Value> {
+        let mut dict = HashMap::new();
+
+        loop {
+            // Check for closing brace
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('}')))) {
+                self.fetch_next()?;
+                break;
+            }
+
+            // Parse the type (optional) or key
+            let first_token = self.fetch_next()?;
+
+            // Check if this is a type declaration (e.g., "string", "dictionary", "bool", "token")
+            let (_type_hint, key_token) = match first_token {
+                Token::Identifier("string")
+                | Token::Identifier("bool")
+                | Token::Identifier("int")
+                | Token::Identifier("float")
+                | Token::Identifier("double")
+                | Token::Identifier("token")
+                | Token::Dictionary => {
+                    // This is a type declaration, next token is the key
+                    let key = self.fetch_next()?;
+                    (Some(first_token), key)
+                }
+                _ => (None, first_token),
+            };
+
+            let key = match key_token {
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
+                // Allow keywords as dictionary keys by converting them to strings
+                other => {
+                    if let Some(lexeme) = keyword_lexeme(&other) {
+                        lexeme.to_owned()
+                    } else {
+                        bail!("Expected identifier as dictionary key, got: {other:?}")
+                    }
+                }
+            };
+
+            self.ensure_pun('=')?;
+
+            // Parse the value recursively
+            let value = self.parse_property_metadata_value()?;
+            dict.insert(key, value);
+
+            // Handle optional trailing comma or newline
+            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('}')))) {
+                self.fetch_next()?;
+                break;
+            }
+        }
+
+        Ok(sdf::Value::Dictionary(dict))
     }
 
     fn read_relationship(
@@ -539,9 +616,30 @@ impl<'a> Parser<'a> {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
             other => bail!("Unexpected token in relationship declaration: {other:?}"),
         };
+
+        let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
+
+        // Check for metadata before or instead of assignment
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+            self.parse_property_metadata(&mut spec)
+                .context("Unable to parse relationship metadata")?;
+        }
+
+        // Check if there's an assignment
         if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            let path = current_path.append_property(name)?;
+            properties.push(name.to_string());
+
+            spec.add(FieldKey::Custom, sdf::Value::Bool(false));
+            spec.add(
+                FieldKey::Variability,
+                sdf::Value::Variability(sdf::Variability::Varying),
+            );
+
+            data.insert(path, spec);
             return Ok(());
         }
+
         self.ensure_pun('=')?;
         let list_op = match self.peek_next() {
             Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
@@ -556,14 +654,13 @@ impl<'a> Parser<'a> {
         let path = current_path.append_property(name)?;
         properties.push(name.to_string());
 
-        let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
         let list_op = self
             .apply_list_op(list_op, targets)
             .context("Unable to build relationship targets listOp")?;
-        spec.add(sdf::schema::FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
-        spec.add(sdf::schema::FieldKey::Custom, sdf::Value::Bool(false));
+        spec.add(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
+        spec.add(FieldKey::Custom, sdf::Value::Bool(false));
         spec.add(
-            sdf::schema::FieldKey::Variability,
+            FieldKey::Variability,
             sdf::Value::Variability(sdf::Variability::Varying),
         );
 
@@ -611,6 +708,8 @@ impl<'a> Parser<'a> {
             Token::References => FieldKey::References.as_str(),
             Token::Payload => FieldKey::Payload.as_str(),
             Token::Inherits => FieldKey::InheritPaths.as_str(),
+            Token::CustomData => "customData",
+            Token::Doc => FieldKey::Documentation.as_str(),
             other => bail!("Unexpected metadata name token: {other:?}"),
         };
 
@@ -655,6 +754,18 @@ impl<'a> Parser<'a> {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
                 let value = self.parse_token::<String>().context("Unable to parse kind metadata")?;
                 spec.add(FieldKey::Kind, sdf::Value::Token(value));
+            }
+            "customData" => {
+                ensure!(list_op.is_none(), "customData metadata does not support list ops");
+                let value = self
+                    .parse_property_metadata_value()
+                    .context("Unable to parse customData dictionary")?;
+                spec.add("customData", value);
+            }
+            n if n == FieldKey::Documentation.as_str() => {
+                ensure!(list_op.is_none(), "doc metadata does not support list ops");
+                let value = self.parse_token::<String>().context("Unable to parse doc metadata")?;
+                spec.add(FieldKey::Documentation, sdf::Value::String(value));
             }
             other => bail!("Unsupported prim metadata: {other}"),
         }
@@ -930,6 +1041,25 @@ impl<'a> Parser<'a> {
         let token = self.fetch_next()?;
         let value_str = match token {
             Token::Number(s) | Token::Identifier(s) | Token::String(s) | Token::NamespacedIdentifier(s) => s,
+            Token::Inf => "inf",
+            Token::Punctuation('-') => {
+                // Handle negative inf
+                let next = self.fetch_next()?;
+                if matches!(next, Token::Inf) {
+                    "-inf"
+                } else {
+                    bail!("Expected number after '-', got {next:?}")
+                }
+            }
+            Token::Punctuation('+') => {
+                // Handle positive inf
+                let next = self.fetch_next()?;
+                if matches!(next, Token::Inf) {
+                    "inf"
+                } else {
+                    bail!("Expected number after '+', got {next:?}")
+                }
+            }
             _ => bail!("Expected a number, identifier, or string, got {token:?}"),
         };
         let value = T::from_str(value_str)
@@ -1258,6 +1388,7 @@ fn keyword_lexeme(token: &Token<'_>) -> Option<&'static str> {
         Token::Dictionary => Some("dictionary"),
         Token::DisplayUnit => Some("displayUnit"),
         Token::Doc => Some("doc"),
+        Token::Inf => Some("inf"),
         Token::Inherits => Some("inherits"),
         Token::Kind => Some("kind"),
         Token::NameChildren => Some("nameChildren"),
@@ -1456,13 +1587,13 @@ def Shader "Image_Texture"
 
         let double_sided = data.get(&sdf::path("/Image_Texture.doubleSided").unwrap()).unwrap();
         assert!(matches!(
-            double_sided.fields.get(sdf::schema::FieldKey::Default.as_str()),
+            double_sided.fields.get(FieldKey::Default.as_str()),
             Some(sdf::Value::Bool(true))
         ));
 
         let info_spec = data.get(&sdf::path("/Image_Texture.info:id").unwrap()).unwrap();
         assert!(matches!(
-            info_spec.fields.get(sdf::schema::FieldKey::Custom.as_str()),
+            info_spec.fields.get(FieldKey::Custom.as_str()),
             Some(sdf::Value::Bool(true))
         ));
 
@@ -1470,7 +1601,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             file_spec
                 .fields
-                .get(sdf::schema::FieldKey::Default.as_str()),
+                .get(FieldKey::Default.as_str()),
             Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
         ));
 
@@ -1480,7 +1611,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             output_spec
                 .fields
-                .get(sdf::schema::FieldKey::TypeName.as_str()),
+                .get(FieldKey::TypeName.as_str()),
             Some(sdf::Value::Token(t)) if t == "token"
         ));
 
@@ -1490,7 +1621,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             connection_spec
                 .fields
-                .get(sdf::schema::FieldKey::ConnectionPaths.as_str()),
+                .get(FieldKey::ConnectionPaths.as_str()),
             Some(sdf::Value::PathListOp(op)) if op.explicit_items.len() == 1
         ));
 
@@ -1528,7 +1659,7 @@ def Xform "X" {
             .expect("transform spec missing");
         let matrix = transform
             .fields
-            .get(sdf::schema::FieldKey::Default.as_str())
+            .get(FieldKey::Default.as_str())
             .expect("matrix default missing");
 
         match matrix {
@@ -1565,7 +1696,7 @@ def Scope "Root" {
             .expect("transforms spec missing");
         let matrix = transforms
             .fields
-            .get(sdf::schema::FieldKey::Default.as_str())
+            .get(FieldKey::Default.as_str())
             .expect("matrix default missing");
 
         match matrix {
@@ -1617,14 +1748,14 @@ def Material "Mat"
             .get(&sdf::path("/Mat.outputs:surface").unwrap())
             .expect("missing outputs:surface spec");
         assert!(matches!(
-            output.fields.get(sdf::schema::FieldKey::TypeName.as_str()),
+            output.fields.get(FieldKey::TypeName.as_str()),
             Some(sdf::Value::Token(t)) if t == "token"
         ));
 
         let connection = data
             .get(&sdf::path("/Mat.outputs:surface.connect").unwrap())
             .expect("missing outputs:surface.connect spec");
-        match connection.fields.get(sdf::schema::FieldKey::ConnectionPaths.as_str()) {
+        match connection.fields.get(FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
                 assert_eq!(op.explicit_items.len(), 1);
                 assert_eq!(op.explicit_items[0].as_str(), "/Mat/Preview.outputs:surface");
@@ -1653,7 +1784,7 @@ def Scope "Root"
             .expect("missing relationship spec");
         let targets = rel_spec
             .fields
-            .get(sdf::schema::FieldKey::TargetPaths.as_str())
+            .get(FieldKey::TargetPaths.as_str())
             .and_then(|v| v.try_as_path_list_op_ref())
             .expect("missing targets on relationship");
         assert_eq!(targets.explicit_items.len(), 1);
@@ -1934,5 +2065,87 @@ def Mesh "visual" (
         assert_eq!(reference.prim_path.as_str(), "/visual");
         assert_eq!(reference.layer_offset.offset, 0.0);
         assert_eq!(reference.layer_offset.scale, 1.0);
+    }
+
+    #[test]
+    fn test_inf_value() {
+        let data = r#"#usda 1.0
+
+def "Test" {
+    float value = -inf
+}
+"#;
+        let mut parser = Parser::new(data);
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_customdata_parsing() {
+        let data = r#"#usda 1.0
+
+over "GLOBAL" (
+    customData = {
+        string libraryName = "test"
+    }
+)
+{
+}
+"#;
+        let mut parser = Parser::new(data);
+        let result = parser.parse();
+        assert!(result.is_ok(), "Parse failed: {:?}", result.err());
+        let data = result.unwrap();
+        assert_ne!(data.len(), 0);
+    }
+
+    #[test]
+    fn parse_schema_issue14() {
+        let data = std::fs::read_to_string("fixtures/usdPhysics_schema.usda").unwrap();
+        let mut parser = Parser::new(&data);
+
+        let specs = parser.parse().unwrap();
+
+        // Basic sanity checks
+        assert_ne!(specs.len(), 0, "Should have parsed some specs");
+
+        // Check that GLOBAL prim exists and has customData
+        let global_path = sdf::Path::from_str("/GLOBAL").unwrap();
+        assert!(specs.contains_key(&global_path), "Should have /GLOBAL prim");
+
+        let global_spec = &specs[&global_path];
+        assert!(
+            global_spec.fields.contains_key("customData"),
+            "GLOBAL should have customData"
+        );
+
+        // Check that PhysicsScene class exists
+        let physics_scene_path = sdf::Path::from_str("/PhysicsScene").unwrap();
+        assert!(
+            specs.contains_key(&physics_scene_path),
+            "Should have /PhysicsScene class"
+        );
+
+        let physics_scene_spec = &specs[&physics_scene_path];
+        assert!(
+            physics_scene_spec.fields.contains_key("customData"),
+            "PhysicsScene should have customData"
+        );
+
+        // Check that attributes were parsed (e.g., physics:gravityDirection)
+        let gravity_attr_path = sdf::Path::from_str("/PhysicsScene.physics:gravityDirection").unwrap();
+        assert!(
+            specs.contains_key(&gravity_attr_path),
+            "Should have physics:gravityDirection attribute"
+        );
+
+        // Check that the attribute has customData in its metadata
+        let gravity_spec = &specs[&gravity_attr_path];
+        assert!(
+            gravity_spec.fields.contains_key("customData"),
+            "gravity attribute should have customData"
+        );
+
+        println!("Successfully parsed {} specs", specs.len());
     }
 }
