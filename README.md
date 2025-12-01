@@ -21,7 +21,14 @@ The following list of docs was used during crate development:
 
 ## Supported features
 
-The USD library is a fairly large project to replicate. For the most up-to-date information on what features are currently supported by the crate, follow issue https://github.com/mxpv/openusd/issues/1 in our repository.
+The library can read all major USD formats. Here's what's currently supported:
+
+- `usdc` (binary format) - for the list of supported features, refer to https://github.com/mxpv/openusd/issues/1
+- `usda` (text format) - can read most text files, corner cases possible
+- `usdz` (zip archive format) - can read archived text/binary files
+- DOM support is WIP: https://github.com/mxpv/openusd/issues/15
+
+If you encounter a file that can't be read, please open an issue and attach it for further investigation.
 
 ## Getting started
 
