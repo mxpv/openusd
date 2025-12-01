@@ -33,22 +33,7 @@ pub enum Token<'source> {
     #[regex(r#"@@@([^@]|@[^@]|@@[^@])*@@@"#, |lex| trim_chars(lex.slice(), 3))]
     String(&'source str),
 
-    /// Numbers (int, float, scientific notation)
-    /// Examples: "42", "3.14", "1.23e-4"
-    #[regex(r"[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?", |lex| lex.slice())]
-    Number(&'source str),
-
-    /// Path references
-    /// Example: "</World/Sphere/material:surface>" -> /World/Sphere/material:surface
-    #[regex(r"<[^>]*>", |lex| trim_chars(lex.slice(), 1))]
-    PathRef(&'source str),
-
-    /// Asset references
-    /// Example: "@./textures/wood.jpg@" -> ./textures/wood.jpg
-    #[regex(r"@[^@]*@", |lex| trim_chars(lex.slice(), 1))]
-    AssetRef(&'source str),
-
-    // Keywords
+    // Keywords must come before Number to ensure "inf" is matched as a keyword, not an identifier
     #[token("add")]
     Add,
     #[token("append")]
@@ -75,6 +60,8 @@ pub enum Token<'source> {
     DisplayUnit,
     #[token("doc")]
     Doc,
+    #[token("inf")]
+    Inf,
     #[token("inherits")]
     Inherits,
     #[token("kind")]
@@ -132,9 +119,25 @@ pub enum Token<'source> {
     #[token("varying")]
     Varying,
 
+    /// Numbers (int, float, scientific notation)
+    /// Examples: "42", "3.14", "1.23e-4", "-42", "+3.14"
+    /// Matches unsigned numbers OR signed numbers (sign must be followed by digit)
+    #[regex(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?|[+-][0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?", |lex| lex.slice())]
+    Number(&'source str),
+
+    /// Path references
+    /// Example: "</World/Sphere/material:surface>" -> /World/Sphere/material:surface
+    #[regex(r"<[^>]*>", |lex| trim_chars(lex.slice(), 1))]
+    PathRef(&'source str),
+
+    /// Asset references
+    /// Example: "@./textures/wood.jpg@" -> ./textures/wood.jpg
+    #[regex(r"@[^@]*@", |lex| trim_chars(lex.slice(), 1))]
+    AssetRef(&'source str),
+
     /// Punctuation characters
-    /// Examples: "=", ",", ";", "(", ")", "{", "}", "[", "]"
-    #[regex(r"[=,;()\{\}\[\]]", |lex| lex.slice().chars().next().unwrap())]
+    /// Examples: "=", ",", ";", "(", ")", "{", "}", "[", "]", "+", "-"
+    #[regex(r"[=,;()\{\}\[\]+\-]", |lex| lex.slice().chars().next().unwrap())]
     Punctuation(char),
 
     /// Namespaced identifiers (contains colon)
@@ -479,4 +482,43 @@ mod tests {
             assert_eq!(token.try_as_punctuation(), Some(expected_char)); // EnumTryAs generated method
         }
     }
+
+    #[test]
+    fn test_tokenize_inf() {
+        let input = "inf -inf +inf";
+        let mut lexer = Token::lexer(input);
+
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Inf, "Expected Inf token");
+
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Punctuation('-'), "Expected '-' punctuation");
+
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Inf, "Expected Inf token after '-'");
+
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Punctuation('+'), "Expected '+' punctuation");
+
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Inf, "Expected Inf token after '+'");
+
+        assert!(lexer.next().is_none(), "Expected no more tokens");
+    }
+}
+
+#[test]
+fn test_rel_token() {
+    let input = "rel physics:test";
+    let mut lexer = Token::lexer(input);
+
+    let token = lexer.next().unwrap().unwrap();
+    assert!(matches!(token, Token::Rel), "Expected Rel token, got {:?}", token);
+
+    let token = lexer.next().unwrap().unwrap();
+    assert!(
+        matches!(token, Token::NamespacedIdentifier(_)),
+        "Expected NamespacedIdentifier, got {:?}",
+        token
+    );
 }
