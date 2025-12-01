@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use logos::{Lexer, Logos};
+use logos::Logos;
+use std::iter::Peekable;
 use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::{any::type_name, collections::HashMap, fmt::Debug, str::FromStr};
@@ -15,10 +16,8 @@ type LexResult<'source> = std::result::Result<Token<'source>, ()>;
 
 /// Parser translates a list of tokens into structured data.
 pub struct Parser<'a> {
-    lexer: Lexer<'a, Token<'a>>,
-    lookahead: Option<(LexResult<'a>, Range<usize>)>,
+    iter: Peekable<logos::SpannedIter<'a, Token<'a>>>,
     source: &'a str,
-    line_offsets: Vec<usize>,
     last_span: Option<Range<usize>>,
 }
 
@@ -44,10 +43,8 @@ impl ErrorHighlight {
 impl<'a> Parser<'a> {
     pub fn new(data: &'a str) -> Self {
         Self {
-            lexer: Token::lexer(data),
-            lookahead: None,
+            iter: Token::lexer(data).spanned().peekable(),
             source: data,
-            line_offsets: Self::compute_line_offsets(data),
             last_span: None,
         }
     }
@@ -61,32 +58,44 @@ impl<'a> Parser<'a> {
         if self.source.is_empty() {
             return None;
         }
-        let mut offset = span.start.min(self.source.len());
-        if offset == self.source.len() && offset > 0 {
+        let source = self.source;
+
+        let mut offset = span.start.min(source.len());
+        if offset == source.len() && offset > 0 {
             offset -= 1;
         }
-        let line_index = self.line_index_for_offset(offset);
-        let line_start = *self.line_offsets.get(line_index)?;
-        let line_end = self
-            .line_offsets
-            .get(line_index + 1)
-            .copied()
-            .unwrap_or(self.source.len());
-        let bounded_end = line_end.min(self.source.len());
-        let raw_line = &self.source[line_start..bounded_end];
-        let line_text = raw_line.trim_end_matches(['\r', '\n']).to_string();
 
-        let mut column_chars = 0usize;
-        for ch in self.source[line_start..offset].chars() {
+        // Calculate line and column by counting newlines up to the offset
+        let mut line = 1;
+        let mut line_start = 0;
+
+        for (idx, ch) in source[..offset].char_indices() {
+            if ch == '\n' {
+                line += 1;
+                line_start = idx + ch.len_utf8();
+            }
+        }
+
+        // Find the end of the current line
+        let line_end = source[line_start..]
+            .find('\n')
+            .map(|pos| line_start + pos)
+            .unwrap_or(source.len());
+
+        let line_text = source[line_start..line_end].trim_end_matches(['\r', '\n']).to_string();
+
+        // Calculate column (character count from line start to offset)
+        let mut column = 1;
+        for ch in source[line_start..offset].chars() {
             if ch == '\n' || ch == '\r' {
                 break;
             }
-            column_chars += 1;
+            column += 1;
         }
-        let column = column_chars + 1;
 
+        // Build pointer line
         let mut pointer_line = String::new();
-        for ch in self.source[line_start..offset].chars() {
+        for ch in source[line_start..offset].chars() {
             if ch == '\n' || ch == '\r' {
                 break;
             }
@@ -95,41 +104,23 @@ impl<'a> Parser<'a> {
         pointer_line.push('^');
 
         Some(ErrorHighlight {
-            line: line_index + 1,
+            line,
             column,
             line_text,
             pointer_line,
         })
     }
 
-    fn line_index_for_offset(&self, offset: usize) -> usize {
-        match self.line_offsets.binary_search(&offset) {
-            Ok(idx) => idx,
-            Err(idx) => idx.saturating_sub(1),
-        }
-    }
-
     #[inline]
     fn fetch_next(&mut self) -> Result<Token<'a>> {
-        let (token, span) = if let Some((token, span)) = self.lookahead.take() {
-            (token, span)
-        } else {
-            let token = self.lexer.next().context("Unexpected end of tokens")?;
-            let span = self.lexer.span();
-            (token, span)
-        };
-        self.last_span = Some(span.clone());
+        let (token, span) = self.iter.next().context("Unexpected end of tokens")?;
+        self.last_span = Some(span);
         token.map_err(|e| anyhow!("Logos error: {e:?}"))
     }
 
     #[inline]
     fn peek_next(&mut self) -> Option<&LexResult<'a>> {
-        if self.lookahead.is_none() {
-            let next = self.lexer.next()?;
-            let span = self.lexer.span();
-            self.lookahead = Some((next, span));
-        }
-        self.lookahead.as_ref().map(|(token, _)| token)
+        self.iter.peek().map(|(token, _)| token)
     }
 
     fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
@@ -1301,20 +1292,6 @@ impl<'a> Parser<'a> {
             Ok(())
         })?;
         Ok(matrices)
-    }
-
-    fn compute_line_offsets(source: &str) -> Vec<usize> {
-        let mut offsets = Vec::new();
-        offsets.push(0);
-        for (idx, ch) in source.char_indices() {
-            if ch == '\n' {
-                offsets.push(idx + ch.len_utf8());
-            }
-        }
-        if offsets.last().copied().unwrap_or_default() != source.len() {
-            offsets.push(source.len());
-        }
-        offsets
     }
 }
 
