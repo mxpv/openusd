@@ -29,6 +29,11 @@ impl TextReader {
 
         Ok(Self { data })
     }
+
+    /// Create from parsed data.
+    pub fn from_data(data: HashMap<sdf::Path, sdf::Spec>) -> Self {
+        Self { data }
+    }
 }
 
 impl sdf::AbstractData for TextReader {
