@@ -318,7 +318,8 @@ impl<'a> Parser<'a> {
                 }
                 Token::Rel => {
                     self.fetch_next()?;
-                    self.skip_relationship()?;
+                    self.read_relationship(&prim_path, &mut properties, data)
+                        .context("Unable to read relationship")?;
                 }
                 _ => {
                     self.read_attribute(&prim_path, &mut properties, data)
@@ -368,18 +369,46 @@ impl<'a> Parser<'a> {
         let name_token = self.fetch_next()?;
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            _ => bail!("Unexpected token type for attribute name: {name_token:?}"),
+            _ => keyword_lexeme(&name_token)
+                .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
         };
 
         if name.contains(".connect") {
             if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
                 self.fetch_next()?;
-                self.skip_connection_value()?;
+                let list_op = match self.peek_next() {
+                    Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
+                        Some(self.fetch_next()?)
+                    }
+                    _ => None,
+                };
+                let targets = self
+                    .parse_connection_targets()
+                    .context("Unable to parse connection targets")?;
+                let path = current_path.append_property(name)?;
+                properties.push(name.to_string());
+
+                spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
+                spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+                spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+
+                let list_op = self
+                    .apply_list_op(list_op, targets)
+                    .context("Unable to build connection listOp")?;
+                spec.add(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
+                data.insert(path, spec);
             }
             return Ok(());
         }
 
         if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            let path = current_path.append_property(name)?;
+            properties.push(name.to_string());
+
+            spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
+            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+            spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+            data.insert(path, spec);
             return Ok(());
         }
 
@@ -402,22 +431,28 @@ impl<'a> Parser<'a> {
 
         Ok(())
     }
-
-    /// Skip over a relationship/connection value without interpreting its contents.
-    fn skip_connection_value(&mut self) -> Result<()> {
-        let token = self.fetch_next()?;
-        if let Token::Punctuation('[') = token {
-            let mut depth = 1i32;
-            while depth > 0 {
-                let next = self.fetch_next()?;
-                match next {
-                    Token::Punctuation('[') => depth += 1,
-                    Token::Punctuation(']') => depth -= 1,
-                    _ => {}
-                }
-            }
+    /// Parses a connection target list into USD paths.
+    fn parse_connection_targets(&mut self) -> Result<Vec<sdf::Path>> {
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+            let mut paths = Vec::new();
+            self.parse_array_fn(|this| {
+                paths.push(this.parse_path_reference().context("Connection path expected")?);
+                Ok(())
+            })?;
+            Ok(paths)
+        } else {
+            Ok(vec![self.parse_path_reference()?])
         }
-        Ok(())
+    }
+
+    /// Parses a single `<...>` path reference token into an `sdf::Path`.
+    fn parse_path_reference(&mut self) -> Result<sdf::Path> {
+        let token = self.fetch_next()?;
+        let path_str = token
+            .clone()
+            .try_as_path_ref()
+            .ok_or_else(|| anyhow!("Path reference expected, got {token:?}"))?;
+        sdf::Path::new(path_str)
     }
 
     /// Parse the metadata block attached to an attribute and stash entries on the spec.
@@ -493,17 +528,46 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip an entire relationship declaration so it does not register as a property.
-    fn skip_relationship(&mut self) -> Result<()> {
-        let target = self.fetch_next()?;
-        match target {
-            Token::Identifier(_) | Token::NamespacedIdentifier(_) => {}
+    fn read_relationship(
+        &mut self,
+        current_path: &sdf::Path,
+        properties: &mut Vec<String>,
+        data: &mut HashMap<sdf::Path, sdf::Spec>,
+    ) -> Result<()> {
+        let name_token = self.fetch_next()?;
+        let name = match name_token {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
             other => bail!("Unexpected token in relationship declaration: {other:?}"),
+        };
+        if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            return Ok(());
         }
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
-            self.fetch_next()?;
-            self.skip_connection_value()?;
-        }
+        self.ensure_pun('=')?;
+        let list_op = match self.peek_next() {
+            Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
+                Some(self.fetch_next()?)
+            }
+            _ => None,
+        };
+        let targets = self
+            .parse_connection_targets()
+            .context("Unable to parse relationship targets")?;
+
+        let path = current_path.append_property(name)?;
+        properties.push(name.to_string());
+
+        let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
+        let list_op = self
+            .apply_list_op(list_op, targets)
+            .context("Unable to build relationship targets listOp")?;
+        spec.add(sdf::schema::FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
+        spec.add(sdf::schema::FieldKey::Custom, sdf::Value::Bool(false));
+        spec.add(
+            sdf::schema::FieldKey::Variability,
+            sdf::Value::Variability(sdf::Variability::Varying),
+        );
+
+        data.insert(path, spec);
         Ok(())
     }
 
@@ -773,7 +837,9 @@ impl<'a> Parser<'a> {
             Type::StringVec => sdf::Value::StringVec(self.parse_array()?),
             Type::TokenVec => sdf::Value::TokenVec(self.parse_array()?),
 
-            _ => bail!("Unimplemented data type: {ty:?}"),
+            Type::Matrix2d => sdf::Value::Matrix2d(self.parse_matrix_value::<2>()?),
+            Type::Matrix3d => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
+            Type::Matrix4d => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
         };
 
         Ok(value)
@@ -835,9 +901,9 @@ impl<'a> Parser<'a> {
             "double4[]" => Type::Double4Vec,
 
             // Matrices
-            "matrix2d" => Type::Matrix2d,
-            "matrix3d" => Type::Matrix3d,
-            "matrix4d" | "frame4d" => Type::Matrix4d,
+            "matrix2d" | "matrix2d[]" => Type::Matrix2d,
+            "matrix3d" | "matrix3d[]" => Type::Matrix3d,
+            "matrix4d" | "matrix4d[]" | "frame4d" | "frame4d[]" => Type::Matrix4d,
 
             // Quats
             "quatd" => Type::Quatd,
@@ -1074,6 +1140,42 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
+    /// Parse a single matrix literal, flattening rows in row-major order.
+    fn parse_matrix<const N: usize>(&mut self) -> Result<Vec<f64>> {
+        let mut values = Vec::with_capacity(N * N);
+        self.parse_seq_fn(',', |this, _| {
+            let row = this.parse_tuple::<f64, N>()?;
+            values.extend(row);
+            Ok(())
+        })?;
+
+        ensure!(
+            values.len() == N * N,
+            "matrix{N}d literal must contain {N} rows"
+        );
+
+        Ok(values)
+    }
+
+    /// Parse either a single matrix or an array of matrices, depending on the next token.
+    fn parse_matrix_value<const N: usize>(&mut self) -> Result<Vec<f64>> {
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+            self.parse_matrix_array::<N>()
+        } else {
+            self.parse_matrix::<N>()
+        }
+    }
+
+    /// Parse an array of matrices, concatenating the row-major matrices into a single vector.
+    fn parse_matrix_array<const N: usize>(&mut self) -> Result<Vec<f64>> {
+        let mut matrices = Vec::new();
+        self.parse_array_fn(|this| {
+            matrices.extend(this.parse_matrix::<N>()?);
+            Ok(())
+        })?;
+        Ok(matrices)
+    }
+
     fn compute_line_offsets(source: &str) -> Vec<usize> {
         let mut offsets = Vec::new();
         offsets.push(0);
@@ -1142,6 +1244,53 @@ enum Type {
     Matrix2d,
     Matrix3d,
     Matrix4d,
+}
+
+fn keyword_lexeme(token: &Token<'_>) -> Option<&'static str> {
+    match token {
+        Token::Add => Some("add"),
+        Token::Append => Some("append"),
+        Token::Class => Some("class"),
+        Token::Config => Some("config"),
+        Token::Connect => Some("connect"),
+        Token::Custom => Some("custom"),
+        Token::CustomData => Some("customData"),
+        Token::Default => Some("default"),
+        Token::Def => Some("def"),
+        Token::Delete => Some("delete"),
+        Token::Dictionary => Some("dictionary"),
+        Token::DisplayUnit => Some("displayUnit"),
+        Token::Doc => Some("doc"),
+        Token::Inherits => Some("inherits"),
+        Token::Kind => Some("kind"),
+        Token::NameChildren => Some("nameChildren"),
+        Token::None => Some("None"),
+        Token::Offset => Some("offset"),
+        Token::Over => Some("over"),
+        Token::Payload => Some("payload"),
+        Token::Permission => Some("permission"),
+        Token::PrefixSubstitutions => Some("prefixSubstitutions"),
+        Token::Prepend => Some("prepend"),
+        Token::Properties => Some("properties"),
+        Token::References => Some("references"),
+        Token::Relocates => Some("relocates"),
+        Token::Rel => Some("rel"),
+        Token::Reorder => Some("reorder"),
+        Token::RootPrims => Some("rootPrims"),
+        Token::Scale => Some("scale"),
+        Token::SubLayers => Some("subLayers"),
+        Token::SuffixSubstitutions => Some("suffixSubstitutions"),
+        Token::Specializes => Some("specializes"),
+        Token::SymmetryArguments => Some("symmetryArguments"),
+        Token::SymmetryFunction => Some("symmetryFunction"),
+        Token::TimeSamples => Some("timeSamples"),
+        Token::Uniform => Some("uniform"),
+        Token::VariantSet => Some("variantSet"),
+        Token::VariantSets => Some("variantSets"),
+        Token::Variants => Some("variants"),
+        Token::Varying => Some("varying"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1288,7 +1437,7 @@ def Mesh "M"
     }
 
     #[test]
-    // Verifies the parser tolerates custom/asset/connect syntax and filters unsanitized props.
+    // Verifies the parser tolerates custom/asset/connect syntax and records connection props.
     fn parse_unsanitized_attributes() {
         let mut parser = Parser::new(
             r#"
@@ -1328,8 +1477,25 @@ def Shader "Image_Texture"
             Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
         ));
 
-        assert!(!data.contains_key(&sdf::path("/Image_Texture.outputs:surface.connect").unwrap()));
-        assert!(!data.contains_key(&sdf::path("/Image_Texture.outputs:surface").unwrap()));
+        let output_spec = data
+            .get(&sdf::path("/Image_Texture.outputs:surface").unwrap())
+            .expect("missing outputs:surface spec");
+        assert!(matches!(
+            output_spec
+                .fields
+                .get(sdf::schema::FieldKey::TypeName.as_str()),
+            Some(sdf::Value::Token(t)) if t == "token"
+        ));
+
+        let connection_spec = data
+            .get(&sdf::path("/Image_Texture.outputs:surface.connect").unwrap())
+            .expect("missing outputs:surface.connect spec");
+        assert!(matches!(
+            connection_spec
+                .fields
+                .get(sdf::schema::FieldKey::ConnectionPaths.as_str()),
+            Some(sdf::Value::PathListOp(op)) if op.explicit_items.len() == 1
+        ));
 
         let props = shader
             .fields
@@ -1342,6 +1508,159 @@ def Shader "Image_Texture"
         assert!(props.contains(&"info:id".to_string()));
         assert!(props.contains(&"doubleSided".to_string()));
         assert!(props.contains(&"inputs:file".to_string()));
+        assert!(props.contains(&"outputs:surface.connect".to_string()));
+        assert!(props.contains(&"outputs:surface".to_string()));
+    }
+
+    #[test]
+    // Ensures matrix4d scalar attributes parse into row-major data.
+    fn parse_matrix4d_attribute() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Xform "X" {
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let transform = data
+            .get(&sdf::path("/X.xformOp:transform").unwrap())
+            .expect("transform spec missing");
+        let matrix = transform
+            .fields
+            .get(sdf::schema::FieldKey::Default.as_str())
+            .expect("matrix default missing");
+
+        match matrix {
+            sdf::Value::Matrix4d(values) => {
+                assert_eq!(values.len(), 16);
+                assert_eq!(values[0], 1.0);
+                assert_eq!(values[5], 1.0);
+                assert_eq!(values[10], 1.0);
+                assert_eq!(values[15], 1.0);
+            }
+            other => panic!("expected Matrix4d, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Ensures matrix4d array attributes parse into contiguous row-major data.
+    fn parse_matrix4d_array_attribute() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Scope "Root" {
+    matrix4d[] transforms = [
+        ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+        ( (2, 0, 0, 0), (0, 2, 0, 0), (0, 0, 2, 0), (0, 0, 0, 2) )
+    ]
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let transforms = data
+            .get(&sdf::path("/Root.transforms").unwrap())
+            .expect("transforms spec missing");
+        let matrix = transforms
+            .fields
+            .get(sdf::schema::FieldKey::Default.as_str())
+            .expect("matrix default missing");
+
+        match matrix {
+            sdf::Value::Matrix4d(values) => {
+                assert_eq!(values.len(), 32);
+                assert_eq!(values[0], 1.0);
+                assert_eq!(values[15], 1.0);
+                assert_eq!(values[16], 2.0);
+                assert_eq!(values[31], 2.0);
+            }
+            other => panic!("expected Matrix4d array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // Validates output declarations and connection attributes produce specs with connection paths.
+    fn parse_material_output_connections() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Preview.outputs:surface>
+    token outputs:surface
+
+    def Shader "Preview"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        token outputs:surface
+    }
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let mat = data.get(&sdf::path("/Mat").unwrap()).unwrap();
+
+        let props = mat
+            .fields
+            .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
+            // Clone because try_as_token_vec consumes the Value.
+            .and_then(|value| value.clone().try_as_token_vec())
+            .unwrap_or_default();
+        assert!(props.contains(&"outputs:surface".to_string()));
+        assert!(props.contains(&"outputs:surface.connect".to_string()));
+
+        let output = data
+            .get(&sdf::path("/Mat.outputs:surface").unwrap())
+            .expect("missing outputs:surface spec");
+        assert!(matches!(
+            output.fields.get(sdf::schema::FieldKey::TypeName.as_str()),
+            Some(sdf::Value::Token(t)) if t == "token"
+        ));
+
+        let connection = data
+            .get(&sdf::path("/Mat.outputs:surface.connect").unwrap())
+            .expect("missing outputs:surface.connect spec");
+        match connection.fields.get(sdf::schema::FieldKey::ConnectionPaths.as_str()) {
+            Some(sdf::Value::PathListOp(op)) => {
+                assert_eq!(op.explicit_items.len(), 1);
+                assert_eq!(op.explicit_items[0].as_str(), "/Mat/Preview.outputs:surface");
+            }
+            other => panic!("unexpected connection paths value: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Verifies relationships are parsed with targets in the raw spec map.
+    fn parse_relationship_specs() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Scope "Root"
+{
+    rel material:binding = </Mat>
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let rel_spec = data
+            .get(&sdf::path("/Root.material:binding").unwrap())
+            .expect("missing relationship spec");
+        let targets = rel_spec
+            .fields
+            .get(sdf::schema::FieldKey::TargetPaths.as_str())
+            .and_then(|v| v.try_as_path_list_op_ref())
+            .expect("missing targets on relationship");
+        assert_eq!(targets.explicit_items.len(), 1);
+        assert_eq!(targets.explicit_items[0].as_str(), "/Mat");
     }
 
     #[test]
