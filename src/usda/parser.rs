@@ -876,7 +876,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn apply_list_op<T: Default + Clone>(&mut self, op: Option<Token<'a>>, items: Vec<T>) -> Result<sdf::ListOp<T>> {
+    fn apply_list_op<T: Default + Clone + PartialEq>(
+        &mut self,
+        op: Option<Token<'a>>,
+        items: Vec<T>,
+    ) -> Result<sdf::ListOp<T>> {
         let mut list = sdf::ListOp::default();
 
         match op {

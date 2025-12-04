@@ -73,7 +73,7 @@ pub enum Variability {
 
 /// Represents a time offset and scale between layers.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct LayerOffset {
     /// Time offset.
     pub offset: f64,
@@ -111,7 +111,7 @@ impl LayerOffset {
 /// Unloaded payloads represent a boundary that lazy composition and
 /// system behaviors will not traverse across, providing a user-visible
 /// way to manage the working set of the scene.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Payload {
     /// The asset path to the external layer.
     pub asset_path: String,
@@ -127,7 +127,7 @@ pub struct Payload {
 /// prim in a layer stack. All opinions in the namespace hierarchy
 /// under the referenced prim will be composed with the opinions in the
 /// namespace hierarchy under the referencing prim.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Reference {
     /// The asset path to the external layer.
     pub asset_path: String,
@@ -143,8 +143,8 @@ pub struct Reference {
 ///
 /// `ListOp`` is a value type representing an operation that edits a list.
 /// It may add or remove items, reorder them, or replace the list entirely.
-#[derive(Default, Debug, Clone)]
-pub struct ListOp<T: Default + Clone> {
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct ListOp<T: Default + Clone + PartialEq> {
     pub explicit: bool,
     pub explicit_items: Vec<T>,
     pub added_items: Vec<T>,

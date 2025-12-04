@@ -15,8 +15,10 @@
 //! let expr: Expr = r#"if(${USE_HIGH_RES}, "high", "low")"#.parse().unwrap();
 //! ```
 
+use crate::sdf;
 use anyhow::{anyhow, bail, ensure, Result};
 use logos::{Logos, SpannedIter};
+use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
 
@@ -217,6 +219,333 @@ impl Expr {
     pub fn parse(s: &str) -> Result<Self> {
         s.parse()
     }
+
+    /// Evaluate the expression with the given variable context.
+    pub fn eval(&self, vars: &HashMap<String, sdf::Value>) -> Result<sdf::Value> {
+        match self {
+            Expr::String(s) => Ok(sdf::Value::String(interpolate_string(s, vars)?)),
+            Expr::Integer(n) => Ok(sdf::Value::Int64(*n)),
+            Expr::Bool(b) => Ok(sdf::Value::Bool(*b)),
+            Expr::None => Ok(sdf::Value::None),
+            Expr::Variable(name) => vars
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow!("Undefined variable: {}", name)),
+            Expr::Array(elements) => {
+                let values: Result<Vec<_>> = elements.iter().map(|e| e.eval(vars)).collect();
+                eval_array(values?)
+            }
+            Expr::Call { func, args } => eval_func(*func, args, vars),
+        }
+    }
+}
+
+/// Interpolate `${var}` references in a string.
+fn interpolate_string(s: &str, vars: &HashMap<String, sdf::Value>) -> Result<String> {
+    let mut result = String::with_capacity(s.len());
+    let mut rest = s;
+
+    while let Some(pos) = rest.find("${") {
+        result.push_str(&rest[..pos]);
+        rest = &rest[pos + 2..];
+
+        let end = rest
+            .find('}')
+            .ok_or_else(|| anyhow!("Unclosed variable reference in string"))?;
+
+        let var_name = &rest[..end];
+        let value = vars
+            .get(var_name)
+            .ok_or_else(|| anyhow!("Undefined variable: {}", var_name))?;
+        result.push_str(&value_to_string(value)?);
+
+        rest = &rest[end + 1..];
+    }
+
+    result.push_str(rest);
+    Ok(result)
+}
+
+/// Convert a value to its string representation for interpolation.
+fn value_to_string(value: &sdf::Value) -> Result<String> {
+    match value {
+        sdf::Value::String(s) => Ok(s.clone()),
+        sdf::Value::Int64(n) => Ok(n.to_string()),
+        sdf::Value::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+        sdf::Value::None => Ok("None".to_string()),
+        _ => bail!("Cannot interpolate {} into string", value_type_name(value)),
+    }
+}
+
+/// Get the type name of a value for error messages.
+fn value_type_name(value: &sdf::Value) -> &'static str {
+    match value {
+        sdf::Value::None => "None",
+        sdf::Value::Bool(_) => "bool",
+        sdf::Value::BoolVec(_) => "bool[]",
+        sdf::Value::Int64(_) => "int64",
+        sdf::Value::Int64Vec(_) => "int64[]",
+        sdf::Value::String(_) => "string",
+        sdf::Value::StringVec(_) => "string[]",
+        _ => "unsupported type",
+    }
+}
+
+/// Convert evaluated array elements into the appropriate sdf::Value array type.
+fn eval_array(values: Vec<sdf::Value>) -> Result<sdf::Value> {
+    if values.is_empty() {
+        return Ok(sdf::Value::StringVec(vec![]));
+    }
+
+    // Determine array type from first element
+    match &values[0] {
+        sdf::Value::String(_) => {
+            let mut strings = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    sdf::Value::String(s) => strings.push(s),
+                    _ => bail!("Array elements must be the same type"),
+                }
+            }
+            Ok(sdf::Value::StringVec(strings))
+        }
+        sdf::Value::Int64(_) => {
+            let mut ints = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    sdf::Value::Int64(n) => ints.push(n),
+                    _ => bail!("Array elements must be the same type"),
+                }
+            }
+            Ok(sdf::Value::Int64Vec(ints))
+        }
+        sdf::Value::Bool(_) => {
+            let mut bools = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    sdf::Value::Bool(b) => bools.push(b),
+                    _ => bail!("Array elements must be the same type"),
+                }
+            }
+            Ok(sdf::Value::BoolVec(bools))
+        }
+        other => bail!("Unsupported array element type: {}", value_type_name(other)),
+    }
+}
+
+/// Extract bool from sdf::Value.
+fn value_as_bool(value: &sdf::Value) -> Result<bool> {
+    match value {
+        sdf::Value::Bool(b) => Ok(*b),
+        other => bail!("Expected bool, got {}", value_type_name(other)),
+    }
+}
+
+/// Extract i64 from sdf::Value.
+fn value_as_int(value: &sdf::Value) -> Result<i64> {
+    match value {
+        sdf::Value::Int64(n) => Ok(*n),
+        other => bail!("Expected int64, got {}", value_type_name(other)),
+    }
+}
+
+/// Evaluate a function call.
+fn eval_func(func: Func, args: &[Expr], vars: &HashMap<String, sdf::Value>) -> Result<sdf::Value> {
+    match func {
+        Func::Defined => {
+            for arg in args {
+                let name = match arg {
+                    Expr::Variable(name) => name,
+                    other => bail!("defined() requires variable names, got {:?}", other),
+                };
+                if !vars.contains_key(name) {
+                    return Ok(sdf::Value::Bool(false));
+                }
+            }
+            Ok(sdf::Value::Bool(true))
+        }
+
+        Func::If => {
+            let cond = value_as_bool(&args[0].eval(vars)?)?;
+            if cond {
+                args[1].eval(vars)
+            } else if args.len() == 3 {
+                args[2].eval(vars)
+            } else {
+                Ok(sdf::Value::None)
+            }
+        }
+
+        Func::And => {
+            for arg in args {
+                if !value_as_bool(&arg.eval(vars)?)? {
+                    return Ok(sdf::Value::Bool(false));
+                }
+            }
+            Ok(sdf::Value::Bool(true))
+        }
+
+        Func::Or => {
+            for arg in args {
+                if value_as_bool(&arg.eval(vars)?)? {
+                    return Ok(sdf::Value::Bool(true));
+                }
+            }
+            Ok(sdf::Value::Bool(false))
+        }
+
+        Func::Not => {
+            let val = value_as_bool(&args[0].eval(vars)?)?;
+            Ok(sdf::Value::Bool(!val))
+        }
+
+        Func::Eq => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(values_equal(&left, &right)?))
+        }
+
+        Func::Neq => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(!values_equal(&left, &right)?))
+        }
+
+        Func::Lt => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(compare_values(&left, &right)?.is_lt()))
+        }
+
+        Func::Leq => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(!compare_values(&left, &right)?.is_gt()))
+        }
+
+        Func::Gt => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(compare_values(&left, &right)?.is_gt()))
+        }
+
+        Func::Geq => {
+            let left = args[0].eval(vars)?;
+            let right = args[1].eval(vars)?;
+            Ok(sdf::Value::Bool(!compare_values(&left, &right)?.is_lt()))
+        }
+
+        Func::Contains => {
+            let container = args[0].eval(vars)?;
+            let value = args[1].eval(vars)?;
+            match &container {
+                sdf::Value::String(s) => {
+                    let needle = match &value {
+                        sdf::Value::String(v) => v,
+                        other => bail!(
+                            "contains() with string requires string value, got {}",
+                            value_type_name(other)
+                        ),
+                    };
+                    Ok(sdf::Value::Bool(s.contains(needle.as_str())))
+                }
+                sdf::Value::StringVec(arr) => {
+                    let needle = match &value {
+                        sdf::Value::String(v) => v,
+                        other => bail!(
+                            "contains() with string[] requires string value, got {}",
+                            value_type_name(other)
+                        ),
+                    };
+                    Ok(sdf::Value::Bool(arr.contains(needle)))
+                }
+                sdf::Value::Int64Vec(arr) => {
+                    let needle = value_as_int(&value)?;
+                    Ok(sdf::Value::Bool(arr.contains(&needle)))
+                }
+                sdf::Value::BoolVec(arr) => {
+                    let needle = value_as_bool(&value)?;
+                    Ok(sdf::Value::Bool(arr.contains(&needle)))
+                }
+                other => bail!("contains() requires string or array, got {}", value_type_name(other)),
+            }
+        }
+
+        Func::At => {
+            let container = args[0].eval(vars)?;
+            let index = value_as_int(&args[1].eval(vars)?)?;
+            match &container {
+                sdf::Value::String(s) => {
+                    let len = s.chars().count() as i64;
+                    let idx = normalize_index(index, len)?;
+                    let ch = s.chars().nth(idx).ok_or_else(|| anyhow!("Index out of bounds"))?;
+                    Ok(sdf::Value::String(ch.to_string()))
+                }
+                sdf::Value::StringVec(arr) => {
+                    let idx = normalize_index(index, arr.len() as i64)?;
+                    Ok(sdf::Value::String(arr[idx].clone()))
+                }
+                sdf::Value::Int64Vec(arr) => {
+                    let idx = normalize_index(index, arr.len() as i64)?;
+                    Ok(sdf::Value::Int64(arr[idx]))
+                }
+                sdf::Value::BoolVec(arr) => {
+                    let idx = normalize_index(index, arr.len() as i64)?;
+                    Ok(sdf::Value::Bool(arr[idx]))
+                }
+                other => bail!("at() requires string or array, got {}", value_type_name(other)),
+            }
+        }
+
+        Func::Len => {
+            let container = args[0].eval(vars)?;
+            match &container {
+                sdf::Value::String(s) => Ok(sdf::Value::Int64(s.chars().count() as i64)),
+                sdf::Value::StringVec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
+                sdf::Value::Int64Vec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
+                sdf::Value::BoolVec(arr) => Ok(sdf::Value::Int64(arr.len() as i64)),
+                other => bail!("len() requires string or array, got {}", value_type_name(other)),
+            }
+        }
+    }
+}
+
+/// Check if two values are equal (must be same type).
+fn values_equal(left: &sdf::Value, right: &sdf::Value) -> Result<bool> {
+    match (left, right) {
+        (sdf::Value::String(a), sdf::Value::String(b)) => Ok(a == b),
+        (sdf::Value::Int64(a), sdf::Value::Int64(b)) => Ok(a == b),
+        (sdf::Value::Bool(a), sdf::Value::Bool(b)) => Ok(a == b),
+        (sdf::Value::None, sdf::Value::None) => Ok(true),
+        _ => bail!(
+            "Cannot compare {} with {}",
+            value_type_name(left),
+            value_type_name(right)
+        ),
+    }
+}
+
+/// Compare two values (must be same type).
+fn compare_values(left: &sdf::Value, right: &sdf::Value) -> Result<std::cmp::Ordering> {
+    match (left, right) {
+        (sdf::Value::String(a), sdf::Value::String(b)) => Ok(a.cmp(b)),
+        (sdf::Value::Int64(a), sdf::Value::Int64(b)) => Ok(a.cmp(b)),
+        (sdf::Value::Bool(a), sdf::Value::Bool(b)) => Ok(a.cmp(b)),
+        _ => bail!(
+            "Cannot compare {} with {}",
+            value_type_name(left),
+            value_type_name(right)
+        ),
+    }
+}
+
+/// Normalize a possibly-negative index to a valid array/string index.
+fn normalize_index(index: i64, len: i64) -> Result<usize> {
+    let idx = if index < 0 { len + index } else { index };
+    if idx < 0 || idx >= len {
+        bail!("Index {} out of bounds for length {}", index, len);
+    }
+    Ok(idx as usize)
 }
 
 /// Parser for USD variable expressions.
@@ -848,5 +1177,199 @@ mod tests {
         let result: Result<Expr, _> = "defined()".parse();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("at least 1"));
+    }
+
+    // Eval tests
+
+    fn make_vars(pairs: &[(&str, sdf::Value)]) -> HashMap<String, sdf::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn eval_literals() {
+        let vars = HashMap::new();
+
+        let expr: Expr = "42".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(42));
+
+        let expr: Expr = "True".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = r#""hello""#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("hello".to_string()));
+
+        let expr: Expr = "None".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::None);
+    }
+
+    #[test]
+    fn eval_variable() {
+        let vars = make_vars(&[("X", sdf::Value::Int64(100))]);
+
+        let expr: Expr = "${X}".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(100));
+    }
+
+    #[test]
+    fn eval_undefined_variable_error() {
+        let vars = HashMap::new();
+        let expr: Expr = "${UNDEFINED}".parse().unwrap();
+        assert!(expr.eval(&vars).is_err());
+    }
+
+    #[test]
+    fn eval_string_interpolation() {
+        let vars = make_vars(&[
+            ("PATH", sdf::Value::String("/assets".to_string())),
+            ("NAME", sdf::Value::String("model".to_string())),
+        ]);
+
+        let expr: Expr = r#"`"${PATH}/${NAME}.usd"`"#.parse().unwrap();
+        assert_eq!(
+            expr.eval(&vars).unwrap(),
+            sdf::Value::String("/assets/model.usd".to_string())
+        );
+    }
+
+    #[test]
+    fn eval_if_function() {
+        let vars = make_vars(&[("COND", sdf::Value::Bool(true))]);
+
+        let expr: Expr = r#"if(${COND}, "yes", "no")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("yes".to_string()));
+
+        let vars = make_vars(&[("COND", sdf::Value::Bool(false))]);
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("no".to_string()));
+    }
+
+    #[test]
+    fn eval_if_two_args_returns_none() {
+        let vars = make_vars(&[("COND", sdf::Value::Bool(false))]);
+
+        let expr: Expr = r#"if(${COND}, "yes")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::None);
+    }
+
+    #[test]
+    fn eval_defined() {
+        let vars = make_vars(&[("X", sdf::Value::Int64(1))]);
+
+        let expr: Expr = "defined(X)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "defined(Y)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+
+        let expr: Expr = "defined(X, Y)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+    }
+
+    #[test]
+    fn eval_and_or_not() {
+        let vars = HashMap::new();
+
+        let expr: Expr = "and(True, True)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "and(True, False)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+
+        let expr: Expr = "or(False, True)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "or(False, False)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+
+        let expr: Expr = "not(True)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+    }
+
+    #[test]
+    fn eval_comparisons() {
+        let vars = HashMap::new();
+
+        let expr: Expr = "eq(1, 1)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "neq(1, 2)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "lt(1, 2)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "leq(2, 2)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "gt(3, 2)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = "geq(2, 2)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    }
+
+    #[test]
+    fn eval_string_comparisons() {
+        let vars = HashMap::new();
+
+        let expr: Expr = r#"lt("apple", "banana")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = r#"eq("test", "test")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    }
+
+    #[test]
+    fn eval_contains() {
+        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into(), "c".into()]))]);
+
+        let expr: Expr = r#"contains(${ARR}, "b")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+
+        let expr: Expr = r#"contains(${ARR}, "z")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(false));
+
+        // String contains substring
+        let vars = make_vars(&[("S", sdf::Value::String("hello world".to_string()))]);
+        let expr: Expr = r#"contains(${S}, "world")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Bool(true));
+    }
+
+    #[test]
+    fn eval_at() {
+        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into(), "c".into()]))]);
+
+        let expr: Expr = "at(${ARR}, 0)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("a".to_string()));
+
+        let expr: Expr = "at(${ARR}, -1)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("c".to_string()));
+
+        // String indexing
+        let vars = make_vars(&[("S", sdf::Value::String("hello".to_string()))]);
+        let expr: Expr = "at(${S}, 1)".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("e".to_string()));
+    }
+
+    #[test]
+    fn eval_len() {
+        let vars = make_vars(&[("ARR", sdf::Value::StringVec(vec!["a".into(), "b".into()]))]);
+
+        let expr: Expr = "len(${ARR})".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(2));
+
+        let vars = make_vars(&[("S", sdf::Value::String("hello".to_string()))]);
+        let expr: Expr = "len(${S})".parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::Int64(5));
+    }
+
+    #[test]
+    fn eval_complex_expression() {
+        let vars = make_vars(&[
+            ("MODE", sdf::Value::String("debug".to_string())),
+            ("DEBUG", sdf::Value::Bool(true)),
+        ]);
+
+        let expr: Expr = r#"if(or(eq(${MODE}, "debug"), ${DEBUG}), "dbg", "rel")"#.parse().unwrap();
+        assert_eq!(expr.eval(&vars).unwrap(), sdf::Value::String("dbg".to_string()));
     }
 }

@@ -660,7 +660,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(vec)
     }
 
-    fn read_list_op<T: Default + Clone>(
+    fn read_list_op<T: Default + Clone + PartialEq>(
         &mut self,
         value: ValueRep,
         mut read: impl FnMut(&mut Self) -> Result<Vec<T>>,
