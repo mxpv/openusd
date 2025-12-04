@@ -217,12 +217,18 @@ impl<'a> Parser<'a> {
                     root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
                 }
                 Token::Identifier(name) => {
-                    if let Some((name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
+                    if let Some((known_name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
                         self.ensure_pun('=')?;
                         let value = self
                             .parse_value(ty)
-                            .with_context(|| format!("Unable to parse value for {name}"))?;
-                        root.add(name, value);
+                            .with_context(|| format!("Unable to parse value for {known_name}"))?;
+                        root.add(known_name, value);
+                    } else {
+                        self.ensure_pun('=')?;
+                        let value = self
+                            .parse_property_metadata_value()
+                            .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
+                        root.fields.insert(name.to_owned(), value);
                     }
                 }
                 _ => bail!("Unexpected token {next:?}"),
@@ -538,6 +544,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[inline]
+    fn is_type_hint_name(name: &str) -> bool {
+        if name == "dictionary" {
+            return true;
+        }
+        Self::parse_data_type(name).is_ok()
+    }
+
     /// Parse a dictionary value from `{` to `}`.
     fn parse_dictionary(&mut self) -> Result<sdf::Value> {
         let mut dict = HashMap::new();
@@ -552,14 +566,13 @@ impl<'a> Parser<'a> {
             // Parse the type (optional) or key
             let first_token = self.fetch_next()?;
 
-            // Check if this is a type declaration (e.g., "string", "dictionary", "bool", "token")
+            // Check if this is a type declaration (e.g., "string", "dictionary", "double3")
             let (_type_hint, key_token) = match first_token {
-                Token::Identifier("string")
-                | Token::Identifier("bool")
-                | Token::Identifier("int")
-                | Token::Identifier("float")
-                | Token::Identifier("double")
-                | Token::Identifier("token")
+                Token::Identifier(name) if Self::is_type_hint_name(name) => {
+                    // This is a type declaration, next token is the key
+                    let key = self.fetch_next()?;
+                    (Some(first_token), key)
+                }
                 | Token::Dictionary => {
                     // This is a type declaration, next token is the key
                     let key = self.fetch_next()?;
@@ -583,7 +596,22 @@ impl<'a> Parser<'a> {
             self.ensure_pun('=')?;
 
             // Parse the value recursively
-            let value = self.parse_property_metadata_value()?;
+            let value = if let Some(type_hint_token) = _type_hint {
+                match type_hint_token {
+                    Token::Dictionary => {
+                        self.ensure_pun('{')?;
+                        self.parse_dictionary()?
+                    }
+                    Token::Identifier(type_name) => {
+                        let ty = Self::parse_data_type(type_name)
+                            .with_context(|| format!("Unable to parse dictionary value type {type_name}"))?;
+                        self.parse_value(ty)?
+                    }
+                    other => bail!("Unsupported dictionary type hint: {other:?}"),
+                }
+            } else {
+                self.parse_property_metadata_value()?
+            };
             dict.insert(key, value);
 
             // Handle optional trailing comma or newline
@@ -654,6 +682,11 @@ impl<'a> Parser<'a> {
             FieldKey::Variability,
             sdf::Value::Variability(sdf::Variability::Varying),
         );
+
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+            self.parse_property_metadata(&mut spec)
+                .context("Unable to parse relationship metadata")?;
+        }
 
         data.insert(path, spec);
         Ok(())
@@ -1467,6 +1500,74 @@ mod tests {
     }
 
     #[test]
+    // Ensures pseudo-root parsing preserves dictionary-valued metadata entries.
+    fn parse_pseudo_root_dictionary_metadata() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Front = {
+                double3 position = (5, 0, 0)
+                double radius = 5
+            }
+        }
+        string boundCamera = "/OmniverseKit_Persp"
+    }
+)
+"#,
+        );
+
+        let pseudo_root = parser.read_pseudo_root().unwrap();
+
+        let custom_layer_data = pseudo_root
+            .fields
+            .get("customLayerData")
+            .expect("customLayerData metadata present");
+
+        let dict = match custom_layer_data {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("customLayerData parsed as unexpected value: {other:?}"),
+        };
+
+        let camera_settings = dict
+            .get("cameraSettings")
+            .expect("cameraSettings dictionary entry");
+        let camera_dict = match camera_settings {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("cameraSettings parsed as unexpected value: {other:?}"),
+        };
+
+        let front = camera_dict.get("Front").expect("Front entry");
+        let front_dict = match front {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("Front stored as unexpected value: {other:?}"),
+        };
+
+        let position = front_dict.get("position").expect("Front.position entry");
+        match position {
+            sdf::Value::Vec3d(values) => assert_eq!(values, &[5.0, 0.0, 0.0]),
+            other => panic!("Front.position stored as unexpected value: {other:?}"),
+        }
+
+        let radius = front_dict.get("radius").expect("Front.radius entry");
+        match radius {
+            sdf::Value::Double(value) => assert_eq!(*value, 5.0),
+            other => panic!("Front.radius stored as unexpected value: {other:?}"),
+        }
+
+        let bound_camera = dict
+            .get("boundCamera")
+            .expect("boundCamera entry");
+        match bound_camera {
+            sdf::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
+            sdf::Value::Token(value) => assert_eq!(value, "/OmniverseKit_Persp"),
+            other => panic!("boundCamera stored as unexpected value: {other:?}"),
+        }
+    }
+
+    #[test]
     // Confirms nested prim traversal builds the expected child hierarchy.
     fn parse_nested_prims() {
         let mut parser = Parser::new(
@@ -2124,5 +2225,60 @@ over "GLOBAL" (
         );
 
         println!("Successfully parsed {} specs", specs.len());
+    }
+
+    #[test]
+    // Ensures relationship metadata is parsed correctly.
+    fn parse_relationship_metadata() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+def Xform "root" {
+    def Mesh "mesh" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding:physics = </root/Physics/PhysicsMaterial> (
+            bindMaterialAs = "weakerThanDescendants"
+        )
+    }
+}
+"#,
+        );
+
+        let specs = parser.parse().expect("stage parsed");
+
+        let relationship_path =
+            sdf::Path::new("/root/mesh.material:binding:physics").expect("relationship path valid");
+        let relationship_spec = specs
+            .get(&relationship_path)
+            .expect("relationship spec present");
+
+        let bind_material_as = relationship_spec
+            .fields
+            .get("bindMaterialAs")
+            .expect("bindMaterialAs metadata present");
+        assert_eq!(
+            bind_material_as
+                .try_as_string_ref()
+                .expect("bindMaterialAs stored as string"),
+            "weakerThanDescendants"
+        );
+
+        let targets = relationship_spec
+            .fields
+            .get(FieldKey::TargetPaths.as_str())
+            .expect("relationship targets present");
+        let list_op = targets
+            .try_as_path_list_op_ref()
+            .expect("relationship targets stored as path listOp");
+        assert_eq!(
+            list_op
+                .explicit_items
+                .first()
+                .expect("relationship target present")
+                .as_str(),
+            "/root/Physics/PhysicsMaterial"
+        );
     }
 }
