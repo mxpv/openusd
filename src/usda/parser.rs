@@ -573,7 +573,7 @@ impl<'a> Parser<'a> {
                     let key = self.fetch_next()?;
                     (Some(first_token), key)
                 }
-                | Token::Dictionary => {
+                Token::Dictionary => {
                     // This is a type declaration, next token is the key
                     let key = self.fetch_next()?;
                     (Some(first_token), key)
@@ -1531,9 +1531,7 @@ mod tests {
             other => panic!("customLayerData parsed as unexpected value: {other:?}"),
         };
 
-        let camera_settings = dict
-            .get("cameraSettings")
-            .expect("cameraSettings dictionary entry");
+        let camera_settings = dict.get("cameraSettings").expect("cameraSettings dictionary entry");
         let camera_dict = match camera_settings {
             sdf::Value::Dictionary(dict) => dict,
             other => panic!("cameraSettings parsed as unexpected value: {other:?}"),
@@ -1557,9 +1555,7 @@ mod tests {
             other => panic!("Front.radius stored as unexpected value: {other:?}"),
         }
 
-        let bound_camera = dict
-            .get("boundCamera")
-            .expect("boundCamera entry");
+        let bound_camera = dict.get("boundCamera").expect("boundCamera entry");
         match bound_camera {
             sdf::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
             sdf::Value::Token(value) => assert_eq!(value, "/OmniverseKit_Persp"),
@@ -2248,11 +2244,8 @@ def Xform "root" {
 
         let specs = parser.parse().expect("stage parsed");
 
-        let relationship_path =
-            sdf::Path::new("/root/mesh.material:binding:physics").expect("relationship path valid");
-        let relationship_spec = specs
-            .get(&relationship_path)
-            .expect("relationship spec present");
+        let relationship_path = sdf::Path::new("/root/mesh.material:binding:physics").expect("relationship path valid");
+        let relationship_spec = specs.get(&relationship_path).expect("relationship spec present");
 
         let bind_material_as = relationship_spec
             .fields
