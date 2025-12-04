@@ -546,9 +546,6 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn is_type_hint_name(name: &str) -> bool {
-        if name == "dictionary" {
-            return true;
-        }
         Self::parse_data_type(name).is_ok()
     }
 
@@ -597,18 +594,13 @@ impl<'a> Parser<'a> {
 
             // Parse the value recursively
             let value = if let Some(type_hint_token) = _type_hint {
-                match type_hint_token {
-                    Token::Dictionary => {
-                        self.ensure_pun('{')?;
-                        self.parse_dictionary()?
-                    }
-                    Token::Identifier(type_name) => {
-                        let ty = Self::parse_data_type(type_name)
-                            .with_context(|| format!("Unable to parse dictionary value type {type_name}"))?;
-                        self.parse_value(ty)?
-                    }
+                let ty = match type_hint_token {
+                    Token::Dictionary => Type::Dictionary,
+                    Token::Identifier(type_name) => Self::parse_data_type(type_name)
+                        .with_context(|| format!("Unable to parse dictionary value type {type_name}"))?,
                     other => bail!("Unsupported dictionary type hint: {other:?}"),
-                }
+                };
+                self.parse_value(ty)?
             } else {
                 self.parse_property_metadata_value()?
             };
@@ -975,6 +967,11 @@ impl<'a> Parser<'a> {
             Type::Matrix2d => sdf::Value::Matrix2d(self.parse_matrix_value::<2>()?),
             Type::Matrix3d => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
             Type::Matrix4d => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
+
+            Type::Dictionary => {
+                self.ensure_pun('{')?;
+                self.parse_dictionary()?
+            }
         };
 
         Ok(value)
@@ -1050,6 +1047,8 @@ impl<'a> Parser<'a> {
             "string[]" | "token[]" => Type::TokenVec,
             "asset" => Type::Asset,
             "asset[]" => Type::AssetVec,
+
+            "dictionary" => Type::Dictionary,
 
             _ => bail!("Unsupported data type: {ty}"),
         };
@@ -1381,6 +1380,7 @@ enum Type {
     Matrix2d,
     Matrix3d,
     Matrix4d,
+    Dictionary,
 }
 
 fn keyword_lexeme(token: &Token<'_>) -> Option<&'static str> {
