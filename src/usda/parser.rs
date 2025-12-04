@@ -502,6 +502,27 @@ impl<'a> Parser<'a> {
 
     /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
+        // Handle array case first by peeking, so parse_array_fn can consume the '['
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+            let mut values = Vec::new();
+            self.parse_array_fn(|this| {
+                let entry = this.fetch_next()?;
+                let value = match entry {
+                    Token::String(v) => v.to_owned(),
+                    Token::Identifier(v) | Token::NamespacedIdentifier(v) | Token::Number(v) => v.to_owned(),
+                    other => bail!("Unsupported metadata array element: {other:?}"),
+                };
+                values.push(value);
+                Ok(())
+            })?;
+            return Ok(sdf::Value::StringVec(values));
+        }
+
+        // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
+        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('{')))) {
+            return self.parse_dictionary();
+        }
+
         let token = self.fetch_next()?;
         match token {
             Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
@@ -515,31 +536,6 @@ impl<'a> Parser<'a> {
                     bail!("Unable to parse numeric metadata value: {raw}");
                 }
             }
-            Token::Punctuation('[') => {
-                let mut values = Vec::new();
-                loop {
-                    if matches!(self.peek_next(), Some(Ok(Token::Punctuation(']')))) {
-                        self.fetch_next()?;
-                        break;
-                    }
-
-                    let entry = self.fetch_next()?;
-                    let value = match entry {
-                        Token::String(v) => v.to_owned(),
-                        Token::Identifier(v) | Token::NamespacedIdentifier(v) | Token::Number(v) => v.to_owned(),
-                        other => bail!("Unsupported metadata array element: {other:?}"),
-                    };
-                    values.push(value);
-
-                    match self.fetch_next()? {
-                        Token::Punctuation(',') => continue,
-                        Token::Punctuation(']') => break,
-                        other => bail!("Unexpected token in metadata array: {other:?}"),
-                    }
-                }
-                Ok(sdf::Value::StringVec(values))
-            }
-            Token::Punctuation('{') => self.parse_dictionary(),
             other => bail!("Unsupported property metadata value token: {other:?}"),
         }
     }
@@ -551,6 +547,8 @@ impl<'a> Parser<'a> {
 
     /// Parse a dictionary value from `{` to `}`.
     fn parse_dictionary(&mut self) -> Result<sdf::Value> {
+        self.ensure_pun('{').context("Dictionary must start with {")?;
+
         let mut dict = HashMap::new();
 
         loop {
@@ -968,10 +966,7 @@ impl<'a> Parser<'a> {
             Type::Matrix3d => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
             Type::Matrix4d => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
 
-            Type::Dictionary => {
-                self.ensure_pun('{')?;
-                self.parse_dictionary()?
-            }
+            Type::Dictionary => self.parse_dictionary()?,
         };
 
         Ok(value)
