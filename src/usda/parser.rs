@@ -123,6 +123,11 @@ impl<'a> Parser<'a> {
         self.iter.peek().map(|(token, _)| token)
     }
 
+    #[inline]
+    fn is_next(&mut self, expected: Token) -> bool {
+        matches!(self.peek_next(), Some(Ok(t)) if *t == expected)
+    }
+
     fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
         let token = self.fetch_next()?;
         ensure!(
@@ -177,7 +182,7 @@ impl<'a> Parser<'a> {
 
         let mut root = sdf::Spec::new(sdf::SpecType::PseudoRoot);
 
-        if self.peek_next().map(|r| r.as_ref().ok()) != Some(Some(&Token::Punctuation('('))) {
+        if !self.is_next(Token::Punctuation('(')) {
             return Ok(root);
         }
 
@@ -345,14 +350,14 @@ impl<'a> Parser<'a> {
         let mut custom = false;
         let mut variability = sdf::Variability::Varying;
 
-        if let Some(Ok(Token::Custom)) = self.peek_next() {
+        if self.is_next(Token::Custom) {
             custom = true;
             self.fetch_next()?;
         }
 
-        if let Some(Ok(Token::Varying)) = self.peek_next() {
+        if self.is_next(Token::Varying) {
             self.fetch_next()?;
-        } else if let Some(Ok(Token::Uniform)) = self.peek_next() {
+        } else if self.is_next(Token::Uniform) {
             variability = sdf::Variability::Uniform;
             self.fetch_next()?;
         }
@@ -372,13 +377,13 @@ impl<'a> Parser<'a> {
         };
 
         // Check for metadata before checking for assignment
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+        if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
 
         if name.contains(".connect") {
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+            if self.is_next(Token::Punctuation('=')) {
                 self.fetch_next()?;
                 let list_op = match self.peek_next() {
                     Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
@@ -406,7 +411,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check if there's an assignment
-        if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+        if !self.is_next(Token::Punctuation('=')) {
             let path = current_path.append_property(name)?;
             properties.push(name.to_string());
 
@@ -422,7 +427,7 @@ impl<'a> Parser<'a> {
         let path = current_path.append_property(name)?;
 
         // Check for metadata after value (could appear here instead of before)
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+        if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
@@ -439,7 +444,7 @@ impl<'a> Parser<'a> {
     }
     /// Parses a connection target list into USD paths.
     fn parse_connection_targets(&mut self) -> Result<Vec<sdf::Path>> {
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+        if self.is_next(Token::Punctuation('[')) {
             let mut paths = Vec::new();
             self.parse_array_fn(|this| {
                 paths.push(this.parse_path_reference().context("Connection path expected")?);
@@ -466,7 +471,7 @@ impl<'a> Parser<'a> {
         self.ensure_pun('(')?;
 
         loop {
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(')')))) {
+            if self.is_next(Token::Punctuation(')')) {
                 self.fetch_next()?;
                 break;
             }
@@ -492,7 +497,7 @@ impl<'a> Parser<'a> {
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
             spec.fields.insert(name, value);
 
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(',')))) {
+            if self.is_next(Token::Punctuation(',')) {
                 self.fetch_next()?;
             }
         }
@@ -503,7 +508,7 @@ impl<'a> Parser<'a> {
     /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
         // Handle array case first by peeking, so parse_array_fn can consume the '['
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+        if self.is_next(Token::Punctuation('[')) {
             let mut values = Vec::new();
             self.parse_array_fn(|this| {
                 let entry = this.fetch_next()?;
@@ -519,7 +524,7 @@ impl<'a> Parser<'a> {
         }
 
         // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('{')))) {
+        if self.is_next(Token::Punctuation('{')) {
             return self.parse_dictionary();
         }
 
@@ -553,7 +558,7 @@ impl<'a> Parser<'a> {
 
         loop {
             // Check for closing brace
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('}')))) {
+            if self.is_next(Token::Punctuation('}')) {
                 self.fetch_next()?;
                 break;
             }
@@ -605,7 +610,7 @@ impl<'a> Parser<'a> {
             dict.insert(key, value);
 
             // Handle optional trailing comma or newline
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation('}')))) {
+            if self.is_next(Token::Punctuation('}')) {
                 self.fetch_next()?;
                 break;
             }
@@ -629,13 +634,13 @@ impl<'a> Parser<'a> {
         let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
 
         // Check for metadata before or instead of assignment
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+        if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
 
         // Check if there's an assignment
-        if !matches!(self.peek_next(), Some(Ok(Token::Punctuation('=')))) {
+        if !self.is_next(Token::Punctuation('=')) {
             let path = current_path.append_property(name)?;
             properties.push(name.to_string());
 
@@ -673,7 +678,7 @@ impl<'a> Parser<'a> {
             sdf::Value::Variability(sdf::Variability::Varying),
         );
 
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('(')))) {
+        if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse relationship metadata")?;
         }
@@ -688,9 +693,7 @@ impl<'a> Parser<'a> {
         let mut current = first;
 
         loop {
-            if matches!(self.peek_next(), Some(Ok(Token::Punctuation(')'))))
-                || matches!(self.peek_next(), Some(Ok(Token::Punctuation('{'))))
-            {
+            if self.is_next(Token::Punctuation(')')) || self.is_next(Token::Punctuation('{')) {
                 break;
             }
 
@@ -749,7 +752,7 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+                let paths = if self.is_next(Token::Punctuation('[')) {
                     let mut collected = Vec::new();
                     self.parse_array_fn(|this| {
                         collected.push(this.parse_inherit_path()?);
@@ -801,7 +804,7 @@ impl<'a> Parser<'a> {
             custom_data: HashMap::new(),
         };
 
-        if matches!(self.peek_next(), Some(Ok(Token::PathRef(_)))) {
+        if matches!(self.peek_next(), Some(Ok(Token::PathRef(..)))) {
             let path = self
                 .fetch_next()?
                 .try_as_path_ref()
@@ -809,7 +812,7 @@ impl<'a> Parser<'a> {
             reference.prim_path = sdf::Path::new(path)?;
         }
 
-        if let Some(Ok(Token::Punctuation('('))) = self.peek_next() {
+        if self.is_next(Token::Punctuation('(')) {
             self.parse_reference_layer_offset(&mut reference.layer_offset)
                 .context("Unable to parse reference layer offset")?;
         }
@@ -844,7 +847,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a list-op friendly sequence of references.
     fn parse_reference_list(&mut self) -> Result<Vec<sdf::Reference>> {
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+        if self.is_next(Token::Punctuation('[')) {
             let mut out = Vec::new();
             self.parse_array_fn(|this| {
                 out.push(this.parse_reference()?);
@@ -865,7 +868,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_token_list(&mut self) -> Result<Vec<String>> {
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+        if self.is_next(Token::Punctuation('[')) {
             self.parse_array()
         } else {
             let value = self.parse_token::<String>()?;
@@ -1154,7 +1157,7 @@ impl<'a> Parser<'a> {
             sublayers.push(asset_path.to_string());
 
             let mut layer_offset = sdf::LayerOffset::default();
-            if let Some(Ok(Token::Punctuation('('))) = this.peek_next() {
+            if this.is_next(Token::Punctuation('(')) {
                 let mut offset = None;
                 let mut scale = None;
 
@@ -1201,7 +1204,7 @@ impl<'a> Parser<'a> {
 
         let mut index = 0;
         loop {
-            if self.peek_next().map(|r| r.as_ref().ok()) == Some(Some(&Token::Punctuation(']'))) {
+            if self.is_next(Token::Punctuation(']')) {
                 self.fetch_next()?;
                 break;
             }
@@ -1228,7 +1231,7 @@ impl<'a> Parser<'a> {
 
         let mut index = 0;
         loop {
-            if self.peek_next().map(|r| r.as_ref().ok()) == Some(Some(&Token::Punctuation(')'))) {
+            if self.is_next(Token::Punctuation(')')) {
                 self.fetch_next()?;
                 break;
             }
@@ -1304,7 +1307,7 @@ impl<'a> Parser<'a> {
 
     /// Parse either a single matrix or an array of matrices, depending on the next token.
     fn parse_matrix_value<const N: usize>(&mut self) -> Result<Vec<f64>> {
-        if matches!(self.peek_next(), Some(Ok(Token::Punctuation('[')))) {
+        if self.is_next(Token::Punctuation('[')) {
             self.parse_matrix_array::<N>()
         } else {
             self.parse_matrix::<N>()
