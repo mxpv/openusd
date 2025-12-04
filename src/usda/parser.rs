@@ -920,6 +920,7 @@ impl<'a> Parser<'a> {
             Type::Int4Vec => sdf::Value::Vec4i(self.parse_array_of_tuples::<_, 4>()?),
             Type::Uint => sdf::Value::Uint(self.parse_token()?),
             Type::Int64 => sdf::Value::Int64(self.parse_token()?),
+            Type::Int64Vec => sdf::Value::Int64Vec(self.parse_array()?),
             Type::Uint64 => sdf::Value::Uint64(self.parse_token()?),
 
             // Half
@@ -998,6 +999,7 @@ impl<'a> Parser<'a> {
             "int4[]" => Type::Int4Vec,
             "uint" => Type::Uint,
             "int64" => Type::Int64,
+            "int64[]" => Type::Int64Vec,
             "uint64" => Type::Uint64,
 
             // Half
@@ -1341,6 +1343,7 @@ enum Type {
     Int4Vec,
     Uint,
     Int64,
+    Int64Vec,
     Uint64,
     Half,
     Half2,
@@ -1558,6 +1561,102 @@ mod tests {
             sdf::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
             sdf::Value::Token(value) => assert_eq!(value, "/OmniverseKit_Persp"),
             other => panic!("boundCamera stored as unexpected value: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Verifies parsing of expressionVariables metadata field with typed values.
+    fn parse_expression_variables() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+(
+    expressionVariables = {
+        string ASSET_PATH = "/models/characters"
+        bool USE_HIGH_RES = true
+        int64 LOD_LEVEL = 2
+    }
+)
+"#,
+        );
+
+        let pseudo_root = parser.read_pseudo_root().unwrap();
+
+        let expr_vars = pseudo_root
+            .fields
+            .get("expressionVariables")
+            .expect("expressionVariables metadata present");
+
+        let dict = match expr_vars {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("expressionVariables parsed as unexpected value: {other:?}"),
+        };
+
+        let asset_path = dict.get("ASSET_PATH").expect("ASSET_PATH entry");
+        match asset_path {
+            sdf::Value::String(value) => assert_eq!(value, "/models/characters"),
+            other => panic!("ASSET_PATH stored as unexpected value: {other:?}"),
+        }
+
+        let use_high_res = dict.get("USE_HIGH_RES").expect("USE_HIGH_RES entry");
+        match use_high_res {
+            sdf::Value::Bool(value) => assert!(*value),
+            other => panic!("USE_HIGH_RES stored as unexpected value: {other:?}"),
+        }
+
+        let lod_level = dict.get("LOD_LEVEL").expect("LOD_LEVEL entry");
+        match lod_level {
+            sdf::Value::Int64(value) => assert_eq!(*value, 2),
+            other => panic!("LOD_LEVEL stored as unexpected value: {other:?}"),
+        }
+    }
+
+    #[test]
+    // Verifies parsing of expressionVariables with array types.
+    fn parse_expression_variables_arrays() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+(
+    expressionVariables = {
+        string[] RENDER_PASSES = ["beauty", "shadow", "reflection"]
+        int64[] FRAME_RANGE = [1, 100]
+        bool[] FLAGS = [true, false, true]
+    }
+)
+"#,
+        );
+
+        let pseudo_root = parser.read_pseudo_root().unwrap();
+
+        let expr_vars = pseudo_root
+            .fields
+            .get("expressionVariables")
+            .expect("expressionVariables metadata present");
+
+        let dict = match expr_vars {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("expressionVariables parsed as unexpected value: {other:?}"),
+        };
+
+        let render_passes = dict.get("RENDER_PASSES").expect("RENDER_PASSES entry");
+        match render_passes {
+            sdf::Value::TokenVec(values) | sdf::Value::StringVec(values) => {
+                assert_eq!(values, &["beauty", "shadow", "reflection"]);
+            }
+            other => panic!("RENDER_PASSES stored as unexpected value: {other:?}"),
+        }
+
+        let frame_range = dict.get("FRAME_RANGE").expect("FRAME_RANGE entry");
+        match frame_range {
+            sdf::Value::Int64Vec(values) => assert_eq!(values, &[1, 100]),
+            other => panic!("FRAME_RANGE stored as unexpected value: {other:?}"),
+        }
+
+        let flags = dict.get("FLAGS").expect("FLAGS entry");
+        match flags {
+            sdf::Value::BoolVec(values) => assert_eq!(values, &[true, false, true]),
+            other => panic!("FLAGS stored as unexpected value: {other:?}"),
         }
     }
 
