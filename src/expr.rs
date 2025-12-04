@@ -22,6 +22,11 @@ use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
 
+/// Returns `true` if the string is a variable expression (backtick-delimited).
+pub fn is_expression(s: &str) -> bool {
+    s.starts_with('`') && s.ends_with('`') && s.len() >= 2
+}
+
 /// Tokens for USD variable expressions.
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\n\f]+")]
@@ -739,6 +744,19 @@ fn unescape_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_expression() {
+        assert!(is_expression(r#"`"hello"`"#));
+        assert!(is_expression(r#"`if(${VAR}, "a", "b")`"#));
+        assert!(is_expression("``"));
+
+        assert!(!is_expression("hello"));
+        assert!(!is_expression("`"));
+        assert!(!is_expression("`hello"));
+        assert!(!is_expression("hello`"));
+        assert!(!is_expression(""));
+    }
 
     #[test]
     fn tokenize_string_literals() {
