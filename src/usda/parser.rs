@@ -582,7 +582,7 @@ impl<'a> Parser<'a> {
             };
 
             let key = match key_token {
-                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
                 // Allow keywords as dictionary keys by converting them to strings
                 other => {
                     if let Some(lexeme) = keyword_lexeme(&other) {
@@ -1502,6 +1502,43 @@ mod tests {
             .and_then(|v| v.try_as_token_ref())
             .unwrap()
             .eq("Y"));
+    }
+
+
+    #[test]
+    // Accepts quoted dictionary keys that include namespace separators.
+    fn parse_dictionary_with_quoted_namespace_keys() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+(
+    customLayerData = {
+        dictionary renderSettings = {
+            bool "rtx:raytracing:fractionalCutoutOpacity" = 1
+            token "rtx:rendermode" = "PathTracing"
+        }
+    }
+)
+"#,
+        );
+
+        let pseudo_root = parser.read_pseudo_root().unwrap();
+        let custom_layer_data = pseudo_root
+            .fields
+            .get("customLayerData")
+            .expect("customLayerData metadata present");
+        let dict = match custom_layer_data {
+            sdf::Value::Dictionary(dict) => dict,
+            other => panic!("customLayerData parsed as unexpected value: {other:?}"),
+        };
+
+        let render_settings = match dict.get("renderSettings") {
+            Some(sdf::Value::Dictionary(d)) => d,
+            other => panic!("renderSettings parsed as unexpected value: {other:?}"),
+        };
+
+        assert!(render_settings.contains_key("rtx:raytracing:fractionalCutoutOpacity"));
+        assert!(render_settings.contains_key("rtx:rendermode"));
     }
 
     #[test]
