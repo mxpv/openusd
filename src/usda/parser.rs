@@ -1504,7 +1504,6 @@ mod tests {
             .eq("Y"));
     }
 
-
     #[test]
     // Accepts quoted dictionary keys that include namespace separators.
     fn parse_dictionary_with_quoted_namespace_keys() {
