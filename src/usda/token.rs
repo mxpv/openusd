@@ -8,7 +8,7 @@ use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
 #[logos(skip r"[ \t\n\f]+")] // Skip whitespace
-#[logos(skip r"#[^\n]*")] // Skip comments
+#[logos(skip(r"#[^\n]*", allow_greedy = true))] // Skip comments
 pub enum Token<'source> {
     /// Magic header - extract version number
     /// Example: "#usda 1.0" -> "1.0"
