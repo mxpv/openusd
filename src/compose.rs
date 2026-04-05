@@ -339,6 +339,18 @@ mod tests {
     }
 
     #[test]
+    fn expression_asset_path() -> Result<()> {
+        let path = fixture_path("expr_asset_path.usda");
+        let resolver = DefaultResolver::new();
+        let stack = collect_layers(&resolver, &path)?;
+
+        assert_eq!(stack.len(), 2, "root + 1 expression-resolved reference");
+        assert!(stack.root().identifier.contains("expr_asset_path.usda"));
+        assert!(stack.layers[1].identifier.contains("expr_assets/extraAssets.usda"));
+        Ok(())
+    }
+
+    #[test]
     fn expression_payload() -> Result<()> {
         let path = fixture_path("expr_payload.usda");
         let resolver = DefaultResolver::new();
