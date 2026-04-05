@@ -78,3 +78,32 @@ impl sdf::AbstractData for TextReader {
         self.data.get(path).map(|spec| spec.fields.keys().cloned().collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdf::{Path, Spec, SpecType, Value};
+    use crate::sdf::schema::ChildrenKey;
+
+    #[test]
+    fn test_get_name_children() {
+        let mut data = HashMap::new();
+        let root_path = Path::new("/World").unwrap();
+        let child_name = "Capsule".to_string();
+        
+        let mut world_spec = Spec::new(SpecType::Prim);
+        world_spec.fields.insert(
+            ChildrenKey::PrimChildren.as_str().to_string(),
+            Value::TokenVec(vec![child_name.clone()])
+        );
+        
+        data.insert(root_path.clone(), world_spec);
+        data.insert(Path::new("/World/Capsule").unwrap(), Spec::new(SpecType::Prim));
+        
+        let reader = TextReader::from_data(data);
+        let children = reader.get_name_children(&root_path);
+        
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].as_str(), "/World/Capsule");
+    }
+}
