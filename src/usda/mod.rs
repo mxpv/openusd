@@ -91,9 +91,7 @@ mod tests {
 
         let attr_path = root.append_property("size").unwrap();
         let mut attr_spec = sdf::Spec::new(SpecType::Attribute);
-        attr_spec
-            .fields
-            .insert("default".into(), sdf::Value::Float(2.5));
+        attr_spec.fields.insert("default".into(), sdf::Value::Float(2.5));
 
         let data = HashMap::from([(root, prim_spec), (attr_path, attr_spec)]);
         TextReader::from_data(data)
