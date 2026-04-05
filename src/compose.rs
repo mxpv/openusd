@@ -1,11 +1,11 @@
 //! Layer collection and composition.
 //!
-//! Given a root USD file, [`collect_layers`] uses an [`ar::Resolver`](crate::ar::Resolver)
-//! to recursively resolve and load every layer the stage depends on — following
-//! sublayers, references, and payloads across files and formats (`.usda`, `.usdc`,
-//! `.usd`, `.usdz`). The result is a [`LayerStack`] of [`Layer`]s, each wrapping
-//! a parsed [`sdf::AbstractData`] with its resolved identity. Cycles are detected
-//! and skipped automatically.
+//! Given a root USD file, [`collect_layers`] uses an [`ar::Resolver`] to recursively
+//! resolve and load every layer the stage depends on — following sublayers, references,
+//! and payloads across files and formats (`.usda`, `.usdc`, `.usd`, `.usdz`). The result
+//! is a [`LayerStack`] of [`Layer`]s, each wrapping a parsed
+//! [`AbstractData`] with its resolved identity. Cycles are
+//! detected and skipped automatically.
 
 use std::collections::HashSet;
 use std::io::Cursor;
