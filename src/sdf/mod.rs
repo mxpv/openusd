@@ -201,7 +201,7 @@ pub trait AbstractData {
     fn list(&self, path: &Path) -> Option<Vec<String>>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Spec {
     /// Specifies the type of an object.
     pub ty: SpecType,
