@@ -167,6 +167,45 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .chain(&self.appended_items)
             .chain(&self.added_items)
     }
+
+    /// Applies this list operation on top of a weaker list, producing the composed result.
+    ///
+    /// Follows USD's list-editing semantics:
+    /// - If `self.explicit` is true, the result is `self.explicit_items` (replacing everything).
+    /// - Otherwise, starts with `weaker` and applies prepend, append, add, and delete edits.
+    pub fn compose_over(&self, weaker: &[T]) -> Vec<T> {
+        if self.explicit {
+            return self.explicit_items.clone();
+        }
+
+        let mut result: Vec<T> = weaker.to_vec();
+
+        // Prepend: insert at front, removing duplicates from the existing list.
+        for item in self.prepended_items.iter().rev() {
+            result.retain(|x| x != item);
+            result.insert(0, item.clone());
+        }
+
+        // Append: push to back, removing duplicates from the existing list.
+        for item in &self.appended_items {
+            result.retain(|x| x != item);
+            result.push(item.clone());
+        }
+
+        // Add: push to back only if not already present.
+        for item in &self.added_items {
+            if !result.contains(item) {
+                result.push(item.clone());
+            }
+        }
+
+        // Delete: remove matching items.
+        for item in &self.deleted_items {
+            result.retain(|x| x != item);
+        }
+
+        result
+    }
 }
 
 pub type IntListOp = ListOp<i32>;
@@ -240,5 +279,126 @@ impl Spec {
     #[inline]
     pub fn add(&mut self, key: impl Into<&'static str>, value: impl Into<Value>) {
         self.fields.insert(key.into().to_owned(), value.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ListOp composition tests.
+    //
+    // USD list editing semantics are documented at:
+    // https://openusd.org/dev/api/class_sdf_list_op.html
+    //
+    // In short, a ListOp can either replace the entire list (explicit mode) or
+    // apply incremental edits (prepend, append, add, delete) on top of a weaker
+    // opinion. These tests verify each operation and their interaction.
+
+    /// Explicit mode replaces the weaker list entirely, regardless of its contents.
+    #[test]
+    fn list_op_compose_explicit_replaces_all() {
+        let op = ListOp {
+            explicit: true,
+            explicit_items: vec![10, 20],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![10, 20]);
+    }
+
+    /// Prepended items are inserted at the front of the weaker list in order.
+    #[test]
+    fn list_op_compose_prepend() {
+        let op = ListOp {
+            prepended_items: vec![1, 2],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[3, 4]), vec![1, 2, 3, 4]);
+    }
+
+    /// When a prepended item already exists in the weaker list, the duplicate
+    /// is removed from its old position and the item appears at the front.
+    #[test]
+    fn list_op_compose_prepend_deduplicates() {
+        let op = ListOp {
+            prepended_items: vec![2],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![2, 1, 3]);
+    }
+
+    /// Appended items are added to the back of the weaker list in order.
+    #[test]
+    fn list_op_compose_append() {
+        let op = ListOp {
+            appended_items: vec![5, 6],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2]), vec![1, 2, 5, 6]);
+    }
+
+    /// When an appended item already exists in the weaker list, the duplicate
+    /// is removed from its old position and the item appears at the back.
+    #[test]
+    fn list_op_compose_append_deduplicates() {
+        let op = ListOp {
+            appended_items: vec![1],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![2, 3, 1]);
+    }
+
+    /// Added items are appended only if they are not already present. Unlike
+    /// prepend/append, `add` never moves existing items.
+    #[test]
+    fn list_op_compose_add_only_if_absent() {
+        let op = ListOp {
+            added_items: vec![2, 4],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![1, 2, 3, 4]);
+    }
+
+    /// Deleted items are removed from the result regardless of origin.
+    #[test]
+    fn list_op_compose_delete() {
+        let op = ListOp {
+            deleted_items: vec![2],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![1, 3]);
+    }
+
+    /// Operations are applied in order: prepend, append, delete. This test
+    /// exercises all three together to verify correct sequencing.
+    #[test]
+    fn list_op_compose_combined() {
+        let op = ListOp {
+            prepended_items: vec![0],
+            appended_items: vec![99],
+            deleted_items: vec![2],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![0, 1, 3, 99]);
+    }
+
+    /// Composing over an empty weaker list produces results purely from the
+    /// stronger operation's items.
+    #[test]
+    fn list_op_compose_over_empty() {
+        let op = ListOp {
+            prepended_items: vec![1],
+            appended_items: vec![2],
+            added_items: vec![3],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[]), vec![1, 2, 3]);
+    }
+
+    /// A default (no-op) ListOp preserves the weaker list unchanged.
+    #[test]
+    fn list_op_compose_noop() {
+        let op: ListOp<i32> = ListOp::default();
+        assert_eq!(op.compose_over(&[1, 2, 3]), vec![1, 2, 3]);
     }
 }
