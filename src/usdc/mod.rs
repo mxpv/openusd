@@ -14,6 +14,9 @@ pub use reader::{CrateFile, ReadExt};
 
 use crate::sdf;
 
+/// USDC binary format magic bytes (`PXR-USDC`).
+pub const MAGIC: &[u8] = b"PXR-USDC";
+
 #[derive(Default, Debug)]
 struct Spec {
     /// Specifies the type of an object.

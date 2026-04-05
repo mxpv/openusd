@@ -1,5 +1,7 @@
 //! `openusd` is a native Rust implementation of USD family of formats.
 
+pub mod ar;
+pub mod compose;
 pub mod expr;
 pub mod sdf;
 pub mod usda;

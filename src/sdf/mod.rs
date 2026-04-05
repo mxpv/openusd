@@ -154,6 +154,21 @@ pub struct ListOp<T: Default + Clone + PartialEq> {
     pub ordered_items: Vec<T>,
 }
 
+impl<T: Default + Clone + PartialEq> ListOp<T> {
+    /// Returns an iterator over all items that contribute opinions:
+    /// explicit, prepended, appended, and added.
+    ///
+    /// This excludes `deleted_items` and `ordered_items` which control
+    /// removal and ordering rather than contributing values.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.explicit_items
+            .iter()
+            .chain(&self.prepended_items)
+            .chain(&self.appended_items)
+            .chain(&self.added_items)
+    }
+}
+
 pub type IntListOp = ListOp<i32>;
 pub type UintListOp = ListOp<u32>;
 
