@@ -142,6 +142,81 @@ impl Path {
         Path::from_str_unchecked(&self.path[..sz])
     }
 
+    /// Returns the parent path, or `None` for the pseudo-root `/` and empty paths.
+    ///
+    /// ```text
+    /// "/A/B/C" -> Some("/A/B")
+    /// "/A"     -> Some("/")
+    /// "/"      -> None
+    /// ""       -> None
+    /// ```
+    pub fn parent(&self) -> Option<Path> {
+        if self.path.is_empty() || self.path == "/" {
+            return None;
+        }
+        match self.path.rsplit_once('/') {
+            Some(("", _)) => Some(Path::abs_root()),
+            Some((before, _)) => Some(Path::from_str_unchecked(before)),
+            None => None,
+        }
+    }
+
+    /// Returns the final component name, or `None` for the pseudo-root and empty paths.
+    ///
+    /// ```text
+    /// "/A/B/C" -> Some("C")
+    /// "/A"     -> Some("A")
+    /// "/"      -> None
+    /// ""       -> None
+    /// ```
+    pub fn name(&self) -> Option<&str> {
+        if self.path.is_empty() || self.path == "/" {
+            return None;
+        }
+        match self.path.rsplit_once('/') {
+            Some((_, after)) => Some(after),
+            None => Some(&self.path),
+        }
+    }
+
+    /// Replaces a prefix path with a new prefix, used for namespace remapping
+    /// during composition (e.g. references and inherits).
+    ///
+    /// Returns `None` if `self` does not start with `old_prefix`.
+    ///
+    /// ```text
+    /// "/Ref/Child".replace_prefix("/Ref", "/MyPrim") -> Some("/MyPrim/Child")
+    /// "/Ref".replace_prefix("/Ref", "/MyPrim")       -> Some("/MyPrim")
+    /// "/Other".replace_prefix("/Ref", "/MyPrim")     -> None
+    /// ```
+    pub fn replace_prefix(&self, old_prefix: &Path, new_prefix: &Path) -> Option<Path> {
+        let old = old_prefix.as_str();
+        let me = self.as_str();
+
+        if me == old {
+            return Some(new_prefix.clone());
+        }
+
+        // Must start with old_prefix followed by '/'.
+        let suffix = me.strip_prefix(old)?;
+        if !suffix.starts_with('/') {
+            return None;
+        }
+
+        let new = new_prefix.as_str();
+        if new == "/" {
+            Some(Path::from_str_unchecked(suffix))
+        } else {
+            Some(Path::from_str_unchecked(&format!("{new}{suffix}")))
+        }
+    }
+
+    /// Appends a variant selection to a prim path, producing a path like
+    /// `/MyPrim{variantSet=selection}`.
+    pub fn append_variant_selection(&self, set: &str, selection: &str) -> Path {
+        Path::from_str_unchecked(&format!("{}{{{set}={selection}}}", self.path))
+    }
+
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.path
@@ -336,6 +411,93 @@ mod tests {
         // Greater equal
         assert!(Path::from_str("aab").unwrap() >= Path::from_str("aaa").unwrap());
         assert!(Path::from_str("aaa").unwrap() >= Path::from_str("aaa").unwrap());
+    }
+
+    #[test]
+    fn test_parent() {
+        #[rustfmt::skip]
+        let cases: &[(&str, Option<&str>)] = &[
+            ("/A/B/C", Some("/A/B")),
+            ("/A/B",   Some("/A")),
+            ("/A",     Some("/")),
+            ("/",      None),
+            ("",       None),
+        ];
+
+        for &(path, expected) in cases {
+            assert_eq!(
+                Path::new(path).unwrap().parent().as_ref().map(|p| p.as_str()),
+                expected,
+                "parent of {path:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_name() {
+        #[rustfmt::skip]
+        let cases: &[(&str, Option<&str>)] = &[
+            ("/A/B/C", Some("C")),
+            ("/A/B",   Some("B")),
+            ("/A",     Some("A")),
+            ("/",      None),
+            ("",       None),
+            ("Foo",    Some("Foo")),
+        ];
+
+        for &(path, expected) in cases {
+            assert_eq!(Path::new(path).unwrap().name(), expected, "name of {path:?}",);
+        }
+    }
+
+    #[test]
+    fn test_replace_prefix() {
+        let p = |s| Path::new(s).unwrap();
+
+        // Exact match.
+        assert_eq!(
+            p("/Ref").replace_prefix(&p("/Ref"), &p("/MyPrim")).unwrap().as_str(),
+            "/MyPrim"
+        );
+
+        // Child remapping.
+        assert_eq!(
+            p("/Ref/Child")
+                .replace_prefix(&p("/Ref"), &p("/MyPrim"))
+                .unwrap()
+                .as_str(),
+            "/MyPrim/Child"
+        );
+
+        // Deeper nesting.
+        assert_eq!(
+            p("/Ref/A/B").replace_prefix(&p("/Ref"), &p("/X")).unwrap().as_str(),
+            "/X/A/B"
+        );
+
+        // Remap to root.
+        assert_eq!(
+            p("/Ref/Child").replace_prefix(&p("/Ref"), &p("/")).unwrap().as_str(),
+            "/Child"
+        );
+
+        // No match.
+        assert!(p("/Other").replace_prefix(&p("/Ref"), &p("/MyPrim")).is_none());
+
+        // Partial name overlap must not match (e.g. /RefExtra should not match /Ref).
+        assert!(p("/RefExtra").replace_prefix(&p("/Ref"), &p("/X")).is_none());
+    }
+
+    #[test]
+    fn test_append_variant_selection() {
+        let p = Path::new("/MyPrim").unwrap();
+        assert_eq!(
+            p.append_variant_selection("model", "high").as_str(),
+            "/MyPrim{model=high}"
+        );
+
+        let root = Path::new("/").unwrap();
+        assert_eq!(root.append_variant_selection("s", "v").as_str(), "/{s=v}");
     }
 
     #[test]
