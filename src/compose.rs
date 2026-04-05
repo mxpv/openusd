@@ -346,7 +346,10 @@ mod tests {
 
         assert_eq!(stack.len(), 2, "root + 1 expression-resolved reference");
         assert!(stack.root().identifier.contains("expr_asset_path.usda"));
-        assert!(stack.layers[1].identifier.contains("expr_assets/extraAssets.usda"));
+        assert!(stack.layers[1]
+            .identifier
+            .replace('\\', "/")
+            .contains("expr_assets/extraAssets.usda"));
         Ok(())
     }
 
