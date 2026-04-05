@@ -41,7 +41,8 @@ impl TextReader {
         use crate::sdf::schema::ChildrenKey;
         if let Some(spec) = self.data.get(path) {
             if let Some(sdf::Value::TokenVec(children)) = spec.fields.get(ChildrenKey::PrimChildren.as_str()) {
-                return children.iter()
+                return children
+                    .iter()
                     .filter_map(|name| path.append_path(name.as_str()).ok())
                     .collect();
             }
@@ -61,11 +62,7 @@ impl TextReader {
     }
 
     /// Helper to get an attribute value directly from a prim path and attribute name.
-    pub fn get_prim_attribute_value<T: sdf::FromValue>(
-        &mut self,
-        prim_path: &sdf::Path,
-        attr_name: &str,
-    ) -> Option<T> {
+    pub fn get_prim_attribute_value<T: sdf::FromValue>(&mut self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
         let prop_path = prim_path.append_property(attr_name).ok()?;
         self.get_attribute_value(&prop_path)
     }
