@@ -57,16 +57,75 @@ impl TextReader {
 
     /// Returns the value of an attribute if it exists and matches the requested type.
     /// This looks for the `default` field on the property spec at the given path.
-    pub fn attribute_value<T: sdf::FromValue>(&self, path: &sdf::Path) -> Option<T> {
+    pub fn attribute_value<T>(&self, path: &sdf::Path) -> Option<T>
+    where
+        for<'a> T: TryFrom<&'a sdf::Value>,
+    {
         let spec = self.data.get(path)?;
         let field = spec.fields.get("default")?;
-        T::from_value(field)
+        T::try_from(field).ok()
     }
 
     /// Returns an attribute value directly from a prim path and attribute name.
-    pub fn prim_attribute_value<T: sdf::FromValue>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
+    pub fn prim_attribute_value<T>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T>
+    where
+        for<'a> T: TryFrom<&'a sdf::Value>,
+    {
         let prop_path = prim_path.append_property(attr_name).ok()?;
         self.attribute_value(&prop_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdf::{self, SpecType};
+
+    /// Build a minimal TextReader with a prim at `/Root` that has a float attribute `size`.
+    fn test_reader() -> TextReader {
+        let root = sdf::path("/Root").unwrap();
+        let mut prim_spec = sdf::Spec::new(SpecType::Prim);
+        prim_spec
+            .fields
+            .insert("primChildren".into(), sdf::Value::TokenVec(vec![]));
+
+        let attr_path = root.append_property("size").unwrap();
+        let mut attr_spec = sdf::Spec::new(SpecType::Attribute);
+        attr_spec
+            .fields
+            .insert("default".into(), sdf::Value::Float(2.5));
+
+        let data = HashMap::from([(root, prim_spec), (attr_path, attr_spec)]);
+        TextReader::from_data(data)
+    }
+
+    #[test]
+    fn attribute_value_returns_matching_type() {
+        let reader = test_reader();
+        let path = sdf::path("/Root").unwrap().append_property("size").unwrap();
+        assert_eq!(reader.attribute_value::<f32>(&path), Some(2.5));
+    }
+
+    #[test]
+    fn attribute_value_returns_none_on_type_mismatch() {
+        let reader = test_reader();
+        let path = sdf::path("/Root").unwrap().append_property("size").unwrap();
+        assert_eq!(reader.attribute_value::<i32>(&path), None);
+    }
+
+    #[test]
+    fn attribute_value_returns_none_for_missing_path() {
+        let reader = test_reader();
+        let path = sdf::path("/Missing").unwrap().append_property("size").unwrap();
+        assert_eq!(reader.attribute_value::<f32>(&path), None);
+    }
+
+    #[test]
+    fn prim_attribute_value_shorthand() {
+        let reader = test_reader();
+        let prim = sdf::path("/Root").unwrap();
+        assert_eq!(reader.prim_attribute_value::<f32>(&prim, "size"), Some(2.5));
+        assert_eq!(reader.prim_attribute_value::<f32>(&prim, "missing"), None);
     }
 }
 
