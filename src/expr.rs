@@ -21,6 +21,7 @@ use logos::{Logos, SpannedIter};
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
+use strum::EnumString;
 
 /// Returns `true` if the string is a variable expression (backtick-delimited).
 pub fn is_expression(s: &str) -> bool {
@@ -90,10 +91,6 @@ pub enum Token<'source> {
     /// Comma separator
     #[token(",")]
     Comma,
-
-    /// Backtick (expression delimiter)
-    #[token("`")]
-    Backtick,
 }
 
 /// Trims quote characters from both ends of a string slice.
@@ -107,7 +104,8 @@ pub fn tokenize(input: &str) -> impl Iterator<Item = Result<Token<'_>, ()>> {
 }
 
 /// Supported functions in USD variable expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
+#[strum(serialize_all = "lowercase")]
 pub enum Func {
     /// `defined(var1, var2, ...)` - Tests if all variables are defined.
     Defined,
@@ -167,29 +165,6 @@ impl Func {
     }
 }
 
-impl FromStr for Func {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "defined" => Ok(Func::Defined),
-            "if" => Ok(Func::If),
-            "and" => Ok(Func::And),
-            "or" => Ok(Func::Or),
-            "not" => Ok(Func::Not),
-            "eq" => Ok(Func::Eq),
-            "neq" => Ok(Func::Neq),
-            "lt" => Ok(Func::Lt),
-            "leq" => Ok(Func::Leq),
-            "gt" => Ok(Func::Gt),
-            "geq" => Ok(Func::Geq),
-            "contains" => Ok(Func::Contains),
-            "at" => Ok(Func::At),
-            "len" => Ok(Func::Len),
-            _ => bail!("Unknown function: {}", s),
-        }
-    }
-}
 
 /// Expression tree node representing a parsed USD variable expression.
 #[derive(Debug, Clone, PartialEq)]
@@ -872,20 +847,6 @@ mod tests {
     }
 
     #[test]
-    fn tokenize_backtick_delimited() {
-        // In USD, expressions inside backticks use quoted strings for interpolation
-        let tokens: Vec<_> = tokenize("`\"${ASSET_PATH}/model.usd\"`").collect();
-        assert_eq!(
-            tokens,
-            vec![
-                Ok(Token::Backtick),
-                Ok(Token::String("${ASSET_PATH}/model.usd")),
-                Ok(Token::Backtick),
-            ]
-        );
-    }
-
-    #[test]
     fn tokenize_comparison_functions() {
         let tokens: Vec<_> = tokenize("lt(${VALUE}, 10)").collect();
         assert_eq!(
@@ -1097,7 +1058,7 @@ mod tests {
     fn parse_unknown_function_fails() {
         let result: Result<Expr, _> = "unknown_func(1, 2)".parse();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown function"));
+        assert!(result.unwrap_err().to_string().contains("Matching variant not found"));
     }
 
     #[test]
