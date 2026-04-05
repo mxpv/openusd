@@ -14,6 +14,7 @@ use parser::Parser;
 use crate::sdf;
 
 /// High level interface to text data.
+#[derive(Clone)]
 pub struct TextReader {
     data: HashMap<sdf::Path, sdf::Spec>,
 }
