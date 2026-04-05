@@ -76,6 +76,36 @@ impl TextReader {
     }
 }
 
+impl sdf::AbstractData for TextReader {
+    fn has_spec(&self, path: &sdf::Path) -> bool {
+        self.data.contains_key(path)
+    }
+
+    fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
+        self.data.get(path).is_some_and(|spec| spec.fields.contains_key(field))
+    }
+
+    fn spec_type(&self, path: &sdf::Path) -> Option<sdf::SpecType> {
+        self.data.get(path).map(|spec| spec.ty)
+    }
+
+    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
+        let Some(spec) = self.data.get(path) else {
+            bail!("No spec found for path: {path}")
+        };
+
+        let Some(field) = spec.fields.get(field) else {
+            bail!("No field found for path '{path}' and field '{field}'")
+        };
+
+        Ok(Cow::Borrowed(field))
+    }
+
+    fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
+        self.data.get(path).map(|spec| spec.fields.keys().cloned().collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,35 +154,5 @@ mod tests {
         let prim = sdf::path("/Root").unwrap();
         assert_eq!(reader.prim_attribute_value::<f32>(&prim, "size"), Some(2.5));
         assert_eq!(reader.prim_attribute_value::<f32>(&prim, "missing"), None);
-    }
-}
-
-impl sdf::AbstractData for TextReader {
-    fn has_spec(&self, path: &sdf::Path) -> bool {
-        self.data.contains_key(path)
-    }
-
-    fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        self.data.get(path).is_some_and(|spec| spec.fields.contains_key(field))
-    }
-
-    fn spec_type(&self, path: &sdf::Path) -> Option<sdf::SpecType> {
-        self.data.get(path).map(|spec| spec.ty)
-    }
-
-    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
-        let Some(spec) = self.data.get(path) else {
-            bail!("No spec found for path: {path}")
-        };
-
-        let Some(field) = spec.fields.get(field) else {
-            bail!("No field found for path '{path}' and field '{field}'")
-        };
-
-        Ok(Cow::Borrowed(field))
-    }
-
-    fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
-        self.data.get(path).map(|spec| spec.fields.keys().cloned().collect())
     }
 }
