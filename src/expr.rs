@@ -165,7 +165,6 @@ impl Func {
     }
 }
 
-
 /// Expression tree node representing a parsed USD variable expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
