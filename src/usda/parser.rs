@@ -2093,6 +2093,17 @@ def Scope "Root"
     }
 
     #[test]
+    fn parse_crlf_line_endings() {
+        // Simulate Windows line endings (\r\n) throughout the file.
+        let input = "#usda 1.0\r\n(\r\n    defaultPrim = \"World\"\r\n)\r\n\r\ndef Scope \"World\"\r\n{\r\n}\r\n";
+        let mut parser = Parser::new(input);
+        let data = parser.parse().unwrap();
+
+        let root = data.get(&sdf::Path::abs_root()).unwrap();
+        assert_eq!(root.ty, sdf::SpecType::PseudoRoot);
+    }
+
+    #[test]
     // Exercises a wide set of attribute types to validate scalar/array decoding.
     fn parse_attributes() {
         let mut parser = Parser::new(
