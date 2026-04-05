@@ -16,7 +16,7 @@ use crate::sdf;
 /// High level interface to text data.
 #[derive(Clone)]
 pub struct TextReader {
-    pub data: HashMap<sdf::Path, sdf::Spec>,
+    data: HashMap<sdf::Path, sdf::Spec>,
 }
 
 impl TextReader {
@@ -36,8 +36,13 @@ impl TextReader {
         Self { data }
     }
 
-    /// Returns a list of child paths for a given prim path.
-    pub fn get_name_children(&self, path: &sdf::Path) -> Vec<sdf::Path> {
+    /// Returns an iterator over all specs in the reader.
+    pub fn iter(&self) -> impl Iterator<Item = (&sdf::Path, &sdf::Spec)> {
+        self.data.iter()
+    }
+
+    /// Returns a list of child prim paths for a given prim path.
+    pub fn prim_children(&self, path: &sdf::Path) -> Vec<sdf::Path> {
         use crate::sdf::schema::ChildrenKey;
         if let Some(spec) = self.data.get(path) {
             if let Some(sdf::Value::TokenVec(children)) = spec.fields.get(ChildrenKey::PrimChildren.as_str()) {
@@ -51,18 +56,15 @@ impl TextReader {
     }
 
     /// Returns the value of an attribute if it exists and matches the requested type.
-    /// This looks for the 'default' field on the property spec at the given path.
-    pub fn get_attribute_value<T: sdf::FromValue>(&mut self, path: &sdf::Path) -> Option<T> {
-        use crate::sdf::AbstractData;
-        if let Ok(val) = self.get(path, "default") {
-            T::from_value(&val)
-        } else {
-            None
-        }
+    /// This looks for the `default` field on the property spec at the given path.
+    pub fn get_attribute_value<T: sdf::FromValue>(&self, path: &sdf::Path) -> Option<T> {
+        let spec = self.data.get(path)?;
+        let field = spec.fields.get("default")?;
+        T::from_value(field)
     }
 
-    /// Helper to get an attribute value directly from a prim path and attribute name.
-    pub fn get_prim_attribute_value<T: sdf::FromValue>(&mut self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
+    /// Returns an attribute value directly from a prim path and attribute name.
+    pub fn get_prim_attribute_value<T: sdf::FromValue>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
         let prop_path = prim_path.append_property(attr_name).ok()?;
         self.get_attribute_value(&prop_path)
     }
