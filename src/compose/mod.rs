@@ -7,6 +7,8 @@
 //! [`AbstractData`] with its resolved identity. Cycles are
 //! detected and skipped automatically.
 
+pub mod prim_index;
+
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
