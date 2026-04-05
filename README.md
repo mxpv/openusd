@@ -26,9 +26,9 @@ The library can read all major USD formats. Here's what's currently supported:
 - `usdc` (binary format) - for the list of supported features, refer to https://github.com/mxpv/openusd/issues/1
 - `usda` (text format) - can read most text files, corner cases possible
 - `usdz` (zip archive format) - can read archived text/binary files
-- [Variable Expressions](src/expr.rs) evaluator
+- [Variable Expressions](src/expr.rs) - tokenizer, parser, and evaluator for USD's [expression syntax](https://openusd.org/dev/user_guides/variable_expressions.html)
 - Asset resolution (`ar`) - `Resolver` trait with filesystem-based `DefaultResolver`, search paths, package-relative paths
-- Layer collection (`compose`) - recursive sublayer, reference, and payload traversal with cycle detection and format auto-detection
+- Layer collection (`compose`) - recursive sublayer, reference, and payload traversal with cycle detection, format auto-detection, and expression evaluation
 - DOM support is WIP: https://github.com/mxpv/openusd/issues/15
 
 If you encounter a file that can't be read, please open an issue and attach it for further investigation.
