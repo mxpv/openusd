@@ -5,14 +5,20 @@ use strum::{EnumIs, EnumTryAs, IntoStaticStr};
 
 use super::*;
 
-/// `Value` is a type that can hold data type loaded from USD file.
+/// A type-erased container for scene description data loaded from a USD file.
 ///
-/// Suffixes:
-/// - d: double
-/// - f: float
-/// - h: half
-/// - i: int
+/// This is the Rust equivalent of USD's [`VtValue`](https://openusd.org/dev/api/class_vt_value.html),
+/// representing any value that can appear in a scene description layer. Each variant corresponds
+/// to a USD data type.
 ///
+/// Vector and matrix variant suffixes indicate the element type:
+/// - `d` — `f64` (double)
+/// - `f` — `f32` (float)
+/// - `h` — `f16` (half)
+/// - `i` — `i32` (int)
+///
+/// Type-safe extraction is supported via [`TryFrom<&Value>`] implementations for common Rust
+/// types (e.g. `f32`, `String`, `[f32; 3]`).
 #[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr)]
 pub enum Value {
     /// None value, only produced by expressions (not directly assignable).
