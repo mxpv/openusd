@@ -7,8 +7,8 @@
 use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
-#[logos(skip r"[ \t\n\f]+")] // Skip whitespace
-#[logos(skip(r"#[^\n]*", allow_greedy = true))] // Skip comments
+#[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
+#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip comments
 pub enum Token<'source> {
     /// Magic header - extract version number
     /// Example: "#usda 1.0" -> "1.0"
@@ -449,6 +449,15 @@ mod tests {
 
         let token2 = lexer2.next().unwrap().unwrap();
         assert_eq!(token2, Token::Magic("2.1"));
+    }
+
+    #[test]
+    fn test_magic_with_crlf() {
+        // Windows line endings: \r\n must not interfere with magic detection.
+        let input = "#usda 1.0\r\n(\r\n)\r\n";
+        let mut lexer = Token::lexer(input);
+        let token = lexer.next().unwrap().unwrap();
+        assert_eq!(token, Token::Magic("1.0"));
     }
 
     #[test]
