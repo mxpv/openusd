@@ -109,6 +109,74 @@ pub enum Value {
     PathExpression,
 }
 
+/// A trait for type-safe conversion from a USD Value.
+pub trait FromValue: Sized {
+    fn from_value(value: &Value) -> Option<Self>;
+}
+
+impl FromValue for bool {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for i32 {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for f32 {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Float(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for f64 {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Double(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for String {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::String(v) | Value::Token(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for Vec<f32> {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::FloatVec(v) | Value::Vec3f(v) | Value::Vec2f(v) | Value::Vec4f(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl FromValue for Vec<f64> {
+    fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::DoubleVec(v) | Value::Vec3d(v) | Value::Vec2d(v) | Value::Vec4d(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// Convert from `&str` to `Value`.
 ///
 /// Used a lot in text parser since all tokens are basically strings.
