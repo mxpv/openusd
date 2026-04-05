@@ -13,27 +13,28 @@
 //! | [`usdz`] | Archive format reader. [`Archive`](usdz::Archive) extracts layers from `.usdz` packages. |
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |
 //! | [`compose`] | Layer collection. [`collect_layers`](compose::collect_layers) recursively resolves and loads the full layer stack from a root file. |
+//! | [`stage`] | Composed stage. [`Stage`](stage::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`expr`] | Variable expression parser and evaluator for USD's `\`...\`` expression syntax. |
 //!
 //! # Quick start
 //!
 //! ```no_run
-//! use openusd::ar::{DefaultResolver, Resolver};
-//! use openusd::compose;
+//! use openusd::ar::DefaultResolver;
+//! use openusd::stage::Stage;
 //!
 //! let resolver = DefaultResolver::new();
-//! let stack = compose::collect_layers(&resolver, "scene.usda").unwrap();
+//! let stage = Stage::open(&resolver, "scene.usda").unwrap();
 //!
-//! println!("loaded {} layers", stack.len());
-//! for layer in stack.iter() {
-//!     println!("  {}", layer.identifier);
-//! }
+//! stage.traverse(|prim_path| {
+//!     println!("{prim_path}");
+//! }).unwrap();
 //! ```
 
 pub mod ar;
 pub mod compose;
 pub mod expr;
 pub mod sdf;
+pub mod stage;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;

@@ -1,0 +1,12 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Scope "World"
+{
+    def Cube "Cube"
+    {
+        color3f[] primvars:displayColor = [(1, 0, 0)]
+    }
+}

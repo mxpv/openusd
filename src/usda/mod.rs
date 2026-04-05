@@ -59,17 +59,17 @@ impl TextReader {
     /// This looks for the `default` field on the property spec at the given path.
     pub fn attribute_value<T>(&self, path: &sdf::Path) -> Option<T>
     where
-        for<'a> T: TryFrom<&'a sdf::Value>,
+        T: TryFrom<sdf::Value>,
     {
         let spec = self.data.get(path)?;
         let field = spec.fields.get("default")?;
-        T::try_from(field).ok()
+        T::try_from(field.clone()).ok()
     }
 
     /// Returns an attribute value directly from a prim path and attribute name.
     pub fn prim_attribute_value<T>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T>
     where
-        for<'a> T: TryFrom<&'a sdf::Value>,
+        T: TryFrom<sdf::Value>,
     {
         let prop_path = prim_path.append_property(attr_name).ok()?;
         self.attribute_value(&prop_path)
