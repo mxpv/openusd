@@ -88,13 +88,13 @@ fn collect_recursive(
     visited.insert(identifier.clone());
 
     // Load and parse the layer.
-    let mut data = open_layer(resolver, &resolved)?;
+    let data = open_layer(resolver, &resolved)?;
 
     // Read expression variables from this layer's pseudo-root.
-    let expr_vars = read_expression_variables(data.as_mut());
+    let expr_vars = read_expression_variables(data.as_ref());
 
     // Collect all asset paths that need recursive loading.
-    let raw_paths = collect_asset_paths(data.as_mut());
+    let raw_paths = collect_asset_paths(data.as_ref());
 
     // Evaluate any expression-valued asset paths.
     let referenced = resolve_expressions(&raw_paths, &expr_vars)?;
@@ -118,7 +118,7 @@ fn collect_recursive(
 }
 
 /// Collects all asset paths from sublayers, references, and payloads in a layer.
-fn collect_asset_paths(data: &mut dyn AbstractData) -> Vec<String> {
+fn collect_asset_paths(data: &dyn AbstractData) -> Vec<String> {
     let mut paths = Vec::new();
 
     let root = Path::abs_root();
@@ -148,7 +148,7 @@ fn collect_asset_paths(data: &mut dyn AbstractData) -> Vec<String> {
 }
 
 /// Collects all prim paths by walking the `primChildren` hierarchy.
-fn collect_prim_paths(data: &mut dyn AbstractData) -> Vec<Path> {
+fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
     let mut result = Vec::new();
     let mut queue = vec![Path::abs_root()];
 
@@ -216,7 +216,7 @@ fn extract_reference_paths(value: &Value, out: &mut Vec<String>) {
 }
 
 /// Reads `expressionVariables` from the layer's pseudo-root, if present.
-fn read_expression_variables(data: &mut dyn AbstractData) -> HashMap<String, Value> {
+fn read_expression_variables(data: &dyn AbstractData) -> HashMap<String, Value> {
     let root = Path::abs_root();
     if let Ok(value) = data.get(&root, FieldKey::ExpressionVariables.as_str()) {
         if let Value::Dictionary(dict) = value.into_owned() {

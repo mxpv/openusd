@@ -249,7 +249,7 @@ pub trait AbstractData {
     ///
     /// With test parsers, there is a data copy already stored, so
     /// a borrowed value will be returned to avoid unnecessary copies.
-    fn get(&mut self, path: &Path, field: &str) -> Result<Cow<'_, Value>>;
+    fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>>;
 
     /// Returns the names of the fields for the given path.
     fn list(&self, path: &Path) -> Option<Vec<String>>;

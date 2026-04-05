@@ -1,6 +1,6 @@
 //! Binary file format (`usdc`) implementation.
 
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, io, mem, path::Path};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, io, mem, path::Path};
 
 use anyhow::{bail, Result};
 use layout::ValueRep;
@@ -26,9 +26,8 @@ struct Spec {
 }
 
 /// High level interface to binary data.
-#[derive(Debug)]
 pub struct CrateData<R> {
-    file: CrateFile<R>,
+    file: RefCell<CrateFile<R>>,
     data: HashMap<sdf::Path, Spec>,
 }
 
@@ -73,7 +72,10 @@ where
             data.insert(path, Spec { ty, fields });
         }
 
-        Ok(Self { file, data })
+        Ok(Self {
+            file: RefCell::new(file),
+            data,
+        })
     }
 }
 
@@ -96,7 +98,7 @@ where
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
+    fn get(&self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
         let Some(spec) = self.data.get(path) else {
             bail!("No spec found for path: {path}")
         };
@@ -105,7 +107,7 @@ where
             bail!("No field found for path '{path}' and field '{field}'")
         };
 
-        let value = self.file.value(value_rep)?;
+        let value = self.file.borrow_mut().value(value_rep)?;
 
         Ok(Cow::Owned(value))
     }
@@ -141,7 +143,7 @@ mod tests {
             return Ok(());
         }
 
-        let mut data = read_file(path)?;
+        let data = read_file(path)?;
 
         let prim_children: Vec<String> = data
             .get(&sdf::Path::abs_root(), "primChildren")?
@@ -181,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_read_custom_layer_data() {
-        let mut data = read_file("fixtures/fields.usdc").unwrap();
+        let data = read_file("fixtures/fields.usdc").unwrap();
 
         let custom_layer_data = data.get(&sdf::Path::abs_root(), "customLayerData").unwrap();
 
@@ -201,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_read_bool() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         let single = data
             .get(&sdf::path("/World.flipNormals")?, "default")?
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_read_chars() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         let single_char = data
             .get(&sdf::path("/World.singleChar")?, "default")?
@@ -247,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_read_quat_floats() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
             .get(&sdf::path("/World.quatfSingle")?, "default")?
@@ -277,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_read_quat_doubles() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
             .get(&sdf::path("/World.quatdSingle")?, "default")?
@@ -306,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_read_quat_half() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
             .get(&sdf::path("/World.quathSingle")?, "default")?
@@ -341,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_read_sub_layers() -> Result<()> {
-        let mut data = read_file("fixtures/expressions.usdc")?;
+        let data = read_file("fixtures/expressions.usdc")?;
 
         let sub_layer_offsets = data
             .get(&sdf::path("/")?, "subLayerOffsets")?
@@ -367,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_read_variant_selection() -> Result<()> {
-        let mut data = read_file("fixtures/expressions.usdc")?;
+        let data = read_file("fixtures/expressions.usdc")?;
 
         // prepend variantSets = "displayVariantSet"
         let variant_set_names = data
@@ -394,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_read_connection() -> Result<()> {
-        let mut data = read_file("fixtures/connection.usdc")?;
+        let data = read_file("fixtures/connection.usdc")?;
 
         let conn = data
             .get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
@@ -425,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_read_reference() -> Result<()> {
-        let mut data = read_file("fixtures/reference.usdc")?;
+        let data = read_file("fixtures/reference.usdc")?;
 
         let references = data
             .get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
@@ -448,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_read_payload() -> Result<()> {
-        let mut data = read_file("fixtures/payload.usdc")?;
+        let data = read_file("fixtures/payload.usdc")?;
 
         let payload = data
             .get(&sdf::path("/MySphere1")?, "payload")?
@@ -488,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_read_doubles() -> Result<()> {
-        let mut data = read_file("fixtures/floats.usdc")?;
+        let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
             .get(&sdf::path("/PrimD.single")?, "default")?
@@ -525,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_read_floats() -> Result<()> {
-        let mut data = read_file("fixtures/floats.usdc")?;
+        let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
             .get(&sdf::path("/PrimF.single")?, "default")?
@@ -561,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_read_halfs() -> Result<()> {
-        let mut data = read_file("fixtures/floats.usdc")?;
+        let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
             .get(&sdf::path("/PrimH.single")?, "default")?
@@ -608,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_read_time_series() -> Result<()> {
-        let mut data = read_file("fixtures/timesamples.usdc")?;
+        let data = read_file("fixtures/timesamples.usdc")?;
 
         let samples = data
             .get(&sdf::path("/Prim.prop")?, "timeSamples")?
@@ -628,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_read_ints_i32() -> Result<()> {
-        let mut data = read_file("fixtures/ints.usdc")?;
+        let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
             data.get(&sdf::path("/Prim32.single")?, "default")?
@@ -654,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_read_ints_i64() -> Result<()> {
-        let mut data = read_file("fixtures/ints.usdc")?;
+        let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
             data.get(&sdf::path("/Prim64.single")?, "default")?
@@ -680,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_read_ints_u32() -> Result<()> {
-        let mut data = read_file("fixtures/ints.usdc")?;
+        let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
             data.get(&sdf::path("/PrimU32.single")?, "default")?
@@ -706,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_read_ints_u64() -> Result<()> {
-        let mut data = read_file("fixtures/ints.usdc")?;
+        let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
             data.get(&sdf::path("/PrimU64.single")?, "default")?
@@ -732,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_read_array_fields() -> Result<()> {
-        let mut data = read_file("fixtures/fields.usdc")?;
+        let data = read_file("fixtures/fields.usdc")?;
 
         // defaultPrim = "World"
         let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;

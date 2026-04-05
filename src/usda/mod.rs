@@ -89,7 +89,7 @@ impl sdf::AbstractData for TextReader {
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&mut self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
+    fn get(&self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
         let Some(spec) = self.data.get(path) else {
             bail!("No spec found for path: {path}")
         };

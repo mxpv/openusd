@@ -37,12 +37,10 @@ use crate::sdf::{AbstractData, Path, SpecType, Value};
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
-/// properties, and metadata. Layers are wrapped in [`RefCell`] to work
-/// around `AbstractData::get` requiring `&mut self` (USDC lazily
-/// decompresses values).
+/// properties, and metadata.
 pub struct Stage {
     /// All layers, root (strongest) first.
-    layers: Vec<RefCell<Box<dyn AbstractData>>>,
+    layers: Vec<Box<dyn AbstractData>>,
     /// Layer identifiers, parallel to `layers`.
     identifiers: Vec<String>,
     /// Cached prim indices, built lazily per prim.
@@ -62,7 +60,7 @@ impl Stage {
 
         for layer in collected {
             identifiers.push(layer.identifier);
-            layers.push(RefCell::new(layer.data));
+            layers.push(layer.data);
         }
 
         Ok(Self {
@@ -115,8 +113,7 @@ impl Stage {
     pub fn spec_type(&self, path: &Path) -> Option<SpecType> {
         let index = self.prim_index(path);
         for node in &index.nodes {
-            let data = self.layers[node.layer_index].borrow();
-            if let Some(ty) = data.spec_type(&node.path) {
+            if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
                 return Some(ty);
             }
         }
@@ -191,7 +188,7 @@ impl Stage {
     ) -> Result<Option<Value>> {
         for node in &index.nodes {
             let query_path = make_path(node)?;
-            let mut data = self.layers[node.layer_index].borrow_mut();
+            let data = &self.layers[node.layer_index];
             if !data.has_field(&query_path, field) {
                 continue;
             }
@@ -249,8 +246,7 @@ impl Stage {
         let mut result: Vec<String> = Vec::new();
 
         for node in &index.nodes {
-            let mut data = self.layers[node.layer_index].borrow_mut();
-            if let Ok(value) = data.get(&node.path, children_field) {
+            if let Ok(value) = self.layers[node.layer_index].get(&node.path, children_field) {
                 if let Value::TokenVec(names) = value.into_owned() {
                     for name in names {
                         if !result.contains(&name) {
@@ -273,8 +269,7 @@ impl Stage {
 
         // Root / sublayer opinions: check each layer in strength order.
         for (i, layer) in self.layers.iter().enumerate() {
-            let data = layer.borrow();
-            if data.has_spec(path) {
+            if layer.has_spec(path) {
                 nodes.push(Node {
                     layer_index: i,
                     path: path.clone(),
