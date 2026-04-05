@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn try_from_scalars() {
-        assert_eq!(bool::try_from(&Value::Bool(true)).unwrap(), true);
+        assert!(bool::try_from(&Value::Bool(true)).unwrap());
         assert_eq!(i32::try_from(&Value::Int(42)).unwrap(), 42);
         assert_eq!(f32::try_from(&Value::Float(1.5)).unwrap(), 1.5);
         assert_eq!(f64::try_from(&Value::Double(2.5)).unwrap(), 2.5);
