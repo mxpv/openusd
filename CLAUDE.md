@@ -8,15 +8,19 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 ## Architecture
 
-The codebase is organized into three main modules:
+The codebase is organized into five modules:
 
-- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions corresponding to USD's SDF module. Contains the `AbstractData` trait that defines the interface for accessing scene description data.
+- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions corresponding to USD's SDF module. Contains the `AbstractData` trait, `Value` enum (60+ variants covering all USD data types), `Path`, `Spec`, and list operation types.
 
-- **`usda/`** - Text format (.usda) reader: Parser implementation for USD's ASCII text format using logos for tokenization and a recursive descent parser.
+- **`usda/`** - Text format (`.usda`) reader: Parser implementation using logos for tokenization and a recursive descent parser. `TextReader` provides helpers for prim traversal and typed attribute access.
 
-- **`usdc/`** - Binary format (.usdc) reader: Implementation for USD's binary crate format, including compressed data handling and efficient memory layout parsing.
+- **`usdc/`** - Binary format (`.usdc`) reader: Implementation for USD's binary crate format, including compressed data handling and efficient memory layout parsing.
 
-The `AbstractData` trait in `sdf/mod.rs` serves as the central abstraction, providing a unified interface for both text and binary format readers.
+- **`usdz`** - Archive format (`.usdz`) reader: ZIP-based package reader that returns a `dyn AbstractData`.
+
+- **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
+
+The `AbstractData` trait in `sdf/mod.rs` serves as the central abstraction, providing a unified interface for text, binary, and archive format readers.
 
 ## Development Commands
 
@@ -87,10 +91,11 @@ Test fixtures are small USD files covering specific format features and edge cas
 Key external dependencies:
 - `anyhow` - Error handling
 - `bytemuck` - Safe transmutation for binary data
-- `half` - 16-bit floating point support
+- `half` - 16-bit floating point support (re-exported as `f16`)
 - `logos` - Lexer generator for USDA tokenization
 - `lz4_flex` - Compression for binary format
 - `num-traits` - Numeric traits
-- `strum` - Enum utilities
+- `strum` - Enum derive macros (Display, EnumIs, EnumTryAs, IntoStaticStr, etc.)
+- `zip` - USDZ archive reading
 
-The project maintains a minimal dependency footprint and uses cargo-deny to prevent license conflicts and vulnerability introduction.
+The project maintains a minimal dependency footprint and uses cargo-deny to prevent license conflicts and vulnerability introduction. Allowed licenses: MIT, Apache-2.0, Zlib, Unicode-3.0.
