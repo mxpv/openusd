@@ -322,12 +322,18 @@ mod tests {
     #[test]
     fn try_from_fixed_arrays() {
         assert_eq!(<[f32; 2]>::try_from(&Value::Vec2f(vec![1.0, 2.0])).unwrap(), [1.0, 2.0]);
-        assert_eq!(<[f32; 3]>::try_from(&Value::Vec3f(vec![1.0, 2.0, 3.0])).unwrap(), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            <[f32; 3]>::try_from(&Value::Vec3f(vec![1.0, 2.0, 3.0])).unwrap(),
+            [1.0, 2.0, 3.0]
+        );
         assert_eq!(
             <[f32; 4]>::try_from(&Value::Vec4f(vec![1.0, 2.0, 3.0, 4.0])).unwrap(),
             [1.0, 2.0, 3.0, 4.0]
         );
-        assert_eq!(<[f64; 3]>::try_from(&Value::Vec3d(vec![1.0, 2.0, 3.0])).unwrap(), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            <[f64; 3]>::try_from(&Value::Vec3d(vec![1.0, 2.0, 3.0])).unwrap(),
+            [1.0, 2.0, 3.0]
+        );
     }
 
     #[test]
