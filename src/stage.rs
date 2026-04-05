@@ -32,7 +32,7 @@ use crate::ar::Resolver;
 use crate::compose;
 use crate::compose::prim_index::{ArcType, Node, PrimIndex};
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{AbstractData, Path, SpecType, Value};
+use crate::sdf::{AbstractData, ListOp, Path, Payload, Reference, SpecType, Value};
 
 /// A composed USD stage.
 ///
@@ -262,12 +262,12 @@ impl Stage {
 
     /// Builds a prim index for the given path.
     ///
-    /// Currently handles root/sublayer composition only. Reference, payload,
-    /// inherit, variant, and specialize arcs are added incrementally.
+    /// Follows LIVERPS ordering: Root (sublayers), then References, then Payloads.
+    /// Inherit, variant, and specialize arcs are added incrementally.
     fn build_prim_index(&self, path: &Path) -> PrimIndex {
         let mut nodes = Vec::new();
 
-        // Root / sublayer opinions: check each layer in strength order.
+        // L — Root / sublayer opinions: check each layer in strength order.
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.has_spec(path) {
                 nodes.push(Node {
@@ -278,7 +278,168 @@ impl Stage {
             }
         }
 
+        // R — References: compose ReferenceListOp across root nodes, then add
+        // nodes from referenced layers with namespace remapping.
+        let references = self.compose_arc_list::<Reference>(&nodes, FieldKey::References);
+        for reference in &references {
+            self.add_reference_nodes(path, reference, ArcType::Reference, &mut nodes);
+        }
+
+        // P — Payloads: same as references but weaker.
+        let payloads = self.collect_payloads(&nodes);
+        for payload in &payloads {
+            let reference = Reference {
+                asset_path: payload.asset_path.clone(),
+                prim_path: payload.prim_path.clone(),
+                ..Default::default()
+            };
+            self.add_reference_nodes(path, &reference, ArcType::Payload, &mut nodes);
+        }
+
         PrimIndex { nodes }
+    }
+
+    /// Composes a list-op field across root nodes, returning the flattened list.
+    fn compose_arc_list<T: Default + Clone + PartialEq>(&self, root_nodes: &[Node], field: FieldKey) -> Vec<T>
+    where
+        Value: TryInto<ListOp<T>>,
+    {
+        let field = field.as_str();
+        let mut result: Vec<T> = Vec::new();
+
+        // Walk from weakest to strongest, composing each ListOp on top.
+        for node in root_nodes.iter().rev() {
+            let data = &self.layers[node.layer_index];
+            let Ok(value) = data.get(&node.path, field) else {
+                continue;
+            };
+
+            let Ok(list_op) = value.into_owned().try_into() else {
+                continue;
+            };
+
+            result = list_op.compose_over(&result);
+        }
+
+        result
+    }
+
+    /// Collects payloads from root nodes, handling both single `Payload` and `PayloadListOp`.
+    fn collect_payloads(&self, root_nodes: &[Node]) -> Vec<Payload> {
+        let mut result: Vec<Payload> = Vec::new();
+
+        for node in root_nodes.iter().rev() {
+            let data = &self.layers[node.layer_index];
+            let Ok(value) = data.get(&node.path, FieldKey::Payload.as_str()) else {
+                continue;
+            };
+
+            match value.into_owned() {
+                Value::Payload(p) => {
+                    if !result.contains(&p) {
+                        result.push(p);
+                    }
+                }
+                Value::PayloadListOp(list_op) => {
+                    result = list_op.compose_over(&result);
+                }
+                _ => {}
+            }
+        }
+
+        result
+    }
+
+    /// Adds nodes from a referenced layer for a given prim path.
+    ///
+    /// If the reference has an `asset_path`, looks up the target layer by
+    /// identifier. If empty, the reference is internal (same layer stack).
+    /// The source `prim_path` is used for namespace remapping; if empty,
+    /// the target layer's `defaultPrim` is used.
+    fn add_reference_nodes(&self, composed_path: &Path, reference: &Reference, arc: ArcType, nodes: &mut Vec<Node>) {
+        if reference.asset_path.is_empty() {
+            // Internal reference — target is within the same layer stack.
+            let source = &reference.prim_path;
+            if source.is_empty() {
+                return;
+            }
+            for (i, layer) in self.layers.iter().enumerate() {
+                self.add_remapped_nodes(layer.as_ref(), i, composed_path, source, arc, nodes);
+            }
+        } else {
+            // External reference — find the target layer by identifier.
+            let Some((layer_index, layer)) = self.find_layer(&reference.asset_path) else {
+                return;
+            };
+
+            let source = if reference.prim_path.is_empty() {
+                // Use the target layer's defaultPrim.
+                let root = Path::abs_root();
+                let Ok(value) = layer.get(&root, FieldKey::DefaultPrim.as_str()) else {
+                    return;
+                };
+                match value.into_owned() {
+                    Value::Token(name) | Value::String(name) => Path::new(&format!("/{name}")).unwrap_or_default(),
+                    _ => return,
+                }
+            } else {
+                reference.prim_path.clone()
+            };
+
+            self.add_remapped_nodes(layer, layer_index, composed_path, &source, arc, nodes);
+        }
+    }
+
+    /// Adds nodes from a single layer with namespace remapping.
+    ///
+    /// Maps `composed_path` and its children from `source_path` in the layer.
+    fn add_remapped_nodes(
+        &self,
+        layer: &dyn AbstractData,
+        layer_index: usize,
+        composed_path: &Path,
+        source_path: &Path,
+        arc: ArcType,
+        nodes: &mut Vec<Node>,
+    ) {
+        // Remap: the composed_path corresponds to source_path in the target layer.
+        // For the prim itself, just check if source_path exists.
+        let query_path = composed_path.replace_prefix(composed_path, source_path);
+        let Some(query_path) = query_path else {
+            return;
+        };
+
+        if layer.has_spec(&query_path) {
+            nodes.push(Node {
+                layer_index,
+                path: query_path,
+                arc,
+            });
+        }
+    }
+
+    /// Finds a layer whose identifier matches `asset_path`.
+    ///
+    /// Tries an exact match first, then falls back to suffix matching at a
+    /// path separator boundary (so `_stage.usda` matches `/abs/path/_stage.usda`
+    /// but not `/abs/path/not_stage.usda`).
+    fn find_layer(&self, asset_path: &str) -> Option<(usize, &dyn AbstractData)> {
+        let sep = std::path::MAIN_SEPARATOR as u8;
+
+        for (i, id) in self.identifiers.iter().enumerate() {
+            if *id == asset_path {
+                return Some((i, self.layers[i].as_ref()));
+            }
+
+            if id.ends_with(asset_path) {
+                let prefix_len = id.len() - asset_path.len();
+                if id.as_bytes()[prefix_len - 1] == sep {
+                    return Some((i, self.layers[i].as_ref()));
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -300,6 +461,67 @@ mod tests {
 
     fn fixture_path(relative: &str) -> String {
         format!("{}/fixtures/{relative}", manifest_dir())
+    }
+
+    // --- find_layer ---
+
+    /// Exact identifier match should return the layer.
+    #[test]
+    fn find_layer_exact_match() -> Result<()> {
+        let path = fixture_path("ref_external.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // The full identifier of the root layer should match exactly.
+        assert!(
+            stage.find_layer(&stage.identifiers[0]).is_some(),
+            "exact match should succeed"
+        );
+
+        Ok(())
+    }
+
+    /// Suffix match at a path separator boundary should work
+    /// (e.g. "ref_target.usda" matches "/full/path/ref_target.usda").
+    #[test]
+    fn find_layer_suffix_match() -> Result<()> {
+        let path = fixture_path("ref_external.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // ref_external.usda references ref_target.usda, which should be loaded.
+        let result = stage.find_layer("ref_target.usda");
+        assert!(result.is_some(), "suffix match at separator boundary should succeed");
+
+        Ok(())
+    }
+
+    /// A partial filename overlap without a separator boundary must not match
+    /// (e.g. "target.usda" should not match "ref_target.usda").
+    #[test]
+    fn find_layer_no_partial_name_match() -> Result<()> {
+        let path = fixture_path("ref_external.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert!(
+            stage.find_layer("target.usda").is_none(),
+            "partial name should not match"
+        );
+
+        Ok(())
+    }
+
+    /// A completely unknown path should return None.
+    #[test]
+    fn find_layer_not_found() -> Result<()> {
+        let path = fixture_path("ref_external.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert!(stage.find_layer("nonexistent.usda").is_none());
+
+        Ok(())
     }
 
     // --- PrimIndex internals ---
@@ -504,6 +726,106 @@ mod tests {
 
         let active = stage.field::<bool>(&Path::new("/World/CubeActive")?, FieldKey::Active)?;
         assert_eq!(active, Some(true));
+
+        Ok(())
+    }
+
+    // --- Reference composition ---
+
+    /// An external reference with defaultPrim should pull the referenced prim's
+    /// children into the referencing prim's namespace.
+    /// ref_external.usda: /World/MyPrim references ref_target.usda (defaultPrim="Source").
+    /// ref_target.usda defines /Source/Child with displayColor.
+    #[test]
+    fn reference_external_default_prim() -> Result<()> {
+        let path = fixture_path("ref_external.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // /World/MyPrim should exist via the reference.
+        assert!(stage.has_spec(&Path::new("/World/MyPrim")?));
+
+        // The prim index should have a Reference arc node.
+        let index = stage.prim_index(&Path::new("/World/MyPrim")?);
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Reference),
+            "prim index should contain a Reference node"
+        );
+
+        // /World/MyPrim/Child should be reachable via namespace remapping
+        // (maps /Source/Child from the target layer to /World/MyPrim/Child).
+        let children = stage.prim_children(&Path::new("/World/MyPrim")?)?;
+        assert!(
+            children.contains(&"Child".to_string()),
+            "referenced children should be visible"
+        );
+
+        Ok(())
+    }
+
+    /// Vendor test: reference_same_folder.usda references _stage.usda with
+    /// defaultPrim. The referenced layer's /World/Cube should appear under the
+    /// referencing prim.
+    #[test]
+    fn vendor_reference_same_folder() -> Result<()> {
+        let path = composition_path("references/reference_same_folder.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // /World references _stage.usda's defaultPrim ("World"),
+        // so /World/Cube should come from the referenced layer.
+        let children = stage.prim_children(&Path::new("/World")?)?;
+        assert!(
+            children.contains(&"Cube".to_string()),
+            "Cube from referenced layer should appear under /World"
+        );
+
+        Ok(())
+    }
+
+    /// An external reference with an explicit prim path should remap the
+    /// target prim into the referencing prim's namespace.
+    /// ref_prim.usda: /World/RefPrim references @ref_target.usda@</Source>.
+    #[test]
+    fn reference_explicit_prim_path() -> Result<()> {
+        let path = fixture_path("ref_prim.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // /World/RefPrim should exist with a Reference arc.
+        let index = stage.prim_index(&Path::new("/World/RefPrim")?);
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Reference),
+            "should have a Reference arc"
+        );
+
+        // /Source/Child in ref_target.usda should appear as /World/RefPrim/Child.
+        let children = stage.prim_children(&Path::new("/World/RefPrim")?)?;
+        assert!(
+            children.contains(&"Child".to_string()),
+            "referenced children should be namespace-remapped"
+        );
+
+        Ok(())
+    }
+
+    // --- Payload composition ---
+
+    /// Vendor test: payload_same_folder.usda has a payload to _stage.usda.
+    /// The payload's prim hierarchy should be composed into the stage.
+    #[test]
+    fn vendor_payload_same_folder() -> Result<()> {
+        let path = composition_path("payload/payload_same_folder.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // The payload target layer has /World/Cube. Since /World is the payload
+        // target, /World/Cube should appear.
+        let children = stage.prim_children(&Path::new("/World")?)?;
+        assert!(
+            children.contains(&"Cube".to_string()),
+            "Cube from payload layer should appear under /World"
+        );
 
         Ok(())
     }

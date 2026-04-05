@@ -1,0 +1,13 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Scope "World"
+{
+    def "RefPrim" (
+        references = @ref_target.usda@</Source>
+    )
+    {
+    }
+}
