@@ -537,10 +537,10 @@ mod tests {
 
     #[test]
     fn resolved_path_deref() {
-        let p = ResolvedPath::new("/tmp/model.usda");
+        let p = ResolvedPath::new("some/path/model.usda");
         // Deref to Path allows calling Path methods directly.
         assert_eq!(p.extension().unwrap(), "usda");
-        assert!(p.is_absolute());
+        assert_eq!(p.file_name().unwrap(), "model.usda");
     }
 
     // -----------------------------------------------------------------------
@@ -727,7 +727,10 @@ mod tests {
     fn resolver_context_dependent_path() {
         let resolver = DefaultResolver::new();
         assert!(resolver.is_context_dependent_path("relative/path.usda"));
-        assert!(!resolver.is_context_dependent_path("/absolute/path.usda"));
+
+        // Use a real absolute path for cross-platform compatibility.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        assert!(!resolver.is_context_dependent_path(&manifest));
     }
 
     #[test]
