@@ -57,16 +57,16 @@ impl TextReader {
 
     /// Returns the value of an attribute if it exists and matches the requested type.
     /// This looks for the `default` field on the property spec at the given path.
-    pub fn get_attribute_value<T: sdf::FromValue>(&self, path: &sdf::Path) -> Option<T> {
+    pub fn attribute_value<T: sdf::FromValue>(&self, path: &sdf::Path) -> Option<T> {
         let spec = self.data.get(path)?;
         let field = spec.fields.get("default")?;
         T::from_value(field)
     }
 
     /// Returns an attribute value directly from a prim path and attribute name.
-    pub fn get_prim_attribute_value<T: sdf::FromValue>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
+    pub fn prim_attribute_value<T: sdf::FromValue>(&self, prim_path: &sdf::Path, attr_name: &str) -> Option<T> {
         let prop_path = prim_path.append_property(attr_name).ok()?;
-        self.get_attribute_value(&prop_path)
+        self.attribute_value(&prop_path)
     }
 }
 
