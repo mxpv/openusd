@@ -302,7 +302,29 @@ impl<'a> Parser<'a> {
             self.ensure_pun('{')?;
         }
 
+        let (children, props) = self.read_prim_body(&prim_path, data)?;
+        spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+        properties.extend(props);
+
+        spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
+        spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+        data.insert(prim_path, spec);
+
+        Ok(())
+    }
+
+    /// Parse the body of a prim or variant (everything between `{` and `}`).
+    ///
+    /// Returns the child prim names and property names found in the body.
+    /// The opening `{` must already be consumed; this method consumes the closing `}`.
+    fn read_prim_body(
+        &mut self,
+        path: &sdf::Path,
+        data: &mut HashMap<sdf::Path, sdf::Spec>,
+    ) -> Result<(Vec<String>, Vec<String>)> {
         let mut children = Vec::new();
+        let mut properties = Vec::new();
+
         loop {
             let next = self
                 .peek_next()
@@ -316,25 +338,78 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 Token::Def | Token::Over | Token::Class => {
-                    self.read_prim(&prim_path, &mut children, data)
-                        .context("Unable to read nested primitive")?;
+                    self.read_prim(path, &mut children, data)?;
+                }
+                Token::VariantSet => {
+                    self.read_variant_set(path, data)?;
                 }
                 Token::Rel => {
                     self.fetch_next()?;
-                    self.read_relationship(&prim_path, &mut properties, data)
-                        .context("Unable to read relationship")?;
+                    self.read_relationship(path, &mut properties, data)?;
                 }
                 _ => {
-                    self.read_attribute(&prim_path, &mut properties, data)
-                        .context("Unable to read attribute")?;
+                    self.read_attribute(path, &mut properties, data)?;
                 }
             }
         }
-        spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
 
-        spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
-        spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
-        data.insert(prim_path, spec);
+        Ok((children, properties))
+    }
+
+    /// Parse a `variantSet "name" = { "variant1" (...) { ... } ... }` block.
+    ///
+    /// Each variant inside the set is represented as a child prim under a variant set
+    /// spec in the scene hierarchy: `/{prim}{vset=name}{variant}`.
+    fn read_variant_set(&mut self, prim_path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<()> {
+        self.fetch_next()?; // consume `variantSet`
+
+        let name = self
+            .fetch_next()?
+            .try_as_string()
+            .ok_or_else(|| anyhow!("Expected variant set name string"))?
+            .to_string();
+
+        self.ensure_pun('=')?;
+        self.ensure_pun('{')?;
+
+        // Create the variant set spec.
+        let vset_path = sdf::Path::new(&format!("{}{{{name}=}}", prim_path))?;
+        let mut vset_spec = sdf::Spec::new(sdf::SpecType::VariantSet);
+        let mut variant_children = Vec::new();
+
+        // Parse each variant: "VariantName" (...) { ... }
+        while !self.is_next(Token::Punctuation('}')) {
+            let variant_name = self
+                .fetch_next()?
+                .try_as_string()
+                .ok_or_else(|| anyhow!("Expected variant name string"))?
+                .to_string();
+
+            variant_children.push(variant_name.clone());
+
+            let variant_path = sdf::Path::new(&format!("{}{{{name}={variant_name}}}", prim_path))?;
+            let mut variant_spec = sdf::Spec::new(sdf::SpecType::Variant);
+
+            // Optional metadata block: consume `(`, parse entries, consume `)`.
+            if self.is_next(Token::Punctuation('(')) {
+                self.ensure_pun('(')?;
+                self.read_prim_metadata(&mut variant_spec, None)
+                    .context("Unable to parse variant metadata")?;
+                self.ensure_pun(')').context("Variant metadata must end with )")?;
+            }
+
+            // Variant body.
+            self.ensure_pun('{')?;
+            let (children, properties) = self.read_prim_body(&variant_path, data)?;
+            variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+            variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+            data.insert(variant_path, variant_spec);
+        }
+
+        self.ensure_pun('}')?; // close the variant set
+
+        vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::TokenVec(variant_children));
+        data.insert(vset_path, vset_spec);
 
         Ok(())
     }
@@ -725,6 +800,9 @@ impl<'a> Parser<'a> {
             Token::References => FieldKey::References.as_str(),
             Token::Payload => FieldKey::Payload.as_str(),
             Token::Inherits => FieldKey::InheritPaths.as_str(),
+            Token::Specializes => FieldKey::Specializes.as_str(),
+            Token::Variants => FieldKey::VariantSelection.as_str(),
+            Token::VariantSets => FieldKey::VariantSetNames.as_str(),
             Token::CustomData => "customData",
             Token::Doc => FieldKey::Documentation.as_str(),
             other => bail!("Unexpected metadata name token: {other:?}"),
@@ -759,16 +837,7 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = if self.is_next(Token::Punctuation('[')) {
-                    let mut collected = Vec::new();
-                    self.parse_array_fn(|this| {
-                        collected.push(this.parse_inherit_path()?);
-                        Ok(())
-                    })?;
-                    collected
-                } else {
-                    vec![self.parse_inherit_path()?]
-                };
+                let paths = self.parse_path_ref_list()?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build inherits listOp")?;
@@ -790,6 +859,36 @@ impl<'a> Parser<'a> {
                 ensure!(list_op.is_none(), "doc metadata does not support list ops");
                 let value = self.parse_token::<String>().context("Unable to parse doc metadata")?;
                 spec.add(FieldKey::Documentation, sdf::Value::String(value));
+            }
+            n if n == FieldKey::AssetInfo.as_str() => {
+                ensure!(list_op.is_none(), "assetInfo does not support list ops");
+                let value = self.parse_dictionary().context("Unable to parse assetInfo")?;
+                spec.add(FieldKey::AssetInfo, value);
+            }
+            n if n == FieldKey::VariantSelection.as_str() => {
+                ensure!(list_op.is_none(), "variants does not support list ops");
+                let dict = self.parse_dictionary().context("Unable to parse variants")?;
+                if let sdf::Value::Dictionary(map) = dict {
+                    let selections: HashMap<String, String> = map
+                        .into_iter()
+                        .filter_map(|(k, v)| v.try_as_string().map(|s| (k, s.to_owned())))
+                        .collect();
+                    spec.add(FieldKey::VariantSelection, sdf::Value::VariantSelectionMap(selections));
+                }
+            }
+            n if n == FieldKey::VariantSetNames.as_str() => {
+                let values = self.parse_token_list().context("Unable to parse variantSets")?;
+                let list_op = self
+                    .apply_list_op(list_op, values)
+                    .context("Unable to build variantSets listOp")?;
+                spec.add(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
+            }
+            n if n == FieldKey::Specializes.as_str() => {
+                let paths = self.parse_path_ref_list()?;
+                let list_op = self
+                    .apply_list_op(list_op, paths)
+                    .context("Unable to build specializes listOp")?;
+                spec.add(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
             }
             other => bail!("Unsupported prim metadata: {other}"),
         }
@@ -917,12 +1016,28 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_inherit_path(&mut self) -> Result<sdf::Path> {
+    /// Parse a single `<path>` reference.
+    fn parse_path_ref(&mut self) -> Result<sdf::Path> {
         let token = self.fetch_next()?;
         let path_str = token
+            .clone()
             .try_as_path_ref()
-            .ok_or_else(|| anyhow!("Path reference expected for inherits metadata"))?;
+            .ok_or_else(|| anyhow!("Path reference expected, got {token:?}"))?;
         sdf::Path::new(path_str)
+    }
+
+    /// Parse a single `<path>` or an array of `[<path>, ...]`.
+    fn parse_path_ref_list(&mut self) -> Result<Vec<sdf::Path>> {
+        if self.is_next(Token::Punctuation('[')) {
+            let mut paths = Vec::new();
+            self.parse_array_fn(|this| {
+                paths.push(this.parse_path_ref()?);
+                Ok(())
+            })?;
+            Ok(paths)
+        } else {
+            Ok(vec![self.parse_path_ref()?])
+        }
     }
 
     fn parse_token_list(&mut self) -> Result<Vec<String>> {

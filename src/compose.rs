@@ -378,4 +378,26 @@ mod tests {
         assert!(stack.layers[1].identifier.contains("_parent_stage.usda"));
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Multi-level composition
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn teapot_multi_level() -> Result<()> {
+        let path = format!("{}/vendor/usd-wg-assets/full_assets/Teapot/Teapot.usd", manifest_dir());
+        let resolver = DefaultResolver::new();
+        let stack = collect_layers(&resolver, &path)?;
+
+        // Teapot.usd -> payload Teapot_Payload.usd -> sublayer Teapot_Materials.usd
+        assert!(stack.len() >= 3, "expected at least 3 layers, got {}", stack.len());
+
+        assert!(stack.root().identifier.contains("Teapot.usd"));
+
+        let ids = stack.identifiers();
+        assert!(ids.iter().any(|id| id.contains("Teapot_Payload")));
+        assert!(ids.iter().any(|id| id.contains("Teapot_Materials")));
+
+        Ok(())
+    }
 }
