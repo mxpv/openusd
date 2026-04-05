@@ -792,24 +792,24 @@ impl<'a> Parser<'a> {
 
     /// Parse one reference entry, including optional target prim path and layer offset.
     fn parse_reference(&mut self) -> Result<sdf::Reference> {
-        let asset_path = self
-            .fetch_next()?
-            .try_as_asset_ref()
-            .ok_or_else(|| anyhow!("Asset reference expected"))?;
-
         let mut reference = sdf::Reference {
-            asset_path: asset_path.to_string(),
+            asset_path: String::new(),
             prim_path: sdf::Path::default(),
             layer_offset: sdf::LayerOffset::default(),
             custom_data: HashMap::new(),
         };
 
-        if matches!(self.peek_next(), Some(Ok(Token::PathRef(..)))) {
-            let path = self
-                .fetch_next()?
-                .try_as_path_ref()
-                .ok_or_else(|| anyhow!("Path reference expected"))?;
+        let token = self.fetch_next()?;
+        if let Some(asset_path) = token.clone().try_as_asset_ref() {
+            reference.asset_path = asset_path.to_string();
+            if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
+                reference.prim_path = sdf::Path::new(path)?;
+                self.fetch_next()?;
+            }
+        } else if let Some(path) = token.clone().try_as_path_ref() {
             reference.prim_path = sdf::Path::new(path)?;
+        } else {
+            bail!("Expected asset reference (@... @) or path reference (<...>), got {token:?}");
         }
 
         if self.is_next(Token::Punctuation('(')) {
