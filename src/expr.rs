@@ -560,7 +560,13 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     /// Create a new parser for the given input string.
+    /// Backtick delimiters are stripped automatically if present.
     fn new(input: &'a str) -> Self {
+        let input = if is_expression(input) {
+            &input[1..input.len() - 1]
+        } else {
+            input
+        };
         Self {
             iter: Token::lexer(input).spanned().peekable(),
         }
@@ -598,19 +604,6 @@ impl<'a> Parser<'a> {
 
     /// Parse a complete expression.
     fn parse_expr(&mut self) -> Result<Expr> {
-        // Handle backtick-delimited string expressions
-        if matches!(self.peek(), Some(Token::Backtick)) {
-            self.next();
-            let expr = match self.next() {
-                Some(Token::String(s)) => Expr::String(unescape_string(s)),
-                Some(other) => bail!("Expected string after backtick, got {:?}", other),
-                None => bail!("Expected string after backtick, got end of input"),
-            };
-            self.expect(Token::Backtick)?;
-            ensure!(self.is_eof(), "Unexpected token after expression: {:?}", self.peek());
-            return Ok(expr);
-        }
-
         let expr = self.parse()?;
         ensure!(self.is_eof(), "Unexpected token after expression: {:?}", self.peek());
         Ok(expr)
@@ -1108,18 +1101,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_backtick_requires_string() {
-        // Non-string after backtick should fail
-        let result: Result<Expr, _> = "`42`".parse();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Expected string after backtick"));
+    fn parse_backtick_any_expression() {
+        // Backticks accept any expression, not just strings.
+        let expr: Expr = "`42`".parse().unwrap();
+        assert_eq!(expr, Expr::Integer(42));
 
-        // Function call after backtick should fail
-        let result: Result<Expr, _> = "`if(True, 1, 2)`".parse();
-        assert!(result.is_err());
+        let expr: Expr = "`if(True, 1, 2)`".parse().unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                func: Func::If,
+                args: vec![Expr::Bool(true), Expr::Integer(1), Expr::Integer(2)],
+            }
+        );
     }
 
     #[test]

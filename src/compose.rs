@@ -7,12 +7,13 @@
 //! [`AbstractData`] with its resolved identity. Cycles are
 //! detected and skipped automatically.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use anyhow::{bail, Context, Result};
 
 use crate::ar::{self, Resolver};
+use crate::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, Value};
 use crate::{usda, usdc};
@@ -124,8 +125,14 @@ fn collect_recursive(
     // Load and parse the layer.
     let mut data = open_layer(resolver, &resolved)?;
 
+    // Read expression variables from this layer's pseudo-root.
+    let expr_vars = read_expression_variables(data.as_mut());
+
     // Collect all asset paths that need recursive loading.
-    let referenced = collect_asset_paths(data.as_mut());
+    let raw_paths = collect_asset_paths(data.as_mut());
+
+    // Evaluate any expression-valued asset paths.
+    let referenced = resolve_expressions(&raw_paths, &expr_vars)?;
 
     // Recurse into discovered layers, anchored to the current layer.
     let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
@@ -239,6 +246,39 @@ fn extract_reference_paths(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Reads `expressionVariables` from the layer's pseudo-root, if present.
+fn read_expression_variables(data: &mut dyn AbstractData) -> HashMap<String, Value> {
+    let root = Path::abs_root();
+    if let Ok(value) = data.get(&root, FieldKey::ExpressionVariables.as_str()) {
+        if let Value::Dictionary(dict) = value.into_owned() {
+            return dict;
+        }
+    }
+    HashMap::new()
+}
+
+/// Evaluates expression-valued asset paths, passing through plain paths unchanged.
+fn resolve_expressions(paths: &[String], vars: &HashMap<String, Value>) -> Result<Vec<String>> {
+    paths
+        .iter()
+        .map(|path| {
+            if expr::is_expression(path) {
+                let expression = expr::Expr::parse(path)
+                    .with_context(|| format!("failed to parse expression: {path}"))?;
+                let result = expression
+                    .eval(vars)
+                    .with_context(|| format!("failed to evaluate expression: {path}"))?;
+                match result {
+                    Value::String(s) => Ok(s),
+                    other => bail!("expression must evaluate to a string, got: {other:?}"),
+                }
+            } else {
+                Ok(path.clone())
+            }
+        })
+        .collect()
+}
+
 /// Appends external asset paths from a payload value.
 fn extract_payload_paths(value: &Value, out: &mut Vec<String>) {
     match value {
@@ -265,6 +305,48 @@ mod tests {
 
     fn composition_path(relative: &str) -> String {
         format!("{}/{}/{}", manifest_dir(), VENDOR_COMPOSITION, relative)
+    }
+
+    fn fixture_path(relative: &str) -> String {
+        format!("{}/fixtures/{}", manifest_dir(), relative)
+    }
+
+    // -----------------------------------------------------------------------
+    // Expression evaluation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expression_sublayer() -> Result<()> {
+        let path = fixture_path("expr_sublayer.usda");
+        let resolver = DefaultResolver::new();
+        let stack = collect_layers(&resolver, &path)?;
+
+        assert_eq!(stack.len(), 2, "root + 1 expression-resolved sublayer");
+        assert!(stack.root().identifier.contains("expr_sublayer.usda"));
+        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_reference() -> Result<()> {
+        let path = fixture_path("expr_reference.usda");
+        let resolver = DefaultResolver::new();
+        let stack = collect_layers(&resolver, &path)?;
+
+        assert_eq!(stack.len(), 2, "root + 1 expression-resolved reference");
+        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        Ok(())
+    }
+
+    #[test]
+    fn expression_payload() -> Result<()> {
+        let path = fixture_path("expr_payload.usda");
+        let resolver = DefaultResolver::new();
+        let stack = collect_layers(&resolver, &path)?;
+
+        assert_eq!(stack.len(), 2, "root + 1 expression-resolved payload");
+        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        Ok(())
     }
 
     // -----------------------------------------------------------------------

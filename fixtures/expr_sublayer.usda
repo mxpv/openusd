@@ -1,0 +1,9 @@
+#usda 1.0
+(
+    expressionVariables = {
+        string LAYER = "expr_sublayer_target"
+    }
+    subLayers = [
+        @`"${LAYER}.usda"`@
+    ]
+)
