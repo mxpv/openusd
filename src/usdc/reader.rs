@@ -141,7 +141,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     fn read_header(mut reader: impl io::Read + io::Seek) -> Result<Bootstrap> {
         let header = reader.read_pod::<Bootstrap>()?;
 
-        ensure!(header.ident.eq(b"PXR-USDC"), "Usd crate bootstrap section corrupt");
+        ensure!(header.ident.eq(super::MAGIC), "Usd crate bootstrap section corrupt");
 
         ensure!(header.toc_offset > 0, "Invalid TOC offset");
 

@@ -751,6 +751,13 @@ impl<'a> Parser<'a> {
                     .context("Unable to build references listOp")?;
                 spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
+            n if n == FieldKey::Payload.as_str() => {
+                let payloads = self.parse_payload_list().context("Unable to parse payloads")?;
+                let list_op = self
+                    .apply_list_op(list_op, payloads)
+                    .context("Unable to build payload listOp")?;
+                spec.add(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
+            }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = if self.is_next(Token::Punctuation('[')) {
                     let mut collected = Vec::new();
@@ -859,6 +866,54 @@ impl<'a> Parser<'a> {
             Ok(out)
         } else {
             Ok(vec![self.parse_reference()?])
+        }
+    }
+
+    /// Parse one payload entry, including optional target prim path and layer offset.
+    fn parse_payload(&mut self) -> Result<sdf::Payload> {
+        let mut payload = sdf::Payload {
+            asset_path: String::new(),
+            prim_path: sdf::Path::default(),
+            layer_offset: None,
+        };
+
+        match self.fetch_next()? {
+            Token::AssetRef(asset_path) => {
+                payload.asset_path = asset_path.to_string();
+                if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
+                    payload.prim_path = sdf::Path::new(path)?;
+                    self.fetch_next()?;
+                }
+            }
+            Token::PathRef(path) => {
+                payload.prim_path = sdf::Path::new(path)?;
+            }
+            token => {
+                bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
+            }
+        }
+
+        if self.is_next(Token::Punctuation('(')) {
+            let mut offset = sdf::LayerOffset::default();
+            self.parse_reference_layer_offset(&mut offset)
+                .context("Unable to parse payload layer offset")?;
+            payload.layer_offset = Some(offset);
+        }
+
+        Ok(payload)
+    }
+
+    /// Parse a list-op friendly sequence of payloads.
+    fn parse_payload_list(&mut self) -> Result<Vec<sdf::Payload>> {
+        if self.is_next(Token::Punctuation('[')) {
+            let mut out = Vec::new();
+            self.parse_array_fn(|this| {
+                out.push(this.parse_payload()?);
+                Ok(())
+            })?;
+            Ok(out)
+        } else {
+            Ok(vec![self.parse_payload()?])
         }
     }
 
