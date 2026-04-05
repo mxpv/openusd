@@ -263,8 +263,8 @@ fn resolve_expressions(paths: &[String], vars: &HashMap<String, Value>) -> Resul
         .iter()
         .map(|path| {
             if expr::is_expression(path) {
-                let expression = expr::Expr::parse(path)
-                    .with_context(|| format!("failed to parse expression: {path}"))?;
+                let expression =
+                    expr::Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
                 let result = expression
                     .eval(vars)
                     .with_context(|| format!("failed to evaluate expression: {path}"))?;
