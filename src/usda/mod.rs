@@ -34,6 +34,19 @@ impl TextReader {
     pub fn from_data(data: HashMap<sdf::Path, sdf::Spec>) -> Self {
         Self { data }
     }
+
+    /// Returns a list of child paths for a given prim path.
+    pub fn get_name_children(&self, path: &sdf::Path) -> Vec<sdf::Path> {
+        use crate::sdf::schema::ChildrenKey;
+        if let Some(spec) = self.data.get(path) {
+            if let Some(sdf::Value::TokenVec(children)) = spec.fields.get(ChildrenKey::PrimChildren.as_str()) {
+                return children.iter()
+                    .filter_map(|name| path.append_path(name.as_str()).ok())
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
 }
 
 impl sdf::AbstractData for TextReader {
