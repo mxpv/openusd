@@ -799,17 +799,20 @@ impl<'a> Parser<'a> {
             custom_data: HashMap::new(),
         };
 
-        let token = self.fetch_next()?;
-        if let Some(asset_path) = token.clone().try_as_asset_ref() {
-            reference.asset_path = asset_path.to_string();
-            if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
-                reference.prim_path = sdf::Path::new(path)?;
-                self.fetch_next()?;
+        match self.fetch_next()? {
+            Token::AssetRef(asset_path) => {
+                reference.asset_path = asset_path.to_string();
+                if let Some(Ok(Token::PathRef(path))) = self.peek_next() {
+                    reference.prim_path = sdf::Path::new(path)?;
+                    self.fetch_next()?;
+                }
             }
-        } else if let Some(path) = token.clone().try_as_path_ref() {
-            reference.prim_path = sdf::Path::new(path)?;
-        } else {
-            bail!("Expected asset reference (@... @) or path reference (<...>), got {token:?}");
+            Token::PathRef(path) => {
+                reference.prim_path = sdf::Path::new(path)?;
+            }
+            token => {
+                bail!("Expected asset reference (@...@) or path reference (<...>), got {token:?}");
+            }
         }
 
         if self.is_next(Token::Punctuation('(')) {
@@ -2410,5 +2413,35 @@ def Xform "root" {
                 .as_str(),
             "/root/Physics/PhysicsMaterial"
         );
+    }
+
+    #[test]
+    fn parse_reference_asset_only() {
+        let mut parser = Parser::new("@./model.usda@");
+        let reference = parser.parse_reference().unwrap();
+        assert_eq!(reference.asset_path, "./model.usda");
+        assert_eq!(reference.prim_path, sdf::Path::default());
+    }
+
+    #[test]
+    fn parse_reference_asset_with_prim_path() {
+        let mut parser = Parser::new("@./model.usda@</Root>");
+        let reference = parser.parse_reference().unwrap();
+        assert_eq!(reference.asset_path, "./model.usda");
+        assert_eq!(reference.prim_path.as_str(), "/Root");
+    }
+
+    #[test]
+    fn parse_reference_path_only() {
+        let mut parser = Parser::new("</Foo>");
+        let reference = parser.parse_reference().unwrap();
+        assert!(reference.asset_path.is_empty());
+        assert_eq!(reference.prim_path.as_str(), "/Foo");
+    }
+
+    #[test]
+    fn parse_reference_invalid_token() {
+        let mut parser = Parser::new("123");
+        assert!(parser.parse_reference().is_err());
     }
 }
