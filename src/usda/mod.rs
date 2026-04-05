@@ -47,6 +47,27 @@ impl TextReader {
         }
         Vec::new()
     }
+
+    /// Returns the value of an attribute if it exists and matches the requested type.
+    /// This looks for the 'default' field on the property spec at the given path.
+    pub fn get_attribute_value<T: sdf::FromValue>(&mut self, path: &sdf::Path) -> Option<T> {
+        use crate::sdf::AbstractData;
+        if let Ok(val) = self.get(path, "default") {
+            T::from_value(&val)
+        } else {
+            None
+        }
+    }
+
+    /// Helper to get an attribute value directly from a prim path and attribute name.
+    pub fn get_prim_attribute_value<T: sdf::FromValue>(
+        &mut self,
+        prim_path: &sdf::Path,
+        attr_name: &str,
+    ) -> Option<T> {
+        let prop_path = prim_path.append_property(attr_name).ok()?;
+        self.get_attribute_value(&prop_path)
+    }
 }
 
 impl sdf::AbstractData for TextReader {
