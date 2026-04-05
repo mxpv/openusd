@@ -1,0 +1,12 @@
+#usda 1.0
+(
+    expressionVariables = {
+        string ASSET_PATH = "expr_assets"
+    }
+)
+
+def "asset0" (
+    references = @`"${ASSET_PATH}/extraAssets.usda"`@
+)
+{
+}
