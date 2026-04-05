@@ -14,7 +14,7 @@ pub mod schema;
 mod value;
 
 pub use path::{path, Path};
-pub use value::{FromValue, Value};
+pub use value::{Value, ValueConversionError};
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.

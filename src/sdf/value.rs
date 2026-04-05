@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use half::f16;
-use strum::{EnumIs, EnumTryAs};
+use strum::{EnumIs, EnumTryAs, IntoStaticStr};
 
 use super::*;
 
@@ -13,7 +13,7 @@ use super::*;
 /// - h: half
 /// - i: int
 ///
-#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs)]
+#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr)]
 pub enum Value {
     /// None value, only produced by expressions (not directly assignable).
     None,
@@ -109,70 +109,175 @@ pub enum Value {
     PathExpression,
 }
 
-/// A trait for type-safe conversion from a USD Value.
-pub trait FromValue: Sized {
-    fn from_value(value: &Value) -> Option<Self>;
+/// Error returned when a [`Value`] cannot be converted to the requested type.
+#[derive(Debug, Clone)]
+pub struct ValueConversionError {
+    expected: &'static str,
+    actual: &'static str,
 }
 
-impl FromValue for bool {
-    fn from_value(value: &Value) -> Option<Self> {
+impl ValueConversionError {
+    /// Creates a new error from the expected type name and the actual value.
+    pub fn new(expected: &'static str, actual: &Value) -> Self {
+        Self {
+            expected,
+            actual: actual.into(),
+        }
+    }
+
+    /// Returns an `Err` with a new conversion error.
+    pub fn err<T>(expected: &'static str, actual: &Value) -> Result<T, Self> {
+        Err(Self::new(expected, actual))
+    }
+}
+
+impl std::fmt::Display for ValueConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "expected {}, got {}", self.expected, self.actual)
+    }
+}
+
+impl std::error::Error for ValueConversionError {}
+
+impl TryFrom<&Value> for bool {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Bool(v) => Some(*v),
-            _ => None,
+            Value::Bool(v) => Ok(*v),
+            _ => ValueConversionError::err("Bool", value),
         }
     }
 }
 
-impl FromValue for i32 {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for i32 {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Int(v) => Some(*v),
-            _ => None,
+            Value::Int(v) => Ok(*v),
+            _ => ValueConversionError::err("Int", value),
         }
     }
 }
 
-impl FromValue for f32 {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for f32 {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Float(v) => Some(*v),
-            _ => None,
+            Value::Float(v) => Ok(*v),
+            _ => ValueConversionError::err("Float", value),
         }
     }
 }
 
-impl FromValue for f64 {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for f64 {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Double(v) => Some(*v),
-            _ => None,
+            Value::Double(v) => Ok(*v),
+            _ => ValueConversionError::err("Double", value),
         }
     }
 }
 
-impl FromValue for String {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for String {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::String(v) | Value::Token(v) => Some(v.clone()),
-            _ => None,
+            Value::String(v) | Value::Token(v) => Ok(v.clone()),
+            _ => ValueConversionError::err("String or Token", value),
         }
     }
 }
 
-impl FromValue for Vec<f32> {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for [f32; 2] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::FloatVec(v) | Value::Vec3f(v) | Value::Vec2f(v) | Value::Vec4f(v) => Some(v.clone()),
-            _ => None,
+            Value::Vec2f(v) if v.len() == 2 => Ok([v[0], v[1]]),
+            _ => ValueConversionError::err("Vec2f", value),
         }
     }
 }
 
-impl FromValue for Vec<f64> {
-    fn from_value(value: &Value) -> Option<Self> {
+impl TryFrom<&Value> for [f32; 3] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
-            Value::DoubleVec(v) | Value::Vec3d(v) | Value::Vec2d(v) | Value::Vec4d(v) => Some(v.clone()),
-            _ => None,
+            Value::Vec3f(v) if v.len() == 3 => Ok([v[0], v[1], v[2]]),
+            _ => ValueConversionError::err("Vec3f", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for [f32; 4] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec4f(v) | Value::Quatf(v) if v.len() == 4 => Ok([v[0], v[1], v[2], v[3]]),
+            _ => ValueConversionError::err("Vec4f or Quatf", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for [f64; 2] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec2d(v) if v.len() == 2 => Ok([v[0], v[1]]),
+            _ => ValueConversionError::err("Vec2d", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for [f64; 3] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec3d(v) if v.len() == 3 => Ok([v[0], v[1], v[2]]),
+            _ => ValueConversionError::err("Vec3d", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for [f64; 4] {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec4d(v) | Value::Quatd(v) if v.len() == 4 => Ok([v[0], v[1], v[2], v[3]]),
+            _ => ValueConversionError::err("Vec4d or Quatd", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for Vec<f32> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::FloatVec(v) | Value::Vec2f(v) | Value::Vec3f(v) | Value::Vec4f(v) => Ok(v.clone()),
+            _ => ValueConversionError::err("FloatVec, Vec2f, Vec3f, or Vec4f", value),
+        }
+    }
+}
+
+impl TryFrom<&Value> for Vec<f64> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::DoubleVec(v) | Value::Vec2d(v) | Value::Vec3d(v) | Value::Vec4d(v) => Ok(v.clone()),
+            _ => ValueConversionError::err("DoubleVec, Vec2d, Vec3d, or Vec4d", value),
         }
     }
 }
@@ -202,5 +307,46 @@ mod tests {
 
         assert!(Value::PayloadListOp(Default::default()).is_payload_list_op());
         assert!(Value::UnregisteredValue.is_unregistered_value());
+    }
+
+    #[test]
+    fn try_from_scalars() {
+        assert_eq!(bool::try_from(&Value::Bool(true)).unwrap(), true);
+        assert_eq!(i32::try_from(&Value::Int(42)).unwrap(), 42);
+        assert_eq!(f32::try_from(&Value::Float(1.5)).unwrap(), 1.5);
+        assert_eq!(f64::try_from(&Value::Double(2.5)).unwrap(), 2.5);
+        assert_eq!(String::try_from(&Value::String("hello".into())).unwrap(), "hello");
+        assert_eq!(String::try_from(&Value::Token("tok".into())).unwrap(), "tok");
+    }
+
+    #[test]
+    fn try_from_fixed_arrays() {
+        assert_eq!(<[f32; 2]>::try_from(&Value::Vec2f(vec![1.0, 2.0])).unwrap(), [1.0, 2.0]);
+        assert_eq!(<[f32; 3]>::try_from(&Value::Vec3f(vec![1.0, 2.0, 3.0])).unwrap(), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            <[f32; 4]>::try_from(&Value::Vec4f(vec![1.0, 2.0, 3.0, 4.0])).unwrap(),
+            [1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(<[f64; 3]>::try_from(&Value::Vec3d(vec![1.0, 2.0, 3.0])).unwrap(), [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn try_from_vec() {
+        // Vec<f32> accepts any float vector variant.
+        assert!(Vec::<f32>::try_from(&Value::FloatVec(vec![1.0])).is_ok());
+        assert!(Vec::<f32>::try_from(&Value::Vec3f(vec![1.0, 2.0, 3.0])).is_ok());
+
+        // Vec<f64> accepts any double vector variant.
+        assert!(Vec::<f64>::try_from(&Value::DoubleVec(vec![1.0])).is_ok());
+        assert!(Vec::<f64>::try_from(&Value::Vec2d(vec![1.0, 2.0])).is_ok());
+    }
+
+    #[test]
+    fn try_from_wrong_variant() {
+        let err = f32::try_from(&Value::Int(1)).unwrap_err();
+        assert_eq!(err.to_string(), "expected Float, got Int");
+
+        let err = <[f32; 3]>::try_from(&Value::Bool(true)).unwrap_err();
+        assert_eq!(err.to_string(), "expected Vec3f, got Bool");
     }
 }
