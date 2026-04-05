@@ -34,6 +34,24 @@ impl Archive {
         Ok(Self { archive })
     }
 
+    /// Returns the file name of the first layer in the archive.
+    ///
+    /// Per the [USDZ specification](https://openusd.org/release/spec_usdz.html),
+    /// the first file in a USDZ package must be a native USD file (`.usda`, `.usdc`,
+    /// or `.usd`) and serves as the root layer of the composed stage.
+    pub fn first_layer_name(&self) -> Option<String> {
+        self.archive
+            .file_names()
+            .find(|name| name.ends_with(".usdc") || name.ends_with(".usda") || name.ends_with(".usd"))
+            .map(String::from)
+    }
+
+    /// Opens the first (root) layer from the archive.
+    pub fn read_first_layer(&mut self) -> Result<Box<dyn sdf::AbstractData>> {
+        let name = self.first_layer_name().context("no USD layer found in USDZ archive")?;
+        self.read(&name)
+    }
+
     /// Read either a USDA or USDC file from the archive.
     ///
     /// NOTE: Nested USDZ files are not yet supported.
