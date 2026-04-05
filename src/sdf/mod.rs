@@ -201,16 +201,19 @@ pub trait AbstractData {
     fn list(&self, path: &Path) -> Option<Vec<String>>;
 }
 
+/// A single spec in a scene description layer, consisting of a type and a set of fields.
+///
+/// See [SdfSpec](https://openusd.org/dev/api/class_sdf_spec.html) in the USD documentation.
 #[derive(Debug, Clone)]
 pub struct Spec {
-    /// Specifies the type of an object.
+    /// The type of this spec (prim, attribute, relationship, etc.).
     pub ty: SpecType,
-    /// Spec properties.
+    /// The fields stored on this spec, keyed by field name.
     pub fields: HashMap<String, Value>,
 }
 
 impl Spec {
-    /// Create a new empty spec of the give type.
+    /// Creates a new empty spec of the given type.
     pub fn new(ty: SpecType) -> Self {
         Self {
             ty,

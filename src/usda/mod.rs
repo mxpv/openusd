@@ -13,7 +13,7 @@ use parser::Parser;
 
 use crate::sdf;
 
-/// High level interface to text data.
+/// Reader for USD's ASCII text format (`.usda`).
 #[derive(Clone)]
 pub struct TextReader {
     data: HashMap<sdf::Path, sdf::Spec>,
@@ -41,7 +41,7 @@ impl TextReader {
         self.data.iter()
     }
 
-    /// Returns a list of child prim paths for a given prim path.
+    /// Returns the child prim paths for a given prim by reading its `primChildren` field.
     pub fn prim_children(&self, path: &sdf::Path) -> Vec<sdf::Path> {
         use crate::sdf::schema::ChildrenKey;
         if let Some(spec) = self.data.get(path) {
