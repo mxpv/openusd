@@ -3,11 +3,11 @@
 //! Given a root USD file, [`collect_layers`] uses an [`ar::Resolver`] to recursively
 //! resolve and load every layer the stage depends on — following sublayers, references,
 //! and payloads across files and formats (`.usda`, `.usdc`, `.usd`, `.usdz`). The result
-//! is a [`LayerStack`] of [`Layer`]s, each wrapping a parsed
-//! [`AbstractData`] with its resolved identity. Cycles are
-//! detected and skipped automatically.
+//! is a [`Vec`] of [`Layer`]s, each wrapping a parsed [`AbstractData`] with its resolved
+//! identity. Cycles are detected and skipped automatically.
 
-pub mod prim_index;
+#[allow(dead_code)] // TODO: Remove once all arc types are implemented.
+pub(crate) mod prim_index;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -45,51 +45,14 @@ impl std::fmt::Debug for Layer {
     }
 }
 
-/// Result of composing a USD stage from a root layer.
-///
-/// Contains the ordered stack of layers discovered by walking sublayers,
-/// references, and payloads.
-#[derive(Debug)]
-pub struct LayerStack {
-    /// All layers in the stack, root layer first.
-    pub layers: Vec<Layer>,
-}
-
-impl LayerStack {
-    /// Returns the root (strongest) layer.
-    pub fn root(&self) -> &Layer {
-        &self.layers[0]
-    }
-
-    /// Returns the number of layers in the stack.
-    pub fn len(&self) -> usize {
-        self.layers.len()
-    }
-
-    /// Returns `true` if the stack is empty.
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
-    }
-
-    /// Returns an iterator over all layers.
-    pub fn iter(&self) -> impl Iterator<Item = &Layer> {
-        self.layers.iter()
-    }
-
-    /// Returns the layer identifiers in order.
-    pub fn identifiers(&self) -> Vec<&str> {
-        self.layers.iter().map(|l| l.identifier.as_str()).collect()
-    }
-}
-
 /// Opens a root layer and recursively collects all referenced layers.
 ///
 /// Walks sublayers (layer-level), then traverses every prim to collect
 /// references and payloads. Each discovered asset path is resolved via the
 /// provided [`Resolver`], loaded, and itself walked for further references.
 ///
-/// Returns a [`LayerStack`] with the root layer first.
-pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<LayerStack> {
+/// Returns a [`Vec<Layer>`] with the root (strongest) layer first.
+pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     let mut visited = HashSet::new();
 
@@ -98,7 +61,7 @@ pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Layer
     // Layers are collected in post-order (leaves first), reverse so root is first.
     layers.reverse();
 
-    Ok(LayerStack { layers })
+    Ok(layers)
 }
 
 /// Recursive layer collector.
@@ -213,8 +176,12 @@ fn collect_prim_paths(data: &mut dyn AbstractData) -> Vec<Path> {
     result
 }
 
-/// Opens a layer from a resolved path, auto-detecting the format.
-fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Result<Box<dyn AbstractData>> {
+/// Opens a single layer from a resolved path, auto-detecting the format.
+///
+/// Supports `.usda` (text), `.usdc` (binary), `.usd` (auto-detected via magic
+/// bytes), and `.usdz` (archive — reads the first layer). Returns the parsed
+/// data as a boxed [`AbstractData`].
+pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Result<Box<dyn AbstractData>> {
     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or_default();
 
     if ext == "usdz" {
@@ -321,11 +288,11 @@ mod tests {
     fn expression_sublayer() -> Result<()> {
         let path = fixture_path("expr_sublayer.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 expression-resolved sublayer");
-        assert!(stack.root().identifier.contains("expr_sublayer.usda"));
-        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 expression-resolved sublayer");
+        assert!(layers[0].identifier.contains("expr_sublayer.usda"));
+        assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
         Ok(())
     }
 
@@ -333,10 +300,10 @@ mod tests {
     fn expression_reference() -> Result<()> {
         let path = fixture_path("expr_reference.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 expression-resolved reference");
-        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 expression-resolved reference");
+        assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
         Ok(())
     }
 
@@ -344,11 +311,11 @@ mod tests {
     fn expression_asset_path() -> Result<()> {
         let path = fixture_path("expr_asset_path.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 expression-resolved reference");
-        assert!(stack.root().identifier.contains("expr_asset_path.usda"));
-        assert!(stack.layers[1]
+        assert_eq!(layers.len(), 2, "root + 1 expression-resolved reference");
+        assert!(layers[0].identifier.contains("expr_asset_path.usda"));
+        assert!(layers[1]
             .identifier
             .replace('\\', "/")
             .contains("expr_assets/extraAssets.usda"));
@@ -359,10 +326,10 @@ mod tests {
     fn expression_payload() -> Result<()> {
         let path = fixture_path("expr_payload.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 expression-resolved payload");
-        assert!(stack.layers[1].identifier.contains("expr_sublayer_target.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 expression-resolved payload");
+        assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
         Ok(())
     }
 
@@ -374,11 +341,11 @@ mod tests {
     fn sublayer_same_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 sublayer");
-        assert!(stack.root().identifier.contains("sublayer_same_folder.usda"));
-        assert!(stack.layers[1].identifier.contains("_stage.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 sublayer");
+        assert!(layers[0].identifier.contains("sublayer_same_folder.usda"));
+        assert!(layers[1].identifier.contains("_stage.usda"));
         Ok(())
     }
 
@@ -386,10 +353,10 @@ mod tests {
     fn sublayer_child_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_child_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_child_stage.usda"));
         Ok(())
     }
 
@@ -397,10 +364,10 @@ mod tests {
     fn sublayer_parent_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_parent_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_parent_stage.usda"));
         Ok(())
     }
 
@@ -412,10 +379,10 @@ mod tests {
     fn reference_same_folder() -> Result<()> {
         let path = composition_path("references/reference_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 referenced layer");
-        assert!(stack.layers[1].identifier.contains("_stage.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 referenced layer");
+        assert!(layers[1].identifier.contains("_stage.usda"));
         Ok(())
     }
 
@@ -423,10 +390,10 @@ mod tests {
     fn reference_child_folder() -> Result<()> {
         let path = composition_path("references/reference_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_child_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_child_stage.usda"));
         Ok(())
     }
 
@@ -434,10 +401,10 @@ mod tests {
     fn reference_parent_folder() -> Result<()> {
         let path = composition_path("references/reference_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_parent_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_parent_stage.usda"));
         Ok(())
     }
 
@@ -449,10 +416,10 @@ mod tests {
     fn payload_same_folder() -> Result<()> {
         let path = composition_path("payload/payload_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2, "root + 1 payload layer");
-        assert!(stack.layers[1].identifier.contains("_stage.usda"));
+        assert_eq!(layers.len(), 2, "root + 1 payload layer");
+        assert!(layers[1].identifier.contains("_stage.usda"));
         Ok(())
     }
 
@@ -460,10 +427,10 @@ mod tests {
     fn payload_child_folder() -> Result<()> {
         let path = composition_path("payload/payload_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_child_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_child_stage.usda"));
         Ok(())
     }
 
@@ -471,10 +438,10 @@ mod tests {
     fn payload_parent_folder() -> Result<()> {
         let path = composition_path("payload/payload_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
-        assert_eq!(stack.len(), 2);
-        assert!(stack.layers[1].identifier.contains("_parent_stage.usda"));
+        assert_eq!(layers.len(), 2);
+        assert!(layers[1].identifier.contains("_parent_stage.usda"));
         Ok(())
     }
 
@@ -486,14 +453,14 @@ mod tests {
     fn teapot_multi_level() -> Result<()> {
         let path = format!("{}/vendor/usd-wg-assets/full_assets/Teapot/Teapot.usd", manifest_dir());
         let resolver = DefaultResolver::new();
-        let stack = collect_layers(&resolver, &path)?;
+        let layers = collect_layers(&resolver, &path)?;
 
         // Teapot.usd -> payload Teapot_Payload.usd -> sublayer Teapot_Materials.usd
-        assert!(stack.len() >= 3, "expected at least 3 layers, got {}", stack.len());
+        assert!(layers.len() >= 3, "expected at least 3 layers, got {}", layers.len());
 
-        assert!(stack.root().identifier.contains("Teapot.usd"));
+        assert!(layers[0].identifier.contains("Teapot.usd"));
 
-        let ids = stack.identifiers();
+        let ids = layers.iter().map(|l| l.identifier.as_str()).collect::<Vec<_>>();
         assert!(ids.iter().any(|id| id.contains("Teapot_Payload")));
         assert!(ids.iter().any(|id| id.contains("Teapot_Materials")));
 

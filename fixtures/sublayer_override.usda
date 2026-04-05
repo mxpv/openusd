@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    subLayers = [
+        @sublayer_base.usda@
+    ]
+)
+
+over "World"
+{
+    over "Cube"
+    {
+        color3f[] primvars:displayColor = [(0, 0, 1)]
+    }
+
+    def Sphere "Sphere"
+    {
+    }
+}
