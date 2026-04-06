@@ -262,8 +262,9 @@ impl Stage {
 
     /// Builds a prim index for the given path.
     ///
-    /// Follows LIVERPS ordering: Root (sublayers), then References, then Payloads.
-    /// Inherit, variant, and specialize arcs are added incrementally.
+    /// Follows LIVERPS ordering:
+    /// Local (sublayers) > Inherits > References > Payloads.
+    /// Variant and specialize arcs are added incrementally.
     fn build_prim_index(&self, path: &Path) -> PrimIndex {
         let mut nodes = Vec::new();
 
@@ -275,6 +276,15 @@ impl Stage {
                     path: path.clone(),
                     arc: ArcType::Root,
                 });
+            }
+        }
+
+        // I — Inherits: compose PathListOp across root nodes, then add nodes
+        // from the inherited prims within the same layer stack.
+        let inherits = self.compose_arc_list::<Path>(&nodes, FieldKey::InheritPaths);
+        for inherit_path in &inherits {
+            for (i, layer) in self.layers.iter().enumerate() {
+                self.add_remapped_nodes(layer.as_ref(), i, path, inherit_path, ArcType::Inherit, &mut nodes);
             }
         }
 
@@ -697,7 +707,7 @@ mod tests {
     /// The sublayer_same_folder vendor test asset should open correctly with
     /// 2 layers and expose the sublayer's prims through composition.
     #[test]
-    fn vendor_sublayer_same_folder() -> Result<()> {
+    fn sublayer_prims_from_weaker_layer() -> Result<()> {
         let path = composition_path("subLayer/sublayer_same_folder.usda");
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
@@ -716,7 +726,7 @@ mod tests {
     /// The active.usda vendor test has prims with active=true/false metadata.
     /// Verify field resolution returns the correct authored values.
     #[test]
-    fn vendor_active_metadata() -> Result<()> {
+    fn field_active_metadata() -> Result<()> {
         let path = composition_path("active.usda");
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
@@ -767,7 +777,7 @@ mod tests {
     /// defaultPrim. The referenced layer's /World/Cube should appear under the
     /// referencing prim.
     #[test]
-    fn vendor_reference_same_folder() -> Result<()> {
+    fn reference_default_prim_from_external_layer() -> Result<()> {
         let path = composition_path("references/reference_same_folder.usda");
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
@@ -809,12 +819,68 @@ mod tests {
         Ok(())
     }
 
+    // --- Inherit composition ---
+
+    /// class_inherit.usda: cubeWithoutSetColor inherits from /_myClass which
+    /// defines displayColor = green. The prim should pick up the class property.
+    #[test]
+    fn inherit_from_class() -> Result<()> {
+        let path = composition_path("class_inherit.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // The prim index for cubeWithoutSetColor should include an Inherit node
+        // pointing at /_myClass.
+        let index = stage.prim_index(&Path::new("/World/cubeWithoutSetColor")?);
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Inherit),
+            "should have an Inherit arc"
+        );
+
+        // The inherited property should be visible.
+        let props = stage.prim_properties(&Path::new("/World/cubeWithoutSetColor")?)?;
+        assert!(
+            props.contains(&"primvars:displayColor".to_string()),
+            "inherited property should be visible"
+        );
+
+        Ok(())
+    }
+
+    /// class_inherit.usda: cubeWithSetColor inherits from /_myClass but
+    /// overrides displayColor locally. Local opinion (red) should win
+    /// over the inherited opinion (green).
+    #[test]
+    fn inherit_local_opinion_wins() -> Result<()> {
+        let path = composition_path("class_inherit.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // cubeWithSetColor has both a local and inherited displayColor.
+        // The prim index should have Root first, then Inherit.
+        let index = stage.prim_index(&Path::new("/World/cubeWithSetColor")?);
+        let arcs: Vec<_> = index.nodes.iter().map(|n| n.arc).collect();
+        assert_eq!(arcs[0], ArcType::Root, "Root should be strongest");
+        assert!(arcs.contains(&ArcType::Inherit), "should also have Inherit");
+
+        // The local displayColor (red) should win over inherited (green).
+        let prop = Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
+        let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
+        assert!(value.is_some());
+
+        // Verify it's the local red, not the inherited green.
+        let green = Value::Vec3f(vec![0.0, 0.8, 0.0]);
+        assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
+
+        Ok(())
+    }
+
     // --- Payload composition ---
 
     /// Vendor test: payload_same_folder.usda has a payload to _stage.usda.
     /// The payload's prim hierarchy should be composed into the stage.
     #[test]
-    fn vendor_payload_same_folder() -> Result<()> {
+    fn payload_pulls_children() -> Result<()> {
         let path = composition_path("payload/payload_same_folder.usda");
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
