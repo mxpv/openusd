@@ -14,6 +14,7 @@ pub mod schema;
 mod value;
 
 pub use path::{path, Path};
+pub use schema::{ChildrenKey, FieldKey};
 pub use value::{Value, ValueConversionError};
 
 /// An enum that specifies the type of an object.

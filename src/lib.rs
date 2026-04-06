@@ -19,10 +19,9 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use openusd::ar::DefaultResolver;
-//! use openusd::stage::Stage;
+//! use openusd::{ar, Stage};
 //!
-//! let resolver = DefaultResolver::new();
+//! let resolver = ar::DefaultResolver::new();
 //! let stage = Stage::open(&resolver, "scene.usda").unwrap();
 //!
 //! stage.traverse(|prim_path| {
@@ -40,3 +39,4 @@ pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
+pub use stage::Stage;
