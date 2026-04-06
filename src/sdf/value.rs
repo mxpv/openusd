@@ -177,6 +177,7 @@ impl_try_from_value!(f32, try_as_float, "Float");
 impl_try_from_value!(f64, try_as_double, "Double");
 impl_try_from_value!(ReferenceListOp, try_as_reference_list_op, "ReferenceListOp");
 impl_try_from_value!(PayloadListOp, try_as_payload_list_op, "PayloadListOp");
+impl_try_from_value!(PathListOp, try_as_path_list_op, "PathListOp");
 
 impl TryFrom<Value> for String {
     type Error = ValueConversionError;
