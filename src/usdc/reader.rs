@@ -430,30 +430,23 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             let spec_count = self.reader.read_count()?;
 
-            let mut specs = vec![Spec::default(); spec_count];
+            let path_indexes = self.read_encoded_ints::<u32>(spec_count)?;
+            let fieldset_indexes = self.read_encoded_ints::<u32>(spec_count)?;
+            let spec_types = self.read_encoded_ints::<u32>(spec_count)?;
 
-            // TODO: Might want to reuse temp buffer space here.
-
-            // pathIndexes.
-            let tmp = self.read_encoded_ints::<u32>(spec_count)?;
-            for (i, path_index) in tmp.iter().enumerate() {
-                specs[i].path_index = *path_index as usize;
-            }
-
-            // fieldSetIndexes.
-            let tmp = self.read_encoded_ints::<u32>(spec_count)?;
-            for (i, field_set_index) in tmp.iter().enumerate() {
-                specs[i].fieldset_index = *field_set_index as usize;
-            }
-
-            // specTypes.
-            let tmp = self.read_encoded_ints::<u32>(spec_count)?;
-            for (i, spec_type) in tmp.iter().enumerate() {
-                specs[i].spec_type = sdf::SpecType::from_repr(*spec_type)
-                    .with_context(|| format!("Unable to parse SDF spec type: {spec_type}"))?;
-            }
-
-            specs
+            path_indexes
+                .into_iter()
+                .zip(fieldset_indexes)
+                .zip(spec_types)
+                .map(|((path, fieldset), spec_type)| {
+                    Ok(Spec {
+                        path_index: path as usize,
+                        fieldset_index: fieldset as usize,
+                        spec_type: sdf::SpecType::from_repr(spec_type)
+                            .with_context(|| format!("Unable to parse SDF spec type: {spec_type}"))?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
         };
 
         Ok(())
@@ -741,6 +734,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(vec)
     }
 
+    /// Reads a count-prefixed vector of POD values.
+    fn read_pod_vec<T: Default + NoUninit + AnyBitPattern>(&mut self) -> Result<Vec<T>> {
+        let count = self.reader.read_count()?;
+        self.reader.read_vec(count)
+    }
+
     fn read_string(&mut self) -> Result<String> {
         let index = self.reader.read_pod::<u32>()?;
         let string = self.resolve_string(index);
@@ -790,6 +789,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(payload)
     }
 
+    /// Applies a recursive offset stored inline in the stream.
+    ///
+    /// USD crate files encode forward jumps as a signed `i64` relative to the
+    /// position **before** the offset itself, so we subtract 8 (the size of the
+    /// offset we just consumed) to land at the correct location.
+    ///
+    /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100>
+    fn apply_recursive_offset(&mut self) -> Result<()> {
+        let offset = self.reader.read_pod::<i64>()?;
+        self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+        Ok(())
+    }
+
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
@@ -798,13 +810,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             let key = self.read_string()?;
 
             let value = {
-                // Read recursive offset.
-                // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
-                let offset = self.reader.read_pod::<i64>()?;
-
-                // -8 to compensate sizeof(offset)
-                // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
-                self.reader.seek(io::SeekFrom::Current(offset - 8))?;
+                self.apply_recursive_offset()?;
 
                 let value = self.reader.read_pod::<ValueRep>()?;
 
@@ -938,15 +944,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
-                let mut tokens = Vec::with_capacity(count);
-
-                if count > 0 {
-                    let indices = self.reader.read_vec::<u32>(count)?;
-
-                    for index in indices {
-                        tokens.push(self.tokens[index as usize].clone());
-                    }
-                }
+                let indices = self.reader.read_vec::<u32>(count)?;
+                let tokens = indices.into_iter().map(|i| self.tokens[i as usize].clone()).collect();
 
                 sdf::Value::TokenVec(tokens)
             }
@@ -1068,35 +1067,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
             Type::IntListOp => {
                 ensure!(!value.is_inlined());
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    file.reader.read_vec::<i32>(count)
-                })?;
-                sdf::Value::IntListOp(list)
+                sdf::Value::IntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::Int64ListOp => {
                 ensure!(!value.is_inlined());
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    file.reader.read_vec::<i64>(count)
-                })?;
-                sdf::Value::Int64ListOp(list)
+                sdf::Value::Int64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UIntListOp => {
                 ensure!(!value.is_inlined());
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    file.reader.read_vec::<u32>(count)
-                })?;
-                sdf::Value::UIntListOp(list)
+                sdf::Value::UIntListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
             Type::UInt64ListOp => {
                 ensure!(!value.is_inlined());
-                let list = self.read_list_op(value, |file: &mut Self| {
-                    let count = file.reader.read_count()?;
-                    file.reader.read_vec::<u64>(count)
-                })?;
-                sdf::Value::UInt64ListOp(list)
+                sdf::Value::UInt64ListOp(self.read_list_op(value, |f: &mut Self| f.read_pod_vec())?)
             }
 
             //
@@ -1190,15 +1173,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 self.set_position(value.payload())?;
 
-                let mut count = self.reader.read_count()?;
+                let count = self.reader.read_count()?;
                 let mut map = HashMap::with_capacity(count);
 
-                while count > 0 {
+                for _ in 0..count {
                     let key = self.read_string()?;
                     let value = self.read_string()?;
-
                     map.insert(key, value);
-                    count -= 1;
                 }
 
                 sdf::Value::VariantSelectionMap(map)
@@ -1210,15 +1191,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 self.set_position(value.payload())?;
 
-                {
-                    // Read recursive offset.
-                    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
-                    let offset = self.reader.read_pod::<i64>()?;
-
-                    // -8 to compensate sizeof(offset)
-                    // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
-                    self.reader.seek(io::SeekFrom::Current(offset - 8))?;
-                }
+                self.apply_recursive_offset()?;
 
                 let times_rep = self.reader.read_pod::<ValueRep>()?;
 
@@ -1239,15 +1212,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 // Restore position
                 self.set_position(saved_position)?;
 
-                {
-                    // Read recursive offset.
-                    // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L1100
-                    let offset = self.reader.read_pod::<i64>()?;
-
-                    // -8 to compensate sizeof(offset)
-                    // See https://github.com/syoyo/tinyusdz/blob/b14f625a776042a384743316236ee55685f144bf/src/crate-reader.cc#L1737C5-L1737C39
-                    self.reader.seek(io::SeekFrom::Current(offset - 8))?;
-                }
+                self.apply_recursive_offset()?;
 
                 let count = self.reader.read_count()?;
                 ensure!(count == times.len(), "Invalid time samples count");
