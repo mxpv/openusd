@@ -87,7 +87,7 @@ impl Stage {
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
-        self.prim_children(&Path::abs_root())
+        self.prim_children(Path::abs_root())
     }
 
     /// Returns the composed list of child prim names for a given prim path.
@@ -95,23 +95,23 @@ impl Stage {
     /// Merges `primChildren` across all layers that have a spec at the given
     /// path, collecting the union of child names while preserving the order
     /// from the strongest layer.
-    pub fn prim_children(&self, path: &Path) -> Result<Vec<String>> {
-        self.composed_children(path, ChildrenKey::PrimChildren)
+    pub fn prim_children(&self, path: impl Into<Path>) -> Result<Vec<String>> {
+        self.composed_children(&path.into(), ChildrenKey::PrimChildren)
     }
 
     /// Returns the composed list of property names for a given prim path.
-    pub fn prim_properties(&self, path: &Path) -> Result<Vec<String>> {
-        self.composed_children(path, ChildrenKey::PropertyChildren)
+    pub fn prim_properties(&self, path: impl Into<Path>) -> Result<Vec<String>> {
+        self.composed_children(&path.into(), ChildrenKey::PropertyChildren)
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
-    pub fn has_spec(&self, path: &Path) -> bool {
-        !self.prim_index(path).is_empty()
+    pub fn has_spec(&self, path: impl Into<Path>) -> bool {
+        !self.prim_index(&path.into()).is_empty()
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub fn spec_type(&self, path: &Path) -> Option<SpecType> {
-        let index = self.prim_index(path);
+    pub fn spec_type(&self, path: impl Into<Path>) -> Option<SpecType> {
+        let index = self.prim_index(&path.into());
         for node in &index.nodes {
             if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
                 return Some(ty);
@@ -142,16 +142,17 @@ impl Stage {
     /// let active: Option<bool> = stage.field(&prim, FieldKey::Active)?;
     /// let raw: Option<Value> = stage.field(&prim, FieldKey::Active)?;
     /// ```
-    pub fn field<T>(&self, path: &Path, field: impl Into<&'static str>) -> Result<Option<T>>
+    pub fn field<T>(&self, path: impl Into<Path>, field: impl Into<&'static str>) -> Result<Option<T>>
     where
         T: TryFrom<Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
+        let path: Path = path.into();
         let field: &str = field.into();
         let raw = if path.is_property_path() {
-            self.property_field(path, field)?
+            self.property_field(&path, field)?
         } else {
-            self.resolve_field(path, field)?
+            self.resolve_field(&path, field)?
         };
 
         match raw {

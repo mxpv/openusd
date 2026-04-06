@@ -75,8 +75,8 @@ impl Path {
         Ok(Path { path: new_path })
     }
 
-    pub fn append_path(&self, path: impl TryInto<Path, Error = anyhow::Error>) -> Result<Path> {
-        let append = path.try_into()?;
+    pub fn append_path(&self, path: impl Into<Path>) -> Result<Path> {
+        let append: Path = path.into();
 
         if self.is_abs() && append.is_abs() {
             bail!("Cannot append absolute path to absolute path");
@@ -243,19 +243,21 @@ impl Path {
     }
 }
 
-impl TryFrom<&str> for Path {
-    type Error = anyhow::Error;
-
-    fn try_from(s: &str) -> result::Result<Path, Self::Error> {
-        Path::from_str(s)
+impl From<&Path> for Path {
+    fn from(p: &Path) -> Self {
+        p.clone()
     }
 }
 
-impl TryFrom<String> for Path {
-    type Error = anyhow::Error;
+impl From<&str> for Path {
+    fn from(s: &str) -> Self {
+        Path { path: s.to_string() }
+    }
+}
 
-    fn try_from(value: String) -> result::Result<Self, Self::Error> {
-        Path::from_str(&value)
+impl From<String> for Path {
+    fn from(value: String) -> Self {
+        Path { path: value }
     }
 }
 
