@@ -263,8 +263,8 @@ impl Stage {
     /// Builds a prim index for the given path.
     ///
     /// Follows LIVERPS ordering:
-    /// Local (sublayers) > Inherits > References > Payloads.
-    /// Variant and specialize arcs are added incrementally.
+    /// Local (sublayers) > Inherits > Variants > References > Payloads.
+    /// Specialize arcs are added incrementally.
     fn build_prim_index(&self, path: &Path) -> PrimIndex {
         let mut nodes = Vec::new();
 
@@ -288,6 +288,22 @@ impl Stage {
             }
         }
 
+        // V — Variants: resolve variant selection (first opinion wins), then
+        // add specs from the selected variant path in each layer.
+        let selections = self.resolve_variant_selections(&nodes);
+        for (set_name, selection) in &selections {
+            let variant_path = path.append_variant_selection(set_name, selection);
+            for (i, layer) in self.layers.iter().enumerate() {
+                if layer.has_spec(&variant_path) {
+                    nodes.push(Node {
+                        layer_index: i,
+                        path: variant_path.clone(),
+                        arc: ArcType::Variant,
+                    });
+                }
+            }
+        }
+
         // R — References: compose ReferenceListOp across root nodes, then add
         // nodes from referenced layers with namespace remapping.
         let references = self.compose_arc_list::<Reference>(&nodes, FieldKey::References);
@@ -307,6 +323,30 @@ impl Stage {
         }
 
         PrimIndex { nodes }
+    }
+
+    /// Resolves variant selections by walking root nodes strongest-to-weakest.
+    ///
+    /// For each variant set, the first opinion wins. Returns a list of
+    /// `(set_name, selection)` pairs.
+    fn resolve_variant_selections(&self, root_nodes: &[Node]) -> Vec<(String, String)> {
+        let mut selections: HashMap<String, String> = HashMap::new();
+
+        for node in root_nodes {
+            let data = &self.layers[node.layer_index];
+            let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) else {
+                continue;
+            };
+
+            if let Value::VariantSelectionMap(map) = value.into_owned() {
+                for (set_name, selection) in map {
+                    // First opinion wins.
+                    selections.entry(set_name).or_insert(selection);
+                }
+            }
+        }
+
+        selections.into_iter().collect()
     }
 
     /// Composes a list-op field across root nodes, returning the flattened list.
@@ -871,6 +911,52 @@ mod tests {
         // Verify it's the local red, not the inherited green.
         let green = Value::Vec3f(vec![0.0, 0.8, 0.0]);
         assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
+
+        Ok(())
+    }
+
+    // --- Variant selection ---
+
+    /// puzzle_1.usda: /World/Sphere has variantSet "size" with selection "small".
+    /// The selected variant sets radius=2, while the local opinion sets radius=1.
+    /// Local should win (L > V in LIVERPS), but the variant node should exist.
+    #[test]
+    fn variant_selection_resolves() -> Result<()> {
+        let path = format!(
+            "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
+            manifest_dir()
+        );
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // The prim index should contain a Variant arc node.
+        let index = stage.prim_index(&Path::new("/World/Sphere")?);
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Variant),
+            "should have a Variant arc for the selected variant"
+        );
+
+        // The variant node's path should be /World/Sphere{size=small}.
+        let variant_node = index.nodes.iter().find(|n| n.arc == ArcType::Variant).unwrap();
+        assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
+
+        Ok(())
+    }
+
+    /// The local opinion on radius (1) should be stronger than the variant's (2).
+    #[test]
+    fn variant_local_opinion_wins() -> Result<()> {
+        let path = format!(
+            "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
+            manifest_dir()
+        );
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        // The local radius=1 should win over variant radius=2.
+        let prop = Path::new("/World/Sphere")?.append_property("radius")?;
+        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some(1.0), "local opinion (1) should win over variant (2)");
 
         Ok(())
     }
