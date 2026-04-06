@@ -142,13 +142,13 @@ impl Stage {
     /// let active: Option<bool> = stage.field(&prim, FieldKey::Active)?;
     /// let raw: Option<Value> = stage.field(&prim, FieldKey::Active)?;
     /// ```
-    pub fn field<T>(&self, path: impl Into<Path>, field: impl Into<&'static str>) -> Result<Option<T>>
+    pub fn field<T>(&self, path: impl Into<Path>, field: impl AsRef<str>) -> Result<Option<T>>
     where
         T: TryFrom<Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
         let path: Path = path.into();
-        let field: &str = field.into();
+        let field: &str = field.as_ref();
         let raw = if path.is_property_path() {
             self.property_field(&path, field)?
         } else {
@@ -241,8 +241,8 @@ impl Stage {
 
     /// Merges a children field (e.g. `primChildren`, `properties`) across all
     /// nodes in the prim index, returning the union with strongest-first ordering.
-    fn composed_children(&self, path: &Path, children_field: impl Into<&'static str>) -> Result<Vec<String>> {
-        let children_field: &str = children_field.into();
+    fn composed_children(&self, path: &Path, children_field: impl AsRef<str>) -> Result<Vec<String>> {
+        let children_field: &str = children_field.as_ref();
         let index = self.prim_index(path);
         let mut result: Vec<String> = Vec::new();
 

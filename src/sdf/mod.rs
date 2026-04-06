@@ -278,8 +278,8 @@ impl Spec {
 
     /// Add a new field to the spec.
     #[inline]
-    pub fn add(&mut self, key: impl Into<&'static str>, value: impl Into<Value>) {
-        self.fields.insert(key.into().to_owned(), value.into());
+    pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<Value>) {
+        self.fields.insert(key.as_ref().to_owned(), value.into());
     }
 }
 

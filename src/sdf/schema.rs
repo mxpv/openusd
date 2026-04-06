@@ -70,8 +70,14 @@ impl From<FieldKey> for &'static str {
     }
 }
 
+impl AsRef<str> for FieldKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl FieldKey {
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             FieldKey::Active => "active",
             FieldKey::AllowedTokens => "allowedTokens",
@@ -155,8 +161,14 @@ impl From<ChildrenKey> for &'static str {
     }
 }
 
+impl AsRef<str> for ChildrenKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl ChildrenKey {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             ChildrenKey::ConnectionChildren => "connectionChildren",
             ChildrenKey::ExpressionChildren => "expressionChildren",
