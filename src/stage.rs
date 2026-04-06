@@ -263,8 +263,7 @@ impl Stage {
     /// Builds a prim index for the given path.
     ///
     /// Follows LIVERPS ordering:
-    /// Local (sublayers) > Inherits > Variants > References > Payloads.
-    /// Specialize arcs are added incrementally.
+    /// Local (sublayers) > Inherits > Variants > References > Payloads > Specializes.
     fn build_prim_index(&self, path: &Path) -> PrimIndex {
         let mut nodes = Vec::new();
 
@@ -320,6 +319,21 @@ impl Stage {
                 ..Default::default()
             };
             self.add_reference_nodes(path, &reference, ArcType::Payload, &mut nodes);
+        }
+
+        // S — Specializes: same as inherits but weakest in LIVERPS.
+        let specializes = self.compose_arc_list::<Path>(&nodes, FieldKey::Specializes);
+        for specialize_path in &specializes {
+            for (i, layer) in self.layers.iter().enumerate() {
+                self.add_remapped_nodes(
+                    layer.as_ref(),
+                    i,
+                    path,
+                    specialize_path,
+                    ArcType::Specialize,
+                    &mut nodes,
+                );
+            }
         }
 
         PrimIndex { nodes }
@@ -978,6 +992,45 @@ mod tests {
             children.contains(&"Cube".to_string()),
             "Cube from payload layer should appear under /World"
         );
+
+        Ok(())
+    }
+
+    // --- Specialize composition ---
+
+    /// inherit_and_specialize.usda: /World/cubeScene/specializes specializes
+    /// </World/cubeScene/source>. The specialize arc should appear in the
+    /// prim index as the weakest arc.
+    #[test]
+    fn specialize_arc_present() -> Result<()> {
+        let path = composition_path("inherit_and_specialize.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let index = stage.prim_index(&Path::new("/World/cubeScene/specializes")?);
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
+            "should have a Specialize arc"
+        );
+
+        Ok(())
+    }
+
+    /// The local opinion on displayColor (yellow) should win over the
+    /// specialized source's displayColor (red).
+    #[test]
+    fn specialize_local_opinion_wins() -> Result<()> {
+        let path = composition_path("inherit_and_specialize.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let prop = Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
+        let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
+        assert!(value.is_some());
+
+        // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
+        let red = Value::Vec3f(vec![0.8, 0.0, 0.0]);
+        assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
 
         Ok(())
     }
