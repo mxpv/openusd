@@ -1008,8 +1008,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Matrix4d if value.is_array() => Value::Matrix4d(self.read_vec_array::<f64, 16>(value)?),
 
             Type::Matrix2d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<2>(self.unpack_value(value)?)),
-            Type::Matrix3d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<3>(self.unpack_value(value)?)),
-            Type::Matrix4d if value.is_inlined() => sdf::Value::Matrix2d(to_mat_diag::<4>(self.unpack_value(value)?)),
+            Type::Matrix3d if value.is_inlined() => sdf::Value::Matrix3d(to_mat_diag::<3>(self.unpack_value(value)?)),
+            Type::Matrix4d if value.is_inlined() => sdf::Value::Matrix4d(to_mat_diag::<4>(self.unpack_value(value)?)),
 
             Type::Matrix2d => sdf::Value::Matrix2d(self.unpack_value::<[f64; 4]>(value)?.into()),
             Type::Matrix3d => sdf::Value::Matrix3d(self.unpack_value::<[f64; 9]>(value)?.into()),
