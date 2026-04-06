@@ -17,6 +17,8 @@ The following list of docs was used during crate development:
 - [API Documentation](https://openusd.org/release/api/index.html)
 - [USD Cookbook](https://github.com/ColinKennedy/USD-Cookbook)
 
+For a detailed comparison with the C++ reference implementation and current progress, see the [Roadmap](ROADMAP.md).
+
 ## Features
 
 - Reads all major USD formats: `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
