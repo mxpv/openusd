@@ -1066,6 +1066,39 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::ReferenceListOp(list)
             }
 
+            Type::IntListOp => {
+                ensure!(!value.is_inlined());
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    file.reader.read_vec::<i32>(count)
+                })?;
+                sdf::Value::IntListOp(list)
+            }
+            Type::Int64ListOp => {
+                ensure!(!value.is_inlined());
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    file.reader.read_vec::<i64>(count)
+                })?;
+                sdf::Value::Int64ListOp(list)
+            }
+            Type::UIntListOp => {
+                ensure!(!value.is_inlined());
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    file.reader.read_vec::<u32>(count)
+                })?;
+                sdf::Value::UIntListOp(list)
+            }
+            Type::UInt64ListOp => {
+                ensure!(!value.is_inlined());
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    let count = file.reader.read_count()?;
+                    file.reader.read_vec::<u64>(count)
+                })?;
+                sdf::Value::UInt64ListOp(list)
+            }
+
             //
             // SDF types
             //
@@ -1076,6 +1109,15 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 let tokens = self.read_token_vec()?;
                 sdf::Value::TokenVec(tokens)
+            }
+
+            Type::PathVector => {
+                ensure!(!value.is_inlined());
+
+                self.set_position(value.payload())?;
+
+                let paths = self.read_path_vec()?;
+                sdf::Value::PathVec(paths)
             }
 
             Type::Specifier => {
@@ -1235,6 +1277,25 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             }
 
             Type::ValueBlock => sdf::Value::ValueBlock,
+            Type::Value => sdf::Value::Value,
+
+            Type::TimeCode if value.is_array() => sdf::Value::TimeCodeVec(self.read_floats(value)?),
+            Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?),
+
+            Type::PathExpression => {
+                let token = self.read_token(value)?;
+                sdf::Value::PathExpression(token)
+            }
+
+            Type::UnregisteredValue => {
+                let token = self.read_token(value)?;
+                sdf::Value::UnregisteredValue(token)
+            }
+            Type::UnregisteredValueListOp => {
+                ensure!(!value.is_inlined());
+                let list = self.read_list_op(value, |file: &mut Self| file.read_string_vec())?;
+                sdf::Value::UnregisteredValueListOp(list)
+            }
 
             _ => bail!("Unsupported value type: {ty}"),
         };
