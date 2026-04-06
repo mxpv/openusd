@@ -64,6 +64,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Less is better - prefer functionality offered by stdlib
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
+- Never remove comments during refactoring if they are still applicable
 
 ## Git
 
