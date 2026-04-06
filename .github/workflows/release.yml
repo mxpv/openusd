@@ -20,7 +20,7 @@ on:
 
 jobs:
   publish:
-    name: 'Publish on crates.io'
+    name: 'Publish v${{ inputs.version }} on crates.io'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
