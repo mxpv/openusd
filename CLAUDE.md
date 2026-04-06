@@ -65,6 +65,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
 - Never remove comments during refactoring if they are still applicable
+- Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
 
 ## Git
 
