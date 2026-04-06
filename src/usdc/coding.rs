@@ -45,40 +45,31 @@ where
     };
 
     let mut prev = 0_i64;
-    let mut ints_left = count as isize;
-    let mut output = Vec::new();
+    let mut output = Vec::with_capacity(count);
 
-    while ints_left > 0 {
-        let n = ints_left.min(4);
-        ints_left -= 4;
-
+    for _ in 0..num_code_bytes {
         // Code byte stores integer types for the next 4 integers.
         let code_byte = codes_reader.read_pod::<u8>()?;
 
-        for i in 0..n {
+        for i in 0..4 {
             let ty = (code_byte >> (2 * i)) & 3;
-            let delta = match ty {
-                COMMON => common_value,
-
-                // 64 bits targets
-                SMALL if is_64_bit => ints_reader.read_pod::<i16>()? as i64,
-                MEDIUM if is_64_bit => ints_reader.read_pod::<i32>()? as i64,
-                LARGE if is_64_bit => ints_reader.read_pod::<i64>()?,
-
-                // 32 bits
-                SMALL => ints_reader.read_pod::<i8>()? as i64,
-                MEDIUM => ints_reader.read_pod::<i16>()? as i64,
-                LARGE => ints_reader.read_pod::<i32>()? as i64,
-
-                _ => bail!("Unexpected index: {ty}"),
+            let delta = match (ty, is_64_bit) {
+                (COMMON, _) => common_value,
+                (SMALL, true) => ints_reader.read_pod::<i16>()? as i64,
+                (SMALL, false) => ints_reader.read_pod::<i8>()? as i64,
+                (MEDIUM, true) => ints_reader.read_pod::<i32>()? as i64,
+                (MEDIUM, false) => ints_reader.read_pod::<i16>()? as i64,
+                (LARGE, true) => ints_reader.read_pod::<i64>()?,
+                (LARGE, false) => ints_reader.read_pod::<i32>()? as i64,
+                _ => bail!("Unexpected code: {ty}"),
             };
 
             prev += delta;
-
             output.push(prev.as_());
         }
     }
 
+    output.truncate(count);
     Ok(output)
 }
 
