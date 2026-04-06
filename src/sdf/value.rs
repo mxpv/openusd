@@ -99,7 +99,7 @@ pub enum Value {
     PayloadListOp(PayloadListOp),
 
     Payload(Payload),
-    PathVec,
+    PathVec(Vec<Path>),
     VariantSelectionMap(HashMap<String, String>),
     TimeSamples(TimeSampleMap),
 
@@ -108,11 +108,12 @@ pub enum Value {
     ValueBlock,
     Value,
 
-    UnregisteredValue,
-    UnregisteredValueListOp,
+    UnregisteredValue(String),
+    UnregisteredValueListOp(StringListOp),
 
     TimeCode(f64),
-    PathExpression,
+    TimeCodeVec(Vec<f64>),
+    PathExpression(String),
 }
 
 /// Error returned when a [`Value`] cannot be converted to the requested type.
@@ -302,7 +303,7 @@ mod tests {
         assert!(!Value::Float(1.44).is_float_vec());
 
         assert!(Value::PayloadListOp(Default::default()).is_payload_list_op());
-        assert!(Value::UnregisteredValue.is_unregistered_value());
+        assert!(Value::UnregisteredValue(String::new()).is_unregistered_value());
     }
 
     #[test]

@@ -1,0 +1,22 @@
+#usda 1.0
+
+def "World"
+{
+    int[] intArray = [1, 2, 3, 4, 5]
+    int64[] int64Array = [10, 20, 30, 40, 50]
+    uint[] uintArray = [100, 200, 300]
+    uint64[] uint64Array = [1000, 2000, 3000]
+
+    timecode timeCodeValue = 24
+    timecode[] timeCodeArray = [1, 12, 24]
+
+    rel targets = [</World/ChildA>, </World/ChildB>]
+
+    def "ChildA"
+    {
+    }
+
+    def "ChildB"
+    {
+    }
+}

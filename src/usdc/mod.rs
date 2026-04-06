@@ -786,4 +786,44 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_read_time_code() -> Result<()> {
+        let data = read_file("fixtures/sdf_types.usdc")?;
+
+        let time_code = data
+            .get(&sdf::path("/World.timeCodeValue")?, "default")?
+            .into_owned()
+            .try_as_time_code()
+            .unwrap();
+        assert_eq!(time_code, 24.0);
+
+        let time_code_array = data
+            .get(&sdf::path("/World.timeCodeArray")?, "default")?
+            .into_owned()
+            .try_as_time_code_vec()
+            .unwrap();
+        assert_eq!(time_code_array, vec![1.0, 12.0, 24.0]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_target_paths() -> Result<()> {
+        let data = read_file("fixtures/sdf_types.usdc")?;
+
+        let targets = data
+            .get(&sdf::path("/World.targets")?, "targetPaths")?
+            .into_owned()
+            .try_as_path_list_op()
+            .unwrap();
+
+        assert!(targets.explicit);
+        assert_eq!(
+            targets.explicit_items,
+            vec![sdf::path("/World/ChildA")?, sdf::path("/World/ChildB")?]
+        );
+
+        Ok(())
+    }
 }
