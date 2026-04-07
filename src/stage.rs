@@ -193,7 +193,7 @@ impl Stage {
     fn resolve_field(&self, path: &Path, field: &str) -> Result<Option<Value>> {
         self.update_index(path);
         let cache = self.prim_indices.borrow();
-        cache[path].resolve_field(field, &self.layers, |node| Ok(node.path.clone()))
+        cache[path].resolve_field(field, &self.layers, None)
     }
 
     /// Resolves a field on a property spec (attribute or relationship).
@@ -205,9 +205,7 @@ impl Stage {
         let prop_suffix = &prop_path.as_str()[prim_path.as_str().len()..];
         self.update_index(&prim_path);
         let cache = self.prim_indices.borrow();
-        cache[&prim_path].resolve_field(field, &self.layers, |node| {
-            Path::new(&format!("{}{prop_suffix}", node.path))
-        })
+        cache[&prim_path].resolve_field(field, &self.layers, Some(prop_suffix))
     }
 
     /// Traverses all composed prims depth-first, calling `visitor` for each.

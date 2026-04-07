@@ -153,16 +153,21 @@ impl PrimIndex {
 
     /// Resolves a field by walking nodes from strongest to weakest, returning the first opinion.
     ///
-    /// `make_path` maps each node to the path to query in that layer.
+    /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
+    /// When `Some`, appends the suffix to form a property path for each node.
     /// A [`Value::ValueBlock`] explicitly blocks opinions from weaker layers.
     pub(crate) fn resolve_field(
         &self,
         field: &str,
         layers: &[LayerData],
-        make_path: impl Fn(&Node) -> Result<Path>,
+        prop_suffix: Option<&str>,
     ) -> Result<Option<Value>> {
         for node in &self.nodes {
-            let query_path = make_path(node)?;
+            let query_path = match prop_suffix {
+                Some(suffix) => Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?),
+                None => Cow::Borrowed(&node.path),
+            };
+
             let data = &layers[node.layer_index];
             if !data.has_field(&query_path, field) {
                 continue;
