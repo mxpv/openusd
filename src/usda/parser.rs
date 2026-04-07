@@ -337,7 +337,12 @@ impl<'a> Parser<'a> {
         let mut properties = Vec::new();
 
         self.parse_block('{', '}', |this| {
-            match this.peek_next().context("Unexpected end of prim body")?.as_ref().map_err(|e| anyhow!("{e:?}"))? {
+            match this
+                .peek_next()
+                .context("Unexpected end of prim body")?
+                .as_ref()
+                .map_err(|e| anyhow!("{e:?}"))?
+            {
                 Token::Def | Token::Over | Token::Class => {
                     this.read_prim(path, &mut children, data)?;
                 }
@@ -365,14 +370,8 @@ impl<'a> Parser<'a> {
     fn read_variant_set(&mut self, prim_path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<()> {
         self.fetch_next()?; // consume `variantSet`
 
-        let name = self
-            .fetch_next()?
-            .try_as_string()
-            .ok_or_else(|| anyhow!("Expected variant set name string"))?
-            .to_string();
-
+        let name = self.fetch_str().context("Expected variant set name")?.to_string();
         self.ensure_pun('=')?;
-        self.ensure_pun('{')?;
 
         // Create the variant set spec.
         let vset_path = sdf::Path::new(&format!("{}{{{name}=}}", prim_path))?;
@@ -380,12 +379,8 @@ impl<'a> Parser<'a> {
         let mut variant_children = Vec::new();
 
         // Parse each variant: "VariantName" (...) { ... }
-        while !self.is_next(Token::Punctuation('}')) {
-            let variant_name = self
-                .fetch_next()?
-                .try_as_string()
-                .ok_or_else(|| anyhow!("Expected variant name string"))?
-                .to_string();
+        self.parse_block('{', '}', |this| {
+            let variant_name = this.fetch_str().context("Expected variant name")?.to_string();
 
             variant_children.push(variant_name.clone());
 
@@ -393,21 +388,20 @@ impl<'a> Parser<'a> {
             let mut variant_spec = sdf::Spec::new(sdf::SpecType::Variant);
 
             // Optional metadata block.
-            if self.is_next(Token::Punctuation('(')) {
-                self.parse_block('(', ')', |this| {
+            if this.is_next(Token::Punctuation('(')) {
+                this.parse_block('(', ')', |this| {
                     this.read_prim_metadata_entry(&mut variant_spec)
                         .context("Unable to parse variant metadata entry")
                 })?;
             }
 
             // Variant body.
-            let (children, properties) = self.read_prim_body(&variant_path, data)?;
+            let (children, properties) = this.read_prim_body(&variant_path, data)?;
             variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
             data.insert(variant_path, variant_spec);
-        }
-
-        self.ensure_pun('}')?; // close the variant set
+            Ok(())
+        })?;
 
         vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::TokenVec(variant_children));
         data.insert(vset_path, vset_spec);
