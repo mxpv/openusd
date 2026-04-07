@@ -43,6 +43,8 @@ pub struct Stage {
     layers: Vec<Box<dyn AbstractData>>,
     /// Layer identifiers, parallel to `layers`.
     identifiers: Vec<String>,
+    /// Asset paths that could not be resolved during composition.
+    unresolved: Vec<String>,
     /// Cached prim indices, built lazily per prim.
     prim_indices: RefCell<HashMap<Path, PrimIndex>>,
 }
@@ -53,7 +55,7 @@ impl Stage {
     /// Recursively resolves and loads all referenced layers, then builds a
     /// composed stage ready for queries.
     pub fn open(resolver: &impl Resolver, root_path: &str) -> Result<Self> {
-        let collected = compose::collect_layers(resolver, root_path)?;
+        let (collected, unresolved) = compose::collect_layers_recording(resolver, root_path)?;
 
         let mut identifiers = Vec::with_capacity(collected.len());
         let mut layers = Vec::with_capacity(collected.len());
@@ -66,6 +68,7 @@ impl Stage {
         Ok(Self {
             layers,
             identifiers,
+            unresolved,
             prim_indices: RefCell::new(HashMap::new()),
         })
     }
@@ -83,6 +86,41 @@ impl Stage {
     /// Returns the `defaultPrim` metadata from the root layer, if set.
     pub fn default_prim(&self) -> Option<String> {
         self.field::<String>(&Path::abs_root(), FieldKey::DefaultPrim).ok()?
+    }
+
+    /// Returns the asset paths that could not be resolved during composition.
+    ///
+    /// When [`Stage::open`] recursively loads referenced and payloaded layers,
+    /// any transitively referenced asset path that the [`Resolver`] cannot map
+    /// to a physical file is recorded here rather than causing an immediate
+    /// error.  This allows the stage to be partially constructed even when
+    /// some assets are missing, which is useful for asset-health inspection
+    /// tasks.
+    ///
+    /// Note the asymmetric handling:
+    ///
+    /// * If the **root** asset cannot be resolved, [`Stage::open`] returns
+    ///   `Err` and no stage is created.
+    /// * If a **transitively referenced** asset cannot be resolved, it is
+    ///   added to this list and composition continues.
+    ///
+    /// The returned slice contains the canonical identifiers (as produced by
+    /// [`crate::ar::Resolver::create_identifier`]) in the order they were
+    /// first encountered during composition.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::{ar::DefaultResolver, Stage};
+    ///
+    /// let resolver = DefaultResolver::new();
+    /// let stage = Stage::open(&resolver, "scene.usda").unwrap();
+    /// for path in stage.unresolved_assets() {
+    ///     eprintln!("missing asset: {path}");
+    /// }
+    /// ```
+    pub fn unresolved_assets(&self) -> &[String] {
+        &self.unresolved
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
@@ -1032,6 +1070,43 @@ mod tests {
         // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
         let red = Value::Vec3f(vec![0.8, 0.0, 0.0]);
         assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
+
+        Ok(())
+    }
+
+    // --- Stage::unresolved_assets() ---
+
+    /// A stage with no external references should have no unresolved entries.
+    #[test]
+    fn unresolved_assets_empty_for_valid_stage() -> Result<()> {
+        let path = fixture_path("unresolved_assets_none.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert!(
+            stage.unresolved_assets().is_empty(),
+            "a stage with all resolvable assets should have no unresolved entries"
+        );
+
+        Ok(())
+    }
+
+    /// A stage with missing referenced files should report them via unresolved_assets().
+    #[test]
+    fn unresolved_assets_records_missing_files() -> Result<()> {
+        let path = fixture_path("unresolved_assets.usda");
+        let resolver = DefaultResolver::new();
+        // Stage::open must succeed even when some transitively referenced
+        // assets are missing.
+        let stage = Stage::open(&resolver, &path)?;
+
+        let unresolved = stage.unresolved_assets();
+        assert_eq!(unresolved.len(), 2, "two missing assets should be recorded");
+
+        let has_missing_ref = unresolved.iter().any(|p| p.contains("this_file_does_not_exist.usda"));
+        let has_missing_payload = unresolved.iter().any(|p| p.contains("also_missing.usda"));
+        assert!(has_missing_ref, "missing reference should be in unresolved list");
+        assert!(has_missing_payload, "missing payload should be in unresolved list");
 
         Ok(())
     }

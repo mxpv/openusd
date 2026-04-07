@@ -53,15 +53,36 @@ impl std::fmt::Debug for Layer {
 ///
 /// Returns a [`Vec<Layer>`] with the root (strongest) layer first.
 pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<Layer>> {
+    let (layers, _unresolved) = collect_layers_recording(resolver, root_path)?;
+    Ok(layers)
+}
+
+/// Like [`collect_layers`] but also returns the asset paths that could not
+/// be resolved during composition.
+///
+/// The second element of the returned tuple contains the unresolved asset
+/// paths in the order they were first encountered.  These paths correspond
+/// to layers that are referenced or payloaded in the scene but whose files
+/// could not be found by the [`Resolver`].
+///
+/// Note the asymmetric handling:
+///
+/// * If the **root** asset cannot be resolved, this function returns `Err`
+///   (there is no stage to return).
+/// * If a **transitively referenced** asset cannot be resolved, it is
+///   recorded in the unresolved list and composition continues with the
+///   assets that *could* be loaded.
+pub fn collect_layers_recording(resolver: &impl Resolver, root_path: &str) -> Result<(Vec<Layer>, Vec<String>)> {
     let mut layers = Vec::new();
     let mut visited = HashSet::new();
+    let mut unresolved = Vec::new();
 
-    collect_recursive(resolver, root_path, None, &mut layers, &mut visited)?;
+    collect_recursive(resolver, root_path, None, &mut layers, &mut visited, &mut unresolved)?;
 
     // Layers are collected in post-order (leaves first), reverse so root is first.
     layers.reverse();
 
-    Ok(layers)
+    Ok((layers, unresolved))
 }
 
 /// Recursive layer collector.
@@ -71,6 +92,7 @@ fn collect_recursive(
     anchor: Option<&ar::ResolvedPath>,
     layers: &mut Vec<Layer>,
     visited: &mut HashSet<String>,
+    unresolved: &mut Vec<String>,
 ) -> Result<()> {
     // Create an anchored identifier so relative paths resolve correctly.
     let identifier = resolver.create_identifier(asset_path, anchor);
@@ -81,9 +103,24 @@ fn collect_recursive(
     }
 
     // Resolve using the anchored identifier (which is absolute).
-    let resolved = resolver
-        .resolve(&identifier)
-        .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
+    // For the root asset (anchor == None) a missing file is always fatal.
+    // For transitively referenced assets (anchor == Some), record the path
+    // and continue so that callers can inspect `unresolved` afterwards.
+    let resolved = match resolver.resolve(&identifier) {
+        Some(r) => r,
+        None => {
+            if anchor.is_none() {
+                // Root layer must exist.
+                anyhow::bail!("failed to resolve asset path: {asset_path}");
+            }
+            if !unresolved.contains(&identifier) {
+                unresolved.push(identifier.clone());
+            }
+            // Mark as visited so we don't attempt to re-resolve in recursive calls.
+            visited.insert(identifier);
+            return Ok(());
+        }
+    };
 
     visited.insert(identifier.clone());
 
@@ -109,7 +146,7 @@ fn collect_recursive(
     }
 
     for ref_path in &referenced {
-        collect_recursive(resolver, ref_path, Some(&resolved), layers, visited)?;
+        collect_recursive(resolver, ref_path, Some(&resolved), layers, visited, unresolved)?;
     }
 
     layers.push(Layer::new(identifier, data));
