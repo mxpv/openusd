@@ -104,6 +104,90 @@ impl Stage {
         self.composed_children(&path.into(), ChildrenKey::PropertyChildren)
     }
 
+    /// Returns the references declared on a prim, collected from every layer
+    /// that has a spec at the given path.
+    ///
+    /// Unlike the composition engine's internal arc resolution (which follows
+    /// references across files), this method reads only the **as-authored**
+    /// `references` field of each layer spec.  It is intended for asset-health
+    /// inspection tasks such as detecting broken or missing references before
+    /// attempting full composition.
+    ///
+    /// Duplicate entries from multiple layers are included as-is; callers can
+    /// de-duplicate if needed.  The ordering is strongest-layer-first.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::{ar::DefaultResolver, Stage, sdf::Path};
+    ///
+    /// let resolver = DefaultResolver::new();
+    /// let stage = Stage::open(&resolver, "scene.usda").unwrap();
+    /// let refs = stage.references_in(Path::new("/World/Prop").unwrap());
+    /// for r in &refs {
+    ///     println!("asset: {}, prim: {}", r.asset_path, r.prim_path);
+    /// }
+    /// ```
+    pub fn references_in(&self, path: impl Into<Path>) -> Vec<Reference> {
+        let path = path.into();
+        let mut result = Vec::new();
+
+        for layer in &self.layers {
+            if !layer.has_field(&path, FieldKey::References.as_str()) {
+                continue;
+            }
+            let Ok(value) = layer.get(&path, FieldKey::References.as_str()) else {
+                continue;
+            };
+            if let Value::ReferenceListOp(list_op) = value.into_owned() {
+                result.extend(list_op.iter().cloned());
+            }
+        }
+
+        result
+    }
+
+    /// Returns the payloads declared on a prim, collected from every layer
+    /// that has a spec at the given path.
+    ///
+    /// Mirrors [`references_in`](Self::references_in): reads the as-authored
+    /// `payload` field from each layer spec without following composition arcs.
+    /// Both `Payload` (single) and `PayloadListOp` (list-edit) field forms are
+    /// handled.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::{ar::DefaultResolver, Stage, sdf::Path};
+    ///
+    /// let resolver = DefaultResolver::new();
+    /// let stage = Stage::open(&resolver, "scene.usda").unwrap();
+    /// let payloads = stage.payloads_in(Path::new("/World/Prop").unwrap());
+    /// for p in &payloads {
+    ///     println!("asset: {}", p.asset_path);
+    /// }
+    /// ```
+    pub fn payloads_in(&self, path: impl Into<Path>) -> Vec<Payload> {
+        let path = path.into();
+        let mut result = Vec::new();
+
+        for layer in &self.layers {
+            if !layer.has_field(&path, FieldKey::Payload.as_str()) {
+                continue;
+            }
+            let Ok(value) = layer.get(&path, FieldKey::Payload.as_str()) else {
+                continue;
+            };
+            match value.into_owned() {
+                Value::Payload(p) => result.push(p),
+                Value::PayloadListOp(list_op) => result.extend(list_op.iter().cloned()),
+                _ => {}
+            }
+        }
+
+        result
+    }
+
     /// Returns `true` if any layer has a spec at the given composed path.
     pub fn has_spec(&self, path: impl Into<Path>) -> bool {
         !self.prim_index(&path.into()).is_empty()
@@ -1032,6 +1116,70 @@ mod tests {
         // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
         let red = Value::Vec3f(vec![0.8, 0.0, 0.0]);
         assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
+
+        Ok(())
+    }
+
+    // --- Stage::references_in() / Stage::payloads_in() ---
+
+    /// references_in() should return the declared reference for a prim that has one.
+    #[test]
+    fn references_in_returns_declared_reference() -> Result<()> {
+        let path = fixture_path("arc_enumeration.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let refs = stage.references_in(Path::new("/Root/WithReference")?);
+        assert_eq!(refs.len(), 1, "expected exactly one reference");
+        assert!(
+            refs[0].asset_path.ends_with("ref_target.usda"),
+            "asset_path should point to ref_target.usda, got: {}",
+            refs[0].asset_path
+        );
+
+        Ok(())
+    }
+
+    /// references_in() should return an empty vec for a prim with no references.
+    #[test]
+    fn references_in_empty_for_prim_without_references() -> Result<()> {
+        let path = fixture_path("arc_enumeration.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let refs = stage.references_in(Path::new("/Root/NoArcs")?);
+        assert!(refs.is_empty(), "prim with no references should return empty vec");
+
+        Ok(())
+    }
+
+    /// payloads_in() should return the declared payload for a prim that has one.
+    #[test]
+    fn payloads_in_returns_declared_payload() -> Result<()> {
+        let path = fixture_path("arc_enumeration.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let payloads = stage.payloads_in(Path::new("/Root/WithPayload")?);
+        assert_eq!(payloads.len(), 1, "expected exactly one payload");
+        assert!(
+            payloads[0].asset_path.ends_with("ref_target.usda"),
+            "asset_path should point to ref_target.usda, got: {}",
+            payloads[0].asset_path
+        );
+
+        Ok(())
+    }
+
+    /// payloads_in() should return an empty vec for a prim with no payloads.
+    #[test]
+    fn payloads_in_empty_for_prim_without_payloads() -> Result<()> {
+        let path = fixture_path("arc_enumeration.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let payloads = stage.payloads_in(Path::new("/Root/NoArcs")?);
+        assert!(payloads.is_empty(), "prim with no payloads should return empty vec");
 
         Ok(())
     }

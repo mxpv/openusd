@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def Xform "Root"
+{
+    def "WithReference" (
+        references = @./ref_target.usda@</World>
+    )
+    {
+    }
+
+    def "WithPayload" (
+        payload = @./ref_target.usda@</World>
+    )
+    {
+    }
+
+    def "NoArcs"
+    {
+    }
+}
