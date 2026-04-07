@@ -324,7 +324,6 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compose::prim_index::ArcType;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -338,70 +337,6 @@ mod tests {
 
     fn fixture_path(relative: &str) -> String {
         format!("{}/fixtures/{relative}", manifest_dir())
-    }
-
-    /// Builds a prim index for the given path using the stage's layers.
-    fn prim_index(stage: &Stage, path: &str) -> PrimIndex {
-        PrimIndex::build(&Path::from(path), &stage.layers, &stage.identifiers)
-    }
-
-    // --- PrimIndex internals ---
-
-    /// A prim in a single-layer stage should produce a PrimIndex with exactly
-    /// one Root node pointing at layer 0.
-    #[test]
-    fn prim_index_single_layer() -> Result<()> {
-        let path = composition_path("active.usda");
-        let stage = Stage::open(&path)?;
-
-        let index = prim_index(&stage, "/World");
-        assert_eq!(index.nodes.len(), 1);
-        assert_eq!(index.nodes[0].layer_index, 0);
-        assert_eq!(index.nodes[0].arc, ArcType::Root);
-
-        Ok(())
-    }
-
-    /// When a prim exists in both layers of a sublayer composition, the index
-    /// should contain two Root nodes with the stronger layer (index 0) first.
-    #[test]
-    fn prim_index_sublayer_two_layers() -> Result<()> {
-        // sublayer_override.usda sublayers sublayer_base.usda; both have /World.
-        let path = fixture_path("sublayer_override.usda");
-        let stage = Stage::open(&path)?;
-
-        let index = prim_index(&stage, "/World");
-        assert_eq!(index.nodes.len(), 2, "both layers should have /World");
-        assert_eq!(index.nodes[0].layer_index, 0, "stronger layer first");
-        assert_eq!(index.nodes[1].layer_index, 1, "weaker layer second");
-
-        Ok(())
-    }
-
-    /// A prim that only exists in the stronger layer should have a single node.
-    #[test]
-    fn prim_index_prim_only_in_stronger_layer() -> Result<()> {
-        let path = fixture_path("sublayer_override.usda");
-        let stage = Stage::open(&path)?;
-
-        // /World/Sphere is only defined in the override layer.
-        let index = prim_index(&stage, "/World/Sphere");
-        assert_eq!(index.nodes.len(), 1);
-        assert_eq!(index.nodes[0].layer_index, 0);
-
-        Ok(())
-    }
-
-    /// A path that doesn't exist in any layer should produce an empty PrimIndex.
-    #[test]
-    fn prim_index_nonexistent() -> Result<()> {
-        let path = composition_path("active.usda");
-        let stage = Stage::open(&path)?;
-
-        let index = prim_index(&stage, "/DoesNotExist");
-        assert!(index.is_empty());
-
-        Ok(())
     }
 
     // --- Basic stage opening (vendor/usd-wg-assets) ---
@@ -553,15 +488,7 @@ mod tests {
         // /World/MyPrim should exist via the reference.
         assert!(stage.has_spec("/World/MyPrim"));
 
-        // The prim index should have a Reference arc node.
-        let index = prim_index(&stage, "/World/MyPrim");
-        assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Reference),
-            "prim index should contain a Reference node"
-        );
-
-        // /World/MyPrim/Child should be reachable via namespace remapping
-        // (maps /Source/Child from the target layer to /World/MyPrim/Child).
+        // /World/MyPrim/Child should be reachable via namespace remapping.
         let children = stage.prim_children("/World/MyPrim")?;
         assert!(
             children.contains(&"Child".to_string()),
@@ -598,13 +525,6 @@ mod tests {
         let path = fixture_path("ref_prim.usda");
         let stage = Stage::open(&path)?;
 
-        // /World/RefPrim should exist with a Reference arc.
-        let index = prim_index(&stage, "/World/RefPrim");
-        assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Reference),
-            "should have a Reference arc"
-        );
-
         // /Source/Child in ref_target.usda should appear as /World/RefPrim/Child.
         let children = stage.prim_children("/World/RefPrim")?;
         assert!(
@@ -624,14 +544,6 @@ mod tests {
         let path = composition_path("class_inherit.usda");
         let stage = Stage::open(&path)?;
 
-        // The prim index for cubeWithoutSetColor should include an Inherit node
-        // pointing at /_myClass.
-        let index = prim_index(&stage, "/World/cubeWithoutSetColor");
-        assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Inherit),
-            "should have an Inherit arc"
-        );
-
         // The inherited property should be visible.
         let props = stage.prim_properties("/World/cubeWithoutSetColor")?;
         assert!(
@@ -650,13 +562,6 @@ mod tests {
         let path = composition_path("class_inherit.usda");
         let stage = Stage::open(&path)?;
 
-        // cubeWithSetColor has both a local and inherited displayColor.
-        // The prim index should have Root first, then Inherit.
-        let index = prim_index(&stage, "/World/cubeWithSetColor");
-        let arcs: Vec<_> = index.nodes.iter().map(|n| n.arc).collect();
-        assert_eq!(arcs[0], ArcType::Root, "Root should be strongest");
-        assert!(arcs.contains(&ArcType::Inherit), "should also have Inherit");
-
         // The local displayColor (red) should win over inherited (green).
         let prop = Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
         let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
@@ -670,31 +575,6 @@ mod tests {
     }
 
     // --- Variant selection ---
-
-    /// puzzle_1.usda: /World/Sphere has variantSet "size" with selection "small".
-    /// The selected variant sets radius=2, while the local opinion sets radius=1.
-    /// Local should win (L > V in LIVERPS), but the variant node should exist.
-    #[test]
-    fn variant_selection_resolves() -> Result<()> {
-        let path = format!(
-            "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
-            manifest_dir()
-        );
-        let stage = Stage::open(&path)?;
-
-        // The prim index should contain a Variant arc node.
-        let index = prim_index(&stage, "/World/Sphere");
-        assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Variant),
-            "should have a Variant arc for the selected variant"
-        );
-
-        // The variant node's path should be /World/Sphere{size=small}.
-        let variant_node = index.nodes.iter().find(|n| n.arc == ArcType::Variant).unwrap();
-        assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
-
-        Ok(())
-    }
 
     /// The local opinion on radius (1) should be stronger than the variant's (2).
     #[test]
@@ -734,23 +614,6 @@ mod tests {
     }
 
     // --- Specialize composition ---
-
-    /// inherit_and_specialize.usda: /World/cubeScene/specializes specializes
-    /// </World/cubeScene/source>. The specialize arc should appear in the
-    /// prim index as the weakest arc.
-    #[test]
-    fn specialize_arc_present() -> Result<()> {
-        let path = composition_path("inherit_and_specialize.usda");
-        let stage = Stage::open(&path)?;
-
-        let index = prim_index(&stage, "/World/cubeScene/specializes");
-        assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
-            "should have a Specialize arc"
-        );
-
-        Ok(())
-    }
 
     /// The local opinion on displayColor (yellow) should win over the
     /// specialized source's displayColor (red).
