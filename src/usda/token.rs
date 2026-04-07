@@ -10,9 +10,9 @@ use logos::Logos;
 #[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
 #[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip comments
 pub enum Token<'source> {
-    /// Magic header - extract version number
-    /// Example: "#usda 1.0" -> "1.0"
-    #[regex(r"#usda ([0-9]+\.[0-9]+)", |lex| {
+    /// Magic header - extract version number.
+    /// Example: "#usda 1.0" -> "1.0", "#usda 1.0.32" -> "1.0.32"
+    #[regex(r"#usda ([0-9]+\.[0-9]+(\.[0-9]+)?)", |lex| {
         let s = lex.slice();
         // Extract version after "#usda "
         &s[6..]
@@ -453,6 +453,12 @@ mod tests {
 
         let token2 = lexer2.next().unwrap().unwrap();
         assert_eq!(token2, Token::Magic("2.1"));
+
+        // Patch version.
+        let input3 = "#usda 1.0.32";
+        let mut lexer3 = Token::lexer(input3);
+        let token3 = lexer3.next().unwrap().unwrap();
+        assert_eq!(token3, Token::Magic("1.0.32"));
     }
 
     #[test]

@@ -210,7 +210,7 @@ impl<'a> Parser<'a> {
             .fetch_next()?
             .try_as_magic()
             .ok_or_else(|| anyhow!("Text file must start with magic token, got {:?}", self.peek_next()))?;
-        ensure!(version == "1.0", "File must start with '#usda 1.0', got: {version:?}");
+        ensure!(version.starts_with("1.0"), "Unsupported USDA version: {version:?}");
 
         let mut root = sdf::Spec::new(sdf::SpecType::PseudoRoot);
 
