@@ -30,7 +30,7 @@ use anyhow::Result;
 
 use crate::ar::{DefaultResolver, Resolver};
 use crate::compose;
-use crate::compose::prim_index::PrimIndex;
+use crate::compose::index::PrimIndex;
 use crate::compose::CompositionError;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, Path, SpecType, Value};
