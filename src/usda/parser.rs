@@ -314,8 +314,6 @@ impl<'a> Parser<'a> {
             })?;
         }
 
-        self.ensure_pun('{')?;
-
         let (children, props) = self.read_prim_body(&prim_path, data)?;
         spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
         properties.extend(props);
@@ -327,10 +325,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parse the body of a prim or variant (everything between `{` and `}`).
+    /// Parse the body of a prim or variant (`{ ... }`).
     ///
     /// Returns the child prim names and property names found in the body.
-    /// The opening `{` must already be consumed; this method consumes the closing `}`.
     fn read_prim_body(
         &mut self,
         path: &sdf::Path,
@@ -339,33 +336,24 @@ impl<'a> Parser<'a> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
 
-        loop {
-            let next = self
-                .peek_next()
-                .context("Unexpected end of prim body")?
-                .as_ref()
-                .map_err(|e| anyhow!("{e:?}"))?;
-
-            match next {
-                Token::Punctuation('}') => {
-                    self.fetch_next()?;
-                    break;
-                }
+        self.parse_block('{', '}', |this| {
+            match this.peek_next().context("Unexpected end of prim body")?.as_ref().map_err(|e| anyhow!("{e:?}"))? {
                 Token::Def | Token::Over | Token::Class => {
-                    self.read_prim(path, &mut children, data)?;
+                    this.read_prim(path, &mut children, data)?;
                 }
                 Token::VariantSet => {
-                    self.read_variant_set(path, data)?;
+                    this.read_variant_set(path, data)?;
                 }
                 Token::Rel => {
-                    self.fetch_next()?;
-                    self.read_relationship(path, &mut properties, data)?;
+                    this.fetch_next()?;
+                    this.read_relationship(path, &mut properties, data)?;
                 }
                 _ => {
-                    self.read_attribute(path, &mut properties, data)?;
+                    this.read_attribute(path, &mut properties, data)?;
                 }
             }
-        }
+            Ok(())
+        })?;
 
         Ok((children, properties))
     }
@@ -413,7 +401,6 @@ impl<'a> Parser<'a> {
             }
 
             // Variant body.
-            self.ensure_pun('{')?;
             let (children, properties) = self.read_prim_body(&variant_path, data)?;
             variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
