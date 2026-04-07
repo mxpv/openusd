@@ -72,7 +72,10 @@ impl std::fmt::Display for CompositionError {
                 kind,
                 prim_path,
             } => {
-                write!(f, "failed to resolve {kind} asset: {asset_path} (referenced by {referencing_layer}")?;
+                write!(
+                    f,
+                    "failed to resolve {kind} asset: {asset_path} (referenced by {referencing_layer}"
+                )?;
                 if let Some(prim) = prim_path {
                     write!(f, " at {prim}")?;
                 }
@@ -109,18 +112,40 @@ impl std::fmt::Debug for Layer {
     }
 }
 
+/// A dependency discovered while walking a layer's scene graph.
+struct Dependency {
+    /// The asset path to resolve.
+    asset_path: String,
+    /// What kind of composition arc declared this dependency.
+    kind: DependencyKind,
+    /// The prim that declared this arc (`None` for sublayers).
+    prim_path: Option<Path>,
+}
+
 /// Opens a root layer and recursively collects all referenced layers.
 ///
-/// Walks sublayers (layer-level), then traverses every prim to collect
-/// references and payloads. Each discovered asset path is resolved via the
-/// provided [`Resolver`], loaded, and itself walked for further references.
+/// Any unresolvable transitive dependency causes an immediate error.
+/// For more control over error handling, use [`collect_layers_with_handler`].
 ///
 /// Returns a [`Vec<Layer>`] with the root (strongest) layer first.
 pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<Layer>> {
+    collect_layers_with_handler(resolver, root_path, |e| bail!("{e}"))
+}
+
+/// Like [`collect_layers`] but with a custom error handler for recoverable
+/// composition failures.
+///
+/// The `on_error` callback decides whether to continue (`Ok(())`) or abort
+/// (`Err(...)`) for each composition error encountered.
+pub(crate) fn collect_layers_with_handler(
+    resolver: &impl Resolver,
+    root_path: &str,
+    on_error: impl Fn(CompositionError) -> Result<()>,
+) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     let mut visited = HashSet::new();
 
-    collect_recursive(resolver, root_path, None, &mut layers, &mut visited)?;
+    collect_recursive(resolver, root_path, None, &mut layers, &mut visited, &on_error)?;
 
     // Layers are collected in post-order (leaves first), reverse so root is first.
     layers.reverse();
@@ -135,6 +160,7 @@ fn collect_recursive(
     anchor: Option<&ar::ResolvedPath>,
     layers: &mut Vec<Layer>,
     visited: &mut HashSet<String>,
+    on_error: &dyn Fn(CompositionError) -> Result<()>,
 ) -> Result<()> {
     // Create an anchored identifier so relative paths resolve correctly.
     let identifier = resolver.create_identifier(asset_path, anchor);
@@ -145,6 +171,7 @@ fn collect_recursive(
     }
 
     // Resolve using the anchored identifier (which is absolute).
+    // Root layer (no anchor) must always resolve — missing root is a hard error.
     let resolved = resolver
         .resolve(&identifier)
         .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
@@ -157,23 +184,36 @@ fn collect_recursive(
     // Read expression variables from this layer's pseudo-root.
     let expr_vars = read_expression_variables(data.as_ref());
 
-    // Collect all asset paths that need recursive loading.
-    let raw_paths = collect_asset_paths(data.as_ref());
+    // Collect typed dependencies from this layer.
+    let deps = collect_dependencies(data.as_ref());
 
-    // Evaluate any expression-valued asset paths.
-    let referenced = resolve_expressions(&raw_paths, &expr_vars)?;
-
-    // Recurse into discovered layers, anchored to the current layer.
     let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
-    if is_usdz && !referenced.is_empty() {
-        bail!(
-            "cross-file references within USDZ archives are not yet supported: {}",
-            resolved
-        );
-    }
 
-    for ref_path in &referenced {
-        collect_recursive(resolver, ref_path, Some(&resolved), layers, visited)?;
+    for dep in deps {
+        // Evaluate expression-valued asset paths.
+        let dep_asset = resolve_expression(&dep.asset_path, &expr_vars)?;
+
+        if is_usdz {
+            bail!(
+                "cross-file references within USDZ archives are not yet supported: {}",
+                resolved
+            );
+        }
+
+        // Check if this dependency resolves before recursing.
+        let dep_id = resolver.create_identifier(&dep_asset, Some(&resolved));
+        if !visited.contains(&dep_id) && resolver.resolve(&dep_id).is_none() {
+            on_error(CompositionError::UnresolvedAsset {
+                asset_path: dep_asset,
+                referencing_layer: identifier.clone(),
+                kind: dep.kind,
+                prim_path: dep.prim_path,
+            })?;
+            visited.insert(dep_id);
+            continue;
+        }
+
+        collect_recursive(resolver, &dep_asset, Some(&resolved), layers, visited, on_error)?;
     }
 
     layers.push(Layer::new(identifier, data));
@@ -181,16 +221,22 @@ fn collect_recursive(
     Ok(())
 }
 
-/// Collects all asset paths from sublayers, references, and payloads in a layer.
-fn collect_asset_paths(data: &dyn AbstractData) -> Vec<String> {
-    let mut paths = Vec::new();
+/// Collects typed dependencies from sublayers, references, and payloads in a layer.
+fn collect_dependencies(data: &dyn AbstractData) -> Vec<Dependency> {
+    let mut deps = Vec::new();
 
     let root = Path::abs_root();
 
     // Sublayers (layer-level).
     if let Ok(value) = data.get(&root, FieldKey::SubLayers.as_str()) {
         if let Value::StringVec(sub_paths) = value.into_owned() {
-            paths.extend(sub_paths);
+            for asset_path in sub_paths {
+                deps.push(Dependency {
+                    asset_path,
+                    kind: DependencyKind::SubLayer,
+                    prim_path: None,
+                });
+            }
         }
     }
 
@@ -199,16 +245,42 @@ fn collect_asset_paths(data: &dyn AbstractData) -> Vec<String> {
     for prim_path in &prim_paths {
         // References.
         if let Ok(value) = data.get(prim_path, FieldKey::References.as_str()) {
-            extract_reference_paths(&value, &mut paths);
+            if let Value::ReferenceListOp(list_op) = value.as_ref() {
+                for r in list_op.iter().filter(|r| !r.asset_path.is_empty()) {
+                    deps.push(Dependency {
+                        asset_path: r.asset_path.clone(),
+                        kind: DependencyKind::Reference,
+                        prim_path: Some(prim_path.clone()),
+                    });
+                }
+            }
         }
 
         // Payloads.
         if let Ok(value) = data.get(prim_path, FieldKey::Payload.as_str()) {
-            extract_payload_paths(&value, &mut paths);
+            match value.as_ref() {
+                Value::Payload(p) if !p.asset_path.is_empty() => {
+                    deps.push(Dependency {
+                        asset_path: p.asset_path.clone(),
+                        kind: DependencyKind::Payload,
+                        prim_path: Some(prim_path.clone()),
+                    });
+                }
+                Value::PayloadListOp(list_op) => {
+                    for p in list_op.iter().filter(|p| !p.asset_path.is_empty()) {
+                        deps.push(Dependency {
+                            asset_path: p.asset_path.clone(),
+                            kind: DependencyKind::Payload,
+                            prim_path: Some(prim_path.clone()),
+                        });
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
-    paths
+    deps
 }
 
 /// Collects all prim paths by walking the `primChildren` hierarchy.
@@ -272,13 +344,6 @@ pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Resu
     }
 }
 
-/// Appends external asset paths from a references value.
-fn extract_reference_paths(value: &Value, out: &mut Vec<String>) {
-    if let Value::ReferenceListOp(list_op) = value {
-        out.extend(list_op.iter().map(|r| &r.asset_path).filter(|p| !p.is_empty()).cloned());
-    }
-}
-
 /// Reads `expressionVariables` from the layer's pseudo-root, if present.
 fn read_expression_variables(data: &dyn AbstractData) -> HashMap<String, Value> {
     let root = Path::abs_root();
@@ -290,43 +355,26 @@ fn read_expression_variables(data: &dyn AbstractData) -> HashMap<String, Value> 
     HashMap::new()
 }
 
-/// Evaluates expression-valued asset paths, passing through plain paths unchanged.
-fn resolve_expressions(paths: &[String], vars: &HashMap<String, Value>) -> Result<Vec<String>> {
-    paths
-        .iter()
-        .map(|path| {
-            if expr::is_expression(path) {
-                let expression =
-                    expr::Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
-                let result = expression
-                    .eval(vars)
-                    .with_context(|| format!("failed to evaluate expression: {path}"))?;
-                match result {
-                    Value::String(s) => Ok(s),
-                    other => bail!("expression must evaluate to a string, got: {other:?}"),
-                }
-            } else {
-                Ok(path.clone())
-            }
-        })
-        .collect()
-}
-
-/// Appends external asset paths from a payload value.
-fn extract_payload_paths(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Payload(p) if !p.asset_path.is_empty() => {
-            out.push(p.asset_path.clone());
+/// Evaluates an expression-valued asset path, or passes it through unchanged.
+fn resolve_expression(path: &str, vars: &HashMap<String, Value>) -> Result<String> {
+    if expr::is_expression(path) {
+        let expression = expr::Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
+        let result = expression
+            .eval(vars)
+            .with_context(|| format!("failed to evaluate expression: {path}"))?;
+        match result {
+            Value::String(s) => Ok(s),
+            other => bail!("expression must evaluate to a string, got: {other:?}"),
         }
-        Value::PayloadListOp(list_op) => {
-            out.extend(list_op.iter().map(|p| &p.asset_path).filter(|p| !p.is_empty()).cloned());
-        }
-        _ => {}
+    } else {
+        Ok(path.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::ar::DefaultResolver;
 
@@ -528,6 +576,79 @@ mod tests {
         assert!(ids.iter().any(|id| id.contains("Teapot_Payload")));
         assert!(ids.iter().any(|id| id.contains("Teapot_Materials")));
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Error handling
+    // -----------------------------------------------------------------------
+
+    /// Default handler errors on unresolvable dependencies (backward compat).
+    #[test]
+    fn collect_layers_errors_on_missing_reference() {
+        let path = composition_path("references/reference_invalid.usda");
+        let resolver = DefaultResolver::new();
+        assert!(collect_layers(&resolver, &path).is_err());
+    }
+
+    /// Custom handler receives correct error details for each dependency kind.
+    #[test]
+    fn handler_receives_error() -> Result<()> {
+        let resolver = DefaultResolver::new();
+        let errors = RefCell::new(Vec::new());
+
+        let path = composition_path("references/reference_invalid.usda");
+        collect_layers_with_handler(&resolver, &path, |e| {
+            errors.borrow_mut().push(e);
+            Ok(())
+        })?;
+
+        let path = composition_path("payload/payload_invalid.usda");
+        collect_layers_with_handler(&resolver, &path, |e| {
+            errors.borrow_mut().push(e);
+            Ok(())
+        })?;
+
+        let path = composition_path("subLayer/sublayer_invalid.usda");
+        collect_layers_with_handler(&resolver, &path, |e| {
+            errors.borrow_mut().push(e);
+            Ok(())
+        })?;
+
+        let errors = errors.into_inner();
+        assert_eq!(errors.len(), 3);
+
+        let CompositionError::UnresolvedAsset {
+            kind, ref prim_path, ..
+        } = errors[0];
+        assert_eq!(kind, DependencyKind::Reference);
+        assert_eq!(prim_path.as_ref().unwrap().as_str(), "/World/invalid_reference");
+
+        let CompositionError::UnresolvedAsset {
+            kind, ref prim_path, ..
+        } = errors[1];
+        assert_eq!(kind, DependencyKind::Payload);
+        assert_eq!(prim_path.as_ref().unwrap().as_str(), "/World/invalid_payload");
+
+        let CompositionError::UnresolvedAsset {
+            kind, ref prim_path, ..
+        } = errors[2];
+        assert_eq!(kind, DependencyKind::SubLayer);
+        assert!(prim_path.is_none());
+
+        Ok(())
+    }
+
+    /// Handler that ignores all errors allows partial layer collection.
+    #[test]
+    fn handler_can_ignore_errors() -> Result<()> {
+        let path = composition_path("references/reference_invalid.usda");
+        let resolver = DefaultResolver::new();
+        let layers = collect_layers_with_handler(&resolver, &path, |_| Ok(()))?;
+
+        // Root layer loads despite the missing reference.
+        assert_eq!(layers.len(), 1);
+        assert!(layers[0].identifier.contains("reference_invalid.usda"));
         Ok(())
     }
 }
