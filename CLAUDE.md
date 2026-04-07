@@ -86,7 +86,7 @@ The test suite includes extensive binary format tests using fixture files in `fi
 - Time-sampled data
 - Scene hierarchy traversal
 
-Test fixtures are small USD files covering specific format features and edge cases.
+Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to `fixtures/` when vendor assets don't cover the specific case needed.
 
 ## Dependencies
 
