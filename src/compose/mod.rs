@@ -6,7 +6,7 @@
 //! is a [`Vec`] of [`Layer`]s, each wrapping a parsed [`AbstractData`] with its resolved
 //! identity. Cycles are detected and skipped automatically.
 
-pub(crate) mod prim_index;
+pub(crate) mod index;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
