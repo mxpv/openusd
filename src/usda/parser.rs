@@ -218,16 +218,16 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
-        const KNOWN_PROPS: &[(&str, Type)] = &[
-            (FieldKey::DefaultPrim.as_str(), Type::Token),
-            (FieldKey::StartTimeCode.as_str(), Type::Uint64),
-            (FieldKey::HasOwnedSubLayers.as_str(), Type::StringVec),
-            ("doc", Type::String),
-            ("endTimeCode", Type::Uint64),
-            ("framesPerSecond", Type::Uint64),
-            ("metersPerUnit", Type::Double),
-            ("timeCodesPerSecond", Type::Uint64),
-            ("upAxis", Type::Token),
+        const KNOWN_PROPS: &[(&str, TypeInfo)] = &[
+            (FieldKey::DefaultPrim.as_str(), TypeInfo::scalar(Type::Token)),
+            (FieldKey::StartTimeCode.as_str(), TypeInfo::scalar(Type::Uint64)),
+            (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::array(Type::String)),
+            ("doc", TypeInfo::scalar(Type::String)),
+            ("endTimeCode", TypeInfo::scalar(Type::Uint64)),
+            ("framesPerSecond", TypeInfo::scalar(Type::Uint64)),
+            ("metersPerUnit", TypeInfo::scalar(Type::Double)),
+            ("timeCodesPerSecond", TypeInfo::scalar(Type::Uint64)),
+            ("upAxis", TypeInfo::scalar(Type::Token)),
         ];
 
         self.parse_block('(', ')', |this| {
@@ -250,9 +250,9 @@ impl<'a> Parser<'a> {
                 }
                 Token::Identifier(name) => {
                     this.ensure_pun('=')?;
-                    if let Some((known_name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
+                    if let Some(&(known_name, info)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
                         let value = this
-                            .parse_value(ty)
+                            .parse_value(info)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
                     } else {
@@ -432,8 +432,7 @@ impl<'a> Parser<'a> {
             self.fetch_next()?;
         }
 
-        let type_name = self.expect_identifier().context("attribute type expected")?;
-        let data_type = Self::parse_data_type(type_name)?;
+        let type_info = self.try_parse_type()?.context("attribute type expected")?;
 
         let name_token = self.fetch_next()?;
         let name = match name_token {
@@ -460,7 +459,7 @@ impl<'a> Parser<'a> {
 
                 spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
                 spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-                spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+                spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
 
                 let list_op = self
                     .apply_list_op(list_op, targets)
@@ -478,13 +477,13 @@ impl<'a> Parser<'a> {
 
             spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
             spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-            spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+            spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
             data.insert(path, spec);
             return Ok(());
         }
 
         self.ensure_pun('=')?;
-        let value = self.parse_value(data_type)?;
+        let value = self.parse_value(type_info)?;
         let path = current_path.append_property(name)?;
 
         // Check for metadata after value (could appear here instead of before)
@@ -497,7 +496,7 @@ impl<'a> Parser<'a> {
 
         spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
         spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-        spec.add(FieldKey::TypeName, sdf::Value::Token(type_name.to_string()));
+        spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
         spec.add(FieldKey::Default, value);
         data.insert(path, spec);
 
@@ -587,25 +586,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    #[inline]
-    fn is_type_hint_name(name: &str) -> bool {
-        Self::parse_data_type(name).is_ok()
-    }
-
     /// Parse a dictionary value from `{` to `}`.
     fn parse_dictionary(&mut self) -> Result<sdf::Value> {
         let mut dict = HashMap::new();
 
         self.parse_block('{', '}', |this| {
-            // Parse the type (optional) or key.
-            let first_token = this.fetch_next()?;
+            // Try optional type hint, then read the key.
+            let type_hint = this.try_parse_type()?;
 
-            let (type_hint, key_token) = match first_token {
-                Token::Identifier(name) if Self::is_type_hint_name(name) => (Some(first_token), this.fetch_next()?),
-                Token::Dictionary => (Some(first_token), this.fetch_next()?),
-                _ => (None, first_token),
-            };
-
+            let key_token = this.fetch_next()?;
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
                 other => {
@@ -619,14 +608,8 @@ impl<'a> Parser<'a> {
 
             this.ensure_pun('=')?;
 
-            let value = if let Some(type_hint_token) = type_hint {
-                let ty = match type_hint_token {
-                    Token::Dictionary => Type::Dictionary,
-                    Token::Identifier(type_name) => Self::parse_data_type(type_name)
-                        .with_context(|| format!("Unable to parse dictionary value type {type_name}"))?,
-                    other => bail!("Unsupported dictionary type hint: {other:?}"),
-                };
-                this.parse_value(ty)?
+            let value = if let Some(info) = type_hint {
+                this.parse_value(info)?
             } else {
                 this.parse_property_metadata_value()?
             };
@@ -858,7 +841,7 @@ impl<'a> Parser<'a> {
         self.parse_seq_fn(';', |this, _index| {
             let token = this.fetch_next()?;
             this.ensure_pun('=')?;
-            let value = this.parse_value(Type::Double)?;
+            let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
 
             match token {
                 Token::Offset => {
@@ -944,164 +927,154 @@ impl<'a> Parser<'a> {
     }
 
     /// Decode a typed value based on USD's scalar/array/role type tables.
-    fn parse_value(&mut self, ty: Type) -> Result<sdf::Value> {
-        let value = match ty {
-            // Bool
-            Type::Bool => sdf::Value::Bool(self.parse_bool()?),
-            Type::BoolVec => sdf::Value::BoolVec(self.parse_bool_array()?),
+    fn parse_value(&mut self, info: TypeInfo) -> Result<sdf::Value> {
+        let value = match (info.ty, info.is_array) {
+            (Type::Bool, false) => sdf::Value::Bool(self.parse_bool()?),
+            (Type::Bool, true) => sdf::Value::BoolVec(self.parse_bool_array()?),
 
-            // Asset paths
-            Type::Asset => sdf::Value::AssetPath(self.parse_asset_path()?),
-            Type::AssetVec => sdf::Value::StringVec(self.parse_asset_path_array()?),
+            (Type::Asset, false) => sdf::Value::AssetPath(self.parse_asset_path()?),
+            (Type::Asset, true) => sdf::Value::StringVec(self.parse_asset_path_array()?),
 
-            // Ints
-            Type::Uchar => sdf::Value::Uchar(self.parse_token()?),
-            Type::UcharVec => sdf::Value::UcharVec(self.parse_array()?),
+            (Type::Uchar, false) => sdf::Value::Uchar(self.parse_token()?),
+            (Type::Uchar, true) => sdf::Value::UcharVec(self.parse_array()?),
 
-            Type::Int => sdf::Value::Int(self.parse_token()?),
-            Type::Int2 => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?.into()),
-            Type::Int3 => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?.into()),
-            Type::Int4 => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?.into()),
-            Type::IntVec => sdf::Value::IntVec(self.parse_array()?),
-            Type::Int2Vec => sdf::Value::Vec2i(self.parse_array_of_tuples::<_, 2>()?),
-            Type::Int3Vec => sdf::Value::Vec3i(self.parse_array_of_tuples::<_, 3>()?),
-            Type::Int4Vec => sdf::Value::Vec4i(self.parse_array_of_tuples::<_, 4>()?),
-            Type::Uint => sdf::Value::Uint(self.parse_token()?),
-            Type::Int64 => sdf::Value::Int64(self.parse_token()?),
-            Type::Int64Vec => sdf::Value::Int64Vec(self.parse_array()?),
-            Type::Uint64 => sdf::Value::Uint64(self.parse_token()?),
+            (Type::Int, false) => sdf::Value::Int(self.parse_token()?),
+            (Type::Int, true) => sdf::Value::IntVec(self.parse_array()?),
+            (Type::Int2, false) => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?.into()),
+            (Type::Int2, true) => sdf::Value::Vec2i(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Int3, false) => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?.into()),
+            (Type::Int3, true) => sdf::Value::Vec3i(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Int4, false) => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Int4, true) => sdf::Value::Vec4i(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Uint, false) => sdf::Value::Uint(self.parse_token()?),
+            (Type::Int64, false) => sdf::Value::Int64(self.parse_token()?),
+            (Type::Int64, true) => sdf::Value::Int64Vec(self.parse_array()?),
+            (Type::Uint64, false) => sdf::Value::Uint64(self.parse_token()?),
 
-            // Half
-            Type::Half => sdf::Value::Half(self.parse_token()?),
-            Type::Half2 => sdf::Value::HalfVec(self.parse_tuple::<_, 2>()?.into()),
-            Type::Half3 => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?.into()),
-            Type::Half4 => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Half, false) => sdf::Value::Half(self.parse_token()?),
+            (Type::Half, true) => sdf::Value::HalfVec(self.parse_array()?),
+            (Type::Half2, false) => sdf::Value::Vec2h(self.parse_tuple::<_, 2>()?.into()),
+            (Type::Half2, true) => sdf::Value::Vec2h(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Half3, false) => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?.into()),
+            (Type::Half3, true) => sdf::Value::Vec3h(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Half4, false) => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Half4, true) => sdf::Value::Vec4h(self.parse_array_of_tuples::<_, 4>()?),
 
-            Type::HalfVec => sdf::Value::HalfVec(self.parse_array()?),
-            Type::Half2Vec => sdf::Value::Vec2h(self.parse_array_of_tuples::<_, 2>()?),
-            Type::Half3Vec => sdf::Value::Vec3h(self.parse_array_of_tuples::<_, 3>()?),
-            Type::Half4Vec => sdf::Value::Vec4h(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Float, false) => sdf::Value::Float(self.parse_token()?),
+            (Type::Float, true) => sdf::Value::FloatVec(self.parse_array()?),
+            (Type::Float2, false) => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?.into()),
+            (Type::Float2, true) => sdf::Value::Vec2f(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Float3, false) => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?.into()),
+            (Type::Float3, true) => sdf::Value::Vec3f(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Float4, false) => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Float4, true) => sdf::Value::Vec4f(self.parse_array_of_tuples::<_, 4>()?),
 
-            // Float
-            Type::Float => sdf::Value::Float(self.parse_token()?),
-            Type::Float2 => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?.into()),
-            Type::Float3 => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?.into()),
-            Type::Float4 => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?.into()),
-            Type::FloatVec => sdf::Value::FloatVec(self.parse_array()?),
-            Type::Float2Vec => sdf::Value::Vec2f(self.parse_array_of_tuples::<_, 2>()?),
-            Type::Float3Vec => sdf::Value::Vec3f(self.parse_array_of_tuples::<_, 3>()?),
-            Type::Float4Vec => sdf::Value::Vec4f(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Double, false) => sdf::Value::Double(self.parse_token()?),
+            (Type::Double, true) => sdf::Value::DoubleVec(self.parse_array()?),
+            (Type::Double2, false) => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?.into()),
+            (Type::Double2, true) => sdf::Value::Vec2d(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Double3, false) => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?.into()),
+            (Type::Double3, true) => sdf::Value::Vec3d(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Double4, false) => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Double4, true) => sdf::Value::Vec4d(self.parse_array_of_tuples::<_, 4>()?),
 
-            // Double
-            Type::Double => sdf::Value::Double(self.parse_token()?),
-            Type::Double2 => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?.into()),
-            Type::Double3 => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?.into()),
-            Type::Double4 => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?.into()),
-            Type::DoubleVec => sdf::Value::DoubleVec(self.parse_array()?),
-            Type::Double2Vec => sdf::Value::Vec2d(self.parse_array_of_tuples::<_, 2>()?),
-            Type::Double3Vec => sdf::Value::Vec3d(self.parse_array_of_tuples::<_, 3>()?),
-            Type::Double4Vec => sdf::Value::Vec4d(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Quath, false) => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Quatf, false) => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?.into()),
+            (Type::Quatd, false) => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?.into()),
+            // TODO: quat array support
+            (Type::Quath | Type::Quatf | Type::Quatd, true) => {
+                bail!("Array of quaternions is not yet supported")
+            }
 
-            // Quats
-            Type::Quath => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
-            Type::Quatf => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?.into()),
-            Type::Quatd => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?.into()),
+            (Type::String, false) => sdf::Value::String(self.fetch_str()?.to_owned()),
+            (Type::Token, false) => sdf::Value::Token(self.fetch_str()?.to_owned()),
+            (Type::String | Type::Token, true) => sdf::Value::TokenVec(self.parse_array()?),
 
-            // String and tokens
-            Type::String => sdf::Value::String(self.fetch_str()?.to_owned()),
-            Type::Token => sdf::Value::Token(self.fetch_str()?.to_owned()),
+            (Type::Matrix2d, false) => sdf::Value::Matrix2d(self.parse_matrix_value::<2>()?),
+            (Type::Matrix3d, false) => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
+            (Type::Matrix4d, false) => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
+            (Type::Matrix2d, true) => sdf::Value::Matrix2d(self.parse_matrix_array::<2>()?),
+            (Type::Matrix3d, true) => sdf::Value::Matrix3d(self.parse_matrix_array::<3>()?),
+            (Type::Matrix4d, true) => sdf::Value::Matrix4d(self.parse_matrix_array::<4>()?),
 
-            Type::StringVec => sdf::Value::StringVec(self.parse_array()?),
-            Type::TokenVec => sdf::Value::TokenVec(self.parse_array()?),
+            (Type::Dictionary, _) => self.parse_dictionary()?,
 
-            Type::Matrix2d => sdf::Value::Matrix2d(self.parse_matrix_value::<2>()?),
-            Type::Matrix3d => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
-            Type::Matrix4d => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
-
-            Type::Dictionary => self.parse_dictionary()?,
+            (ty, true) => bail!("Array of {ty:?} is not supported"),
         };
 
         Ok(value)
     }
 
-    /// Parse basic types and roles.
+    /// Parses a scalar type name into a `Type`. Does not handle arrays.
+    ///
     /// See
     /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Basic_Datatypes>
     /// - <https://openusd.org/dev/api/_usd__page__datatypes.html#Usd_Roles>
-    fn parse_data_type(ty: &str) -> Result<Type> {
-        let data_type = match ty {
-            // Bool
+    fn parse_base_type(name: &str) -> Result<Type> {
+        let ty = match name {
             "bool" => Type::Bool,
-            "bool[]" => Type::BoolVec,
-
-            // Ints
             "uchar" => Type::Uchar,
-            "uchar[]" => Type::UcharVec,
             "int" => Type::Int,
             "int2" => Type::Int2,
             "int3" => Type::Int3,
             "int4" => Type::Int4,
-            "int[]" => Type::IntVec,
-            "int2[]" => Type::Int2Vec,
-            "int3[]" => Type::Int3Vec,
-            "int4[]" => Type::Int4Vec,
             "uint" => Type::Uint,
             "int64" => Type::Int64,
-            "int64[]" => Type::Int64Vec,
             "uint64" => Type::Uint64,
-
-            // Half
             "half" => Type::Half,
             "half2" | "texCoord2h" => Type::Half2,
             "half3" | "point3h" | "normal3h" | "vector3h" | "color3h" | "texCoord3h" => Type::Half3,
             "half4" | "color4h" => Type::Half4,
-            "half[]" => Type::HalfVec,
-            "half2[]" | "texCoord2h[]" => Type::Half2Vec,
-            "half3[]" | "point3h[]" | "normal3h[]" | "vector3h[]" | "color3h[]" | "texCoord3h[]" => Type::Half3Vec,
-            "half4[]" | "color4h[]" => Type::Half4Vec,
-
-            // Float
             "float" => Type::Float,
             "float2" | "texCoord2f" => Type::Float2,
             "float3" | "point3f" | "normal3f" | "vector3f" | "color3f" | "texCoord3f" => Type::Float3,
             "float4" | "color4f" => Type::Float4,
-            "float[]" => Type::FloatVec,
-            "float2[]" | "texCoord2f[]" => Type::Float2Vec,
-            "float3[]" | "point3f[]" | "normal3f[]" | "vector3f[]" | "color3f[]" | "texCoord3f[]" => Type::Float3Vec,
-            "float4[]" | "color4f[]" => Type::Float4Vec,
-
-            // Double
             "double" => Type::Double,
             "double2" | "texCoord2d" => Type::Double2,
             "double3" | "point3d" | "normal3d" | "vector3d" | "color3d" | "texCoord3d" => Type::Double3,
             "double4" | "color4d" => Type::Double4,
-            "double[]" => Type::DoubleVec,
-            "double2[]" | "texCoord2d[]" => Type::Double2Vec,
-            "double3[]" | "point3d[]" | "normal3d[]" | "vector3d[]" | "color3d[]" | "texCoord3d[]" => Type::Double3Vec,
-            "double4[]" => Type::Double4Vec,
-
-            // Matrices
-            "matrix2d" | "matrix2d[]" => Type::Matrix2d,
-            "matrix3d" | "matrix3d[]" => Type::Matrix3d,
-            "matrix4d" | "matrix4d[]" | "frame4d" | "frame4d[]" => Type::Matrix4d,
-
-            // Quats
+            "matrix2d" => Type::Matrix2d,
+            "matrix3d" => Type::Matrix3d,
+            "matrix4d" | "frame4d" => Type::Matrix4d,
             "quatd" => Type::Quatd,
             "quatf" => Type::Quatf,
             "quath" => Type::Quath,
-
-            // String, tokens
             "string" | "token" => Type::String,
-            "string[]" | "token[]" => Type::TokenVec,
             "asset" => Type::Asset,
-            "asset[]" => Type::AssetVec,
-
             "dictionary" => Type::Dictionary,
+            _ => bail!("Unsupported type: {name}"),
+        };
+        Ok(ty)
+    }
 
-            _ => bail!("Unsupported data type: {ty}"),
+    /// Tries to parse a type declaration: a recognized type name optionally followed by `[]`.
+    ///
+    /// Returns `Ok(None)` if the next token is not a known type (without consuming it).
+    fn try_parse_type(&mut self) -> Result<Option<TypeInfo<'a>>> {
+        let base = match self.peek_next() {
+            Some(Ok(Token::Identifier(name))) => *name,
+            Some(Ok(Token::Dictionary)) => "dictionary",
+            _ => return Ok(None),
         };
 
-        Ok(data_type)
+        let ty = match Self::parse_base_type(base) {
+            Ok(ty) => ty,
+            Err(_) => return Ok(None),
+        };
+        self.fetch_next()?;
+
+        let mut is_array = false;
+        if self.is_next(Token::Punctuation('[')) {
+            self.fetch_next()?;
+            self.ensure_pun(']')?;
+            is_array = true;
+        }
+
+        Ok(Some(TypeInfo {
+            ty,
+            type_name: base,
+            is_array,
+        }))
     }
 
     /// Parse single token as `T` which can be deserialized from string (such as `int`, `float`, etc).
@@ -1214,7 +1187,7 @@ impl<'a> Parser<'a> {
                 this.parse_seq_fn(';', |this, _| {
                     let token = this.fetch_next()?;
                     this.ensure_pun('=')?;
-                    let value = this.parse_value(Type::Double)?;
+                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
                     match token {
                         Token::Offset => {
                             ensure!(offset.is_none(), "offset specified twice");
@@ -1373,57 +1346,73 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Result of parsing a type declaration, holding the parsed base type,
+/// the original token text, and whether `[]` was present.
+#[derive(Debug, Clone, Copy)]
+struct TypeInfo<'a> {
+    ty: Type,
+    type_name: &'a str,
+    is_array: bool,
+}
+
+impl<'a> TypeInfo<'a> {
+    const fn scalar(ty: Type) -> TypeInfo<'a> {
+        TypeInfo {
+            ty,
+            type_name: "",
+            is_array: false,
+        }
+    }
+
+    const fn array(ty: Type) -> TypeInfo<'a> {
+        TypeInfo {
+            ty,
+            type_name: "",
+            is_array: true,
+        }
+    }
+}
+
+impl std::fmt::Display for TypeInfo<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_array {
+            write!(f, "{}[]", self.type_name)
+        } else {
+            write!(f, "{}", self.type_name)
+        }
+    }
+}
+
+/// Base data type without array semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Type {
     Bool,
-    BoolVec,
     Uchar,
-    UcharVec,
     Int,
     Int2,
     Int3,
     Int4,
-    IntVec,
-    Int2Vec,
-    Int3Vec,
-    Int4Vec,
     Uint,
     Int64,
-    Int64Vec,
     Uint64,
     Half,
     Half2,
     Half3,
     Half4,
-    HalfVec,
-    Half2Vec,
-    Half3Vec,
-    Half4Vec,
     Float,
     Float2,
     Float3,
     Float4,
-    FloatVec,
-    Float2Vec,
-    Float3Vec,
-    Float4Vec,
     Double,
     Double2,
     Double3,
     Double4,
-    DoubleVec,
-    Double2Vec,
-    Double3Vec,
-    Double4Vec,
     Quath,
     Quatf,
     Quatd,
     String,
     Token,
     Asset,
-    StringVec,
-    TokenVec,
-    AssetVec,
     Matrix2d,
     Matrix3d,
     Matrix4d,
@@ -2493,5 +2482,91 @@ def Xform "root" {
     fn parse_reference_invalid_token() {
         let mut parser = Parser::new("123");
         assert!(parser.parse_reference().is_err());
+    }
+
+    #[test]
+    fn try_parse_type_scalar() {
+        let mut parser = Parser::new("float x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Float);
+        assert_eq!(info.type_name, "float");
+        assert!(!info.is_array);
+        assert_eq!(info.to_string(), "float");
+    }
+
+    #[test]
+    fn try_parse_type_array_no_space() {
+        // After tokenizer change, `float[]` is three tokens: float [ ]
+        let mut parser = Parser::new("float[] x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Float);
+        assert_eq!(info.type_name, "float");
+        assert!(info.is_array);
+        assert_eq!(info.to_string(), "float[]");
+    }
+
+    #[test]
+    fn try_parse_type_array_with_space() {
+        let mut parser = Parser::new("int [] x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Int);
+        assert!(info.is_array);
+        assert_eq!(info.to_string(), "int[]");
+    }
+
+    #[test]
+    fn try_parse_type_alias() {
+        let mut parser = Parser::new("point3f x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Float3);
+        assert_eq!(info.type_name, "point3f");
+        assert_eq!(info.to_string(), "point3f");
+    }
+
+    #[test]
+    fn try_parse_type_dictionary() {
+        let mut parser = Parser::new("dictionary x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Dictionary);
+        assert!(!info.is_array);
+    }
+
+    #[test]
+    fn try_parse_type_not_a_type() {
+        let mut parser = Parser::new("foobar x");
+        assert!(parser.try_parse_type().unwrap().is_none());
+        // Token should not have been consumed.
+        assert_eq!(parser.expect_identifier().unwrap(), "foobar");
+    }
+
+    #[test]
+    fn try_parse_type_matrix_array() {
+        let mut parser = Parser::new("matrix4d[] x");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Matrix4d);
+        assert!(info.is_array);
+        assert_eq!(info.to_string(), "matrix4d[]");
+    }
+
+    /// Array type with space between type name and `[]` parses correctly in a full attribute.
+    #[test]
+    fn parse_attribute_array_type_with_space() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Scope "Root" {
+    int [] myList = [5, 6, 7]
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        let path = sdf::path("/Root").unwrap().append_property("myList").unwrap();
+        let spec = data.get(&path).expect("myList spec not found");
+        assert_eq!(
+            spec.fields.get(FieldKey::TypeName.as_str()),
+            Some(&sdf::Value::Token("int[]".into()))
+        );
+        assert_eq!(spec.fields.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
     }
 }

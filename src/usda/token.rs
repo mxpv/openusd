@@ -145,9 +145,9 @@ pub enum Token<'source> {
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_:\.]*", |lex| lex.slice())]
     NamespacedIdentifier(&'source str),
 
-    /// Regular identifiers and array types
-    /// Examples: "Sphere", "Material", "bool[]", "float3[]"
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*(\[\])?", |lex| lex.slice())]
+    /// Regular identifiers.
+    /// Examples: "Sphere", "Material", "bool", "float3"
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice())]
     Identifier(&'source str),
 }
 
@@ -362,7 +362,11 @@ mod tests {
     #[test]
     fn parse_array_type() {
         let input = "bool[]";
-        let tokens = [(Token::Identifier("bool[]"), "bool[]")];
+        let tokens = [
+            (Token::Identifier("bool"), "bool"),
+            (Token::Punctuation('['), "["),
+            (Token::Punctuation(']'), "]"),
+        ];
         assert_tokens(input, &tokens);
     }
 
