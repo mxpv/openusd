@@ -692,11 +692,11 @@ mod tests {
         let stage = Stage::open(&resolver, &path)?;
 
         // The "active" metadata on CubeInactive should be false.
-        let active = stage.field::<bool>(&Path::new("/World/CubeInactive")?, FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeInactive", FieldKey::Active)?;
         assert_eq!(active, Some(false));
 
         // CubeActive has active = true.
-        let active = stage.field::<bool>(&Path::new("/World/CubeActive")?, FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeActive", FieldKey::Active)?;
         assert_eq!(active, Some(true));
 
         Ok(())
@@ -709,7 +709,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let active = stage.field::<Value>(&Path::new("/World")?, FieldKey::Active)?;
+        let active = stage.field::<Value>("/World", FieldKey::Active)?;
         assert_eq!(active, None);
 
         Ok(())
@@ -751,7 +751,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let children = stage.prim_children(&Path::new("/World")?)?;
+        let children = stage.prim_children("/World")?;
         // Override layer adds Sphere; base layer defines Cube.
         assert!(children.contains(&"Cube".to_string()), "Cube from base layer");
         assert!(children.contains(&"Sphere".to_string()), "Sphere from override layer");
@@ -786,10 +786,10 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let inactive: Option<bool> = stage.field(&Path::new("/World/CubeInactive")?, FieldKey::Active)?;
+        let inactive: Option<bool> = stage.field("/World/CubeInactive", FieldKey::Active)?;
         assert_eq!(inactive, Some(false));
 
-        let active = stage.field::<bool>(&Path::new("/World/CubeActive")?, FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeActive", FieldKey::Active)?;
         assert_eq!(active, Some(true));
 
         Ok(())
@@ -808,7 +808,7 @@ mod tests {
         let stage = Stage::open(&resolver, &path)?;
 
         // /World/MyPrim should exist via the reference.
-        assert!(stage.has_spec(&Path::new("/World/MyPrim")?));
+        assert!(stage.has_spec("/World/MyPrim"));
 
         // The prim index should have a Reference arc node.
         let index = stage.prim_index(&Path::new("/World/MyPrim")?);
@@ -819,7 +819,7 @@ mod tests {
 
         // /World/MyPrim/Child should be reachable via namespace remapping
         // (maps /Source/Child from the target layer to /World/MyPrim/Child).
-        let children = stage.prim_children(&Path::new("/World/MyPrim")?)?;
+        let children = stage.prim_children("/World/MyPrim")?;
         assert!(
             children.contains(&"Child".to_string()),
             "referenced children should be visible"
@@ -839,7 +839,7 @@ mod tests {
 
         // /World references _stage.usda's defaultPrim ("World"),
         // so /World/Cube should come from the referenced layer.
-        let children = stage.prim_children(&Path::new("/World")?)?;
+        let children = stage.prim_children("/World")?;
         assert!(
             children.contains(&"Cube".to_string()),
             "Cube from referenced layer should appear under /World"
@@ -865,7 +865,7 @@ mod tests {
         );
 
         // /Source/Child in ref_target.usda should appear as /World/RefPrim/Child.
-        let children = stage.prim_children(&Path::new("/World/RefPrim")?)?;
+        let children = stage.prim_children("/World/RefPrim")?;
         assert!(
             children.contains(&"Child".to_string()),
             "referenced children should be namespace-remapped"
@@ -893,7 +893,7 @@ mod tests {
         );
 
         // The inherited property should be visible.
-        let props = stage.prim_properties(&Path::new("/World/cubeWithoutSetColor")?)?;
+        let props = stage.prim_properties("/World/cubeWithoutSetColor")?;
         assert!(
             props.contains(&"primvars:displayColor".to_string()),
             "inherited property should be visible"
@@ -988,7 +988,7 @@ mod tests {
 
         // The payload target layer has /World/Cube. Since /World is the payload
         // target, /World/Cube should appear.
-        let children = stage.prim_children(&Path::new("/World")?)?;
+        let children = stage.prim_children("/World")?;
         assert!(
             children.contains(&"Cube".to_string()),
             "Cube from payload layer should appear under /World"
@@ -1036,8 +1036,6 @@ mod tests {
         Ok(())
     }
 
-    // --- PR #1: instanceable prim metadata ---
-
     /// A prim with `instanceable = true` should parse without error, and the
     /// `instanceable` field should be readable via `stage.field()`.
     #[test]
@@ -1046,7 +1044,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let value = stage.field::<bool>(&Path::new("/Root/InstancePrototype")?, FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root/InstancePrototype", FieldKey::Instanceable)?;
         assert_eq!(value, Some(true), "instanceable = true should be stored");
 
         Ok(())
@@ -1059,7 +1057,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let value = stage.field::<bool>(&Path::new("/Root/NotInstanceable")?, FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root/NotInstanceable", FieldKey::Instanceable)?;
         assert_eq!(value, Some(false), "instanceable = false should be stored");
 
         Ok(())
@@ -1072,7 +1070,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         let stage = Stage::open(&resolver, &path)?;
 
-        let value = stage.field::<bool>(&Path::new("/Root")?, FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root", FieldKey::Instanceable)?;
         assert_eq!(value, None, "instanceable should be None when not authored");
 
         Ok(())
