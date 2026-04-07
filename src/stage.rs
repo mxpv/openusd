@@ -1035,4 +1035,46 @@ mod tests {
 
         Ok(())
     }
+
+    // --- PR #1: instanceable prim metadata ---
+
+    /// A prim with `instanceable = true` should parse without error, and the
+    /// `instanceable` field should be readable via `stage.field()`.
+    #[test]
+    fn instanceable_true_parses_and_is_readable() -> Result<()> {
+        let path = fixture_path("instanceable_metadata.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let value = stage.field::<bool>(&Path::new("/Root/InstancePrototype")?, FieldKey::Instanceable)?;
+        assert_eq!(value, Some(true), "instanceable = true should be stored");
+
+        Ok(())
+    }
+
+    /// A prim with `instanceable = false` should also parse correctly.
+    #[test]
+    fn instanceable_false_parses_and_is_readable() -> Result<()> {
+        let path = fixture_path("instanceable_metadata.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let value = stage.field::<bool>(&Path::new("/Root/NotInstanceable")?, FieldKey::Instanceable)?;
+        assert_eq!(value, Some(false), "instanceable = false should be stored");
+
+        Ok(())
+    }
+
+    /// A prim without `instanceable` metadata should return None.
+    #[test]
+    fn instanceable_absent_returns_none() -> Result<()> {
+        let path = fixture_path("instanceable_metadata.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        let value = stage.field::<bool>(&Path::new("/Root")?, FieldKey::Instanceable)?;
+        assert_eq!(value, None, "instanceable should be None when not authored");
+
+        Ok(())
+    }
 }
