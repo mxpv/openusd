@@ -310,29 +310,16 @@ impl<'a> Parser<'a> {
         let prim_path = current_path.append_path(name)?;
 
         let mut properties = Vec::new();
-        let mut brace_consumed = false;
 
-        let brace = self.fetch_next()?;
-        match brace {
-            Token::Punctuation('(') => {
-                self.read_prim_metadata(&mut spec, None)
-                    .context("Unable to parse prim metadata")?;
-                self.ensure_pun(')').context("Prim metadata must end with )")?;
-            }
-            Token::Punctuation('{') => {
-                brace_consumed = true;
-            }
-            other => {
-                // Support metadata without wrapping parentheses.
-                self.read_prim_metadata(&mut spec, Some(other))
-                    .context("Unable to parse prim metadata")?;
-                brace_consumed = false;
-            }
-        };
-
-        if !brace_consumed {
-            self.ensure_pun('{')?;
+        // Optional metadata block.
+        if self.is_next(Token::Punctuation('(')) {
+            self.parse_block('(', ')', |this| {
+                this.read_prim_metadata_entry(&mut spec)
+                    .context("Unable to parse prim metadata entry")
+            })?;
         }
+
+        self.ensure_pun('{')?;
 
         let (children, props) = self.read_prim_body(&prim_path, data)?;
         spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
@@ -422,12 +409,12 @@ impl<'a> Parser<'a> {
             let variant_path = sdf::Path::new(&format!("{}{{{name}={variant_name}}}", prim_path))?;
             let mut variant_spec = sdf::Spec::new(sdf::SpecType::Variant);
 
-            // Optional metadata block: consume `(`, parse entries, consume `)`.
+            // Optional metadata block.
             if self.is_next(Token::Punctuation('(')) {
-                self.ensure_pun('(')?;
-                self.read_prim_metadata(&mut variant_spec, None)
-                    .context("Unable to parse variant metadata")?;
-                self.ensure_pun(')').context("Variant metadata must end with )")?;
+                self.parse_block('(', ')', |this| {
+                    this.read_prim_metadata_entry(&mut variant_spec)
+                        .context("Unable to parse variant metadata entry")
+                })?;
             }
 
             // Variant body.
@@ -735,35 +722,10 @@ impl<'a> Parser<'a> {
 
     /// Parse prim metadata contained either within parentheses or directly after the prim
     /// declaration (until `{` is encountered).
-    fn read_prim_metadata(&mut self, spec: &mut sdf::Spec, first: Option<Token<'a>>) -> Result<()> {
-        let mut current = first;
-
-        loop {
-            if self.is_next(Token::Punctuation(')')) || self.is_next(Token::Punctuation('{')) {
-                break;
-            }
-
-            let token = match current.take() {
-                Some(token) => token,
-                None => self.fetch_next()?,
-            };
-
-            self.read_prim_metadata_entry(token, spec)
-                .context("Unable to parse prim metadata entry")?;
-        }
-
-        Ok(())
-    }
-
     /// Parse a single prim metadata assignment, honoring list ops for supported fields.
-    fn read_prim_metadata_entry(&mut self, token: Token<'a>, spec: &mut sdf::Spec) -> Result<()> {
-        let (list_op, name_token) = match token {
-            Token::Add | Token::Append | Token::Delete | Token::Prepend | Token::Reorder => {
-                let name = self.fetch_next()?;
-                (Some(token), name)
-            }
-            _ => (None, token),
-        };
+    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::Spec) -> Result<()> {
+        let list_op = self.try_list_op();
+        let name_token = self.fetch_next()?;
 
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
