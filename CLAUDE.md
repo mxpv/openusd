@@ -75,7 +75,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Keep commits focused and atomic - one logical change per commit
 - Don't add "Generated with Claude Code" to commit messages or pull request descriptions
 - Don't add "Co-Authored-By: Claude noreply@anthropic.com" to commit messages or pull request descriptions
-- Before opening a PR or making a commit, make sure the code passes lint, formatting, and unit tests
+- Before opening a PR or making a commit, run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure code passes formatting, lint, and unit tests
 
 ## Testing
 
