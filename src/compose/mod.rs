@@ -20,6 +20,70 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, Value};
 use crate::{usda, usdc};
 
+/// The kind of layer dependency that triggered a composition error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    /// A sublayer declared on the layer's pseudo-root.
+    SubLayer,
+    /// A reference arc on a prim.
+    Reference,
+    /// A payload arc on a prim.
+    Payload,
+}
+
+impl std::fmt::Display for DependencyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SubLayer => write!(f, "sublayer"),
+            Self::Reference => write!(f, "reference"),
+            Self::Payload => write!(f, "payload"),
+        }
+    }
+}
+
+/// An error encountered during stage composition that may be recoverable.
+///
+/// When opening a stage, some errors (such as missing referenced files) can be
+/// tolerated so that the stage is partially constructed. A callback provided via
+/// [`StageBuilder::on_error`](crate::stage::StageBuilder::on_error) receives
+/// these errors and decides whether to continue or abort.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CompositionError {
+    /// An asset path could not be resolved to a physical location.
+    UnresolvedAsset {
+        /// The asset path that could not be resolved.
+        asset_path: String,
+        /// The layer that declared this dependency.
+        referencing_layer: String,
+        /// What kind of composition arc declared this dependency.
+        kind: DependencyKind,
+        /// The prim that declared this arc (`None` for sublayers).
+        prim_path: Option<Path>,
+    },
+}
+
+impl std::fmt::Display for CompositionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnresolvedAsset {
+                asset_path,
+                referencing_layer,
+                kind,
+                prim_path,
+            } => {
+                write!(f, "failed to resolve {kind} asset: {asset_path} (referenced by {referencing_layer}")?;
+                if let Some(prim) = prim_path {
+                    write!(f, " at {prim}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompositionError {}
+
 /// A single loaded layer in the composition.
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.

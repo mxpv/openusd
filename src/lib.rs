@@ -38,5 +38,6 @@ pub mod usda;
 pub mod usdc;
 pub mod usdz;
 
+pub use compose::{CompositionError, DependencyKind};
 pub use half::f16;
 pub use stage::Stage;
