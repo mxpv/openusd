@@ -173,7 +173,7 @@ impl<'a> Parser<'a> {
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
         if self.is_next(Token::Punctuation('[')) {
             let mut out = Vec::new();
-            self.parse_block('[', ']',|this| {
+            self.parse_block('[', ']', |this| {
                 out.push(parse(this)?);
                 Ok(())
             })?;
@@ -218,9 +218,6 @@ impl<'a> Parser<'a> {
             return Ok(root);
         }
 
-        // Eat (
-        self.ensure_pun('(')?;
-
         const KNOWN_PROPS: &[(&str, Type)] = &[
             (FieldKey::DefaultPrim.as_str(), Type::Token),
             (FieldKey::StartTimeCode.as_str(), Type::Uint64),
@@ -233,36 +230,33 @@ impl<'a> Parser<'a> {
             ("upAxis", Type::Token),
         ];
 
-        // Read pseudo root properties
-        loop {
-            let next = self.fetch_next().context("Unable to fetch next pseudo root property")?;
+        self.parse_block('(', ')', |this| {
+            let next = this.fetch_next().context("Unable to fetch next pseudo root property")?;
 
             match next {
-                Token::Punctuation(')') => break,
                 Token::String(str) => {
                     root.add(FieldKey::Documentation, str);
                 }
                 Token::Doc => {
-                    self.ensure_pun('=')?;
-                    let value = self.fetch_str()?;
+                    this.ensure_pun('=')?;
+                    let value = this.fetch_str()?;
                     root.add("doc", value);
                 }
                 Token::SubLayers => {
-                    self.ensure_pun('=')?;
-                    let (sublayers, sublayer_offsets) = self.parse_sublayers().context("Unable to parse subLayers")?;
+                    this.ensure_pun('=')?;
+                    let (sublayers, sublayer_offsets) = this.parse_sublayers().context("Unable to parse subLayers")?;
                     root.add(FieldKey::SubLayers, sublayers);
                     root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
                 }
                 Token::Identifier(name) => {
+                    this.ensure_pun('=')?;
                     if let Some((known_name, ty)) = KNOWN_PROPS.iter().copied().find(|(n, _)| *n == name) {
-                        self.ensure_pun('=')?;
-                        let value = self
+                        let value = this
                             .parse_value(ty)
                             .with_context(|| format!("Unable to parse value for {known_name}"))?;
                         root.add(known_name, value);
                     } else {
-                        self.ensure_pun('=')?;
-                        let value = self
+                        let value = this
                             .parse_property_metadata_value()
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
                         root.fields.insert(name.to_owned(), value);
@@ -270,7 +264,8 @@ impl<'a> Parser<'a> {
                 }
                 _ => bail!("Unexpected token {next:?}"),
             }
-        }
+            Ok(())
+        })?;
 
         Ok(root)
     }
@@ -576,7 +571,7 @@ impl<'a> Parser<'a> {
         // Handle array case first by peeking, so parse_block can consume the '['
         if self.is_next(Token::Punctuation('[')) {
             let mut values = Vec::new();
-            self.parse_block('[', ']',|this| {
+            self.parse_block('[', ']', |this| {
                 let entry = this.fetch_next()?;
                 let value = match entry {
                     Token::String(v) => v.to_owned(),
@@ -1194,7 +1189,7 @@ impl<'a> Parser<'a> {
     /// Parse an array of booleans, reusing the permissive literal parsing rules.
     fn parse_bool_array(&mut self) -> Result<Vec<bool>> {
         let mut out = Vec::new();
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             out.push(this.parse_bool()?);
             Ok(())
         })?;
@@ -1211,7 +1206,7 @@ impl<'a> Parser<'a> {
 
     fn parse_asset_path_array(&mut self) -> Result<Vec<String>> {
         let mut result = Vec::new();
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             result.push(this.parse_asset_path()?);
             Ok(())
         })?;
@@ -1223,7 +1218,7 @@ impl<'a> Parser<'a> {
         let mut sublayers = Vec::new();
         let mut sublayer_offsets = Vec::new();
 
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             let asset_path = this
                 .fetch_next()?
                 .try_as_asset_ref()
@@ -1277,12 +1272,7 @@ impl<'a> Parser<'a> {
     ///
     /// Calls `entry` for each item. Commas between entries are consumed automatically.
     /// Handles empty blocks and trailing commas.
-    fn parse_block(
-        &mut self,
-        open: char,
-        close: char,
-        mut entry: impl FnMut(&mut Self) -> Result<()>,
-    ) -> Result<()> {
+    fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
         self.ensure_pun(open)?;
         loop {
             if self.is_next(Token::Punctuation(close)) {
@@ -1347,7 +1337,7 @@ impl<'a> Parser<'a> {
         <T as FromStr>::Err: Debug,
     {
         let mut out = Vec::new();
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             out.push(this.parse_token::<T>()?);
             Ok(())
         })?;
@@ -1361,7 +1351,7 @@ impl<'a> Parser<'a> {
         <T as FromStr>::Err: Debug,
     {
         let mut out = Vec::new();
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             out.extend(this.parse_tuple::<T, N>()?);
             Ok(())
         })?;
@@ -1394,7 +1384,7 @@ impl<'a> Parser<'a> {
     /// Parse an array of matrices, concatenating the row-major matrices into a single vector.
     fn parse_matrix_array<const N: usize>(&mut self) -> Result<Vec<f64>> {
         let mut matrices = Vec::new();
-        self.parse_block('[', ']',|this| {
+        self.parse_block('[', ']', |this| {
             matrices.extend(this.parse_matrix::<N>()?);
             Ok(())
         })?;
