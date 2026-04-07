@@ -892,9 +892,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
-                let value = self
-                    .parse_bool()
-                    .context("Unable to parse instanceable flag")?;
+                let value = self.parse_bool().context("Unable to parse instanceable flag")?;
                 spec.add(FieldKey::Instanceable, sdf::Value::Bool(value));
             }
             other => bail!("Unsupported prim metadata: {other}"),
