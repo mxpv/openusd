@@ -62,6 +62,7 @@ pub enum FieldKey {
     VariantSetNames,
     EndFrame,
     StartFrame,
+    MetersPerUnit,
 }
 
 impl From<FieldKey> for &'static str {
@@ -138,6 +139,7 @@ impl FieldKey {
             FieldKey::VariantSetNames => "variantSetNames",
             FieldKey::EndFrame => "endFrame",
             FieldKey::StartFrame => "startFrame",
+            FieldKey::MetersPerUnit => "metersPerUnit",
         }
     }
 }

@@ -85,6 +85,28 @@ impl Stage {
         self.field::<String>(&Path::abs_root(), FieldKey::DefaultPrim).ok()?
     }
 
+    /// Returns the `metersPerUnit` metadata from the root layer, if set.
+    ///
+    /// The value represents how many meters one scene unit corresponds to.
+    /// Common values are `0.01` (centimeters, used by many DCC tools) and
+    /// `1.0` (meters).  Returns `None` when the metadata is not authored;
+    /// the USD specification does not define a default value.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::{ar::DefaultResolver, Stage};
+    ///
+    /// let resolver = DefaultResolver::new();
+    /// let stage = Stage::open(&resolver, "scene.usda").unwrap();
+    /// if let Some(scale) = stage.meters_per_unit() {
+    ///     println!("1 unit = {scale} meters");
+    /// }
+    /// ```
+    pub fn meters_per_unit(&self) -> Option<f64> {
+        self.field::<f64>(&Path::abs_root(), FieldKey::MetersPerUnit).ok()?
+    }
+
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
         self.prim_children(Path::abs_root())
@@ -1032,6 +1054,44 @@ mod tests {
         // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
         let red = Value::Vec3f(vec![0.8, 0.0, 0.0]);
         assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
+
+        Ok(())
+    }
+
+    // --- Stage::meters_per_unit() ---
+
+    /// A stage with `metersPerUnit = 0.01` should return `Some(0.01)`.
+    #[test]
+    fn meters_per_unit_centimeters() -> Result<()> {
+        let path = fixture_path("meters_per_unit_centimeters.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert_eq!(stage.meters_per_unit(), Some(0.01));
+
+        Ok(())
+    }
+
+    /// A stage with `metersPerUnit = 1.0` should return `Some(1.0)`.
+    #[test]
+    fn meters_per_unit_meters() -> Result<()> {
+        let path = fixture_path("meters_per_unit_meters.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert_eq!(stage.meters_per_unit(), Some(1.0));
+
+        Ok(())
+    }
+
+    /// A stage without `metersPerUnit` should return `None`.
+    #[test]
+    fn meters_per_unit_absent_returns_none() -> Result<()> {
+        let path = fixture_path("meters_per_unit_absent.usda");
+        let resolver = DefaultResolver::new();
+        let stage = Stage::open(&resolver, &path)?;
+
+        assert_eq!(stage.meters_per_unit(), None);
 
         Ok(())
     }
