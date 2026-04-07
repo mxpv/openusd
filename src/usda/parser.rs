@@ -151,6 +151,24 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| anyhow!("Unexpected token {token:?} (want String)"))
     }
 
+    /// Consumes and returns an identifier token, or errors.
+    fn expect_identifier(&mut self) -> Result<&'a str> {
+        match self.fetch_next()? {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => Ok(s),
+            other => bail!("expected identifier, got {other:?}"),
+        }
+    }
+
+    /// Tries to consume a list-op keyword (`add`, `append`, `prepend`, `delete`, `reorder`).
+    fn try_list_op(&mut self) -> Option<Token<'a>> {
+        match self.peek_next() {
+            Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
+                self.fetch_next().ok()
+            }
+            _ => None,
+        }
+    }
+
     /// Parses a single item or a bracketed array of items.
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
         if self.is_next(Token::Punctuation('[')) {
@@ -451,11 +469,7 @@ impl<'a> Parser<'a> {
             self.fetch_next()?;
         }
 
-        let type_token = self.fetch_next()?;
-        let type_name = match type_token {
-            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            other => bail!("Unexpected token type for attribute type, expected Identifier, got {other:?}"),
-        };
+        let type_name = self.expect_identifier().context("attribute type expected")?;
         let data_type = Self::parse_data_type(type_name)?;
 
         let name_token = self.fetch_next()?;
@@ -474,12 +488,7 @@ impl<'a> Parser<'a> {
         if name.contains(".connect") {
             if self.is_next(Token::Punctuation('=')) {
                 self.fetch_next()?;
-                let list_op = match self.peek_next() {
-                    Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
-                        Some(self.fetch_next()?)
-                    }
-                    _ => None,
-                };
+                let list_op = self.try_list_op();
                 let targets = self
                     .parse_connection_targets()
                     .context("Unable to parse connection targets")?;
@@ -705,11 +714,7 @@ impl<'a> Parser<'a> {
         properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<()> {
-        let name_token = self.fetch_next()?;
-        let name = match name_token {
-            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            other => bail!("Unexpected token in relationship declaration: {other:?}"),
-        };
+        let name = self.expect_identifier().context("relationship name expected")?;
 
         let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
 
@@ -735,12 +740,7 @@ impl<'a> Parser<'a> {
         }
 
         self.ensure_pun('=')?;
-        let list_op = match self.peek_next() {
-            Some(Ok(Token::Add | Token::Append | Token::Prepend | Token::Delete | Token::Reorder)) => {
-                Some(self.fetch_next()?)
-            }
-            _ => None,
-        };
+        let list_op = self.try_list_op();
         let targets = self
             .parse_connection_targets()
             .context("Unable to parse relationship targets")?;
@@ -821,21 +821,27 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::Active, sdf::Value::Bool(value));
             }
             "apiSchemas" => {
-                let values = self.one_or_list(|this| this.parse_token::<String>()).context("Unable to parse apiSchemas list")?;
+                let values = self
+                    .one_or_list(|this| this.parse_token::<String>())
+                    .context("Unable to parse apiSchemas list")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build apiSchemas listOp")?;
                 spec.add("apiSchemas", sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
-                let references = self.one_or_list(Self::parse_reference).context("Unable to parse references")?;
+                let references = self
+                    .one_or_list(Self::parse_reference)
+                    .context("Unable to parse references")?;
                 let list_op = self
                     .apply_list_op(list_op, references)
                     .context("Unable to build references listOp")?;
                 spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
-                let payloads = self.one_or_list(Self::parse_payload).context("Unable to parse payloads")?;
+                let payloads = self
+                    .one_or_list(Self::parse_payload)
+                    .context("Unable to parse payloads")?;
                 let list_op = self
                     .apply_list_op(list_op, payloads)
                     .context("Unable to build payload listOp")?;
@@ -882,7 +888,9 @@ impl<'a> Parser<'a> {
                 }
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
-                let values = self.one_or_list(|this| this.parse_token::<String>()).context("Unable to parse variantSets")?;
+                let values = self
+                    .one_or_list(|this| this.parse_token::<String>())
+                    .context("Unable to parse variantSets")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build variantSets listOp")?;
