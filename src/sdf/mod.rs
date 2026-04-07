@@ -256,6 +256,9 @@ pub trait AbstractData {
     fn list(&self, path: &Path) -> Option<Vec<String>>;
 }
 
+/// A boxed layer data source, used throughout the layer stack.
+pub type LayerData = Box<dyn AbstractData>;
+
 /// A single spec in a scene description layer, consisting of a type and a set of fields.
 ///
 /// See [SdfSpec](https://openusd.org/dev/api/class_sdf_spec.html) in the USD documentation.
