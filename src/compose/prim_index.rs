@@ -347,3 +347,168 @@ fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ar::DefaultResolver;
+    use crate::compose::collect_layers;
+    use crate::sdf::LayerData;
+
+    use anyhow::Result;
+
+    const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
+
+    fn manifest_dir() -> String {
+        std::env::var("CARGO_MANIFEST_DIR").unwrap()
+    }
+
+    fn composition_path(relative: &str) -> String {
+        format!("{}/{VENDOR_COMPOSITION}/{relative}", manifest_dir())
+    }
+
+    fn fixture_path(relative: &str) -> String {
+        format!("{}/fixtures/{relative}", manifest_dir())
+    }
+
+    /// Loads layers and splits into parallel vecs for PrimIndex::build.
+    fn load_layers(path: &str) -> Result<(Vec<LayerData>, Vec<String>)> {
+        let resolver = DefaultResolver::new();
+        let collected = collect_layers(&resolver, path)?;
+        let mut layers = Vec::new();
+        let mut identifiers = Vec::new();
+        for layer in collected {
+            identifiers.push(layer.identifier);
+            layers.push(layer.data);
+        }
+        Ok((layers, identifiers))
+    }
+
+    /// Builds a prim index for a given path string.
+    fn build(layers: &[LayerData], identifiers: &[String], prim: &str) -> PrimIndex {
+        PrimIndex::build(&Path::from(prim), layers, identifiers)
+    }
+
+    #[test]
+    fn single_layer_root_node() -> Result<()> {
+        let (layers, ids) = load_layers(&composition_path("active.usda"))?;
+        let index = build(&layers, &ids, "/World");
+
+        assert_eq!(index.nodes.len(), 1);
+        assert_eq!(index.nodes[0].layer_index, 0);
+        assert_eq!(index.nodes[0].arc, ArcType::Root);
+        Ok(())
+    }
+
+    #[test]
+    fn sublayer_two_root_nodes() -> Result<()> {
+        let (layers, ids) = load_layers(&fixture_path("sublayer_override.usda"))?;
+        let index = build(&layers, &ids, "/World");
+
+        assert_eq!(index.nodes.len(), 2, "both layers should have /World");
+        assert_eq!(index.nodes[0].layer_index, 0, "stronger layer first");
+        assert_eq!(index.nodes[1].layer_index, 1, "weaker layer second");
+        Ok(())
+    }
+
+    #[test]
+    fn prim_only_in_stronger_layer() -> Result<()> {
+        let (layers, ids) = load_layers(&fixture_path("sublayer_override.usda"))?;
+        let index = build(&layers, &ids, "/World/Sphere");
+
+        assert_eq!(index.nodes.len(), 1);
+        assert_eq!(index.nodes[0].layer_index, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn nonexistent_prim_empty_index() -> Result<()> {
+        let (layers, ids) = load_layers(&composition_path("active.usda"))?;
+        let index = build(&layers, &ids, "/DoesNotExist");
+
+        assert!(index.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn reference_arc_present() -> Result<()> {
+        let (layers, ids) = load_layers(&fixture_path("ref_external.usda"))?;
+        let index = build(&layers, &ids, "/World/MyPrim");
+
+        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Reference));
+        Ok(())
+    }
+
+    #[test]
+    fn inherit_arc_present() -> Result<()> {
+        let (layers, ids) = load_layers(&composition_path("class_inherit.usda"))?;
+        let index = build(&layers, &ids, "/World/cubeWithoutSetColor");
+
+        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Inherit));
+        Ok(())
+    }
+
+    #[test]
+    fn inherit_root_is_strongest() -> Result<()> {
+        let (layers, ids) = load_layers(&composition_path("class_inherit.usda"))?;
+        let index = build(&layers, &ids, "/World/cubeWithSetColor");
+        let arcs: Vec<_> = index.nodes.iter().map(|n| n.arc).collect();
+
+        assert_eq!(arcs[0], ArcType::Root);
+        assert!(arcs.contains(&ArcType::Inherit));
+        Ok(())
+    }
+
+    #[test]
+    fn variant_arc_with_selection() -> Result<()> {
+        let path = format!(
+            "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
+            manifest_dir()
+        );
+        let (layers, ids) = load_layers(&path)?;
+        let index = build(&layers, &ids, "/World/Sphere");
+
+        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Variant));
+
+        let variant_node = index.nodes.iter().find(|n| n.arc == ArcType::Variant).unwrap();
+        assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
+        Ok(())
+    }
+
+    #[test]
+    fn specialize_arc_present() -> Result<()> {
+        let (layers, ids) = load_layers(&composition_path("inherit_and_specialize.usda"))?;
+        let index = build(&layers, &ids, "/World/cubeScene/specializes");
+
+        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Specialize));
+        Ok(())
+    }
+
+    #[test]
+    fn find_layer_exact_match() -> Result<()> {
+        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer(&ids[0], &ids).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn find_layer_suffix_match() -> Result<()> {
+        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("ref_target.usda", &ids).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn find_layer_no_partial_name_match() -> Result<()> {
+        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("target.usda", &ids).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn find_layer_not_found() -> Result<()> {
+        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("nonexistent.usda", &ids).is_none());
+        Ok(())
+    }
+}
