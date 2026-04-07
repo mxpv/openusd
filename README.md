@@ -34,9 +34,21 @@ If you encounter a file that can't be read, please open an [issue](https://githu
 ## Example
 
 ```rust,no_run
-use openusd::{sdf::FieldKey, Stage};
+use openusd::{ar, sdf::FieldKey, Stage};
 
+// Open a stage with default settings (DefaultResolver, strict errors).
 let stage = Stage::open("scene.usda")?;
+
+// Or configure via the builder:
+let stage = Stage::builder()
+    // Use a custom asset resolver (default: DefaultResolver).
+    .resolver(ar::DefaultResolver::new())
+    // Handle composition errors instead of failing (default: hard error).
+    .on_error(|err| {
+        eprintln!("warning: {err}");
+        Ok(()) // skip missing dependency and continue
+    })
+    .open("scene.usda")?;
 
 // Traverse all prims in the composed scene graph.
 stage.traverse(|path| {
