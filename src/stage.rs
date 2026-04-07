@@ -129,13 +129,18 @@ impl Stage {
 
     /// Returns `true` if any layer has a spec at the given composed path.
     pub fn has_spec(&self, path: impl Into<Path>) -> bool {
-        !self.prim_index(&path.into()).is_empty()
+        let path = path.into();
+        self.update_index(&path);
+        let cache = self.prim_indices.borrow();
+        !cache[&path].is_empty()
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub fn spec_type(&self, path: impl Into<Path>) -> Option<SpecType> {
-        let index = self.prim_index(&path.into());
-        for node in &index.nodes {
+        let path = path.into();
+        self.update_index(&path);
+        let cache = self.prim_indices.borrow();
+        for node in &cache[&path].nodes {
             if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
                 return Some(ty);
             }
@@ -186,8 +191,9 @@ impl Stage {
 
     /// Walks the prim index for a prim path, returning the first opinion for `field`.
     fn resolve_field(&self, path: &Path, field: &str) -> Result<Option<Value>> {
-        let index = self.prim_index(path);
-        index.resolve_field(field, &self.layers, |node| Ok(node.path.clone()))
+        self.update_index(path);
+        let cache = self.prim_indices.borrow();
+        cache[path].resolve_field(field, &self.layers, |node| Ok(node.path.clone()))
     }
 
     /// Resolves a field on a property spec (attribute or relationship).
@@ -197,8 +203,9 @@ impl Stage {
     fn property_field(&self, prop_path: &Path, field: &str) -> Result<Option<Value>> {
         let prim_path = prop_path.prim_path();
         let prop_suffix = &prop_path.as_str()[prim_path.as_str().len()..];
-        let index = self.prim_index(&prim_path);
-        index.resolve_field(field, &self.layers, |node| {
+        self.update_index(&prim_path);
+        let cache = self.prim_indices.borrow();
+        cache[&prim_path].resolve_field(field, &self.layers, |node| {
             Path::new(&format!("{}{prop_suffix}", node.path))
         })
     }
@@ -226,26 +233,24 @@ impl Stage {
         Ok(())
     }
 
-    /// Returns the prim index for a path, building and caching it if needed.
-    fn prim_index(&self, path: &Path) -> PrimIndex {
-        // Check cache first.
-        if let Some(cached) = self.prim_indices.borrow().get(path) {
-            return cached.clone();
+    /// Ensures the prim index for `path` is built and cached.
+    fn update_index(&self, path: &Path) {
+        if self.prim_indices.borrow().contains_key(path) {
+            return;
         }
-
         let index = PrimIndex::build(path, &self.layers, &self.identifiers);
-        self.prim_indices.borrow_mut().insert(path.clone(), index.clone());
-        index
+        self.prim_indices.borrow_mut().insert(path.clone(), index);
     }
 
     /// Merges a children field (e.g. `primChildren`, `properties`) across all
     /// nodes in the prim index, returning the union with strongest-first ordering.
     fn composed_children(&self, path: &Path, children_field: impl AsRef<str>) -> Result<Vec<String>> {
         let children_field: &str = children_field.as_ref();
-        let index = self.prim_index(path);
+        self.update_index(path);
+        let cache = self.prim_indices.borrow();
         let mut result: Vec<String> = Vec::new();
 
-        for node in &index.nodes {
+        for node in &cache[path].nodes {
             if let Ok(value) = self.layers[node.layer_index].get(&node.path, children_field) {
                 if let Value::TokenVec(names) = value.into_owned() {
                     for name in names {
@@ -335,6 +340,11 @@ mod tests {
         format!("{}/fixtures/{relative}", manifest_dir())
     }
 
+    /// Builds a prim index for the given path using the stage's layers.
+    fn prim_index(stage: &Stage, path: &str) -> PrimIndex {
+        PrimIndex::build(&Path::from(path), &stage.layers, &stage.identifiers)
+    }
+
     // --- PrimIndex internals ---
 
     /// A prim in a single-layer stage should produce a PrimIndex with exactly
@@ -344,7 +354,7 @@ mod tests {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
-        let index = stage.prim_index(&Path::new("/World")?);
+        let index = prim_index(&stage, "/World");
         assert_eq!(index.nodes.len(), 1);
         assert_eq!(index.nodes[0].layer_index, 0);
         assert_eq!(index.nodes[0].arc, ArcType::Root);
@@ -360,7 +370,7 @@ mod tests {
         let path = fixture_path("sublayer_override.usda");
         let stage = Stage::open(&path)?;
 
-        let index = stage.prim_index(&Path::new("/World")?);
+        let index = prim_index(&stage, "/World");
         assert_eq!(index.nodes.len(), 2, "both layers should have /World");
         assert_eq!(index.nodes[0].layer_index, 0, "stronger layer first");
         assert_eq!(index.nodes[1].layer_index, 1, "weaker layer second");
@@ -375,7 +385,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // /World/Sphere is only defined in the override layer.
-        let index = stage.prim_index(&Path::new("/World/Sphere")?);
+        let index = prim_index(&stage, "/World/Sphere");
         assert_eq!(index.nodes.len(), 1);
         assert_eq!(index.nodes[0].layer_index, 0);
 
@@ -388,7 +398,7 @@ mod tests {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
-        let index = stage.prim_index(&Path::new("/DoesNotExist")?);
+        let index = prim_index(&stage, "/DoesNotExist");
         assert!(index.is_empty());
 
         Ok(())
@@ -544,7 +554,7 @@ mod tests {
         assert!(stage.has_spec("/World/MyPrim"));
 
         // The prim index should have a Reference arc node.
-        let index = stage.prim_index(&Path::new("/World/MyPrim")?);
+        let index = prim_index(&stage, "/World/MyPrim");
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Reference),
             "prim index should contain a Reference node"
@@ -589,7 +599,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // /World/RefPrim should exist with a Reference arc.
-        let index = stage.prim_index(&Path::new("/World/RefPrim")?);
+        let index = prim_index(&stage, "/World/RefPrim");
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Reference),
             "should have a Reference arc"
@@ -616,7 +626,7 @@ mod tests {
 
         // The prim index for cubeWithoutSetColor should include an Inherit node
         // pointing at /_myClass.
-        let index = stage.prim_index(&Path::new("/World/cubeWithoutSetColor")?);
+        let index = prim_index(&stage, "/World/cubeWithoutSetColor");
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Inherit),
             "should have an Inherit arc"
@@ -642,7 +652,7 @@ mod tests {
 
         // cubeWithSetColor has both a local and inherited displayColor.
         // The prim index should have Root first, then Inherit.
-        let index = stage.prim_index(&Path::new("/World/cubeWithSetColor")?);
+        let index = prim_index(&stage, "/World/cubeWithSetColor");
         let arcs: Vec<_> = index.nodes.iter().map(|n| n.arc).collect();
         assert_eq!(arcs[0], ArcType::Root, "Root should be strongest");
         assert!(arcs.contains(&ArcType::Inherit), "should also have Inherit");
@@ -673,7 +683,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // The prim index should contain a Variant arc node.
-        let index = stage.prim_index(&Path::new("/World/Sphere")?);
+        let index = prim_index(&stage, "/World/Sphere");
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Variant),
             "should have a Variant arc for the selected variant"
@@ -733,7 +743,7 @@ mod tests {
         let path = composition_path("inherit_and_specialize.usda");
         let stage = Stage::open(&path)?;
 
-        let index = stage.prim_index(&Path::new("/World/cubeScene/specializes")?);
+        let index = prim_index(&stage, "/World/cubeScene/specializes");
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
             "should have a Specialize arc"

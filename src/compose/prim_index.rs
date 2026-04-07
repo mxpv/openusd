@@ -13,6 +13,7 @@
 //!
 //! See <https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html>
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -92,7 +93,7 @@ impl PrimIndex {
         let inherits = compose_arc_list::<Path>(&nodes, FieldKey::InheritPaths, layers);
         for inherit_path in &inherits {
             for (i, layer) in layers.iter().enumerate() {
-                add_remapped_nodes(layer.as_ref(), i, path, inherit_path, ArcType::Inherit, &mut nodes);
+                add_remapped_nodes(layer.as_ref(), i, inherit_path, ArcType::Inherit, &mut nodes);
             }
         }
 
@@ -116,32 +117,34 @@ impl PrimIndex {
         // nodes from referenced layers with namespace remapping.
         let references = compose_arc_list::<Reference>(&nodes, FieldKey::References, layers);
         for reference in &references {
-            add_reference_nodes(path, reference, ArcType::Reference, &mut nodes, layers, identifiers);
+            add_arc_nodes(
+                &reference.asset_path,
+                &reference.prim_path,
+                ArcType::Reference,
+                &mut nodes,
+                layers,
+                identifiers,
+            );
         }
 
         // P — Payloads: same as references but weaker.
         let payloads = collect_payloads(&nodes, layers);
         for payload in &payloads {
-            let reference = Reference {
-                asset_path: payload.asset_path.clone(),
-                prim_path: payload.prim_path.clone(),
-                ..Default::default()
-            };
-            add_reference_nodes(path, &reference, ArcType::Payload, &mut nodes, layers, identifiers);
+            add_arc_nodes(
+                &payload.asset_path,
+                &payload.prim_path,
+                ArcType::Payload,
+                &mut nodes,
+                layers,
+                identifiers,
+            );
         }
 
         // S — Specializes: same as inherits but weakest in LIVERPS.
         let specializes = compose_arc_list::<Path>(&nodes, FieldKey::Specializes, layers);
         for specialize_path in &specializes {
             for (i, layer) in layers.iter().enumerate() {
-                add_remapped_nodes(
-                    layer.as_ref(),
-                    i,
-                    path,
-                    specialize_path,
-                    ArcType::Specialize,
-                    &mut nodes,
-                );
+                add_remapped_nodes(layer.as_ref(), i, specialize_path, ArcType::Specialize, &mut nodes);
             }
         }
 
@@ -179,7 +182,7 @@ impl PrimIndex {
 /// Resolves variant selections by walking root nodes strongest-to-weakest.
 ///
 /// For each variant set, the first opinion wins.
-fn resolve_variant_selections(root_nodes: &[Node], layers: &[LayerData]) -> Vec<(String, String)> {
+fn resolve_variant_selections(root_nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
     for node in root_nodes {
@@ -196,7 +199,7 @@ fn resolve_variant_selections(root_nodes: &[Node], layers: &[LayerData]) -> Vec<
         }
     }
 
-    selections.into_iter().collect()
+    selections
 }
 
 /// Composes a list-op field across root nodes, returning the flattened list.
@@ -254,51 +257,51 @@ fn collect_payloads(root_nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
     result
 }
 
-/// Adds nodes from a referenced layer for a given prim path.
+/// Adds nodes from a referenced or payloaded layer for a given prim path.
 ///
-/// If the reference has an `asset_path`, looks up the target layer by
-/// identifier. If empty, the reference is internal (same layer stack).
-/// The source `prim_path` is used for namespace remapping; if empty,
-/// the target layer's `defaultPrim` is used.
-fn add_reference_nodes(
-    composed_path: &Path,
-    reference: &Reference,
+/// If `asset_path` is empty, the target is internal (same layer stack).
+/// `prim_path` is used for namespace remapping; if empty, the target
+/// layer's `defaultPrim` is used.
+fn add_arc_nodes(
+    asset_path: &str,
+    prim_path: &Path,
     arc: ArcType,
     nodes: &mut Vec<Node>,
     layers: &[LayerData],
     identifiers: &[String],
 ) {
-    if reference.asset_path.is_empty() {
+    if asset_path.is_empty() {
         // Internal reference — target is within the same layer stack.
-        let source = &reference.prim_path;
-        if source.is_empty() {
+        if prim_path.is_empty() {
             return;
         }
         for (i, layer) in layers.iter().enumerate() {
-            add_remapped_nodes(layer.as_ref(), i, composed_path, source, arc, nodes);
+            add_remapped_nodes(layer.as_ref(), i, prim_path, arc, nodes);
         }
     } else {
         // External reference — find the target layer by identifier.
-        let Some(layer_index) = find_layer(&reference.asset_path, identifiers) else {
+        let Some(layer_index) = find_layer(asset_path, identifiers) else {
             return;
         };
         let layer = layers[layer_index].as_ref();
 
-        let source = if reference.prim_path.is_empty() {
+        let source = if prim_path.is_empty() {
             // Use the target layer's defaultPrim.
             let root = Path::abs_root();
             let Ok(value) = layer.get(&root, FieldKey::DefaultPrim.as_str()) else {
                 return;
             };
             match value.into_owned() {
-                Value::Token(name) | Value::String(name) => Path::new(&format!("/{name}")).unwrap_or_default(),
+                Value::Token(name) | Value::String(name) => {
+                    Cow::Owned(Path::new(&format!("/{name}")).unwrap_or_default())
+                }
                 _ => return,
             }
         } else {
-            reference.prim_path.clone()
+            Cow::Borrowed(prim_path)
         };
 
-        add_remapped_nodes(layer, layer_index, composed_path, &source, arc, nodes);
+        add_remapped_nodes(layer, layer_index, &source, arc, nodes);
     }
 }
 
@@ -308,22 +311,14 @@ fn add_reference_nodes(
 fn add_remapped_nodes(
     layer: &dyn AbstractData,
     layer_index: usize,
-    composed_path: &Path,
     source_path: &Path,
     arc: ArcType,
     nodes: &mut Vec<Node>,
 ) {
-    // Remap: the composed_path corresponds to source_path in the target layer.
-    // For the prim itself, just check if source_path exists.
-    let query_path = composed_path.replace_prefix(composed_path, source_path);
-    let Some(query_path) = query_path else {
-        return;
-    };
-
-    if layer.has_spec(&query_path) {
+    if layer.has_spec(source_path) {
         nodes.push(Node {
             layer_index,
-            path: query_path,
+            path: source_path.clone(),
             arc,
         });
     }
