@@ -151,6 +151,20 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| anyhow!("Unexpected token {token:?} (want String)"))
     }
 
+    /// Parses a single item or a bracketed array of items.
+    fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
+        if self.is_next(Token::Punctuation('[')) {
+            let mut out = Vec::new();
+            self.parse_array_fn(|this| {
+                out.push(parse(this)?);
+                Ok(())
+            })?;
+            Ok(out)
+        } else {
+            Ok(vec![parse(self)?])
+        }
+    }
+
     /// Parse tokens to specs.
     /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
     pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::Spec>> {
@@ -519,16 +533,7 @@ impl<'a> Parser<'a> {
     }
     /// Parses a connection target list into USD paths.
     fn parse_connection_targets(&mut self) -> Result<Vec<sdf::Path>> {
-        if self.is_next(Token::Punctuation('[')) {
-            let mut paths = Vec::new();
-            self.parse_array_fn(|this| {
-                paths.push(this.parse_path_reference().context("Connection path expected")?);
-                Ok(())
-            })?;
-            Ok(paths)
-        } else {
-            Ok(vec![self.parse_path_reference()?])
-        }
+        self.one_or_list(|this| this.parse_path_reference().context("Connection path expected"))
     }
 
     /// Parses a single `<...>` path reference token into an `sdf::Path`.
@@ -816,28 +821,28 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::Active, sdf::Value::Bool(value));
             }
             "apiSchemas" => {
-                let values = self.parse_token_list().context("Unable to parse apiSchemas list")?;
+                let values = self.one_or_list(|this| this.parse_token::<String>()).context("Unable to parse apiSchemas list")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build apiSchemas listOp")?;
                 spec.add("apiSchemas", sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
-                let references = self.parse_reference_list().context("Unable to parse references")?;
+                let references = self.one_or_list(Self::parse_reference).context("Unable to parse references")?;
                 let list_op = self
                     .apply_list_op(list_op, references)
                     .context("Unable to build references listOp")?;
                 spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
-                let payloads = self.parse_payload_list().context("Unable to parse payloads")?;
+                let payloads = self.one_or_list(Self::parse_payload).context("Unable to parse payloads")?;
                 let list_op = self
                     .apply_list_op(list_op, payloads)
                     .context("Unable to build payload listOp")?;
                 spec.add(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = self.parse_path_ref_list()?;
+                let paths = self.one_or_list(Self::parse_path_ref)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build inherits listOp")?;
@@ -877,14 +882,14 @@ impl<'a> Parser<'a> {
                 }
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
-                let values = self.parse_token_list().context("Unable to parse variantSets")?;
+                let values = self.one_or_list(|this| this.parse_token::<String>()).context("Unable to parse variantSets")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build variantSets listOp")?;
                 spec.add(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
-                let paths = self.parse_path_ref_list()?;
+                let paths = self.one_or_list(Self::parse_path_ref)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build specializes listOp")?;
@@ -959,20 +964,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parse a list-op friendly sequence of references.
-    fn parse_reference_list(&mut self) -> Result<Vec<sdf::Reference>> {
-        if self.is_next(Token::Punctuation('[')) {
-            let mut out = Vec::new();
-            self.parse_array_fn(|this| {
-                out.push(this.parse_reference()?);
-                Ok(())
-            })?;
-            Ok(out)
-        } else {
-            Ok(vec![self.parse_reference()?])
-        }
-    }
-
     /// Parse one payload entry, including optional target prim path and layer offset.
     fn parse_payload(&mut self) -> Result<sdf::Payload> {
         let mut payload = sdf::Payload {
@@ -1007,20 +998,6 @@ impl<'a> Parser<'a> {
         Ok(payload)
     }
 
-    /// Parse a list-op friendly sequence of payloads.
-    fn parse_payload_list(&mut self) -> Result<Vec<sdf::Payload>> {
-        if self.is_next(Token::Punctuation('[')) {
-            let mut out = Vec::new();
-            self.parse_array_fn(|this| {
-                out.push(this.parse_payload()?);
-                Ok(())
-            })?;
-            Ok(out)
-        } else {
-            Ok(vec![self.parse_payload()?])
-        }
-    }
-
     /// Parse a single `<path>` reference.
     fn parse_path_ref(&mut self) -> Result<sdf::Path> {
         let token = self.fetch_next()?;
@@ -1029,29 +1006,6 @@ impl<'a> Parser<'a> {
             .try_as_path_ref()
             .ok_or_else(|| anyhow!("Path reference expected, got {token:?}"))?;
         sdf::Path::new(path_str)
-    }
-
-    /// Parse a single `<path>` or an array of `[<path>, ...]`.
-    fn parse_path_ref_list(&mut self) -> Result<Vec<sdf::Path>> {
-        if self.is_next(Token::Punctuation('[')) {
-            let mut paths = Vec::new();
-            self.parse_array_fn(|this| {
-                paths.push(this.parse_path_ref()?);
-                Ok(())
-            })?;
-            Ok(paths)
-        } else {
-            Ok(vec![self.parse_path_ref()?])
-        }
-    }
-
-    fn parse_token_list(&mut self) -> Result<Vec<String>> {
-        if self.is_next(Token::Punctuation('[')) {
-            self.parse_array()
-        } else {
-            let value = self.parse_token::<String>()?;
-            Ok(vec![value])
-        }
     }
 
     fn apply_list_op<T: Default + Clone + PartialEq>(
