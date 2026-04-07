@@ -173,7 +173,7 @@ impl<'a> Parser<'a> {
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
         if self.is_next(Token::Punctuation('[')) {
             let mut out = Vec::new();
-            self.parse_array_fn(|this| {
+            self.parse_block('[', ']',|this| {
                 out.push(parse(this)?);
                 Ok(())
             })?;
@@ -557,15 +557,8 @@ impl<'a> Parser<'a> {
 
     /// Parse the metadata block attached to an attribute and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
-        self.ensure_pun('(')?;
-
-        loop {
-            if self.is_next(Token::Punctuation(')')) {
-                self.fetch_next()?;
-                break;
-            }
-
-            let name_token = self.fetch_next()?;
+        self.parse_block('(', ')', |this| {
+            let name_token = this.fetch_next()?;
             let name = match name_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::CustomData => "customData".to_owned(),
@@ -580,26 +573,23 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            self.ensure_pun('=')?;
-            let value = self
+            this.ensure_pun('=')?;
+            let value = this
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
             spec.fields.insert(name, value);
-
-            if self.is_next(Token::Punctuation(',')) {
-                self.fetch_next()?;
-            }
-        }
+            Ok(())
+        })?;
 
         Ok(())
     }
 
     /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
-        // Handle array case first by peeking, so parse_array_fn can consume the '['
+        // Handle array case first by peeking, so parse_block can consume the '['
         if self.is_next(Token::Punctuation('[')) {
             let mut values = Vec::new();
-            self.parse_array_fn(|this| {
+            self.parse_block('[', ']',|this| {
                 let entry = this.fetch_next()?;
                 let value = match entry {
                     Token::String(v) => v.to_owned(),
@@ -641,38 +631,20 @@ impl<'a> Parser<'a> {
 
     /// Parse a dictionary value from `{` to `}`.
     fn parse_dictionary(&mut self) -> Result<sdf::Value> {
-        self.ensure_pun('{').context("Dictionary must start with {")?;
-
         let mut dict = HashMap::new();
 
-        loop {
-            // Check for closing brace
-            if self.is_next(Token::Punctuation('}')) {
-                self.fetch_next()?;
-                break;
-            }
+        self.parse_block('{', '}', |this| {
+            // Parse the type (optional) or key.
+            let first_token = this.fetch_next()?;
 
-            // Parse the type (optional) or key
-            let first_token = self.fetch_next()?;
-
-            // Check if this is a type declaration (e.g., "string", "dictionary", "double3")
-            let (_type_hint, key_token) = match first_token {
-                Token::Identifier(name) if Self::is_type_hint_name(name) => {
-                    // This is a type declaration, next token is the key
-                    let key = self.fetch_next()?;
-                    (Some(first_token), key)
-                }
-                Token::Dictionary => {
-                    // This is a type declaration, next token is the key
-                    let key = self.fetch_next()?;
-                    (Some(first_token), key)
-                }
+            let (type_hint, key_token) = match first_token {
+                Token::Identifier(name) if Self::is_type_hint_name(name) => (Some(first_token), this.fetch_next()?),
+                Token::Dictionary => (Some(first_token), this.fetch_next()?),
                 _ => (None, first_token),
             };
 
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
-                // Allow keywords as dictionary keys by converting them to strings
                 other => {
                     if let Some(lexeme) = keyword_lexeme(&other) {
                         lexeme.to_owned()
@@ -682,28 +654,22 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            self.ensure_pun('=')?;
+            this.ensure_pun('=')?;
 
-            // Parse the value recursively
-            let value = if let Some(type_hint_token) = _type_hint {
+            let value = if let Some(type_hint_token) = type_hint {
                 let ty = match type_hint_token {
                     Token::Dictionary => Type::Dictionary,
                     Token::Identifier(type_name) => Self::parse_data_type(type_name)
                         .with_context(|| format!("Unable to parse dictionary value type {type_name}"))?,
                     other => bail!("Unsupported dictionary type hint: {other:?}"),
                 };
-                self.parse_value(ty)?
+                this.parse_value(ty)?
             } else {
-                self.parse_property_metadata_value()?
+                this.parse_property_metadata_value()?
             };
             dict.insert(key, value);
-
-            // Handle optional trailing comma or newline
-            if self.is_next(Token::Punctuation('}')) {
-                self.fetch_next()?;
-                break;
-            }
-        }
+            Ok(())
+        })?;
 
         Ok(sdf::Value::Dictionary(dict))
     }
@@ -1266,7 +1232,7 @@ impl<'a> Parser<'a> {
     /// Parse an array of booleans, reusing the permissive literal parsing rules.
     fn parse_bool_array(&mut self) -> Result<Vec<bool>> {
         let mut out = Vec::new();
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             out.push(this.parse_bool()?);
             Ok(())
         })?;
@@ -1283,7 +1249,7 @@ impl<'a> Parser<'a> {
 
     fn parse_asset_path_array(&mut self) -> Result<Vec<String>> {
         let mut result = Vec::new();
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             result.push(this.parse_asset_path()?);
             Ok(())
         })?;
@@ -1295,7 +1261,7 @@ impl<'a> Parser<'a> {
         let mut sublayers = Vec::new();
         let mut sublayer_offsets = Vec::new();
 
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             let asset_path = this
                 .fetch_next()?
                 .try_as_asset_ref()
@@ -1345,23 +1311,26 @@ impl<'a> Parser<'a> {
     }
 
     /// Generic array parser that delegates element parsing while handling delimiters.
-    fn parse_array_fn(&mut self, mut read_elements: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
-        self.ensure_pun('[').context("Array must start with [")?;
-
-        let mut index = 0;
+    /// Parses a delimited block: `open` ... entries ... `close`.
+    ///
+    /// Calls `entry` for each item. Commas between entries are consumed automatically.
+    /// Handles empty blocks and trailing commas.
+    fn parse_block(
+        &mut self,
+        open: char,
+        close: char,
+        mut entry: impl FnMut(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        self.ensure_pun(open)?;
         loop {
-            if self.is_next(Token::Punctuation(']')) {
+            if self.is_next(Token::Punctuation(close)) {
                 self.fetch_next()?;
                 break;
             }
-
-            read_elements(self).with_context(|| format!("Unable to read array element {index}"))?;
-            index += 1;
-
-            match self.fetch_next()? {
-                Token::Punctuation(',') => continue,
-                Token::Punctuation(']') => break,
-                t => bail!("Either comma or closing bracket expected after value, got: {t:?}"),
+            entry(self)?;
+            // Consume optional comma separator.
+            if self.is_next(Token::Punctuation(',')) {
+                self.fetch_next()?;
             }
         }
         Ok(())
@@ -1416,7 +1385,7 @@ impl<'a> Parser<'a> {
         <T as FromStr>::Err: Debug,
     {
         let mut out = Vec::new();
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             out.push(this.parse_token::<T>()?);
             Ok(())
         })?;
@@ -1430,7 +1399,7 @@ impl<'a> Parser<'a> {
         <T as FromStr>::Err: Debug,
     {
         let mut out = Vec::new();
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             out.extend(this.parse_tuple::<T, N>()?);
             Ok(())
         })?;
@@ -1463,7 +1432,7 @@ impl<'a> Parser<'a> {
     /// Parse an array of matrices, concatenating the row-major matrices into a single vector.
     fn parse_matrix_array<const N: usize>(&mut self) -> Result<Vec<f64>> {
         let mut matrices = Vec::new();
-        self.parse_array_fn(|this| {
+        self.parse_block('[', ']',|this| {
             matrices.extend(this.parse_matrix::<N>()?);
             Ok(())
         })?;
