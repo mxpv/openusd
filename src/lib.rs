@@ -19,10 +19,9 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use openusd::{ar, Stage};
+//! use openusd::Stage;
 //!
-//! let resolver = ar::DefaultResolver::new();
-//! let stage = Stage::open(&resolver, "scene.usda").unwrap();
+//! let stage = Stage::open("scene.usda").unwrap();
 //!
 //! stage.traverse(|prim_path| {
 //!     println!("{prim_path}");
@@ -40,4 +39,4 @@ pub mod usdz;
 
 pub use compose::{CompositionError, DependencyKind};
 pub use half::f16;
-pub use stage::Stage;
+pub use stage::{Stage, StageBuilder};

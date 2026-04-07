@@ -34,11 +34,9 @@ If you encounter a file that can't be read, please open an [issue](https://githu
 ## Example
 
 ```rust,no_run
-use openusd::{ar, sdf::FieldKey, Stage};
+use openusd::{sdf::FieldKey, Stage};
 
-// Filesystem-based asset resolver.
-let resolver = ar::DefaultResolver::new();
-let stage = Stage::open(&resolver, "scene.usda")?;
+let stage = Stage::open("scene.usda")?;
 
 // Traverse all prims in the composed scene graph.
 stage.traverse(|path| {
