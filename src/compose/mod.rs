@@ -6,7 +6,6 @@
 //! is a [`Vec`] of [`Layer`]s, each wrapping a parsed [`AbstractData`] with its resolved
 //! identity. Cycles are detected and skipped automatically.
 
-#[allow(dead_code)] // TODO: Remove once all arc types are implemented.
 pub(crate) mod prim_index;
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use crate::ar::{self, Resolver};
 use crate::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{AbstractData, Path, Value};
+use crate::sdf::{AbstractData, LayerData, Path, Value};
 use crate::{usda, usdc};
 
 /// The kind of layer dependency that triggered a composition error.
@@ -92,11 +91,11 @@ pub struct Layer {
     /// Resolved, canonical identifier for this layer.
     pub identifier: String,
     /// The parsed scene description data.
-    pub data: Box<dyn AbstractData>,
+    pub data: LayerData,
 }
 
 impl Layer {
-    fn new(identifier: impl Into<String>, data: Box<dyn AbstractData>) -> Self {
+    fn new(identifier: impl Into<String>, data: LayerData) -> Self {
         Self {
             identifier: identifier.into(),
             data,
@@ -317,7 +316,7 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
 /// Supports `.usda` (text), `.usdc` (binary), `.usd` (auto-detected via magic
 /// bytes), and `.usdz` (archive — reads the first layer). Returns the parsed
 /// data as a boxed [`AbstractData`].
-pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Result<Box<dyn AbstractData>> {
+pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData> {
     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or_default();
 
     if ext == "usdz" {
