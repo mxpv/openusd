@@ -28,9 +28,10 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::ar::Resolver;
+use crate::ar::{DefaultResolver, Resolver};
 use crate::compose;
 use crate::compose::prim_index::{ArcType, Node, PrimIndex};
+use crate::compose::CompositionError;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, ListOp, Path, Payload, Reference, SpecType, Value};
 
@@ -48,13 +49,35 @@ pub struct Stage {
 }
 
 impl Stage {
-    /// Opens a stage from a root layer file.
+    /// Opens a stage from a root layer file using the [`DefaultResolver`].
     ///
-    /// Recursively resolves and loads all referenced layers, then builds a
-    /// composed stage ready for queries.
-    pub fn open(resolver: &impl Resolver, root_path: &str) -> Result<Self> {
-        let collected = compose::collect_layers(resolver, root_path)?;
+    /// Any unresolvable transitive dependency causes an immediate error.
+    /// For custom resolver or error handling, use [`Stage::builder`].
+    pub fn open(root_path: &str) -> Result<Self> {
+        Self::builder().open(root_path)
+    }
 
+    /// Creates a [`StageBuilder`] for configuring how the stage is opened.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::Stage;
+    ///
+    /// let stage = Stage::builder()
+    ///     .on_error(|err| {
+    ///         eprintln!("warning: {err}");
+    ///         Ok(())
+    ///     })
+    ///     .open("scene.usda")
+    ///     .unwrap();
+    /// ```
+    pub fn builder() -> StageBuilder<DefaultResolver> {
+        StageBuilder::new()
+    }
+
+    /// Constructs a stage from pre-collected layers.
+    fn from_layers(collected: Vec<compose::Layer>) -> Self {
         let mut identifiers = Vec::with_capacity(collected.len());
         let mut layers = Vec::with_capacity(collected.len());
 
@@ -63,11 +86,11 @@ impl Stage {
             layers.push(layer.data);
         }
 
-        Ok(Self {
+        Self {
             layers,
             identifiers,
             prim_indices: RefCell::new(HashMap::new()),
-        })
+        }
     }
 
     /// Returns the number of layers in the stage.
@@ -508,10 +531,64 @@ impl Stage {
     }
 }
 
+/// Default composition error handler that treats all errors as fatal.
+type StrictErrorHandler = fn(CompositionError) -> Result<()>;
+
+/// Converts a composition error into a hard failure.
+fn strict_composition_error(e: CompositionError) -> Result<()> {
+    Err(anyhow::anyhow!("{e}"))
+}
+
+/// Builder for configuring and opening a [`Stage`].
+///
+/// Created via [`Stage::builder`]. Allows setting a custom asset resolver
+/// and an error handler for recoverable composition failures.
+pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -> Result<()> = StrictErrorHandler> {
+    resolver: R,
+    on_error: E,
+}
+
+impl StageBuilder {
+    fn new() -> Self {
+        Self {
+            resolver: DefaultResolver::new(),
+            on_error: strict_composition_error,
+        }
+    }
+}
+
+impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
+    /// Sets a custom asset resolver.
+    pub fn resolver<R2: Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
+        StageBuilder {
+            resolver,
+            on_error: self.on_error,
+        }
+    }
+
+    /// Sets a callback invoked when a recoverable composition error occurs.
+    ///
+    /// Return `Ok(())` to skip the problematic dependency and continue,
+    /// or `Err(...)` to abort composition.
+    ///
+    /// By default, all composition errors are fatal.
+    pub fn on_error<E2: Fn(CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
+        StageBuilder {
+            resolver: self.resolver,
+            on_error: handler,
+        }
+    }
+
+    /// Opens a stage from a root layer file.
+    pub fn open(self, root_path: &str) -> Result<Stage> {
+        let collected = compose::collect_layers_with_handler(&self.resolver, root_path, self.on_error)?;
+        Ok(Stage::from_layers(collected))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
     use crate::compose::prim_index::ArcType;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
@@ -534,8 +611,7 @@ mod tests {
     #[test]
     fn find_layer_exact_match() -> Result<()> {
         let path = fixture_path("ref_external.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The full identifier of the root layer should match exactly.
         assert!(
@@ -551,8 +627,7 @@ mod tests {
     #[test]
     fn find_layer_suffix_match() -> Result<()> {
         let path = fixture_path("ref_external.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // ref_external.usda references ref_target.usda, which should be loaded.
         let result = stage.find_layer("ref_target.usda");
@@ -566,8 +641,7 @@ mod tests {
     #[test]
     fn find_layer_no_partial_name_match() -> Result<()> {
         let path = fixture_path("ref_external.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         assert!(
             stage.find_layer("target.usda").is_none(),
@@ -581,8 +655,7 @@ mod tests {
     #[test]
     fn find_layer_not_found() -> Result<()> {
         let path = fixture_path("ref_external.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         assert!(stage.find_layer("nonexistent.usda").is_none());
 
@@ -596,8 +669,7 @@ mod tests {
     #[test]
     fn prim_index_single_layer() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let index = stage.prim_index(&Path::new("/World")?);
         assert_eq!(index.nodes.len(), 1);
@@ -613,8 +685,7 @@ mod tests {
     fn prim_index_sublayer_two_layers() -> Result<()> {
         // sublayer_override.usda sublayers sublayer_base.usda; both have /World.
         let path = fixture_path("sublayer_override.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let index = stage.prim_index(&Path::new("/World")?);
         assert_eq!(index.nodes.len(), 2, "both layers should have /World");
@@ -628,8 +699,7 @@ mod tests {
     #[test]
     fn prim_index_prim_only_in_stronger_layer() -> Result<()> {
         let path = fixture_path("sublayer_override.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // /World/Sphere is only defined in the override layer.
         let index = stage.prim_index(&Path::new("/World/Sphere")?);
@@ -643,8 +713,7 @@ mod tests {
     #[test]
     fn prim_index_nonexistent() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let index = stage.prim_index(&Path::new("/DoesNotExist")?);
         assert!(index.is_empty());
@@ -659,8 +728,7 @@ mod tests {
     #[test]
     fn open_single_layer() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         assert_eq!(stage.layer_count(), 1);
         assert_eq!(stage.default_prim(), Some("World".to_string()));
@@ -673,8 +741,7 @@ mod tests {
     #[test]
     fn traverse_single_layer() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let mut prims = Vec::new();
         stage.traverse(|p| prims.push(p.as_str().to_string()))?;
@@ -688,8 +755,7 @@ mod tests {
     #[test]
     fn field_single_layer() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The "active" metadata on CubeInactive should be false.
         let active = stage.field::<bool>("/World/CubeInactive", FieldKey::Active)?;
@@ -706,8 +772,7 @@ mod tests {
     #[test]
     fn field_not_authored() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let active = stage.field::<Value>("/World", FieldKey::Active)?;
         assert_eq!(active, None);
@@ -723,8 +788,7 @@ mod tests {
     #[test]
     fn sublayer_stronger_opinion_wins() -> Result<()> {
         let path = fixture_path("sublayer_override.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         assert_eq!(stage.layer_count(), 2);
 
@@ -748,8 +812,7 @@ mod tests {
     #[test]
     fn sublayer_children_union() -> Result<()> {
         let path = fixture_path("sublayer_override.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let children = stage.prim_children("/World")?;
         // Override layer adds Sphere; base layer defines Cube.
@@ -764,8 +827,7 @@ mod tests {
     #[test]
     fn sublayer_prims_from_weaker_layer() -> Result<()> {
         let path = composition_path("subLayer/sublayer_same_folder.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         assert_eq!(stage.layer_count(), 2);
         assert_eq!(stage.default_prim(), Some("World".to_string()));
@@ -783,8 +845,7 @@ mod tests {
     #[test]
     fn field_active_metadata() -> Result<()> {
         let path = composition_path("active.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let inactive: Option<bool> = stage.field("/World/CubeInactive", FieldKey::Active)?;
         assert_eq!(inactive, Some(false));
@@ -804,8 +865,7 @@ mod tests {
     #[test]
     fn reference_external_default_prim() -> Result<()> {
         let path = fixture_path("ref_external.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // /World/MyPrim should exist via the reference.
         assert!(stage.has_spec("/World/MyPrim"));
@@ -834,8 +894,7 @@ mod tests {
     #[test]
     fn reference_default_prim_from_external_layer() -> Result<()> {
         let path = composition_path("references/reference_same_folder.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // /World references _stage.usda's defaultPrim ("World"),
         // so /World/Cube should come from the referenced layer.
@@ -854,8 +913,7 @@ mod tests {
     #[test]
     fn reference_explicit_prim_path() -> Result<()> {
         let path = fixture_path("ref_prim.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // /World/RefPrim should exist with a Reference arc.
         let index = stage.prim_index(&Path::new("/World/RefPrim")?);
@@ -881,8 +939,7 @@ mod tests {
     #[test]
     fn inherit_from_class() -> Result<()> {
         let path = composition_path("class_inherit.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The prim index for cubeWithoutSetColor should include an Inherit node
         // pointing at /_myClass.
@@ -908,8 +965,7 @@ mod tests {
     #[test]
     fn inherit_local_opinion_wins() -> Result<()> {
         let path = composition_path("class_inherit.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // cubeWithSetColor has both a local and inherited displayColor.
         // The prim index should have Root first, then Inherit.
@@ -941,8 +997,7 @@ mod tests {
             "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
             manifest_dir()
         );
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The prim index should contain a Variant arc node.
         let index = stage.prim_index(&Path::new("/World/Sphere")?);
@@ -965,8 +1020,7 @@ mod tests {
             "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
             manifest_dir()
         );
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The local radius=1 should win over variant radius=2.
         let prop = Path::new("/World/Sphere")?.append_property("radius")?;
@@ -983,8 +1037,7 @@ mod tests {
     #[test]
     fn payload_pulls_children() -> Result<()> {
         let path = composition_path("payload/payload_same_folder.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         // The payload target layer has /World/Cube. Since /World is the payload
         // target, /World/Cube should appear.
@@ -1005,8 +1058,7 @@ mod tests {
     #[test]
     fn specialize_arc_present() -> Result<()> {
         let path = composition_path("inherit_and_specialize.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let index = stage.prim_index(&Path::new("/World/cubeScene/specializes")?);
         assert!(
@@ -1022,8 +1074,7 @@ mod tests {
     #[test]
     fn specialize_local_opinion_wins() -> Result<()> {
         let path = composition_path("inherit_and_specialize.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let prop = Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
         let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
@@ -1041,8 +1092,7 @@ mod tests {
     #[test]
     fn instanceable_true_parses_and_is_readable() -> Result<()> {
         let path = fixture_path("instanceable_metadata.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let value = stage.field::<bool>("/Root/InstancePrototype", FieldKey::Instanceable)?;
         assert_eq!(value, Some(true), "instanceable = true should be stored");
@@ -1054,8 +1104,7 @@ mod tests {
     #[test]
     fn instanceable_false_parses_and_is_readable() -> Result<()> {
         let path = fixture_path("instanceable_metadata.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let value = stage.field::<bool>("/Root/NotInstanceable", FieldKey::Instanceable)?;
         assert_eq!(value, Some(false), "instanceable = false should be stored");
@@ -1067,8 +1116,7 @@ mod tests {
     #[test]
     fn instanceable_absent_returns_none() -> Result<()> {
         let path = fixture_path("instanceable_metadata.usda");
-        let resolver = DefaultResolver::new();
-        let stage = Stage::open(&resolver, &path)?;
+        let stage = Stage::open(&path)?;
 
         let value = stage.field::<bool>("/Root", FieldKey::Instanceable)?;
         assert_eq!(value, None, "instanceable should be None when not authored");
