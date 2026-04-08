@@ -290,17 +290,14 @@ impl<'a> Parser<'a> {
         };
 
         let mut name_token = self.fetch_next()?;
-        if specifier == sdf::Specifier::Def || specifier == sdf::Specifier::Class {
-            if let Some(prim_type) = name_token.clone().try_as_identifier() {
-                spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
-                name_token = self.fetch_next()?;
-            }
+        if let Token::Identifier(prim_type) = name_token {
+            spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
+            name_token = self.fetch_next()?;
         }
 
-        let name = name_token
-            .clone()
-            .try_as_string()
-            .ok_or_else(|| anyhow!("Unexpected token {name_token:?} (want String)"))?;
+        let Token::String(name) = name_token else {
+            bail!("Expected prim name string, got {name_token:?}");
+        };
         parent_children.push(name.to_string());
         let prim_path = current_path.append_path(name)?;
 
@@ -2568,5 +2565,30 @@ def Scope "Root" {
             Some(&sdf::Value::Token("int[]".into()))
         );
         assert_eq!(spec.fields.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
+    }
+
+    /// `over` with a type name should parse the type and prim name.
+    #[test]
+    fn parse_over_with_type_name() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+over MfScope "TestOver"
+{
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        let path = sdf::path("/TestOver").unwrap();
+        let spec = data.get(&path).expect("TestOver not found");
+        assert_eq!(
+            spec.fields.get(FieldKey::Specifier.as_str()),
+            Some(&sdf::Value::Specifier(sdf::Specifier::Over))
+        );
+        assert_eq!(
+            spec.fields.get(FieldKey::TypeName.as_str()),
+            Some(&sdf::Value::Token("MfScope".into()))
+        );
     }
 }
