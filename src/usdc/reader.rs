@@ -932,7 +932,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::StringVec(self.read_string_vec()?)
             }
 
-            Type::String if value.is_array() => sdf::Value::StringVec(self.read_string_vec()?),
+            Type::String if value.is_array() => {
+                self.set_position(value.payload())?;
+                sdf::Value::StringVec(self.read_string_vec()?)
+            }
 
             Type::String => {
                 ensure!(!value.is_array());

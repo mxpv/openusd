@@ -826,4 +826,20 @@ mod tests {
 
         Ok(())
     }
+
+    /// String arrays should have a readable default value.
+    #[test]
+    fn test_read_string_array_default() -> Result<()> {
+        let data = read_file("fixtures/gen_string.usdc")?;
+
+        let array = data
+            .get(&sdf::path("/root.array")?, "default")?
+            .into_owned()
+            .try_as_string_vec()
+            .unwrap();
+
+        assert_eq!(array, vec!["Hello/World", "Good/Bye"]);
+
+        Ok(())
+    }
 }
