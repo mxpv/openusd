@@ -991,9 +991,9 @@ impl<'a> Parser<'a> {
             (Type::Token, false) => sdf::Value::Token(self.fetch_str()?.to_owned()),
             (Type::String | Type::Token, true) => sdf::Value::TokenVec(self.parse_array()?),
 
-            (Type::Matrix2d, false) => sdf::Value::Matrix2d(self.parse_matrix_value::<2, 4>()?),
-            (Type::Matrix3d, false) => sdf::Value::Matrix3d(self.parse_matrix_value::<3, 9>()?),
-            (Type::Matrix4d, false) => sdf::Value::Matrix4d(self.parse_matrix_value::<4, 16>()?),
+            (Type::Matrix2d, false) => sdf::Value::Matrix2d(self.parse_matrix::<2, 4>()?),
+            (Type::Matrix3d, false) => sdf::Value::Matrix3d(self.parse_matrix::<3, 9>()?),
+            (Type::Matrix4d, false) => sdf::Value::Matrix4d(self.parse_matrix::<4, 16>()?),
             (Type::Matrix2d, true) => sdf::Value::Matrix2dVec(self.parse_matrix_array::<2, 4>()?),
             (Type::Matrix3d, true) => sdf::Value::Matrix3dVec(self.parse_matrix_array::<3, 9>()?),
             (Type::Matrix4d, true) => sdf::Value::Matrix4dVec(self.parse_matrix_array::<4, 16>()?),
@@ -1314,7 +1314,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single matrix literal, flattening rows in row-major order.
+    ///
+    /// Handles both bare `(row), (row), ...` and bracket-wrapped `[ (row), ... ]` forms.
     fn parse_matrix<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
+        if self.is_next(Token::Punctuation('[')) {
+            let mut arr = self.parse_matrix_array::<N, M>()?;
+            ensure!(arr.len() == 1, "expected a single matrix value");
+            return Ok(arr.remove(0));
+        }
+
         let mut values = [0_f64; M];
         let mut idx = 0;
         self.parse_seq_fn(',', |this, _| {
@@ -1326,31 +1334,27 @@ impl<'a> Parser<'a> {
             }
             Ok(())
         })?;
-
         ensure!(idx == M, "matrix{N}d literal must contain {N} rows");
-
         Ok(values)
     }
 
-    /// Parse either a single matrix or an array of matrices, depending on the next token.
-    fn parse_matrix_value<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
-        if self.is_next(Token::Punctuation('[')) {
-            // Looks like an array literal, but for a scalar context this is
-            // a single matrix wrapped in square brackets (e.g. `[ (row), ... ]`).
-            // Parse as a single-element array and extract it.
-            let mut arr = self.parse_matrix_array::<N, M>()?;
-            ensure!(arr.len() == 1, "expected a single matrix value");
-            Ok(arr.remove(0))
-        } else {
-            self.parse_matrix::<N, M>()
-        }
-    }
-
-    /// Parse an array of matrices.
+    /// Parse an array of matrices: `[ matrix, matrix, ... ]`.
     fn parse_matrix_array<const N: usize, const M: usize>(&mut self) -> Result<Vec<[f64; M]>> {
         let mut matrices = Vec::new();
         self.parse_block('[', ']', |this| {
-            matrices.push(this.parse_matrix::<N, M>()?);
+            let mut values = [0_f64; M];
+            let mut idx = 0;
+            this.parse_seq_fn(',', |this, _| {
+                let row = this.parse_tuple::<f64, N>()?;
+                for v in row {
+                    ensure!(idx < M, "matrix{N}d literal has too many elements");
+                    values[idx] = v;
+                    idx += 1;
+                }
+                Ok(())
+            })?;
+            ensure!(idx == M, "matrix{N}d literal must contain {N} rows");
+            matrices.push(values);
             Ok(())
         })?;
         Ok(matrices)
