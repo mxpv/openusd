@@ -792,6 +792,11 @@ impl<'a> Parser<'a> {
                 let value = self.parse_bool().context("Unable to parse instanceable flag")?;
                 spec.add(FieldKey::Instanceable, sdf::Value::Bool(value));
             }
+            "displayName" => {
+                ensure!(list_op.is_none(), "displayName does not support list ops");
+                let value = self.fetch_str().context("Unable to parse displayName")?;
+                spec.add("displayName", sdf::Value::String(value.to_owned()));
+            }
             other => bail!("Unsupported prim metadata: {other}"),
         }
 
@@ -2589,6 +2594,41 @@ over MfScope "TestOver"
         assert_eq!(
             spec.fields.get(FieldKey::TypeName.as_str()),
             Some(&sdf::Value::Token("MfScope".into()))
+        );
+    }
+
+    /// Prim metadata `displayName` should be parsed as a string.
+    #[test]
+    fn parse_prim_display_name() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def Scope "Root" (
+    displayName = "My Root"
+)
+{
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        let path = sdf::path("/Root").unwrap();
+        let spec = data.get(&path).unwrap();
+        assert_eq!(
+            spec.fields.get("displayName"),
+            Some(&sdf::Value::String("My Root".into()))
+        );
+    }
+
+    #[test]
+    fn parse_prim_display_name_utf8() {
+        let input = "#usda 1.0\ndef Scope \"R\" (\n    displayName = \"\u{1F680}\"\n)\n{\n}\n";
+        let mut parser = Parser::new(input);
+        let data = parser.parse().unwrap();
+        let spec = data.get(&sdf::path("/R").unwrap()).unwrap();
+        assert_eq!(
+            spec.fields.get("displayName"),
+            Some(&sdf::Value::String("\u{1F680}".into()))
         );
     }
 }
