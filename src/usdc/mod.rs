@@ -257,20 +257,20 @@ mod tests {
             .try_as_quatf()
             .unwrap();
 
-        assert_eq!(quat, vec![2.9, 8.5, 4.6, 1.4]);
+        assert_eq!(quat, [2.9, 8.5, 4.6, 1.4]);
 
         let quat = data
             .get(&sdf::path("/World.quatfArr")?, "default")?
             .into_owned()
-            .try_as_quatf()
+            .try_as_quatf_vec()
             .unwrap();
 
         assert_eq!(
             quat,
             vec![
-                3.5, 2.6, 3.6, 4.2, // 1
-                5.3, 6.3, 5.2, 2.4, // 2
-                4.3, 2.4, 6.4, 7.1, // 3
+                [3.5, 2.6, 3.6, 4.2], // 1
+                [5.3, 6.3, 5.2, 2.4], // 2
+                [4.3, 2.4, 6.4, 7.1], // 3
             ]
         );
 
@@ -287,19 +287,19 @@ mod tests {
             .try_as_quatd()
             .unwrap();
 
-        assert_eq!(quat, vec![5.3, 6.3, 5.2, 2.4]);
+        assert_eq!(quat, [5.3, 6.3, 5.2, 2.4]);
 
         let quat = data
             .get(&sdf::path("/World.quatdArr")?, "default")?
             .into_owned()
-            .try_as_quatd()
+            .try_as_quatd_vec()
             .unwrap();
 
         assert_eq!(
             quat,
             vec![
-                3.5, 2.6, 3.6, 4.2, // 1
-                4.3, 2.4, 6.4, 7.1, // 2
+                [3.5, 2.6, 3.6, 4.2], // 1
+                [4.3, 2.4, 6.4, 7.1], // 2
             ]
         );
 
@@ -316,26 +316,20 @@ mod tests {
             .try_as_quath()
             .unwrap();
 
-        assert_eq!(
-            quat,
-            [4.6, 2.5, 7.6, 3.5].into_iter().map(f16::from_f32).collect::<Vec<_>>()
-        );
+        assert_eq!(quat, [4.6, 2.5, 7.6, 3.5].map(f16::from_f32));
 
         let quat = data
             .get(&sdf::path("/World.quathArr")?, "default")?
             .into_owned()
-            .try_as_quath()
+            .try_as_quath_vec()
             .unwrap();
 
         assert_eq!(
             quat,
-            [
-                2.4, 7.8, 8.5, 4.7, // 1
-                6.7, 5.6, 5.3, 4.6, // 2
+            vec![
+                [2.4, 7.8, 8.5, 4.7].map(f16::from_f32), // 1
+                [6.7, 5.6, 5.3, 4.6].map(f16::from_f32), // 2
             ]
-            .into_iter()
-            .map(f16::from_f32)
-            .collect::<Vec<_>>()
         );
 
         Ok(())
@@ -742,21 +736,15 @@ mod tests {
 
         // float4[] clippingPlanes = []
         let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;
-        assert!(clipping_planes.into_owned().try_as_vec_4f_ref().unwrap().is_empty());
+        assert!(clipping_planes.into_owned().try_as_vec_4f_vec().unwrap().is_empty());
 
         // float2 clippingRange = (1, 10000000)
         let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
-        assert_eq!(
-            &clipping_range.into_owned().try_as_vec_2f().unwrap(),
-            &[1.0, 10000000.0]
-        );
+        assert_eq!(clipping_range.into_owned().try_as_vec_2f().unwrap(), [1.0, 10000000.0]);
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
         let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
-        assert_eq!(
-            &diffuse_color.into_owned().try_as_vec_3f().unwrap(),
-            &[0.18, 0.18, 0.18]
-        );
+        assert_eq!(diffuse_color.into_owned().try_as_vec_3f().unwrap(), [0.18, 0.18, 0.18]);
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
         let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
@@ -768,8 +756,16 @@ mod tests {
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
         let normals = data.get(&sdf::path("/World.normals")?, "default")?;
         assert_eq!(
-            normals.try_as_vec_3f_ref().unwrap(),
-            &[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+            normals.try_as_vec_3f_vec_ref().unwrap(),
+            &[
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ]
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)

@@ -942,12 +942,12 @@ impl<'a> Parser<'a> {
 
             (Type::Int, false) => sdf::Value::Int(self.parse_token()?),
             (Type::Int, true) => sdf::Value::IntVec(self.parse_array()?),
-            (Type::Int2, false) => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?.into()),
-            (Type::Int2, true) => sdf::Value::Vec2i(self.parse_array_of_tuples::<_, 2>()?),
-            (Type::Int3, false) => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?.into()),
-            (Type::Int3, true) => sdf::Value::Vec3i(self.parse_array_of_tuples::<_, 3>()?),
-            (Type::Int4, false) => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Int4, true) => sdf::Value::Vec4i(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Int2, false) => sdf::Value::Vec2i(self.parse_tuple::<_, 2>()?),
+            (Type::Int2, true) => sdf::Value::Vec2iVec(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Int3, false) => sdf::Value::Vec3i(self.parse_tuple::<_, 3>()?),
+            (Type::Int3, true) => sdf::Value::Vec3iVec(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Int4, false) => sdf::Value::Vec4i(self.parse_tuple::<_, 4>()?),
+            (Type::Int4, true) => sdf::Value::Vec4iVec(self.parse_array_of_tuples::<_, 4>()?),
             (Type::Uint, false) => sdf::Value::Uint(self.parse_token()?),
             (Type::Int64, false) => sdf::Value::Int64(self.parse_token()?),
             (Type::Int64, true) => sdf::Value::Int64Vec(self.parse_array()?),
@@ -955,49 +955,48 @@ impl<'a> Parser<'a> {
 
             (Type::Half, false) => sdf::Value::Half(self.parse_token()?),
             (Type::Half, true) => sdf::Value::HalfVec(self.parse_array()?),
-            (Type::Half2, false) => sdf::Value::Vec2h(self.parse_tuple::<_, 2>()?.into()),
-            (Type::Half2, true) => sdf::Value::Vec2h(self.parse_array_of_tuples::<_, 2>()?),
-            (Type::Half3, false) => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?.into()),
-            (Type::Half3, true) => sdf::Value::Vec3h(self.parse_array_of_tuples::<_, 3>()?),
-            (Type::Half4, false) => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Half4, true) => sdf::Value::Vec4h(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Half2, false) => sdf::Value::Vec2h(self.parse_tuple::<_, 2>()?),
+            (Type::Half2, true) => sdf::Value::Vec2hVec(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Half3, false) => sdf::Value::Vec3h(self.parse_tuple::<_, 3>()?),
+            (Type::Half3, true) => sdf::Value::Vec3hVec(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Half4, false) => sdf::Value::Vec4h(self.parse_tuple::<_, 4>()?),
+            (Type::Half4, true) => sdf::Value::Vec4hVec(self.parse_array_of_tuples::<_, 4>()?),
 
             (Type::Float, false) => sdf::Value::Float(self.parse_token()?),
             (Type::Float, true) => sdf::Value::FloatVec(self.parse_array()?),
-            (Type::Float2, false) => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?.into()),
-            (Type::Float2, true) => sdf::Value::Vec2f(self.parse_array_of_tuples::<_, 2>()?),
-            (Type::Float3, false) => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?.into()),
-            (Type::Float3, true) => sdf::Value::Vec3f(self.parse_array_of_tuples::<_, 3>()?),
-            (Type::Float4, false) => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Float4, true) => sdf::Value::Vec4f(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Float2, false) => sdf::Value::Vec2f(self.parse_tuple::<_, 2>()?),
+            (Type::Float2, true) => sdf::Value::Vec2fVec(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Float3, false) => sdf::Value::Vec3f(self.parse_tuple::<_, 3>()?),
+            (Type::Float3, true) => sdf::Value::Vec3fVec(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Float4, false) => sdf::Value::Vec4f(self.parse_tuple::<_, 4>()?),
+            (Type::Float4, true) => sdf::Value::Vec4fVec(self.parse_array_of_tuples::<_, 4>()?),
 
             (Type::Double, false) => sdf::Value::Double(self.parse_token()?),
             (Type::Double, true) => sdf::Value::DoubleVec(self.parse_array()?),
-            (Type::Double2, false) => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?.into()),
-            (Type::Double2, true) => sdf::Value::Vec2d(self.parse_array_of_tuples::<_, 2>()?),
-            (Type::Double3, false) => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?.into()),
-            (Type::Double3, true) => sdf::Value::Vec3d(self.parse_array_of_tuples::<_, 3>()?),
-            (Type::Double4, false) => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Double4, true) => sdf::Value::Vec4d(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Double2, false) => sdf::Value::Vec2d(self.parse_tuple::<_, 2>()?),
+            (Type::Double2, true) => sdf::Value::Vec2dVec(self.parse_array_of_tuples::<_, 2>()?),
+            (Type::Double3, false) => sdf::Value::Vec3d(self.parse_tuple::<_, 3>()?),
+            (Type::Double3, true) => sdf::Value::Vec3dVec(self.parse_array_of_tuples::<_, 3>()?),
+            (Type::Double4, false) => sdf::Value::Vec4d(self.parse_tuple::<_, 4>()?),
+            (Type::Double4, true) => sdf::Value::Vec4dVec(self.parse_array_of_tuples::<_, 4>()?),
 
-            (Type::Quath, false) => sdf::Value::Quath(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Quatf, false) => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?.into()),
-            (Type::Quatd, false) => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?.into()),
-            // TODO: quat array support
-            (Type::Quath | Type::Quatf | Type::Quatd, true) => {
-                bail!("Array of quaternions is not yet supported")
-            }
+            (Type::Quath, false) => sdf::Value::Quath(self.parse_tuple::<_, 4>()?),
+            (Type::Quatf, false) => sdf::Value::Quatf(self.parse_tuple::<_, 4>()?),
+            (Type::Quatd, false) => sdf::Value::Quatd(self.parse_tuple::<_, 4>()?),
+            (Type::Quath, true) => sdf::Value::QuathVec(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Quatf, true) => sdf::Value::QuatfVec(self.parse_array_of_tuples::<_, 4>()?),
+            (Type::Quatd, true) => sdf::Value::QuatdVec(self.parse_array_of_tuples::<_, 4>()?),
 
             (Type::String, false) => sdf::Value::String(self.fetch_str()?.to_owned()),
             (Type::Token, false) => sdf::Value::Token(self.fetch_str()?.to_owned()),
             (Type::String | Type::Token, true) => sdf::Value::TokenVec(self.parse_array()?),
 
-            (Type::Matrix2d, false) => sdf::Value::Matrix2d(self.parse_matrix_value::<2>()?),
-            (Type::Matrix3d, false) => sdf::Value::Matrix3d(self.parse_matrix_value::<3>()?),
-            (Type::Matrix4d, false) => sdf::Value::Matrix4d(self.parse_matrix_value::<4>()?),
-            (Type::Matrix2d, true) => sdf::Value::Matrix2d(self.parse_matrix_array::<2>()?),
-            (Type::Matrix3d, true) => sdf::Value::Matrix3d(self.parse_matrix_array::<3>()?),
-            (Type::Matrix4d, true) => sdf::Value::Matrix4d(self.parse_matrix_array::<4>()?),
+            (Type::Matrix2d, false) => sdf::Value::Matrix2d(self.parse_matrix_value::<2, 4>()?),
+            (Type::Matrix3d, false) => sdf::Value::Matrix3d(self.parse_matrix_value::<3, 9>()?),
+            (Type::Matrix4d, false) => sdf::Value::Matrix4d(self.parse_matrix_value::<4, 16>()?),
+            (Type::Matrix2d, true) => sdf::Value::Matrix2dVec(self.parse_matrix_array::<2, 4>()?),
+            (Type::Matrix3d, true) => sdf::Value::Matrix3dVec(self.parse_matrix_array::<3, 9>()?),
+            (Type::Matrix4d, true) => sdf::Value::Matrix4dVec(self.parse_matrix_array::<4, 16>()?),
 
             (Type::Dictionary, _) => self.parse_dictionary()?,
 
@@ -1301,47 +1300,57 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse array of tuples.
-    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<T>>
+    fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<[T; N]>>
     where
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
         let mut out = Vec::new();
         self.parse_block('[', ']', |this| {
-            out.extend(this.parse_tuple::<T, N>()?);
+            out.push(this.parse_tuple::<T, N>()?);
             Ok(())
         })?;
         Ok(out)
     }
 
     /// Parse a single matrix literal, flattening rows in row-major order.
-    fn parse_matrix<const N: usize>(&mut self) -> Result<Vec<f64>> {
-        let mut values = Vec::with_capacity(N * N);
+    fn parse_matrix<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
+        let mut values = [0_f64; M];
+        let mut idx = 0;
         self.parse_seq_fn(',', |this, _| {
             let row = this.parse_tuple::<f64, N>()?;
-            values.extend(row);
+            for v in row {
+                ensure!(idx < M, "matrix{N}d literal has too many elements");
+                values[idx] = v;
+                idx += 1;
+            }
             Ok(())
         })?;
 
-        ensure!(values.len() == N * N, "matrix{N}d literal must contain {N} rows");
+        ensure!(idx == M, "matrix{N}d literal must contain {N} rows");
 
         Ok(values)
     }
 
     /// Parse either a single matrix or an array of matrices, depending on the next token.
-    fn parse_matrix_value<const N: usize>(&mut self) -> Result<Vec<f64>> {
+    fn parse_matrix_value<const N: usize, const M: usize>(&mut self) -> Result<[f64; M]> {
         if self.is_next(Token::Punctuation('[')) {
-            self.parse_matrix_array::<N>()
+            // Looks like an array literal, but for a scalar context this is
+            // a single matrix wrapped in square brackets (e.g. `[ (row), ... ]`).
+            // Parse as a single-element array and extract it.
+            let mut arr = self.parse_matrix_array::<N, M>()?;
+            ensure!(arr.len() == 1, "expected a single matrix value");
+            Ok(arr.remove(0))
         } else {
-            self.parse_matrix::<N>()
+            self.parse_matrix::<N, M>()
         }
     }
 
-    /// Parse an array of matrices, concatenating the row-major matrices into a single vector.
-    fn parse_matrix_array<const N: usize>(&mut self) -> Result<Vec<f64>> {
+    /// Parse an array of matrices.
+    fn parse_matrix_array<const N: usize, const M: usize>(&mut self) -> Result<Vec<[f64; M]>> {
         let mut matrices = Vec::new();
         self.parse_block('[', ']', |this| {
-            matrices.extend(this.parse_matrix::<N>()?);
+            matrices.push(this.parse_matrix::<N, M>()?);
             Ok(())
         })?;
         Ok(matrices)
@@ -1500,7 +1509,7 @@ mod tests {
     fn parse_array_of_tuples() {
         let mut parser = Parser::new("[(1, 2), (3, 4)]");
         let result = parser.parse_array_of_tuples::<u32, 2>().unwrap();
-        assert_eq!(result, vec![1_u32, 2, 3, 4]);
+        assert_eq!(result, vec![[1_u32, 2], [3, 4]]);
     }
 
     #[test]
@@ -1944,14 +1953,14 @@ def Scope "Root" {
             .expect("matrix default missing");
 
         match matrix {
-            sdf::Value::Matrix4d(values) => {
-                assert_eq!(values.len(), 32);
-                assert_eq!(values[0], 1.0);
-                assert_eq!(values[15], 1.0);
-                assert_eq!(values[16], 2.0);
-                assert_eq!(values[31], 2.0);
+            sdf::Value::Matrix4dVec(values) => {
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0][0], 1.0);
+                assert_eq!(values[0][15], 1.0);
+                assert_eq!(values[1][0], 2.0);
+                assert_eq!(values[1][15], 2.0);
             }
-            other => panic!("expected Matrix4d array, got {other:?}"),
+            other => panic!("expected Matrix4dVec, got {other:?}"),
         }
     }
 
@@ -2150,11 +2159,16 @@ def Xform "World"
         let value = normals.fields.get("default").unwrap();
 
         assert_eq!(
+            value.try_as_vec_3f_vec_ref().unwrap(),
             &[
-                0_f32, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-                0.0
-            ],
-            value.try_as_vec_3f_ref().unwrap().as_slice()
+                [0_f32, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ]
         );
 
         let order = data.get(&sdf::path("/World.xformOpOrder").unwrap()).unwrap();

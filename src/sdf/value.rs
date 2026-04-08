@@ -59,28 +59,46 @@ pub enum Value {
 
     AssetPath(String),
 
-    Quath(Vec<f16>),
-    Quatf(Vec<f32>),
-    Quatd(Vec<f64>),
+    Quath([f16; 4]),
+    Quatf([f32; 4]),
+    Quatd([f64; 4]),
+    QuathVec(Vec<[f16; 4]>),
+    QuatfVec(Vec<[f32; 4]>),
+    QuatdVec(Vec<[f64; 4]>),
 
-    Vec2h(Vec<f16>),
-    Vec2f(Vec<f32>),
-    Vec2d(Vec<f64>),
-    Vec2i(Vec<i32>),
+    Vec2h([f16; 2]),
+    Vec2f([f32; 2]),
+    Vec2d([f64; 2]),
+    Vec2i([i32; 2]),
+    Vec2hVec(Vec<[f16; 2]>),
+    Vec2fVec(Vec<[f32; 2]>),
+    Vec2dVec(Vec<[f64; 2]>),
+    Vec2iVec(Vec<[i32; 2]>),
 
-    Vec3h(Vec<f16>),
-    Vec3f(Vec<f32>),
-    Vec3d(Vec<f64>),
-    Vec3i(Vec<i32>),
+    Vec3h([f16; 3]),
+    Vec3f([f32; 3]),
+    Vec3d([f64; 3]),
+    Vec3i([i32; 3]),
+    Vec3hVec(Vec<[f16; 3]>),
+    Vec3fVec(Vec<[f32; 3]>),
+    Vec3dVec(Vec<[f64; 3]>),
+    Vec3iVec(Vec<[i32; 3]>),
 
-    Vec4h(Vec<f16>),
-    Vec4f(Vec<f32>),
-    Vec4d(Vec<f64>),
-    Vec4i(Vec<i32>),
+    Vec4h([f16; 4]),
+    Vec4f([f32; 4]),
+    Vec4d([f64; 4]),
+    Vec4i([i32; 4]),
+    Vec4hVec(Vec<[f16; 4]>),
+    Vec4fVec(Vec<[f32; 4]>),
+    Vec4dVec(Vec<[f64; 4]>),
+    Vec4iVec(Vec<[i32; 4]>),
 
-    Matrix2d(Vec<f64>),
-    Matrix3d(Vec<f64>),
-    Matrix4d(Vec<f64>),
+    Matrix2d([f64; 4]),
+    Matrix3d([f64; 9]),
+    Matrix4d([f64; 16]),
+    Matrix2dVec(Vec<[f64; 4]>),
+    Matrix3dVec(Vec<[f64; 9]>),
+    Matrix4dVec(Vec<[f64; 16]>),
 
     Specifier(Specifier),
     Permission(Permission),
@@ -196,7 +214,7 @@ impl TryFrom<Value> for [f32; 2] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec2f(v) if v.len() == 2 => Ok([v[0], v[1]]),
+            Value::Vec2f(v) => Ok(v),
             other => ValueConversionError::err("Vec2f", &other),
         }
     }
@@ -207,7 +225,7 @@ impl TryFrom<Value> for [f32; 3] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec3f(v) if v.len() == 3 => Ok([v[0], v[1], v[2]]),
+            Value::Vec3f(v) => Ok(v),
             other => ValueConversionError::err("Vec3f", &other),
         }
     }
@@ -218,7 +236,7 @@ impl TryFrom<Value> for [f32; 4] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec4f(v) | Value::Quatf(v) if v.len() == 4 => Ok([v[0], v[1], v[2], v[3]]),
+            Value::Vec4f(v) | Value::Quatf(v) => Ok(v),
             other => ValueConversionError::err("Vec4f or Quatf", &other),
         }
     }
@@ -229,7 +247,7 @@ impl TryFrom<Value> for [f64; 2] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec2d(v) if v.len() == 2 => Ok([v[0], v[1]]),
+            Value::Vec2d(v) => Ok(v),
             other => ValueConversionError::err("Vec2d", &other),
         }
     }
@@ -240,7 +258,7 @@ impl TryFrom<Value> for [f64; 3] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec3d(v) if v.len() == 3 => Ok([v[0], v[1], v[2]]),
+            Value::Vec3d(v) => Ok(v),
             other => ValueConversionError::err("Vec3d", &other),
         }
     }
@@ -251,7 +269,7 @@ impl TryFrom<Value> for [f64; 4] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec4d(v) | Value::Quatd(v) if v.len() == 4 => Ok([v[0], v[1], v[2], v[3]]),
+            Value::Vec4d(v) | Value::Quatd(v) => Ok(v),
             other => ValueConversionError::err("Vec4d or Quatd", &other),
         }
     }
@@ -262,7 +280,10 @@ impl TryFrom<Value> for Vec<f32> {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::FloatVec(v) | Value::Vec2f(v) | Value::Vec3f(v) | Value::Vec4f(v) => Ok(v),
+            Value::FloatVec(v) => Ok(v),
+            Value::Vec2f(v) => Ok(v.into()),
+            Value::Vec3f(v) => Ok(v.into()),
+            Value::Vec4f(v) => Ok(v.into()),
             other => ValueConversionError::err("FloatVec, Vec2f, Vec3f, or Vec4f", &other),
         }
     }
@@ -273,7 +294,10 @@ impl TryFrom<Value> for Vec<f64> {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::DoubleVec(v) | Value::Vec2d(v) | Value::Vec3d(v) | Value::Vec4d(v) => Ok(v),
+            Value::DoubleVec(v) => Ok(v),
+            Value::Vec2d(v) => Ok(v.into()),
+            Value::Vec3d(v) => Ok(v.into()),
+            Value::Vec4d(v) => Ok(v.into()),
             other => ValueConversionError::err("DoubleVec, Vec2d, Vec3d, or Vec4d", &other),
         }
     }
@@ -318,17 +342,17 @@ mod tests {
 
     #[test]
     fn try_from_fixed_arrays() {
-        assert_eq!(<[f32; 2]>::try_from(Value::Vec2f(vec![1.0, 2.0])).unwrap(), [1.0, 2.0]);
+        assert_eq!(<[f32; 2]>::try_from(Value::Vec2f([1.0, 2.0])).unwrap(), [1.0, 2.0]);
         assert_eq!(
-            <[f32; 3]>::try_from(Value::Vec3f(vec![1.0, 2.0, 3.0])).unwrap(),
+            <[f32; 3]>::try_from(Value::Vec3f([1.0, 2.0, 3.0])).unwrap(),
             [1.0, 2.0, 3.0]
         );
         assert_eq!(
-            <[f32; 4]>::try_from(Value::Vec4f(vec![1.0, 2.0, 3.0, 4.0])).unwrap(),
+            <[f32; 4]>::try_from(Value::Vec4f([1.0, 2.0, 3.0, 4.0])).unwrap(),
             [1.0, 2.0, 3.0, 4.0]
         );
         assert_eq!(
-            <[f64; 3]>::try_from(Value::Vec3d(vec![1.0, 2.0, 3.0])).unwrap(),
+            <[f64; 3]>::try_from(Value::Vec3d([1.0, 2.0, 3.0])).unwrap(),
             [1.0, 2.0, 3.0]
         );
     }
@@ -337,11 +361,11 @@ mod tests {
     fn try_from_vec() {
         // Vec<f32> accepts any float vector variant.
         assert!(Vec::<f32>::try_from(Value::FloatVec(vec![1.0])).is_ok());
-        assert!(Vec::<f32>::try_from(Value::Vec3f(vec![1.0, 2.0, 3.0])).is_ok());
+        assert!(Vec::<f32>::try_from(Value::Vec3f([1.0, 2.0, 3.0])).is_ok());
 
         // Vec<f64> accepts any double vector variant.
         assert!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).is_ok());
-        assert!(Vec::<f64>::try_from(Value::Vec2d(vec![1.0, 2.0])).is_ok());
+        assert!(Vec::<f64>::try_from(Value::Vec2d([1.0, 2.0])).is_ok());
     }
 
     #[test]
