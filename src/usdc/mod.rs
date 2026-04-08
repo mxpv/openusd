@@ -842,4 +842,33 @@ mod tests {
 
         Ok(())
     }
+
+    /// Vec2h single value should read half-floats, not raw integers.
+    #[test]
+    fn test_read_vec2h_single() -> Result<()> {
+        let data = read_file("fixtures/gen_vec2h.usdc")?;
+
+        let single = data
+            .get(&sdf::path("/root.single")?, "default")?
+            .into_owned()
+            .try_as_vec_2h()
+            .unwrap();
+
+        #[allow(clippy::approx_constant)]
+        let expected_x = f16::from_f32(3.14);
+        assert_eq!(single[0], expected_x);
+        assert_eq!(single[1], f16::from_f32(4.824));
+
+        // Inlined value should also read correctly.
+        let inlined = data
+            .get(&sdf::path("/root.inlined")?, "default")?
+            .into_owned()
+            .try_as_vec_2h()
+            .unwrap();
+
+        assert_eq!(inlined[0], f16::from_f32(0.0));
+        assert_eq!(inlined[1], f16::from_f32(1.0));
+
+        Ok(())
+    }
 }

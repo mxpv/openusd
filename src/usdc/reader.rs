@@ -972,17 +972,17 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Vec4d if value.is_array() => Value::Vec4d(self.read_vec_array::<f64, 4>(value)?),
             Type::Vec4i if value.is_array() => Value::Vec4i(self.read_vec_array::<i32, 4>(value)?),
 
-            Type::Vec2h if value.is_inlined() => sdf::Value::Vec2h(to_vec::<f16, 2>(self.unpack_value(value)?)),
+            Type::Vec2h if value.is_inlined() => sdf::Value::Vec2h(self.unpack_value::<[f16; 2]>(value)?.into()),
             Type::Vec2f if value.is_inlined() => sdf::Value::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
             Type::Vec2d if value.is_inlined() => sdf::Value::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
             Type::Vec2i if value.is_inlined() => sdf::Value::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
 
-            Type::Vec3h if value.is_inlined() => sdf::Value::Vec3h(to_vec::<f16, 3>(self.unpack_value(value)?)),
+            Type::Vec3h if value.is_inlined() => sdf::Value::Vec3h(self.unpack_value::<[f16; 3]>(value)?.into()),
             Type::Vec3f if value.is_inlined() => sdf::Value::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
             Type::Vec3d if value.is_inlined() => sdf::Value::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
             Type::Vec3i if value.is_inlined() => sdf::Value::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
 
-            Type::Vec4h if value.is_inlined() => sdf::Value::Vec4h(to_vec::<f16, 4>(self.unpack_value(value)?)),
+            Type::Vec4h if value.is_inlined() => sdf::Value::Vec4h(self.unpack_value::<[f16; 4]>(value)?.into()),
             Type::Vec4f if value.is_inlined() => sdf::Value::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
             Type::Vec4d if value.is_inlined() => sdf::Value::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
             Type::Vec4i if value.is_inlined() => sdf::Value::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
