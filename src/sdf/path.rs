@@ -30,6 +30,13 @@ impl fmt::Display for Path {
     }
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Path {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.path.serialize(serializer)
+    }
+}
+
 impl FromStr for Path {
     type Err = anyhow::Error;
 

@@ -134,6 +134,124 @@ pub enum Value {
     PathExpression(String),
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Value {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        match self {
+            Value::None | Value::ValueBlock | Value::Value => serializer.serialize_none(),
+
+            Value::Bool(v) => v.serialize(serializer),
+            Value::BoolVec(v) => v.serialize(serializer),
+            Value::Uchar(v) => v.serialize(serializer),
+            Value::UcharVec(v) => v.serialize(serializer),
+            Value::Int(v) => v.serialize(serializer),
+            Value::IntVec(v) => v.serialize(serializer),
+            Value::Uint(v) => v.serialize(serializer),
+            Value::UintVec(v) => v.serialize(serializer),
+            Value::Int64(v) => v.serialize(serializer),
+            Value::Int64Vec(v) => v.serialize(serializer),
+            Value::Uint64(v) => v.serialize(serializer),
+            Value::Uint64Vec(v) => v.serialize(serializer),
+            Value::Half(v) => v.serialize(serializer),
+            Value::HalfVec(v) => v.serialize(serializer),
+            Value::Float(v) => v.serialize(serializer),
+            Value::FloatVec(v) => v.serialize(serializer),
+            Value::Double(v) => v.serialize(serializer),
+            Value::DoubleVec(v) => v.serialize(serializer),
+            Value::TimeCode(v) => v.serialize(serializer),
+            Value::TimeCodeVec(v) => v.serialize(serializer),
+
+            Value::String(v) | Value::Token(v) | Value::AssetPath(v) | Value::PathExpression(v) => {
+                v.serialize(serializer)
+            }
+            Value::StringVec(v) | Value::TokenVec(v) => v.serialize(serializer),
+
+            Value::Vec2h(v) => v.serialize(serializer),
+            Value::Vec3h(v) => v.serialize(serializer),
+            Value::Vec4h(v) => v.serialize(serializer),
+            Value::Quath(v) => v.serialize(serializer),
+            Value::Vec2f(v) => v.serialize(serializer),
+            Value::Vec3f(v) => v.serialize(serializer),
+            Value::Vec4f(v) => v.serialize(serializer),
+            Value::Quatf(v) => v.serialize(serializer),
+            Value::Vec2d(v) => v.serialize(serializer),
+            Value::Vec3d(v) => v.serialize(serializer),
+            Value::Vec4d(v) => v.serialize(serializer),
+            Value::Quatd(v) => v.serialize(serializer),
+            Value::Vec2i(v) => v.serialize(serializer),
+            Value::Vec3i(v) => v.serialize(serializer),
+            Value::Vec4i(v) => v.serialize(serializer),
+
+            Value::Vec2hVec(v) => v.serialize(serializer),
+            Value::Vec3hVec(v) => v.serialize(serializer),
+            Value::Vec4hVec(v) => v.serialize(serializer),
+            Value::QuathVec(v) => v.serialize(serializer),
+            Value::Vec2fVec(v) => v.serialize(serializer),
+            Value::Vec3fVec(v) => v.serialize(serializer),
+            Value::Vec4fVec(v) => v.serialize(serializer),
+            Value::QuatfVec(v) => v.serialize(serializer),
+            Value::Vec2dVec(v) => v.serialize(serializer),
+            Value::Vec3dVec(v) => v.serialize(serializer),
+            Value::Vec4dVec(v) => v.serialize(serializer),
+            Value::QuatdVec(v) => v.serialize(serializer),
+            Value::Vec2iVec(v) => v.serialize(serializer),
+            Value::Vec3iVec(v) => v.serialize(serializer),
+            Value::Vec4iVec(v) => v.serialize(serializer),
+
+            Value::Matrix2d(v) => v.chunks(2).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix3d(v) => v.chunks(3).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix4d(v) => v.chunks(4).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix2dVec(v) => {
+                v.iter().map(|m| m.chunks(2).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
+            }
+            Value::Matrix3dVec(v) => {
+                v.iter().map(|m| m.chunks(3).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
+            }
+            Value::Matrix4dVec(v) => {
+                v.iter().map(|m| m.chunks(4).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
+            }
+
+            Value::Specifier(v) => v.serialize(serializer),
+            Value::Permission(v) => v.serialize(serializer),
+            Value::Variability(v) => v.serialize(serializer),
+            Value::Dictionary(v) => v.serialize(serializer),
+
+            Value::TokenListOp(v) | Value::StringListOp(v) => v.serialize(serializer),
+            Value::PathListOp(v) => v.serialize(serializer),
+            Value::ReferenceListOp(v) => v.serialize(serializer),
+            Value::IntListOp(v) => v.serialize(serializer),
+            Value::Int64ListOp(v) => v.serialize(serializer),
+            Value::UIntListOp(v) => v.serialize(serializer),
+            Value::UInt64ListOp(v) => v.serialize(serializer),
+            Value::PayloadListOp(v) => v.serialize(serializer),
+
+            Value::Payload(v) => v.serialize(serializer),
+            Value::PathVec(v) => v.serialize(serializer),
+            Value::VariantSelectionMap(v) => v.serialize(serializer),
+            Value::LayerOffsetVec(v) => v.serialize(serializer),
+
+            Value::UnregisteredValue(v) => v.serialize(serializer),
+            Value::UnregisteredValueListOp(v) => v.serialize(serializer),
+
+            // Time samples serialize as a map with string keys.
+            Value::TimeSamples(v) => {
+                let mut map = serializer.serialize_map(Some(v.len()))?;
+                for (time, value) in v {
+                    let key = if time.fract() == 0.0 && time.is_finite() {
+                        format!("{}", *time as i64)
+                    } else {
+                        format!("{time}")
+                    };
+                    map.serialize_entry(&key, value)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
 /// Error returned when a [`Value`] cannot be converted to the requested type.
 #[derive(Debug, Clone)]
 pub struct ValueConversionError {
