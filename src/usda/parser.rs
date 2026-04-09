@@ -143,12 +143,19 @@ impl<'a> Parser<'a> {
             .context("Punctuation token expected")
     }
 
-    fn fetch_str(&mut self) -> Result<&str> {
-        let token = self.fetch_next()?;
-        token
-            .clone()
-            .try_as_string()
-            .ok_or_else(|| anyhow!("Unexpected token {token:?} (want String)"))
+    fn fetch_str(&mut self) -> Result<&'a str> {
+        match self.fetch_next()? {
+            Token::String(s) => Ok(s),
+            other => bail!("Unexpected token {other:?} (want String)"),
+        }
+    }
+
+    /// Consumes and returns a path reference (`<...>`) token, or errors.
+    fn fetch_path_ref(&mut self) -> Result<&'a str> {
+        match self.fetch_next()? {
+            Token::PathRef(s) => Ok(s),
+            other => bail!("Path reference expected, got {other:?}"),
+        }
     }
 
     /// Consumes and returns an identifier token, or errors.
@@ -598,12 +605,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a single `<...>` path reference token into an `sdf::Path`.
     fn parse_path_reference(&mut self) -> Result<sdf::Path> {
-        let token = self.fetch_next()?;
-        let path_str = token
-            .clone()
-            .try_as_path_ref()
-            .ok_or_else(|| anyhow!("Path reference expected, got {token:?}"))?;
-        sdf::Path::new(path_str)
+        sdf::Path::new(self.fetch_path_ref()?)
     }
 
     /// Parse the metadata block attached to a property and stash entries on the spec.
@@ -841,7 +843,7 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
-                let paths = self.one_or_list(Self::parse_path_ref)?;
+                let paths = self.one_or_list(Self::parse_path_reference)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build inherits listOp")?;
@@ -890,7 +892,7 @@ impl<'a> Parser<'a> {
                 spec.add(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
-                let paths = self.one_or_list(Self::parse_path_ref)?;
+                let paths = self.one_or_list(Self::parse_path_reference)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build specializes listOp")?;
@@ -931,12 +933,7 @@ impl<'a> Parser<'a> {
 
     /// Parse one reference entry, including optional target prim path and layer offset.
     fn parse_reference(&mut self) -> Result<sdf::Reference> {
-        let mut reference = sdf::Reference {
-            asset_path: String::new(),
-            prim_path: sdf::Path::default(),
-            layer_offset: sdf::LayerOffset::default(),
-            custom_data: HashMap::new(),
-        };
+        let mut reference = sdf::Reference::default();
 
         match self.fetch_next()? {
             Token::AssetRef(asset_path) => {
@@ -973,7 +970,7 @@ impl<'a> Parser<'a> {
         let mut layer_offset = sdf::LayerOffset::default();
         let mut custom_data = HashMap::new();
 
-        self.parse_seq_fn(';', |this, _index| {
+        self.parse_block('(', ')', |this| {
             let token = this.fetch_next()?;
             this.ensure_pun('=')?;
 
@@ -1003,11 +1000,7 @@ impl<'a> Parser<'a> {
 
     /// Parse one payload entry, including optional target prim path and layer offset.
     fn parse_payload(&mut self) -> Result<sdf::Payload> {
-        let mut payload = sdf::Payload {
-            asset_path: String::new(),
-            prim_path: sdf::Path::default(),
-            layer_offset: None,
-        };
+        let mut payload = sdf::Payload::default();
 
         match self.fetch_next()? {
             Token::AssetRef(asset_path) => {
@@ -1035,15 +1028,6 @@ impl<'a> Parser<'a> {
         Ok(payload)
     }
 
-    /// Parse a single `<path>` reference.
-    fn parse_path_ref(&mut self) -> Result<sdf::Path> {
-        let token = self.fetch_next()?;
-        let path_str = token
-            .clone()
-            .try_as_path_ref()
-            .ok_or_else(|| anyhow!("Path reference expected, got {token:?}"))?;
-        sdf::Path::new(path_str)
-    }
 
     fn apply_list_op<T: Default + Clone + PartialEq>(
         &mut self,
@@ -1330,7 +1314,7 @@ impl<'a> Parser<'a> {
                 let mut offset = None;
                 let mut scale = None;
 
-                this.parse_seq_fn(';', |this, _| {
+                this.parse_block('(', ')', |this| {
                     let token = this.fetch_next()?;
                     this.ensure_pun('=')?;
                     let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
@@ -1386,32 +1370,6 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parse delimiter-separated sequences like `(a, b)` or `(offset = ...; scale = ...)`.
-    fn parse_seq_fn(
-        &mut self,
-        delim: char,
-        mut read_element: impl FnMut(&mut Self, usize) -> Result<()>,
-    ) -> Result<()> {
-        self.ensure_pun('(').context("Open brace expected")?;
-
-        let mut index = 0;
-        loop {
-            if self.is_next(Token::Punctuation(')')) {
-                self.fetch_next()?;
-                break;
-            }
-
-            read_element(self, index).with_context(|| format!("Unable to read element {index}"))?;
-            index += 1;
-
-            // Consume optional delimiter between entries.
-            while self.is_next(Token::Punctuation(delim)) {
-                self.fetch_next()?;
-            }
-        }
-        Ok(())
-    }
-
     /// Parse fixed-size tuples, preserving order and surfacing contextual errors.
     fn parse_tuple<T, const N: usize>(&mut self) -> Result<[T; N]>
     where
@@ -1419,40 +1377,43 @@ impl<'a> Parser<'a> {
         <T as FromStr>::Err: Debug,
     {
         let mut result: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-        self.parse_seq_fn(',', |this, i| {
+        let mut i = 0;
+        self.parse_block('(', ')', |this| {
+            ensure!(i < N, "tuple has too many elements (expected {N})");
             result[i] = MaybeUninit::new(this.parse_token::<T>()?);
+            i += 1;
             Ok(())
         })?;
         let result = unsafe { std::mem::transmute_copy::<_, [T; N]>(&result) };
         Ok(result)
     }
 
-    /// Parse array or array of tuples.
-    fn parse_array<T>(&mut self) -> Result<Vec<T>>
-    where
-        T: FromStr + Default,
-        <T as FromStr>::Err: Debug,
-    {
+    /// Parse a `[...]` array, using `parse_element` for each item.
+    fn parse_array_with<T>(&mut self, mut parse_element: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
         let mut out = Vec::new();
         self.parse_block('[', ']', |this| {
-            out.push(this.parse_token::<T>()?);
+            out.push(parse_element(this)?);
             Ok(())
         })?;
         Ok(out)
     }
 
-    /// Parse array of tuples.
+    /// Parse a `[scalar, ...]` array of `FromStr` values.
+    fn parse_array<T>(&mut self) -> Result<Vec<T>>
+    where
+        T: FromStr + Default,
+        <T as FromStr>::Err: Debug,
+    {
+        self.parse_array_with(Self::parse_token)
+    }
+
+    /// Parse a `[(tuple), ...]` array of fixed-size tuples.
     fn parse_array_of_tuples<T, const N: usize>(&mut self) -> Result<Vec<[T; N]>>
     where
         T: FromStr,
         <T as FromStr>::Err: Debug,
     {
-        let mut out = Vec::new();
-        self.parse_block('[', ']', |this| {
-            out.push(this.parse_tuple::<T, N>()?);
-            Ok(())
-        })?;
-        Ok(out)
+        self.parse_array_with(Self::parse_tuple)
     }
 
     /// Parse a single matrix literal, flattening rows in row-major order.
@@ -1467,7 +1428,7 @@ impl<'a> Parser<'a> {
 
         let mut values = [0_f64; M];
         let mut idx = 0;
-        self.parse_seq_fn(',', |this, _| {
+        self.parse_block('(', ')', |this| {
             let row = this.parse_tuple::<f64, N>()?;
             for v in row {
                 ensure!(idx < M, "matrix{N}d literal has too many elements");
@@ -1480,26 +1441,9 @@ impl<'a> Parser<'a> {
         Ok(values)
     }
 
-    /// Parse an array of matrices: `[ matrix, matrix, ... ]`.
+    /// Parse `[ matrix, matrix, ... ]`.
     fn parse_matrix_array<const N: usize, const M: usize>(&mut self) -> Result<Vec<[f64; M]>> {
-        let mut matrices = Vec::new();
-        self.parse_block('[', ']', |this| {
-            let mut values = [0_f64; M];
-            let mut idx = 0;
-            this.parse_seq_fn(',', |this, _| {
-                let row = this.parse_tuple::<f64, N>()?;
-                for v in row {
-                    ensure!(idx < M, "matrix{N}d literal has too many elements");
-                    values[idx] = v;
-                    idx += 1;
-                }
-                Ok(())
-            })?;
-            ensure!(idx == M, "matrix{N}d literal must contain {N} rows");
-            matrices.push(values);
-            Ok(())
-        })?;
-        Ok(matrices)
+        self.parse_array_with(Self::parse_matrix::<N, M>)
     }
 }
 
