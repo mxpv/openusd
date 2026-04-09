@@ -224,6 +224,43 @@ impl Path {
         Path::from_str_unchecked(&format!("{}{{{set}={selection}}}", self.path))
     }
 
+    /// Resolve a relative path against this path as anchor.
+    ///
+    /// Absolute paths are returned as-is. Relative segments (`..`) walk up
+    /// from the anchor's prim path.
+    ///
+    /// Equivalent to C++ `SdfPath::MakeAbsolutePath`.
+    ///
+    /// ```text
+    /// "/A/B".make_absolute("../C")   -> "/A/C"
+    /// "/A/B".make_absolute("C/D")    -> "/A/B/C/D"
+    /// "/A".make_absolute("/X")       -> "/X"
+    /// ```
+    pub fn make_absolute(&self, target: &Path) -> Path {
+        let s = target.as_str();
+        if s.starts_with('/') {
+            return target.clone();
+        }
+
+        // Walk up from the anchor for each leading `..` segment.
+        let base = self.prim_path();
+        let mut anchor = base.as_str();
+        let mut rest = s;
+        while let Some(tail) = rest.strip_prefix("..") {
+            // Strip one parent from anchor.
+            anchor = anchor.rsplit_once('/').map_or("/", |(pre, _)| if pre.is_empty() { "/" } else { pre });
+            rest = tail.strip_prefix('/').unwrap_or(tail);
+        }
+
+        if rest.is_empty() {
+            return Path::from_str_unchecked(anchor);
+        }
+        if anchor == "/" {
+            return Path::from_str_unchecked(&format!("/{rest}"));
+        }
+        Path::from_str_unchecked(&format!("{anchor}/{rest}"))
+    }
+
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.path
@@ -536,5 +573,17 @@ mod tests {
         assert!(!Path::is_valid_identifier("te st"));
         assert!(!Path::is_valid_identifier("te.st"));
         assert!(!Path::is_valid_identifier("te:st"));
+    }
+
+    #[test]
+    fn make_absolute() {
+        let abs = |anchor, target| Path::from_str_unchecked(anchor).make_absolute(&Path::from_str_unchecked(target));
+
+        assert_eq!(abs("/A/B", "/X/Y").as_str(), "/X/Y");
+        assert_eq!(abs("/A/B", "../C").as_str(), "/A/C");
+        assert_eq!(abs("/A/B/C", "../../D").as_str(), "/A/D");
+        assert_eq!(abs("/A", "../X").as_str(), "/X");
+        assert_eq!(abs("/A/B", "..").as_str(), "/A");
+        assert_eq!(abs("/A/B", "C/D").as_str(), "/A/B/C/D");
     }
 }

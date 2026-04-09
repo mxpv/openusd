@@ -138,8 +138,8 @@ pub enum Token<'source> {
     AssetRef(&'source str),
 
     /// Punctuation characters
-    /// Examples: "=", ",", ";", "(", ")", "{", "}", "[", "]", "+", "-"
-    #[regex(r"[=,;()\{\}\[\]+\-]", |lex| lex.slice().chars().next().unwrap())]
+    /// Examples: "=", ",", ";", ":", "(", ")", "{", "}", "[", "]", "+", "-", "."
+    #[regex(r"[=,:;.()\{\}\[\]+\-]", |lex| lex.slice().chars().next().unwrap())]
     Punctuation(char),
 
     /// Namespaced identifiers (contains colon)

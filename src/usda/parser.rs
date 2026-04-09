@@ -345,6 +345,7 @@ impl<'a> Parser<'a> {
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
+        let mut suffixed_properties = Vec::<String>::new();
         let mut variant_sets = Vec::new();
 
         self.parse_block('{', '}', |this| {
@@ -363,14 +364,20 @@ impl<'a> Parser<'a> {
                 }
                 Token::Rel => {
                     this.fetch_next()?;
-                    this.read_relationship(path, false, &mut properties, data)?;
+                    this.read_relationship(path, false, &mut properties, data, None)?;
                 }
                 _ => {
-                    this.read_attribute(path, &mut properties, data)?;
+                    this.read_attribute(path, &mut properties, &mut suffixed_properties, data)?;
                 }
             }
             Ok(())
         })?;
+
+        // Append properties that were only declared via suffixed forms
+        // (e.g. `.connect`, `.timeSamples`) and never had a bare declaration.
+        for name in suffixed_properties {
+            push_unique(&mut properties, &name);
+        }
 
         Ok((children, properties, variant_sets))
     }
@@ -428,27 +435,57 @@ impl<'a> Parser<'a> {
         Ok(name)
     }
 
+    /// Merge a spec's fields into an existing spec at the given path, or insert it.
+    fn merge_spec(data: &mut HashMap<sdf::Path, sdf::Spec>, path: sdf::Path, spec: sdf::Spec) {
+        use std::collections::hash_map::Entry;
+        match data.entry(path) {
+            Entry::Occupied(mut e) => e.get_mut().fields.extend(spec.fields),
+            Entry::Vacant(e) => {
+                e.insert(spec);
+            }
+        }
+    }
+
+    /// Create an attribute spec with the standard type/custom/variability fields.
+    fn make_attribute_spec(type_info: &TypeInfo, custom: bool, variability: sdf::Variability) -> sdf::Spec {
+        let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
+        spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
+        if custom {
+            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+        }
+        if variability != sdf::Variability::default() {
+            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+        }
+        spec
+    }
+
     /// Parse an attribute/property declaration, including variability, metadata, and default value.
     fn read_attribute(
         &mut self,
         current_path: &sdf::Path,
         properties: &mut Vec<String>,
+        suffixed_properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<()> {
-        let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
         let mut custom = false;
-        let mut variability = sdf::Variability::Varying;
+        let list_op = self.try_list_op();
 
         if self.is_next(Token::Custom) {
             self.fetch_next()?;
-            // `custom` can prefix relationships as well as attributes.
             if self.is_next(Token::Rel) {
                 self.fetch_next()?;
-                return self.read_relationship(current_path, true, properties, data);
+                return self.read_relationship(current_path, true, properties, data, list_op);
             }
             custom = true;
         }
 
+        if self.is_next(Token::Rel) {
+            self.fetch_next()?;
+            return self.read_relationship(current_path, false, properties, data, list_op);
+        }
+
+        let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
+        let mut variability = sdf::Variability::Varying;
         if self.is_next(Token::Varying) {
             self.fetch_next()?;
         } else if self.is_next(Token::Uniform) {
@@ -465,52 +502,74 @@ impl<'a> Parser<'a> {
                 .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
         };
 
+        // Read optional `.suffix` (e.g. `.connect`, `.timeSamples`).
+        // In USDA the dot and suffix can be separated by whitespace.
+        let (name, suffix) = if let Some((base, sfx)) = name.rsplit_once('.') {
+            (base, Some(sfx))
+        } else if self.is_next(Token::Punctuation('.')) {
+            self.fetch_next()?;
+            let next = self.fetch_next()?;
+            let sfx = match next {
+                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
+                ref kw => keyword_lexeme(kw)
+                    .ok_or_else(|| anyhow!("expected suffix after '.', got {next:?}"))?,
+            };
+            (name, Some(sfx))
+        } else {
+            (name, None)
+        };
+
         // Check for metadata before checking for assignment
         if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
 
-        if name.contains(".connect") {
+        if suffix == Some("connect") {
+            push_unique(suffixed_properties, name);
             if self.is_next(Token::Punctuation('=')) {
                 self.fetch_next()?;
-                let list_op = self.try_list_op();
+                let list_op = list_op.or(self.try_list_op());
                 let targets = self
                     .parse_connection_targets()
                     .context("Unable to parse connection targets")?;
                 let path = current_path.append_property(name)?;
-                properties.push(name.to_string());
 
-                if custom {
-                    spec.add(FieldKey::Custom, sdf::Value::Bool(true));
-                }
-                if variability != sdf::Variability::default() {
-                    spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-                }
-                spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
+                let spec = data
+                    .entry(path)
+                    .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
 
                 let list_op = self
                     .apply_list_op(list_op, targets)
                     .context("Unable to build connection listOp")?;
                 spec.add(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
-                data.insert(path, spec);
             }
+            return Ok(());
+        }
+
+        if suffix == Some("timeSamples") {
+            push_unique(suffixed_properties, name);
+            self.ensure_pun('=')?;
+            let samples = self.parse_time_samples()?;
+            let path = current_path.append_property(name)?;
+
+            let spec = data
+                .entry(path)
+                .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
+            spec.add(FieldKey::TimeSamples, sdf::Value::TimeSamples(samples));
             return Ok(());
         }
 
         // Check if there's an assignment
         if !self.is_next(Token::Punctuation('=')) {
             let path = current_path.append_property(name)?;
-            properties.push(name.to_string());
+            if !properties.contains(&name.to_string()) {
+                properties.push(name.to_string());
+            }
 
-            if custom {
-                spec.add(FieldKey::Custom, sdf::Value::Bool(true));
-            }
-            if variability != sdf::Variability::default() {
-                spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-            }
-            spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
-            data.insert(path, spec);
+            let mut base = Self::make_attribute_spec(&type_info, custom, variability);
+            base.fields.extend(spec.fields);
+            Self::merge_spec(data, path, base);
             return Ok(());
         }
 
@@ -518,23 +577,17 @@ impl<'a> Parser<'a> {
         let value = self.parse_value(type_info)?;
         let path = current_path.append_property(name)?;
 
-        // Check for metadata after value (could appear here instead of before)
         if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
                 .context("Unable to parse attribute metadata")?;
         }
 
-        properties.push(name.to_string());
+        push_unique(properties, name);
 
-        if custom {
-            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
-        }
-        if variability != sdf::Variability::default() {
-            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
-        }
-        spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
-        spec.add(FieldKey::Default, value);
-        data.insert(path, spec);
+        let mut base = Self::make_attribute_spec(&type_info, custom, variability);
+        base.fields.extend(spec.fields);
+        base.add(FieldKey::Default, value);
+        Self::merge_spec(data, path, base);
 
         Ok(())
     }
@@ -556,25 +609,32 @@ impl<'a> Parser<'a> {
     /// Parse the metadata block attached to a property and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
         self.parse_block('(', ')', |this| {
+            let list_op = this.try_list_op();
+
             let name_token = this.fetch_next()?;
             let name = match name_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::CustomData => "customData".to_owned(),
                 Token::Doc => FieldKey::Documentation.as_str().to_owned(),
-                // Allow other keywords as metadata keys
-                other => {
-                    if let Some(lexeme) = keyword_lexeme(&other) {
-                        lexeme.to_owned()
-                    } else {
-                        bail!("Unexpected attribute metadata name token: {other:?}")
-                    }
-                }
+                other => keyword_lexeme(&other)
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("Unexpected attribute metadata name token: {other:?}"))?,
             };
 
             this.ensure_pun('=')?;
             let value = this
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
+
+            // Wrap in a dictionary keyed by the list op name to match the baseline format.
+            let value = match list_op {
+                Some(ref tok @ (Token::Prepend | Token::Append | Token::Delete | Token::Add)) => {
+                    let key = keyword_lexeme(tok).unwrap().to_owned();
+                    sdf::Value::Dictionary(HashMap::from([(key, value)]))
+                }
+                _ => value,
+            };
+
             spec.fields.insert(name, value);
             Ok(())
         })?;
@@ -584,20 +644,33 @@ impl<'a> Parser<'a> {
 
     /// Parse a single attribute metadata value (scalar or array) from within a metadata block.
     fn parse_property_metadata_value(&mut self) -> Result<sdf::Value> {
-        // Handle array case first by peeking, so parse_block can consume the '['
+        // Handle array case: parse each element as a typed scalar, then collect
+        // into the most specific Vec variant that fits all elements.
         if self.is_next(Token::Punctuation('[')) {
             let mut values = Vec::new();
             self.parse_block('[', ']', |this| {
-                let entry = this.fetch_next()?;
-                let value = match entry {
-                    Token::String(v) => v.to_owned(),
-                    Token::Identifier(v) | Token::NamespacedIdentifier(v) | Token::Number(v) => v.to_owned(),
-                    other => bail!("Unsupported metadata array element: {other:?}"),
-                };
-                values.push(value);
+                values.push(this.parse_property_metadata_value()?);
                 Ok(())
             })?;
-            return Ok(sdf::Value::StringVec(values));
+
+            // Infer the array type from the first element.
+            return Ok(match values.first() {
+                Some(sdf::Value::Double(_)) => sdf::Value::DoubleVec(
+                    values.into_iter().map(|v| v.try_as_double().unwrap_or_default()).collect(),
+                ),
+                Some(sdf::Value::Int64(_)) => sdf::Value::Int64Vec(
+                    values.into_iter().map(|v| v.try_as_int_64().unwrap_or_default()).collect(),
+                ),
+                _ => sdf::Value::StringVec(
+                    values
+                        .into_iter()
+                        .map(|v| match v {
+                            sdf::Value::String(s) | sdf::Value::Token(s) => s,
+                            other => format!("{other:?}"),
+                        })
+                        .collect(),
+                ),
+            });
         }
 
         // Handle dictionary case by peeking, so parse_dictionary can consume the '{'
@@ -634,13 +707,9 @@ impl<'a> Parser<'a> {
             let key_token = this.fetch_next()?;
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
-                other => {
-                    if let Some(lexeme) = keyword_lexeme(&other) {
-                        lexeme.to_owned()
-                    } else {
-                        bail!("Expected identifier as dictionary key, got: {other:?}")
-                    }
-                }
+                other => keyword_lexeme(&other)
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
             };
 
             this.ensure_pun('=')?;
@@ -663,6 +732,7 @@ impl<'a> Parser<'a> {
         custom: bool,
         properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
+        outer_list_op: Option<Token<'a>>,
     ) -> Result<()> {
         let name = self.expect_identifier().context("relationship name expected")?;
 
@@ -677,23 +747,24 @@ impl<'a> Parser<'a> {
                 .context("Unable to parse relationship metadata")?;
         }
 
+        let path = current_path.append_property(name)?;
+        push_unique(properties, name);
+
         // Check if there's an assignment
         if !self.is_next(Token::Punctuation('=')) {
-            let path = current_path.append_property(name)?;
-            properties.push(name.to_string());
-
-            data.insert(path, spec);
+            Self::merge_spec(data, path, spec);
             return Ok(());
         }
 
         self.ensure_pun('=')?;
-        let list_op = self.try_list_op();
-        let targets = self
-            .parse_connection_targets()
-            .context("Unable to parse relationship targets")?;
-
-        let path = current_path.append_property(name)?;
-        properties.push(name.to_string());
+        let list_op = outer_list_op.or(self.try_list_op());
+        let targets: Vec<sdf::Path> = self
+            .one_or_list(Self::parse_path_reference)
+            .context("Unable to parse relationship targets")?
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .map(|p| path.make_absolute(&p))
+            .collect();
 
         let list_op = self
             .apply_list_op(list_op, targets)
@@ -705,7 +776,7 @@ impl<'a> Parser<'a> {
                 .context("Unable to parse relationship metadata")?;
         }
 
-        data.insert(path, spec);
+        Self::merge_spec(data, path, spec);
         Ok(())
     }
 
@@ -839,6 +910,23 @@ impl<'a> Parser<'a> {
         }
 
         Ok(())
+    }
+
+    /// Parse a time sample map: `{ time : value, time : value, ... }`.
+    fn parse_time_samples(&mut self) -> Result<sdf::TimeSampleMap> {
+        let mut samples = Vec::new();
+        self.parse_block('{', '}', |this| {
+            let time_str = this.fetch_next()?;
+            let time: f64 = match time_str {
+                Token::Number(s) => s.parse()?,
+                other => bail!("Expected time value, got {other:?}"),
+            };
+            this.ensure_pun(':')?;
+            let value = this.parse_property_metadata_value()?;
+            samples.push((time, value));
+            Ok(())
+        })?;
+        Ok(samples)
     }
 
     /// Parse one reference entry, including optional target prim path and layer offset.
@@ -982,6 +1070,12 @@ impl<'a> Parser<'a> {
 
     /// Decode a typed value based on USD's scalar/array/role type tables.
     fn parse_value(&mut self, info: TypeInfo) -> Result<sdf::Value> {
+        // None means "value block" (explicitly unset) regardless of type.
+        if self.is_next(Token::None) {
+            self.fetch_next()?;
+            return Ok(sdf::Value::ValueBlock);
+        }
+
         let value = match (info.ty, info.is_array) {
             (Type::Bool, false) => sdf::Value::Bool(self.parse_bool()?),
             (Type::Bool, true) => sdf::Value::BoolVec(self.parse_bool_array()?),
@@ -1408,6 +1502,14 @@ impl<'a> Parser<'a> {
         Ok(matrices)
     }
 }
+
+/// Push a string into a Vec if it's not already present.
+fn push_unique(vec: &mut Vec<String>, name: &str) {
+    if !vec.iter().any(|s| s == name) {
+        vec.push(name.to_owned());
+    }
+}
+
 
 /// Result of parsing a type declaration, holding the parsed base type,
 /// the original token text, and whether `[]` was present.
@@ -1922,11 +2024,9 @@ def Shader "Image_Texture"
             Some(sdf::Value::Token(t)) if t == "token"
         ));
 
-        let connection_spec = data
-            .get(&sdf::path("/Image_Texture.outputs:surface.connect").unwrap())
-            .expect("missing outputs:surface.connect spec");
+        // Connection paths are stored on the same spec (not a separate `.connect` spec).
         assert!(matches!(
-            connection_spec
+            output_spec
                 .fields
                 .get(FieldKey::ConnectionPaths.as_str()),
             Some(sdf::Value::PathListOp(op)) if op.explicit_items.len() == 1
@@ -1943,7 +2043,6 @@ def Shader "Image_Texture"
         assert!(props.contains(&"info:id".to_string()));
         assert!(props.contains(&"doubleSided".to_string()));
         assert!(props.contains(&"inputs:file".to_string()));
-        assert!(props.contains(&"outputs:surface.connect".to_string()));
         assert!(props.contains(&"outputs:surface".to_string()));
     }
 
@@ -2049,7 +2148,6 @@ def Material "Mat"
             .and_then(|value| value.clone().try_as_token_vec())
             .unwrap_or_default();
         assert!(props.contains(&"outputs:surface".to_string()));
-        assert!(props.contains(&"outputs:surface.connect".to_string()));
 
         let output = data
             .get(&sdf::path("/Mat.outputs:surface").unwrap())
@@ -2059,10 +2157,8 @@ def Material "Mat"
             Some(sdf::Value::Token(t)) if t == "token"
         ));
 
-        let connection = data
-            .get(&sdf::path("/Mat.outputs:surface.connect").unwrap())
-            .expect("missing outputs:surface.connect spec");
-        match connection.fields.get(FieldKey::ConnectionPaths.as_str()) {
+        // Connection paths are stored on the same spec (not a separate `.connect` spec).
+        match output.fields.get(FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
                 assert_eq!(op.explicit_items.len(), 1);
                 assert_eq!(op.explicit_items[0].as_str(), "/Mat/Preview.outputs:surface");
