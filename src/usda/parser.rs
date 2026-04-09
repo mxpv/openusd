@@ -1052,6 +1052,8 @@ impl<'a> Parser<'a> {
 
             (Type::Dictionary, _) => self.parse_dictionary()?,
 
+            (Type::Custom, _) => bail!("Cannot parse value for unrecognized type: {}", info.type_name),
+
             (ty, true) => bail!("Array of {ty:?} is not supported"),
         };
 
@@ -1110,10 +1112,7 @@ impl<'a> Parser<'a> {
             _ => return Ok(None),
         };
 
-        let ty = match Self::parse_base_type(base) {
-            Ok(ty) => ty,
-            Err(_) => return Ok(None),
-        };
+        let ty = Self::parse_base_type(base).unwrap_or(Type::Custom);
         self.fetch_next()?;
 
         let mut is_array = false;
@@ -1481,6 +1480,8 @@ enum Type {
     Matrix3d,
     Matrix4d,
     Dictionary,
+    /// Unrecognized type name; the raw name is preserved in `TypeInfo::type_name`.
+    Custom,
 }
 
 fn keyword_lexeme(token: &Token<'_>) -> Option<&'static str> {
@@ -2603,9 +2604,9 @@ def Xform "root" {
     #[test]
     fn try_parse_type_not_a_type() {
         let mut parser = Parser::new("foobar x");
-        assert!(parser.try_parse_type().unwrap().is_none());
-        // Token should not have been consumed.
-        assert_eq!(parser.expect_identifier().unwrap(), "foobar");
+        let info = parser.try_parse_type().unwrap().unwrap();
+        assert_eq!(info.ty, Type::Custom);
+        assert_eq!(info.type_name, "foobar");
     }
 
     #[test]
