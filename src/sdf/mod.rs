@@ -42,6 +42,8 @@ pub enum SpecType {
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum Specifier {
     Def,
     Over,
@@ -56,6 +58,8 @@ pub enum Specifier {
 /// permission to access the prim will be ignored.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum Permission {
     Public,
     Private,
@@ -67,6 +71,8 @@ pub enum Permission {
 /// or from its owner.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum Variability {
     Varying,
     Uniform,
@@ -75,6 +81,7 @@ pub enum Variability {
 /// Represents a time offset and scale between layers.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct LayerOffset {
     /// Time offset.
     pub offset: f64,
@@ -113,12 +120,16 @@ impl LayerOffset {
 /// system behaviors will not traverse across, providing a user-visible
 /// way to manage the working set of the scene.
 #[derive(Debug, Default, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Payload {
     /// The asset path to the external layer.
+    #[cfg_attr(feature = "serde", serde(rename = "asset", skip_serializing_if = "String::is_empty"))]
     pub asset_path: String,
     /// The root prim path to the referenced prim in the external layer.
+    #[cfg_attr(feature = "serde", serde(rename = "path", skip_serializing_if = "Path::is_empty"))]
     pub prim_path: Path,
     /// The layer offset to transform time.
+    #[cfg_attr(feature = "serde", serde(rename = "layerOffset", skip_serializing_if = "Option::is_none"))]
     pub layer_offset: Option<LayerOffset>,
 }
 
@@ -129,14 +140,19 @@ pub struct Payload {
 /// under the referenced prim will be composed with the opinions in the
 /// namespace hierarchy under the referencing prim.
 #[derive(Debug, Default, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Reference {
     /// The asset path to the external layer.
+    #[cfg_attr(feature = "serde", serde(rename = "asset", skip_serializing_if = "String::is_empty"))]
     pub asset_path: String,
     /// The path to the referenced prim in the external layer.
+    #[cfg_attr(feature = "serde", serde(rename = "path", skip_serializing_if = "Path::is_empty"))]
     pub prim_path: Path,
     /// The layer offset to transform time.
+    #[cfg_attr(feature = "serde", serde(rename = "layerOffset"))]
     pub layer_offset: LayerOffset,
     /// The custom data associated with the reference.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     pub custom_data: HashMap<String, Value>,
 }
 
@@ -145,13 +161,21 @@ pub struct Reference {
 /// `ListOp`` is a value type representing an operation that edits a list.
 /// It may add or remove items, reorder them, or replace the list entirely.
 #[derive(Default, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ListOp<T: Default + Clone + PartialEq> {
+    #[cfg_attr(feature = "serde", serde(skip))]
     pub explicit: bool,
+    #[cfg_attr(feature = "serde", serde(rename = "explicit", skip_serializing_if = "Vec::is_empty"))]
     pub explicit_items: Vec<T>,
+    #[cfg_attr(feature = "serde", serde(rename = "add", skip_serializing_if = "Vec::is_empty"))]
     pub added_items: Vec<T>,
+    #[cfg_attr(feature = "serde", serde(rename = "prepend", skip_serializing_if = "Vec::is_empty"))]
     pub prepended_items: Vec<T>,
+    #[cfg_attr(feature = "serde", serde(rename = "append", skip_serializing_if = "Vec::is_empty"))]
     pub appended_items: Vec<T>,
+    #[cfg_attr(feature = "serde", serde(rename = "delete", skip_serializing_if = "Vec::is_empty"))]
     pub deleted_items: Vec<T>,
+    #[cfg_attr(feature = "serde", serde(rename = "order", skip_serializing_if = "Vec::is_empty"))]
     pub ordered_items: Vec<T>,
 }
 
