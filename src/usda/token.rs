@@ -121,9 +121,9 @@ pub enum Token<'source> {
     Varying,
 
     /// Numbers (int, float, scientific notation)
-    /// Examples: "42", "3.14", "1.23e-4", "-42", "+3.14"
-    /// Matches unsigned numbers OR signed numbers (sign must be followed by digit)
-    #[regex(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?|[+-][0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?", |lex| lex.slice())]
+    /// Examples: "42", "3.14", "1.23e-4", "-42", "+3.14", "-.67"
+    /// Matches unsigned numbers OR signed numbers (sign may be followed by dot)
+    #[regex(r"[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?|[+-]([0-9]+(\.[0-9]+)?|\.[0-9]+)([eE][+-]?[0-9]+)?", |lex| lex.slice())]
     Number(&'source str),
 
     /// Path references
