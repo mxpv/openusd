@@ -313,7 +313,7 @@ impl<'a> Parser<'a> {
             })?;
         }
 
-        let (children, props) = self.read_prim_body(&prim_path, data)?;
+        let (children, props, variant_sets) = self.read_prim_body(&prim_path, data)?;
         if !children.is_empty() {
             spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
         }
@@ -322,6 +322,9 @@ impl<'a> Parser<'a> {
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
         if !properties.is_empty() {
             spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+        }
+        if !variant_sets.is_empty() {
+            spec.add(ChildrenKey::VariantSetChildren, sdf::Value::TokenVec(variant_sets));
         }
         data.insert(prim_path, spec);
 
@@ -335,9 +338,10 @@ impl<'a> Parser<'a> {
         &mut self,
         path: &sdf::Path,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
-    ) -> Result<(Vec<String>, Vec<String>)> {
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
+        let mut variant_sets = Vec::new();
 
         self.parse_block('{', '}', |this| {
             match this
@@ -350,7 +354,8 @@ impl<'a> Parser<'a> {
                     this.read_prim(path, &mut children, data)?;
                 }
                 Token::VariantSet => {
-                    this.read_variant_set(path, data)?;
+                    let name = this.read_variant_set(path, data)?;
+                    variant_sets.push(name);
                 }
                 Token::Rel => {
                     this.fetch_next()?;
@@ -363,14 +368,14 @@ impl<'a> Parser<'a> {
             Ok(())
         })?;
 
-        Ok((children, properties))
+        Ok((children, properties, variant_sets))
     }
 
     /// Parse a `variantSet "name" = { "variant1" (...) { ... } ... }` block.
     ///
     /// Each variant inside the set is represented as a child prim under a variant set
     /// spec in the scene hierarchy: `/{prim}{vset=name}{variant}`.
-    fn read_variant_set(&mut self, prim_path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<()> {
+    fn read_variant_set(&mut self, prim_path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<String> {
         self.fetch_next()?; // consume `variantSet`
 
         let name = self.fetch_str().context("Expected variant set name")?.to_string();
@@ -399,12 +404,15 @@ impl<'a> Parser<'a> {
             }
 
             // Variant body.
-            let (children, properties) = this.read_prim_body(&variant_path, data)?;
+            let (children, properties, variant_sets) = this.read_prim_body(&variant_path, data)?;
             if !children.is_empty() {
                 variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             }
             if !properties.is_empty() {
                 variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+            }
+            if !variant_sets.is_empty() {
+                variant_spec.add(ChildrenKey::VariantSetChildren, sdf::Value::TokenVec(variant_sets));
             }
             data.insert(variant_path, variant_spec);
             Ok(())
@@ -413,7 +421,7 @@ impl<'a> Parser<'a> {
         vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::TokenVec(variant_children));
         data.insert(vset_path, vset_spec);
 
-        Ok(())
+        Ok(name)
     }
 
     /// Parse an attribute/property declaration, including variability, metadata, and default value.
@@ -2141,7 +2149,7 @@ def Xform "World"
 
         let props = world
             .fields
-            .get("properties")
+            .get(ChildrenKey::PropertyChildren.as_str())
             .unwrap()
             .to_owned()
             .try_as_token_vec()

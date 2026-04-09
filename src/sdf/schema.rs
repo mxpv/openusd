@@ -175,7 +175,7 @@ impl ChildrenKey {
             ChildrenKey::MapperArgChildren => "mapperArgChildren",
             ChildrenKey::MapperChildren => "mapperChildren",
             ChildrenKey::PrimChildren => "primChildren",
-            ChildrenKey::PropertyChildren => "properties",
+            ChildrenKey::PropertyChildren => "propertyChildren",
             ChildrenKey::RelationshipTargetChildren => "targetChildren",
             ChildrenKey::VariantChildren => "variantChildren",
             ChildrenKey::VariantSetChildren => "variantSetChildren",
