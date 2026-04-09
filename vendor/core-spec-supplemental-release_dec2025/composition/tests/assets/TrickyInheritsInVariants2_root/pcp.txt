@@ -1,0 +1,64 @@
+Loading @composition/tests/assets/TrickyInheritsInVariants2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </_class_Model>
+
+Prim Stack:
+    root.usd             /_class_Model
+
+------------------------------------------------------------------------
+Results for composing </Sarah>
+
+Prim Stack:
+    root.usd             /Sarah
+    root.usd             /_class_Model
+    Sarah_modelComplexity.usd /Sarah
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}
+    Sarah_rig.usd        /Sarah
+
+Variant Selections:
+    {modelComplexity = full}
+
+Child names:
+     ['FaceRig']
+
+------------------------------------------------------------------------
+Results for composing </Sarah/FaceRig>
+
+Prim Stack:
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}FaceRig
+    Sarah_rig.usd        /Sarah/FaceRig
+
+Child names:
+     ['EyesRig']
+
+------------------------------------------------------------------------
+Results for composing </Sarah/FaceRig/EyesRig>
+
+Prim Stack:
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}FaceRig/EyesRig
+    Sarah_rig.usd        /Sarah/FaceRig/EyesRig
+
+Child names:
+     ['SymEyeRig', 'LEyeRig']
+
+------------------------------------------------------------------------
+Results for composing </Sarah/FaceRig/EyesRig/SymEyeRig>
+
+Prim Stack:
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}FaceRig/EyesRig/SymEyeRig
+    Sarah_rig.usd        /Sarah/FaceRig/EyesRig/SymEyeRig
+
+------------------------------------------------------------------------
+Results for composing </Sarah/FaceRig/EyesRig/LEyeRig>
+
+Prim Stack:
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}FaceRig/EyesRig/LEyeRig
+    Sarah_modelComplexity.usd /Sarah{modelComplexity=full}FaceRig/EyesRig/SymEyeRig
+    Sarah_rig.usd        /Sarah/FaceRig/EyesRig/LEyeRig
+    Sarah_rig.usd        /Sarah/FaceRig/EyesRig/SymEyeRig
+

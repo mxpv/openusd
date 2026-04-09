@@ -1,0 +1,231 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/PayloadedModel": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel",
+                "model_payload.usd": "/Model"
+            },
+            "Child names": [
+                "Rig",
+                "Test"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ],
+            "Property names": [
+                "doc"
+            ],
+            "Property stacks": {
+                "/PayloadedModel.doc": {
+                    "model_payload.usd": "/Model.doc"
+                }
+            }
+        },
+        "/PayloadedModel/Rig": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Child names": [
+                "SymRigBase",
+                "SymRig",
+                "LRig"
+            ]
+        },
+        "/PayloadedModel/Rig/SymRigBase": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Rig/SymRigBase/Anim": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/PayloadedModel/Rig/SymRigBase/Anim.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        },
+        "/PayloadedModel/Rig/SymRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Rig/SymRig/Anim": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/PayloadedModel/Rig/SymRig/Anim.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        },
+        "/PayloadedModel/Rig/LRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Test": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel/Test"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Test/Anim": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Anim"
+            },
+            "Child names": [
+                "LRig"
+            ]
+        },
+        "/PayloadedModel/Test/Anim/LRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/PayloadedModel/Test/Anim/LRig.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        },
+        "/ReferencePayloadedModel": {
+            "Prim Stack": {
+                "root.usd": "/ReferencePayloadedModel",
+                "model.usd": "/Model",
+                "model_payload.usd": "/Model"
+            },
+            "Child names": [
+                "Rig",
+                "Test"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ],
+            "Property names": [
+                "doc"
+            ],
+            "Property stacks": {
+                "/ReferencePayloadedModel.doc": {
+                    "model_payload.usd": "/Model.doc"
+                }
+            }
+        },
+        "/ReferencePayloadedModel/Rig": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Child names": [
+                "SymRigBase",
+                "SymRig",
+                "LRig"
+            ]
+        },
+        "/ReferencePayloadedModel/Rig/SymRigBase": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Rig/SymRigBase/Anim": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/ReferencePayloadedModel/Rig/SymRigBase/Anim.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        },
+        "/ReferencePayloadedModel/Rig/SymRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Rig/SymRig/Anim": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/ReferencePayloadedModel/Rig/SymRig/Anim.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        },
+        "/ReferencePayloadedModel/Rig/LRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Test": {
+            "Prim Stack": {
+                "model.usd": "/Model/Test"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Test/Anim": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Anim"
+            },
+            "Child names": [
+                "LRig"
+            ]
+        },
+        "/ReferencePayloadedModel/Test/Anim/LRig": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/SymRigBase/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/ReferencePayloadedModel/Test/Anim/LRig.foo": {
+                    "rig.usd": "/Rig/SymRigBase/Anim.foo"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

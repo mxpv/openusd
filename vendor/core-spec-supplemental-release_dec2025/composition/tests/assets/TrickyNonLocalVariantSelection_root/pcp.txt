@@ -1,0 +1,24 @@
+Loading @composition/tests/assets/TrickyNonLocalVariantSelection_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    model.usd            /Model
+    model.usd            /Model{costume=basicCostume}
+
+Variant Selections:
+    {costume = basicCostume}
+
+Property names:
+     ['b']
+
+Property stacks:
+/Model.b:
+    model.usd            /Model{costume=basicCostume}.b
+

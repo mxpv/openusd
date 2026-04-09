@@ -1,0 +1,148 @@
+Loading @composition/tests/assets/TrickyNestedClasses_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </CharRig>
+
+Prim Stack:
+    root.usd             /CharRig
+
+Child names:
+     ['Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig
+
+Child names:
+     ['HandsRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig
+    HandsRig.usd         /HandsRig
+
+Child names:
+     ['_Class_HandRig', 'SymHandRig', 'LHandRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/_Class_HandRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig
+    HandsRig.usd         /HandsRig/_Class_HandRig
+    HandRig.usd          /HandRig
+
+Child names:
+     ['IndexRig', '_Class_FingerRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/_Class_HandRig/IndexRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/IndexRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/IndexRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/SymHandRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig
+    HandsRig.usd         /HandsRig/SymHandRig
+    HandsRig.usd         /HandsRig/_Class_HandRig
+    HandRig.usd          /HandRig
+
+Child names:
+     ['IndexRig', '_Class_FingerRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/SymHandRig/IndexRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/SymHandRig/IndexRig
+    HandsRig.usd         /HandsRig/SymHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/IndexRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/IndexRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/SymHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/LHandRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/LHandRig
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig
+    HandsRig.usd         /HandsRig/LHandRig
+    HandsRig.usd         /HandsRig/SymHandRig
+    HandsRig.usd         /HandsRig/_Class_HandRig
+    HandRig.usd          /HandRig
+
+Child names:
+     ['IndexRig', '_Class_FingerRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/LHandRig/IndexRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/LHandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/LHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/IndexRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/LHandRig/IndexRig
+    HandsRig.usd         /HandsRig/LHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/SymHandRig/IndexRig
+    HandsRig.usd         /HandsRig/SymHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/IndexRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/IndexRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/HandsRig/LHandRig/_Class_FingerRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/HandsRig/LHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig
+    root.usd             /CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/LHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/SymHandRig/_Class_FingerRig
+    HandsRig.usd         /HandsRig/_Class_HandRig/_Class_FingerRig
+    HandRig.usd          /HandRig/_Class_FingerRig
+

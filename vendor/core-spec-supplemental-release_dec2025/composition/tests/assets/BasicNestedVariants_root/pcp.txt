@@ -1,0 +1,75 @@
+Loading @composition/tests/assets/BasicNestedVariants_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Foo>
+
+Prim Stack:
+    root.usd             /Foo
+    root.usd             /Foo{which=A}
+
+Variant Selections:
+    {which = A}
+
+Child names:
+     ['A']
+
+------------------------------------------------------------------------
+Results for composing </Foo/A>
+
+Prim Stack:
+    root.usd             /Foo{which=A}A
+
+Child names:
+     ['Number']
+
+------------------------------------------------------------------------
+Results for composing </Foo/A/Number>
+
+Prim Stack:
+    root.usd             /Foo{which=A}A/Number
+    root.usd             /Foo{which=A}A/Number{count=one}
+
+Variant Selections:
+    {count = one}
+
+Child names:
+     ['one']
+
+------------------------------------------------------------------------
+Results for composing </Foo/A/Number/one>
+
+Prim Stack:
+    root.usd             /Foo{which=A}A/Number{count=one}one
+
+------------------------------------------------------------------------
+Results for composing </DirectlyNestedVariants>
+
+Prim Stack:
+    root.usd             /DirectlyNestedVariants
+    root.usd             /DirectlyNestedVariants{standin=anim}
+    root.usd             /DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}
+    root.usd             /DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}{standin=anim}
+
+Variant Selections:
+    {shadingVariant = spooky}
+    {standin = anim}
+
+Child names:
+     ['anim_spooky_anim_sphere', 'anim_spooky_sphere']
+
+------------------------------------------------------------------------
+Results for composing </DirectlyNestedVariants/anim_spooky_anim_sphere>
+
+Prim Stack:
+    root.usd             /DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}{standin=anim}anim_spooky_anim_sphere
+
+------------------------------------------------------------------------
+Results for composing </DirectlyNestedVariants/anim_spooky_sphere>
+
+Prim Stack:
+    root.usd             /DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}anim_spooky_sphere
+

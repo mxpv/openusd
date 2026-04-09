@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "root"
+    endTimeCode = 30
+    framesPerSecond = 24
+    metersPerUnit = 0.01
+    startTimeCode = 0
+    timeCodesPerSecond = 24
+)
+
+def XForm "Root" ()
+{
+   float root.timeSamples = {
+        1: 5,
+        30: 10,
+        40: 15
+    }
+    
+    float root = 2.0
+}
+
+
+

@@ -1,0 +1,35 @@
+Loading @composition/tests/assets/TrickySpecializesAndRelocates_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    ref.usd              /Ref
+
+Child names:
+     ['Brass_2', 'Metal']
+
+Prohibited child names:
+     ['Brass']
+
+------------------------------------------------------------------------
+Results for composing </Model/Brass_2>
+
+Prim Stack:
+    root.usd             /Model/Brass_2
+    ref.usd              /Ref/Brass
+    root.usd             /Model/Metal
+    ref.usd              /Ref/Metal
+
+------------------------------------------------------------------------
+Results for composing </Model/Metal>
+
+Prim Stack:
+    root.usd             /Model/Metal
+    ref.usd              /Ref/Metal
+

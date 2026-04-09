@@ -1,0 +1,136 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/FaceRig": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig"
+            },
+            "Child names": [
+                "BrowRig",
+                "Anim"
+            ]
+        },
+        "/FaceRig/BrowRig": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig",
+                "BrowRig.usd": "/BrowRig"
+            },
+            "Child names": [
+                "SymBrow",
+                "LBrow",
+                "RBrow",
+                "Anim"
+            ]
+        },
+        "/FaceRig/BrowRig/SymBrow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow",
+                "BrowRig.usd": "/BrowRig/SymBrow"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/FaceRig/BrowRig/SymBrow/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim"
+            },
+            "Child names": [
+                "Brow"
+            ]
+        },
+        "/FaceRig/BrowRig/SymBrow/Anim/Brow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim/Brow",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim/Brow"
+            }
+        },
+        "/FaceRig/BrowRig/LBrow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow",
+                "BrowRig.usd": "/BrowRig/SymBrow"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/FaceRig/BrowRig/LBrow/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim"
+            },
+            "Prohibited child names": [
+                "Brow"
+            ]
+        },
+        "/FaceRig/BrowRig/RBrow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow",
+                "BrowRig.usd": "/BrowRig/SymBrow"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/FaceRig/BrowRig/RBrow/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim"
+            },
+            "Prohibited child names": [
+                "Brow"
+            ]
+        },
+        "/FaceRig/BrowRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/Anim",
+                "BrowRig.usd": "/BrowRig/Anim"
+            },
+            "Prohibited child names": [
+                "LBrow",
+                "RBrow"
+            ]
+        },
+        "/FaceRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/Anim"
+            },
+            "Child names": [
+                "Face"
+            ]
+        },
+        "/FaceRig/Anim/Face": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/Anim/Face"
+            },
+            "Child names": [
+                "Eyes"
+            ]
+        },
+        "/FaceRig/Anim/Face/Eyes": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/Anim/Face/Eyes"
+            },
+            "Child names": [
+                "LBrow",
+                "RBrow"
+            ]
+        },
+        "/FaceRig/Anim/Face/Eyes/LBrow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim/Brow",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim/Brow"
+            }
+        },
+        "/FaceRig/Anim/Face/Eyes/RBrow": {
+            "Prim Stack": {
+                "root.usd": "/FaceRig/BrowRig/SymBrow/Anim/Brow",
+                "BrowRig.usd": "/BrowRig/SymBrow/Anim/Brow"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

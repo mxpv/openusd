@@ -1,0 +1,22 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/BadPayload_NonExistentFile": {
+            "Prim Stack": {
+                "root.usd": "/BadPayload_NonExistentFile"
+            }
+        },
+        "/BadPayload_NonExistentPrim": {
+            "Prim Stack": {
+                "root.usd": "/BadPayload_NonExistentPrim"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </BadPayload_NonExistentFile>\nCould not open asset @composition/tests/assets/ErrorInvalidPayload_root/usda/payload_non_existent_file.usd@ for payload introduced by @composition/tests/assets/ErrorInvalidPayload_root/usda/root.usd@</BadPayload_NonExistentFile>.",
+        "Errors while composing </BadPayload_NonExistentPrim>\nUnresolved payload prim path @composition/tests/assets/ErrorInvalidPayload_root/usda/payload.usd@</NonExistentPrim> introduced by @composition/tests/assets/ErrorInvalidPayload_root/usda/root.usd@</BadPayload_NonExistentPrim> ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

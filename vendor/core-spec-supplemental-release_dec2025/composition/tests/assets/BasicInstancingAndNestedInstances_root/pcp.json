@@ -1,0 +1,62 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Set_1": {
+            "Prim Stack": {
+                "root.usd": "/Set_1",
+                "set.usd": "/Set"
+            },
+            "Child names": [
+                "PropInstance_1",
+                "PropInstance2",
+                "PropNotAnInstance_1"
+            ]
+        },
+        "/Set_1/PropInstance_1": {
+            "Prim Stack": {
+                "set.usd": "/Set/PropInstance_1",
+                "prop.usd": "/Prop"
+            },
+            "Child names": [
+                "geom"
+            ]
+        },
+        "/Set_1/PropInstance_1/geom": {
+            "Prim Stack": {
+                "prop.usd": "/Prop/geom"
+            }
+        },
+        "/Set_1/PropInstance2": {
+            "Prim Stack": {
+                "set.usd": "/Set/PropInstance2",
+                "prop.usd": "/Prop"
+            },
+            "Child names": [
+                "geom"
+            ]
+        },
+        "/Set_1/PropInstance2/geom": {
+            "Prim Stack": {
+                "prop.usd": "/Prop/geom"
+            }
+        },
+        "/Set_1/PropNotAnInstance_1": {
+            "Prim Stack": {
+                "set.usd": "/Set/PropNotAnInstance_1",
+                "prop.usd": "/Prop"
+            },
+            "Child names": [
+                "geom"
+            ]
+        },
+        "/Set_1/PropNotAnInstance_1/geom": {
+            "Prim Stack": {
+                "set.usd": "/Set/PropNotAnInstance_1/geom",
+                "prop.usd": "/Prop/geom"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

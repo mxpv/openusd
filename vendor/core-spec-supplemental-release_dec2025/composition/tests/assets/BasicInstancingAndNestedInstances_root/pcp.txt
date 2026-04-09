@@ -1,0 +1,65 @@
+Loading @composition/tests/assets/BasicInstancingAndNestedInstances_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Set_1>
+
+Prim Stack:
+    root.usd             /Set_1
+    set.usd              /Set
+
+Child names:
+     ['PropInstance_1', 'PropInstance2', 'PropNotAnInstance_1']
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropInstance_1>
+
+Prim Stack:
+    set.usd              /Set/PropInstance_1
+    prop.usd             /Prop
+
+Child names:
+     ['geom']
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropInstance_1/geom>
+
+Prim Stack:
+    prop.usd             /Prop/geom
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropInstance2>
+
+Prim Stack:
+    set.usd              /Set/PropInstance2
+    prop.usd             /Prop
+
+Child names:
+     ['geom']
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropInstance2/geom>
+
+Prim Stack:
+    prop.usd             /Prop/geom
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropNotAnInstance_1>
+
+Prim Stack:
+    set.usd              /Set/PropNotAnInstance_1
+    prop.usd             /Prop
+
+Child names:
+     ['geom']
+
+------------------------------------------------------------------------
+Results for composing </Set_1/PropNotAnInstance_1/geom>
+
+Prim Stack:
+    set.usd              /Set/PropNotAnInstance_1/geom
+    prop.usd             /Prop/geom
+

@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    defaultPrim = "SecondRoot"
+)
+
+def Xform "SecondRoot"
+{
+    def Scope "Container"
+    {
+        def Xform "Base"
+        {
+            string standard = "fromSecond"
+            string arc = "FromRef"
+        }
+
+        def Xform "Specialized" (
+            specializes = </SecondRoot/Container/Base>
+        )
+        {
+            string arc = "FromSpecialized"
+        }
+
+        def Xform "Inherits" (
+            inherits = [</SecondRoot/Container/Base>, </SecondRoot/Foo>, </Cool>]
+        )
+        {
+            string arc = "FromInherits"
+        }
+    }
+}

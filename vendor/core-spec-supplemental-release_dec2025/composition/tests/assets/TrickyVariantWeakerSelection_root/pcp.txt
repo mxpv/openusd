@@ -1,0 +1,26 @@
+Loading @composition/tests/assets/TrickyVariantWeakerSelection_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    root.usd             /A{v=v2}
+    model.usd            /A
+    model.usd            /A{v=v2}
+
+Variant Selections:
+    {v = v2}
+
+Property names:
+     ['v2']
+
+Property stacks:
+/A.v2:
+    root.usd             /A{v=v2}.v2
+    model.usd            /A{v=v2}.v2
+

@@ -1,0 +1,55 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/World": {
+            "Prim Stack": {
+                "root.usd": "/World"
+            },
+            "Child names": [
+                "CharGroup"
+            ]
+        },
+        "/World/CharGroup": {
+            "Prim Stack": {
+                "root.usd": "/World/CharGroup",
+                "Group.usd": "/CharGroup",
+                "CharGroupRig.usd": "/_class_CharGroupRig"
+            },
+            "Child names": [
+                "Sim"
+            ]
+        },
+        "/World/CharGroup/Sim": {
+            "Prim Stack": {
+                "CharGroupRig.usd": "/_class_CharGroupRig/Sim"
+            },
+            "Child names": [
+                "includes"
+            ]
+        },
+        "/World/CharGroup/Sim/includes": {
+            "Prim Stack": {
+                "CharGroupRig.usd": "/_class_CharGroupRig/Sim/includes"
+            },
+            "Child names": [
+                "Hand"
+            ]
+        },
+        "/World/CharGroup/Sim/includes/Hand": {
+            "Prim Stack": {
+                "CharGroupRig.usd": "/_class_SimHand"
+            },
+            "Child names": [
+                "Geom"
+            ]
+        },
+        "/World/CharGroup/Sim/includes/Hand/Geom": {
+            "Prim Stack": {
+                "CharGroupRig.usd": "/_class_SimHand/Geom"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

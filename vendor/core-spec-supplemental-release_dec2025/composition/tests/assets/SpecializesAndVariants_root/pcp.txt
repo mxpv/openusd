@@ -1,0 +1,43 @@
+Loading @composition/tests/assets/SpecializesAndVariants_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    root.usd             /A{nestedVariantSet=nestedVariant}
+
+Variant Selections:
+    {nestedVariantSet = nestedVariant}
+
+Property names:
+     ['test']
+
+Property stacks:
+/A.test:
+    root.usd             /A{nestedVariantSet=nestedVariant}.test
+
+------------------------------------------------------------------------
+Results for composing </B>
+
+Prim Stack:
+    root.usd             /B
+    root.usd             /B{introducingVariantSet=introducingVariant}
+    root.usd             /A
+    root.usd             /A{nestedVariantSet=nestedVariant}
+
+Variant Selections:
+    {introducingVariantSet = introducingVariant}
+    {nestedVariantSet = nestedVariant}
+
+Property names:
+     ['test']
+
+Property stacks:
+/B.test:
+    root.usd             /A{nestedVariantSet=nestedVariant}.test
+

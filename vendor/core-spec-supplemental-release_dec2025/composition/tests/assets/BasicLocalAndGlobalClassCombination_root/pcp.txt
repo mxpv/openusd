@@ -1,0 +1,89 @@
+Loading @composition/tests/assets/BasicLocalAndGlobalClassCombination_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model_1>
+
+Prim Stack:
+    root.usd             /Model_1
+    model.usd            /Model
+    model.usd            /_class_Model
+
+Child names:
+     ['_class_Nested', 'Instance']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/_class_Nested>
+
+Prim Stack:
+    root.usd             /Model_1/_class_Nested
+    model.usd            /Model/_class_Nested
+    model.usd            /_class_Model/_class_Nested
+
+Child names:
+     ['Sym', 'Left']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/_class_Nested/Sym>
+
+Prim Stack:
+    root.usd             /Model_1/_class_Nested/Sym
+    model.usd            /Model/_class_Nested/Sym
+    model.usd            /_class_Model/_class_Nested/Sym
+
+------------------------------------------------------------------------
+Results for composing </Model_1/_class_Nested/Left>
+
+Prim Stack:
+    root.usd             /Model_1/_class_Nested/Left
+    root.usd             /Model_1/_class_Nested/Sym
+    model.usd            /Model/_class_Nested/Left
+    model.usd            /Model/_class_Nested/Sym
+    model.usd            /_class_Model/_class_Nested/Left
+    model.usd            /_class_Model/_class_Nested/Sym
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Instance>
+
+Prim Stack:
+    root.usd             /Model_1/Instance
+    root.usd             /Model_1/_class_Nested
+    model.usd            /Model/Instance
+    model.usd            /Model/_class_Nested
+    model.usd            /_class_Model/Instance
+    model.usd            /_class_Model/_class_Nested
+
+Child names:
+     ['Sym', 'Left']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Instance/Sym>
+
+Prim Stack:
+    root.usd             /Model_1/Instance/Sym
+    root.usd             /Model_1/_class_Nested/Sym
+    model.usd            /Model/Instance/Sym
+    model.usd            /Model/_class_Nested/Sym
+    model.usd            /_class_Model/Instance/Sym
+    model.usd            /_class_Model/_class_Nested/Sym
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Instance/Left>
+
+Prim Stack:
+    root.usd             /Model_1/Instance/Left
+    root.usd             /Model_1/Instance/Sym
+    root.usd             /Model_1/_class_Nested/Left
+    root.usd             /Model_1/_class_Nested/Sym
+    model.usd            /Model/Instance/Left
+    model.usd            /Model/Instance/Sym
+    model.usd            /Model/_class_Nested/Left
+    model.usd            /Model/_class_Nested/Sym
+    model.usd            /_class_Model/Instance/Left
+    model.usd            /_class_Model/Instance/Sym
+    model.usd            /_class_Model/_class_Nested/Left
+    model.usd            /_class_Model/_class_Nested/Sym
+

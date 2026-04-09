@@ -1,0 +1,92 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Child names": [
+                "SymRig",
+                "_class_SubRig",
+                "LRig",
+                "RRig"
+            ]
+        },
+        "/Rig/SymRig": {
+            "Prim Stack": {
+                "root.usd": "/Rig/SymRig",
+                "rig.usd": "/Rig/SymRig"
+            },
+            "Child names": [
+                "SubRig1",
+                "SubRig2"
+            ]
+        },
+        "/Rig/SymRig/SubRig1": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/SymRig/SubRig2": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/_class_SubRig": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/LRig": {
+            "Prim Stack": {
+                "root.usd": "/Rig/SymRig",
+                "rig.usd": "/Rig/SymRig"
+            },
+            "Child names": [
+                "SubRig1",
+                "SubRig2"
+            ]
+        },
+        "/Rig/LRig/SubRig1": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/LRig/SubRig2": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/RRig": {
+            "Prim Stack": {
+                "root.usd": "/Rig/SymRig",
+                "rig.usd": "/Rig/SymRig"
+            },
+            "Child names": [
+                "SubRig1",
+                "SubRig2"
+            ]
+        },
+        "/Rig/RRig/SubRig1": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        },
+        "/Rig/RRig/SubRig2": {
+            "Prim Stack": {
+                "root.usd": "/Rig/_class_SubRig",
+                "rig.usd": "/Rig/_class_SubRig"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

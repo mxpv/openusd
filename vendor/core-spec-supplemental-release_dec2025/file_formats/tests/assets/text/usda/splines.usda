@@ -1,0 +1,28 @@
+#usda 1.0
+
+def "foo" {
+    double bar.spline = {
+
+    }
+
+    def "baz" {
+        custom float mySpline.spline = {
+            bezier,
+            -20 : 2.43,
+            -45.2: 6532.62342  ;      post curve (3.6, -7.8)    , 
+                5:  2 & 17.45e45 ; pre (-0.21,     3),
+                0 : 1; post linear
+        }
+
+        custom double anotherSpline.spline = {
+            hermite,
+            post : none,
+            post: sloped (6.5)  ,
+
+
+            loop: (3.4, 5.7, 0, 4, -22.3),
+
+            14: 23.4e6; pre/*this counts as a space*/(6.4, 6.4);post none; { string custom_comment = "this one is another spline"}
+        }
+    }
+}

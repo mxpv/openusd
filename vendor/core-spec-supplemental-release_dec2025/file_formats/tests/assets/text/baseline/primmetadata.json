@@ -1,0 +1,44 @@
+{
+    "/": {
+        "primChildren": ["baz"]
+    },
+    "/baz": {
+        "specifier": "def",
+        "typeName": "FooBar",
+        "kind": "component",
+        "active": false,
+        "displayName": "baaazzzz",
+        "comment": "this will be the comment",
+        "payload": {
+            "explicit": [
+                {
+                    "asset": "a/triple/asset ref",
+                    "layerOffset": {
+                        "offset": 0.0,
+                        "scale": -2.0
+                    }
+                }
+            ]
+        },
+        "references": {
+            "append": [
+                {
+                    "asset": "simple_asset",
+                    "path": "/with/different/path",
+                    "layerOffset": {
+                        "offset": 4.0,
+                        "scale": 1.0
+                    }
+                }
+            ]
+        },
+        "inheritPaths": {
+            "explicit": [
+                "/foo/bar/foo",
+                "/foo/bar/baz"
+            ]
+        },
+        "specializes": {
+        }
+    }
+}

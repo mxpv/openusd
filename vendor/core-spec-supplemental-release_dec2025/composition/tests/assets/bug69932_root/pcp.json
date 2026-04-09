@@ -1,0 +1,180 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Pigeon": {
+            "Prim Stack": {
+                "root.usd": "/Pigeon",
+                "Pigeon_rig.usd": "/_class_CharRig",
+                "Pigeon_bodyrig.usd": "/CharRig"
+            },
+            "Child names": [
+                "Rig",
+                "Anim"
+            ]
+        },
+        "/Pigeon/Rig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig"
+            },
+            "Child names": [
+                "LegsRig",
+                "ToesRig"
+            ]
+        },
+        "/Pigeon/Rig/LegsRig": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/LegsRig",
+                "LegsRig.usd": "/LegsRig"
+            },
+            "Child names": [
+                "LLegRig",
+                "_Class_LegRig"
+            ]
+        },
+        "/Pigeon/Rig/LegsRig/LLegRig": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/LegsRig/LLegRig",
+                "LegsRig.usd": "/LegsRig/_Class_LegRig"
+            },
+            "Prohibited child names": [
+                "Toes"
+            ]
+        },
+        "/Pigeon/Rig/LegsRig/_Class_LegRig": {
+            "Prim Stack": {
+                "LegsRig.usd": "/LegsRig/_Class_LegRig"
+            },
+            "Child names": [
+                "Toes"
+            ]
+        },
+        "/Pigeon/Rig/LegsRig/_Class_LegRig/Toes": {
+            "Prim Stack": {
+                "LegsRig.usd": "/LegsRig/_Class_LegRig/Toes"
+            },
+            "Child names": [
+                "Thumb"
+            ]
+        },
+        "/Pigeon/Rig/LegsRig/_Class_LegRig/Toes/Thumb": {
+            "Prim Stack": {
+                "LegsRig.usd": "/LegsRig/_Class_LegRig/Toes/Thumb"
+            }
+        },
+        "/Pigeon/Rig/ToesRig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig/ToesRig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig"
+            },
+            "Child names": [
+                "_Class_ToesRig",
+                "LToesRig"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/_Class_ToesRig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig/ToesRig/_Class_ToesRig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig"
+            },
+            "Child names": [
+                "_Class_Toe",
+                "ThumbToeLOCALRig"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/_Class_ToesRig/_Class_Toe": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe"
+            },
+            "Child names": [
+                "Toe"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/_Class_ToesRig/_Class_Toe/Toe": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe/Toe"
+            }
+        },
+        "/Pigeon/Rig/ToesRig/_Class_ToesRig/ThumbToeLOCALRig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig/ToesRig/_Class_ToesRig/ThumbToeLOCALRig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe"
+            },
+            "Child names": [
+                "Toe"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/_Class_ToesRig/ThumbToeLOCALRig/Toe": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe/Toe"
+            }
+        },
+        "/Pigeon/Rig/ToesRig/LToesRig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig/ToesRig/_Class_ToesRig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig"
+            },
+            "Child names": [
+                "_Class_Toe",
+                "ThumbToeLOCALRig"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/LToesRig/_Class_Toe": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe"
+            },
+            "Child names": [
+                "Toe"
+            ]
+        },
+        "/Pigeon/Rig/ToesRig/LToesRig/_Class_Toe/Toe": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe/Toe"
+            }
+        },
+        "/Pigeon/Rig/ToesRig/LToesRig/ThumbToeLOCALRig": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/Pigeon/Rig/ToesRig/_Class_ToesRig/ThumbToeLOCALRig",
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe"
+            },
+            "Prohibited child names": [
+                "Toe"
+            ]
+        },
+        "/Pigeon/Anim": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/_class_CharRig/Anim",
+                "Pigeon_bodyrig.usd": "/CharRig/Anim"
+            },
+            "Child names": [
+                "Legs"
+            ]
+        },
+        "/Pigeon/Anim/Legs": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/_class_CharRig/Anim/Legs",
+                "Pigeon_bodyrig.usd": "/CharRig/Anim/Legs"
+            },
+            "Child names": [
+                "LToes"
+            ]
+        },
+        "/Pigeon/Anim/Legs/LToes": {
+            "Prim Stack": {
+                "Pigeon_rig.usd": "/_class_CharRig/Anim/Legs/LToes",
+                "LegsRig.usd": "/LegsRig/_Class_LegRig/Toes"
+            },
+            "Child names": [
+                "Thumb"
+            ]
+        },
+        "/Pigeon/Anim/Legs/LToes/Thumb": {
+            "Prim Stack": {
+                "Pigeon_bodyrig.usd": "/CharRig/Rig/ToesRig/_Class_ToesRig/_Class_Toe/Toe"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

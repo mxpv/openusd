@@ -1,0 +1,105 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Kilt": {
+            "Prim Stack": {
+                "root.usd": "/_class_ClothRig",
+                "rig.usd": "/_class_ClothRig",
+                "ClothRig.usd": "/_class_StdAvarsRig"
+            },
+            "Child names": [
+                "rig"
+            ]
+        },
+        "/Kilt/rig": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig",
+                "rig.usd": "/KiltRig/rig"
+            },
+            "Child names": [
+                "KiltHemRig"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig",
+                "rig.usd": "/KiltRig/rig/KiltHemRig",
+                "ClothHemRig.usd": "/ClothHemRig"
+            },
+            "Child names": [
+                "rig"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig/rig": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig",
+                "ClothHemRig.usd": "/ClothHemRig/rig"
+            },
+            "Child names": [
+                "PatchWeightRig"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig"
+            },
+            "Child names": [
+                "PatchWeightsClass",
+                "SimPatchWeights"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass"
+            },
+            "Child names": [
+                "PatchClass",
+                "Patch0"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass"
+            }
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/Patch0": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass"
+            }
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/SimPatchWeights": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass"
+            },
+            "Child names": [
+                "PatchClass",
+                "Patch0"
+            ]
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/SimPatchWeights/PatchClass": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass"
+            }
+        },
+        "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/SimPatchWeights/Patch0": {
+            "Prim Stack": {
+                "root.usd": "/Kilt/rig/KiltHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass",
+                "ClothHemRig.usd": "/ClothHemRig/rig/PatchWeightRig/PatchWeightsClass/PatchClass"
+            }
+        },
+        "/_class_ClothRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_ClothRig"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

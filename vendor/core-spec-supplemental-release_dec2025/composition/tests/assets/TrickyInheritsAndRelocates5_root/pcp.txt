@@ -1,0 +1,314 @@
+Loading @composition/tests/assets/TrickyInheritsAndRelocates5_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </CharRig>
+
+Prim Stack:
+    root.usd             /CharRig
+
+Child names:
+     ['Anim', 'Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Anim
+
+Child names:
+     ['Arms']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Arms>
+
+Prim Stack:
+    TentaclesRig.usd     /TentaclesRig/Arms
+
+Child names:
+     ['R1Arm']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Arms/R1Arm>
+
+Prim Stack:
+    TentacleRig.usd      /TentacleRig/Tentacle
+
+Child names:
+     ['Knot03']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Arms/R1Arm/Knot03>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Anim/Arms/R1Arm/Knot03.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig
+
+Child names:
+     ['TentaclesRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig
+    TentaclesRig.usd     /TentaclesRig
+
+Child names:
+     ['TentacleRigs']
+
+Prohibited child names:
+     ['Arms']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs
+
+Child names:
+     ['_Class_TentacleRig', 'Sym1TentacleRig', 'R1TentacleRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentacleRig.usd      /TentacleRig
+
+Child names:
+     ['TentacleInterface', 'Tentacle']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface
+    TentacleRig.usd      /TentacleRig/TentacleInterface
+
+Child names:
+     ['_Class_KnotRig', 'Knot03Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/Knot03Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/Knot03Rig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Prohibited child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle>
+
+Prim Stack:
+    TentacleRig.usd      /TentacleRig/Tentacle
+
+Child names:
+     ['Knot03']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle/Knot03>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle/Knot03.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/Sym1TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentacleRig.usd      /TentacleRig
+
+Child names:
+     ['TentacleInterface', 'Tentacle']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface
+    TentacleRig.usd      /TentacleRig/TentacleInterface
+
+Child names:
+     ['_Class_KnotRig', 'Knot03Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/Knot03Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/Knot03Rig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Prohibited child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle>
+
+Prim Stack:
+    TentacleRig.usd      /TentacleRig/Tentacle
+
+Child names:
+     ['Knot03']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle/Knot03>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle/Knot03.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/R1TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/Sym1TentacleRig
+    TentaclesRig.usd     /TentaclesRig/TentacleRigs/_Class_TentacleRig
+    TentacleRig.usd      /TentacleRig
+
+Child names:
+     ['TentacleInterface']
+
+Prohibited child names:
+     ['Tentacle']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface
+    TentacleRig.usd      /TentacleRig/TentacleInterface
+
+Child names:
+     ['_Class_KnotRig', 'Knot03Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim
+
+Property names:
+     ['foo']
+
+Property stacks:
+/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/Knot03Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/Knot03Rig
+    TentacleRig.usd      /TentacleRig/TentacleInterface/_Class_KnotRig
+
+Prohibited child names:
+     ['Anim']
+

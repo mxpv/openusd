@@ -1,0 +1,127 @@
+Loading @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Bad_ReloOfPreRelo>
+
+Prim Stack:
+
+------------------------------------------------------------------------
+Results for composing </Good_ReloOfRelocated>
+
+Prim Stack:
+    char.usd             /Char/Relocated
+    model.usd            /Model/PreRelo
+
+Child names:
+     ['ModelChild', 'RelocatedChild']
+
+------------------------------------------------------------------------
+Results for composing </Good_ReloOfRelocated/ModelChild>
+
+Prim Stack:
+    model.usd            /Model/PreRelo/ModelChild
+
+------------------------------------------------------------------------
+Results for composing </Good_ReloOfRelocated/RelocatedChild>
+
+Prim Stack:
+    char.usd             /Char/Relocated/RelocatedChild
+
+------------------------------------------------------------------------
+Results for composing </Good_RefToRelocated>
+
+Prim Stack:
+    root.usd             /Good_RefToRelocated
+    char.usd             /Char/Relocated
+    model.usd            /Model/PreRelo
+
+Child names:
+     ['ModelChild', 'RelocatedChild']
+
+------------------------------------------------------------------------
+Results for composing </Good_RefToRelocated/ModelChild>
+
+Prim Stack:
+    model.usd            /Model/PreRelo/ModelChild
+
+------------------------------------------------------------------------
+Results for composing </Good_RefToRelocated/RelocatedChild>
+
+Prim Stack:
+    char.usd             /Char/Relocated/RelocatedChild
+
+------------------------------------------------------------------------
+Results for composing </Good_RefToChildOfRelocated>
+
+Prim Stack:
+    root.usd             /Good_RefToChildOfRelocated
+    model.usd            /Model/PreRelo/ModelChild
+
+------------------------------------------------------------------------
+Results for composing </Bad_RefToPreRelo>
+
+Prim Stack:
+    root.usd             /Bad_RefToPreRelo
+
+------------------------------------------------------------------------
+Results for composing </Bad_RefToChildOfPreRelo>
+
+Prim Stack:
+    root.usd             /Bad_RefToChildOfPreRelo
+
+------------------------------------------------------------------------
+Results for composing </ReferencedChar>
+
+Prim Stack:
+    root.usd             /ReferencedChar
+    char.usd             /Char
+    model.usd            /Model
+
+Prohibited child names:
+     ['PreRelo', 'Relocated']
+
+
+------------------------------------------------------------------------
+Errors while composing </Bad_ReloOfPreRelo>
+
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/root.usd@</Bad_ReloOfPreRelo>
+CANNOT be relocated from:
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/root.usd@</ReferencedChar/PreRelo>
+which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@</Char/PreRelo>.
+
+------------------------------------------------------------------------
+Errors while composing </Good_ReloOfRelocated>
+
+The layer @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@ has an invalid opinion at the relocation source path </Char/PreRelo>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Good_RefToRelocated>
+
+The layer @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@ has an invalid opinion at the relocation source path </Char/PreRelo>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Good_RefToChildOfRelocated>
+
+The layer @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@ has an invalid opinion at the relocation source path </Char/PreRelo>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Bad_RefToPreRelo>
+
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/root.usd@</Bad_RefToPreRelo>
+CANNOT reference:
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@</Char/PreRelo>
+which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@</Char/PreRelo>.
+
+------------------------------------------------------------------------
+Errors while composing </Bad_RefToChildOfPreRelo>
+
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/root.usd@</Bad_RefToChildOfPreRelo>
+CANNOT reference:
+@composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@</Char/PreRelo/ModelChild>
+which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/ErrorInvalidReferenceToRelocationSource_root/usda/char.usd@</Char/PreRelo>.
+
+ERROR: Unexpected error(s) encountered during test!

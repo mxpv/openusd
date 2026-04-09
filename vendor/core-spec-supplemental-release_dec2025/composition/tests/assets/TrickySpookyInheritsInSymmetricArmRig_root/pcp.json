@@ -1,0 +1,138 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/CharRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig",
+                "humanRig.usd": "/HumanRig"
+            },
+            "Child names": [
+                "Anim",
+                "Rig"
+            ]
+        },
+        "/CharRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Anim",
+                "humanRig.usd": "/HumanRig/Anim"
+            },
+            "Child names": [
+                "LArm"
+            ]
+        },
+        "/CharRig/Anim/LArm": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Anim/LArm",
+                "humanRig.usd": "/HumanRig/Anim/LArm",
+                "armRig.usd": "/ArmRig/Anim"
+            },
+            "Property names": [
+                "bendAmount"
+            ],
+            "Property stacks": {
+                "/CharRig/Anim/LArm.bendAmount": {
+                    "armRig.usd": "/ArmRig/Anim.bendAmount"
+                }
+            }
+        },
+        "/CharRig/Rig": {
+            "Prim Stack": {
+                "humanRig.usd": "/HumanRig/Rig"
+            },
+            "Child names": [
+                "SymArm",
+                "LArm"
+            ]
+        },
+        "/CharRig/Rig/SymArm": {
+            "Prim Stack": {
+                "humanRig.usd": "/HumanRig/Rig/SymArm",
+                "armRig.usd": "/ArmRig"
+            },
+            "Child names": [
+                "Rig",
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/SymArm/Rig": {
+            "Prim Stack": {
+                "armRig.usd": "/ArmRig/Rig"
+            },
+            "Child names": [
+                "Some_Internal_Rig_Prim"
+            ]
+        },
+        "/CharRig/Rig/SymArm/Rig/Some_Internal_Rig_Prim": {
+            "Prim Stack": {
+                "armRig.usd": "/ArmRig/Rig/Some_Internal_Rig_Prim"
+            },
+            "Property names": [
+                "bendAmount"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/SymArm/Rig/Some_Internal_Rig_Prim.bendAmount": {
+                    "armRig.usd": "/ArmRig/Rig/Some_Internal_Rig_Prim.bendAmount"
+                }
+            },
+            "Attribute connections": {
+                "/CharRig/Rig/SymArm/Rig/Some_Internal_Rig_Prim.bendAmount": [
+                    "/CharRig/Rig/SymArm/Anim.bendAmount"
+                ]
+            }
+        },
+        "/CharRig/Rig/SymArm/Anim": {
+            "Prim Stack": {
+                "armRig.usd": "/ArmRig/Anim"
+            },
+            "Property names": [
+                "bendAmount"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/SymArm/Anim.bendAmount": {
+                    "armRig.usd": "/ArmRig/Anim.bendAmount"
+                }
+            }
+        },
+        "/CharRig/Rig/LArm": {
+            "Prim Stack": {
+                "humanRig.usd": "/HumanRig/Rig/SymArm",
+                "armRig.usd": "/ArmRig"
+            },
+            "Child names": [
+                "Rig"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/LArm/Rig": {
+            "Prim Stack": {
+                "armRig.usd": "/ArmRig/Rig"
+            },
+            "Child names": [
+                "Some_Internal_Rig_Prim"
+            ]
+        },
+        "/CharRig/Rig/LArm/Rig/Some_Internal_Rig_Prim": {
+            "Prim Stack": {
+                "armRig.usd": "/ArmRig/Rig/Some_Internal_Rig_Prim"
+            },
+            "Property names": [
+                "bendAmount"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/LArm/Rig/Some_Internal_Rig_Prim.bendAmount": {
+                    "armRig.usd": "/ArmRig/Rig/Some_Internal_Rig_Prim.bendAmount"
+                }
+            },
+            "Attribute connections": {
+                "/CharRig/Rig/LArm/Rig/Some_Internal_Rig_Prim.bendAmount": [
+                    "/CharRig/Anim/LArm.bendAmount"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,42 @@
+[
+    {
+        "description": "Empty prepended items over empty explicit items",
+        "chain" : [{"prepended_items" : []}, {"explicit_items" : []}],
+        "combined_reduced" : {"explicit_items" : []}
+    },
+    {
+        "description": "Empty prepended items over non-empty explicit items",
+        "chain" : [{"prepended_items" : []}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    },
+    {
+        "description": "Singled prepended items over non-empty explicit items, no repititions",
+        "chain" : [{"prepended_items" : [50]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [50, 100, 150]}
+    },
+    {
+        "description": "Multiple prepended items  over non-empty explicit items, no repititions",
+        "chain" : [{"prepended_items" : [50, 75]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [50, 75, 100, 150]}
+    },
+    {
+        "description": "Single prepended item over non-empty explicit items, repeated",
+        "chain" : [{"prepended_items" : [100]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    },
+    {
+        "description": "Two prepended items over non-empty explicit items (one repeated item)",
+        "chain" : [{"prepended_items" : [75, 100]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [75, 100, 150]}
+    },
+    {
+        "description": "Two prepended items over non-empty explicit items (one repeated item, different order)",
+        "chain" : [{"prepended_items" : [100, 75]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 75, 150]}
+    },
+    {
+        "description": "Multiple prepended items over empty explicit items",
+        "chain" : [{"prepended_items" : [100, 150]}, {"explicit_items" : []}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    }
+]

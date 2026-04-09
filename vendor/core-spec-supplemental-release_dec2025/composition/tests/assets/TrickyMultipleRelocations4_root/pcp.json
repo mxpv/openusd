@@ -1,0 +1,165 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SymRig": {
+            "Prim Stack": {
+                "root.usd": "/SymRig"
+            },
+            "Child names": [
+                "Leg_bone"
+            ]
+        },
+        "/SymRig/Leg_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone"
+            },
+            "Child names": [
+                "Knee_bone"
+            ],
+            "Property names": [
+                "bones"
+            ],
+            "Property stacks": {
+                "/SymRig/Leg_bone.bones": {
+                    "root.usd": "/SymRig/Leg_bone.bones"
+                }
+            },
+            "Relationship targets": {
+                "/SymRig/Leg_bone.bones": [
+                    "/SymRig",
+                    "/SymRig/Leg_bone",
+                    "/SymRig/Leg_bone/Knee_bone",
+                    "/SymRig/Leg_bone/Knee_bone/Ankle_bone"
+                ]
+            }
+        },
+        "/SymRig/Leg_bone/Knee_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone"
+            },
+            "Child names": [
+                "Ankle_bone"
+            ]
+        },
+        "/SymRig/Leg_bone/Knee_bone/Ankle_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone/Ankle_bone"
+            }
+        },
+        "/RearLegRig": {
+            "Prim Stack": {
+                "root.usd": "/RearLegRig"
+            },
+            "Child names": [
+                "Knee_bone",
+                "Legs"
+            ]
+        },
+        "/RearLegRig/Knee_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone"
+            },
+            "Child names": [
+                "Ankle_bone_phrbv"
+            ],
+            "Prohibited child names": [
+                "Ankle_bone"
+            ]
+        },
+        "/RearLegRig/Knee_bone/Ankle_bone_phrbv": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone/Ankle_bone"
+            }
+        },
+        "/RearLegRig/Legs": {
+            "Prim Stack": {
+                "root.usd": "/RearLegRig/Legs"
+            },
+            "Child names": [
+                "RightRig",
+                "LeftRig"
+            ]
+        },
+        "/RearLegRig/Legs/RightRig": {
+            "Prim Stack": {
+                "root.usd": "/SymRig"
+            },
+            "Prohibited child names": [
+                "Leg_bone"
+            ]
+        },
+        "/RearLegRig/Legs/LeftRig": {
+            "Prim Stack": {
+                "root.usd": "/SymRig"
+            },
+            "Child names": [
+                "Leg_bone"
+            ]
+        },
+        "/RearLegRig/Legs/LeftRig/Leg_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone"
+            },
+            "Child names": [
+                "Knee_bone",
+                "Leg_bone"
+            ],
+            "Property names": [
+                "bones"
+            ],
+            "Property stacks": {
+                "/RearLegRig/Legs/LeftRig/Leg_bone.bones": {
+                    "root.usd": "/SymRig/Leg_bone.bones"
+                }
+            },
+            "Relationship targets": {
+                "/RearLegRig/Legs/LeftRig/Leg_bone.bones": [
+                    "/RearLegRig/Legs/LeftRig",
+                    "/RearLegRig/Legs/LeftRig/Leg_bone",
+                    "/RearLegRig/Legs/LeftRig/Leg_bone/Knee_bone",
+                    "/RearLegRig/Legs/LeftRig/Leg_bone/Knee_bone/Ankle_bone"
+                ]
+            }
+        },
+        "/RearLegRig/Legs/LeftRig/Leg_bone/Knee_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone"
+            },
+            "Child names": [
+                "Ankle_bone"
+            ]
+        },
+        "/RearLegRig/Legs/LeftRig/Leg_bone/Knee_bone/Ankle_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone/Knee_bone/Ankle_bone"
+            }
+        },
+        "/RearLegRig/Legs/LeftRig/Leg_bone/Leg_bone": {
+            "Prim Stack": {
+                "root.usd": "/SymRig/Leg_bone"
+            },
+            "Prohibited child names": [
+                "Knee_bone"
+            ],
+            "Property names": [
+                "bones"
+            ],
+            "Property stacks": {
+                "/RearLegRig/Legs/LeftRig/Leg_bone/Leg_bone.bones": {
+                    "root.usd": "/SymRig/Leg_bone.bones"
+                }
+            },
+            "Relationship targets": {
+                "/RearLegRig/Legs/LeftRig/Leg_bone/Leg_bone.bones": [
+                    "/RearLegRig/Legs/RightRig",
+                    "/RearLegRig/Legs/LeftRig/Leg_bone/Leg_bone",
+                    "/RearLegRig/Knee_bone",
+                    "/RearLegRig/Knee_bone/Ankle_bone_phrbv"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

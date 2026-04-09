@@ -1,0 +1,13 @@
+{
+    "Entry": "session.usd",
+    "Composing": {
+        "/InternalReference2": {
+            "Prim Stack": {
+                "session.usd": "/InternalReference2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "session.usd"
+    ]
+}

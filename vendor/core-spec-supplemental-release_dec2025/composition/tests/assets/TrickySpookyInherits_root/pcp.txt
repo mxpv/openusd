@@ -1,0 +1,109 @@
+Loading @composition/tests/assets/TrickySpookyInherits_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model_1>
+
+Prim Stack:
+    root.usd             /Model_1
+    root.usd             /_class_Model
+    model.usd            /Model
+    model.usd            /_class_Model
+
+Child names:
+     ['Rig', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Rig>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig
+    model.usd            /Model/Rig
+    model.usd            /_class_Model/Rig
+    rig.usd              /Rig
+
+Child names:
+     ['SymRig']
+
+Prohibited child names:
+     ['LRig']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Rig/SymRig>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig/SymRig
+    model.usd            /_class_Model/Rig/SymRig
+    rig.usd              /Rig/SymRig
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Anim>
+
+Prim Stack:
+    root.usd             /_class_Model/Anim
+    model.usd            /Model/Anim
+    model.usd            /_class_Model/Anim
+
+Child names:
+     ['LAnim']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Anim/LAnim>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig/SymRig
+    root.usd             /_class_Model/Rig/LRig
+    root.usd             /_class_Model/Anim/LAnim
+    model.usd            /_class_Model/Rig/SymRig
+    model.usd            /_class_Model/Rig/LRig
+    rig.usd              /Rig/LRig
+    rig.usd              /Rig/SymRig
+
+------------------------------------------------------------------------
+Results for composing </_class_Model>
+
+Prim Stack:
+    root.usd             /_class_Model
+
+Child names:
+     ['Rig', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </_class_Model/Rig>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig
+
+Child names:
+     ['SymRig', 'LRig']
+
+------------------------------------------------------------------------
+Results for composing </_class_Model/Rig/SymRig>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig/SymRig
+
+------------------------------------------------------------------------
+Results for composing </_class_Model/Rig/LRig>
+
+Prim Stack:
+    root.usd             /_class_Model/Rig/LRig
+
+------------------------------------------------------------------------
+Results for composing </_class_Model/Anim>
+
+Prim Stack:
+    root.usd             /_class_Model/Anim
+
+Child names:
+     ['LAnim']
+
+------------------------------------------------------------------------
+Results for composing </_class_Model/Anim/LAnim>
+
+Prim Stack:
+    root.usd             /_class_Model/Anim/LAnim
+

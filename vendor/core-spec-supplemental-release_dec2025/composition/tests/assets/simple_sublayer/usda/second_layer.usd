@@ -1,0 +1,20 @@
+#usda 1.0
+(
+        upAxis="Y"
+    metersPerUnit=0.1
+    defaultPrim="Root"
+)
+
+def Xform "Root" () {
+
+    string name = "RootFromSecondLayer"
+
+    def Xform "FromSecondLayer" () {
+        int secondLayerAttr = 52
+    }
+
+}
+
+def Xform "FromSecond" () {
+
+}

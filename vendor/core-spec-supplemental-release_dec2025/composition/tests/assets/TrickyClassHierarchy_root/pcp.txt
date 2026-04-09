@@ -1,0 +1,67 @@
+Loading @composition/tests/assets/TrickyClassHierarchy_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Sullivan_1>
+
+Prim Stack:
+    root.usd             /Sullivan_1
+    root.usd             /_Class_Sullivan
+    root.usd             /_Class_Char
+    root.usd             /_Class_Model
+    Sullivan.usd         /Sullivan
+    Sullivan.usd         /_Class_Sullivan
+    Sullivan.usd         /_Class_Char
+    Sullivan.usd         /_Class_Model
+
+Property names:
+     ['name']
+
+Property stacks:
+/Sullivan_1.name:
+    root.usd             /_Class_Sullivan.name
+    root.usd             /_Class_Char.name
+    root.usd             /_Class_Model.name
+
+------------------------------------------------------------------------
+Results for composing </_Class_Sullivan>
+
+Prim Stack:
+    root.usd             /_Class_Sullivan
+
+Property names:
+     ['name']
+
+Property stacks:
+/_Class_Sullivan.name:
+    root.usd             /_Class_Sullivan.name
+
+------------------------------------------------------------------------
+Results for composing </_Class_Char>
+
+Prim Stack:
+    root.usd             /_Class_Char
+
+Property names:
+     ['name']
+
+Property stacks:
+/_Class_Char.name:
+    root.usd             /_Class_Char.name
+
+------------------------------------------------------------------------
+Results for composing </_Class_Model>
+
+Prim Stack:
+    root.usd             /_Class_Model
+
+Property names:
+     ['name']
+
+Property stacks:
+/_Class_Model.name:
+    root.usd             /_Class_Model.name
+

@@ -1,0 +1,12 @@
+Loading @composition/tests/assets/BasicReference_session/usda/session.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     session.usd
+
+------------------------------------------------------------------------
+Results for composing </InternalReference2>
+
+Prim Stack:
+    session.usd          /InternalReference2
+

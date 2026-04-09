@@ -1,0 +1,85 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root",
+                "ref.usd": "/RefRoot"
+            },
+            "Child names": [
+                "Child",
+                "SpecializesChild",
+                "InheritsChild"
+            ]
+        },
+        "/Root/Child": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child"
+            },
+            "Child names": [
+                "GrandChild"
+            ]
+        },
+        "/Root/Child/GrandChild": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child/GrandChild",
+                "ref2.usd": "/Ref2Root/Ref2Child"
+            },
+            "Child names": [
+                "Ref2GrandChild"
+            ]
+        },
+        "/Root/Child/GrandChild/Ref2GrandChild": {
+            "Prim Stack": {
+                "ref2.usd": "/Ref2Root/Ref2Child/Ref2GrandChild"
+            }
+        },
+        "/Root/SpecializesChild": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child"
+            },
+            "Child names": [
+                "GrandChild"
+            ]
+        },
+        "/Root/SpecializesChild/GrandChild": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child/GrandChild",
+                "ref2.usd": "/Ref2Root/Ref2Child"
+            },
+            "Child names": [
+                "Ref2GrandChild"
+            ]
+        },
+        "/Root/SpecializesChild/GrandChild/Ref2GrandChild": {
+            "Prim Stack": {
+                "ref2.usd": "/Ref2Root/Ref2Child/Ref2GrandChild"
+            }
+        },
+        "/Root/InheritsChild": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child"
+            },
+            "Child names": [
+                "GrandChild"
+            ]
+        },
+        "/Root/InheritsChild/GrandChild": {
+            "Prim Stack": {
+                "ref.usd": "/RefRoot/Child/GrandChild",
+                "ref2.usd": "/Ref2Root/Ref2Child"
+            },
+            "Child names": [
+                "Ref2GrandChild"
+            ]
+        },
+        "/Root/InheritsChild/GrandChild/Ref2GrandChild": {
+            "Prim Stack": {
+                "ref2.usd": "/Ref2Root/Ref2Child/Ref2GrandChild"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

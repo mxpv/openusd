@@ -1,0 +1,35 @@
+Loading @composition/tests/assets/TrickyVariantWeakerSelection2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </_class_geotype>
+
+Prim Stack:
+    root.usd             /_class_geotype
+
+------------------------------------------------------------------------
+Results for composing </bob>
+
+Prim Stack:
+    root.usd             /bob
+    root.usd             /_class_geotype
+    root.usd             /_class_geotype{geotype_selector=select_cube}
+    root.usd             /bob{geotype=cube}
+    geo.usd              /bob_root_cube
+
+Variant Selections:
+    {geotype = cube}
+    {geotype_selector = select_cube}
+
+Child names:
+     ['bob_body']
+
+------------------------------------------------------------------------
+Results for composing </bob/bob_body>
+
+Prim Stack:
+    geo.usd              /bob_root_cube/bob_body
+

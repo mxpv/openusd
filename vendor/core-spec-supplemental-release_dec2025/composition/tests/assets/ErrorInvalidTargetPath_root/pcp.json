@@ -1,0 +1,92 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/_Class1",
+                "A.usd": "/A"
+            },
+            "Property names": [
+                "A",
+                "B",
+                "prohibitedConnectionToInstance",
+                "x"
+            ],
+            "Property stacks": {
+                "/Root.A": {
+                    "A.usd": "/A.A"
+                },
+                "/Root.B": {
+                    "A.usd": "/A.B"
+                },
+                "/Root.prohibitedConnectionToInstance": {
+                    "root.usd": "/_Class1.prohibitedConnectionToInstance"
+                },
+                "/Root.x": {
+                    "root.usd": "/Root.x"
+                }
+            }
+        },
+        "/SubrootRef": {
+            "Prim Stack": {
+                "root.usd": "/SubrootRef",
+                "A.usd": "/B/C"
+            },
+            "Property names": [
+                "testRel"
+            ],
+            "Property stacks": {
+                "/SubrootRef.testRel": {
+                    "A.usd": "/B/C.testRel"
+                }
+            }
+        },
+        "/RootWithReferenceUnderVariant": {
+            "Prim Stack": {
+                "root.usd": "/RootWithReferenceUnderVariant{standin=anim}",
+                "A.usd": "/A"
+            },
+            "Variant Selections": {
+                "standin": "anim"
+            },
+            "Property names": [
+                "A",
+                "B"
+            ],
+            "Property stacks": {
+                "/RootWithReferenceUnderVariant.A": {
+                    "A.usd": "/A.A"
+                },
+                "/RootWithReferenceUnderVariant.B": {
+                    "A.usd": "/A.B"
+                }
+            }
+        },
+        "/_Class1": {
+            "Prim Stack": {
+                "root.usd": "/_Class1"
+            },
+            "Property names": [
+                "prohibitedConnectionToInstance"
+            ],
+            "Property stacks": {
+                "/_Class1.prohibitedConnectionToInstance": {
+                    "root.usd": "/_Class1.prohibitedConnectionToInstance"
+                }
+            },
+            "Attribute connections": {
+                "/_Class1.prohibitedConnectionToInstance": [
+                    "/Root.x"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </Root>\nThe attribute connection </PrimOutsideReferenceRoot.A> from </A.A> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/A.usd@ refers to a path outside the scope of the reference from </Root>.  Ignoring. The relationship target </PrimOutsideReferenceRoot> from </A.B> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/A.usd@ refers to a path outside the scope of the reference from </Root>.  Ignoring. The attribute connection </Root.x> from </_Class1.prohibitedConnectionToInstance> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/root.usd@ refers to a path outside the scope of the inherit from </Root>.  Ignoring.",
+        "Errors while composing </SubrootRef>\nThe relationship target </B/D> from </B/C.testRel> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/A.usd@ refers to a path outside the scope of the reference from </SubrootRef>.  Ignoring.",
+        "Errors while composing </RootWithReferenceUnderVariant>\nThe attribute connection </PrimOutsideReferenceRoot.A> from </A.A> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/A.usd@ refers to a path outside the scope of the reference from </RootWithReferenceUnderVariant{standin=anim}>.  Ignoring. The relationship target </PrimOutsideReferenceRoot> from </A.B> in layer @composition/tests/assets/ErrorInvalidTargetPath_root/usda/A.usd@ refers to a path outside the scope of the reference from </RootWithReferenceUnderVariant{standin=anim}>.  Ignoring. ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

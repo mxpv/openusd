@@ -1,0 +1,104 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/element": {
+            "Prim Stack": {
+                "root.usd": "/implementation{testVariantSet=testVariant}"
+            },
+            "Variant Selections": {
+                "testVariantSet": "testVariant"
+            },
+            "Property names": [
+                "variantAttr",
+                "referencedAttr"
+            ],
+            "Property stacks": {
+                "/element.referencedAttr": {
+                    "root.usd": "/referencedMiddleman.referencedAttr"
+                },
+                "/element.variantAttr": {
+                    "root.usd": "/implementation{testVariantSet=testVariant}.variantAttr"
+                }
+            }
+        },
+        "/_element_class": {
+            "Prim Stack": {
+                "root.usd": "/implementation{testVariantSet=testVariant}"
+            },
+            "Variant Selections": {
+                "testVariantSet": "testVariant"
+            },
+            "Property names": [
+                "variantAttr",
+                "referencedAttr"
+            ],
+            "Property stacks": {
+                "/_element_class.referencedAttr": {
+                    "root.usd": "/referencedMiddleman.referencedAttr"
+                },
+                "/_element_class.variantAttr": {
+                    "root.usd": "/implementation{testVariantSet=testVariant}.variantAttr"
+                }
+            }
+        },
+        "/middleman": {
+            "Prim Stack": {
+                "root.usd": "/implementation{testVariantSet=testVariant}"
+            },
+            "Variant Selections": {
+                "testVariantSet": "testVariant"
+            },
+            "Property names": [
+                "variantAttr",
+                "referencedAttr"
+            ],
+            "Property stacks": {
+                "/middleman.referencedAttr": {
+                    "root.usd": "/referencedMiddleman.referencedAttr"
+                },
+                "/middleman.variantAttr": {
+                    "root.usd": "/implementation{testVariantSet=testVariant}.variantAttr"
+                }
+            }
+        },
+        "/referencedMiddleman": {
+            "Prim Stack": {
+                "root.usd": "/implementation{testVariantSet=testVariant}"
+            },
+            "Variant Selections": {
+                "testVariantSet": "testVariant"
+            },
+            "Property names": [
+                "variantAttr",
+                "referencedAttr"
+            ],
+            "Property stacks": {
+                "/referencedMiddleman.referencedAttr": {
+                    "root.usd": "/referencedMiddleman.referencedAttr"
+                },
+                "/referencedMiddleman.variantAttr": {
+                    "root.usd": "/implementation{testVariantSet=testVariant}.variantAttr"
+                }
+            }
+        },
+        "/implementation": {
+            "Prim Stack": {
+                "root.usd": "/implementation{testVariantSet=testVariant}"
+            },
+            "Variant Selections": {
+                "testVariantSet": "testVariant"
+            },
+            "Property names": [
+                "variantAttr"
+            ],
+            "Property stacks": {
+                "/implementation.variantAttr": {
+                    "root.usd": "/implementation{testVariantSet=testVariant}.variantAttr"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

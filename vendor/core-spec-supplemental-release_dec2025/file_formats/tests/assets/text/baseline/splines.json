@@ -1,0 +1,114 @@
+{
+    "/": {
+        "primChildren": ["foo"]
+    },
+    "/foo": {
+        "specifier": "def",
+        "primChildren": ["baz"],
+        "propertyChildren": ["bar"]
+    },
+    "/foo.bar": {
+        "typeName": "double",
+        "spline": {
+            "curveType": "bezier",
+            "preExtrapolation": null,
+            "postExtrapolation": null,
+            "loopParameters": null,
+            "knots": [],
+            "knotCustomData": {}
+        }
+    },
+    "/foo/baz": {
+        "specifier": "def",
+        "propertyChildren": ["mySpline", "anotherSpline"]
+    },
+    "/foo/baz.mySpline": {
+        "typeName": "float",
+        "custom": true,
+        "spline": {
+            "curveType": "bezier",
+            "preExtrapolation": null,
+            "postExtrapolation": null,
+            "loopParameters": null,
+            "knots": [
+                {
+                    "time": -20,
+                    "value": 2.43,
+                    "preValue": 0.0,
+                    "preTangentSlope": 0.0,
+                    "preTangentWidth": 0.0,
+                    "postTangentSlope": 0.0,
+                    "postTangentWidth": 0.0,
+                    "nextInterpolationMode": "held"
+                },
+                {
+                    "time": -45.2,
+                    "value": 6532.62342,
+                    "preValue": 0.0,
+                    "preTangentSlope": 0.0,
+                    "preTangentWidth": 0.0,
+                    "postTangentSlope": 3.6,
+                    "postTangentWidth": -7.8,
+                    "nextInterpolationMode": "curve"
+                },
+                {
+                    "time": 5,
+                    "value": 17.45e45,
+                    "preValue": 2,
+                    "preTangentSlope": -0.21,
+                    "preTangentWidth": 3,
+                    "postTangentSlope": 0.0,
+                    "postTangentWidth": 0.0,
+                    "nextInterpolationMode": "held"
+                },
+                {
+                    "time": 0,
+                    "value": 1,
+                    "preValue": 0.0,
+                    "preTangentSlope": 0.0,
+                    "preTangentWidth": 0.0,
+                    "postTangentSlope": 0.0,
+                    "postTangentWidth": 0.0,
+                    "nextInterpolationMode": "linear"
+                }
+            ],
+            "knotCustomData": {}
+        }
+    },
+    "/foo/baz.anotherSpline": {
+        "typeName": "double",
+        "custom": true,
+        "spline": {
+            "curveType": "hermite",
+            "preExtrapolation": null,
+            "postExtrapolation": {
+                "mode": "sloped",
+                "slope": 6.5
+            },
+            "loopParameters": {
+                "protoStart": 3.4,
+                "protoEnd": 5.7,
+                "numPreLoops": 0,
+                "numPostLoops": 4,
+                "valueOffset": -22.3
+            },
+            "knots": [
+                {
+                    "time": 14,
+                    "value": 23.4e6,
+                    "preValue": 0.0,
+                    "preTangentSlope": 6.4,
+                    "preTangentWidth": 6.4,
+                    "postTangentSlope": 0.0,
+                    "postTangentWidth": 0.0,
+                    "nextInterpolationMode": "none"
+                }
+            ],
+            "knotCustomData": {
+                "14": {
+                    "custom_comment": "this one is another spline"
+                }
+            }
+        }
+    }
+}

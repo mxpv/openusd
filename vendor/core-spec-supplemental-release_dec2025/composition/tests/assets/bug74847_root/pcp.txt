@@ -1,0 +1,36 @@
+Loading @composition/tests/assets/bug74847_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    payload.usd          /A
+
+Child names:
+     ['B']
+
+------------------------------------------------------------------------
+Results for composing </A/B>
+
+Prim Stack:
+    payload.usd          /A/B
+    ref.usd              /A
+
+Child names:
+     ['B']
+
+------------------------------------------------------------------------
+Results for composing </A/B/B>
+
+Prim Stack:
+    ref.usd              /A/B
+    ref.usd              /A/B{deformable=off}
+
+Variant Selections:
+    {deformable = off}
+

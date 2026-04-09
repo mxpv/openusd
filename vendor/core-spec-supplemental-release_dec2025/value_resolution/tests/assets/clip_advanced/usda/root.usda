@@ -1,0 +1,24 @@
+#usda 1.0
+
+def "Model" (
+    references = @./ref.usd@</Model>
+
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usd@]
+            string primPath = "/Model"
+            asset manifestAssetPath = @./manifest.usd@
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float local = 1.0
+    float local.timeSamples = {
+        0: 0.0,
+        5: 5.0,
+        10: 10.0,
+        15: 15.0,
+        20: 20.0
+    }
+}

@@ -1,0 +1,84 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_": {
+            "Prim Stack": {
+                "root.usd": "/_class_"
+            },
+            "Child names": [
+                "defaultImplementation",
+                "render"
+            ]
+        },
+        "/_class_/defaultImplementation": {
+            "Prim Stack": {
+                "root.usd": "/_class_/defaultImplementation"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/_class_/defaultImplementation.test": {
+                    "root.usd": "/_class_/defaultImplementation.test"
+                }
+            }
+        },
+        "/_class_/render": {
+            "Prim Stack": {
+                "root.usd": "/_class_/defaultImplementation"
+            },
+            "Variant Selections": {
+                "implementation": "default"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/_class_/render.test": {
+                    "root.usd": "/_class_/defaultImplementation.test"
+                }
+            }
+        },
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/_class_"
+            },
+            "Child names": [
+                "defaultImplementation",
+                "render"
+            ]
+        },
+        "/A/defaultImplementation": {
+            "Prim Stack": {
+                "root.usd": "/_class_/defaultImplementation"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/A/defaultImplementation.test": {
+                    "root.usd": "/_class_/defaultImplementation.test"
+                }
+            }
+        },
+        "/A/render": {
+            "Prim Stack": {
+                "root.usd": "/_class_/defaultImplementation"
+            },
+            "Variant Selections": {
+                "implementation": "default"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/A/render.test": {
+                    "root.usd": "/_class_/defaultImplementation.test"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

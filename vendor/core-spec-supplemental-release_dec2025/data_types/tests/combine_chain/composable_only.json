@@ -1,0 +1,35 @@
+[
+    {
+        "description": "An empty explicit list op reduces to an inert list op",
+        "chain" : [{"appended_items" : [], "prepended_items": [], "deleted_items": []}],
+        "combined_reduced" : {}
+    },
+    {
+        "description": "Combined reduced should remove duplicate elements",
+        "chain" : [{"appended_items" : [50, 100, 150], "prepended_items": [50, 75], "deleted_items": [100, 25]}],
+        "combined_reduced" : {"appended_items": [50, 100, 150], "prepended_items": [75], "deleted_items": [25]}
+    },
+    {
+        "description": "Composable over inert with items in multiple sequences",
+        "chain" : [{"appended_items" : [50, 100, 150], "prepended_items": [50, 75], "deleted_items": [100, 25]}, {}],
+        "combined_reduced" : {"appended_items": [50, 100, 150], "prepended_items": [75], "deleted_items": [25]}
+    },
+    {
+        "description": "Inert over composable with items in multiple sequences",
+        "chain" : [{}, {"appended_items" : [50, 100, 150], "prepended_items": [50, 75], "deleted_items": [100, 25]}],
+        "combined_reduced" : {"appended_items": [50, 100, 150], "prepended_items": [75], "deleted_items": [25]}
+    },
+    {
+        "description": "Composable over composable with items in multiple sequences (no repeats)",
+        "chain" : [{"appended_items" : [50, 100, 150], "prepended_items": [50, 75], "deleted_items": [100, 25]},
+                   {"appended_items" : [52, 102, 152], "prepended_items": [52, 77], "deleted_items": [102, 27]}],
+        "combined_reduced" : {"appended_items": [52, 102, 152, 50, 100, 150], "prepended_items": [75, 77], "deleted_items": [27, 25]}
+    },
+    {
+        "description": "Composable over composable with items in multiple sequences (repeats)",
+        "chain" : [{"appended_items" : [50, 100, 150], "prepended_items": [50, 75], "deleted_items": [100, 25]},
+                   {"appended_items" : [50, 102, 150], "prepended_items": [77, 50], "deleted_items": [100, 27]},
+                   {"appended_items" : [150, 104, 50], "prepended_items": [50, 79], "deleted_items": [100, 29]}],
+        "combined_reduced" : {"appended_items": [104, 102, 50, 100, 150], "prepended_items": [75, 77, 79], "deleted_items": [29, 27, 25]}
+    }
+]

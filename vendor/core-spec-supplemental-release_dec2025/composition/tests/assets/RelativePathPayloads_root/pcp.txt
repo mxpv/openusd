@@ -1,0 +1,19 @@
+Loading @composition/tests/assets/RelativePathPayloads_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     sub1/sub1.usd
+     sub2/sub2.usd
+     sub3.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    sub1/sub1.usd        /Model
+    sub2/sub2.usd        /Model
+    sub3.usd             /Model
+    sub1/ref.usd         /Ref
+    sub2/ref.usd         /Ref
+

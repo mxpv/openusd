@@ -1,0 +1,41 @@
+Loading @composition/tests/assets/ExpressionsInPayloads_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </SinglePayload>
+
+Prim Stack:
+    root.usd             /SinglePayload
+    A.usd                /A
+
+------------------------------------------------------------------------
+Results for composing </ChainedPayload>
+
+Prim Stack:
+    root.usd             /ChainedPayload
+    ref2.usd             /Ref2
+    B.usd                /B
+
+------------------------------------------------------------------------
+Results for composing </ChainedPayloadOverride>
+
+Prim Stack:
+    root.usd             /ChainedPayloadOverride
+    ref3.usd             /Ref3
+    ref2.usd             /Ref2
+    A.usd                /A
+
+------------------------------------------------------------------------
+Results for composing </MultiPayload>
+
+Prim Stack:
+    root.usd             /MultiPayload
+    ref3.usd             /Ref3
+    ref2.usd             /Ref2
+    A.usd                /A
+    ref2.usd             /Ref2
+    B.usd                /B
+

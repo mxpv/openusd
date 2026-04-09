@@ -1,0 +1,44 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/NestedSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/NestedSpecializes"
+            }
+        },
+        "/Specializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes"
+            },
+            "Child names": [
+                "Nested"
+            ]
+        },
+        "/Specializes/Nested": {
+            "Prim Stack": {
+                "root.usd": "/Specializes/Nested"
+            }
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Specializes",
+                "ref.usd": "/Specializes",
+                "ref2.usd": "/Specializes"
+            },
+            "Child names": [
+                "Nested"
+            ]
+        },
+        "/Root/Nested": {
+            "Prim Stack": {
+                "root.usd": "/NestedSpecializes",
+                "ref.usd": "/NestedSpecializes",
+                "ref2.usd": "/NestedSpecializes",
+                "ref3.usd": "/NestedSpecializes"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

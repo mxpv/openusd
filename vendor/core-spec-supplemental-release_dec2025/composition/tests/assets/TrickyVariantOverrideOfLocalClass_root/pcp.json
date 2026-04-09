@@ -1,0 +1,46 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/HandRig": {
+            "Prim Stack": {
+                "root.usd": "/HandRig{FingerRigArmature=off}"
+            },
+            "Variant Selections": {
+                "FingerRigArmature": "off"
+            },
+            "Child names": [
+                "_Class_FingerRig",
+                "IndexRig"
+            ]
+        },
+        "/HandRig/_Class_FingerRig": {
+            "Prim Stack": {
+                "root.usd": "/HandRig{FingerRigArmature=off}_Class_FingerRig"
+            },
+            "Property names": [
+                "armature_enabled"
+            ],
+            "Property stacks": {
+                "/HandRig/_Class_FingerRig.armature_enabled": {
+                    "root.usd": "/HandRig{FingerRigArmature=off}_Class_FingerRig.armature_enabled"
+                }
+            }
+        },
+        "/HandRig/IndexRig": {
+            "Prim Stack": {
+                "root.usd": "/HandRig{FingerRigArmature=off}_Class_FingerRig"
+            },
+            "Property names": [
+                "armature_enabled"
+            ],
+            "Property stacks": {
+                "/HandRig/IndexRig.armature_enabled": {
+                    "root.usd": "/HandRig{FingerRigArmature=off}_Class_FingerRig.armature_enabled"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

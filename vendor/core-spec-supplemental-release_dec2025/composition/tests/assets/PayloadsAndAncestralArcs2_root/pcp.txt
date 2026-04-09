@@ -1,0 +1,58 @@
+Loading @composition/tests/assets/PayloadsAndAncestralArcs2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </SubrootInherits>
+
+Prim Stack:
+    root.usd             /SubrootInherits
+    inherits.usd         /Ref
+    inherits.usd         /Payload
+
+Child names:
+     ['Class', 'Child']
+
+------------------------------------------------------------------------
+Results for composing </SubrootInherits/Class>
+
+Prim Stack:
+    root.usd             /SubrootInherits/Class
+    inherits.usd         /Ref/Class
+    inherits.usd         /Payload/Class
+
+------------------------------------------------------------------------
+Results for composing </SubrootInherits/Child>
+
+Prim Stack:
+    root.usd             /SubrootInherits/Child
+    root.usd             /SubrootInherits/Class
+    inherits.usd         /Ref/Child
+    inherits.usd         /Ref/Class
+    inherits.usd         /Payload/Class
+    inherits.usd         /Payload/Child
+
+------------------------------------------------------------------------
+Results for composing </Relocates>
+
+Prim Stack:
+    root.usd             /Relocates
+    relocates.usd        /Ref
+    relocates.usd        /Payload
+
+Child names:
+     ['Child']
+
+Prohibited child names:
+     ['PayloadChild']
+
+------------------------------------------------------------------------
+Results for composing </Relocates/Child>
+
+Prim Stack:
+    root.usd             /Relocates/Child
+    relocates.usd        /Ref/Child
+    relocates.usd        /Payload/PayloadChild
+

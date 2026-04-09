@@ -1,0 +1,356 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/PermissionsAcrossReferences": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossReferences",
+                "ref.usd": "/Reference"
+            },
+            "Child names": [
+                "PrivatePrimFromRef",
+                "PublicPrimFromRef",
+                "ChildFromRef",
+                "PrivatePrimFromRoot",
+                "PublicPrimFromRoot",
+                "ChildFromRoot"
+            ],
+            "Property names": [
+                "privateAttrFromRef",
+                "publicAttrFromRef",
+                "privateAttrFromRoot",
+                "publicAttrFromRoot"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossReferences.privateAttrFromRef": {
+                    "ref.usd": "/Reference.privateAttrFromRef"
+                },
+                "/PermissionsAcrossReferences.privateAttrFromRoot": {
+                    "root.usd": "/PermissionsAcrossReferences.privateAttrFromRoot"
+                },
+                "/PermissionsAcrossReferences.publicAttrFromRef": {
+                    "ref.usd": "/Reference.publicAttrFromRef"
+                },
+                "/PermissionsAcrossReferences.publicAttrFromRoot": {
+                    "root.usd": "/PermissionsAcrossReferences.publicAttrFromRoot"
+                }
+            }
+        },
+        "/PermissionsAcrossReferences/PrivatePrimFromRef": {
+            "Prim Stack": {
+                "ref.usd": "/Reference/PrivatePrimFromRef"
+            }
+        },
+        "/PermissionsAcrossReferences/PublicPrimFromRef": {
+            "Prim Stack": {
+                "ref.usd": "/Reference/PublicPrimFromRef"
+            }
+        },
+        "/PermissionsAcrossReferences/ChildFromRef": {
+            "Prim Stack": {
+                "ref.usd": "/Reference/ChildFromRef"
+            },
+            "Property names": [
+                "relInRef"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossReferences/ChildFromRef.relInRef": {
+                    "ref.usd": "/Reference/ChildFromRef.relInRef"
+                }
+            },
+            "Relationship targets": {
+                "/PermissionsAcrossReferences/ChildFromRef.relInRef": [
+                    "/PermissionsAcrossReferences/PrivatePrimFromRef",
+                    "/PermissionsAcrossReferences/PublicPrimFromRef",
+                    "/PermissionsAcrossReferences.privateAttrFromRef",
+                    "/PermissionsAcrossReferences.publicAttrFromRef"
+                ]
+            }
+        },
+        "/PermissionsAcrossReferences/PrivatePrimFromRoot": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossReferences/PrivatePrimFromRoot"
+            }
+        },
+        "/PermissionsAcrossReferences/PublicPrimFromRoot": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossReferences/PublicPrimFromRoot"
+            }
+        },
+        "/PermissionsAcrossReferences/ChildFromRoot": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossReferences/ChildFromRoot"
+            },
+            "Property names": [
+                "relInRoot"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossReferences/ChildFromRoot.relInRoot": {
+                    "root.usd": "/PermissionsAcrossReferences/ChildFromRoot.relInRoot"
+                }
+            },
+            "Relationship targets": {
+                "/PermissionsAcrossReferences/ChildFromRoot.relInRoot": [
+                    "/PermissionsAcrossReferences/PrivatePrimFromRef",
+                    "/PermissionsAcrossReferences/PublicPrimFromRef",
+                    "/PermissionsAcrossReferences/PrivatePrimFromRoot",
+                    "/PermissionsAcrossReferences/PublicPrimFromRoot",
+                    "/PermissionsAcrossReferences.privateAttrFromRef",
+                    "/PermissionsAcrossReferences.publicAttrFromRef",
+                    "/PermissionsAcrossReferences.privateAttrFromRoot",
+                    "/PermissionsAcrossReferences.publicAttrFromRoot"
+                ]
+            }
+        },
+        "/PermissionsAcrossInherits": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossInherits",
+                "ref.usd": "/ReferenceWithLocalClass"
+            },
+            "Child names": [
+                "Class",
+                "Instance"
+            ]
+        },
+        "/PermissionsAcrossInherits/Class": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class"
+            },
+            "Child names": [
+                "PrivatePrimFromClass",
+                "PublicPrimFromClass",
+                "ChildFromClass"
+            ],
+            "Property names": [
+                "privateAttrFromClass",
+                "publicAttrFromClass"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossInherits/Class.privateAttrFromClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class.privateAttrFromClass"
+                },
+                "/PermissionsAcrossInherits/Class.publicAttrFromClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class.publicAttrFromClass"
+                }
+            }
+        },
+        "/PermissionsAcrossInherits/Class/PrivatePrimFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/PrivatePrimFromClass"
+            }
+        },
+        "/PermissionsAcrossInherits/Class/PublicPrimFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/PublicPrimFromClass"
+            }
+        },
+        "/PermissionsAcrossInherits/Class/ChildFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/ChildFromClass"
+            },
+            "Property names": [
+                "relInClass"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossInherits/Class/ChildFromClass.relInClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class/ChildFromClass.relInClass"
+                }
+            },
+            "Relationship targets": {
+                "/PermissionsAcrossInherits/Class/ChildFromClass.relInClass": [
+                    "/PermissionsAcrossInherits/Class/PrivatePrimFromClass",
+                    "/PermissionsAcrossInherits/Class/PublicPrimFromClass",
+                    "/PermissionsAcrossInherits/Class.privateAttrFromClass",
+                    "/PermissionsAcrossInherits/Class.publicAttrFromClass"
+                ]
+            }
+        },
+        "/PermissionsAcrossInherits/Instance": {
+            "Prim Stack": {
+                "root.usd": "/PermissionsAcrossInherits/Instance",
+                "ref.usd": "/ReferenceWithLocalClass/Class"
+            },
+            "Child names": [
+                "PrivatePrimFromClass",
+                "PublicPrimFromClass",
+                "ChildFromClass"
+            ],
+            "Property names": [
+                "privateAttrFromClass",
+                "publicAttrFromClass",
+                "relInInstance",
+                "relInRootInstance"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossInherits/Instance.privateAttrFromClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class.privateAttrFromClass"
+                },
+                "/PermissionsAcrossInherits/Instance.publicAttrFromClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class.publicAttrFromClass"
+                },
+                "/PermissionsAcrossInherits/Instance.relInInstance": {
+                    "ref.usd": "/ReferenceWithLocalClass/Instance.relInInstance"
+                },
+                "/PermissionsAcrossInherits/Instance.relInRootInstance": {
+                    "root.usd": "/PermissionsAcrossInherits/Instance.relInRootInstance"
+                }
+            },
+            "Relationship targets": {
+                "/PermissionsAcrossInherits/Instance.relInInstance": [
+                    "/PermissionsAcrossInherits/Instance/PrivatePrimFromClass",
+                    "/PermissionsAcrossInherits/Instance/PublicPrimFromClass",
+                    "/PermissionsAcrossInherits/Instance.privateAttrFromClass",
+                    "/PermissionsAcrossInherits/Instance.publicAttrFromClass"
+                ],
+                "/PermissionsAcrossInherits/Instance.relInRootInstance": [
+                    "/PermissionsAcrossInherits/Instance/PrivatePrimFromClass",
+                    "/PermissionsAcrossInherits/Instance/PublicPrimFromClass",
+                    "/PermissionsAcrossInherits/Instance.privateAttrFromClass",
+                    "/PermissionsAcrossInherits/Instance.publicAttrFromClass"
+                ]
+            }
+        },
+        "/PermissionsAcrossInherits/Instance/PrivatePrimFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/PrivatePrimFromClass"
+            }
+        },
+        "/PermissionsAcrossInherits/Instance/PublicPrimFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/PublicPrimFromClass"
+            }
+        },
+        "/PermissionsAcrossInherits/Instance/ChildFromClass": {
+            "Prim Stack": {
+                "ref.usd": "/ReferenceWithLocalClass/Class/ChildFromClass"
+            },
+            "Property names": [
+                "relInClass"
+            ],
+            "Property stacks": {
+                "/PermissionsAcrossInherits/Instance/ChildFromClass.relInClass": {
+                    "ref.usd": "/ReferenceWithLocalClass/Class/ChildFromClass.relInClass"
+                }
+            },
+            "Relationship targets": {
+                "/PermissionsAcrossInherits/Instance/ChildFromClass.relInClass": [
+                    "/PermissionsAcrossInherits/Instance/PrivatePrimFromClass",
+                    "/PermissionsAcrossInherits/Instance/PublicPrimFromClass",
+                    "/PermissionsAcrossInherits/Instance.privateAttrFromClass",
+                    "/PermissionsAcrossInherits/Instance.publicAttrFromClass"
+                ]
+            }
+        },
+        "/CulledPermissions_1": {
+            "Prim Stack": {
+                "root.usd": "/CulledPermissions_1",
+                "culled.usd": "/CulledPermissions_1"
+            },
+            "Child names": [
+                "Foo"
+            ],
+            "Property names": [
+                "rel"
+            ],
+            "Property stacks": {
+                "/CulledPermissions_1.rel": {
+                    "culled.usd": "/CulledPermissions_1.rel"
+                }
+            },
+            "Relationship targets": {
+                "/CulledPermissions_1.rel": [
+                    "/CulledPermissions_1/Foo/NonExistentPrim"
+                ]
+            }
+        },
+        "/CulledPermissions_1/Foo": {
+            "Prim Stack": {
+                "culled.usd": "/CulledPermissions_1/Foo"
+            }
+        },
+        "/CulledPermissions_2": {
+            "Prim Stack": {
+                "root.usd": "/CulledPermissions_2",
+                "culled.usd": "/CulledPermissions_2_2"
+            },
+            "Child names": [
+                "Foo"
+            ],
+            "Property names": [
+                "rel"
+            ],
+            "Property stacks": {
+                "/CulledPermissions_2.rel": {
+                    "culled.usd": "/CulledPermissions_2_2.rel"
+                }
+            },
+            "Relationship targets": {
+                "/CulledPermissions_2.rel": [
+                    "/CulledPermissions_2/Foo.x"
+                ]
+            }
+        },
+        "/CulledPermissions_2/Foo": {
+            "Prim Stack": {
+                "culled.usd": "/CulledPermissions_2_1/Foo"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/CulledPermissions_2/Foo.x": {
+                    "culled.usd": "/CulledPermissions_2_1/Foo.x"
+                }
+            }
+        },
+        "/CulledPermissions_3": {
+            "Prim Stack": {
+                "root.usd": "/CulledPermissions_3{pin=stable}",
+                "culled_stable.usd": "/CulledModel",
+                "culled_payload.usd": "/CulledModelPayload"
+            },
+            "Variant Selections": {
+                "pin": "stable"
+            },
+            "Child names": [
+                "sim"
+            ],
+            "Property names": [
+                "colliders"
+            ],
+            "Property stacks": {
+                "/CulledPermissions_3.colliders": {
+                    "culled_stable.usd": "/CulledModel.colliders"
+                }
+            },
+            "Relationship targets": {
+                "/CulledPermissions_3.colliders": [
+                    "/CulledPermissions_3/sim/CollisionRig/FiztCollBody"
+                ]
+            }
+        },
+        "/CulledPermissions_3/sim": {
+            "Prim Stack": {
+                "culled_payload.usd": "/CulledModelPayload/sim"
+            },
+            "Child names": [
+                "CollisionRig"
+            ]
+        },
+        "/CulledPermissions_3/sim/CollisionRig": {
+            "Prim Stack": {
+                "culled_payload.usd": "/CulledModelPayload/sim/CollisionRig"
+            },
+            "Child names": [
+                "FiztCollBody"
+            ]
+        },
+        "/CulledPermissions_3/sim/CollisionRig/FiztCollBody": {
+            "Prim Stack": {
+                "culled_payload.usd": "/CulledModelPayload/sim/CollisionRig/FiztCollBody"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

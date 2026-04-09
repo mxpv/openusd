@@ -1,0 +1,33 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "Brass_2",
+                "Metal"
+            ],
+            "Prohibited child names": [
+                "Brass"
+            ]
+        },
+        "/Model/Brass_2": {
+            "Prim Stack": {
+                "root.usd": "/Model/Metal",
+                "ref.usd": "/Ref/Metal"
+            }
+        },
+        "/Model/Metal": {
+            "Prim Stack": {
+                "root.usd": "/Model/Metal",
+                "ref.usd": "/Ref/Metal"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

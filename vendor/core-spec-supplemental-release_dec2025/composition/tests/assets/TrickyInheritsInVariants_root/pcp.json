@@ -1,0 +1,73 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "model.usd": "/Model{complexity=high}"
+            },
+            "Variant Selections": {
+                "complexity": "high"
+            },
+            "Child names": [
+                "Class",
+                "Scope"
+            ]
+        },
+        "/Model/Class": {
+            "Prim Stack": {
+                "model.usd": "/Model{complexity=high}Class",
+                "ref.usd": "/RefFromHighClass"
+            },
+            "Child names": [
+                "RefFromHighClassStuff",
+                "HighClassStuff"
+            ]
+        },
+        "/Model/Class/RefFromHighClassStuff": {
+            "Prim Stack": {
+                "ref.usd": "/RefFromHighClass/RefFromHighClassStuff"
+            }
+        },
+        "/Model/Class/HighClassStuff": {
+            "Prim Stack": {
+                "model.usd": "/Model{complexity=high}Class/HighClassStuff"
+            }
+        },
+        "/Model/Scope": {
+            "Prim Stack": {
+                "model.usd": "/Model{complexity=high}Scope",
+                "ref.usd": "/RefFromHighScope"
+            },
+            "Child names": [
+                "RefFromHighScopeStuff",
+                "HighScopeStuff",
+                "RefFromHighClassStuff",
+                "HighClassStuff"
+            ]
+        },
+        "/Model/Scope/RefFromHighScopeStuff": {
+            "Prim Stack": {
+                "ref.usd": "/RefFromHighScope/RefFromHighScopeStuff"
+            }
+        },
+        "/Model/Scope/HighScopeStuff": {
+            "Prim Stack": {
+                "model.usd": "/Model{complexity=high}Scope/HighScopeStuff"
+            }
+        },
+        "/Model/Scope/RefFromHighClassStuff": {
+            "Prim Stack": {
+                "ref.usd": "/RefFromHighClass/RefFromHighClassStuff"
+            }
+        },
+        "/Model/Scope/HighClassStuff": {
+            "Prim Stack": {
+                "model.usd": "/Model{complexity=high}Class/HighClassStuff"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

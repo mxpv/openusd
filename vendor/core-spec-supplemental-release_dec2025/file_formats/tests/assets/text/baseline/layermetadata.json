@@ -1,0 +1,23 @@
+{
+    "/": {
+        "foo": "bar",
+        "baz": null,
+        "comment": "My multiline\ncomment",
+        "documentation": "This is some \\' documentation.",
+        "subLayers": ["foo.usda", "bar.usda", "baz.usda"],
+        "subLayerOffsets": [
+            {
+                "offset": 0.0,
+                "scale": 1.0
+            },
+            {
+                "offset": 4.5,
+                "scale": 1.0
+            },
+            {
+                "offset": 1.2,
+                "scale": 6.0
+            }
+        ]
+    }
+}

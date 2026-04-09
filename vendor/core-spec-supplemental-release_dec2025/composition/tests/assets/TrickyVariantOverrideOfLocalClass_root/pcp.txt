@@ -1,0 +1,48 @@
+Loading @composition/tests/assets/TrickyVariantOverrideOfLocalClass_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </HandRig>
+
+Prim Stack:
+    root.usd             /HandRig
+    root.usd             /HandRig{FingerRigArmature=off}
+
+Variant Selections:
+    {FingerRigArmature = off}
+
+Child names:
+     ['_Class_FingerRig', 'IndexRig']
+
+------------------------------------------------------------------------
+Results for composing </HandRig/_Class_FingerRig>
+
+Prim Stack:
+    root.usd             /HandRig/_Class_FingerRig
+    root.usd             /HandRig{FingerRigArmature=off}_Class_FingerRig
+
+Property names:
+     ['armature_enabled']
+
+Property stacks:
+/HandRig/_Class_FingerRig.armature_enabled:
+    root.usd             /HandRig{FingerRigArmature=off}_Class_FingerRig.armature_enabled
+
+------------------------------------------------------------------------
+Results for composing </HandRig/IndexRig>
+
+Prim Stack:
+    root.usd             /HandRig/IndexRig
+    root.usd             /HandRig/_Class_FingerRig
+    root.usd             /HandRig{FingerRigArmature=off}_Class_FingerRig
+
+Property names:
+     ['armature_enabled']
+
+Property stacks:
+/HandRig/IndexRig.armature_enabled:
+    root.usd             /HandRig{FingerRigArmature=off}_Class_FingerRig.armature_enabled
+

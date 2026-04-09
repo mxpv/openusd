@@ -1,0 +1,25 @@
+#usda 1.0
+
+def Scope "LipRig" (
+    variantSets = "LipRigStyle"
+    variants = {
+        string LipRigStyle = "SingleLip"
+    }
+)
+{
+    variantSet "LipRigStyle" = {
+        "SingleLip" (
+            references = @./SingleLip.usd@</LipsRig>
+        )
+        {
+        }
+        "TwoLips" (
+            references = @./TwoLips.usd@</LipsRig>
+        )
+        {
+        }
+    }
+
+    def Scope "Anim" {
+    }
+}

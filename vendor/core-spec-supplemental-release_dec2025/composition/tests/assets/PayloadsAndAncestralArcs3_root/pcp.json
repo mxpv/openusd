@@ -1,0 +1,90 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "empty_payload.usd": "/Empty"
+            }
+        },
+        "/ReferencePayloadedModel": {
+            "Prim Stack": {
+                "root.usd": "/ReferencePayloadedModel",
+                "model.usd": "/Model",
+                "model_payload.usd": "/Model"
+            },
+            "Child names": [
+                "Test"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Test": {
+            "Prim Stack": {
+                "model.usd": "/Model/Test"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/ReferencePayloadedModel/Test/Anim": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Anim"
+            }
+        },
+        "/PayloadedModel": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel",
+                "model_payload.usd": "/Model"
+            },
+            "Child names": [
+                "Test"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Test": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel/Test"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/PayloadedModel/Test/Anim": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Anim"
+            }
+        },
+        "/InternalReferencePayloadedModel": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel",
+                "model_payload.usd": "/Model"
+            },
+            "Child names": [
+                "Test"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/InternalReferencePayloadedModel/Test": {
+            "Prim Stack": {
+                "root.usd": "/PayloadedModel/Test"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/InternalReferencePayloadedModel/Test/Anim": {
+            "Prim Stack": {
+                "model_payload.usd": "/Model/Anim"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,25 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "model.usd": "/Model{costume=basicCostume}"
+            },
+            "Variant Selections": {
+                "costume": "basicCostume"
+            },
+            "Property names": [
+                "b"
+            ],
+            "Property stacks": {
+                "/Model.b": {
+                    "model.usd": "/Model{costume=basicCostume}.b"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

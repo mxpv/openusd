@@ -1,0 +1,56 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "model.usd": "/Model"
+            },
+            "Child names": [
+                "SymRig",
+                "LeftRig"
+            ]
+        },
+        "/Model/SymRig": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig"
+            },
+            "Child names": [
+                "C2",
+                "C1"
+            ]
+        },
+        "/Model/SymRig/C2": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig/C2"
+            }
+        },
+        "/Model/SymRig/C1": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig/C1"
+            }
+        },
+        "/Model/LeftRig": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig"
+            },
+            "Child names": [
+                "C1",
+                "C2"
+            ]
+        },
+        "/Model/LeftRig/C1": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig/C1"
+            }
+        },
+        "/Model/LeftRig/C2": {
+            "Prim Stack": {
+                "model.usd": "/Model/SymRig/C2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

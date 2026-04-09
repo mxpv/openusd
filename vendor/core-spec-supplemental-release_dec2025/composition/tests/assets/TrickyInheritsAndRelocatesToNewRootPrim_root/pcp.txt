@@ -1,0 +1,171 @@
+Loading @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Group>
+
+Prim Stack:
+    root.usd             /Group
+    group.usd            /Group
+
+Prohibited child names:
+     ['Model']
+
+------------------------------------------------------------------------
+Results for composing </Model_Renamed>
+
+Prim Stack:
+    root.usd             /Model_Renamed
+    group.usd            /Group/Model
+    model.usd            /Model
+
+Child names:
+     ['A', 'B', 'Scope']
+
+------------------------------------------------------------------------
+Results for composing </Model_Renamed/A>
+
+Prim Stack:
+    root.usd             /Model_Renamed/A
+    model.usd            /Model/A
+
+Property names:
+     ['a_target']
+
+Property stacks:
+/Model_Renamed/A.a_target:
+    root.usd             /Model_Renamed/A.a_target
+
+------------------------------------------------------------------------
+Results for composing </Model_Renamed/B>
+
+Prim Stack:
+    root.usd             /Model_Renamed/B
+    root.usd             /Model_Renamed/A
+    model.usd            /Model/B
+    model.usd            /Model/A
+
+Property names:
+     ['a_target', 'b_target']
+
+Property stacks:
+/Model_Renamed/B.a_target:
+    root.usd             /Model_Renamed/A.a_target
+/Model_Renamed/B.b_target:
+    root.usd             /Model_Renamed/B.b_target
+
+------------------------------------------------------------------------
+Results for composing </Model_Renamed/Scope>
+
+Prim Stack:
+    root.usd             /Model_Renamed/B
+    root.usd             /Model_Renamed/A
+    model.usd            /Model/Scope
+    model.usd            /Model/B
+    model.usd            /Model/A
+
+Property names:
+     ['a_target', 'b_target']
+
+Property stacks:
+/Model_Renamed/Scope.a_target:
+    root.usd             /Model_Renamed/A.a_target
+/Model_Renamed/Scope.b_target:
+    root.usd             /Model_Renamed/B.b_target
+
+------------------------------------------------------------------------
+Results for composing </Rig>
+
+Prim Stack:
+    root.usd             /Rig
+    rig.usd              /Rig
+
+Child names:
+     ['Anim']
+
+Prohibited child names:
+     ['RigClass']
+
+------------------------------------------------------------------------
+Results for composing </Rig/Anim>
+
+Prim Stack:
+    root.usd             /Rig/Anim
+
+Child names:
+     ['RigInstance', 'BadRigInstance']
+
+------------------------------------------------------------------------
+Results for composing </Rig/Anim/RigInstance>
+
+Prim Stack:
+    root.usd             /Rig/Anim/RigInstance
+    root.usd             /RigClass
+    rig.usd              /Rig/RigClass
+
+Property names:
+     ['r_target']
+
+Property stacks:
+/Rig/Anim/RigInstance.r_target:
+    root.usd             /RigClass.r_target
+
+------------------------------------------------------------------------
+Results for composing </Rig/Anim/BadRigInstance>
+
+Prim Stack:
+    root.usd             /Rig/Anim/BadRigInstance
+
+------------------------------------------------------------------------
+Results for composing </RigClass>
+
+Prim Stack:
+    root.usd             /RigClass
+    rig.usd              /Rig/RigClass
+
+Property names:
+     ['r_target']
+
+Property stacks:
+/RigClass.r_target:
+    root.usd             /RigClass.r_target
+
+
+------------------------------------------------------------------------
+Errors while composing </Model_Renamed>
+
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Model_Renamed/B>
+
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Model_Renamed/Scope>
+
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Rig/Anim/RigInstance>
+
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Rig/RigClass>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </Rig/Anim/BadRigInstance>
+
+@composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@</Rig/Anim/BadRigInstance>
+CANNOT inherit from:
+@composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@</Rig/RigClass>
+which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@</Rig/RigClass>.
+
+------------------------------------------------------------------------
+Errors while composing </RigClass>
+
+The layer @composition/tests/assets/TrickyInheritsAndRelocatesToNewRootPrim_root/usda/root.usd@ has an invalid opinion at the relocation source path </Rig/RigClass>, which will be ignored.
+
+ERROR: Unexpected error(s) encountered during test!

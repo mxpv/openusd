@@ -1,0 +1,44 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "A",
+                "B",
+                "C",
+                "D"
+            ]
+        },
+        "/Model/A": {
+            "Prim Stack": {
+                "root.usd": "/Model/D",
+                "ref.usd": "/Ref/D"
+            }
+        },
+        "/Model/B": {
+            "Prim Stack": {
+                "root.usd": "/Model/D",
+                "ref.usd": "/Ref/D"
+            }
+        },
+        "/Model/C": {
+            "Prim Stack": {
+                "root.usd": "/Model/D",
+                "ref.usd": "/Ref/D"
+            }
+        },
+        "/Model/D": {
+            "Prim Stack": {
+                "root.usd": "/Model/D",
+                "ref.usd": "/Ref/D"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,27 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Inherit": {
+            "Prim Stack": {
+                "root.usd": "/Inherit"
+            },
+            "Child names": [
+                "CHARACTER"
+            ]
+        },
+        "/Inherit/CHARACTER": {
+            "Prim Stack": {
+                "root.usd": "/Inherit/CHARACTER"
+            }
+        },
+        "/Character": {
+            "Prim Stack": {
+                "root.usd": "/Inherit/CHARACTER",
+                "CharGroup.usd": "/Inherit/CHARACTER"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

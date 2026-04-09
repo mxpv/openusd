@@ -1,0 +1,53 @@
+Loading @composition/tests/assets/SpecializesAndAncestralArcs_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Specializes>
+
+Prim Stack:
+    root.usd             /Specializes
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </Specializes/Child>
+
+Prim Stack:
+    root.usd             /Specializes/Child
+
+------------------------------------------------------------------------
+Results for composing </Class>
+
+Prim Stack:
+    root.usd             /Class
+
+------------------------------------------------------------------------
+Results for composing </AncestralReference>
+
+Prim Stack:
+    root.usd             /AncestralReference
+    ref.usd              /Ref
+    root.usd             /Specializes
+    ref.usd              /Specializes
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </AncestralReference/Child>
+
+Prim Stack:
+    root.usd             /AncestralReference/Child
+    ref.usd              /Ref/Child
+    root.usd             /Specializes/Child
+    root.usd             /Class
+    ref.usd              /Specializes/Child
+    ref.usd              /ChildRef
+    ref.usd              /Class
+    ref2.usd             /Ref2
+    ref2.usd             /Class
+

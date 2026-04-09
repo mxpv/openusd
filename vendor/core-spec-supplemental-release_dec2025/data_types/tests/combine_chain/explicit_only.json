@@ -1,0 +1,27 @@
+[
+    {
+        "description": "An empty explicit list op reduces to an empty (not inert) explicit list op",
+        "chain" : [{"explicit_items" : []}],
+        "combined_reduced" : {"explicit_items" : []}
+    },
+    {
+        "description": "A explicit list op with one item reduces to an explicit list op ",
+        "chain" : [{"explicit_items" : [100]}],
+        "combined_reduced" : {"explicit_items" : [100]}
+    },
+    {
+        "description": "A single explicit list with multiple items reduces to a single explicit list",
+        "chain" : [{"explicit_items" : [100, 50]}],
+        "combined_reduced" : {"explicit_items" : [100, 50]}
+    },
+    {
+        "description": "A stack of multiple explicit list ops reduces to the elements and order of the top of the stack",
+        "chain" : [{"explicit_items" : [100, 50]}, {"explicit_items" : [50, 100, 75]}],
+        "combined_reduced" : {"explicit_items" : [100, 50]}
+    },
+    {
+        "description": "A stack of multiple explicit list ops whose top is empty reduces to an empty (not inert) explicit list op",
+        "chain" : [{"explicit_items" : []}, {"explicit_items" : [50, 100, 75]}],
+        "combined_reduced" : {"explicit_items" : []}
+    }
+]

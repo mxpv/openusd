@@ -1,0 +1,27 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Class",
+                "model.usd": "/Class"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Model.x": {
+                    "model.usd": "/Class.x"
+                }
+            }
+        },
+        "/Class": {
+            "Prim Stack": {
+                "root.usd": "/Class"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

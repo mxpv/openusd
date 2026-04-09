@@ -1,0 +1,34 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/A",
+                "payload.usd": "/A"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/A/B": {
+            "Prim Stack": {
+                "payload.usd": "/A/B",
+                "ref.usd": "/A"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/A/B/B": {
+            "Prim Stack": {
+                "ref.usd": "/A/B{deformable=off}"
+            },
+            "Variant Selections": {
+                "deformable": "off"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

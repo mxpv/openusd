@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+class "Inherit" () {
+    int first = 99
+}
+
+
+def Xform "Root" (
+    references = @./second.usd@
+) {
+
+}

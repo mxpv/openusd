@@ -1,0 +1,56 @@
+Loading @composition/tests/assets/TrickySpecializesAndInherits_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    ref.usd              /Ref
+
+Child names:
+     ['A', 'B', 'C', 'D']
+
+------------------------------------------------------------------------
+Results for composing </Model/A>
+
+Prim Stack:
+    root.usd             /Model/A
+    ref.usd              /Ref/A
+    root.usd             /Model/B
+    root.usd             /Model/C
+    ref.usd              /Ref/B
+    ref.usd              /Ref/C
+    root.usd             /Model/D
+    ref.usd              /Ref/D
+
+------------------------------------------------------------------------
+Results for composing </Model/B>
+
+Prim Stack:
+    root.usd             /Model/B
+    root.usd             /Model/C
+    ref.usd              /Ref/B
+    ref.usd              /Ref/C
+    root.usd             /Model/D
+    ref.usd              /Ref/D
+
+------------------------------------------------------------------------
+Results for composing </Model/C>
+
+Prim Stack:
+    root.usd             /Model/C
+    ref.usd              /Ref/C
+    root.usd             /Model/D
+    ref.usd              /Ref/D
+
+------------------------------------------------------------------------
+Results for composing </Model/D>
+
+Prim Stack:
+    root.usd             /Model/D
+    ref.usd              /Ref/D
+

@@ -1,0 +1,41 @@
+Loading @composition/tests/assets/ExpressionsInReferences_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </SingleRef>
+
+Prim Stack:
+    root.usd             /SingleRef
+    A.usd                /A
+
+------------------------------------------------------------------------
+Results for composing </ChainedRef>
+
+Prim Stack:
+    root.usd             /ChainedRef
+    ref2.usd             /Ref2
+    B.usd                /B
+
+------------------------------------------------------------------------
+Results for composing </ChainedRefOverride>
+
+Prim Stack:
+    root.usd             /ChainedRefOverride
+    ref3.usd             /Ref3
+    ref2.usd             /Ref2
+    A.usd                /A
+
+------------------------------------------------------------------------
+Results for composing </MultiRef>
+
+Prim Stack:
+    root.usd             /MultiRef
+    ref3.usd             /Ref3
+    ref2.usd             /Ref2
+    A.usd                /A
+    ref2.usd             /Ref2
+    B.usd                /B
+

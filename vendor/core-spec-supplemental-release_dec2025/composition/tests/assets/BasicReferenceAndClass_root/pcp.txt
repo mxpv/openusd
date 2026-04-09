@@ -1,0 +1,28 @@
+Loading @composition/tests/assets/BasicReferenceAndClass_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    root.usd             /Class
+    model.usd            /Model
+    model.usd            /Class
+
+Property names:
+     ['x']
+
+Property stacks:
+/Model.x:
+    model.usd            /Class.x
+
+------------------------------------------------------------------------
+Results for composing </Class>
+
+Prim Stack:
+    root.usd             /Class
+

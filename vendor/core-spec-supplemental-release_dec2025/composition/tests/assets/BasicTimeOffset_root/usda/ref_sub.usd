@@ -1,0 +1,13 @@
+#usda 1.0
+
+def "Ref" (
+    payload = @./B.usd@</Model>
+)
+{
+}
+
+def "Ref2" (
+    references = @./B.usd@</Model>
+)
+{
+}

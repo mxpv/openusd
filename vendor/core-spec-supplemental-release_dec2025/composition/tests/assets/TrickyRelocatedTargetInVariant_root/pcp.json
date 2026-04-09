@@ -1,0 +1,133 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root{v=a}",
+                "ref.usd": "/Ref"
+            },
+            "Variant Selections": {
+                "v": "a"
+            },
+            "Child names": [
+                "Rig",
+                "Anim"
+            ],
+            "Prohibited child names": [
+                "Child",
+                "Child2"
+            ],
+            "Property names": [
+                "myRel"
+            ],
+            "Property stacks": {
+                "/Root.myRel": {
+                    "root.usd": "/Root{v=a}.myRel"
+                }
+            },
+            "Relationship targets": {
+                "/Root.myRel": [
+                    "/Root/Anim/Child2",
+                    "/Root/Anim/Child"
+                ]
+            }
+        },
+        "/Root/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Root{v=a}Rig",
+                "ref.usd": "/Ref"
+            },
+            "Prohibited child names": [
+                "Child",
+                "Child2"
+            ]
+        },
+        "/Root/Anim": {
+            "Prim Stack": {
+                "root.usd": "/Root/Anim"
+            },
+            "Child names": [
+                "Child",
+                "Child2",
+                "Child3",
+                "Child4"
+            ]
+        },
+        "/Root/Anim/Child": {
+            "Prim Stack": {
+                "root.usd": "/Root/Anim/Child",
+                "ref.usd": "/Ref/Child"
+            },
+            "Property names": [
+                "sibling"
+            ],
+            "Property stacks": {
+                "/Root/Anim/Child.sibling": {
+                    "ref.usd": "/Ref/Child.sibling"
+                }
+            },
+            "Relationship targets": {
+                "/Root/Anim/Child.sibling": [
+                    "/Root/Anim/Child2"
+                ]
+            }
+        },
+        "/Root/Anim/Child2": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/Child2"
+            },
+            "Property names": [
+                "sibling"
+            ],
+            "Property stacks": {
+                "/Root/Anim/Child2.sibling": {
+                    "ref.usd": "/Ref/Child2.sibling"
+                }
+            },
+            "Relationship targets": {
+                "/Root/Anim/Child2.sibling": [
+                    "/Root/Anim/Child"
+                ]
+            }
+        },
+        "/Root/Anim/Child3": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/Child"
+            },
+            "Property names": [
+                "sibling"
+            ],
+            "Property stacks": {
+                "/Root/Anim/Child3.sibling": {
+                    "ref.usd": "/Ref/Child.sibling"
+                }
+            },
+            "Relationship targets": {
+                "/Root/Anim/Child3.sibling": [
+                    "/Root/Anim/Child4"
+                ]
+            }
+        },
+        "/Root/Anim/Child4": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/Child2"
+            },
+            "Property names": [
+                "sibling"
+            ],
+            "Property stacks": {
+                "/Root/Anim/Child4.sibling": {
+                    "ref.usd": "/Ref/Child2.sibling"
+                }
+            },
+            "Relationship targets": {
+                "/Root/Anim/Child4.sibling": [
+                    "/Root/Anim/Child3"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

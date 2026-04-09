@@ -1,0 +1,46 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group",
+                "group.usd": "/Group{standin=sim}"
+            },
+            "Variant Selections": {
+                "standin": "sim"
+            },
+            "Child names": [
+                "Model"
+            ],
+            "Property names": [
+                "standin_name"
+            ],
+            "Property stacks": {
+                "/Group.standin_name": {
+                    "group.usd": "/Group{standin=sim}.standin_name"
+                }
+            }
+        },
+        "/Group/Model": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model",
+                "group.usd": "/Group{standin=sim}Model",
+                "model.usd": "/Model{standin=sim}"
+            },
+            "Variant Selections": {
+                "standin": "sim"
+            },
+            "Property names": [
+                "standin_name"
+            ],
+            "Property stacks": {
+                "/Group/Model.standin_name": {
+                    "model.usd": "/Model{standin=sim}.standin_name"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

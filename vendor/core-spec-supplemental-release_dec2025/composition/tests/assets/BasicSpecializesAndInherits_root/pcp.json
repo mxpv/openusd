@@ -1,0 +1,83 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Inherits_1": {
+            "Prim Stack": {
+                "root.usd": "/Inherits_1"
+            }
+        },
+        "/Specializes_1": {
+            "Prim Stack": {
+                "root.usd": "/Inherits_1"
+            }
+        },
+        "/Instance_1": {
+            "Prim Stack": {
+                "root.usd": "/Inherits_1"
+            }
+        },
+        "/Inherits_2": {
+            "Prim Stack": {
+                "root.usd": "/Inherits_2"
+            }
+        },
+        "/Specializes_2": {
+            "Prim Stack": {
+                "root.usd": "/Specializes_2"
+            }
+        },
+        "/Instance_2": {
+            "Prim Stack": {
+                "root.usd": "/Inherits_2",
+                "ref.usd": "/Inherits_2"
+            }
+        },
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model"
+            },
+            "Child names": [
+                "Looks"
+            ]
+        },
+        "/Model/Looks": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks",
+                "looks.usd": "/Looks"
+            },
+            "Child names": [
+                "BaseMaterial",
+                "Material",
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/Model/Looks/BaseMaterial": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/BaseMaterial",
+                "looks.usd": "/Looks/BaseMaterial"
+            }
+        },
+        "/Model/Looks/Material": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/BaseMaterial",
+                "looks.usd": "/Looks/BaseMaterial"
+            }
+        },
+        "/Model/Looks/Metal": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/BaseMaterial",
+                "looks.usd": "/Looks/BaseMaterial"
+            }
+        },
+        "/Model/Looks/Brass": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/BaseMaterial",
+                "looks.usd": "/Looks/BaseMaterial"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,49 @@
+Loading @composition/tests/assets/ErrorSublayerCycle_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     A.usd
+     B.usd
+     B.usd
+     A.usd
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    A.usd                /A
+    A.usd                /A
+
+Property names:
+     ['A_attr']
+
+Property stacks:
+/A.A_attr:
+    A.usd                /A.A_attr
+    A.usd                /A.A_attr
+
+------------------------------------------------------------------------
+Results for composing </B>
+
+Prim Stack:
+    B.usd                /B
+    B.usd                /B
+
+Property names:
+     ['B_attr']
+
+Property stacks:
+/B.B_attr:
+    B.usd                /B.B_attr
+    B.usd                /B.B_attr
+
+
+------------------------------------------------------------------------
+Errors while computing Layer Stack
+
+Sublayer hierarchy with root layer @composition/tests/assets/ErrorSublayerCycle_root/usda/B.usd@ has cycles. Detected when layer @composition/tests/assets/ErrorSublayerCycle_root/usda/A.usd@ was seen in the layer stack for the second time.
+Sublayer hierarchy with root layer @composition/tests/assets/ErrorSublayerCycle_root/usda/A.usd@ has cycles. Detected when layer @composition/tests/assets/ErrorSublayerCycle_root/usda/B.usd@ was seen in the layer stack for the second time.
+
+ERROR: Unexpected error(s) encountered during test!

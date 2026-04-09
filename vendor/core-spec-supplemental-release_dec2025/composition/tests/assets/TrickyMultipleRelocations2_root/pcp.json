@@ -1,0 +1,104 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/ModelGroup": {
+            "Prim Stack": {
+                "root.usd": "/ModelGroup",
+                "group.usd": "/Group"
+            },
+            "Child names": [
+                "Model_2"
+            ],
+            "Prohibited child names": [
+                "Model"
+            ],
+            "Property names": [
+                "groupRel"
+            ],
+            "Property stacks": {
+                "/ModelGroup.groupRel": {
+                    "root.usd": "/ModelGroup.groupRel"
+                }
+            },
+            "Relationship targets": {
+                "/ModelGroup.groupRel": [
+                    "/ModelGroup/Model_2/Anim/Collider"
+                ]
+            }
+        },
+        "/ModelGroup/Model_2": {
+            "Prim Stack": {
+                "root.usd": "/ModelGroup/Model_2",
+                "group.usd": "/Group/Model"
+            },
+            "Child names": [
+                "Anim",
+                "Rig"
+            ],
+            "Property names": [
+                "modelRel"
+            ],
+            "Property stacks": {
+                "/ModelGroup/Model_2.modelRel": {
+                    "root.usd": "/ModelGroup/Model_2.modelRel"
+                }
+            },
+            "Relationship targets": {
+                "/ModelGroup/Model_2.modelRel": [
+                    "/ModelGroup/Model_2/Anim/Collider"
+                ]
+            }
+        },
+        "/ModelGroup/Model_2/Anim": {
+            "Prim Stack": {
+                "group.usd": "/Group/Model/Anim"
+            },
+            "Child names": [
+                "Collider"
+            ]
+        },
+        "/ModelGroup/Model_2/Anim/Collider": {
+            "Prim Stack": {
+                "rig.usd": "/Rig/Collider"
+            },
+            "Property names": [
+                "colliderRel"
+            ],
+            "Property stacks": {
+                "/ModelGroup/Model_2/Anim/Collider.colliderRel": {
+                    "rig.usd": "/Rig/Collider.colliderRel"
+                }
+            },
+            "Relationship targets": {
+                "/ModelGroup/Model_2/Anim/Collider.colliderRel": [
+                    "/ModelGroup/Model_2/Anim/Collider"
+                ]
+            }
+        },
+        "/ModelGroup/Model_2/Rig": {
+            "Prim Stack": {
+                "root.usd": "/ModelGroup/Model_2/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Prohibited child names": [
+                "Collider"
+            ],
+            "Property names": [
+                "rigRel"
+            ],
+            "Property stacks": {
+                "/ModelGroup/Model_2/Rig.rigRel": {
+                    "rig.usd": "/Rig.rigRel"
+                }
+            },
+            "Relationship targets": {
+                "/ModelGroup/Model_2/Rig.rigRel": [
+                    "/ModelGroup/Model_2/Anim/Collider"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

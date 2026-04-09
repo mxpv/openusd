@@ -1,0 +1,272 @@
+Loading @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </ConnectionToLocalClass>
+
+Prim Stack:
+    root.usd             /ConnectionToLocalClass
+
+Child names:
+     ['LocalClass', 'Instance_1', 'Instance_2']
+
+------------------------------------------------------------------------
+Results for composing </ConnectionToLocalClass/LocalClass>
+
+Prim Stack:
+    root.usd             /ConnectionToLocalClass/LocalClass
+
+Property names:
+     ['x', 'y']
+
+Property stacks:
+/ConnectionToLocalClass/LocalClass.x:
+    root.usd             /ConnectionToLocalClass/LocalClass.x
+/ConnectionToLocalClass/LocalClass.y:
+    root.usd             /ConnectionToLocalClass/LocalClass.y
+
+Attribute connections:
+/ConnectionToLocalClass/LocalClass.x:
+    /ConnectionToLocalClass/Instance_1.y
+    /ConnectionToLocalClass/Instance_2.y
+
+------------------------------------------------------------------------
+Results for composing </ConnectionToLocalClass/Instance_1>
+
+Prim Stack:
+    root.usd             /ConnectionToLocalClass/Instance_1
+    root.usd             /ConnectionToLocalClass/LocalClass
+
+Property names:
+     ['x', 'y']
+
+Property stacks:
+/ConnectionToLocalClass/Instance_1.x:
+    root.usd             /ConnectionToLocalClass/LocalClass.x
+/ConnectionToLocalClass/Instance_1.y:
+    root.usd             /ConnectionToLocalClass/LocalClass.y
+
+------------------------------------------------------------------------
+Results for composing </ConnectionToLocalClass/Instance_2>
+
+Prim Stack:
+    root.usd             /ConnectionToLocalClass/Instance_2
+    root.usd             /ConnectionToLocalClass/LocalClass
+
+Property names:
+     ['x', 'y']
+
+Property stacks:
+/ConnectionToLocalClass/Instance_2.x:
+    root.usd             /ConnectionToLocalClass/LocalClass.x
+/ConnectionToLocalClass/Instance_2.y:
+    root.usd             /ConnectionToLocalClass/LocalClass.y
+
+------------------------------------------------------------------------
+Results for composing </FaceRig>
+
+Prim Stack:
+    root.usd             /FaceRig
+
+Child names:
+     ['BrowRig', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig>
+
+Prim Stack:
+    root.usd             /FaceRig/BrowRig
+    ref.usd              /BrowRig
+
+Child names:
+     ['SymBrow', 'LBrow', 'RBrow', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/SymBrow>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow
+
+Child names:
+     ['BrowInnUDPosBrowInnUDNeg_sculpt', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt
+
+Property names:
+     ['amount']
+
+Property stacks:
+/FaceRig/BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount
+
+Attribute connections:
+/FaceRig/BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    /FaceRig/Anim/Face/Eyes/RBrow.InnUD
+    /FaceRig/Anim/Face/Eyes/LBrow.InnUD
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/SymBrow/Anim>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim
+
+Child names:
+     ['Brow']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/SymBrow/Anim/Brow>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim/Brow
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/LBrow>
+
+Prim Stack:
+    ref.usd              /BrowRig/LBrow
+    ref.usd              /BrowRig/SymBrow
+
+Child names:
+     ['BrowInnUDPosBrowInnUDNeg_sculpt', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/LBrow/BrowInnUDPosBrowInnUDNeg_sculpt>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt
+
+Property names:
+     ['amount']
+
+Property stacks:
+/FaceRig/BrowRig/LBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount
+
+Attribute connections:
+/FaceRig/BrowRig/LBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    /FaceRig/BrowRig/Anim/LBrow.InnUD
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/LBrow/Anim>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim
+
+Prohibited child names:
+     ['Brow']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/RBrow>
+
+Prim Stack:
+    ref.usd              /BrowRig/RBrow
+    ref.usd              /BrowRig/SymBrow
+
+Child names:
+     ['BrowInnUDPosBrowInnUDNeg_sculpt', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/RBrow/BrowInnUDPosBrowInnUDNeg_sculpt>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt
+
+Property names:
+     ['amount']
+
+Property stacks:
+/FaceRig/BrowRig/RBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    ref.usd              /BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount
+
+Attribute connections:
+/FaceRig/BrowRig/RBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount:
+    /FaceRig/BrowRig/Anim/RBrow.InnUD
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/RBrow/Anim>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim
+
+Prohibited child names:
+     ['Brow']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/BrowRig/Anim>
+
+Prim Stack:
+    ref.usd              /BrowRig/Anim
+
+Prohibited child names:
+     ['LBrow', 'RBrow']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/Anim>
+
+Prim Stack:
+    root.usd             /FaceRig/Anim
+
+Child names:
+     ['Face']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/Anim/Face>
+
+Prim Stack:
+    root.usd             /FaceRig/Anim/Face
+
+Child names:
+     ['Eyes']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/Anim/Face/Eyes>
+
+Prim Stack:
+    root.usd             /FaceRig/Anim/Face/Eyes
+
+Child names:
+     ['LBrow', 'RBrow']
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/Anim/Face/Eyes/LBrow>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim/Brow
+
+------------------------------------------------------------------------
+Results for composing </FaceRig/Anim/Face/Eyes/RBrow>
+
+Prim Stack:
+    ref.usd              /BrowRig/SymBrow/Anim/Brow
+
+
+------------------------------------------------------------------------
+Errors while composing </ConnectionToLocalClass/Instance_1>
+
+The attribute connection </ConnectionToLocalClass/Instance_1.y> from </ConnectionToLocalClass/LocalClass.x> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/root.usd@ refers to a path outside the scope of the inherit from </ConnectionToLocalClass/Instance_1>.  Ignoring.
+The attribute connection </ConnectionToLocalClass/Instance_2.y> from </ConnectionToLocalClass/LocalClass.x> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/root.usd@ is authored in a class but refers to an instance of that class.  Ignoring.
+
+------------------------------------------------------------------------
+Errors while composing </ConnectionToLocalClass/Instance_2>
+
+The attribute connection </ConnectionToLocalClass/Instance_1.y> from </ConnectionToLocalClass/LocalClass.x> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/root.usd@ is authored in a class but refers to an instance of that class.  Ignoring.
+The attribute connection </ConnectionToLocalClass/Instance_2.y> from </ConnectionToLocalClass/LocalClass.x> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/root.usd@ refers to a path outside the scope of the inherit from </ConnectionToLocalClass/Instance_2>.  Ignoring.
+
+------------------------------------------------------------------------
+Errors while composing </FaceRig/BrowRig/LBrow/BrowInnUDPosBrowInnUDNeg_sculpt>
+
+The attribute connection </BrowRig/Anim/RBrow.InnUD> from </BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/ref.usd@ is authored in a class but refers to an instance of that class.  Ignoring.
+
+------------------------------------------------------------------------
+Errors while composing </FaceRig/BrowRig/RBrow/BrowInnUDPosBrowInnUDNeg_sculpt>
+
+The attribute connection </BrowRig/Anim/LBrow.InnUD> from </BrowRig/SymBrow/BrowInnUDPosBrowInnUDNeg_sculpt.amount> in layer @composition/tests/assets/ErrorInvalidInstanceTargetPath_root/usda/ref.usd@ is authored in a class but refers to an instance of that class.  Ignoring.
+
+ERROR: Unexpected error(s) encountered during test!

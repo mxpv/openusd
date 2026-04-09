@@ -1,0 +1,73 @@
+Loading @composition/tests/assets/TrickyRelocationOfPrimFromVariant_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Char>
+
+Prim Stack:
+    root.usd             /Char
+    CharRig.usd          /CharRig
+    CharRig.usd          /CharRig{TailRigVersion=Standard}
+
+Variant Selections:
+    {TailRigVersion = Standard}
+
+Child names:
+     ['TailRig', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </Char/TailRig>
+
+Prim Stack:
+    CharRig.usd          /CharRig{TailRigVersion=Standard}TailRig
+    TailRig.usd          /TailRig
+
+Prohibited child names:
+     ['Tail']
+
+------------------------------------------------------------------------
+Results for composing </Char/Anim>
+
+Prim Stack:
+    CharRig.usd          /CharRig/Anim
+
+Child names:
+     ['Tail']
+
+------------------------------------------------------------------------
+Results for composing </Char/Anim/Tail>
+
+Prim Stack:
+    TailRig.usd          /TailRig/Tail
+
+------------------------------------------------------------------------
+Results for composing </Char2>
+
+Prim Stack:
+    root.usd             /Char2
+    CharRig.usd          /CharRig2
+    CharRig.usd          /CharRig2{TailRigVersion=None}
+
+Variant Selections:
+    {TailRigVersion = None}
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </Char2/Anim>
+
+Prim Stack:
+    CharRig.usd          /CharRig2/Anim
+
+Child names:
+     ['Tail']
+
+------------------------------------------------------------------------
+Results for composing </Char2/Anim/Tail>
+
+Prim Stack:
+

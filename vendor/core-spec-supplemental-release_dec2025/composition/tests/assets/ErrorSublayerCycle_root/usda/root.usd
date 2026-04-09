@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    """
+    This example contains a sublayer cycle:
+    A.usd and B.usd sublayer each other.
+    """
+    subLayers = [
+        @./A.usd@,
+        @./B.usd@
+    ]
+)
+
+def "A" 
+{
+}

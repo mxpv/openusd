@@ -1,0 +1,52 @@
+[
+    {
+        "description": "Empty appended items over inert",
+        "chain" : [{"appended_items" : []}, {}],
+        "combined_reduced" : {}
+    },
+    {
+        "description": "Empty appended items over appeneded items",
+        "chain" : [{"appended_items" : []}, {"appended_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [100, 150]}
+    },
+    {
+        "description": "Empty appended items over prepended items",
+        "chain" : [{"appended_items" : []}, {"prepended_items" : [100, 150]}],
+        "combined_reduced" : {"prepended_items" : [100, 150]}
+    },
+    {
+        "description": "Empty appended items over deleted items",
+        "chain" : [{"appended_items" : []}, {"deleted_items" : [100, 150]}],
+        "combined_reduced" : {"deleted_items" : [100, 150]}
+    },
+    {
+        "description": "Appended items over appended items (no repetitions)",
+        "chain" : [{"appended_items" : [75, 50]}, {"appended_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [100, 150, 75, 50]}
+    },
+    {
+        "description": "Appended items over prepended items (no repititions)",
+        "chain" : [{"appended_items" : [75, 50]}, {"prepended_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [75, 50], "prepended_items" : [100, 150]}
+    },
+    {
+        "description": "Appended items over deleted items (no repititions)",
+        "chain" : [{"appended_items" : [75, 50]}, {"deleted_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [75, 50], "deleted_items" : [100, 150]}
+    },
+    {
+        "description": "Appended items over appended items (repetitions)",
+        "chain" : [{"appended_items" : [75, 150]}, {"appended_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [100, 75, 150]}
+    },
+    {
+        "description": "Appended items over repeated items (repititions)",
+        "chain" : [{"appended_items" : [75, 150]}, {"prepended_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [75, 150], "prepended_items" : [100]}
+    },
+    {
+        "description": "Appended items over deleted items (repititions)",
+        "chain" : [{"appended_items" : [75, 150]}, {"deleted_items" : [100, 150]}],
+        "combined_reduced" : {"appended_items" : [75, 150], "deleted_items" : [100]}
+    }
+]

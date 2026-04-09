@@ -1,0 +1,26 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/A{v=v2}",
+                "model.usd": "/A{v=v2}"
+            },
+            "Variant Selections": {
+                "v": "v2"
+            },
+            "Property names": [
+                "v2"
+            ],
+            "Property stacks": {
+                "/A.v2": {
+                    "root.usd": "/A{v=v2}.v2",
+                    "model.usd": "/A{v=v2}.v2"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

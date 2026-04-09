@@ -1,0 +1,196 @@
+Loading @composition/tests/assets/ErrorInvalidAuthoredRelocates_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model_1>
+
+Prim Stack:
+    root.usd             /Model_1
+    model.usd            /Model
+
+Child names:
+     ['LocalClass', 'Instance']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/LocalClass>
+
+Prim Stack:
+    root.usd             /Model_1/LocalClass
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/LocalClass/Test>
+
+Prim Stack:
+    root.usd             /Model_1/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Instance>
+
+Prim Stack:
+    root.usd             /Model_1/Instance
+    root.usd             /Model_1/LocalClass
+    model.usd            /Model/Instance
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_1/Instance/Test>
+
+Prim Stack:
+    root.usd             /Model_1/Instance/Test
+    root.usd             /Model_1/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_2>
+
+Prim Stack:
+    root.usd             /Model_2
+    model.usd            /Model
+
+Child names:
+     ['LocalClass', 'Instance']
+
+------------------------------------------------------------------------
+Results for composing </Model_2/LocalClass>
+
+Prim Stack:
+    root.usd             /Model_2/LocalClass
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_2/LocalClass/Test>
+
+Prim Stack:
+    root.usd             /Model_2/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_2/Instance>
+
+Prim Stack:
+    root.usd             /Model_2/Instance
+    root.usd             /Model_2/LocalClass
+    model.usd            /Model/Instance
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_2/Instance/Test>
+
+Prim Stack:
+    root.usd             /Model_2/Instance/Test
+    root.usd             /Model_2/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_3>
+
+Prim Stack:
+    root.usd             /Model_3
+    model.usd            /Model
+
+Child names:
+     ['LocalClass', 'Instance']
+
+------------------------------------------------------------------------
+Results for composing </Model_3/LocalClass>
+
+Prim Stack:
+    root.usd             /Model_3/LocalClass
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_3/LocalClass/Test>
+
+Prim Stack:
+    root.usd             /Model_3/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_3/Instance>
+
+Prim Stack:
+    root.usd             /Model_3/Instance
+    root.usd             /Model_3/LocalClass
+    model.usd            /Model/Instance
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_3/Instance/Test>
+
+Prim Stack:
+    root.usd             /Model_3/Instance/Test
+    root.usd             /Model_3/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_4>
+
+Prim Stack:
+    root.usd             /Model_4
+    model.usd            /Model
+
+Child names:
+     ['LocalClass', 'Instance']
+
+------------------------------------------------------------------------
+Results for composing </Model_4/LocalClass>
+
+Prim Stack:
+    root.usd             /Model_4/LocalClass
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_4/LocalClass/Test>
+
+Prim Stack:
+    root.usd             /Model_4/LocalClass/Test
+
+------------------------------------------------------------------------
+Results for composing </Model_4/Instance>
+
+Prim Stack:
+    root.usd             /Model_4/Instance
+    root.usd             /Model_4/LocalClass
+    model.usd            /Model/Instance
+    model.usd            /Model/LocalClass
+
+Child names:
+     ['Test']
+
+------------------------------------------------------------------------
+Results for composing </Model_4/Instance/Test>
+
+Prim Stack:
+    root.usd             /Model_4/Instance/Test
+    root.usd             /Model_4/LocalClass/Test
+
+
+------------------------------------------------------------------------
+Errors while computing Layer Stack
+
+Relocation from </Model_1/Instance/Test> to </Model_1/Instance/Test> authored at @composition/tests/assets/ErrorInvalidAuthoredRelocates_root/usda/root.usd@</> is invalid and will be ignored: The target of a relocate cannot be the same as its source.
+Relocation from </Model_2/Instance/Test> to </Model_2/Instance> authored at @composition/tests/assets/ErrorInvalidAuthoredRelocates_root/usda/root.usd@</> is invalid and will be ignored: The target of a relocate cannot be an ancestor of its source.
+Relocation from </Model_3/Instance> to </Model_3/Instance/Test> authored at @composition/tests/assets/ErrorInvalidAuthoredRelocates_root/usda/root.usd@</> is invalid and will be ignored: The target of a relocate cannot be a descendant of its source.
+Relocation from </Model_4> to </Model_5> authored at @composition/tests/assets/ErrorInvalidAuthoredRelocates_root/usda/root.usd@</> is invalid and will be ignored: Root prims cannot be the source of a relocate.
+
+ERROR: Unexpected error(s) encountered during test!

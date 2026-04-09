@@ -1,0 +1,32 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root",
+                "A.usd": "/A",
+                "C.usd": "/C",
+                "B.usd": "/B"
+            },
+            "Property names": [
+                "C_attr",
+                "B_attr",
+                "A_attr"
+            ],
+            "Property stacks": {
+                "/Root.A_attr": {
+                    "A.usd": "/A.A_attr"
+                },
+                "/Root.B_attr": {
+                    "B.usd": "/B.B_attr"
+                },
+                "/Root.C_attr": {
+                    "C.usd": "/C.C_attr"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

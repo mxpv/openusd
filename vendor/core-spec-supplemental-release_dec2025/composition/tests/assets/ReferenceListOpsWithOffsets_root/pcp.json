@@ -1,0 +1,211 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/AddRefs1": {
+            "Prim Stack": {
+                "sub.usd": "/AddRefs1",
+                "base.usd": "/AddRefs1",
+                "ref.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "sub.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "sub_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "root.usd",
+                    "prim": "/AddRefs1",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "30.00",
+                    "scale": "4.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/DeleteRefs1": {
+            "Prim Stack": {
+                "sub.usd": "/DeleteRefs1",
+                "base.usd": "/DeleteRefs1",
+                "ref.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "sub.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "sub_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "root.usd",
+                    "prim": "/DeleteRefs1",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/AddRefs2": {
+            "Prim Stack": {
+                "sub_48tcps.usd": "/AddRefs2",
+                "base.usd": "/AddRefs2",
+                "ref.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "sub.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "sub_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "root.usd",
+                    "prim": "/AddRefs2",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "5.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/DeleteRefs2": {
+            "Prim Stack": {
+                "sub_48tcps.usd": "/DeleteRefs2",
+                "base.usd": "/DeleteRefs2",
+                "ref.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "sub.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "sub_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "root.usd",
+                    "prim": "/DeleteRefs2",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "100.00",
+                    "scale": "1.00"
+                }
+            ]
+        }
+    },
+    "Layer Stack": [
+        "root.usd",
+        "sub.usd",
+        "sub_48tcps.usd",
+        "base.usd"
+    ]
+}

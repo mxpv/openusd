@@ -1,0 +1,109 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_shared_HumanHair": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair"
+            },
+            "Child names": [
+                "Hair_Chiang_Head_Chiang_Hair",
+                "Hair_Chiang"
+            ]
+        },
+        "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair"
+            },
+            "Child names": [
+                "Class",
+                "Inner"
+            ]
+        },
+        "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair/Class": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair/Class"
+            }
+        },
+        "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair/Inner": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang_Head_Chiang_Hair/Inner"
+            }
+        },
+        "/_shared_HumanHair/Hair_Chiang": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang"
+            },
+            "Child names": [
+                "Class",
+                "Inner"
+            ]
+        },
+        "/_shared_HumanHair/Hair_Chiang/Class": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Class"
+            }
+        },
+        "/_shared_HumanHair/Hair_Chiang/Inner": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Inner"
+            }
+        },
+        "/HumanMaleStdHair": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair",
+                "ref.usd": "/_shared_HumanHair"
+            },
+            "Child names": [
+                "Hair_Chiang_Head_Chiang_Hair",
+                "Hair_Chiang"
+            ]
+        },
+        "/HumanMaleStdHair/Hair_Chiang_Head_Chiang_Hair": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang"
+            },
+            "Child names": [
+                "Class",
+                "Inner"
+            ]
+        },
+        "/HumanMaleStdHair/Hair_Chiang_Head_Chiang_Hair/Class": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Class",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang/Class"
+            }
+        },
+        "/HumanMaleStdHair/Hair_Chiang_Head_Chiang_Hair/Inner": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Class",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang/Class"
+            }
+        },
+        "/HumanMaleStdHair/Hair_Chiang": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang"
+            },
+            "Child names": [
+                "Class",
+                "Inner"
+            ]
+        },
+        "/HumanMaleStdHair/Hair_Chiang/Class": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Class",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang/Class"
+            }
+        },
+        "/HumanMaleStdHair/Hair_Chiang/Inner": {
+            "Prim Stack": {
+                "root.usd": "/_shared_HumanHair/Hair_Chiang/Class",
+                "ref.usd": "/_shared_HumanHair/Hair_Chiang/Class"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

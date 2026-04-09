@@ -1,0 +1,7 @@
+{
+    "Entry": "root.usd",
+    "Composing": {},
+    "Errors": [
+        "\n\tError in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file C:/sources/nvidia-usd/usd-ci/USD/pxr/usd/sdf/textParserHelpers.h : ''/Model_1{vset=vsel}PrimOnlyInVariantSet' is not a valid relocates source path at '</Model_1{vset=vsel}PrimOnlyInVariantSet>: </Model_1/TryOutsideVariantSet>,' in </>\n'\n\tError in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file C:/sources/nvidia-usd/usd-ci/USD/pxr/usd/sdf/textParserHelpers.h : 'C:\\sources\\core-spec-supplemental\\composition\\tests\\assets\\ErrorRelocateWithVariantSelection_root\\usda\\root.usd:9:9: '/Model_1{vset=vsel}PrimOnlyInVariantSet' is not a valid relocates source path at '</Model_1{vset=vsel}PrimOnlyInVariantSet>: </Model_1/TryOutsideVariantSet>,' in </>\n'"
+    ]
+}

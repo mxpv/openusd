@@ -1,0 +1,28 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Sphere": {
+            "Prim Stack": {
+                "stronger.usd": "/Sphere",
+                "owned.usd": "/Sphere",
+                "weaker.usd": "/Sphere"
+            },
+            "Property names": [
+                "radius"
+            ],
+            "Property stacks": {
+                "/Sphere.radius": {
+                    "stronger.usd": "/Sphere.radius",
+                    "owned.usd": "/Sphere.radius",
+                    "weaker.usd": "/Sphere.radius"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd",
+        "stronger.usd",
+        "owned.usd",
+        "weaker.usd"
+    ]
+}

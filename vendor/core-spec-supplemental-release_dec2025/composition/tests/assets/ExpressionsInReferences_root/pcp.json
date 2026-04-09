@@ -1,0 +1,38 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SingleRef": {
+            "Prim Stack": {
+                "root.usd": "/SingleRef",
+                "A.usd": "/A"
+            }
+        },
+        "/ChainedRef": {
+            "Prim Stack": {
+                "root.usd": "/ChainedRef",
+                "ref2.usd": "/Ref2",
+                "B.usd": "/B"
+            }
+        },
+        "/ChainedRefOverride": {
+            "Prim Stack": {
+                "root.usd": "/ChainedRefOverride",
+                "ref3.usd": "/Ref3",
+                "ref2.usd": "/Ref2",
+                "A.usd": "/A"
+            }
+        },
+        "/MultiRef": {
+            "Prim Stack": {
+                "root.usd": "/MultiRef",
+                "ref3.usd": "/Ref3",
+                "ref2.usd": "/Ref2",
+                "A.usd": "/A",
+                "B.usd": "/B"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

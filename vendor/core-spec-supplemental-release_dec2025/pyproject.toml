@@ -1,0 +1,23 @@
+[project]
+name = "aousd-core-spec-supplemental"
+description = "This repository is dedicated to host code for compliance testing and other efforts supplemental to the draft specification content in the AOUSD core-spec-wg repo."
+version = "0.0.0-dev"
+requires-python = ">=3.12"
+dependencies = ["lz4", "parsimonious"]
+
+[dependency-groups]
+dev = ["jsondiff", "parameterized", "ruff==0.14.9", "usd-core==25.5"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = [
+    "I",      # isort - import sorting
+    "RUF023", # unsorted-dunder-slots
+    "UP006",  # non-pep585-annotation
+    "UP014",  # convert-named-tuple-functional-to-class
+    "UP024",  # os-error-alias
+    "UP034",  # extraneous-parentheses
+    "W605",   # invalid-escape-sequence
+]

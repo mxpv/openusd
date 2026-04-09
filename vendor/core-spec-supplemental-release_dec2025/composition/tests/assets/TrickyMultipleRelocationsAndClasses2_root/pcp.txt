@@ -1,0 +1,155 @@
+Loading @composition/tests/assets/TrickyMultipleRelocationsAndClasses2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </CharRig>
+
+Prim Stack:
+    root.usd             /CharRig
+
+Child names:
+     ['Rig', 'Anim']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig
+
+Child names:
+     ['LegsRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig
+    LegsRig.usd          /LegsRig
+
+Child names:
+     ['SymLegRig', 'LLegRig']
+
+Prohibited child names:
+     ['Legs']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/SymLegRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig
+    LegsRig.usd          /LegsRig/SymLegRig
+    SymLegRig.usd        /SymLegRig
+
+Child names:
+     ['TentacleRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/SymLegRig/TentacleRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig
+    SymLegRig.usd        /SymLegRig/TentacleRig
+
+Child names:
+     ['Tentacle']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig/Tentacle
+    SymLegRig.usd        /SymLegRig/TentacleRig/Tentacle
+
+Child names:
+     ['Seg2']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2
+    SymLegRig.usd        /SymLegRig/TentacleRig/Tentacle/Seg2
+
+Property names:
+     ['JointBlend']
+
+Property stacks:
+/CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2.JointBlend:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2.JointBlend
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/LLegRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig
+    LegsRig.usd          /LegsRig/LLegRig
+    LegsRig.usd          /LegsRig/SymLegRig
+    SymLegRig.usd        /SymLegRig
+
+Child names:
+     ['TentacleRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/LegsRig/LLegRig/TentacleRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig
+    SymLegRig.usd        /SymLegRig/TentacleRig
+
+Prohibited child names:
+     ['Tentacle']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Anim
+
+Child names:
+     ['Legs']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Legs>
+
+Prim Stack:
+    LegsRig.usd          /LegsRig/Legs
+
+Child names:
+     ['LHip']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Legs/LHip>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig/Tentacle
+    SymLegRig.usd        /SymLegRig/TentacleRig/Tentacle
+
+Child names:
+     ['Knee']
+
+Prohibited child names:
+     ['Seg2']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Legs/LHip/Knee>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2
+    LegsRig.usd          /LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2
+    SymLegRig.usd        /SymLegRig/TentacleRig/Tentacle/Seg2
+
+Property names:
+     ['JointBlend']
+
+Property stacks:
+/CharRig/Anim/Legs/LHip/Knee.JointBlend:
+    root.usd             /CharRig/Rig/LegsRig/SymLegRig/TentacleRig/Tentacle/Seg2.JointBlend
+

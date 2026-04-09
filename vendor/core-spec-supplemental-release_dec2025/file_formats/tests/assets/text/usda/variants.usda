@@ -1,0 +1,129 @@
+#usda 1.0.32
+(
+    framesPerSecond = 24
+    framePrecision = 3
+    unknownMetadata = 45.7
+)
+
+def Scope "SimpleVariant" (
+    variantSets = "foo"
+)
+{
+    variantSet "foo" = {
+        "bar" {
+            string s = "barStringPropertyValue"
+                rel r = </baz/foobar.prop>
+        }
+    }
+}
+
+def Scope "VariantWithPrimMetadata" (
+    variantSets = "foo"
+)
+{
+    variantSet "foo" = {
+        "bar" (
+            payload = [
+                @somelayer.usda@</some/sub/prim>
+            ]
+        )
+        {}
+    }
+}
+
+over Scope "MultipleVariants" (
+    variantSets = ["notPresent", "present", "_notPresent2"]
+    variants = {
+        string notPresent = "foo"
+        string present = "bar"
+        string _notPresent2 = "baz"
+    }
+)
+{
+    variantSet "present" = {
+        "foo" {
+            def Scope "root"
+            {
+                custom float myValue = 78.3e4
+            }
+        }
+        "bar" {
+            def Scope "root"
+            {
+                custom float myValue = 43.8e7
+                int otherValue = 2
+            }
+        }
+        "baz" (
+                                inherits = </root>
+        )
+        {
+            def Scope "root"
+            {
+                custom float myValue = 0.0
+            }
+        }
+    }
+}
+
+over Scope "VariantNameCheck" (
+    variantSets = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]
+    variants = {
+        string a = "leadingdot"
+        string b = "hasabar"
+        string c = "hasahyphen"
+        string d = "_has_an_underscore"
+        string e = "tartsWithDigit"
+        string f = "hasabaranddot"
+        string g = "hasahyphenanddot"
+        string h = "_has_an_underscore_and_dot"
+        string i = "tartsWithDigitAndDot"
+        string j = "heWo_rk5_"
+        string k = "heWo_rk5_"
+        string var_expr = "`'this_is_a_${VARIABLE}_expression'`"
+    }
+)
+{
+    variantSet "a" = { "leadingdot" { } }
+    variantSet "b" = { "hasabar" { } }
+    variantSet "c" = { "hasahyphen" { } }
+    variantSet "d" = { "_has_an_underscore" { } }
+    variantSet "e" = { "tartsWithDigit" { } }
+    variantSet "f" = { "hasabaranddot" { } }
+    variantSet "g" = { "hasahyphenanddot" { } }
+    variantSet "h" = { "_has_an_underscore_and_dot" { } }
+    variantSet "i" = { "tartsWithDigitAndDot" { } }
+    variantSet "j" = { "heWo_rk5_" { } }
+    variantSet "k" = { "heWo_rk5_" { } }
+}
+
+over Scope "VariantNameCheck2" (
+    variantSets = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]
+    variants = {
+        string a = ".leadingdot"
+        string b = "has|a|bar"
+        string c = "has-a-hyphen"
+        string d = "_has_an_underscore"
+        string e = "5tartsWithDigit"
+        string f = ".has|a|bar|and|dot"
+        string g = ".has-a-hyphen-and-dot"
+        string h = "._has_an_underscore_and_dot"
+        string i = ".5tartsWithDigitAndDot"
+        string j = "7he|W-o_r|k-5_"
+        string k = ".7he|W-o_r|k-5_"
+        string var_expr = "`'this_is_a_${VARIABLE}_expression'`"
+    }
+)
+{
+    variantSet "a" = { ".leadingdot" { } }
+    variantSet "b" = { "has|a|bar" { } }
+    variantSet "c" = { "has-a-hyphen" { } }
+    variantSet "d" = { "_has_an_underscore" { } }
+    variantSet "e" = { "5tartsWithDigit" { } }
+    variantSet "f" = { ".has|a|bar|and|dot" { } }
+    variantSet "g" = { ".has-a-hyphen-and-dot" { } }
+    variantSet "h" = { "._has_an_underscore_and_dot" { } }
+    variantSet "i" = { ".5tartsWithDigitAndDot" { } }
+    variantSet "j" = { "7he|W-o_r|k-5_" { } }
+    variantSet "k" = { ".7he|W-o_r|k-5_" { } }
+}

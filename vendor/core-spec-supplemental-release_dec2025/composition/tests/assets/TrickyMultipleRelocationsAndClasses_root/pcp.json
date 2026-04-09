@@ -1,0 +1,407 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/HumanRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig"
+            },
+            "Child names": [
+                "Face",
+                "rig"
+            ]
+        },
+        "/HumanRig/Face": {
+            "Prim Stack": {
+                "FaceRig.usd": "/FaceRig/Anim/Face"
+            },
+            "Child names": [
+                "Eyes"
+            ]
+        },
+        "/HumanRig/Face/Eyes": {
+            "Prim Stack": {
+                "FaceRig.usd": "/FaceRig/Anim/Face/Eyes"
+            },
+            "Child names": [
+                "LEye",
+                "REye"
+            ]
+        },
+        "/HumanRig/Face/Eyes/LEye": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye",
+                "EyeRig.usd": "/EyeRig/Anim/Eye"
+            },
+            "Child names": [
+                "LLids"
+            ],
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/Face/Eyes/LEye.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye.value",
+                    "EyeRig.usd": "/EyeRig/Anim/Eye.value"
+                }
+            }
+        },
+        "/HumanRig/Face/Eyes/LEye/LLids": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids",
+                "EyeLidRig.usd": "/EyeLidRig/Anim/Lids"
+            },
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/Face/Eyes/LEye/LLids.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids.value",
+                    "EyeLidRig.usd": "/EyeLidRig/Anim/Lids.value"
+                }
+            }
+        },
+        "/HumanRig/Face/Eyes/REye": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye",
+                "EyeRig.usd": "/EyeRig/Anim/Eye"
+            },
+            "Child names": [
+                "RLids"
+            ],
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/Face/Eyes/REye.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye.value",
+                    "EyeRig.usd": "/EyeRig/Anim/Eye.value"
+                }
+            }
+        },
+        "/HumanRig/Face/Eyes/REye/RLids": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids",
+                "EyeLidRig.usd": "/EyeLidRig/Anim/Lids"
+            },
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/Face/Eyes/REye/RLids.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids.value",
+                    "EyeLidRig.usd": "/EyeLidRig/Anim/Lids.value"
+                }
+            }
+        },
+        "/HumanRig/rig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig"
+            },
+            "Child names": [
+                "Face"
+            ]
+        },
+        "/HumanRig/rig/Face": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face",
+                "FaceRig.usd": "/FaceRig"
+            },
+            "Child names": [
+                "Anim",
+                "EyeLidRig",
+                "EyeRig"
+            ]
+        },
+        "/HumanRig/rig/Face/Anim": {
+            "Prim Stack": {
+                "FaceRig.usd": "/FaceRig/Anim"
+            },
+            "Prohibited child names": [
+                "Face"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig",
+                "FaceRig.usd": "/FaceRig/EyeLidRig"
+            },
+            "Child names": [
+                "SymEyeLidRig",
+                "LEyeLidRig",
+                "REyeLidRig"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig",
+                "FaceRig.usd": "/FaceRig/EyeLidRig/SymEyeLidRig",
+                "EyeLidRig.usd": "/EyeLidRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim",
+                "EyeLidRig.usd": "/EyeLidRig/Anim"
+            },
+            "Child names": [
+                "Lids"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids",
+                "EyeLidRig.usd": "/EyeLidRig/Anim/Lids"
+            },
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids.value",
+                    "EyeLidRig.usd": "/EyeLidRig/Anim/Lids.value"
+                }
+            }
+        },
+        "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Mover": {
+            "Prim Stack": {
+                "EyeLidRig.usd": "/EyeLidRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Mover.input": {
+                    "EyeLidRig.usd": "/EyeLidRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Mover.input": [
+                    "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim/Lids.value"
+                ]
+            }
+        },
+        "/HumanRig/rig/Face/EyeLidRig/LEyeLidRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig",
+                "FaceRig.usd": "/FaceRig/EyeLidRig/SymEyeLidRig",
+                "EyeLidRig.usd": "/EyeLidRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/LEyeLidRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim",
+                "EyeLidRig.usd": "/EyeLidRig/Anim"
+            },
+            "Prohibited child names": [
+                "Lids"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/LEyeLidRig/Mover": {
+            "Prim Stack": {
+                "EyeLidRig.usd": "/EyeLidRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeLidRig/LEyeLidRig/Mover.input": {
+                    "EyeLidRig.usd": "/EyeLidRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeLidRig/LEyeLidRig/Mover.input": [
+                    "/HumanRig/Face/Eyes/LEye/LLids.value"
+                ]
+            }
+        },
+        "/HumanRig/rig/Face/EyeLidRig/REyeLidRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig",
+                "FaceRig.usd": "/FaceRig/EyeLidRig/SymEyeLidRig",
+                "EyeLidRig.usd": "/EyeLidRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/REyeLidRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeLidRig/SymEyeLidRig/Anim",
+                "EyeLidRig.usd": "/EyeLidRig/Anim"
+            },
+            "Prohibited child names": [
+                "Lids"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeLidRig/REyeLidRig/Mover": {
+            "Prim Stack": {
+                "EyeLidRig.usd": "/EyeLidRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeLidRig/REyeLidRig/Mover.input": {
+                    "EyeLidRig.usd": "/EyeLidRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeLidRig/REyeLidRig/Mover.input": [
+                    "/HumanRig/Face/Eyes/REye/RLids.value"
+                ]
+            }
+        },
+        "/HumanRig/rig/Face/EyeRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig",
+                "FaceRig.usd": "/FaceRig/EyeRig"
+            },
+            "Child names": [
+                "SymEyeRig",
+                "LEyeRig",
+                "REyeRig"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/SymEyeRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig",
+                "FaceRig.usd": "/FaceRig/EyeRig/SymEyeRig",
+                "EyeRig.usd": "/EyeRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim",
+                "EyeRig.usd": "/EyeRig/Anim"
+            },
+            "Child names": [
+                "Eye"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye",
+                "EyeRig.usd": "/EyeRig/Anim/Eye"
+            },
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye.value": {
+                    "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye.value",
+                    "EyeRig.usd": "/EyeRig/Anim/Eye.value"
+                }
+            }
+        },
+        "/HumanRig/rig/Face/EyeRig/SymEyeRig/Mover": {
+            "Prim Stack": {
+                "EyeRig.usd": "/EyeRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeRig/SymEyeRig/Mover.input": {
+                    "EyeRig.usd": "/EyeRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeRig/SymEyeRig/Mover.input": [
+                    "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim/Eye.value"
+                ]
+            }
+        },
+        "/HumanRig/rig/Face/EyeRig/LEyeRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig",
+                "FaceRig.usd": "/FaceRig/EyeRig/SymEyeRig",
+                "EyeRig.usd": "/EyeRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/LEyeRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim",
+                "EyeRig.usd": "/EyeRig/Anim"
+            },
+            "Prohibited child names": [
+                "Eye"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/LEyeRig/Mover": {
+            "Prim Stack": {
+                "EyeRig.usd": "/EyeRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeRig/LEyeRig/Mover.input": {
+                    "EyeRig.usd": "/EyeRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeRig/LEyeRig/Mover.input": [
+                    "/HumanRig/Face/Eyes/LEye.value"
+                ]
+            }
+        },
+        "/HumanRig/rig/Face/EyeRig/REyeRig": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig",
+                "FaceRig.usd": "/FaceRig/EyeRig/SymEyeRig",
+                "EyeRig.usd": "/EyeRig"
+            },
+            "Child names": [
+                "Anim",
+                "Mover"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/REyeRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/HumanRig/rig/Face/EyeRig/SymEyeRig/Anim",
+                "EyeRig.usd": "/EyeRig/Anim"
+            },
+            "Prohibited child names": [
+                "Eye"
+            ]
+        },
+        "/HumanRig/rig/Face/EyeRig/REyeRig/Mover": {
+            "Prim Stack": {
+                "EyeRig.usd": "/EyeRig/Mover"
+            },
+            "Property names": [
+                "input"
+            ],
+            "Property stacks": {
+                "/HumanRig/rig/Face/EyeRig/REyeRig/Mover.input": {
+                    "EyeRig.usd": "/EyeRig/Mover.input"
+                }
+            },
+            "Attribute connections": {
+                "/HumanRig/rig/Face/EyeRig/REyeRig/Mover.input": [
+                    "/HumanRig/Face/Eyes/REye.value"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

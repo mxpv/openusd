@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    upAxis="Y"
+    metersPerUnit=0.1
+    defaultPrim="Root"
+)
+
+def Xform "Root" (
+    references = @ref.usda@
+) {
+
+    def Xform "Foo" () {
+
+    }
+}

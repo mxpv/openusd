@@ -1,0 +1,57 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_Model": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model"
+            }
+        },
+        "/Sarah": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model",
+                "Sarah_modelComplexity.usd": "/Sarah{modelComplexity=full}",
+                "Sarah_rig.usd": "/Sarah"
+            },
+            "Variant Selections": {
+                "modelComplexity": "full"
+            },
+            "Child names": [
+                "FaceRig"
+            ]
+        },
+        "/Sarah/FaceRig": {
+            "Prim Stack": {
+                "Sarah_modelComplexity.usd": "/Sarah{modelComplexity=full}FaceRig",
+                "Sarah_rig.usd": "/Sarah/FaceRig"
+            },
+            "Child names": [
+                "EyesRig"
+            ]
+        },
+        "/Sarah/FaceRig/EyesRig": {
+            "Prim Stack": {
+                "Sarah_modelComplexity.usd": "/Sarah{modelComplexity=full}FaceRig/EyesRig",
+                "Sarah_rig.usd": "/Sarah/FaceRig/EyesRig"
+            },
+            "Child names": [
+                "SymEyeRig",
+                "LEyeRig"
+            ]
+        },
+        "/Sarah/FaceRig/EyesRig/SymEyeRig": {
+            "Prim Stack": {
+                "Sarah_modelComplexity.usd": "/Sarah{modelComplexity=full}FaceRig/EyesRig/SymEyeRig",
+                "Sarah_rig.usd": "/Sarah/FaceRig/EyesRig/SymEyeRig"
+            }
+        },
+        "/Sarah/FaceRig/EyesRig/LEyeRig": {
+            "Prim Stack": {
+                "Sarah_modelComplexity.usd": "/Sarah{modelComplexity=full}FaceRig/EyesRig/SymEyeRig",
+                "Sarah_rig.usd": "/Sarah/FaceRig/EyesRig/SymEyeRig"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

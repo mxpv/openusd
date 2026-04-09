@@ -1,0 +1,48 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SubrootInherits": {
+            "Prim Stack": {
+                "root.usd": "/SubrootInherits",
+                "inherits.usd": "/Payload"
+            },
+            "Child names": [
+                "Class",
+                "Child"
+            ]
+        },
+        "/SubrootInherits/Class": {
+            "Prim Stack": {
+                "root.usd": "/SubrootInherits/Class",
+                "inherits.usd": "/Payload/Class"
+            }
+        },
+        "/SubrootInherits/Child": {
+            "Prim Stack": {
+                "root.usd": "/SubrootInherits/Class",
+                "inherits.usd": "/Payload/Child"
+            }
+        },
+        "/Relocates": {
+            "Prim Stack": {
+                "root.usd": "/Relocates",
+                "relocates.usd": "/Payload"
+            },
+            "Child names": [
+                "Child"
+            ],
+            "Prohibited child names": [
+                "PayloadChild"
+            ]
+        },
+        "/Relocates/Child": {
+            "Prim Stack": {
+                "root.usd": "/Relocates/Child",
+                "relocates.usd": "/Payload/PayloadChild"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

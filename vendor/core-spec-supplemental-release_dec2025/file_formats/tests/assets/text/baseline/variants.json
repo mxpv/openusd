@@ -1,0 +1,268 @@
+{
+    "/": {
+        "framesPerSecond": 24.0,
+        "framePrecision": 3,
+        "unknownMetadata": 45.7,
+        "primChildren": ["SimpleVariant", "VariantWithPrimMetadata", "MultipleVariants", "VariantNameCheck", "VariantNameCheck2"]
+    },
+    "/SimpleVariant": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "variantSetNames": {
+            "explicit": ["foo"]
+        },
+        "variantSetChildren": ["foo"]
+    },
+    "/SimpleVariant{foo=}": {
+        "variantChildren": ["bar"]
+    },
+    "/SimpleVariant{foo=bar}": {
+        "propertyChildren": ["s", "r"]
+    },
+    "/SimpleVariant{foo=bar}.s": {
+        "typeName": "string",
+        "default": "barStringPropertyValue"
+    },
+    "/SimpleVariant{foo=bar}.r": {
+        "targetPaths": {
+            "explicit": ["/baz/foobar.prop"]
+        }
+    },
+    "/VariantWithPrimMetadata": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "variantSetNames": {
+            "explicit": ["foo"]
+        },
+        "variantSetChildren": ["foo"]
+    },
+    "/VariantWithPrimMetadata{foo=}": {
+        "variantChildren": ["bar"]
+    },
+    "/VariantWithPrimMetadata{foo=bar}": {
+        "payload": {
+            "explicit": [
+                {
+                    "asset": "somelayer.usda",
+                    "path": "/some/sub/prim"
+                }
+            ]
+        }
+    },
+    "/MultipleVariants": {
+        "specifier": "over",
+        "typeName": "Scope",
+        "variantSetNames": {
+            "explicit": ["notPresent", "present", "_notPresent2"]
+        },
+        "variantSetChildren": ["present"],
+        "variantSelection": {
+            "notPresent": "foo",
+            "present": "bar",
+            "_notPresent2": "baz"
+        }
+    },
+    "/MultipleVariants{present=}": {
+        "variantChildren": ["foo", "bar", "baz"]
+    },
+    "/MultipleVariants{present=foo}": {
+        "primChildren": ["root"]
+    },
+    "/MultipleVariants{present=foo}/root": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "propertyChildren": ["myValue"]
+    },
+    "/MultipleVariants{present=foo}/root.myValue": {
+        "typeName": "float",
+        "custom": true,
+        "default": 78.3e4
+    },
+    "/MultipleVariants{present=bar}": {
+        "primChildren": ["root"]
+    },
+    "/MultipleVariants{present=bar}/root": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "propertyChildren": ["myValue", "otherValue"]
+    },
+    "/MultipleVariants{present=bar}/root.myValue": {
+        "typeName": "float",
+        "custom": true,
+        "default": 43.8e7
+    },
+    "/MultipleVariants{present=bar}/root.otherValue": {
+        "typeName": "int",
+        "default": 2
+    },
+    "/MultipleVariants{present=baz}": {
+        "primChildren": ["root"],
+        "inheritPaths": {
+            "explicit": ["/root"]
+        }
+    },
+    "/MultipleVariants{present=baz}/root": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "propertyChildren": ["myValue"]
+    },
+    "/MultipleVariants{present=baz}/root.myValue": {
+        "typeName": "float",
+        "custom": true,
+        "default": 0.0
+    },
+    "/VariantNameCheck": {
+        "specifier": "over",
+        "typeName": "Scope",
+        "variantSetNames": {
+            "explicit": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]
+        },
+        "variantSetChildren": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"],
+        "variantSelection": {
+            "a": "leadingdot",
+            "b": "hasabar",
+            "c": "hasahyphen",
+            "d": "_has_an_underscore",
+            "e": "tartsWithDigit",
+            "f": "hasabaranddot",
+            "g": "hasahyphenanddot",
+            "h": "_has_an_underscore_and_dot",
+            "i": "tartsWithDigitAndDot",
+            "j": "heWo_rk5_",
+            "k": "heWo_rk5_",
+            "var_expr": "`'this_is_a_${VARIABLE}_expression'`"
+        }
+    },
+    "/VariantNameCheck{a=}": {
+        "variantChildren": ["leadingdot"]
+    },
+    "/VariantNameCheck{b=}": {
+        "variantChildren": ["hasabar"]
+    },
+    "/VariantNameCheck{c=}": {
+        "variantChildren": ["hasahyphen"]
+    },
+    "/VariantNameCheck{d=}": {
+        "variantChildren": ["_has_an_underscore"]
+    },
+    "/VariantNameCheck{e=}": {
+        "variantChildren": ["tartsWithDigit"]
+    },
+    "/VariantNameCheck{f=}": {
+        "variantChildren": ["hasabaranddot"]
+    },
+    "/VariantNameCheck{g=}": {
+        "variantChildren": ["hasahyphenanddot"]
+    },
+    "/VariantNameCheck{h=}": {
+        "variantChildren": ["_has_an_underscore_and_dot"]
+    },
+    "/VariantNameCheck{i=}": {
+        "variantChildren": ["tartsWithDigitAndDot"]
+    },
+    "/VariantNameCheck{j=}": {
+        "variantChildren": ["heWo_rk5_"]
+    },
+    "/VariantNameCheck{k=}": {
+        "variantChildren": ["heWo_rk5_"]
+    },
+    "/VariantNameCheck{a=leadingdot}": {
+    },
+    "/VariantNameCheck{b=hasabar}": {
+    },
+    "/VariantNameCheck{c=hasahyphen}": {
+    },
+    "/VariantNameCheck{d=_has_an_underscore}": {
+    },
+    "/VariantNameCheck{e=tartsWithDigit}": {
+    },
+    "/VariantNameCheck{f=hasabaranddot}": {
+    },
+    "/VariantNameCheck{g=hasahyphenanddot}": {
+    },
+    "/VariantNameCheck{h=_has_an_underscore_and_dot}": {
+    },
+    "/VariantNameCheck{i=tartsWithDigitAndDot}": {
+    },
+    "/VariantNameCheck{j=heWo_rk5_}": {
+    },
+    "/VariantNameCheck{k=heWo_rk5_}": {
+    },
+    "/VariantNameCheck2": {
+        "specifier": "over",
+        "typeName": "Scope",
+        "variantSetNames": {
+            "explicit": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]
+        },
+        "variantSetChildren": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"],
+        "variantSelection": {
+            "a": ".leadingdot",
+            "b": "has|a|bar",
+            "c": "has-a-hyphen",
+            "d": "_has_an_underscore",
+            "e": "5tartsWithDigit",
+            "f": ".has|a|bar|and|dot",
+            "g": ".has-a-hyphen-and-dot",
+            "h": "._has_an_underscore_and_dot",
+            "i": ".5tartsWithDigitAndDot",
+            "j": "7he|W-o_r|k-5_",
+            "k": ".7he|W-o_r|k-5_",
+            "var_expr": "`'this_is_a_${VARIABLE}_expression'`"
+        }
+    },
+    "/VariantNameCheck2{a=}": {
+        "variantChildren": [".leadingdot"]
+    },
+    "/VariantNameCheck2{b=}": {
+        "variantChildren": ["has|a|bar"]
+    },
+    "/VariantNameCheck2{c=}": {
+        "variantChildren": ["has-a-hyphen"]
+    },
+    "/VariantNameCheck2{d=}": {
+        "variantChildren": ["_has_an_underscore"]
+    },
+    "/VariantNameCheck2{e=}": {
+        "variantChildren": ["5tartsWithDigit"]
+    },
+    "/VariantNameCheck2{f=}": {
+        "variantChildren": [".has|a|bar|and|dot"]
+    },
+    "/VariantNameCheck2{g=}": {
+        "variantChildren": [".has-a-hyphen-and-dot"]
+    },
+    "/VariantNameCheck2{h=}": {
+        "variantChildren": ["._has_an_underscore_and_dot"]
+    },
+    "/VariantNameCheck2{i=}": {
+        "variantChildren": [".5tartsWithDigitAndDot"]
+    },
+    "/VariantNameCheck2{j=}": {
+        "variantChildren": ["7he|W-o_r|k-5_"]
+    },
+    "/VariantNameCheck2{k=}": {
+        "variantChildren": [".7he|W-o_r|k-5_"]
+    },
+    "/VariantNameCheck2{a=.leadingdot}": {
+    },
+    "/VariantNameCheck2{b=has|a|bar}": {
+    },
+    "/VariantNameCheck2{c=has-a-hyphen}": {
+    },
+    "/VariantNameCheck2{d=_has_an_underscore}": {
+    },
+    "/VariantNameCheck2{e=5tartsWithDigit}": {
+    },
+    "/VariantNameCheck2{f=.has|a|bar|and|dot}": {
+    },
+    "/VariantNameCheck2{g=.has-a-hyphen-and-dot}": {
+    },
+    "/VariantNameCheck2{h=._has_an_underscore_and_dot}": {
+    },
+    "/VariantNameCheck2{i=.5tartsWithDigitAndDot}": {
+    },
+    "/VariantNameCheck2{j=7he|W-o_r|k-5_}": {
+    },
+    "/VariantNameCheck2{k=.7he|W-o_r|k-5_}": {
+    }
+}

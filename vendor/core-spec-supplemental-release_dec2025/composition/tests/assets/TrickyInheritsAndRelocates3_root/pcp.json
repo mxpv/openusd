@@ -1,0 +1,147 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/GuitarRigX": {
+            "Prim Stack": {
+                "root.usd": "/GuitarRigX",
+                "rig.usd": "/GuitarRig"
+            },
+            "Child names": [
+                "Anim",
+                "Rig"
+            ]
+        },
+        "/GuitarRigX/Anim": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Anim"
+            },
+            "Child names": [
+                "Strings"
+            ]
+        },
+        "/GuitarRigX/Anim/Strings": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Anim/Strings",
+                "strings_rig.usd": "/StringsRig/Strings"
+            },
+            "Child names": [
+                "String1",
+                "String2"
+            ]
+        },
+        "/GuitarRigX/Anim/Strings/String1": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Anim/Strings/String1",
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/String"
+            }
+        },
+        "/GuitarRigX/Anim/Strings/String2": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Anim/Strings/String2",
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/String"
+            }
+        },
+        "/GuitarRigX/Rig": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Rig"
+            },
+            "Child names": [
+                "StringsRig"
+            ]
+        },
+        "/GuitarRigX/Rig/StringsRig": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Rig/StringsRig",
+                "strings_rig.usd": "/StringsRig"
+            },
+            "Child names": [
+                "_Class_StringRig",
+                "String1Rig",
+                "String2Rig"
+            ],
+            "Prohibited child names": [
+                "Strings"
+            ]
+        },
+        "/GuitarRigX/Rig/StringsRig/_Class_StringRig": {
+            "Prim Stack": {
+                "strings_rig.usd": "/StringsRig/_Class_StringRig"
+            },
+            "Child names": [
+                "String",
+                "Vibrate"
+            ]
+        },
+        "/GuitarRigX/Rig/StringsRig/_Class_StringRig/String": {
+            "Prim Stack": {
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/String"
+            }
+        },
+        "/GuitarRigX/Rig/StringsRig/_Class_StringRig/Vibrate": {
+            "Prim Stack": {
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate"
+            },
+            "Property names": [
+                "amount"
+            ],
+            "Property stacks": {
+                "/GuitarRigX/Rig/StringsRig/_Class_StringRig/Vibrate.amount": {
+                    "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate.amount"
+                }
+            }
+        },
+        "/GuitarRigX/Rig/StringsRig/String1Rig": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Rig/StringsRig/String1Rig",
+                "strings_rig.usd": "/StringsRig/_Class_StringRig"
+            },
+            "Child names": [
+                "Vibrate"
+            ],
+            "Prohibited child names": [
+                "String"
+            ]
+        },
+        "/GuitarRigX/Rig/StringsRig/String1Rig/Vibrate": {
+            "Prim Stack": {
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate"
+            },
+            "Property names": [
+                "amount"
+            ],
+            "Property stacks": {
+                "/GuitarRigX/Rig/StringsRig/String1Rig/Vibrate.amount": {
+                    "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate.amount"
+                }
+            }
+        },
+        "/GuitarRigX/Rig/StringsRig/String2Rig": {
+            "Prim Stack": {
+                "rig.usd": "/GuitarRig/Rig/StringsRig/String2Rig",
+                "strings_rig.usd": "/StringsRig/_Class_StringRig"
+            },
+            "Child names": [
+                "Vibrate"
+            ],
+            "Prohibited child names": [
+                "String"
+            ]
+        },
+        "/GuitarRigX/Rig/StringsRig/String2Rig/Vibrate": {
+            "Prim Stack": {
+                "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate"
+            },
+            "Property names": [
+                "amount"
+            ],
+            "Property stacks": {
+                "/GuitarRigX/Rig/StringsRig/String2Rig/Vibrate.amount": {
+                    "strings_rig.usd": "/StringsRig/_Class_StringRig/Vibrate.amount"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

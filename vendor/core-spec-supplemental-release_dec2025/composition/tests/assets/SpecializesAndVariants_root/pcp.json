@@ -1,0 +1,41 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/A{nestedVariantSet=nestedVariant}"
+            },
+            "Variant Selections": {
+                "nestedVariantSet": "nestedVariant"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/A.test": {
+                    "root.usd": "/A{nestedVariantSet=nestedVariant}.test"
+                }
+            }
+        },
+        "/B": {
+            "Prim Stack": {
+                "root.usd": "/A{nestedVariantSet=nestedVariant}"
+            },
+            "Variant Selections": {
+                "introducingVariantSet": "introducingVariant",
+                "nestedVariantSet": "nestedVariant"
+            },
+            "Property names": [
+                "test"
+            ],
+            "Property stacks": {
+                "/B.test": {
+                    "root.usd": "/A{nestedVariantSet=nestedVariant}.test"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

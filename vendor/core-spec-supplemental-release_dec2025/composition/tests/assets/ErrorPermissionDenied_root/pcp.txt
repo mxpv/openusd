@@ -1,0 +1,119 @@
+Loading @composition/tests/assets/ErrorPermissionDenied_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    A.usd                /A
+
+Property names:
+     ['A_attr', 'attr', 'privateRel', 'publicRel', 'localAttr']
+
+Property stacks:
+/Root.A_attr:
+    A.usd                /A.A_attr
+/Root.attr:
+    root.usd             /Root.attr
+    A.usd                /A.attr
+/Root.localAttr:
+    root.usd             /Root.localAttr
+/Root.privateRel:
+    root.usd             /Root.privateRel
+    A.usd                /A.privateRel
+/Root.publicRel:
+    root.usd             /Root.publicRel
+    A.usd                /A.publicRel
+
+Relationship targets:
+/Root.privateRel:
+    /Root.A_attr
+    /Root.localAttr
+/Root.publicRel:
+    /Root.A_attr
+
+------------------------------------------------------------------------
+Results for composing </Parent>
+
+Prim Stack:
+    root.usd             /Parent
+    A.usd                /Parent
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </Parent/Child>
+
+Prim Stack:
+    root.usd             /Parent/Child
+    A.usd                /Parent/Child
+
+------------------------------------------------------------------------
+Results for composing </_PrivateClass>
+
+Prim Stack:
+    root.usd             /_PrivateClass
+
+Property names:
+     ['attr']
+
+Property stacks:
+/_PrivateClass.attr:
+    root.usd             /_PrivateClass.attr
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    root.usd             /_PrivateClass
+
+Property names:
+     ['attr']
+
+Property stacks:
+/Model.attr:
+    root.usd             /Model.attr
+    root.usd             /_PrivateClass.attr
+
+------------------------------------------------------------------------
+Results for composing </VariantsOpinionsOnRestrictedPrim>
+
+Prim Stack:
+    root.usd             /VariantsOpinionsOnRestrictedPrim
+    ref.usd              /Ref
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </VariantsOpinionsOnRestrictedPrim/Child>
+
+Prim Stack:
+    root.usd             /VariantsOpinionsOnRestrictedPrim/Child
+    root.usd             /VariantsOpinionsOnRestrictedPrim/Child{child=a}
+    ref.usd              /Ref/Child
+
+Variant Selections:
+    {child = a}
+
+Child names:
+     ['Child2']
+
+------------------------------------------------------------------------
+Results for composing </VariantsOpinionsOnRestrictedPrim/Child/Child2>
+
+Prim Stack:
+    root.usd             /VariantsOpinionsOnRestrictedPrim/Child/Child2
+    root.usd             /VariantsOpinionsOnRestrictedPrim/Child/Child2{child2=a}
+    root.usd             /VariantsOpinionsOnRestrictedPrim/Child{child=a}Child2
+    ref.usd              /Ref/Child/Child2
+
+Variant Selections:
+    {child2 = a}
+

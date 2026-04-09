@@ -1,0 +1,13 @@
+{
+    "ObjectPath" : {
+        "valid"   : ["/hello/world", "/hello.world", "/hello"],
+        "invalid" : ["/", "", "/hello{world=earth}"]
+    },
+    "ReferenceOrPayload" : {
+        "valid" : [{"asset" : null, "prim": "/hello/world", "retiming" : null},
+                   {"asset" : "./hello.usda", "prim" : null, "retiming" : null},
+                   {"asset" : "./hello.usda", "prim" : "/world", "retiming" : null}],
+        "invalid" : [{"asset" : null, "prim" : "/hello.world", "retiming" : null},
+                     {"asset" : null, "prim" : null, "retiming" : [0.5, 2.0]}]
+    }
+}

@@ -1,0 +1,35 @@
+{
+    "/": {
+        "primChildren": ["root"]
+    },
+    "/root": {
+        "specifier": "def",
+        "typeName": "Scope",
+        "propertyChildren": ["testStringWithDictionaryMetadata"]
+    },
+    "/root.testStringWithDictionaryMetadata": {
+        "typeName": "string",
+        "customData": {
+            "testBool1": false,
+            "testToken1": "aToken",
+            "testInt1": 73425,
+            "testString1": "_|a|test|string",
+            "colorTest1": [
+                [0.4, 0.6, 0.1234]
+            ],
+            "topLevel": {
+                "testBool2": true,
+                "testToken2": "tokenInDictionary",
+                "testFloat1": 0.65e45,
+                "nestedDictionary": {
+                    "testString2": "inside-nested-dictionary",
+                    "nestedDictionary2": {
+                        "testToken3": "triplyNested",
+                        "emptyDictionary": {
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

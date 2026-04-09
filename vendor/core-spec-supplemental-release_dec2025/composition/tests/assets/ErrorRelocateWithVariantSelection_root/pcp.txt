@@ -1,0 +1,13 @@
+Loading @composition/tests/assets/ErrorRelocateWithVariantSelection_root/usda/root.usd@
+
+
+--------------------------------------------------------------------------------
+Traceback (most recent call last):
+  File "\pxr\usd\pcp\testenv\testPcpCompositionResults.py", line 99, in <module>
+    rootLayer = Sdf.Layer.FindOrOpen(rootLayerPath)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pxr.Tf.ErrorException: 
+	Error in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file /pxr/usd/sdf/textParserHelpers.h : ''/Model_1{vset=vsel}PrimOnlyInVariantSet' is not a valid relocates source path at '</Model_1{vset=vsel}PrimOnlyInVariantSet>: </Model_1/TryOutsideVariantSet>,' in </>
+'
+	Error in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file /pxr/usd/sdf/textParserHelpers.h : '\composition\tests\assets\ErrorRelocateWithVariantSelection_root\usda\root.usd:9:9: '/Model_1{vset=vsel}PrimOnlyInVariantSet' is not a valid relocates source path at '</Model_1{vset=vsel}PrimOnlyInVariantSet>: </Model_1/TryOutsideVariantSet>,' in </>
+'

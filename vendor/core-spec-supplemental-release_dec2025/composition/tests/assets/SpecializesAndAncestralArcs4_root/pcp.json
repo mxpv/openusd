@@ -1,0 +1,147 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Parent": {
+            "Prim Stack": {
+                "root.usd": "/PISI",
+                "ref.usd": "/PR"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/Parent/Child": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Child",
+                "ref.usd": "/PR/Sibling"
+            }
+        },
+        "/Parent/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Sibling",
+                "ref.usd": "/PR/Sibling"
+            }
+        },
+        "/Parent2": {
+            "Prim Stack": {
+                "root.usd": "/PSI",
+                "ref.usd": "/PR"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/Parent2/Child": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Child",
+                "ref.usd": "/PR/Sibling"
+            }
+        },
+        "/Parent2/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Sibling",
+                "ref.usd": "/PR/Sibling"
+            }
+        },
+        "/PS": {
+            "Prim Stack": {
+                "root.usd": "/PSI"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/PS/Child": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Child"
+            }
+        },
+        "/PS/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Sibling"
+            }
+        },
+        "/PSI": {
+            "Prim Stack": {
+                "root.usd": "/PSI"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/PSI/Child": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Child"
+            }
+        },
+        "/PSI/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PSI/Sibling"
+            }
+        },
+        "/PI": {
+            "Prim Stack": {
+                "root.usd": "/PISI"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/PI/Child": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Child"
+            }
+        },
+        "/PI/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Sibling"
+            }
+        },
+        "/PIS": {
+            "Prim Stack": {
+                "root.usd": "/PISI"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/PIS/Child": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Child"
+            }
+        },
+        "/PIS/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Sibling"
+            }
+        },
+        "/PISI": {
+            "Prim Stack": {
+                "root.usd": "/PISI"
+            },
+            "Child names": [
+                "Child",
+                "Sibling"
+            ]
+        },
+        "/PISI/Child": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Child"
+            }
+        },
+        "/PISI/Sibling": {
+            "Prim Stack": {
+                "root.usd": "/PISI/Sibling"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

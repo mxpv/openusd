@@ -1,0 +1,35 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/foo": {
+            "Prim Stack": {
+                "root.usd": "/foo{commonName=c}"
+            },
+            "Variant Selections": {
+                "commonName": "c"
+            },
+            "Child names": [
+                "bar"
+            ]
+        },
+        "/foo/bar": {
+            "Prim Stack": {
+                "root.usd": "/foo{commonName=c}bar"
+            },
+            "Variant Selections": {
+                "commonName": "c"
+            },
+            "Property names": [
+                "value"
+            ],
+            "Property stacks": {
+                "/foo/bar.value": {
+                    "root.usd": "/foo/bar{commonName=c}.value"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

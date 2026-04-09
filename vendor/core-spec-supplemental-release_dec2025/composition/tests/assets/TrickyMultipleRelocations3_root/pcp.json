@@ -1,0 +1,46 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group",
+                "group.usd": "/Group"
+            },
+            "Child names": [
+                "Subgroup"
+            ]
+        },
+        "/Group/Subgroup": {
+            "Prim Stack": {
+                "root.usd": "/Group/Subgroup",
+                "group.usd": "/Group/Subgroup"
+            },
+            "Child names": [
+                "Char_Renamed"
+            ],
+            "Prohibited child names": [
+                "Char"
+            ]
+        },
+        "/Group/Subgroup/Char_Renamed": {
+            "Prim Stack": {
+                "root.usd": "/Group/Subgroup/Char_Renamed",
+                "group.usd": "/Group/Subgroup/Char"
+            },
+            "Child names": [
+                "Rig_Renamed"
+            ],
+            "Prohibited child names": [
+                "Rig"
+            ]
+        },
+        "/Group/Subgroup/Char_Renamed/Rig_Renamed": {
+            "Prim Stack": {
+                "group.usd": "/ClassB"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

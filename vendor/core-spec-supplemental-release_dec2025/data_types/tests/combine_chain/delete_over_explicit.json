@@ -1,0 +1,42 @@
+[
+    {
+        "description": "Empty deleted items over empty explicit items",
+        "chain" : [{"deleted_items" : []}, {"explicit_items" : []}],
+        "combined_reduced" : {"explicit_items" : []}
+    },
+    {
+        "description": "Empty deleted items over non-empty explicit items",
+        "chain" : [{"deleted_items" : []}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    },
+    {
+        "description": "Singled deleted item over non-empty explicit items (no items to delete)",
+        "chain" : [{"deleted_items" : [50]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    },
+    {
+        "description": "Multiple deleted items over non-empty explicit items (no items to delete)",
+        "chain" : [{"deleted_items" : [50, 75]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [100, 150]}
+    },
+    {
+        "description": "Single deleted item over non-empty explicit items (one items to delete)",
+        "chain" : [{"deleted_items" : [100]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [150]}
+    },
+    {
+        "description": "Two deleted items over non-empty explicit items (one item to delete)",
+        "chain" : [{"deleted_items" : [75, 100]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [150]}
+    },
+    {
+        "description": "Two deleted items over non-empty explicit items (one item to delete, different order)",
+        "chain" : [{"deleted_items" : [100, 75]}, {"explicit_items" : [100, 150]}],
+        "combined_reduced" : {"explicit_items" : [150]}
+    },
+    {
+        "description": "Multiple deleted items over empty explicit items",
+        "chain" : [{"deleted_items" : [100, 150]}, {"explicit_items" : []}],
+        "combined_reduced" : {"explicit_items" : []}
+    }
+]

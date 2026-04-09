@@ -1,0 +1,40 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Inherit": {
+            "Prim Stack": {
+                "root.usd": "/Inherit"
+            },
+            "Child names": [
+                "Model"
+            ]
+        },
+        "/Inherit/Model": {
+            "Prim Stack": {
+                "root.usd": "/Inherit/Model"
+            }
+        },
+        "/Specializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes"
+            },
+            "Child names": [
+                "Model"
+            ]
+        },
+        "/Specializes/Model": {
+            "Prim Stack": {
+                "root.usd": "/Specializes/Model"
+            }
+        },
+        "/SubrootRef": {
+            "Prim Stack": {
+                "root.usd": "/Specializes/Model",
+                "set.usd": "/Specializes/Model"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

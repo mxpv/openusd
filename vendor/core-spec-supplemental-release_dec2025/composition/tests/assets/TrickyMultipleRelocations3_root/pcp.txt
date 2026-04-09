@@ -1,0 +1,50 @@
+Loading @composition/tests/assets/TrickyMultipleRelocations3_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Group>
+
+Prim Stack:
+    root.usd             /Group
+    group.usd            /Group
+
+Child names:
+     ['Subgroup']
+
+------------------------------------------------------------------------
+Results for composing </Group/Subgroup>
+
+Prim Stack:
+    root.usd             /Group/Subgroup
+    group.usd            /Group/Subgroup
+
+Child names:
+     ['Char_Renamed']
+
+Prohibited child names:
+     ['Char']
+
+------------------------------------------------------------------------
+Results for composing </Group/Subgroup/Char_Renamed>
+
+Prim Stack:
+    root.usd             /Group/Subgroup/Char_Renamed
+    group.usd            /Group/Subgroup/Char
+
+Child names:
+     ['Rig_Renamed']
+
+Prohibited child names:
+     ['Rig']
+
+------------------------------------------------------------------------
+Results for composing </Group/Subgroup/Char_Renamed/Rig_Renamed>
+
+Prim Stack:
+    group.usd            /Group/Subgroup/Char/Rig
+    group.usd            /ClassA
+    group.usd            /ClassB
+

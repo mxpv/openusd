@@ -1,0 +1,52 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SetClass": {
+            "Prim Stack": {
+                "root.usd": "/SetClass"
+            },
+            "Child names": [
+                "Metal",
+                "CorrodedMetal"
+            ]
+        },
+        "/SetClass/Metal": {
+            "Prim Stack": {
+                "root.usd": "/SetClass/Metal"
+            }
+        },
+        "/SetClass/CorrodedMetal": {
+            "Prim Stack": {
+                "root.usd": "/SetClass/CorrodedMetal"
+            }
+        },
+        "/Set": {
+            "Prim Stack": {
+                "root.usd": "/SetClass",
+                "package.usd": "/SetClass",
+                "model.usd": "/SetModel"
+            },
+            "Child names": [
+                "Metal",
+                "CorrodedMetal"
+            ]
+        },
+        "/Set/Metal": {
+            "Prim Stack": {
+                "root.usd": "/SetClass/Metal",
+                "package.usd": "/SetClass/Metal",
+                "model.usd": "/SetModel/Metal"
+            }
+        },
+        "/Set/CorrodedMetal": {
+            "Prim Stack": {
+                "root.usd": "/SetClass/Metal",
+                "package.usd": "/SetClass/Metal",
+                "model.usd": "/SetModel/Metal"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

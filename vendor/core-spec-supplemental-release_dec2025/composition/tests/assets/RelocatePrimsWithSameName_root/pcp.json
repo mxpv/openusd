@@ -1,0 +1,184 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/ExternalReferences": {
+            "Prim Stack": {
+                "root.usd": "/ExternalReferences",
+                "ref_1.usd": "/Ref1",
+                "base.usd": "/Base",
+                "ref_2.usd": "/Ref2"
+            },
+            "Child names": [
+                "Child_2",
+                "Ref2_Child",
+                "Child_1",
+                "Ref1_Child"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/ExternalReferences/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/ExternalReferences/Ref2_Child": {
+            "Prim Stack": {
+                "ref_2.usd": "/Ref2/Ref2_Child"
+            }
+        },
+        "/ExternalReferences/Child_1": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/ExternalReferences/Ref1_Child": {
+            "Prim Stack": {
+                "ref_1.usd": "/Ref1/Ref1_Child"
+            }
+        },
+        "/InternalReferences": {
+            "Prim Stack": {
+                "root.usd": "/Ref2",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_2",
+                "Ref2_Child",
+                "Child_1",
+                "Ref1_Child"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/InternalReferences/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/InternalReferences/Ref2_Child": {
+            "Prim Stack": {
+                "root.usd": "/Ref2/Ref2_Child"
+            }
+        },
+        "/InternalReferences/Child_1": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/InternalReferences/Ref1_Child": {
+            "Prim Stack": {
+                "root.usd": "/Ref1/Ref1_Child"
+            }
+        },
+        "/ChainedReferences": {
+            "Prim Stack": {
+                "root.usd": "/ChainedRef_2",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_2",
+                "Child_1"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/ChainedReferences/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/ChainedReferences/Child_1": {
+            "Prim Stack": {}
+        },
+        "/ChainedRef_1": {
+            "Prim Stack": {
+                "root.usd": "/ChainedRef_2",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_2"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/ChainedRef_1/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/ChainedRef_2": {
+            "Prim Stack": {
+                "root.usd": "/ChainedRef_2",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_2"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/ChainedRef_2/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/Ref1": {
+            "Prim Stack": {
+                "root.usd": "/Ref1",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_1",
+                "Ref1_Child"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/Ref1/Child_1": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/Ref1/Ref1_Child": {
+            "Prim Stack": {
+                "root.usd": "/Ref1/Ref1_Child"
+            }
+        },
+        "/Ref2": {
+            "Prim Stack": {
+                "root.usd": "/Ref2",
+                "base.usd": "/Base"
+            },
+            "Child names": [
+                "Child_2",
+                "Ref2_Child"
+            ],
+            "Prohibited child names": [
+                "Child"
+            ]
+        },
+        "/Ref2/Child_2": {
+            "Prim Stack": {
+                "base.usd": "/Base/Child"
+            }
+        },
+        "/Ref2/Ref2_Child": {
+            "Prim Stack": {
+                "root.usd": "/Ref2/Ref2_Child"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </ChainedReferences/Child_1>\n@composition/tests/assets/RelocatePrimsWithSameName_root/usda/root.usd@</ChainedReferences/Child_1> CANNOT be relocated from: @composition/tests/assets/RelocatePrimsWithSameName_root/usda/root.usd@</ChainedReferences/Child> which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/RelocatePrimsWithSameName_root/usda/root.usd@</ChainedRef_2/Child>. ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

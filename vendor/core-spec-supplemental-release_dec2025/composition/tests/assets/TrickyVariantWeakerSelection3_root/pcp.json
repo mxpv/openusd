@@ -1,0 +1,18 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model{modelComplexity=full}",
+                "geo.usd": "/Model{K_hierarchy=full}"
+            },
+            "Variant Selections": {
+                "K_hierarchy": "full",
+                "modelComplexity": "full"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}
