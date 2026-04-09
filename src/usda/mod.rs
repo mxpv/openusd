@@ -26,7 +26,10 @@ impl TextReader {
         let data = fs::read_to_string(path).with_context(|| format!("Unable to read file: {}", path.display()))?;
 
         let mut parser = Parser::new(&data);
-        let data = parser.parse().context("Unable to parse text file")?;
+        let data = parser.parse().map_err(|e| match parser.last_error_highlight() {
+            Some(h) => e.context(format!("{}:{}: {}", path.display(), h.line, h.column)),
+            None => e.context(format!("{}: parse error", path.display())),
+        })?;
 
         Ok(Self { data })
     }
