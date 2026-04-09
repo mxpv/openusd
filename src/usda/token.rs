@@ -103,6 +103,8 @@ pub enum Token<'source> {
     SuffixSubstitutions,
     #[token("specializes")]
     Specializes,
+    #[token("spline")]
+    Spline,
     #[token("symmetryArguments")]
     SymmetryArguments,
     #[token("symmetryFunction")]
@@ -142,14 +144,66 @@ pub enum Token<'source> {
     Punctuation(char),
 
     /// Namespaced identifiers (contains colon)
-    /// Examples: "inputs:diffuseColor", "outputs:surface.connect"
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_:\.]*", |lex| lex.slice())]
+    /// Examples: "inputs:diffuseColor", "outputs:surface"
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*:[a-zA-Z0-9_:]*", |lex| lex.slice())]
     NamespacedIdentifier(&'source str),
 
     /// Regular identifiers.
     /// Examples: "Sphere", "Material", "bool", "float3"
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice())]
     Identifier(&'source str),
+}
+
+impl Token<'_> {
+    /// Returns the keyword's string representation, or `None` for non-keyword tokens.
+    pub fn keyword_lexeme(&self) -> Option<&'static str> {
+        match self {
+            Token::Add => Some("add"),
+            Token::Append => Some("append"),
+            Token::Class => Some("class"),
+            Token::Config => Some("config"),
+            Token::Connect => Some("connect"),
+            Token::Custom => Some("custom"),
+            Token::CustomData => Some("customData"),
+            Token::Default => Some("default"),
+            Token::Def => Some("def"),
+            Token::Delete => Some("delete"),
+            Token::Dictionary => Some("dictionary"),
+            Token::DisplayUnit => Some("displayUnit"),
+            Token::Doc => Some("doc"),
+            Token::Inf => Some("inf"),
+            Token::Inherits => Some("inherits"),
+            Token::Kind => Some("kind"),
+            Token::NameChildren => Some("nameChildren"),
+            Token::None => Some("None"),
+            Token::Offset => Some("offset"),
+            Token::Over => Some("over"),
+            Token::Payload => Some("payload"),
+            Token::Permission => Some("permission"),
+            Token::PrefixSubstitutions => Some("prefixSubstitutions"),
+            Token::Prepend => Some("prepend"),
+            Token::Properties => Some("properties"),
+            Token::References => Some("references"),
+            Token::Relocates => Some("relocates"),
+            Token::Rel => Some("rel"),
+            Token::Reorder => Some("reorder"),
+            Token::RootPrims => Some("rootPrims"),
+            Token::Scale => Some("scale"),
+            Token::SubLayers => Some("subLayers"),
+            Token::SuffixSubstitutions => Some("suffixSubstitutions"),
+            Token::Specializes => Some("specializes"),
+            Token::Spline => Some("spline"),
+            Token::SymmetryArguments => Some("symmetryArguments"),
+            Token::SymmetryFunction => Some("symmetryFunction"),
+            Token::TimeSamples => Some("timeSamples"),
+            Token::Uniform => Some("uniform"),
+            Token::VariantSet => Some("variantSet"),
+            Token::VariantSets => Some("variantSets"),
+            Token::Variants => Some("variants"),
+            Token::Varying => Some("varying"),
+            _ => None,
+        }
+    }
 }
 
 fn trim_chars(s: &str, n: usize) -> Option<&str> {
@@ -278,9 +332,11 @@ mod tests {
             // token outputs:surface.connect = </TexModel/boardMat/PBRShader.outputs:surface>
             (Token::Identifier("token"), "token"),
             (
-                Token::NamespacedIdentifier("outputs:surface.connect"),
-                "outputs:surface.connect",
+                Token::NamespacedIdentifier("outputs:surface"),
+                "outputs:surface",
             ),
+            (Token::Punctuation('.'), "."),
+            (Token::Connect, "connect"),
             (Token::Punctuation('='), "="),
             (
                 Token::PathRef("/TexModel/boardMat/PBRShader.outputs:surface"),

@@ -128,6 +128,17 @@ impl<'a> Parser<'a> {
         matches!(self.peek_next(), Some(Ok(t)) if *t == expected)
     }
 
+    /// Consume the next token if it matches, returning whether it was consumed.
+    #[inline]
+    fn try_consume(&mut self, expected: Token) -> bool {
+        if self.is_next(expected) {
+            let _ = self.fetch_next();
+            true
+        } else {
+            false
+        }
+    }
+
     fn ensure_next(&mut self, expected_token: Token) -> Result<()> {
         let token = self.fetch_next()?;
         ensure!(
@@ -178,8 +189,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a single item or a bracketed array of items.
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
-        if self.is_next(Token::None) {
-            self.fetch_next()?;
+        if self.try_consume(Token::None) {
             return Ok(Vec::new());
         }
         if self.is_next(Token::Punctuation('[')) {
@@ -477,27 +487,23 @@ impl<'a> Parser<'a> {
         let mut custom = false;
         let list_op = self.try_list_op();
 
-        if self.is_next(Token::Custom) {
-            self.fetch_next()?;
-            if self.is_next(Token::Rel) {
-                self.fetch_next()?;
+        if self.try_consume(Token::Custom) {
+            if self.try_consume(Token::Rel) {
                 return self.read_relationship(current_path, true, properties, data, list_op);
             }
             custom = true;
         }
 
-        if self.is_next(Token::Rel) {
-            self.fetch_next()?;
+        if self.try_consume(Token::Rel) {
             return self.read_relationship(current_path, false, properties, data, list_op);
         }
 
         let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
         let mut variability = sdf::Variability::Varying;
-        if self.is_next(Token::Varying) {
-            self.fetch_next()?;
-        } else if self.is_next(Token::Uniform) {
+        if self.try_consume(Token::Varying) {
+            // default
+        } else if self.try_consume(Token::Uniform) {
             variability = sdf::Variability::Uniform;
-            self.fetch_next()?;
         }
 
         let type_info = self.try_parse_type()?.context("attribute type expected")?;
@@ -505,25 +511,15 @@ impl<'a> Parser<'a> {
         let name_token = self.fetch_next()?;
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            _ => keyword_lexeme(&name_token)
+            _ => name_token.keyword_lexeme()
                 .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
         };
 
-        // Read optional `.suffix` (e.g. `.connect`, `.timeSamples`).
-        // In USDA the dot and suffix can be separated by whitespace.
-        let (name, suffix) = if let Some((base, sfx)) = name.rsplit_once('.') {
-            (base, Some(sfx))
-        } else if self.is_next(Token::Punctuation('.')) {
-            self.fetch_next()?;
-            let next = self.fetch_next()?;
-            let sfx = match next {
-                Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-                ref kw => keyword_lexeme(kw)
-                    .ok_or_else(|| anyhow!("expected suffix after '.', got {next:?}"))?,
-            };
-            (name, Some(sfx))
+        // Read optional `.suffix` (e.g. `.connect`, `.timeSamples`, `.spline`).
+        let suffix = if self.try_consume(Token::Punctuation('.')) {
+            Some(self.fetch_next()?)
         } else {
-            (name, None)
+            None
         };
 
         // Check for metadata before checking for assignment
@@ -532,10 +528,9 @@ impl<'a> Parser<'a> {
                 .context("Unable to parse attribute metadata")?;
         }
 
-        if suffix == Some("connect") {
+        if matches!(suffix, Some(Token::Connect)) {
             push_unique(suffixed_properties, name);
-            if self.is_next(Token::Punctuation('=')) {
-                self.fetch_next()?;
+            if self.try_consume(Token::Punctuation('=')) {
                 let list_op = list_op.or(self.try_list_op());
                 let targets = self
                     .parse_connection_targets()
@@ -554,7 +549,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
-        if suffix == Some("timeSamples") {
+        if matches!(suffix, Some(Token::TimeSamples)) {
             push_unique(suffixed_properties, name);
             self.ensure_pun('=')?;
             let samples = self.parse_time_samples()?;
@@ -567,7 +562,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
-        if suffix == Some("spline") {
+        if matches!(suffix, Some(Token::Spline)) {
             push_unique(suffixed_properties, name);
             self.ensure_pun('=')?;
             let spline = self.parse_spline()?;
@@ -578,6 +573,10 @@ impl<'a> Parser<'a> {
                 .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
             spec.add("spline", spline);
             return Ok(());
+        }
+
+        if let Some(tok) = suffix {
+            bail!("Unsupported attribute suffix: {tok:?}");
         }
 
         // Check if there's an assignment
@@ -631,7 +630,7 @@ impl<'a> Parser<'a> {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::CustomData => "customData".to_owned(),
                 Token::Doc => FieldKey::Documentation.as_str().to_owned(),
-                other => keyword_lexeme(&other)
+                other => other.keyword_lexeme()
                     .map(str::to_owned)
                     .ok_or_else(|| anyhow!("Unexpected attribute metadata name token: {other:?}"))?,
             };
@@ -644,7 +643,7 @@ impl<'a> Parser<'a> {
             // Wrap in a dictionary keyed by the list op name to match the baseline format.
             let value = match list_op {
                 Some(ref tok @ (Token::Prepend | Token::Append | Token::Delete | Token::Add)) => {
-                    let key = keyword_lexeme(tok).unwrap().to_owned();
+                    let key = tok.keyword_lexeme().unwrap().to_owned();
                     sdf::Value::Dictionary(HashMap::from([(key, value)]))
                 }
                 _ => value,
@@ -722,7 +721,7 @@ impl<'a> Parser<'a> {
             let key_token = this.fetch_next()?;
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
-                other => keyword_lexeme(&other)
+                other => other.keyword_lexeme()
                     .map(str::to_owned)
                     .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
             };
@@ -971,8 +970,7 @@ impl<'a> Parser<'a> {
                 }
                 // Extrapolation: `pre : mode` or `post: mode [(slope)]`
                 // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
-                Token::Identifier(dir @ ("pre" | "post")) if this.is_next(Token::Punctuation(':')) => {
-                    this.fetch_next()?;
+                Token::Identifier(dir @ ("pre" | "post")) if this.try_consume(Token::Punctuation(':')) => {
                     let extrap = this.parse_extrapolation()?;
                     if dir == "pre" { pre_extrapolation = extrap; } else { post_extrapolation = extrap; }
                 }
@@ -1009,8 +1007,7 @@ impl<'a> Parser<'a> {
                     let mut interp_mode = "held".to_owned();
 
                     // `time : value` or `time : preValue & value`
-                    let (pre_value, value) = if this.is_next(Token::Punctuation('&')) {
-                        this.fetch_next()?;
+                    let (pre_value, value) = if this.try_consume(Token::Punctuation('&')) {
                         let actual: f64 = this.parse_token()?;
                         (first, actual)
                     } else {
@@ -1018,8 +1015,7 @@ impl<'a> Parser<'a> {
                     };
 
                     // Optional semicolon-separated knot attributes
-                    while this.is_next(Token::Punctuation(';')) {
-                        this.fetch_next()?;
+                    while this.try_consume(Token::Punctuation(';')) {
 
                         if this.is_next(Token::Punctuation('{')) {
                             // Per-knot custom data
@@ -1223,8 +1219,7 @@ impl<'a> Parser<'a> {
     /// Decode a typed value based on USD's scalar/array/role type tables.
     fn parse_value(&mut self, info: TypeInfo) -> Result<sdf::Value> {
         // None means "value block" (explicitly unset) regardless of type.
-        if self.is_next(Token::None) {
-            self.fetch_next()?;
+        if self.try_consume(Token::None) {
             return Ok(sdf::Value::ValueBlock);
         }
 
@@ -1525,15 +1520,11 @@ impl<'a> Parser<'a> {
     fn parse_block(&mut self, open: char, close: char, mut entry: impl FnMut(&mut Self) -> Result<()>) -> Result<()> {
         self.ensure_pun(open)?;
         loop {
-            if self.is_next(Token::Punctuation(close)) {
-                self.fetch_next()?;
+            if self.try_consume(Token::Punctuation(close)) {
                 break;
             }
             entry(self)?;
-            // Consume optional separator (comma or semicolon).
-            while self.is_next(Token::Punctuation(',')) || self.is_next(Token::Punctuation(';')) {
-                self.fetch_next()?;
-            }
+            while self.try_consume(Token::Punctuation(',')) || self.try_consume(Token::Punctuation(';')) {}
         }
         Ok(())
     }
@@ -1699,53 +1690,6 @@ enum Type {
     Custom,
 }
 
-fn keyword_lexeme(token: &Token<'_>) -> Option<&'static str> {
-    match token {
-        Token::Add => Some("add"),
-        Token::Append => Some("append"),
-        Token::Class => Some("class"),
-        Token::Config => Some("config"),
-        Token::Connect => Some("connect"),
-        Token::Custom => Some("custom"),
-        Token::CustomData => Some("customData"),
-        Token::Default => Some("default"),
-        Token::Def => Some("def"),
-        Token::Delete => Some("delete"),
-        Token::Dictionary => Some("dictionary"),
-        Token::DisplayUnit => Some("displayUnit"),
-        Token::Doc => Some("doc"),
-        Token::Inf => Some("inf"),
-        Token::Inherits => Some("inherits"),
-        Token::Kind => Some("kind"),
-        Token::NameChildren => Some("nameChildren"),
-        Token::None => Some("None"),
-        Token::Offset => Some("offset"),
-        Token::Over => Some("over"),
-        Token::Payload => Some("payload"),
-        Token::Permission => Some("permission"),
-        Token::PrefixSubstitutions => Some("prefixSubstitutions"),
-        Token::Prepend => Some("prepend"),
-        Token::Properties => Some("properties"),
-        Token::References => Some("references"),
-        Token::Relocates => Some("relocates"),
-        Token::Rel => Some("rel"),
-        Token::Reorder => Some("reorder"),
-        Token::RootPrims => Some("rootPrims"),
-        Token::Scale => Some("scale"),
-        Token::SubLayers => Some("subLayers"),
-        Token::SuffixSubstitutions => Some("suffixSubstitutions"),
-        Token::Specializes => Some("specializes"),
-        Token::SymmetryArguments => Some("symmetryArguments"),
-        Token::SymmetryFunction => Some("symmetryFunction"),
-        Token::TimeSamples => Some("timeSamples"),
-        Token::Uniform => Some("uniform"),
-        Token::VariantSet => Some("variantSet"),
-        Token::VariantSets => Some("variantSets"),
-        Token::Variants => Some("variants"),
-        Token::Varying => Some("varying"),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
