@@ -567,6 +567,19 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
 
+        if suffix == Some("spline") {
+            push_unique(suffixed_properties, name);
+            self.ensure_pun('=')?;
+            let spline = self.parse_spline()?;
+            let path = current_path.append_property(name)?;
+
+            let spec = data
+                .entry(path)
+                .or_insert_with(|| Self::make_attribute_spec(&type_info, custom, variability));
+            spec.add("spline", spline);
+            return Ok(());
+        }
+
         // Check if there's an assignment
         if !self.is_next(Token::Punctuation('=')) {
             let path = current_path.append_property(name)?;
@@ -912,6 +925,161 @@ impl<'a> Parser<'a> {
         }
 
         Ok(())
+    }
+
+    /// Parse an extrapolation mode: `mode [(slope)]`.
+    fn parse_extrapolation(&mut self) -> Result<sdf::Value> {
+        let mode = self.expect_identifier()?;
+        if mode == "none" {
+            return Ok(sdf::Value::ValueBlock);
+        }
+        let slope = if self.is_next(Token::Punctuation('(')) {
+            self.ensure_pun('(')?;
+            let v = self.parse_token::<f64>()?;
+            self.ensure_pun(')')?;
+            v
+        } else {
+            0.0
+        };
+        Ok(sdf::Value::Dictionary(HashMap::from([
+            ("mode".to_owned(), sdf::Value::Token(mode.to_owned())),
+            ("slope".to_owned(), sdf::Value::Double(slope)),
+        ])))
+    }
+
+    /// Parse a spline value: `{ curveType, knots... }`.
+    ///
+    /// The result is stored as a `Dictionary` matching the baseline JSON structure:
+    /// `{ curveType, preExtrapolation, postExtrapolation, loopParameters, knots, knotCustomData }`.
+    fn parse_spline(&mut self) -> Result<sdf::Value> {
+        let mut curve_type: Option<String> = None;
+        let mut pre_extrapolation = sdf::Value::ValueBlock;
+        let mut post_extrapolation = sdf::Value::ValueBlock;
+        let mut loop_params = sdf::Value::ValueBlock;
+        let mut knots = Vec::new();
+        let mut knot_custom_data: HashMap<String, sdf::Value> = HashMap::new();
+
+        self.parse_block('{', '}', |this| {
+            let token = this.fetch_next()?;
+            match token {
+                // Curve type: `bezier`, `hermite`, etc.
+                Token::Identifier(name)
+                    if !matches!(name, "pre" | "post" | "loop")
+                        && !this.is_next(Token::Punctuation(':')) =>
+                {
+                    curve_type = Some(name.to_owned());
+                }
+                // Extrapolation: `pre : mode` or `post: mode [(slope)]`
+                // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
+                Token::Identifier(dir @ ("pre" | "post")) if this.is_next(Token::Punctuation(':')) => {
+                    this.fetch_next()?;
+                    let extrap = this.parse_extrapolation()?;
+                    if dir == "pre" { pre_extrapolation = extrap; } else { post_extrapolation = extrap; }
+                }
+                Token::NamespacedIdentifier("pre:") => {
+                    pre_extrapolation = this.parse_extrapolation()?;
+                }
+                Token::NamespacedIdentifier("post:") => {
+                    post_extrapolation = this.parse_extrapolation()?;
+                }
+                // Loop parameters
+                Token::Identifier("loop") | Token::NamespacedIdentifier("loop:") => {
+                    if matches!(token, Token::Identifier(_)) {
+                        this.ensure_pun(':')?;
+                    }
+                    let vals = this.parse_tuple::<f64, 5>()?;
+                    loop_params = sdf::Value::Dictionary(HashMap::from([
+                        ("protoStart".to_owned(), sdf::Value::Double(vals[0])),
+                        ("protoEnd".to_owned(), sdf::Value::Double(vals[1])),
+                        ("numPreLoops".to_owned(), sdf::Value::Double(vals[2])),
+                        ("numPostLoops".to_owned(), sdf::Value::Double(vals[3])),
+                        ("valueOffset".to_owned(), sdf::Value::Double(vals[4])),
+                    ]));
+                }
+                // Knot: `time : value [& preValue] [; pre (...)] [; post mode [...]] [; { customData }]`
+                Token::Number(time_str) => {
+                    let time: f64 = time_str.parse()?;
+                    this.ensure_pun(':')?;
+                    let first: f64 = this.parse_token()?;
+
+                    let mut pre_slope = 0.0;
+                    let mut pre_width = 0.0;
+                    let mut post_slope = 0.0;
+                    let mut post_width = 0.0;
+                    let mut interp_mode = "held".to_owned();
+
+                    // `time : value` or `time : preValue & value`
+                    let (pre_value, value) = if this.is_next(Token::Punctuation('&')) {
+                        this.fetch_next()?;
+                        let actual: f64 = this.parse_token()?;
+                        (first, actual)
+                    } else {
+                        (0.0, first)
+                    };
+
+                    // Optional semicolon-separated knot attributes
+                    while this.is_next(Token::Punctuation(';')) {
+                        this.fetch_next()?;
+
+                        if this.is_next(Token::Punctuation('{')) {
+                            // Per-knot custom data
+                            let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
+                                unreachable!();
+                            };
+                            let time_key = if time.fract() == 0.0 && time.is_finite() {
+                                format!("{}", time as i64)
+                            } else {
+                                format!("{time}")
+                            };
+                            knot_custom_data.insert(time_key, sdf::Value::Dictionary(dict));
+                            continue;
+                        }
+
+                        let dir = this.expect_identifier()?;
+                        match dir {
+                            "pre" => {
+                                let vals = this.parse_tuple::<f64, 2>()?;
+                                pre_slope = vals[0];
+                                pre_width = vals[1];
+                            }
+                            "post" => {
+                                // `post mode` or `post mode (slope, width)`
+                                let mode = this.expect_identifier()?;
+                                interp_mode = mode.to_owned();
+                                if this.is_next(Token::Punctuation('(')) {
+                                    let vals = this.parse_tuple::<f64, 2>()?;
+                                    post_slope = vals[0];
+                                    post_width = vals[1];
+                                }
+                            }
+                            other => bail!("Unexpected knot attribute: {other}"),
+                        }
+                    }
+
+                    knots.push(sdf::Value::Dictionary(HashMap::from([
+                        ("time".to_owned(), sdf::Value::Double(time)),
+                        ("value".to_owned(), sdf::Value::Double(value)),
+                        ("preValue".to_owned(), sdf::Value::Double(pre_value)),
+                        ("preTangentSlope".to_owned(), sdf::Value::Double(pre_slope)),
+                        ("preTangentWidth".to_owned(), sdf::Value::Double(pre_width)),
+                        ("postTangentSlope".to_owned(), sdf::Value::Double(post_slope)),
+                        ("postTangentWidth".to_owned(), sdf::Value::Double(post_width)),
+                        ("nextInterpolationMode".to_owned(), sdf::Value::Token(interp_mode)),
+                    ])));
+                }
+                other => bail!("Unexpected spline token: {other:?}"),
+            }
+            Ok(())
+        })?;
+
+        Ok(sdf::Value::Dictionary(HashMap::from([
+            ("curveType".to_owned(), sdf::Value::Token(curve_type.unwrap_or_else(|| "bezier".to_owned()))),
+            ("preExtrapolation".to_owned(), pre_extrapolation),
+            ("postExtrapolation".to_owned(), post_extrapolation),
+            ("loopParameters".to_owned(), loop_params),
+            ("knots".to_owned(), sdf::Value::ValueVec(knots)),
+            ("knotCustomData".to_owned(), sdf::Value::Dictionary(knot_custom_data)),
+        ])))
     }
 
     /// Parse a time sample map: `{ time : value, time : value, ... }`.
@@ -1446,6 +1614,7 @@ impl<'a> Parser<'a> {
         self.parse_array_with(Self::parse_matrix::<N, M>)
     }
 }
+
 
 /// Push a string into a Vec if it's not already present.
 fn push_unique(vec: &mut Vec<String>, name: &str) {
@@ -2738,5 +2907,85 @@ def Scope "Root" (
             spec.fields.get("displayName"),
             Some(&sdf::Value::String("\u{1F680}".into()))
         );
+    }
+
+    #[test]
+    fn parse_spline_empty() {
+        let mut parser = Parser::new(r#"#usda 1.0
+def "p" { double x.spline = {} }
+"#);
+        let data = parser.parse().unwrap();
+        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
+            .fields.get("spline").unwrap()
+            .try_as_dictionary_ref().unwrap();
+        assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("bezier".into())));
+        assert_eq!(d.get("preExtrapolation"), Some(&sdf::Value::ValueBlock));
+        assert!(d.get("knots").unwrap().try_as_value_vec_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_spline_knot_with_tangents() {
+        let mut parser = Parser::new(r#"#usda 1.0
+def "p" {
+    float x.spline = {
+        hermite,
+        10 : 5.0 ; pre (1.0, 2.0) ; post curve (3.0, 4.0)
+    }
+}
+"#);
+        let data = parser.parse().unwrap();
+        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
+            .fields.get("spline").unwrap()
+            .try_as_dictionary_ref().unwrap();
+        assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("hermite".into())));
+
+        let knots = d.get("knots").unwrap().try_as_value_vec_ref().unwrap();
+        assert_eq!(knots.len(), 1);
+
+        let knot = knots[0].try_as_dictionary_ref().unwrap();
+        assert_eq!(knot.get("time"), Some(&sdf::Value::Double(10.0)));
+        assert_eq!(knot.get("value"), Some(&sdf::Value::Double(5.0)));
+        assert_eq!(knot.get("preTangentSlope"), Some(&sdf::Value::Double(1.0)));
+        assert_eq!(knot.get("preTangentWidth"), Some(&sdf::Value::Double(2.0)));
+        assert_eq!(knot.get("postTangentSlope"), Some(&sdf::Value::Double(3.0)));
+        assert_eq!(knot.get("postTangentWidth"), Some(&sdf::Value::Double(4.0)));
+        assert_eq!(knot.get("nextInterpolationMode"), Some(&sdf::Value::Token("curve".into())));
+    }
+
+    #[test]
+    fn parse_spline_extrapolation_and_loop() {
+        let mut parser = Parser::new(r#"#usda 1.0
+def "p" {
+    double x.spline = {
+        pre: sloped (2.5),
+        post: clamp,
+        loop: (1.0, 10.0, 0, 3, 0.5),
+        5 : 1.0 & 9.0
+    }
+}
+"#);
+        let data = parser.parse().unwrap();
+        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
+            .fields.get("spline").unwrap()
+            .try_as_dictionary_ref().unwrap();
+
+        let pre = d.get("preExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
+        assert_eq!(pre.get("mode"), Some(&sdf::Value::Token("sloped".into())));
+        assert_eq!(pre.get("slope"), Some(&sdf::Value::Double(2.5)));
+
+        let post = d.get("postExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
+        assert_eq!(post.get("mode"), Some(&sdf::Value::Token("clamp".into())));
+        assert_eq!(post.get("slope"), Some(&sdf::Value::Double(0.0)));
+
+        let lp = d.get("loopParameters").unwrap().try_as_dictionary_ref().unwrap();
+        assert_eq!(lp.get("protoStart"), Some(&sdf::Value::Double(1.0)));
+        assert_eq!(lp.get("numPostLoops"), Some(&sdf::Value::Double(3.0)));
+        assert_eq!(lp.get("valueOffset"), Some(&sdf::Value::Double(0.5)));
+
+        // `5 : 1.0 & 9.0` — preValue is 1.0, value is 9.0.
+        let knot = d.get("knots").unwrap().try_as_value_vec_ref().unwrap()[0]
+            .try_as_dictionary_ref().unwrap();
+        assert_eq!(knot.get("preValue"), Some(&sdf::Value::Double(1.0)));
+        assert_eq!(knot.get("value"), Some(&sdf::Value::Double(9.0)));
     }
 }

@@ -126,6 +126,9 @@ pub enum Value {
     ValueBlock,
     Value,
 
+    /// Heterogeneous array (e.g. spline knots). Each element is a `Value`.
+    ValueVec(Vec<Value>),
+
     UnregisteredValue(String),
     UnregisteredValueListOp(StringListOp),
 
@@ -231,6 +234,8 @@ impl serde::Serialize for Value {
             Value::PathVec(v) => v.serialize(serializer),
             Value::VariantSelectionMap(v) => v.serialize(serializer),
             Value::LayerOffsetVec(v) => v.serialize(serializer),
+
+            Value::ValueVec(v) => v.serialize(serializer),
 
             Value::UnregisteredValue(v) => v.serialize(serializer),
             Value::UnregisteredValueListOp(v) => v.serialize(serializer),
