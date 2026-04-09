@@ -8,7 +8,8 @@ use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
 #[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
-#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip comments
+#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip line comments
+#[logos(skip(r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/", allow_greedy = true))] // Skip block comments
 pub enum Token<'source> {
     /// Magic header - extract version number.
     /// Example: "#usda 1.0" -> "1.0", "#usda 1.0.32" -> "1.0.32"
@@ -523,6 +524,36 @@ mod tests {
         assert_eq!(token, Token::Inf, "Expected Inf token after '+'");
 
         assert!(lexer.next().is_none(), "Expected no more tokens");
+    }
+
+    /// Block comments (`/* ... */`) are skipped, preserving surrounding tokens.
+    #[test]
+    fn block_comments() {
+        assert_tokens(
+            "int /* padding */ a:b",
+            &[
+                (Token::Identifier("int"), "int"),
+                (Token::NamespacedIdentifier("a:b"), "a:b"),
+            ],
+        );
+
+        // Multiline block comment.
+        assert_tokens(
+            "float /* multi\nline\ncomment */ x",
+            &[
+                (Token::Identifier("float"), "float"),
+                (Token::Identifier("x"), "x"),
+            ],
+        );
+
+        // Adjacent block comments.
+        assert_tokens(
+            "a /* one */ /* two */ b",
+            &[
+                (Token::Identifier("a"), "a"),
+                (Token::Identifier("b"), "b"),
+            ],
+        );
     }
 }
 
