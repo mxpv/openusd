@@ -237,7 +237,7 @@ impl<'a> Parser<'a> {
 
             match next {
                 Token::String(str) => {
-                    root.add(FieldKey::Documentation, str);
+                    root.add(FieldKey::Comment, str);
                 }
                 Token::Doc => {
                     this.ensure_pun('=')?;
