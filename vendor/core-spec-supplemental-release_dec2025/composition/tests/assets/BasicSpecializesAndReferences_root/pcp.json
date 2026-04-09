@@ -1,0 +1,111 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/ShaderBindings": {
+            "Prim Stack": {
+                "root.usd": "/ShaderBindings_defaultShadingVariant"
+            },
+            "Child names": [
+                "ShinyPlastic",
+                "ShinyPlastic_BlueShinyPlastic"
+            ]
+        },
+        "/ShaderBindings/ShinyPlastic": {
+            "Prim Stack": {
+                "root.usd": "/ShinyPlasticLook"
+            }
+        },
+        "/ShaderBindings/ShinyPlastic_BlueShinyPlastic": {
+            "Prim Stack": {
+                "root.usd": "/ShinyPlasticLook"
+            }
+        },
+        "/ShinyPlasticLook": {
+            "Prim Stack": {
+                "root.usd": "/ShinyPlasticLook"
+            }
+        },
+        "/ShaderBindings_defaultShadingVariant": {
+            "Prim Stack": {
+                "root.usd": "/ShaderBindings_defaultShadingVariant"
+            },
+            "Child names": [
+                "ShinyPlastic",
+                "ShinyPlastic_BlueShinyPlastic"
+            ]
+        },
+        "/ShaderBindings_defaultShadingVariant/ShinyPlastic": {
+            "Prim Stack": {
+                "root.usd": "/ShinyPlasticLook"
+            }
+        },
+        "/ShaderBindings_defaultShadingVariant/ShinyPlastic_BlueShinyPlastic": {
+            "Prim Stack": {
+                "root.usd": "/ShinyPlasticLook"
+            }
+        },
+        "/InternalRef": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef"
+            },
+            "Child names": [
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/InternalRef/Metal": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef/Metal"
+            }
+        },
+        "/InternalRef/Brass": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef/Metal"
+            }
+        },
+        "/InternalRefAndSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef"
+            },
+            "Child names": [
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/InternalRefAndSpecializes/Metal": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef/Metal"
+            }
+        },
+        "/InternalRefAndSpecializes/Brass": {
+            "Prim Stack": {
+                "root.usd": "/InternalRef/Metal"
+            }
+        },
+        "/RemoteRefAndSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/RemoteRefAndSpecializes",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/RemoteRefAndSpecializes/Metal": {
+            "Prim Stack": {
+                "root.usd": "/RemoteRefAndSpecializes/Metal",
+                "ref.usd": "/Ref/Metal"
+            }
+        },
+        "/RemoteRefAndSpecializes/Brass": {
+            "Prim Stack": {
+                "root.usd": "/RemoteRefAndSpecializes/Metal",
+                "ref.usd": "/Ref/Metal"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

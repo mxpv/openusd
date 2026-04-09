@@ -1,0 +1,91 @@
+Loading @composition/tests/assets/SpecializesAndVariants4_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </_class_>
+
+Prim Stack:
+    root.usd             /_class_
+
+Child names:
+     ['defaultImplementation', 'render']
+
+------------------------------------------------------------------------
+Results for composing </_class_/defaultImplementation>
+
+Prim Stack:
+    root.usd             /_class_/defaultImplementation
+
+Property names:
+     ['test']
+
+Property stacks:
+/_class_/defaultImplementation.test:
+    root.usd             /_class_/defaultImplementation.test
+
+------------------------------------------------------------------------
+Results for composing </_class_/render>
+
+Prim Stack:
+    root.usd             /_class_/render
+    root.usd             /_class_/render{implementation=default}
+    root.usd             /_class_/defaultImplementation
+
+Variant Selections:
+    {implementation = default}
+
+Property names:
+     ['test']
+
+Property stacks:
+/_class_/render.test:
+    root.usd             /_class_/defaultImplementation.test
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    root.usd             /_class_
+
+Child names:
+     ['defaultImplementation', 'render']
+
+------------------------------------------------------------------------
+Results for composing </A/defaultImplementation>
+
+Prim Stack:
+    root.usd             /A/defaultImplementation
+    root.usd             /_class_/defaultImplementation
+
+Property names:
+     ['test']
+
+Property stacks:
+/A/defaultImplementation.test:
+    root.usd             /A/defaultImplementation.test
+    root.usd             /_class_/defaultImplementation.test
+
+------------------------------------------------------------------------
+Results for composing </A/render>
+
+Prim Stack:
+    root.usd             /_class_/render
+    root.usd             /_class_/render{implementation=default}
+    root.usd             /A/defaultImplementation
+    root.usd             /_class_/defaultImplementation
+
+Variant Selections:
+    {implementation = default}
+
+Property names:
+     ['test']
+
+Property stacks:
+/A/render.test:
+    root.usd             /A/defaultImplementation.test
+    root.usd             /_class_/defaultImplementation.test
+

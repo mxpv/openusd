@@ -1,0 +1,26 @@
+Loading @composition/tests/assets/ErrorOwner_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     stronger.usd
+     owned.usd
+     weaker.usd
+
+------------------------------------------------------------------------
+Results for composing </Sphere>
+
+Prim Stack:
+    stronger.usd         /Sphere
+    owned.usd            /Sphere
+    weaker.usd           /Sphere
+
+Property names:
+     ['radius']
+
+Property stacks:
+/Sphere.radius:
+    stronger.usd         /Sphere.radius
+    owned.usd            /Sphere.radius
+    weaker.usd           /Sphere.radius
+

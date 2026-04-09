@@ -1,0 +1,176 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_Prop": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop"
+            },
+            "Child names": [
+                "From_class_in_root",
+                "geom"
+            ],
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/_class_Prop.a": {
+                    "root.usd": "/_class_Prop.a"
+                }
+            }
+        },
+        "/_class_Prop/From_class_in_root": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/From_class_in_root"
+            }
+        },
+        "/_class_Prop/geom": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/geom"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/_class_Prop/geom.x": {
+                    "root.usd": "/_class_Prop/geom.x"
+                }
+            }
+        },
+        "/Set_1": {
+            "Prim Stack": {
+                "root.usd": "/Set_1",
+                "set.usd": "/Set"
+            },
+            "Child names": [
+                "InstancedProp",
+                "UninstancedProp"
+            ]
+        },
+        "/Set_1/InstancedProp": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop",
+                "set.usd": "/_class_Prop",
+                "prop.usd": "/_class_Prop"
+            },
+            "Child names": [
+                "geom",
+                "From_class_in_set",
+                "From_class_in_root"
+            ],
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/Set_1/InstancedProp.a": {
+                    "root.usd": "/_class_Prop.a",
+                    "set.usd": "/_class_Prop.a",
+                    "prop.usd": "/Prop.a"
+                }
+            }
+        },
+        "/Set_1/InstancedProp/geom": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/geom",
+                "set.usd": "/_class_Prop/geom",
+                "prop.usd": "/Prop/geom"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Set_1/InstancedProp/geom.x": {
+                    "root.usd": "/_class_Prop/geom.x",
+                    "set.usd": "/_class_Prop/geom.x",
+                    "prop.usd": "/Prop/geom.x"
+                }
+            }
+        },
+        "/Set_1/InstancedProp/From_class_in_set": {
+            "Prim Stack": {
+                "set.usd": "/_class_Prop/From_class_in_set"
+            }
+        },
+        "/Set_1/InstancedProp/From_class_in_root": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/From_class_in_root"
+            }
+        },
+        "/Set_1/UninstancedProp": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop",
+                "set.usd": "/_class_Prop",
+                "prop.usd": "/_class_Prop"
+            },
+            "Child names": [
+                "geom",
+                "From_class_in_set",
+                "From_set",
+                "From_class_in_root",
+                "From_root"
+            ],
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/Set_1/UninstancedProp.a": {
+                    "root.usd": "/_class_Prop.a",
+                    "set.usd": "/_class_Prop.a",
+                    "prop.usd": "/Prop.a"
+                }
+            }
+        },
+        "/Set_1/UninstancedProp/geom": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/geom",
+                "set.usd": "/_class_Prop/geom",
+                "prop.usd": "/Prop/geom"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Set_1/UninstancedProp/geom.x": {
+                    "root.usd": "/_class_Prop/geom.x",
+                    "set.usd": "/_class_Prop/geom.x",
+                    "prop.usd": "/Prop/geom.x"
+                }
+            }
+        },
+        "/Set_1/UninstancedProp/From_class_in_set": {
+            "Prim Stack": {
+                "set.usd": "/_class_Prop/From_class_in_set"
+            }
+        },
+        "/Set_1/UninstancedProp/From_set": {
+            "Prim Stack": {
+                "set.usd": "/Set/UninstancedProp/From_set"
+            }
+        },
+        "/Set_1/UninstancedProp/From_class_in_root": {
+            "Prim Stack": {
+                "root.usd": "/_class_Prop/From_class_in_root"
+            }
+        },
+        "/Set_1/UninstancedProp/From_root": {
+            "Prim Stack": {
+                "root.usd": "/Set_1/UninstancedProp/From_root"
+            }
+        },
+        "/NotAnInstance": {
+            "Prim Stack": {
+                "root.usd": "/NotAnInstance"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/NotAnInstance/Child": {
+            "Prim Stack": {
+                "root.usd": "/NotAnInstance/Child"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

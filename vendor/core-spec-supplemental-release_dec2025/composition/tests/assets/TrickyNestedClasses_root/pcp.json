@@ -1,0 +1,110 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/CharRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig"
+            },
+            "Child names": [
+                "Rig"
+            ]
+        },
+        "/CharRig/Rig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig"
+            },
+            "Child names": [
+                "HandsRig"
+            ]
+        },
+        "/CharRig/Rig/HandsRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig",
+                "HandsRig.usd": "/HandsRig"
+            },
+            "Child names": [
+                "_Class_HandRig",
+                "SymHandRig",
+                "LHandRig"
+            ]
+        },
+        "/CharRig/Rig/HandsRig/_Class_HandRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig",
+                "HandRig.usd": "/HandRig"
+            },
+            "Child names": [
+                "IndexRig",
+                "_Class_FingerRig"
+            ]
+        },
+        "/CharRig/Rig/HandsRig/_Class_HandRig/IndexRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        },
+        "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        },
+        "/CharRig/Rig/HandsRig/SymHandRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig",
+                "HandRig.usd": "/HandRig"
+            },
+            "Child names": [
+                "IndexRig",
+                "_Class_FingerRig"
+            ]
+        },
+        "/CharRig/Rig/HandsRig/SymHandRig/IndexRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        },
+        "/CharRig/Rig/HandsRig/SymHandRig/_Class_FingerRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        },
+        "/CharRig/Rig/HandsRig/LHandRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig",
+                "HandRig.usd": "/HandRig"
+            },
+            "Child names": [
+                "IndexRig",
+                "_Class_FingerRig"
+            ]
+        },
+        "/CharRig/Rig/HandsRig/LHandRig/IndexRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        },
+        "/CharRig/Rig/HandsRig/LHandRig/_Class_FingerRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandsRig.usd": "/HandsRig/_Class_HandRig/_Class_FingerRig",
+                "HandRig.usd": "/HandRig/_Class_FingerRig"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

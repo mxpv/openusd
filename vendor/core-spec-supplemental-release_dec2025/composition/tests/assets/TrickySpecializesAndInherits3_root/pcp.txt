@@ -1,0 +1,65 @@
+Loading @composition/tests/assets/TrickySpecializesAndInherits3_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </SetClass>
+
+Prim Stack:
+    root.usd             /SetClass
+
+Child names:
+     ['Metal', 'CorrodedMetal']
+
+------------------------------------------------------------------------
+Results for composing </SetClass/Metal>
+
+Prim Stack:
+    root.usd             /SetClass/Metal
+
+------------------------------------------------------------------------
+Results for composing </SetClass/CorrodedMetal>
+
+Prim Stack:
+    root.usd             /SetClass/CorrodedMetal
+
+------------------------------------------------------------------------
+Results for composing </Set>
+
+Prim Stack:
+    root.usd             /Set
+    root.usd             /SetClass
+    package.usd          /SetPackage
+    package.usd          /SetClass
+    model.usd            /SetModel
+
+Child names:
+     ['Metal', 'CorrodedMetal']
+
+------------------------------------------------------------------------
+Results for composing </Set/Metal>
+
+Prim Stack:
+    root.usd             /Set/Metal
+    root.usd             /SetClass/Metal
+    package.usd          /SetPackage/Metal
+    package.usd          /SetClass/Metal
+    model.usd            /SetModel/Metal
+
+------------------------------------------------------------------------
+Results for composing </Set/CorrodedMetal>
+
+Prim Stack:
+    root.usd             /Set/CorrodedMetal
+    root.usd             /SetClass/CorrodedMetal
+    package.usd          /SetPackage/CorrodedMetal
+    package.usd          /SetClass/CorrodedMetal
+    model.usd            /SetModel/CorrodedMetal
+    root.usd             /Set/Metal
+    root.usd             /SetClass/Metal
+    package.usd          /SetPackage/Metal
+    package.usd          /SetClass/Metal
+    model.usd            /SetModel/Metal
+

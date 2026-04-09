@@ -1,0 +1,66 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group",
+                "b.usd": "/Group"
+            },
+            "Child names": [
+                "Char_Named"
+            ],
+            "Prohibited child names": [
+                "Char"
+            ]
+        },
+        "/Group/Char_Named": {
+            "Prim Stack": {
+                "root.usd": "/_class_B",
+                "b.usd": "/_class_B"
+            },
+            "Child names": [
+                "PrimFromClassB",
+                "PrimFromClassA"
+            ]
+        },
+        "/Group/Char_Named/PrimFromClassB": {
+            "Prim Stack": {
+                "root.usd": "/_class_B/PrimFromClassB"
+            }
+        },
+        "/Group/Char_Named/PrimFromClassA": {
+            "Prim Stack": {
+                "root.usd": "/_class_A/PrimFromClassA"
+            }
+        },
+        "/_class_A": {
+            "Prim Stack": {
+                "root.usd": "/_class_A"
+            },
+            "Child names": [
+                "PrimFromClassA"
+            ]
+        },
+        "/_class_A/PrimFromClassA": {
+            "Prim Stack": {
+                "root.usd": "/_class_A/PrimFromClassA"
+            }
+        },
+        "/_class_B": {
+            "Prim Stack": {
+                "root.usd": "/_class_B"
+            },
+            "Child names": [
+                "PrimFromClassB"
+            ]
+        },
+        "/_class_B/PrimFromClassB": {
+            "Prim Stack": {
+                "root.usd": "/_class_B/PrimFromClassB"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

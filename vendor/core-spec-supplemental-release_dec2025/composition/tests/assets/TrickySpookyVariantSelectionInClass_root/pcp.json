@@ -1,0 +1,175 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Char": {
+            "Prim Stack": {
+                "root.usd": "/Char",
+                "CharRig.usd": "/CharRig"
+            },
+            "Child names": [
+                "Anim",
+                "Rig",
+                "InheritTest"
+            ]
+        },
+        "/Char/Anim": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig/Anim"
+            },
+            "Child names": [
+                "LeftLeg",
+                "RightLeg"
+            ]
+        },
+        "/Char/Anim/LeftLeg": {
+            "Prim Stack": {
+                "LegRig.usd": "/LegRig{LegRigStyle=1Leg}Anim"
+            },
+            "Property names": [
+                "avarFor1LegStyle"
+            ],
+            "Property stacks": {
+                "/Char/Anim/LeftLeg.avarFor1LegStyle": {
+                    "LegRig.usd": "/LegRig{LegRigStyle=1Leg}Anim.avarFor1LegStyle"
+                }
+            }
+        },
+        "/Char/Anim/RightLeg": {
+            "Prim Stack": {
+                "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim"
+            },
+            "Property names": [
+                "avarFor2LegStyle"
+            ],
+            "Property stacks": {
+                "/Char/Anim/RightLeg.avarFor2LegStyle": {
+                    "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim.avarFor2LegStyle"
+                }
+            }
+        },
+        "/Char/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Char/Rig",
+                "CharRig.usd": "/CharRig/Rig"
+            },
+            "Child names": [
+                "SymLegRig",
+                "LeftLegRig",
+                "RightLegRig"
+            ]
+        },
+        "/Char/Rig/SymLegRig": {
+            "Prim Stack": {
+                "root.usd": "/Char/Rig/SymLegRig",
+                "CharRig.usd": "/CharRig/Rig/SymLegRig",
+                "LegRig.usd": "/LegRig{LegRigStyle=1Leg}"
+            },
+            "Variant Selections": {
+                "LegRigStyle": "1Leg"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/Char/Rig/SymLegRig/Anim": {
+            "Prim Stack": {
+                "LegRig.usd": "/LegRig{LegRigStyle=1Leg}Anim"
+            },
+            "Property names": [
+                "avarFor1LegStyle"
+            ],
+            "Property stacks": {
+                "/Char/Rig/SymLegRig/Anim.avarFor1LegStyle": {
+                    "LegRig.usd": "/LegRig{LegRigStyle=1Leg}Anim.avarFor1LegStyle"
+                }
+            }
+        },
+        "/Char/Rig/LeftLegRig": {
+            "Prim Stack": {
+                "root.usd": "/Char/Rig/SymLegRig",
+                "CharRig.usd": "/CharRig/Rig/SymLegRig",
+                "LegRig.usd": "/LegRig{LegRigStyle=1Leg}"
+            },
+            "Variant Selections": {
+                "LegRigStyle": "1Leg"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/Char/Rig/RightLegRig": {
+            "Prim Stack": {
+                "root.usd": "/Char/Rig/SymLegRig",
+                "CharRig.usd": "/CharRig/Rig/SymLegRig",
+                "LegRig.usd": "/LegRig{LegRigStyle=2Leg}"
+            },
+            "Variant Selections": {
+                "LegRigStyle": "2Leg"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/Char/InheritTest": {
+            "Prim Stack": {
+                "root.usd": "/Char/InheritTest",
+                "CharRig.usd": "/CharRig/InheritTest"
+            },
+            "Child names": [
+                "_class_X",
+                "X",
+                "Y"
+            ]
+        },
+        "/Char/InheritTest/_class_X": {
+            "Prim Stack": {
+                "root.usd": "/Char/InheritTest/_class_X",
+                "CharRig.usd": "/CharRig/InheritTest/_class_X"
+            }
+        },
+        "/Char/InheritTest/X": {
+            "Prim Stack": {
+                "root.usd": "/Char/InheritTest/_class_X",
+                "CharRig.usd": "/CharRig/InheritTest/_class_X",
+                "LegRig.usd": "/LegRig{LegRigStyle=2Leg}"
+            },
+            "Variant Selections": {
+                "LegRigStyle": "2Leg"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/Char/InheritTest/X/Anim": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig/InheritTest/X/Anim",
+                "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim"
+            },
+            "Property names": [
+                "avarFor2LegStyle"
+            ],
+            "Property stacks": {
+                "/Char/InheritTest/X/Anim.avarFor2LegStyle": {
+                    "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim.avarFor2LegStyle"
+                }
+            }
+        },
+        "/Char/InheritTest/Y": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig/InheritTest/X/Anim",
+                "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim"
+            },
+            "Property names": [
+                "avarFor2LegStyle"
+            ],
+            "Property stacks": {
+                "/Char/InheritTest/Y.avarFor2LegStyle": {
+                    "LegRig.usd": "/LegRig{LegRigStyle=2Leg}Anim.avarFor2LegStyle"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

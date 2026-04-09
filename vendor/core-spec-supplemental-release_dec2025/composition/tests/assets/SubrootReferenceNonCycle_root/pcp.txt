@@ -1,0 +1,209 @@
+Loading @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle>
+
+Prim Stack:
+    root.usd             /ImplNoCycle
+
+Child names:
+     ['A']
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle/A>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A
+
+Child names:
+     ['B', 'D']
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle/A/B>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle/A/B/C>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle/A/D>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/D
+    root.usd             /ImplNoCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </ImplNoCycle/A/D/C>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle>
+
+Prim Stack:
+    root.usd             /PrimNoCycle
+    root.usd             /ImplNoCycle
+
+Child names:
+     ['A']
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle/A>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A
+
+Child names:
+     ['B', 'D']
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle/A/B>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle/A/B/C>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle/A/D>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/D
+    root.usd             /ImplNoCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </PrimNoCycle/A/D/C>
+
+Prim Stack:
+    root.usd             /ImplNoCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </ImplCycle>
+
+Prim Stack:
+    root.usd             /ImplCycle
+
+Child names:
+     ['A']
+
+------------------------------------------------------------------------
+Results for composing </ImplCycle/A>
+
+Prim Stack:
+    root.usd             /ImplCycle/A
+
+Child names:
+     ['B', 'D']
+
+------------------------------------------------------------------------
+Results for composing </ImplCycle/A/B>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </ImplCycle/A/B/C>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </ImplCycle/A/D>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/D
+
+------------------------------------------------------------------------
+Results for composing </PrimCycle>
+
+Prim Stack:
+    root.usd             /PrimCycle
+    root.usd             /ImplCycle
+
+Child names:
+     ['A']
+
+------------------------------------------------------------------------
+Results for composing </PrimCycle/A>
+
+Prim Stack:
+    root.usd             /ImplCycle/A
+
+Child names:
+     ['B', 'D']
+
+------------------------------------------------------------------------
+Results for composing </PrimCycle/A/B>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/B
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </PrimCycle/A/B/C>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/B/C
+
+------------------------------------------------------------------------
+Results for composing </PrimCycle/A/D>
+
+Prim Stack:
+    root.usd             /ImplCycle/A/D
+
+
+------------------------------------------------------------------------
+Errors while composing </ImplCycle/A/D>
+
+Cycle detected:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D>
+references:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle>
+which CANNOT reference:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle>
+
+Unresolved reference prim path @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A> introduced by @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D>
+
+------------------------------------------------------------------------
+Errors while composing </PrimCycle/A/D>
+
+Cycle detected:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A/D>
+references:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D>
+which CANNOT reference:
+@composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A>
+
+
+ERROR: Unexpected error(s) encountered during test!

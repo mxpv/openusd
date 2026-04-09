@@ -1,0 +1,30 @@
+###############################################################################
+# Project specific exclusions
+###############################################################################
+
+output/
+
+###############################################################################
+# General exclusions
+###############################################################################
+
+# python byte-compiled / optimized files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv*/
+_venv*/
+
+# Linters / tools
+.mypy_cache/
+.bash_history
+
+# IDEs
+.idea/
+.vs/
+
+# OS - specific
+.DS_Store

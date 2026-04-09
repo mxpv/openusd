@@ -1,0 +1,435 @@
+Loading @composition/tests/assets/TimeCodesPerSecond_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     s.usd
+     ss.usd
+     ss_48tcps.usd
+     ss_24tcps_12fps.usd
+     ss_12fps.usd
+     s_48tcps.usd
+     ss.usd
+     ss_48tcps.usd
+     ss_24tcps_12fps.usd
+     ss_12fps.usd
+     s_24tcps_12fps.usd
+     ss.usd
+     ss_48tcps.usd
+     ss_24tcps_12fps.usd
+     ss_12fps.usd
+     s_12fps.usd
+     ss.usd
+     ss_48tcps.usd
+     ss_24tcps_12fps.usd
+     ss_12fps.usd
+
+------------------------------------------------------------------------
+Results for composing </SS4>
+
+Prim Stack:
+    ss_12fps.usd         /SS4
+    ss_12fps.usd         /SS4
+    ss_12fps.usd         /SS4
+    ss_12fps.usd         /SS4
+    ref.usd              /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_48tcps.usd       /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_24tcps_12fps.usd /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_12fps.usd        /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+
+Time Offsets:
+    root.usd             /SS4            root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+    ref.usd              /Ref            reference  (offset=110.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_48tcps.usd       /Ref            reference  (offset=110.00, scale=4.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=2.00)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=2.00)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=4.00)
+    ref_24tcps_12fps.usd /Ref            reference  (offset=110.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_12fps.usd        /Ref            reference  (offset=110.00, scale=16.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=0.50)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.25)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=0.50)
+
+------------------------------------------------------------------------
+Results for composing </SS3>
+
+Prim Stack:
+    ss_24tcps_12fps.usd  /SS3
+    ss_24tcps_12fps.usd  /SS3
+    ss_24tcps_12fps.usd  /SS3
+    ss_24tcps_12fps.usd  /SS3
+    ref.usd              /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_48tcps.usd       /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_24tcps_12fps.usd /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_12fps.usd        /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+
+Time Offsets:
+    root.usd             /SS3            root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+    ref.usd              /Ref            reference  (offset=70.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_48tcps.usd       /Ref            reference  (offset=70.00, scale=4.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=2.00)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=2.00)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=4.00)
+    ref_24tcps_12fps.usd /Ref            reference  (offset=70.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_12fps.usd        /Ref            reference  (offset=70.00, scale=16.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=0.50)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.25)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=0.50)
+
+------------------------------------------------------------------------
+Results for composing </SS2>
+
+Prim Stack:
+    ss_48tcps.usd        /SS2
+    ss_48tcps.usd        /SS2
+    ss_48tcps.usd        /SS2
+    ss_48tcps.usd        /SS2
+    ref.usd              /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_48tcps.usd       /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_24tcps_12fps.usd /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_12fps.usd        /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+
+Time Offsets:
+    root.usd             /SS2            root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+    ref.usd              /Ref            reference  (offset=50.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_48tcps.usd       /Ref            reference  (offset=50.00, scale=4.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=2.00)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=2.00)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=4.00)
+    ref_24tcps_12fps.usd /Ref            reference  (offset=50.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_12fps.usd        /Ref            reference  (offset=50.00, scale=16.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=0.50)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.25)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=0.50)
+
+------------------------------------------------------------------------
+Results for composing </SS1>
+
+Prim Stack:
+    ss.usd               /SS1
+    ss.usd               /SS1
+    ss.usd               /SS1
+    ss.usd               /SS1
+    ref.usd              /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_48tcps.usd       /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_24tcps_12fps.usd /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+    ref_12fps.usd        /Ref
+    ref_s.usd            /Ref
+    ref_s_48tcps.usd     /Ref
+    ref_s_24tcps_12fps.usd /Ref
+    ref_s_12fps.usd      /Ref
+
+Time Offsets:
+    root.usd             /SS1            root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+    ref.usd              /Ref            reference  (offset=70.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_48tcps.usd       /Ref            reference  (offset=70.00, scale=4.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=2.00)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=2.00)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=4.00)
+    ref_24tcps_12fps.usd /Ref            reference  (offset=70.00, scale=8.00)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.50)
+        ref_s_12fps.usd                  sublayer   (offset=0.00, scale=2.00)
+    ref_12fps.usd        /Ref            reference  (offset=70.00, scale=16.00)
+        ref_s.usd                        sublayer   (offset=0.00, scale=0.50)
+        ref_s_48tcps.usd                 sublayer   (offset=0.00, scale=0.25)
+        ref_s_24tcps_12fps.usd           sublayer   (offset=0.00, scale=0.50)
+
+------------------------------------------------------------------------
+Results for composing </S4>
+
+Prim Stack:
+    s_12fps.usd          /S4
+
+Time Offsets:
+    root.usd             /S4             root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+
+------------------------------------------------------------------------
+Results for composing </S3>
+
+Prim Stack:
+    s_24tcps_12fps.usd   /S3
+
+Time Offsets:
+    root.usd             /S3             root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+
+------------------------------------------------------------------------
+Results for composing </S2>
+
+Prim Stack:
+    s_48tcps.usd         /S2
+
+Time Offsets:
+    root.usd             /S2             root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+
+------------------------------------------------------------------------
+Results for composing </S1>
+
+Prim Stack:
+    s.usd                /S1
+
+Time Offsets:
+    root.usd             /S1             root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+
+Time Offsets:
+    root.usd             /Root           root       (offset=0.00, scale=1.00)
+        s.usd                            sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_48tcps.usd                     sublayer   (offset=10.00, scale=1.00)
+        ss.usd                           sublayer   (offset=20.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=20.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=20.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=20.00, scale=8.00)
+        s_24tcps_12fps.usd               sublayer   (offset=10.00, scale=2.00)
+        ss.usd                           sublayer   (offset=30.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=30.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=30.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=30.00, scale=8.00)
+        s_12fps.usd                      sublayer   (offset=10.00, scale=4.00)
+        ss.usd                           sublayer   (offset=50.00, scale=4.00)
+        ss_48tcps.usd                    sublayer   (offset=50.00, scale=2.00)
+        ss_24tcps_12fps.usd              sublayer   (offset=50.00, scale=4.00)
+        ss_12fps.usd                     sublayer   (offset=50.00, scale=8.00)
+

@@ -1,0 +1,50 @@
+Loading @composition/tests/assets/TrickyNestedSpecializes2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Class_1>
+
+Prim Stack:
+    root.usd             /Class_1
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </Class_1/Child>
+
+Prim Stack:
+    root.usd             /Class_1/Child
+
+------------------------------------------------------------------------
+Results for composing </Class_2>
+
+Prim Stack:
+    root.usd             /Class_2
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    ref.usd              /Ref
+    root.usd             /Class_1
+    ref.usd              /Class_1
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </Root/Child>
+
+Prim Stack:
+    root.usd             /Root/Child
+    ref.usd              /Ref/Child
+    root.usd             /Class_2
+    ref.usd              /Class_2
+    root.usd             /Class_1/Child
+    ref.usd              /Class_1/Child
+

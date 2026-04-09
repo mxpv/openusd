@@ -1,0 +1,256 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/InternalSublayerPayload": {
+            "Prim Stack": {
+                "root.usd": "/InternalSublayerPayload",
+                "sublayer.usd": "/InternalSublayerPayload"
+            },
+            "Child names": [
+                "InternalSublayerPayload_Child"
+            ]
+        },
+        "/InternalSublayerPayload/InternalSublayerPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalSublayerPayload/InternalSublayerPayload_Child",
+                "sublayer.usd": "/InternalSublayerPayload/InternalSublayerPayload_Child"
+            }
+        },
+        "/PrimInSublayerWithInternalPayload": {
+            "Prim Stack": {
+                "sublayer.usd": "/InternalSublayerPayload",
+                "root.usd": "/InternalSublayerPayload"
+            },
+            "Child names": [
+                "InternalSublayerPayload_Child"
+            ]
+        },
+        "/PrimInSublayerWithInternalPayload/InternalSublayerPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalSublayerPayload/InternalSublayerPayload_Child",
+                "sublayer.usd": "/InternalSublayerPayload/InternalSublayerPayload_Child"
+            }
+        },
+        "/SublayerPrim": {
+            "Prim Stack": {
+                "sublayer.usd": "/SublayerPrim"
+            }
+        },
+        "/PrimInSublayerWithInternalPayload2": {
+            "Prim Stack": {
+                "sublayer.usd": "/SublayerPrim"
+            }
+        },
+        "/SimplePayload": {
+            "Prim Stack": {
+                "root.usd": "/SimplePayload",
+                "payload.usd": "/SimplePayload"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/SimplePayload/Child": {
+            "Prim Stack": {
+                "payload.usd": "/SimplePayload/Child"
+            }
+        },
+        "/SimpleSubrootPayload": {
+            "Prim Stack": {
+                "root.usd": "/SimpleSubrootPayload",
+                "payload.usd": "/SimplePayload/Child"
+            }
+        },
+        "/PrimWithPayloads": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithPayloads",
+                "payload.usd": "/SimplePayload",
+                "ref.usd": "/PayloadPrimA",
+                "ref2.usd": "/PrimB"
+            },
+            "Child names": [
+                "PrimB_Child",
+                "PrimC_Child",
+                "PrimA_Child",
+                "Child"
+            ]
+        },
+        "/PrimWithPayloads/PrimB_Child": {
+            "Prim Stack": {
+                "ref2.usd": "/PrimB/PrimB_Child"
+            }
+        },
+        "/PrimWithPayloads/PrimC_Child": {
+            "Prim Stack": {
+                "ref2.usd": "/PrimC/PrimC_Child"
+            }
+        },
+        "/PrimWithPayloads/PrimA_Child": {
+            "Prim Stack": {
+                "ref.usd": "/PayloadPrimA/PrimA_Child"
+            }
+        },
+        "/PrimWithPayloads/Child": {
+            "Prim Stack": {
+                "payload.usd": "/SimplePayload/Child"
+            }
+        },
+        "/PrimB": {
+            "Prim Stack": {
+                "root.usd": "/PrimB"
+            },
+            "Child names": [
+                "PrimB_Child"
+            ]
+        },
+        "/PrimB/PrimB_Child": {
+            "Prim Stack": {
+                "root.usd": "/PrimB/PrimB_Child"
+            }
+        },
+        "/PrimWithSelfPayload": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload",
+                "sublayer.usd": "/InternalSublayerPayload"
+            },
+            "Child names": [
+                "InternalSublayerPayload_Child",
+                "InternalPayload_Child"
+            ]
+        },
+        "/PrimWithSelfPayload/InternalSublayerPayload_Child": {
+            "Prim Stack": {
+                "sublayer.usd": "/InternalSublayerPayload/InternalSublayerPayload_Child"
+            }
+        },
+        "/PrimWithSelfPayload/InternalPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload/InternalPayload_Child"
+            }
+        },
+        "/PrimWithInternalPayload": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload"
+            },
+            "Child names": [
+                "InternalPayload_Child"
+            ]
+        },
+        "/PrimWithInternalPayload/InternalPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload/InternalPayload_Child"
+            }
+        },
+        "/InternalPayload": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload"
+            },
+            "Child names": [
+                "InternalPayload_Child"
+            ]
+        },
+        "/InternalPayload/InternalPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload/InternalPayload_Child"
+            }
+        },
+        "/PrimWithDefaultPayloadTarget": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithDefaultPayloadTarget",
+                "defaultRef.usd": "/Default"
+            },
+            "Child names": [
+                "Default_Child"
+            ]
+        },
+        "/PrimWithDefaultPayloadTarget/Default_Child": {
+            "Prim Stack": {
+                "defaultRef.usd": "/Default/Default_Child"
+            }
+        },
+        "/PrimWithDefaultPayloadTarget2": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload"
+            },
+            "Child names": [
+                "InternalPayload_Child"
+            ]
+        },
+        "/PrimWithDefaultPayloadTarget2/InternalPayload_Child": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload/InternalPayload_Child"
+            }
+        },
+        "/PayloadPrimWithSubrootInReference": {
+            "Prim Stack": {
+                "root.usd": "/PayloadPrimWithSubrootInReference",
+                "ref.usd": "/RefPrimA/PrimA_Child",
+                "ref2.usd": "/PrimC/PrimC_Child"
+            }
+        },
+        "/RefPrimWithSubrootInReference": {
+            "Prim Stack": {
+                "root.usd": "/RefPrimWithSubrootInReference",
+                "ref.usd": "/RefPrimA/PrimA_Child",
+                "ref2.usd": "/PrimC/PrimC_Child"
+            }
+        },
+        "/PrimWithInternalSubrootPayload": {
+            "Prim Stack": {
+                "root.usd": "/InternalPayload/InternalPayload_Child"
+            }
+        },
+        "/PrimWithPayloadsInVariants": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithPayloadsInVariants{v=ref}"
+            },
+            "Variant Selections": {
+                "v": "ref"
+            },
+            "Child names": [
+                "Ref",
+                "A",
+                "B"
+            ]
+        },
+        "/PrimWithPayloadsInVariants/Ref": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithPayloadsInVariants{v=ref}Ref"
+            }
+        },
+        "/PrimWithPayloadsInVariants/A": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithPayloadsInVariants{v=ref}Ref"
+            }
+        },
+        "/PrimWithPayloadsInVariants/B": {
+            "Prim Stack": {
+                "root.usd": "/PrimWithPayloadsInVariants{v=ref}Ref"
+            }
+        },
+        "/PayloadPrimWithSubrootInPayload": {
+            "Prim Stack": {
+                "root.usd": "/PayloadPrimWithSubrootInPayload",
+                "ref.usd": "/PayloadPrimA/PrimA_Child",
+                "ref2.usd": "/PrimC/PrimC_Child"
+            }
+        },
+        "/RefPrimWithSubrootInPayload": {
+            "Prim Stack": {
+                "root.usd": "/RefPrimWithSubrootInPayload",
+                "ref.usd": "/PayloadPrimA/PrimA_Child",
+                "ref2.usd": "/PrimC/PrimC_Child"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd",
+        "sublayer.usd"
+    ],
+    "Warnings": [
+        "Warning: in SdfPath at line 129 of \\pxr\\usd\\sdf\\path.cpp -- Ill-formed SdfPath <>: :1:1: parse error matching struct pxrInternal_v0_25_8__pxrReserved__::Sdf_PathParser::Path\n"
+    ],
+    "Errors": [
+        "Errors while composing </PrimWithInternalPayload>\nUnresolved payload prim path @composition/tests/assets/BasicPayload_root/usda/root.usd@</InternalPayload2> introduced by @composition/tests/assets/BasicPayload_root/usda/root.usd@</PrimWithInternalPayload> ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

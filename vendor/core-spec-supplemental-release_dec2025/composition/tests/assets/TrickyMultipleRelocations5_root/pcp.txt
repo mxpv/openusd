@@ -1,0 +1,35 @@
+Loading @composition/tests/assets/TrickyMultipleRelocations5_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Group>
+
+Prim Stack:
+    root.usd             /Group
+    variant.usd          /Group
+    variant.usd          /Group{v=x}
+    relocates.usd        /Group
+    chargroup.usd        /CHARGROUP
+
+Variant Selections:
+    {v = x}
+
+Child names:
+     ['Model']
+
+Prohibited child names:
+     ['CHARACTER', 'Character']
+
+------------------------------------------------------------------------
+Results for composing </Group/Model>
+
+Prim Stack:
+    root.usd             /Group/Model
+    variant.usd          /Group/Character
+    variant.usd          /Group{v=x}Character
+    relocates.usd        /Group/Character
+    chargroup.usd        /CHARGROUP/CHARACTER
+

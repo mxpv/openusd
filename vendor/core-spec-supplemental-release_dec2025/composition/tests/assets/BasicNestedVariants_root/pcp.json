@@ -1,0 +1,66 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Foo": {
+            "Prim Stack": {
+                "root.usd": "/Foo{which=A}"
+            },
+            "Variant Selections": {
+                "which": "A"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/Foo/A": {
+            "Prim Stack": {
+                "root.usd": "/Foo{which=A}A"
+            },
+            "Child names": [
+                "Number"
+            ]
+        },
+        "/Foo/A/Number": {
+            "Prim Stack": {
+                "root.usd": "/Foo{which=A}A/Number{count=one}"
+            },
+            "Variant Selections": {
+                "count": "one"
+            },
+            "Child names": [
+                "one"
+            ]
+        },
+        "/Foo/A/Number/one": {
+            "Prim Stack": {
+                "root.usd": "/Foo{which=A}A/Number{count=one}one"
+            }
+        },
+        "/DirectlyNestedVariants": {
+            "Prim Stack": {
+                "root.usd": "/DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}{standin=anim}"
+            },
+            "Variant Selections": {
+                "shadingVariant": "spooky",
+                "standin": "anim"
+            },
+            "Child names": [
+                "anim_spooky_anim_sphere",
+                "anim_spooky_sphere"
+            ]
+        },
+        "/DirectlyNestedVariants/anim_spooky_anim_sphere": {
+            "Prim Stack": {
+                "root.usd": "/DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}{standin=anim}anim_spooky_anim_sphere"
+            }
+        },
+        "/DirectlyNestedVariants/anim_spooky_sphere": {
+            "Prim Stack": {
+                "root.usd": "/DirectlyNestedVariants{standin=anim}{shadingVariant=spooky}anim_spooky_sphere"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

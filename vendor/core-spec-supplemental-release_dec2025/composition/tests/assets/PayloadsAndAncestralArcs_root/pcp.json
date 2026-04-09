@@ -1,0 +1,51 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root"
+            },
+            "Child names": [
+                "LocalClass",
+                "UnloadedInheritedPayload",
+                "LoadedInheritedPayload2",
+                "Payload",
+                "SubrootPayload"
+            ]
+        },
+        "/Root/LocalClass": {
+            "Prim Stack": {
+                "root.usd": "/Root/LocalClass",
+                "payload2.usd": "/Payload2"
+            }
+        },
+        "/Root/UnloadedInheritedPayload": {
+            "Prim Stack": {
+                "root.usd": "/Root/LocalClass",
+                "payload2.usd": "/Payload2"
+            }
+        },
+        "/Root/LoadedInheritedPayload2": {
+            "Prim Stack": {
+                "root.usd": "/Root/LocalClass",
+                "payload2.usd": "/Payload2"
+            }
+        },
+        "/Root/Payload": {
+            "Prim Stack": {
+                "root.usd": "/Root/Payload",
+                "payload2.usd": "/Payload2"
+            }
+        },
+        "/Root/SubrootPayload": {
+            "Prim Stack": {
+                "root.usd": "/Root/SubrootPayload",
+                "payload.usd": "/Root/Payload",
+                "payload2.usd": "/Payload2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,44 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SlugJ": {
+            "Prim Stack": {
+                "root.usd": "/SlugJ",
+                "SlugJ_payload.usd": "/SlugJ",
+                "SlugJ_modelInterface.gen.usd": "/SlugJ{shadingVariant=Axel}",
+                "SlugJ_shaderDisplayDefs.usd": "/ShaderBindingVariants{shaderBindingVariant=Wet}"
+            },
+            "Variant Selections": {
+                "shaderBindingVariant": "Wet",
+                "shadingVariant": "Axel"
+            },
+            "Child names": [
+                "Shaders"
+            ]
+        },
+        "/SlugJ/Shaders": {
+            "Prim Stack": {
+                "SlugJ_shaderDisplayDefs.usd": "/ShaderBindingVariants{shaderBindingVariant=Wet}Shaders"
+            },
+            "Child names": [
+                "BGVariant_Surface"
+            ]
+        },
+        "/SlugJ/Shaders/BGVariant_Surface": {
+            "Prim Stack": {
+                "SlugJ_shaderDisplayDefs.usd": "/ShaderBindingVariants{shaderBindingVariant=Wet}Shaders/BGVariant_Surface"
+            },
+            "Property names": [
+                "activeBinding"
+            ],
+            "Property stacks": {
+                "/SlugJ/Shaders/BGVariant_Surface.activeBinding": {
+                    "SlugJ_shaderDisplayDefs.usd": "/ShaderBindingVariants{shaderBindingVariant=Wet}Shaders/BGVariant_Surface.activeBinding"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

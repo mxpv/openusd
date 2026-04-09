@@ -1,0 +1,43 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/CrowdGroup": {
+            "Prim Stack": {
+                "root.usd": "/CrowdGroup",
+                "groups.usd": "/Groups/CrowdGroup"
+            },
+            "Child names": [
+                "Char",
+                "_class_Char"
+            ]
+        },
+        "/CrowdGroup/Char": {
+            "Prim Stack": {
+                "root.usd": "/CrowdGroup/Char",
+                "groups.usd": "/Groups/CharGroup/_class_Char",
+                "chargroup.usd": "/CharGroup/_class_Char"
+            }
+        },
+        "/CrowdGroup/_class_Char": {
+            "Prim Stack": {
+                "root.usd": "/CrowdGroup/_class_Char"
+            }
+        },
+        "/CharGroup": {
+            "Prim Stack": {
+                "root.usd": "/CharGroup"
+            },
+            "Child names": [
+                "_class_Char"
+            ]
+        },
+        "/CharGroup/_class_Char": {
+            "Prim Stack": {
+                "root.usd": "/CharGroup/_class_Char"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

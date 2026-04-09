@@ -1,0 +1,102 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model_defaultShadingVariant": {
+            "Prim Stack": {
+                "root.usd": "/Model_defaultShadingVariant"
+            },
+            "Child names": [
+                "Material"
+            ]
+        },
+        "/Model_defaultShadingVariant/Material": {
+            "Prim Stack": {
+                "root.usd": "/Model_defaultShadingVariant/Material"
+            },
+            "Property names": [
+                "myInt"
+            ],
+            "Property stacks": {
+                "/Model_defaultShadingVariant/Material.myInt": {
+                    "root.usd": "/Model_defaultShadingVariant/Material.myInt"
+                }
+            }
+        },
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model_defaultShadingVariant"
+            },
+            "Variant Selections": {
+                "shadingVariant": "New_Shading_Variant"
+            },
+            "Child names": [
+                "Material",
+                "Material_Child"
+            ]
+        },
+        "/Model/Material": {
+            "Prim Stack": {
+                "root.usd": "/Model_defaultShadingVariant/Material"
+            },
+            "Property names": [
+                "myInt"
+            ],
+            "Property stacks": {
+                "/Model/Material.myInt": {
+                    "root.usd": "/Model_defaultShadingVariant/Material.myInt"
+                }
+            }
+        },
+        "/Model/Material_Child": {
+            "Prim Stack": {
+                "root.usd": "/New_Shading_Variant/Material"
+            },
+            "Property names": [
+                "myInt"
+            ],
+            "Property stacks": {
+                "/Model/Material_Child.myInt": {
+                    "root.usd": "/New_Shading_Variant/Material.myInt"
+                }
+            }
+        },
+        "/New_Shading_Variant": {
+            "Prim Stack": {
+                "root.usd": "/New_Shading_Variant"
+            },
+            "Child names": [
+                "Material_Child",
+                "Material"
+            ]
+        },
+        "/New_Shading_Variant/Material_Child": {
+            "Prim Stack": {
+                "root.usd": "/New_Shading_Variant/Material"
+            },
+            "Property names": [
+                "myInt"
+            ],
+            "Property stacks": {
+                "/New_Shading_Variant/Material_Child.myInt": {
+                    "root.usd": "/New_Shading_Variant/Material.myInt"
+                }
+            }
+        },
+        "/New_Shading_Variant/Material": {
+            "Prim Stack": {
+                "root.usd": "/New_Shading_Variant/Material"
+            },
+            "Property names": [
+                "myInt"
+            ],
+            "Property stacks": {
+                "/New_Shading_Variant/Material.myInt": {
+                    "root.usd": "/New_Shading_Variant/Material.myInt"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

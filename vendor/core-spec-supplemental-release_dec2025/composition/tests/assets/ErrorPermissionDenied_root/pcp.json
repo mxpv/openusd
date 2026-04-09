@@ -1,0 +1,121 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root",
+                "A.usd": "/A"
+            },
+            "Property names": [
+                "A_attr",
+                "attr",
+                "privateRel",
+                "publicRel",
+                "localAttr"
+            ],
+            "Property stacks": {
+                "/Root.A_attr": {
+                    "A.usd": "/A.A_attr"
+                },
+                "/Root.attr": {
+                    "root.usd": "/Root.attr",
+                    "A.usd": "/A.attr"
+                },
+                "/Root.localAttr": {
+                    "root.usd": "/Root.localAttr"
+                },
+                "/Root.privateRel": {
+                    "root.usd": "/Root.privateRel",
+                    "A.usd": "/A.privateRel"
+                },
+                "/Root.publicRel": {
+                    "root.usd": "/Root.publicRel",
+                    "A.usd": "/A.publicRel"
+                }
+            },
+            "Relationship targets": {
+                "/Root.privateRel": [
+                    "/Root.A_attr",
+                    "/Root.localAttr"
+                ],
+                "/Root.publicRel": [
+                    "/Root.A_attr"
+                ]
+            }
+        },
+        "/Parent": {
+            "Prim Stack": {
+                "root.usd": "/Parent",
+                "A.usd": "/Parent"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/Parent/Child": {
+            "Prim Stack": {
+                "root.usd": "/Parent/Child",
+                "A.usd": "/Parent/Child"
+            }
+        },
+        "/_PrivateClass": {
+            "Prim Stack": {
+                "root.usd": "/_PrivateClass"
+            },
+            "Property names": [
+                "attr"
+            ],
+            "Property stacks": {
+                "/_PrivateClass.attr": {
+                    "root.usd": "/_PrivateClass.attr"
+                }
+            }
+        },
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/_PrivateClass"
+            },
+            "Property names": [
+                "attr"
+            ],
+            "Property stacks": {
+                "/Model.attr": {
+                    "root.usd": "/_PrivateClass.attr"
+                }
+            }
+        },
+        "/VariantsOpinionsOnRestrictedPrim": {
+            "Prim Stack": {
+                "root.usd": "/VariantsOpinionsOnRestrictedPrim",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/VariantsOpinionsOnRestrictedPrim/Child": {
+            "Prim Stack": {
+                "root.usd": "/VariantsOpinionsOnRestrictedPrim/Child{child=a}",
+                "ref.usd": "/Ref/Child"
+            },
+            "Variant Selections": {
+                "child": "a"
+            },
+            "Child names": [
+                "Child2"
+            ]
+        },
+        "/VariantsOpinionsOnRestrictedPrim/Child/Child2": {
+            "Prim Stack": {
+                "root.usd": "/VariantsOpinionsOnRestrictedPrim/Child{child=a}Child2",
+                "ref.usd": "/Ref/Child/Child2"
+            },
+            "Variant Selections": {
+                "child2": "a"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

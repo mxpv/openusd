@@ -1,0 +1,132 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/FergusCloak": {
+            "Prim Stack": {
+                "root.usd": "/FergusCloak"
+            },
+            "Child names": [
+                "rig",
+                "Anim"
+            ]
+        },
+        "/FergusCloak/rig": {
+            "Prim Stack": {
+                "root.usd": "/FergusCloak/rig"
+            },
+            "Child names": [
+                "LArmRig"
+            ]
+        },
+        "/FergusCloak/rig/LArmRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig",
+                "CurveTrackRig.usd": "/_class_MultiLevelCurveRig"
+            },
+            "Child names": [
+                "rig",
+                "Anim"
+            ]
+        },
+        "/FergusCloak/rig/LArmRig/rig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig",
+                "CurveTrackRig.usd": "/_class_MultiLevelCurveRig/rig"
+            },
+            "Child names": [
+                "ConstRig"
+            ]
+        },
+        "/FergusCloak/rig/LArmRig/rig/ConstRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig",
+                "CurveTrackRig.usd": "/_class_MultiLevelCurveRig/rig/ConstRig",
+                "ConstraintRig.usd": "/ConstraintRig"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/FergusCloak/rig/LArmRig/rig/ConstRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim",
+                "CurveTrackRig.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim",
+                "ConstraintRig.usd": "/ConstraintRig/Anim"
+            },
+            "Prohibited child names": [
+                "Const"
+            ]
+        },
+        "/FergusCloak/rig/LArmRig/Anim": {
+            "Prim Stack": {
+                "CurveTrackRig.usd": "/CurveTrackRig/Anim"
+            },
+            "Prohibited child names": [
+                "Curve"
+            ]
+        },
+        "/FergusCloak/Anim": {
+            "Prim Stack": {
+                "root.usd": "/FergusCloak/Anim"
+            },
+            "Child names": [
+                "LArm"
+            ]
+        },
+        "/FergusCloak/Anim/LArm": {
+            "Prim Stack": {
+                "CurveTrackRig.usd": "/CurveTrackRig/Anim/Curve"
+            },
+            "Child names": [
+                "Const"
+            ]
+        },
+        "/FergusCloak/Anim/LArm/Const": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim/Const",
+                "CurveTrackRig.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim/Const",
+                "ConstraintRig.usd": "/ConstraintRig/Anim/Const"
+            }
+        },
+        "/_class_MultiLevelCurveRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig"
+            },
+            "Child names": [
+                "rig"
+            ]
+        },
+        "/_class_MultiLevelCurveRig/rig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig"
+            },
+            "Child names": [
+                "ConstRig"
+            ]
+        },
+        "/_class_MultiLevelCurveRig/rig/ConstRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/_class_MultiLevelCurveRig/rig/ConstRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim"
+            },
+            "Child names": [
+                "Const"
+            ]
+        },
+        "/_class_MultiLevelCurveRig/rig/ConstRig/Anim/Const": {
+            "Prim Stack": {
+                "root.usd": "/_class_MultiLevelCurveRig/rig/ConstRig/Anim/Const"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

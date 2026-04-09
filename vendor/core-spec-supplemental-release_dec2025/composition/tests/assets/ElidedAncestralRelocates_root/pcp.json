@@ -1,0 +1,166 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/CharBase": {
+            "Prim Stack": {
+                "root.usd": "/CharBase",
+                "base.usd": "/Rigs"
+            },
+            "Child names": [
+                "CharRig",
+                "CharBaseRig",
+                "Anim"
+            ]
+        },
+        "/CharBase/CharRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}"
+            },
+            "Variant Selections": {
+                "rigVariant": "default"
+            },
+            "Child names": [
+                "CollisionRig"
+            ]
+        },
+        "/CharBase/CharRig/CollisionRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig"
+            },
+            "Child names": [
+                "Collision",
+                "Colliders"
+            ]
+        },
+        "/CharBase/CharRig/CollisionRig/Collision": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig/Collision"
+            }
+        },
+        "/CharBase/CharRig/CollisionRig/Colliders": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig/Colliders"
+            }
+        },
+        "/CharBase/CharBaseRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}"
+            },
+            "Variant Selections": {
+                "rigVariant": "default"
+            },
+            "Child names": [
+                "CollisionRig"
+            ]
+        },
+        "/CharBase/CharBaseRig/CollisionRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}CollisionRig"
+            },
+            "Prohibited child names": [
+                "Colliders",
+                "Collision"
+            ]
+        },
+        "/CharBase/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharBase/Anim",
+                "base.usd": "/Rigs/Anim"
+            },
+            "Child names": [
+                "Collision"
+            ]
+        },
+        "/CharBase/Anim/Collision": {
+            "Prim Stack": {
+                "root.usd": "/CharBase/Anim/Collision",
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}CollisionRig/Collision"
+            },
+            "Child names": [
+                "Colliders"
+            ]
+        },
+        "/CharBase/Anim/Collision/Colliders": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}CollisionRig/Colliders"
+            }
+        },
+        "/Char": {
+            "Prim Stack": {
+                "root.usd": "/CharBase",
+                "base.usd": "/Rigs"
+            },
+            "Child names": [
+                "CharRig",
+                "CharBaseRig",
+                "Anim"
+            ]
+        },
+        "/Char/CharRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}"
+            },
+            "Variant Selections": {
+                "rigVariant": "default"
+            },
+            "Child names": [
+                "CollisionRig"
+            ]
+        },
+        "/Char/CharRig/CollisionRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig"
+            },
+            "Prohibited child names": [
+                "Colliders",
+                "Collision"
+            ]
+        },
+        "/Char/CharBaseRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}"
+            },
+            "Variant Selections": {
+                "rigVariant": "default"
+            },
+            "Child names": [
+                "CollisionRig"
+            ]
+        },
+        "/Char/CharBaseRig/CollisionRig": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharBaseRig{rigVariant=default}CollisionRig"
+            },
+            "Prohibited child names": [
+                "Colliders",
+                "Collision"
+            ]
+        },
+        "/Char/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharBase/Anim",
+                "base.usd": "/Rigs/Anim"
+            },
+            "Child names": [
+                "Collision"
+            ]
+        },
+        "/Char/Anim/Collision": {
+            "Prim Stack": {
+                "root.usd": "/Char/Anim/Collision",
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig/Collision"
+            },
+            "Child names": [
+                "Colliders"
+            ]
+        },
+        "/Char/Anim/Collision/Colliders": {
+            "Prim Stack": {
+                "base.usd": "/Rigs/CharRig{rigVariant=default}CollisionRig/Colliders"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

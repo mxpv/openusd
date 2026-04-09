@@ -1,0 +1,49 @@
+Loading @composition/tests/assets/TypicalReferenceToChargroupWithRename_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Group_1>
+
+Prim Stack:
+    root.usd             /Group_1
+    group.usd            /Group
+
+Child names:
+     ['Model_1']
+
+Prohibited child names:
+     ['Model']
+
+------------------------------------------------------------------------
+Results for composing </Group_1/Model_1>
+
+Prim Stack:
+    root.usd             /Group_1/Model_1
+    group.usd            /Group/Model
+    model.usd            /Model
+
+Child names:
+     ['LArm', 'SymArm']
+
+------------------------------------------------------------------------
+Results for composing </Group_1/Model_1/LArm>
+
+Prim Stack:
+    root.usd             /Group_1/Model_1/LArm
+    root.usd             /Group_1/Model_1/SymArm
+    group.usd            /Group/Model/LArm
+    group.usd            /Group/Model/SymArm
+    model.usd            /Model/LArm
+    model.usd            /Model/SymArm
+
+------------------------------------------------------------------------
+Results for composing </Group_1/Model_1/SymArm>
+
+Prim Stack:
+    root.usd             /Group_1/Model_1/SymArm
+    group.usd            /Group/Model/SymArm
+    model.usd            /Model/SymArm
+

@@ -1,0 +1,58 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Specializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes"
+            }
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Specializes",
+                "ref.usd": "/Specializes"
+            },
+            "Variant Selections": {
+                "v": "ref"
+            }
+        },
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model"
+            },
+            "Child names": [
+                "Looks"
+            ]
+        },
+        "/Model/Looks": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks",
+                "looks.usd": "/Looks"
+            },
+            "Child names": [
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/Model/Looks/Metal": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/Metal",
+                "looks.usd": "/Looks/Metal{v=from_metal}"
+            },
+            "Variant Selections": {
+                "v": "from_metal"
+            }
+        },
+        "/Model/Looks/Brass": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks/Metal",
+                "looks.usd": "/Looks/Metal{v=from_brass}"
+            },
+            "Variant Selections": {
+                "v": "from_brass"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

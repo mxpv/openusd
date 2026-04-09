@@ -1,0 +1,66 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Char": {
+            "Prim Stack": {
+                "root.usd": "/Char",
+                "CharRig.usd": "/CharRig{TailRigVersion=Standard}"
+            },
+            "Variant Selections": {
+                "TailRigVersion": "Standard"
+            },
+            "Child names": [
+                "TailRig",
+                "Anim"
+            ]
+        },
+        "/Char/TailRig": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig{TailRigVersion=Standard}TailRig",
+                "TailRig.usd": "/TailRig"
+            },
+            "Prohibited child names": [
+                "Tail"
+            ]
+        },
+        "/Char/Anim": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig/Anim"
+            },
+            "Child names": [
+                "Tail"
+            ]
+        },
+        "/Char/Anim/Tail": {
+            "Prim Stack": {
+                "TailRig.usd": "/TailRig/Tail"
+            }
+        },
+        "/Char2": {
+            "Prim Stack": {
+                "root.usd": "/Char2",
+                "CharRig.usd": "/CharRig2{TailRigVersion=None}"
+            },
+            "Variant Selections": {
+                "TailRigVersion": "None"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/Char2/Anim": {
+            "Prim Stack": {
+                "CharRig.usd": "/CharRig2/Anim"
+            },
+            "Child names": [
+                "Tail"
+            ]
+        },
+        "/Char2/Anim/Tail": {
+            "Prim Stack": {}
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

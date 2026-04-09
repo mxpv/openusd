@@ -1,0 +1,27 @@
+#usda 1.0
+
+def Scope "root" {
+    string testStringWithDictionaryMetadata (
+        customData = {
+            bool testBool1 = 0
+            token testToken1 = "aToken"
+            int testInt1 = 73425
+            string testString1 =        "_|a|test|string"
+            color3f [] colorTest1 = [(0.4, 0.6, 0.1234)]
+            dictionary topLevel = {
+                bool testBool2 = 1
+                token testToken2 = "tokenInDictionary"
+                float testFloat1 = 0.65e45
+                dictionary nestedDictionary = {
+                    string testString2 = "inside-nested-dictionary"
+                    dictionary nestedDictionary2 = {
+                        token testToken3 =      "triplyNested"
+                        dictionary emptyDictionary = {
+
+                        }
+                    }
+                }
+            }
+        }
+    )
+}

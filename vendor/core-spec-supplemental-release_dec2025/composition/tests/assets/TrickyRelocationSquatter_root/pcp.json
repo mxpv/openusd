@@ -1,0 +1,52 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/X": {
+            "Prim Stack": {
+                "root.usd": "/_Class_X",
+                "rig.usd": "/Y"
+            },
+            "Child names": [
+                "A2",
+                "B2"
+            ],
+            "Prohibited child names": [
+                "A",
+                "B"
+            ]
+        },
+        "/X/A2": {
+            "Prim Stack": {
+                "root.usd": "/X/A2",
+                "rig.usd": "/Y/A"
+            }
+        },
+        "/X/B2": {
+            "Prim Stack": {
+                "root.usd": "/_Class_X/B"
+            }
+        },
+        "/_Class_X": {
+            "Prim Stack": {
+                "root.usd": "/_Class_X"
+            },
+            "Child names": [
+                "B",
+                "B2"
+            ]
+        },
+        "/_Class_X/B": {
+            "Prim Stack": {
+                "root.usd": "/_Class_X/B"
+            }
+        },
+        "/_Class_X/B2": {
+            "Prim Stack": {
+                "root.usd": "/_Class_X/B2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

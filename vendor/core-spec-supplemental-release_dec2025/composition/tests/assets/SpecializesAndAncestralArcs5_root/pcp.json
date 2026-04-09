@@ -1,0 +1,66 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Overalls": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant",
+                "payload.usd": "/Overalls_defaultShadingVariant"
+            },
+            "Child names": [
+                "Looks"
+            ]
+        },
+        "/Overalls/Looks": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks",
+                "payload.usd": "/Overalls_defaultShadingVariant/Looks"
+            },
+            "Child names": [
+                "Cloth_C_Weave_09_Satin",
+                "Cloth_C_Weave_09"
+            ]
+        },
+        "/Overalls/Looks/Cloth_C_Weave_09_Satin": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09",
+                "payload.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09"
+            }
+        },
+        "/Overalls/Looks/Cloth_C_Weave_09": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09",
+                "payload.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09"
+            }
+        },
+        "/Overalls_defaultShadingVariant": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant"
+            },
+            "Child names": [
+                "Looks"
+            ]
+        },
+        "/Overalls_defaultShadingVariant/Looks": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks"
+            },
+            "Child names": [
+                "Cloth_C_Weave_09_Satin",
+                "Cloth_C_Weave_09"
+            ]
+        },
+        "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09_Satin": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09"
+            }
+        },
+        "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09": {
+            "Prim Stack": {
+                "root.usd": "/Overalls_defaultShadingVariant/Looks/Cloth_C_Weave_09"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+class "Cool" () {
+    int height = 53
+}
+
+def "Root" (
+    references = @./second.usd@
+)
+{
+    def Xform "Foo" () {
+        int age = 34
+    }
+    over "Container"
+    {
+        over "Base"
+        {
+            string standard = "fromEntry"
+            string arc = "FromRoot"
+        }
+    }
+}

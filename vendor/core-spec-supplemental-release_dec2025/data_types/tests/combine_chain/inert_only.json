@@ -1,0 +1,17 @@
+[
+    {
+        "description": "A single inert list op redues to a single inert list op",
+        "chain" : [{}],
+        "combined_reduced" : {}
+    },
+    {
+        "description": "Two inert list ops reduce to a single inert list op",
+        "chain" : [{}, {}],
+        "combined_reduced" : {}
+    },
+    {
+        "description": "Three inert list ops reduce to a single inert list op",
+        "chain" : [{}, {}, {}],
+        "combined_reduced" : {}
+    }
+]

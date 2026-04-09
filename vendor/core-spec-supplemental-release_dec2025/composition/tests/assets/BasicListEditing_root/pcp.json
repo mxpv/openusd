@@ -1,0 +1,217 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/root_append",
+                "sub1.usd": "/sub1_append",
+                "sub2.usd": "/sub2_append"
+            },
+            "Child names": [
+                "z",
+                "a",
+                "x",
+                "f",
+                "y",
+                "b",
+                "c"
+            ],
+            "Property names": [
+                "targets",
+                "x",
+                "y",
+                "z",
+                "a",
+                "b",
+                "c",
+                "f"
+            ],
+            "Property stacks": {
+                "/A.a": {
+                    "sub1.usd": "/A.a"
+                },
+                "/A.b": {
+                    "sub1.usd": "/A.b"
+                },
+                "/A.c": {
+                    "sub1.usd": "/A.c"
+                },
+                "/A.f": {
+                    "root.usd": "/A.f"
+                },
+                "/A.targets": {
+                    "root.usd": "/root_append.targets",
+                    "sub1.usd": "/sub1_append.targets",
+                    "sub2.usd": "/sub2_append.targets"
+                },
+                "/A.x": {
+                    "sub2.usd": "/A.x"
+                },
+                "/A.y": {
+                    "sub2.usd": "/A.y"
+                },
+                "/A.z": {
+                    "sub2.usd": "/A.z"
+                }
+            },
+            "Relationship targets": {
+                "/A.targets": [
+                    "/A/root_prepend",
+                    "/A/sub1_prepend",
+                    "/A/sub2_prepend",
+                    "/A/sub2_append",
+                    "/A/sub1_append",
+                    "/A/root_append"
+                ]
+            }
+        },
+        "/A/z": {
+            "Prim Stack": {
+                "sub2.usd": "/A/z"
+            }
+        },
+        "/A/a": {
+            "Prim Stack": {
+                "sub1.usd": "/A/a"
+            }
+        },
+        "/A/x": {
+            "Prim Stack": {
+                "sub2.usd": "/A/x"
+            }
+        },
+        "/A/f": {
+            "Prim Stack": {
+                "root.usd": "/A/f"
+            }
+        },
+        "/A/y": {
+            "Prim Stack": {
+                "sub2.usd": "/A/y"
+            }
+        },
+        "/A/b": {
+            "Prim Stack": {
+                "sub1.usd": "/A/b"
+            }
+        },
+        "/A/c": {
+            "Prim Stack": {
+                "sub1.usd": "/A/c"
+            }
+        },
+        "/sub2_prepend": {
+            "Prim Stack": {
+                "sub2.usd": "/sub2_prepend"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/sub2_prepend.targets": {
+                    "sub2.usd": "/sub2_prepend.targets"
+                }
+            },
+            "Relationship targets": {
+                "/sub2_prepend.targets": [
+                    "/sub2_prepend/sub2_prepend"
+                ]
+            }
+        },
+        "/sub2_append": {
+            "Prim Stack": {
+                "sub2.usd": "/sub2_append"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/sub2_append.targets": {
+                    "sub2.usd": "/sub2_append.targets"
+                }
+            },
+            "Relationship targets": {
+                "/sub2_append.targets": [
+                    "/sub2_append/sub2_append"
+                ]
+            }
+        },
+        "/sub1_prepend": {
+            "Prim Stack": {
+                "sub1.usd": "/sub1_prepend"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/sub1_prepend.targets": {
+                    "sub1.usd": "/sub1_prepend.targets"
+                }
+            },
+            "Relationship targets": {
+                "/sub1_prepend.targets": [
+                    "/sub1_prepend/sub1_prepend"
+                ]
+            }
+        },
+        "/sub1_append": {
+            "Prim Stack": {
+                "sub1.usd": "/sub1_append"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/sub1_append.targets": {
+                    "sub1.usd": "/sub1_append.targets"
+                }
+            },
+            "Relationship targets": {
+                "/sub1_append.targets": [
+                    "/sub1_append/sub1_append"
+                ]
+            }
+        },
+        "/root_prepend": {
+            "Prim Stack": {
+                "root.usd": "/root_prepend"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/root_prepend.targets": {
+                    "root.usd": "/root_prepend.targets"
+                }
+            },
+            "Relationship targets": {
+                "/root_prepend.targets": [
+                    "/root_prepend/root_prepend"
+                ]
+            }
+        },
+        "/root_append": {
+            "Prim Stack": {
+                "root.usd": "/root_append"
+            },
+            "Property names": [
+                "targets"
+            ],
+            "Property stacks": {
+                "/root_append.targets": {
+                    "root.usd": "/root_append.targets"
+                }
+            },
+            "Relationship targets": {
+                "/root_append.targets": [
+                    "/root_append/root_append"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd",
+        "sub1.usd",
+        "sub2.usd"
+    ]
+}

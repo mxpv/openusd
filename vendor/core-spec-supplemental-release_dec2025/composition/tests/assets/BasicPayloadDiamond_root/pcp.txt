@@ -1,0 +1,50 @@
+Loading @composition/tests/assets/BasicPayloadDiamond_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    A.usd                /A
+    C.usd                /C
+    B.usd                /B
+    C.usd                /C
+
+Property names:
+     ['C_attr', 'B_attr', 'A_attr']
+
+Property stacks:
+/Root.A_attr:
+    A.usd                /A.A_attr
+/Root.B_attr:
+    B.usd                /B.B_attr
+/Root.C_attr:
+    C.usd                /C.C_attr
+    C.usd                /C.C_attr
+
+------------------------------------------------------------------------
+Results for composing </RootUnloaded>
+
+Prim Stack:
+    root.usd             /RootUnloaded
+    A.usd                /A
+    C.usd                /C
+    B.usd                /B
+    C.usd                /C
+
+Property names:
+     ['C_attr', 'B_attr', 'A_attr']
+
+Property stacks:
+/RootUnloaded.A_attr:
+    A.usd                /A.A_attr
+/RootUnloaded.B_attr:
+    B.usd                /B.B_attr
+/RootUnloaded.C_attr:
+    C.usd                /C.C_attr
+    C.usd                /C.C_attr
+

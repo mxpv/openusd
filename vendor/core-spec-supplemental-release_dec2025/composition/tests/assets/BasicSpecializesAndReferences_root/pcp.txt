@@ -1,0 +1,135 @@
+Loading @composition/tests/assets/BasicSpecializesAndReferences_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings>
+
+Prim Stack:
+    root.usd             /ShaderBindings
+    root.usd             /ShaderBindings_defaultShadingVariant
+
+Child names:
+     ['ShinyPlastic', 'ShinyPlastic_BlueShinyPlastic']
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings/ShinyPlastic>
+
+Prim Stack:
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic
+    root.usd             /ShinyPlasticLook
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings/ShinyPlastic_BlueShinyPlastic>
+
+Prim Stack:
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic_BlueShinyPlastic
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic
+    root.usd             /ShinyPlasticLook
+
+------------------------------------------------------------------------
+Results for composing </ShinyPlasticLook>
+
+Prim Stack:
+    root.usd             /ShinyPlasticLook
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings_defaultShadingVariant>
+
+Prim Stack:
+    root.usd             /ShaderBindings_defaultShadingVariant
+
+Child names:
+     ['ShinyPlastic', 'ShinyPlastic_BlueShinyPlastic']
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings_defaultShadingVariant/ShinyPlastic>
+
+Prim Stack:
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic
+    root.usd             /ShinyPlasticLook
+
+------------------------------------------------------------------------
+Results for composing </ShaderBindings_defaultShadingVariant/ShinyPlastic_BlueShinyPlastic>
+
+Prim Stack:
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic_BlueShinyPlastic
+    root.usd             /ShaderBindings_defaultShadingVariant/ShinyPlastic
+    root.usd             /ShinyPlasticLook
+
+------------------------------------------------------------------------
+Results for composing </InternalRef>
+
+Prim Stack:
+    root.usd             /InternalRef
+
+Child names:
+     ['Metal', 'Brass']
+
+------------------------------------------------------------------------
+Results for composing </InternalRef/Metal>
+
+Prim Stack:
+    root.usd             /InternalRef/Metal
+
+------------------------------------------------------------------------
+Results for composing </InternalRef/Brass>
+
+Prim Stack:
+    root.usd             /InternalRef/Brass
+    root.usd             /InternalRef/Metal
+
+------------------------------------------------------------------------
+Results for composing </InternalRefAndSpecializes>
+
+Prim Stack:
+    root.usd             /InternalRefAndSpecializes
+    root.usd             /InternalRef
+
+Child names:
+     ['Metal', 'Brass']
+
+------------------------------------------------------------------------
+Results for composing </InternalRefAndSpecializes/Metal>
+
+Prim Stack:
+    root.usd             /InternalRefAndSpecializes/Metal
+    root.usd             /InternalRef/Metal
+
+------------------------------------------------------------------------
+Results for composing </InternalRefAndSpecializes/Brass>
+
+Prim Stack:
+    root.usd             /InternalRefAndSpecializes/Brass
+    root.usd             /InternalRef/Brass
+    root.usd             /InternalRefAndSpecializes/Metal
+    root.usd             /InternalRef/Metal
+
+------------------------------------------------------------------------
+Results for composing </RemoteRefAndSpecializes>
+
+Prim Stack:
+    root.usd             /RemoteRefAndSpecializes
+    ref.usd              /Ref
+
+Child names:
+     ['Metal', 'Brass']
+
+------------------------------------------------------------------------
+Results for composing </RemoteRefAndSpecializes/Metal>
+
+Prim Stack:
+    root.usd             /RemoteRefAndSpecializes/Metal
+    ref.usd              /Ref/Metal
+
+------------------------------------------------------------------------
+Results for composing </RemoteRefAndSpecializes/Brass>
+
+Prim Stack:
+    root.usd             /RemoteRefAndSpecializes/Brass
+    ref.usd              /Ref/Brass
+    root.usd             /RemoteRefAndSpecializes/Metal
+    ref.usd              /Ref/Metal
+

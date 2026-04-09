@@ -1,0 +1,34 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group",
+                "variant.usd": "/Group{v=x}",
+                "relocates.usd": "/Group",
+                "chargroup.usd": "/CHARGROUP"
+            },
+            "Variant Selections": {
+                "v": "x"
+            },
+            "Child names": [
+                "Model"
+            ],
+            "Prohibited child names": [
+                "CHARACTER",
+                "Character"
+            ]
+        },
+        "/Group/Model": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model",
+                "variant.usd": "/Group{v=x}Character",
+                "relocates.usd": "/Group/Character",
+                "chargroup.usd": "/CHARGROUP/CHARACTER"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

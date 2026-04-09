@@ -1,0 +1,46 @@
+#usda 1.0.1243516573613513497235682340520347582043658743685
+
+def MyFoo "foo" {
+
+    over MyOtherFoo "otherFoo"
+    {
+
+        rel             a:b:c:d:e
+
+        custom rel              foo:bar = None
+
+        rel bar:baz:foo (
+
+        )
+
+        rel foo:bar2 = </foo/otherFoo>
+
+        custom rel everything:in:one = [
+            </a/path/ref>,</another/path/ref>,
+
+
+
+
+
+
+            <../foo>, <../_relative/path/ref>] (
+            foo = "bar"
+        prepend this_metadata_value = [5.67]
+        _custom_dictionary_data = {
+            int       myKey = 8
+        }
+        )
+
+        rel foo:bar3 = [</one/path/ref/to/rule/them/all>]
+
+        delete rel everything:in:one
+
+        append rel everything:in:one = None
+
+        prepend rel everything:in:one = </foo/otherFoo.foo:bar3>
+
+        append rel foo:bar2 = [
+            <>,<../that/path>,</all/of/the/paths>
+        ]
+    }
+}

@@ -1,0 +1,145 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group",
+                "group.usd": "/Group"
+            },
+            "Child names": [
+                "Model_Renamed"
+            ],
+            "Prohibited child names": [
+                "Model"
+            ]
+        },
+        "/Group/Model_Renamed": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model_Renamed",
+                "group.usd": "/Group/Model",
+                "model.usd": "/Model"
+            },
+            "Child names": [
+                "A",
+                "B",
+                "Scope"
+            ]
+        },
+        "/Group/Model_Renamed/A": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model_Renamed/A",
+                "model.usd": "/Model/A"
+            },
+            "Property names": [
+                "a_target"
+            ],
+            "Property stacks": {
+                "/Group/Model_Renamed/A.a_target": {
+                    "root.usd": "/Group/Model_Renamed/A.a_target"
+                }
+            }
+        },
+        "/Group/Model_Renamed/B": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model_Renamed/A",
+                "model.usd": "/Model/A"
+            },
+            "Property names": [
+                "a_target",
+                "b_target"
+            ],
+            "Property stacks": {
+                "/Group/Model_Renamed/B.a_target": {
+                    "root.usd": "/Group/Model_Renamed/A.a_target"
+                },
+                "/Group/Model_Renamed/B.b_target": {
+                    "root.usd": "/Group/Model_Renamed/B.b_target"
+                }
+            }
+        },
+        "/Group/Model_Renamed/Scope": {
+            "Prim Stack": {
+                "root.usd": "/Group/Model_Renamed/A",
+                "model.usd": "/Model/A"
+            },
+            "Property names": [
+                "a_target",
+                "b_target"
+            ],
+            "Property stacks": {
+                "/Group/Model_Renamed/Scope.a_target": {
+                    "root.usd": "/Group/Model_Renamed/A.a_target"
+                },
+                "/Group/Model_Renamed/Scope.b_target": {
+                    "root.usd": "/Group/Model_Renamed/B.b_target"
+                }
+            }
+        },
+        "/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Child names": [
+                "Anim"
+            ],
+            "Prohibited child names": [
+                "RigClass"
+            ]
+        },
+        "/Rig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Anim"
+            },
+            "Child names": [
+                "RigClass",
+                "RigInstance",
+                "BadRigInstance"
+            ]
+        },
+        "/Rig/Anim/RigClass": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Anim/RigClass",
+                "rig.usd": "/Rig/RigClass"
+            },
+            "Property names": [
+                "r_target"
+            ],
+            "Property stacks": {
+                "/Rig/Anim/RigClass.r_target": {
+                    "root.usd": "/Rig/Anim/RigClass.r_target"
+                }
+            }
+        },
+        "/Rig/Anim/RigInstance": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Anim/RigClass",
+                "rig.usd": "/Rig/RigClass"
+            },
+            "Property names": [
+                "r_target"
+            ],
+            "Property stacks": {
+                "/Rig/Anim/RigInstance.r_target": {
+                    "root.usd": "/Rig/Anim/RigClass.r_target"
+                }
+            }
+        },
+        "/Rig/Anim/BadRigInstance": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Anim/BadRigInstance"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </Group/Model_Renamed>\nThe layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.",
+        "Errors while composing </Group/Model_Renamed/B>\nThe layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.",
+        "Errors while composing </Group/Model_Renamed/Scope>\nThe layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored. The layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Group/Model>, which will be ignored.",
+        "Errors while composing </Rig/Anim/RigClass>\nThe layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Rig/RigClass>, which will be ignored.",
+        "Errors while composing </Rig/Anim/RigInstance>\nThe layer @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@ has an invalid opinion at the relocation source path </Rig/RigClass>, which will be ignored.",
+        "Errors while composing </Rig/Anim/BadRigInstance>\n@composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@</Rig/Anim/BadRigInstance> CANNOT inherit from: @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@</Rig/RigClass> which is a prohibited child of its parent because it would require allowing opinions from the source of a relocation at @composition/tests/assets/TrickyInheritsAndRelocates_root/usda/root.usd@</Rig/RigClass>. ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

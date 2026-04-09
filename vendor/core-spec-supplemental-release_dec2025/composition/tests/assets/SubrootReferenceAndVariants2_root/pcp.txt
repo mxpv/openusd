@@ -1,0 +1,32 @@
+Loading @composition/tests/assets/SubrootReferenceAndVariants2_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Inherit>
+
+Prim Stack:
+    root.usd             /Inherit
+
+Child names:
+     ['CHARACTER']
+
+------------------------------------------------------------------------
+Results for composing </Inherit/CHARACTER>
+
+Prim Stack:
+    root.usd             /Inherit/CHARACTER
+
+------------------------------------------------------------------------
+Results for composing </Character>
+
+Prim Stack:
+    root.usd             /Character
+    root.usd             /Inherit/CHARACTER
+    CharGroup.usd        /CHARGROUP/CHARACTER
+    CharGroup.usd        /CHARGROUP{v=x}CHARACTER
+    CharGroup.usd        /Ref/CHARACTER
+    CharGroup.usd        /Inherit/CHARACTER
+

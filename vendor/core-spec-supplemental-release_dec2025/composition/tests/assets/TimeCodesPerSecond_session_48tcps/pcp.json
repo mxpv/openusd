@@ -1,0 +1,56 @@
+{
+    "Entry": "session_48tcps.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "session_48tcps.usd": "/Root",
+                "sess_s.usd": "/Root",
+                "sess_s_48tcps.usd": "/Root",
+                "sess_s_24tcps_12fps.usd": "/Root",
+                "sess_s_12fps.usd": "/Root"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "sess_s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "sess_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "sess_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "sess_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        }
+                    ],
+                    "layer": "session_48tcps.usd",
+                    "prim": "/Root",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        }
+    },
+    "Layer Stack": [
+        "session_48tcps.usd",
+        "sess_s.usd",
+        "sess_s_48tcps.usd",
+        "sess_s_24tcps_12fps.usd",
+        "sess_s_12fps.usd"
+    ]
+}

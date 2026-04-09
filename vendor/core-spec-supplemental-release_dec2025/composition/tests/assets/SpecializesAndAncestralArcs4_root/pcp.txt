@@ -1,0 +1,207 @@
+Loading @composition/tests/assets/SpecializesAndAncestralArcs4_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Parent>
+
+Prim Stack:
+    root.usd             /Parent
+    root.usd             /PI
+    ref.usd              /PR
+    root.usd             /PIS
+    root.usd             /PISI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </Parent/Child>
+
+Prim Stack:
+    root.usd             /Parent/Child
+    root.usd             /Parent/Sibling
+    root.usd             /PI/Sibling
+    root.usd             /PI/Child
+    ref.usd              /PR/Child
+    ref.usd              /PR/Sibling
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+    root.usd             /PIS/Child
+    root.usd             /PISI/Child
+
+------------------------------------------------------------------------
+Results for composing </Parent/Sibling>
+
+Prim Stack:
+    root.usd             /Parent/Sibling
+    root.usd             /PI/Sibling
+    ref.usd              /PR/Sibling
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </Parent2>
+
+Prim Stack:
+    root.usd             /Parent2
+    root.usd             /PI
+    ref.usd              /PR
+    root.usd             /PIS
+    root.usd             /PISI
+    root.usd             /PS
+    root.usd             /PSI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </Parent2/Child>
+
+Prim Stack:
+    root.usd             /Parent2/Child
+    root.usd             /Parent2/Sibling
+    root.usd             /PI/Sibling
+    root.usd             /PI/Child
+    ref.usd              /PR/Child
+    ref.usd              /PR/Sibling
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+    root.usd             /PS/Sibling
+    root.usd             /PSI/Sibling
+    root.usd             /PIS/Child
+    root.usd             /PISI/Child
+    root.usd             /PS/Child
+    root.usd             /PSI/Child
+
+------------------------------------------------------------------------
+Results for composing </Parent2/Sibling>
+
+Prim Stack:
+    root.usd             /Parent2/Sibling
+    root.usd             /PI/Sibling
+    ref.usd              /PR/Sibling
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+    root.usd             /PS/Sibling
+    root.usd             /PSI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </PS>
+
+Prim Stack:
+    root.usd             /PS
+    root.usd             /PSI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </PS/Child>
+
+Prim Stack:
+    root.usd             /PS/Child
+    root.usd             /PSI/Child
+
+------------------------------------------------------------------------
+Results for composing </PS/Sibling>
+
+Prim Stack:
+    root.usd             /PS/Sibling
+    root.usd             /PSI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </PSI>
+
+Prim Stack:
+    root.usd             /PSI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </PSI/Child>
+
+Prim Stack:
+    root.usd             /PSI/Child
+
+------------------------------------------------------------------------
+Results for composing </PSI/Sibling>
+
+Prim Stack:
+    root.usd             /PSI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </PI>
+
+Prim Stack:
+    root.usd             /PI
+    root.usd             /PIS
+    root.usd             /PISI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </PI/Child>
+
+Prim Stack:
+    root.usd             /PI/Child
+    root.usd             /PIS/Child
+    root.usd             /PISI/Child
+
+------------------------------------------------------------------------
+Results for composing </PI/Sibling>
+
+Prim Stack:
+    root.usd             /PI/Sibling
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </PIS>
+
+Prim Stack:
+    root.usd             /PIS
+    root.usd             /PISI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </PIS/Child>
+
+Prim Stack:
+    root.usd             /PIS/Child
+    root.usd             /PISI/Child
+
+------------------------------------------------------------------------
+Results for composing </PIS/Sibling>
+
+Prim Stack:
+    root.usd             /PIS/Sibling
+    root.usd             /PISI/Sibling
+
+------------------------------------------------------------------------
+Results for composing </PISI>
+
+Prim Stack:
+    root.usd             /PISI
+
+Child names:
+     ['Child', 'Sibling']
+
+------------------------------------------------------------------------
+Results for composing </PISI/Child>
+
+Prim Stack:
+    root.usd             /PISI/Child
+
+------------------------------------------------------------------------
+Results for composing </PISI/Sibling>
+
+Prim Stack:
+    root.usd             /PISI/Sibling
+

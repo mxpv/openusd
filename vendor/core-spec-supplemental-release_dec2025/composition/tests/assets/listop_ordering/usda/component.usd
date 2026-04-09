@@ -1,0 +1,10 @@
+#usda 1.0
+
+class "class_a" {
+
+    string identifier = "A_from_Leaf"
+}
+
+def "child" (inherits = </class_a>) {
+
+}

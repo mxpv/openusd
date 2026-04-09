@@ -1,0 +1,13 @@
+Loading @composition/tests/assets/SubrootReferenceAndVariants_root/usda/root.usd@
+
+
+--------------------------------------------------------------------------------
+Traceback (most recent call last):
+  File "\pxr\usd\pcp\testenv\testPcpCompositionResults.py", line 99, in <module>
+    rootLayer = Sdf.Layer.FindOrOpen(rootLayerPath)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pxr.Tf.ErrorException: 
+	Error in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file /pxr/usd/sdf/textParserHelpers.h : 'Reference paths cannot contain variant selections at '@./group.usd@</Group{v=x}Model>' in </InvalidSubrootRefWithVariantSelection>
+'
+	Error in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file /pxr/usd/sdf/textParserHelpers.h : '\composition\tests\assets\SubrootReferenceAndVariants_root\usda\root.usd:36:18: Reference paths cannot contain variant selections at '@./group.usd@</Group{v=x}Model>' in </InvalidSubrootRefWithVariantSelection>
+'

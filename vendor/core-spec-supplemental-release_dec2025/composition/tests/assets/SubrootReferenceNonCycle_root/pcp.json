@@ -1,0 +1,168 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/ImplNoCycle": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/ImplNoCycle/A": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A"
+            },
+            "Child names": [
+                "B",
+                "D"
+            ]
+        },
+        "/ImplNoCycle/A/B": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/ImplNoCycle/A/B/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B/C"
+            }
+        },
+        "/ImplNoCycle/A/D": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/ImplNoCycle/A/D/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B/C"
+            }
+        },
+        "/PrimNoCycle": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/PrimNoCycle/A": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A"
+            },
+            "Child names": [
+                "B",
+                "D"
+            ]
+        },
+        "/PrimNoCycle/A/B": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/PrimNoCycle/A/B/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B/C"
+            }
+        },
+        "/PrimNoCycle/A/D": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/PrimNoCycle/A/D/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplNoCycle/A/B/C"
+            }
+        },
+        "/ImplCycle": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/ImplCycle/A": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A"
+            },
+            "Child names": [
+                "B",
+                "D"
+            ]
+        },
+        "/ImplCycle/A/B": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/ImplCycle/A/B/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/B/C"
+            }
+        },
+        "/ImplCycle/A/D": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/D"
+            }
+        },
+        "/PrimCycle": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/PrimCycle/A": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A"
+            },
+            "Child names": [
+                "B",
+                "D"
+            ]
+        },
+        "/PrimCycle/A/B": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/PrimCycle/A/B/C": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/B/C"
+            }
+        },
+        "/PrimCycle/A/D": {
+            "Prim Stack": {
+                "root.usd": "/ImplCycle/A/D"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </ImplCycle/A/D>\nCycle detected: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D> references: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle> which CANNOT reference: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle> Unresolved reference prim path @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A> introduced by @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D>",
+        "Errors while composing </PrimCycle/A/D>\nCycle detected: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A/D> references: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</ImplCycle/A/D> which CANNOT reference: @composition/tests/assets/SubrootReferenceNonCycle_root/usda/root.usd@</PrimCycle/A> ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

@@ -1,0 +1,41 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/A{v1=x}",
+                "ref.usd": "/RAx"
+            },
+            "Variant Selections": {
+                "v1": "x"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/A/B": {
+            "Prim Stack": {
+                "root.usd": "/A{v1=x}B{v2=y}",
+                "ref.usd": "/RB"
+            },
+            "Variant Selections": {
+                "v2": "y"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/A/B/C": {
+            "Prim Stack": {
+                "root.usd": "/A{v1=x}B{v2=y}C{v3=z}",
+                "ref.usd": "/RB/C"
+            },
+            "Variant Selections": {
+                "v3": "z"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

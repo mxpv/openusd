@@ -1,0 +1,80 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Group": {
+            "Prim Stack": {
+                "root.usd": "/Group{v=z}"
+            },
+            "Variant Selections": {
+                "v": "z"
+            },
+            "Child names": [
+                "Model"
+            ]
+        },
+        "/Group/Model": {
+            "Prim Stack": {
+                "root.usd": "/Group{v=z}Model"
+            },
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/Group/Model.a": {
+                    "root.usd": "/Group{v=z}Model.a"
+                }
+            }
+        },
+        "/SubrootInheritRef": {
+            "Prim Stack": {
+                "root.usd": "/Group{v=z}Model",
+                "group.usd": "/Group{v=y}Model"
+            },
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/SubrootInheritRef.a": {
+                    "root.usd": "/Group{v=z}Model.a",
+                    "group.usd": "/Group{v=y}Model.a"
+                }
+            }
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root",
+                "model.usd": "/Model{v=x}"
+            },
+            "Variant Selections": {
+                "v": "x"
+            },
+            "Child names": [
+                "Child"
+            ],
+            "Property names": [
+                "modelAttr"
+            ],
+            "Property stacks": {
+                "/Root.modelAttr": {
+                    "model.usd": "/Model{v=x}.modelAttr"
+                }
+            }
+        },
+        "/Root/Child": {
+            "Prim Stack": {
+                "root.usd": "/Group{v=z}Model"
+            },
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/Root/Child.a": {
+                    "root.usd": "/Group{v=z}Model.a"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

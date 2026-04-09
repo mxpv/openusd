@@ -1,0 +1,20 @@
+#usda 1.0
+
+class "class_a" {
+    string identifier = "A_from_Entry"
+}
+class "class_b" {
+    string identifier = "B_from_Entry"
+}
+
+def "append" (
+        append inherits = </class_b>
+        references = @./component.usd@</child>) {}
+
+def "explicit_remove" (
+        inherits = </class_b>
+        references = @./component.usd@</child>) {}
+
+def "explicit_order" (
+         inherits = [</class_a>, </class_b>]
+         references = @./component.usd@</child>) {}

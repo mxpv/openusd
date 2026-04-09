@@ -1,0 +1,99 @@
+Loading @composition/tests/assets/PayloadsAndAncestralArcs3_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+    empty_payload.usd    /Empty
+
+------------------------------------------------------------------------
+Results for composing </ReferencePayloadedModel>
+
+Prim Stack:
+    root.usd             /ReferencePayloadedModel
+    model.usd            /Model
+    model_payload.usd    /Model
+
+Child names:
+     ['Test']
+
+Prohibited child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </ReferencePayloadedModel/Test>
+
+Prim Stack:
+    model.usd            /Model/Test
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </ReferencePayloadedModel/Test/Anim>
+
+Prim Stack:
+    model_payload.usd    /Model/Anim
+
+------------------------------------------------------------------------
+Results for composing </PayloadedModel>
+
+Prim Stack:
+    root.usd             /PayloadedModel
+    model_payload.usd    /Model
+
+Child names:
+     ['Test']
+
+Prohibited child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </PayloadedModel/Test>
+
+Prim Stack:
+    root.usd             /PayloadedModel/Test
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </PayloadedModel/Test/Anim>
+
+Prim Stack:
+    model_payload.usd    /Model/Anim
+
+------------------------------------------------------------------------
+Results for composing </InternalReferencePayloadedModel>
+
+Prim Stack:
+    root.usd             /InternalReferencePayloadedModel
+    root.usd             /PayloadedModel
+    model_payload.usd    /Model
+
+Child names:
+     ['Test']
+
+Prohibited child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </InternalReferencePayloadedModel/Test>
+
+Prim Stack:
+    root.usd             /PayloadedModel/Test
+
+Child names:
+     ['Anim']
+
+------------------------------------------------------------------------
+Results for composing </InternalReferencePayloadedModel/Test/Anim>
+
+Prim Stack:
+    model_payload.usd    /Model/Anim
+

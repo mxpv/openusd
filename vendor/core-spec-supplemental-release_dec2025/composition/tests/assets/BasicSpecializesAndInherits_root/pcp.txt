@@ -1,0 +1,109 @@
+Loading @composition/tests/assets/BasicSpecializesAndInherits_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Inherits_1>
+
+Prim Stack:
+    root.usd             /Inherits_1
+
+------------------------------------------------------------------------
+Results for composing </Specializes_1>
+
+Prim Stack:
+    root.usd             /Specializes_1
+    root.usd             /Inherits_1
+
+------------------------------------------------------------------------
+Results for composing </Instance_1>
+
+Prim Stack:
+    root.usd             /Instance_1
+    root.usd             /Specializes_1
+    root.usd             /Inherits_1
+
+------------------------------------------------------------------------
+Results for composing </Inherits_2>
+
+Prim Stack:
+    root.usd             /Inherits_2
+
+------------------------------------------------------------------------
+Results for composing </Specializes_2>
+
+Prim Stack:
+    root.usd             /Specializes_2
+
+------------------------------------------------------------------------
+Results for composing </Instance_2>
+
+Prim Stack:
+    root.usd             /Instance_2
+    ref.usd              /Ref
+    root.usd             /Specializes_2
+    root.usd             /Inherits_2
+    ref.usd              /Specializes_2
+    ref.usd              /Inherits_2
+
+------------------------------------------------------------------------
+Results for composing </Model>
+
+Prim Stack:
+    root.usd             /Model
+
+Child names:
+     ['Looks']
+
+------------------------------------------------------------------------
+Results for composing </Model/Looks>
+
+Prim Stack:
+    root.usd             /Model/Looks
+    looks.usd            /Looks
+
+Child names:
+     ['BaseMaterial', 'Material', 'Metal', 'Brass']
+
+------------------------------------------------------------------------
+Results for composing </Model/Looks/BaseMaterial>
+
+Prim Stack:
+    root.usd             /Model/Looks/BaseMaterial
+    looks.usd            /Looks/BaseMaterial
+
+------------------------------------------------------------------------
+Results for composing </Model/Looks/Material>
+
+Prim Stack:
+    root.usd             /Model/Looks/Material
+    root.usd             /Model/Looks/BaseMaterial
+    looks.usd            /Looks/Material
+    looks.usd            /Looks/BaseMaterial
+
+------------------------------------------------------------------------
+Results for composing </Model/Looks/Metal>
+
+Prim Stack:
+    root.usd             /Model/Looks/Metal
+    root.usd             /Model/Looks/Material
+    root.usd             /Model/Looks/BaseMaterial
+    looks.usd            /Looks/Metal
+    looks.usd            /Looks/Material
+    looks.usd            /Looks/BaseMaterial
+
+------------------------------------------------------------------------
+Results for composing </Model/Looks/Brass>
+
+Prim Stack:
+    root.usd             /Model/Looks/Brass
+    looks.usd            /Looks/Brass
+    root.usd             /Model/Looks/Metal
+    root.usd             /Model/Looks/Material
+    root.usd             /Model/Looks/BaseMaterial
+    looks.usd            /Looks/Metal
+    looks.usd            /Looks/Material
+    looks.usd            /Looks/BaseMaterial
+

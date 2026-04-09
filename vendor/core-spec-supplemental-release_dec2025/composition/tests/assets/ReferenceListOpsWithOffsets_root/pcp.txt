@@ -1,0 +1,77 @@
+Loading @composition/tests/assets/ReferenceListOpsWithOffsets_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     sub.usd
+     sub_48tcps.usd
+     base.usd
+
+------------------------------------------------------------------------
+Results for composing </AddRefs1>
+
+Prim Stack:
+    sub.usd              /AddRefs1
+    base.usd             /AddRefs1
+    ref.usd              /Ref
+    ref.usd              /Ref
+    ref.usd              /Ref
+    ref.usd              /Ref
+
+Time Offsets:
+    root.usd             /AddRefs1       root       (offset=0.00, scale=1.00)
+        sub.usd                          sublayer   (offset=10.00, scale=2.00)
+        sub_48tcps.usd                   sublayer   (offset=0.00, scale=0.50)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+    ref.usd              /Ref            reference  (offset=30.00, scale=4.00)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+    ref.usd              /Ref            reference  (offset=10.00, scale=2.00)
+
+------------------------------------------------------------------------
+Results for composing </DeleteRefs1>
+
+Prim Stack:
+    sub.usd              /DeleteRefs1
+    base.usd             /DeleteRefs1
+    ref.usd              /Ref
+
+Time Offsets:
+    root.usd             /DeleteRefs1    root       (offset=0.00, scale=1.00)
+        sub.usd                          sublayer   (offset=10.00, scale=2.00)
+        sub_48tcps.usd                   sublayer   (offset=0.00, scale=0.50)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </AddRefs2>
+
+Prim Stack:
+    sub_48tcps.usd       /AddRefs2
+    base.usd             /AddRefs2
+    ref.usd              /Ref
+    ref.usd              /Ref
+    ref.usd              /Ref
+    ref.usd              /Ref
+
+Time Offsets:
+    root.usd             /AddRefs2       root       (offset=0.00, scale=1.00)
+        sub.usd                          sublayer   (offset=10.00, scale=2.00)
+        sub_48tcps.usd                   sublayer   (offset=0.00, scale=0.50)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+    ref.usd              /Ref            reference  (offset=5.00, scale=2.00)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+    ref.usd              /Ref            reference  (offset=0.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </DeleteRefs2>
+
+Prim Stack:
+    sub_48tcps.usd       /DeleteRefs2
+    base.usd             /DeleteRefs2
+    ref.usd              /Ref
+
+Time Offsets:
+    root.usd             /DeleteRefs2    root       (offset=0.00, scale=1.00)
+        sub.usd                          sublayer   (offset=10.00, scale=2.00)
+        sub_48tcps.usd                   sublayer   (offset=0.00, scale=0.50)
+    ref.usd              /Ref            reference  (offset=100.00, scale=1.00)
+

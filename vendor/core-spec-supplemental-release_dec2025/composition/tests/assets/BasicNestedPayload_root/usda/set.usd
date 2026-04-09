@@ -1,0 +1,13 @@
+#usda 1.0
+
+def Scope "Set" (
+    payload = @./set_payload.usd@</Set>
+)
+{
+    over "Prop"
+    {
+        over "PropScope"
+        {
+        }
+    }
+}

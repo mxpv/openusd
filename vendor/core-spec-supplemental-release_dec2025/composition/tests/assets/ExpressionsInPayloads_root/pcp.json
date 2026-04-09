@@ -1,0 +1,38 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/SinglePayload": {
+            "Prim Stack": {
+                "root.usd": "/SinglePayload",
+                "A.usd": "/A"
+            }
+        },
+        "/ChainedPayload": {
+            "Prim Stack": {
+                "root.usd": "/ChainedPayload",
+                "ref2.usd": "/Ref2",
+                "B.usd": "/B"
+            }
+        },
+        "/ChainedPayloadOverride": {
+            "Prim Stack": {
+                "root.usd": "/ChainedPayloadOverride",
+                "ref3.usd": "/Ref3",
+                "ref2.usd": "/Ref2",
+                "A.usd": "/A"
+            }
+        },
+        "/MultiPayload": {
+            "Prim Stack": {
+                "root.usd": "/MultiPayload",
+                "ref3.usd": "/Ref3",
+                "ref2.usd": "/Ref2",
+                "A.usd": "/A",
+                "B.usd": "/B"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

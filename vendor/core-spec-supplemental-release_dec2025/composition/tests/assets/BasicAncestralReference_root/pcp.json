@@ -1,0 +1,41 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A": {
+            "Prim Stack": {
+                "root.usd": "/A",
+                "A.usd": "/A"
+            },
+            "Child names": [
+                "B"
+            ],
+            "Property names": [
+                "A_attr"
+            ],
+            "Property stacks": {
+                "/A.A_attr": {
+                    "A.usd": "/A.A_attr"
+                }
+            }
+        },
+        "/A/B": {
+            "Prim Stack": {
+                "root.usd": "/A/B",
+                "B.usd": "/B",
+                "A.usd": "/A/B"
+            },
+            "Property names": [
+                "B_attr"
+            ],
+            "Property stacks": {
+                "/A/B.B_attr": {
+                    "B.usd": "/B.B_attr",
+                    "A.usd": "/A/B.B_attr"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

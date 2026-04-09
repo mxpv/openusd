@@ -1,0 +1,61 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Sullivan_1": {
+            "Prim Stack": {
+                "root.usd": "/_Class_Model",
+                "Sullivan.usd": "/_Class_Model"
+            },
+            "Property names": [
+                "name"
+            ],
+            "Property stacks": {
+                "/Sullivan_1.name": {
+                    "root.usd": "/_Class_Model.name"
+                }
+            }
+        },
+        "/_Class_Sullivan": {
+            "Prim Stack": {
+                "root.usd": "/_Class_Sullivan"
+            },
+            "Property names": [
+                "name"
+            ],
+            "Property stacks": {
+                "/_Class_Sullivan.name": {
+                    "root.usd": "/_Class_Sullivan.name"
+                }
+            }
+        },
+        "/_Class_Char": {
+            "Prim Stack": {
+                "root.usd": "/_Class_Char"
+            },
+            "Property names": [
+                "name"
+            ],
+            "Property stacks": {
+                "/_Class_Char.name": {
+                    "root.usd": "/_Class_Char.name"
+                }
+            }
+        },
+        "/_Class_Model": {
+            "Prim Stack": {
+                "root.usd": "/_Class_Model"
+            },
+            "Property names": [
+                "name"
+            ],
+            "Property stacks": {
+                "/_Class_Model.name": {
+                    "root.usd": "/_Class_Model.name"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

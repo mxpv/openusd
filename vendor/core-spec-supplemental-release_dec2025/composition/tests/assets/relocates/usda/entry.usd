@@ -1,0 +1,28 @@
+#usda 1.0
+(
+    upAxis="Y"
+    metersPerUnit=0.1
+    defaultPrim="Root"
+    relocates = {
+        </Root/Foo>:<Root/Spam>,
+        </Root/ChildA>:<Root/ChildB>
+    }
+    sublayers = [@sublayer.usd@]
+)
+
+class "Foo" () {
+    def Xform "Foo" () {
+
+    }
+}
+
+def Xform "Root" (
+    references = @ref.usd@
+    inherits = </Foo>
+) {
+
+    def Xform "Foo" () {
+
+    }
+
+}

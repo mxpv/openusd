@@ -1,0 +1,31 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_geotype": {
+            "Prim Stack": {
+                "root.usd": "/_class_geotype"
+            }
+        },
+        "/bob": {
+            "Prim Stack": {
+                "root.usd": "/bob{geotype=cube}",
+                "geo.usd": "/bob_root_cube"
+            },
+            "Variant Selections": {
+                "geotype": "cube",
+                "geotype_selector": "select_cube"
+            },
+            "Child names": [
+                "bob_body"
+            ]
+        },
+        "/bob/bob_body": {
+            "Prim Stack": {
+                "geo.usd": "/bob_root_cube/bob_body"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

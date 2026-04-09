@@ -1,0 +1,123 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Set": {
+            "Prim Stack": {
+                "root.usd": "/Set",
+                "set.usd": "/Set",
+                "set_payload.usd": "/Set"
+            },
+            "Child names": [
+                "Prop"
+            ]
+        },
+        "/Set/Prop": {
+            "Prim Stack": {
+                "set.usd": "/Set/Prop",
+                "set_payload.usd": "/Set/Prop",
+                "prop.usd": "/Prop",
+                "prop_payload.usd": "/Prop"
+            },
+            "Child names": [
+                "PropScope"
+            ]
+        },
+        "/Set/Prop/PropScope": {
+            "Prim Stack": {
+                "set.usd": "/Set/Prop/PropScope",
+                "set_payload.usd": "/Set/Prop/PropScope",
+                "prop.usd": "/Prop/PropScope",
+                "prop_payload.usd": "/Prop/PropScope"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Set/Prop/PropScope.x": {
+                    "set_payload.usd": "/Set/Prop/PropScope.x",
+                    "prop_payload.usd": "/Prop/PropScope.x"
+                }
+            }
+        },
+        "/Set2": {
+            "Prim Stack": {
+                "root.usd": "/Set2",
+                "set_payload.usd": "/Set"
+            },
+            "Child names": [
+                "Prop"
+            ]
+        },
+        "/Set2/Prop": {
+            "Prim Stack": {
+                "root.usd": "/Set2/Prop",
+                "prop_payload.usd": "/Prop",
+                "set_payload.usd": "/Set/Prop",
+                "prop.usd": "/Prop"
+            },
+            "Child names": [
+                "PropScope"
+            ]
+        },
+        "/Set2/Prop/PropScope": {
+            "Prim Stack": {
+                "prop_payload.usd": "/Prop/PropScope",
+                "set_payload.usd": "/Set/Prop/PropScope",
+                "prop.usd": "/Prop/PropScope"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Set2/Prop/PropScope.x": {
+                    "prop_payload.usd": "/Prop/PropScope.x",
+                    "set_payload.usd": "/Set/Prop/PropScope.x"
+                }
+            }
+        },
+        "/Set3": {
+            "Prim Stack": {
+                "root.usd": "/Set3",
+                "set.usd": "/Set",
+                "set_payload.usd": "/Set"
+            },
+            "Child names": [
+                "Prop"
+            ]
+        },
+        "/Set3/Prop": {
+            "Prim Stack": {
+                "root.usd": "/Set3/Prop",
+                "set.usd": "/Set/Prop",
+                "set_payload.usd": "/Set/Prop",
+                "prop.usd": "/Prop",
+                "prop_payload.usd": "/Prop"
+            },
+            "Child names": [
+                "PropScope"
+            ]
+        },
+        "/Set3/Prop/PropScope": {
+            "Prim Stack": {
+                "root.usd": "/Set3/Prop/PropScope",
+                "set.usd": "/Set/Prop/PropScope",
+                "set_payload.usd": "/Set/Prop/PropScope",
+                "prop.usd": "/Prop/PropScope",
+                "prop_payload.usd": "/Prop/PropScope"
+            },
+            "Property names": [
+                "x"
+            ],
+            "Property stacks": {
+                "/Set3/Prop/PropScope.x": {
+                    "root.usd": "/Set3/Prop/PropScope.x",
+                    "set_payload.usd": "/Set/Prop/PropScope.x",
+                    "prop_payload.usd": "/Prop/PropScope.x"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

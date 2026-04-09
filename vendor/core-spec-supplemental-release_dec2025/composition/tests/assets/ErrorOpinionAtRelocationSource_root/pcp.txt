@@ -1,0 +1,118 @@
+Loading @composition/tests/assets/ErrorOpinionAtRelocationSource_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </CharRig>
+
+Prim Stack:
+    root.usd             /CharRig
+
+Child names:
+     ['Anim', 'Rig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim>
+
+Prim Stack:
+    root.usd             /CharRig/Anim
+
+Child names:
+     ['Path']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Anim/Path>
+
+Prim Stack:
+    pathRig.usd          /PathRig/Path
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig
+
+Child names:
+     ['PathRig']
+
+------------------------------------------------------------------------
+Results for composing </CharRig/Rig/PathRig>
+
+Prim Stack:
+    root.usd             /CharRig/Rig/PathRig
+    pathRig.usd          /PathRig
+
+Prohibited child names:
+     ['Path']
+
+------------------------------------------------------------------------
+Results for composing </VariantAtRelocateSource>
+
+Prim Stack:
+    root.usd             /VariantAtRelocateSource
+    ref.usd              /Ref
+
+Child names:
+     ['Child', 'Sibling', 'Inherit']
+
+------------------------------------------------------------------------
+Results for composing </VariantAtRelocateSource/Child>
+
+Prim Stack:
+    root.usd             /VariantAtRelocateSource/Child
+    root.usd             /VariantAtRelocateSource/Child{child=a}
+    ref.usd              /Ref/Child
+
+Variant Selections:
+    {child = a}
+
+Prohibited child names:
+     ['Child2']
+
+------------------------------------------------------------------------
+Results for composing </VariantAtRelocateSource/Sibling>
+
+Prim Stack:
+    root.usd             /VariantAtRelocateSource/Sibling
+    root.usd             /VariantAtRelocateSource/Child{child=a}Child2
+    ref.usd              /Ref/Child/Child2
+
+Child names:
+     ['Class']
+
+------------------------------------------------------------------------
+Results for composing </VariantAtRelocateSource/Sibling/Class>
+
+Prim Stack:
+    root.usd             /VariantAtRelocateSource/Sibling/Class
+    root.usd             /VariantAtRelocateSource/Child{child=a}Child2/Class
+    ref.usd              /Ref/Child/Child2/Class
+
+------------------------------------------------------------------------
+Results for composing </VariantAtRelocateSource/Inherit>
+
+Prim Stack:
+    root.usd             /VariantAtRelocateSource/Inherit
+    root.usd             /VariantAtRelocateSource/Sibling/Class
+    root.usd             /VariantAtRelocateSource/Child{child=a}Child2/Class
+    ref.usd              /Ref/Child/Child2/Class
+
+
+------------------------------------------------------------------------
+Errors while composing </CharRig/Anim/Path>
+
+The layer @composition/tests/assets/ErrorOpinionAtRelocationSource_root/usda/root.usd@ has an invalid opinion at the relocation source path </CharRig/Rig/PathRig/Path>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </VariantAtRelocateSource/Sibling>
+
+The layer @composition/tests/assets/ErrorOpinionAtRelocationSource_root/usda/root.usd@ has an invalid opinion at the relocation source path </VariantAtRelocateSource/Child/Child2>, which will be ignored.
+
+------------------------------------------------------------------------
+Errors while composing </VariantAtRelocateSource/Inherit>
+
+The layer @composition/tests/assets/ErrorOpinionAtRelocationSource_root/usda/root.usd@ has an invalid opinion at the relocation source path </VariantAtRelocateSource/Child/Child2>, which will be ignored.
+
+ERROR: Unexpected error(s) encountered during test!

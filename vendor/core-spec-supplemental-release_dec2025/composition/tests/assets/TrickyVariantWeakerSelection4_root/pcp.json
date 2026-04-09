@@ -1,0 +1,53 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_geotype": {
+            "Prim Stack": {
+                "root.usd": "/_class_geotype"
+            }
+        },
+        "/bob": {
+            "Prim Stack": {
+                "root.usd": "/bob{geotype=cube}"
+            },
+            "Variant Selections": {
+                "geotype": "cube",
+                "geotype_selector": "select_cube"
+            },
+            "Child names": [
+                "geom"
+            ]
+        },
+        "/bob/geom": {
+            "Prim Stack": {
+                "root.usd": "/bob{geotype=cube}geom",
+                "geo.usd": "/bob_root_cube"
+            },
+            "Child names": [
+                "bob_body"
+            ]
+        },
+        "/bob/geom/bob_body": {
+            "Prim Stack": {
+                "geo.usd": "/bob_root_cube/bob_body"
+            }
+        },
+        "/shape": {
+            "Prim Stack": {
+                "root.usd": "/bob{geotype=cube}geom",
+                "geo.usd": "/bob_root_cube"
+            },
+            "Child names": [
+                "bob_body"
+            ]
+        },
+        "/shape/bob_body": {
+            "Prim Stack": {
+                "geo.usd": "/bob_root_cube/bob_body"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

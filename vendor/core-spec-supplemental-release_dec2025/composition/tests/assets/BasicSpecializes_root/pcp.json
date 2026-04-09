@@ -1,0 +1,144 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/BasicSpecializes1": {
+            "Prim Stack": {
+                "root.usd": "/BasicSpecializes2"
+            }
+        },
+        "/BasicSpecializes2": {
+            "Prim Stack": {
+                "root.usd": "/BasicSpecializes2"
+            }
+        },
+        "/Basic": {
+            "Prim Stack": {
+                "root.usd": "/BasicSpecializes2"
+            }
+        },
+        "/BasicLocal": {
+            "Prim Stack": {
+                "root.usd": "/BasicLocal"
+            },
+            "Child names": [
+                "Specializes1",
+                "Specializes2",
+                "Local"
+            ]
+        },
+        "/BasicLocal/Specializes1": {
+            "Prim Stack": {
+                "root.usd": "/BasicLocal/Specializes2"
+            }
+        },
+        "/BasicLocal/Specializes2": {
+            "Prim Stack": {
+                "root.usd": "/BasicLocal/Specializes2"
+            }
+        },
+        "/BasicLocal/Local": {
+            "Prim Stack": {
+                "root.usd": "/BasicLocal/Specializes2"
+            }
+        },
+        "/Base": {
+            "Prim Stack": {
+                "root.usd": "/Base"
+            }
+        },
+        "/Specializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes"
+            }
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Base",
+                "ref.usd": "/Base",
+                "ref2.usd": "/Base"
+            }
+        },
+        "/_class_Material": {
+            "Prim Stack": {
+                "root.usd": "/_class_Material"
+            }
+        },
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model"
+            },
+            "Child names": [
+                "Looks"
+            ]
+        },
+        "/Model/Looks": {
+            "Prim Stack": {
+                "root.usd": "/Model/Looks",
+                "looks.usd": "/Looks"
+            },
+            "Child names": [
+                "Material",
+                "Metal",
+                "Brass"
+            ]
+        },
+        "/Model/Looks/Material": {
+            "Prim Stack": {
+                "root.usd": "/_class_Material",
+                "looks.usd": "/_class_Material"
+            }
+        },
+        "/Model/Looks/Metal": {
+            "Prim Stack": {
+                "root.usd": "/_class_Material",
+                "looks.usd": "/_class_Material"
+            }
+        },
+        "/Model/Looks/Brass": {
+            "Prim Stack": {
+                "root.usd": "/_class_Material",
+                "looks.usd": "/_class_Material"
+            }
+        },
+        "/Specializes_1": {
+            "Prim Stack": {
+                "root.usd": "/Specializes_1"
+            }
+        },
+        "/Specializes_2": {
+            "Prim Stack": {
+                "root.usd": "/Specializes_2"
+            }
+        },
+        "/MultipleSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes_2",
+                "ref.usd": "/Specializes_2"
+            }
+        },
+        "/NonExistentSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/NonExistentSpecializes",
+                "ref.usd": "/NonExistentSpecializes"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/NonExistentSpecializes/Child": {
+            "Prim Stack": {
+                "ref.usd": "/NonExistentSpecializes/Child"
+            }
+        },
+        "/MultipleRefsAndSpecializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes_1",
+                "ref.usd": "/Specializes_1",
+                "ref2.usd": "/Specializes_2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

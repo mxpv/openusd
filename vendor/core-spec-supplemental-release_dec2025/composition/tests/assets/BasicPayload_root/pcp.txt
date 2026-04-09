@@ -1,0 +1,297 @@
+Loading @composition/tests/assets/BasicPayload_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+     sublayer.usd
+
+------------------------------------------------------------------------
+Results for composing </InternalSublayerPayload>
+
+Prim Stack:
+    root.usd             /InternalSublayerPayload
+    sublayer.usd         /InternalSublayerPayload
+
+Child names:
+     ['InternalSublayerPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </InternalSublayerPayload/InternalSublayerPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalSublayerPayload/InternalSublayerPayload_Child
+    sublayer.usd         /InternalSublayerPayload/InternalSublayerPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimInSublayerWithInternalPayload>
+
+Prim Stack:
+    sublayer.usd         /PrimInSublayerWithInternalPayload
+    root.usd             /InternalSublayerPayload
+    sublayer.usd         /InternalSublayerPayload
+
+Child names:
+     ['InternalSublayerPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimInSublayerWithInternalPayload/InternalSublayerPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalSublayerPayload/InternalSublayerPayload_Child
+    sublayer.usd         /InternalSublayerPayload/InternalSublayerPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </SublayerPrim>
+
+Prim Stack:
+    sublayer.usd         /SublayerPrim
+
+------------------------------------------------------------------------
+Results for composing </PrimInSublayerWithInternalPayload2>
+
+Prim Stack:
+    sublayer.usd         /PrimInSublayerWithInternalPayload2
+    sublayer.usd         /SublayerPrim
+
+------------------------------------------------------------------------
+Results for composing </SimplePayload>
+
+Prim Stack:
+    root.usd             /SimplePayload
+    payload.usd          /SimplePayload
+
+Child names:
+     ['Child']
+
+------------------------------------------------------------------------
+Results for composing </SimplePayload/Child>
+
+Prim Stack:
+    payload.usd          /SimplePayload/Child
+
+------------------------------------------------------------------------
+Results for composing </SimpleSubrootPayload>
+
+Prim Stack:
+    root.usd             /SimpleSubrootPayload
+    payload.usd          /SimplePayload/Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloads>
+
+Prim Stack:
+    root.usd             /PrimWithPayloads
+    payload.usd          /SimplePayload
+    ref.usd              /PayloadPrimA
+    ref2.usd             /PrimC
+    ref2.usd             /PrimB
+
+Child names:
+     ['PrimB_Child', 'PrimC_Child', 'PrimA_Child', 'Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloads/PrimB_Child>
+
+Prim Stack:
+    ref2.usd             /PrimB/PrimB_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloads/PrimC_Child>
+
+Prim Stack:
+    ref2.usd             /PrimC/PrimC_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloads/PrimA_Child>
+
+Prim Stack:
+    ref.usd              /PayloadPrimA/PrimA_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloads/Child>
+
+Prim Stack:
+    payload.usd          /SimplePayload/Child
+
+------------------------------------------------------------------------
+Results for composing </PrimB>
+
+Prim Stack:
+    root.usd             /PrimB
+
+Child names:
+     ['PrimB_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimB/PrimB_Child>
+
+Prim Stack:
+    root.usd             /PrimB/PrimB_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithSelfPayload>
+
+Prim Stack:
+    root.usd             /PrimWithSelfPayload
+    root.usd             /InternalPayload
+    sublayer.usd         /InternalSublayerPayload
+
+Child names:
+     ['InternalSublayerPayload_Child', 'InternalPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithSelfPayload/InternalSublayerPayload_Child>
+
+Prim Stack:
+    sublayer.usd         /InternalSublayerPayload/InternalSublayerPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithSelfPayload/InternalPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalPayload/InternalPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithInternalPayload>
+
+Prim Stack:
+    root.usd             /PrimWithInternalPayload
+    root.usd             /InternalPayload
+
+Child names:
+     ['InternalPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithInternalPayload/InternalPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalPayload/InternalPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </InternalPayload>
+
+Prim Stack:
+    root.usd             /InternalPayload
+
+Child names:
+     ['InternalPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </InternalPayload/InternalPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalPayload/InternalPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithDefaultPayloadTarget>
+
+Prim Stack:
+    root.usd             /PrimWithDefaultPayloadTarget
+    defaultRef.usd       /Default
+
+Child names:
+     ['Default_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithDefaultPayloadTarget/Default_Child>
+
+Prim Stack:
+    defaultRef.usd       /Default/Default_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithDefaultPayloadTarget2>
+
+Prim Stack:
+    root.usd             /PrimWithDefaultPayloadTarget2
+    root.usd             /InternalPayload
+
+Child names:
+     ['InternalPayload_Child']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithDefaultPayloadTarget2/InternalPayload_Child>
+
+Prim Stack:
+    root.usd             /InternalPayload/InternalPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PayloadPrimWithSubrootInReference>
+
+Prim Stack:
+    root.usd             /PayloadPrimWithSubrootInReference
+    ref.usd              /RefPrimA/PrimA_Child
+    ref2.usd             /PrimC/PrimC_Child
+
+------------------------------------------------------------------------
+Results for composing </RefPrimWithSubrootInReference>
+
+Prim Stack:
+    root.usd             /RefPrimWithSubrootInReference
+    ref.usd              /RefPrimA/PrimA_Child
+    ref2.usd             /PrimC/PrimC_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithInternalSubrootPayload>
+
+Prim Stack:
+    root.usd             /PrimWithInternalSubrootPayload
+    root.usd             /InternalPayload/InternalPayload_Child
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloadsInVariants>
+
+Prim Stack:
+    root.usd             /PrimWithPayloadsInVariants
+    root.usd             /PrimWithPayloadsInVariants{v=ref}
+
+Variant Selections:
+    {v = ref}
+
+Child names:
+     ['Ref', 'A', 'B']
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloadsInVariants/Ref>
+
+Prim Stack:
+    root.usd             /PrimWithPayloadsInVariants{v=ref}Ref
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloadsInVariants/A>
+
+Prim Stack:
+    root.usd             /PrimWithPayloadsInVariants{v=ref}A
+    root.usd             /PrimWithPayloadsInVariants{v=ref}Ref
+
+------------------------------------------------------------------------
+Results for composing </PrimWithPayloadsInVariants/B>
+
+Prim Stack:
+    root.usd             /PrimWithPayloadsInVariants/B
+    root.usd             /PrimWithPayloadsInVariants{v=ref}Ref
+
+------------------------------------------------------------------------
+Results for composing </PayloadPrimWithSubrootInPayload>
+
+Prim Stack:
+    root.usd             /PayloadPrimWithSubrootInPayload
+    ref.usd              /PayloadPrimA/PrimA_Child
+    ref2.usd             /PrimC/PrimC_Child
+
+------------------------------------------------------------------------
+Results for composing </RefPrimWithSubrootInPayload>
+
+Prim Stack:
+    root.usd             /RefPrimWithSubrootInPayload
+    ref.usd              /PayloadPrimA/PrimA_Child
+    ref2.usd             /PrimC/PrimC_Child
+
+
+--------------------------------------------------------------------------------
+Warning: in SdfPath at line 129 of \pxr\usd\sdf\path.cpp -- Ill-formed SdfPath <>: :1:1: parse error matching struct pxrInternal_v0_25_8__pxrReserved__::Sdf_PathParser::Path
+------------------------------------------------------------------------
+Errors while composing </PrimWithInternalPayload>
+
+Unresolved payload prim path @composition/tests/assets/BasicPayload_root/usda/root.usd@</InternalPayload2> introduced by @composition/tests/assets/BasicPayload_root/usda/root.usd@</PrimWithInternalPayload>
+
+ERROR: Unexpected error(s) encountered during test!

@@ -1,0 +1,7 @@
+{
+    "Entry": "root.usd",
+    "Composing": {},
+    "Errors": [
+        "\n\tError in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file C:/sources/nvidia-usd/usd-ci/USD/pxr/usd/sdf/textParserHelpers.h : 'Reference paths cannot contain variant selections at '@./group.usd@</Group{v=x}Model>' in </InvalidSubrootRefWithVariantSelection>\n'\n\tError in 'pxrInternal_v0_25_8__pxrReserved__::Sdf_TextFileFormatParser::_RaiseErrorPEGTL' at line 48 in file C:/sources/nvidia-usd/usd-ci/USD/pxr/usd/sdf/textParserHelpers.h : 'C:\\sources\\core-spec-supplemental\\composition\\tests\\assets\\SubrootReferenceAndVariants_root\\usda\\root.usd:36:18: Reference paths cannot contain variant selections at '@./group.usd@</Group{v=x}Model>' in </InvalidSubrootRefWithVariantSelection>\n'"
+    ]
+}

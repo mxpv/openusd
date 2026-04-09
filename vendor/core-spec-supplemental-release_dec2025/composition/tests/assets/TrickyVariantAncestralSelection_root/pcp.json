@@ -1,0 +1,74 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/_class_A1": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/_class_A1/B": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/_class_A1/B/C": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1/B/C"
+            }
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1",
+                "ref.usd": "/_class_A1",
+                "ref2.usd": "/A"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/Root/B": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1/B",
+                "ref.usd": "/A1/B",
+                "ref2.usd": "/A/B"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/Root/B/C": {
+            "Prim Stack": {
+                "root.usd": "/_class_A1/B/C",
+                "ref.usd": "/A1/B/C",
+                "ref2.usd": "/A/B/C{v2=Z}"
+            },
+            "Variant Selections": {
+                "v1": "C",
+                "v2": "Z"
+            },
+            "Child names": [
+                "v2_Z",
+                "v1_C"
+            ]
+        },
+        "/Root/B/C/v2_Z": {
+            "Prim Stack": {
+                "ref2.usd": "/C{v2=Z}v2_Z"
+            }
+        },
+        "/Root/B/C/v1_C": {
+            "Prim Stack": {
+                "ref2.usd": "/C{v1=C}v1_C"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

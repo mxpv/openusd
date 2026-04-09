@@ -1,0 +1,26 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/A1": {
+            "Prim Stack": {
+                "root.usd": "/A1",
+                "model.usd": "/A"
+            },
+            "Child names": [
+                "B"
+            ]
+        },
+        "/A1/B": {
+            "Prim Stack": {
+                "root.usd": "/A1/B",
+                "model.usd": "/A/B{v=v2}"
+            },
+            "Variant Selections": {
+                "v": "v2"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

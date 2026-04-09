@@ -1,0 +1,113 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Rig"
+            },
+            "Child names": [
+                "B",
+                "Class",
+                "Other"
+            ]
+        },
+        "/Rig/B": {
+            "Prim Stack": {}
+        },
+        "/Rig/Class": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class"
+            },
+            "Child names": [
+                "A",
+                "B"
+            ]
+        },
+        "/Rig/Class/A": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class/A"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/Rig/Class/A.foo": {
+                    "root.usd": "/Rig/Class/A.foo"
+                }
+            }
+        },
+        "/Rig/Class/B": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class/B"
+            },
+            "Property names": [
+                "bar"
+            ],
+            "Property stacks": {
+                "/Rig/Class/B.bar": {
+                    "root.usd": "/Rig/Class/B.bar"
+                }
+            }
+        },
+        "/Rig/Other": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Other"
+            },
+            "Child names": [
+                "A"
+            ]
+        },
+        "/Rig/Other/A": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Other/A"
+            },
+            "Child names": [
+                "Instance"
+            ],
+            "Prohibited child names": [
+                "B"
+            ]
+        },
+        "/Rig/Other/A/Instance": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class"
+            },
+            "Child names": [
+                "A",
+                "B"
+            ]
+        },
+        "/Rig/Other/A/Instance/A": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class/A"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/Rig/Other/A/Instance/A.foo": {
+                    "root.usd": "/Rig/Class/A.foo"
+                }
+            }
+        },
+        "/Rig/Other/A/Instance/B": {
+            "Prim Stack": {
+                "root.usd": "/Rig/Class/B"
+            },
+            "Property names": [
+                "bar"
+            ],
+            "Property stacks": {
+                "/Rig/Other/A/Instance/B.bar": {
+                    "root.usd": "/Rig/Class/B.bar"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while computing Layer Stack\nRelocation from </Rig/Other/A/Instance/A> to </Rig/Other/A> authored at @composition/tests/assets/bug92827_root/usda/root.usd@</> is invalid and will be ignored: The target of a relocate cannot be an ancestor of its source. ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

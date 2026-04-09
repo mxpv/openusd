@@ -1,0 +1,54 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Class",
+                "mcat.usd": "/Model{pin=latest}",
+                "model_latest.usd": "/Model{standin=render}",
+                "model_latest_payload.usd": "/Model"
+            },
+            "Variant Selections": {
+                "pin": "latest",
+                "standin": "render"
+            },
+            "Child names": [
+                "Rig"
+            ],
+            "Property names": [
+                "standin_name",
+                "a"
+            ],
+            "Property stacks": {
+                "/Model.a": {
+                    "root.usd": "/Class.a",
+                    "model_latest.usd": "/Model.a"
+                },
+                "/Model.standin_name": {
+                    "model_latest.usd": "/Model{standin=render}.standin_name"
+                }
+            }
+        },
+        "/Model/Rig": {
+            "Prim Stack": {
+                "model_latest_payload.usd": "/Model/Rig"
+            }
+        },
+        "/Class": {
+            "Prim Stack": {
+                "root.usd": "/Class"
+            },
+            "Property names": [
+                "a"
+            ],
+            "Property stacks": {
+                "/Class.a": {
+                    "root.usd": "/Class.a"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

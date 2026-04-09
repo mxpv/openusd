@@ -1,0 +1,48 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model_1": {
+            "Prim Stack": {
+                "root.usd": "/Model_1",
+                "model.usd": "/Model"
+            },
+            "Child names": [
+                "LocalClass",
+                "Instance"
+            ]
+        },
+        "/Model_1/LocalClass": {
+            "Prim Stack": {
+                "root.usd": "/Model_1/LocalClass",
+                "model.usd": "/Model/LocalClass"
+            },
+            "Property names": [
+                "attr"
+            ],
+            "Property stacks": {
+                "/Model_1/LocalClass.attr": {
+                    "root.usd": "/Model_1/LocalClass.attr",
+                    "model.usd": "/Model/LocalClass.attr"
+                }
+            }
+        },
+        "/Model_1/Instance": {
+            "Prim Stack": {
+                "root.usd": "/Model_1/LocalClass",
+                "model.usd": "/Model/LocalClass"
+            },
+            "Property names": [
+                "attr"
+            ],
+            "Property stacks": {
+                "/Model_1/Instance.attr": {
+                    "root.usd": "/Model_1/LocalClass.attr",
+                    "model.usd": "/Model/LocalClass.attr"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

@@ -1,0 +1,16 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    subLayers = [
+        @./second.usd@ (offset = 10; scale = 0.5)
+    ]
+)
+
+def Xform "Root" () {
+
+    int root.timeSamples = {
+        -10:100,
+        0:200,
+        15:300
+    }
+}

@@ -1,0 +1,680 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/Root",
+                "A.usd": "/Model",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/Root",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/Root/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/Root/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model/Anim",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/Root/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/Root/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model/Frame",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/RefPayload": {
+            "Prim Stack": {
+                "root.usd": "/RefPayload",
+                "ref_sub.usd": "/Ref",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/RefPayload",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model",
+                    "type": "payload",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/RefPayload/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/RefPayload/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref/Anim",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Anim",
+                    "type": "payload",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/RefPayload/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/RefPayload/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref/Frame",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Frame",
+                    "type": "payload",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/MultiRef": {
+            "Prim Stack": {
+                "root.usd": "/MultiRef",
+                "ref_sub.usd": "/Ref2",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/MultiRef",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model",
+                    "type": "reference",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/MultiRef/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/MultiRef/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2/Anim",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Anim",
+                    "type": "reference",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/MultiRef/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/MultiRef/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2/Frame",
+                    "type": "reference",
+                    "offset": "10.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Frame",
+                    "type": "reference",
+                    "offset": "30.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/PayloadRoot": {
+            "Prim Stack": {
+                "root.usd": "/PayloadRoot",
+                "A.usd": "/Model",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRoot",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/PayloadRoot/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRoot/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model/Anim",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/PayloadRoot/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRoot/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "B.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "A.usd",
+                    "prim": "/Model/Frame",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/PayloadRefPayload": {
+            "Prim Stack": {
+                "root.usd": "/PayloadRefPayload",
+                "ref_sub.usd": "/Ref",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRefPayload",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model",
+                    "type": "payload",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/PayloadRefPayload/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRefPayload/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref/Anim",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Anim",
+                    "type": "payload",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/PayloadRefPayload/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadRefPayload/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref/Frame",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Frame",
+                    "type": "payload",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/PayloadMultiRef": {
+            "Prim Stack": {
+                "root.usd": "/PayloadMultiRef",
+                "ref_sub.usd": "/Ref2",
+                "B.usd": "/Model"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadMultiRef",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model",
+                    "type": "reference",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ],
+            "Child names": [
+                "Anim",
+                "Frame"
+            ]
+        },
+        "/PayloadMultiRef/Anim": {
+            "Prim Stack": {
+                "B.usd": "/Model/Anim"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadMultiRef/Anim",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2/Anim",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Anim",
+                    "type": "reference",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ]
+        },
+        "/PayloadMultiRef/Frame": {
+            "Prim Stack": {
+                "B.usd": "/Model/Frame"
+            },
+            "Time Offsets": [
+                {
+                    "children": [],
+                    "layer": "root.usd",
+                    "prim": "/PayloadMultiRef/Frame",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_sub.usd",
+                            "type": "sublayer",
+                            "offset": "20.00",
+                            "scale": "1.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref2/Frame",
+                    "type": "payload",
+                    "offset": "10.00",
+                    "scale": "2.00"
+                },
+                {
+                    "children": [],
+                    "layer": "B.usd",
+                    "prim": "/Model/Frame",
+                    "type": "reference",
+                    "offset": "50.00",
+                    "scale": "2.00"
+                }
+            ]
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

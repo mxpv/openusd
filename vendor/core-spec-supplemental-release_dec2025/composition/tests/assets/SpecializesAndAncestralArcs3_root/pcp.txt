@@ -1,0 +1,93 @@
+Loading @composition/tests/assets/SpecializesAndAncestralArcs3_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    ref.usd              /RefRoot
+
+Child names:
+     ['Child', 'SpecializesChild', 'InheritsChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/Child>
+
+Prim Stack:
+    ref.usd              /RefRoot/Child
+
+Child names:
+     ['GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/Child/GrandChild>
+
+Prim Stack:
+    ref.usd              /RefRoot/Child/GrandChild
+    ref2.usd             /Ref2Root/Ref2Child
+
+Child names:
+     ['Ref2GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/Child/GrandChild/Ref2GrandChild>
+
+Prim Stack:
+    ref2.usd             /Ref2Root/Ref2Child/Ref2GrandChild
+
+------------------------------------------------------------------------
+Results for composing </Root/SpecializesChild>
+
+Prim Stack:
+    ref.usd              /RefRoot/SpecializesChild
+    ref.usd              /RefRoot/Child
+
+Child names:
+     ['GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/SpecializesChild/GrandChild>
+
+Prim Stack:
+    ref.usd              /RefRoot/Child/GrandChild
+    ref2.usd             /Ref2Root/Ref2Child
+
+Child names:
+     ['Ref2GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/SpecializesChild/GrandChild/Ref2GrandChild>
+
+Prim Stack:
+    ref2.usd             /Ref2Root/Ref2Child/Ref2GrandChild
+
+------------------------------------------------------------------------
+Results for composing </Root/InheritsChild>
+
+Prim Stack:
+    ref.usd              /RefRoot/InheritsChild
+    ref.usd              /RefRoot/Child
+
+Child names:
+     ['GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/InheritsChild/GrandChild>
+
+Prim Stack:
+    ref.usd              /RefRoot/Child/GrandChild
+    ref2.usd             /Ref2Root/Ref2Child
+
+Child names:
+     ['Ref2GrandChild']
+
+------------------------------------------------------------------------
+Results for composing </Root/InheritsChild/GrandChild/Ref2GrandChild>
+
+Prim Stack:
+    ref2.usd             /Ref2Root/Ref2Child/Ref2GrandChild
+

@@ -1,0 +1,95 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model_1": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model",
+                "model.usd": "/_class_Model"
+            },
+            "Child names": [
+                "Rig",
+                "Anim"
+            ]
+        },
+        "/Model_1/Rig": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Rig",
+                "model.usd": "/_class_Model/Rig",
+                "rig.usd": "/Rig"
+            },
+            "Child names": [
+                "SymRig"
+            ],
+            "Prohibited child names": [
+                "LRig"
+            ]
+        },
+        "/Model_1/Rig/SymRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Rig/SymRig",
+                "model.usd": "/_class_Model/Rig/SymRig",
+                "rig.usd": "/Rig/SymRig"
+            }
+        },
+        "/Model_1/Anim": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Anim",
+                "model.usd": "/_class_Model/Anim"
+            },
+            "Child names": [
+                "LAnim"
+            ]
+        },
+        "/Model_1/Anim/LAnim": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Anim/LAnim",
+                "model.usd": "/_class_Model/Rig/LRig",
+                "rig.usd": "/Rig/SymRig"
+            }
+        },
+        "/_class_Model": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model"
+            },
+            "Child names": [
+                "Rig",
+                "Anim"
+            ]
+        },
+        "/_class_Model/Rig": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Rig"
+            },
+            "Child names": [
+                "SymRig",
+                "LRig"
+            ]
+        },
+        "/_class_Model/Rig/SymRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Rig/SymRig"
+            }
+        },
+        "/_class_Model/Rig/LRig": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Rig/LRig"
+            }
+        },
+        "/_class_Model/Anim": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Anim"
+            },
+            "Child names": [
+                "LAnim"
+            ]
+        },
+        "/_class_Model/Anim/LAnim": {
+            "Prim Stack": {
+                "root.usd": "/_class_Model/Anim/LAnim"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

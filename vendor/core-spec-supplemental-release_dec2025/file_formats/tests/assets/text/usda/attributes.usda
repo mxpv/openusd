@@ -1,0 +1,54 @@
+#usda 1.0
+
+def PrimType "foo" {
+    custom      string  x:y:z
+    int /* this is a separating comment for padding*/        a:b
+    float bar
+    custom double3d[] baz 
+
+    point3d[] foo:bar:baz:a:b:c:d       =  [(1.0, 2.0, 3.0), (-4.0, -.67, 0.999999)]
+
+    uniform string _with_some_metadata  = """A 
+    multiline string."""(
+        foo = "bar"
+        prepend this_metadata_value = [5.67]
+        _custom_dictionary_data = {
+            int       myKey = 8
+        }
+    )
+
+    float a:blocked_attribute                    =                       None
+
+    # connect attributes
+    custom uniform           vector3f    my:attribute .      connect = None
+
+    int path:connection.connect = </a/conn/path>
+
+
+    color4f anotherConnection_.connect = [
+        <../this_path>, 
+        </another/path>
+    ]
+
+    delete      color4f anotherConnection_.connect = None
+
+    # time samples
+    custom uniform vector3f my:attribute.timeSamples = {
+        3 : 5.67,
+        6.78 : None,
+        3567.234: -7,
+        -0.4312: None
+    }
+
+
+    custom uniform vector3f my:attribute        .       timeSamples = {
+        3 : 5.67,
+        6.78:None,
+                        3567.234: -7,
+        -0.4312: 0.99e5
+    }
+
+    string preKeywordAtBeginningOfIdentifier = ""
+    int keywordcustomInTheMiddleOfdefIdentifier
+    float keywordAtEndOfIdentifierdefault = -.43 
+}

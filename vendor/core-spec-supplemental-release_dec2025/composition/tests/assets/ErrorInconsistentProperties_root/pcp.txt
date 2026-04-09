@@ -1,0 +1,58 @@
+Loading @composition/tests/assets/ErrorInconsistentProperties_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </InconsistentPropertyType>
+
+Prim Stack:
+    root.usd             /InconsistentPropertyType
+    ref.usd              /InconsistentPropType
+
+Property names:
+     ['x']
+
+Property stacks:
+/InconsistentPropertyType.x:
+    root.usd             /InconsistentPropertyType.x
+
+------------------------------------------------------------------------
+Results for composing </InconsistentValueType>
+
+Prim Stack:
+    root.usd             /InconsistentValueType
+    ref.usd              /InconsistentValType
+
+Property names:
+     ['x']
+
+Property stacks:
+/InconsistentValueType.x:
+    root.usd             /InconsistentValueType.x
+    ref.usd              /InconsistentValType.x
+
+------------------------------------------------------------------------
+Results for composing </InconsistentVariability>
+
+Prim Stack:
+    root.usd             /InconsistentVariability
+    ref.usd              /InconsistentVar
+
+Property names:
+     ['x']
+
+Property stacks:
+/InconsistentVariability.x:
+    root.usd             /InconsistentVariability.x
+    ref.usd              /InconsistentVar.x
+
+
+------------------------------------------------------------------------
+Errors while composing </InconsistentPropertyType>
+
+The property </InconsistentPropertyType.x> has inconsistent spec types.  The defining spec is @composition/tests/assets/ErrorInconsistentProperties_root/usda/root.usd@</InconsistentPropertyType.x> and is an attribute spec.  The conflicting spec is @composition/tests/assets/ErrorInconsistentProperties_root/usda/ref.usd@</InconsistentPropType.x> and is a relationship spec.  The conflicting spec will be ignored.
+The property </InconsistentPropertyType.x> has inconsistent spec types.  The defining spec is @composition/tests/assets/ErrorInconsistentProperties_root/usda/root.usd@</InconsistentPropertyType.x> and is an attribute spec.  The conflicting spec is @composition/tests/assets/ErrorInconsistentProperties_root/usda/ref.usd@</InconsistentPropType.x> and is a relationship spec.  The conflicting spec will be ignored.
+
+ERROR: Unexpected error(s) encountered during test!

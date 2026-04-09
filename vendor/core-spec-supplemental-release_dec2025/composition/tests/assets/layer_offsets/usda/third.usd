@@ -1,0 +1,13 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def Xform "Root" () {
+
+    int third.timeSamples = {
+        -10:100,
+        0:200,
+        15:300
+    }
+}

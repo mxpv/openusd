@@ -1,0 +1,96 @@
+Loading @composition/tests/assets/BasicInstancingAndVariants_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </InstancedModel>
+
+Prim Stack:
+    root.usd             /InstancedModel
+    root.usd             /InstancedModel{x=a}
+    ref.usd              /Model
+    ref.usd              /Model{y=a}
+
+Variant Selections:
+    {x = a}
+    {y = a}
+
+Child names:
+     ['geom', 'from_a_variant']
+
+Property names:
+     ['x']
+
+Property stacks:
+/InstancedModel.x:
+    root.usd             /InstancedModel{x=a}.x
+    ref.usd              /Model.x
+
+------------------------------------------------------------------------
+Results for composing </InstancedModel/geom>
+
+Prim Stack:
+    root.usd             /InstancedModel{x=a}geom
+    ref.usd              /Model{y=a}geom
+
+Property names:
+     ['x']
+
+Property stacks:
+/InstancedModel/geom.x:
+    root.usd             /InstancedModel{x=a}geom.x
+    ref.usd              /Model{y=a}geom.x
+
+------------------------------------------------------------------------
+Results for composing </InstancedModel/from_a_variant>
+
+Prim Stack:
+    root.usd             /InstancedModel{x=a}from_a_variant
+
+------------------------------------------------------------------------
+Results for composing </UninstancedModel>
+
+Prim Stack:
+    root.usd             /UninstancedModel
+    root.usd             /UninstancedModel{x=b}
+    ref.usd              /Model
+    ref.usd              /Model{y=b}
+
+Variant Selections:
+    {x = b}
+    {y = b}
+
+Child names:
+     ['geom', 'from_b_variant']
+
+Property names:
+     ['x']
+
+Property stacks:
+/UninstancedModel.x:
+    root.usd             /UninstancedModel{x=b}.x
+    ref.usd              /Model.x
+
+------------------------------------------------------------------------
+Results for composing </UninstancedModel/geom>
+
+Prim Stack:
+    root.usd             /UninstancedModel{x=b}geom
+    ref.usd              /Model{y=b}geom
+
+Property names:
+     ['x']
+
+Property stacks:
+/UninstancedModel/geom.x:
+    root.usd             /UninstancedModel{x=b}geom.x
+    ref.usd              /Model{y=b}geom.x
+
+------------------------------------------------------------------------
+Results for composing </UninstancedModel/from_b_variant>
+
+Prim Stack:
+    root.usd             /UninstancedModel{x=b}from_b_variant
+

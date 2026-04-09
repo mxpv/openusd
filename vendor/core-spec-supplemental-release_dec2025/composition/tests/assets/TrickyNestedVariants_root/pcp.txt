@@ -1,0 +1,55 @@
+Loading @composition/tests/assets/TrickyNestedVariants_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </A>
+
+Prim Stack:
+    root.usd             /A
+    root.usd             /A{v1=x}
+    ref.usd              /RAx
+
+Variant Selections:
+    {v1 = x}
+
+Child names:
+     ['B']
+
+------------------------------------------------------------------------
+Results for composing </A/B>
+
+Prim Stack:
+    root.usd             /A/B
+    root.usd             /A{v1=x}B
+    root.usd             /A{v1=x}B{v2=y}
+    ref.usd              /RBxy
+    ref.usd              /RAx/B
+    ref.usd              /RB
+
+Variant Selections:
+    {v2 = y}
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </A/B/C>
+
+Prim Stack:
+    root.usd             /A/B/C
+    root.usd             /A{v1=x}B/C
+    root.usd             /A{v1=x}B{v2=y}C
+    root.usd             /A{v1=x}B{v2=y}C{v3=z}
+    ref.usd              /RCxyz
+    ref.usd              /RBxy/C
+    ref.usd              /RCx
+    ref.usd              /RAx/B/C
+    ref.usd              /RC
+    ref.usd              /RB/C
+
+Variant Selections:
+    {v3 = z}
+

@@ -1,0 +1,79 @@
+{
+    "/": {
+        "primChildren": ["foo"]
+    },
+    "/foo": {
+        "specifier": "def",
+        "typeName": "PrimType",
+        "propertyChildren": ["x:y:z", "a:b", "bar", "baz", "foo:bar:baz:a:b:c:d", "_with_some_metadata", "a:blocked_attribute", "preKeywordAtBeginningOfIdentifier", "keywordcustomInTheMiddleOfdefIdentifier", "keywordAtEndOfIdentifierdefault", "my:attribute", "path:connection", "anotherConnection_"]
+    },
+    "/foo.x:y:z": {
+        "custom": true,
+        "typeName": "string"
+    },
+    "/foo.a:b": {
+        "typeName": "int"
+    },
+    "/foo.bar": {
+        "typeName": "float"
+    },
+    "/foo.baz": {
+        "custom": true,
+        "typeName": "double3d[]"
+    },
+    "/foo.foo:bar:baz:a:b:c:d": {
+        "typeName": "point3d[]",
+        "default": [[1.0, 2.0, 3.0], [-4.0, -0.67, 0.999999]]
+    },
+    "/foo._with_some_metadata": {
+        "variability": "uniform",
+        "typeName": "string",
+        "default": "A \n    multiline string.",
+        "foo": "bar",
+        "_custom_dictionary_data": {
+            "myKey": 8
+        },
+        "this_metadata_value": {
+            "prepend": [5.67]
+        }
+    },
+    "/foo.a:blocked_attribute": {
+        "typeName": "float",
+        "default": null
+    },
+    "/foo.my:attribute": {
+        "typeName": "vector3f",
+        "custom": true,
+        "variability": "uniform",
+        "connectionPaths": {
+        },
+        "timeSamples": {
+            "3" : 5.67,
+            "6.78" : null,
+            "3567.234": -7,
+            "-0.4312": 0.99e5
+        }
+    },
+    "/foo.path:connection": {
+        "typeName": "int",
+        "connectionPaths": {
+            "explicit": ["/a/conn/path"]
+        }
+    },
+    "/foo.anotherConnection_": {
+        "typeName": "color4f",
+        "connectionPaths": {
+        }
+    },
+    "/foo.preKeywordAtBeginningOfIdentifier": {
+        "typeName": "string",
+        "default": ""
+    },
+    "/foo.keywordcustomInTheMiddleOfdefIdentifier": {
+        "typeName": "int"
+    },
+    "/foo.keywordAtEndOfIdentifierdefault": {
+        "typeName": "float",
+        "default": -0.43
+    }
+}

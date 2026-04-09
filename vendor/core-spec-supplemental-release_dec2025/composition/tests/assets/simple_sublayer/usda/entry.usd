@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    upAxis="Y"
+    metersPerUnit=0.1
+    defaultPrim="Root"
+    subLayers = [@./second_layer.usd@]
+)
+
+class "RootBaseClass" () {
+    int fromRootBaseClass = 12
+    string name = "RootFromBaseClass"
+    def Xform "FirstChild" () {
+        int fromFirstChild:RootBaseClass = 12
+    }
+
+    def Xform "InheritedChild" () {
+
+    }
+}
+
+def Xform "Root" (
+    prepend inherits = </RootBaseClass>
+    prepend references = @./ref_source.usd@
+) {
+    string name = "Root"
+    def Xform "FirstChild" () {
+        int fromFirstChild = 0
+    }
+}
+
+def Xform "WithVariants" (
+    variants = {
+        string Color = "blue"
+        string Height = "short"
+    }
+    prepend variantSets = ["Color", "Height"]
+) {
+
+    variantSet "Color" = {
+        "blue" {
+            int blue = 1
+            int red = 0
+        }
+
+        "red" {
+            int red = 1
+            int blue = 0
+        }
+    }
+
+    variantSet "Height" = {
+        "tall" {
+            def Xform "Tall" () {
+
+            }
+        }
+
+        "short" {
+            def Xform "Short" () {
+
+            }
+        }
+    }
+
+}
+
+def Xform "Sleeping" (
+    active = false
+) {
+    def Xform "SleepingChild" () {
+
+    }
+}

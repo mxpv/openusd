@@ -1,0 +1,22 @@
+#usda 1.0.234
+
+(
+    subLayers = [
+        @foo.usda@,
+        @bar.usda@ (
+            offset = 4.5
+        ),@baz.usda@ (
+            offset = 2.4;
+            scale = 6
+            offset = 1.2
+        )
+    ]
+            """My multiline
+comment"""
+
+doc = '''This is some \' documentation.'''
+
+
+foo = bar
+baz = None
+)

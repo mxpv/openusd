@@ -1,0 +1,192 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/GroupRoot": {
+            "Prim Stack": {
+                "root.usd": "/GroupRoot",
+                "A.usd": "/GroupA",
+                "B.usd": "/GroupB"
+            },
+            "Child names": [
+                "ChildA"
+            ],
+            "Property names": [
+                "B_attr",
+                "A_attr"
+            ],
+            "Property stacks": {
+                "/GroupRoot.A_attr": {
+                    "A.usd": "/GroupA.A_attr"
+                },
+                "/GroupRoot.B_attr": {
+                    "B.usd": "/GroupB.B_attr"
+                }
+            }
+        },
+        "/GroupRoot/ChildA": {
+            "Prim Stack": {
+                "A.usd": "/GroupA/ChildA"
+            },
+            "Property names": [
+                "A_attr"
+            ],
+            "Property stacks": {
+                "/GroupRoot/ChildA.A_attr": {
+                    "A.usd": "/GroupA/ChildA.A_attr"
+                }
+            }
+        },
+        "/Parent": {
+            "Prim Stack": {
+                "root.usd": "/Parent"
+            },
+            "Child names": [
+                "Child1",
+                "Child2"
+            ]
+        },
+        "/Parent/Child1": {
+            "Prim Stack": {
+                "root.usd": "/Parent/Child2"
+            }
+        },
+        "/Parent/Child2": {
+            "Prim Stack": {
+                "root.usd": "/Parent/Child1"
+            }
+        },
+        "/AnotherParent": {
+            "Prim Stack": {
+                "root.usd": "/AnotherParent"
+            },
+            "Child names": [
+                "AnotherChild"
+            ]
+        },
+        "/AnotherParent/AnotherChild": {
+            "Prim Stack": {
+                "root.usd": "/AnotherParent/AnotherChild",
+                "model.usd": "/Model"
+            }
+        },
+        "/YetAnotherParent": {
+            "Prim Stack": {
+                "root.usd": "/YetAnotherParent"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/YetAnotherParent/Child": {
+            "Prim Stack": {
+                "root.usd": "/YetAnotherParent/Child"
+            }
+        },
+        "/CoRecursiveParent1": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent1"
+            },
+            "Child names": [
+                "Child1"
+            ]
+        },
+        "/CoRecursiveParent1/Child1": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent2"
+            },
+            "Child names": [
+                "Child2"
+            ]
+        },
+        "/CoRecursiveParent1/Child1/Child2": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent2/Child2"
+            }
+        },
+        "/CoRecursiveParent2": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent2"
+            },
+            "Child names": [
+                "Child2"
+            ]
+        },
+        "/CoRecursiveParent2/Child2": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent1"
+            },
+            "Child names": [
+                "Child1"
+            ]
+        },
+        "/CoRecursiveParent2/Child2/Child1": {
+            "Prim Stack": {
+                "root.usd": "/CoRecursiveParent1/Child1"
+            }
+        },
+        "/InheritOfChild": {
+            "Prim Stack": {
+                "root.usd": "/InheritOfChild"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/InheritOfChild/Child": {
+            "Prim Stack": {
+                "root.usd": "/InheritOfChild/Child"
+            }
+        },
+        "/RelocatedInheritOfChild": {
+            "Prim Stack": {
+                "root.usd": "/RelocatedInheritOfChild"
+            },
+            "Child names": [
+                "Object",
+                "Child"
+            ]
+        },
+        "/RelocatedInheritOfChild/Object": {
+            "Prim Stack": {}
+        },
+        "/RelocatedInheritOfChild/Child": {
+            "Prim Stack": {
+                "root.usd": "/RelocatedInheritOfChild/Child"
+            },
+            "Child names": [
+                "Class"
+            ],
+            "Prohibited child names": [
+                "Object"
+            ]
+        },
+        "/RelocatedInheritOfChild/Child/Class": {
+            "Prim Stack": {
+                "root.usd": "/RelocatedInheritOfChild/Child/Class"
+            },
+            "Child names": [
+                "Object"
+            ]
+        },
+        "/RelocatedInheritOfChild/Child/Class/Object": {
+            "Prim Stack": {
+                "root.usd": "/RelocatedInheritOfChild/Child/Class/Object"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </GroupRoot>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</GroupRoot> references: @composition/tests/assets/ErrorArcCycle_root/usda/A.usd@</GroupA> which references: @composition/tests/assets/ErrorArcCycle_root/usda/B.usd@</GroupB> which CANNOT reference: @composition/tests/assets/ErrorArcCycle_root/usda/A.usd@</GroupA>",
+        "Errors while composing </Parent/Child1>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child1> inherits from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child2> which CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child1>",
+        "Errors while composing </Parent/Child2>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child2> inherits from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child1> which CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</Parent/Child2>",
+        "Errors while composing </AnotherParent/AnotherChild>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</AnotherParent/AnotherChild> references: @composition/tests/assets/ErrorArcCycle_root/usda/model.usd@</Model> which CANNOT reference: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</AnotherParent>",
+        "Errors while composing </YetAnotherParent/Child>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</YetAnotherParent/Child> CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</YetAnotherParent>",
+        "Errors while composing </CoRecursiveParent1/Child1/Child2>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent1/Child1/Child2> inherits from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent2/Child2> which CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent1>",
+        "Errors while composing </CoRecursiveParent2/Child2/Child1>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent2/Child2/Child1> inherits from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent1/Child1> which CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</CoRecursiveParent2>",
+        "Errors while composing </InheritOfChild>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</InheritOfChild> CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</InheritOfChild/Child>",
+        "Errors while composing </RelocatedInheritOfChild/Object>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</RelocatedInheritOfChild/Object> is relocated from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</RelocatedInheritOfChild/Child> which CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</RelocatedInheritOfChild/Child/Class>",
+        "Errors while composing </RelocatedInheritOfChild/Child>\nCycle detected: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</RelocatedInheritOfChild/Child> CANNOT inherit from: @composition/tests/assets/ErrorArcCycle_root/usda/root.usd@</RelocatedInheritOfChild/Child/Class> ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

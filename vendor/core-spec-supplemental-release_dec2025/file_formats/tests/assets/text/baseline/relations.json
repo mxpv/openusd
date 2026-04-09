@@ -1,0 +1,56 @@
+{
+    "/": {
+        "primChildren": ["foo"]
+    },
+    "/foo": {
+        "specifier": "def",
+        "typeName": "MyFoo",
+        "primChildren": ["otherFoo"]
+    },
+    "/foo/otherFoo": {
+        "specifier": "over",
+        "typeName": "MyOtherFoo",
+        "propertyChildren": [
+            "a:b:c:d:e",
+            "foo:bar",
+            "bar:baz:foo",
+            "foo:bar2",
+            "everything:in:one",
+            "foo:bar3"
+        ]
+    },
+    "/foo/otherFoo.a:b:c:d:e": {
+    },
+    "/foo/otherFoo.foo:bar": {
+        "custom": true,
+        "targetPaths": {
+        }
+    },
+    "/foo/otherFoo.bar:baz:foo": {
+    },
+    "/foo/otherFoo.foo:bar2": {
+        "targetPaths": {
+            "append": [
+                "/foo/that/path","/all/of/the/paths"
+            ]
+        }
+    },
+    "/foo/otherFoo.everything:in:one": {
+        "custom": true,
+        "targetPaths": {
+            "prepend": ["/foo/otherFoo.foo:bar3"]
+        },
+        "foo": "bar",
+        "this_metadata_value": {
+            "prepend": [5.67]
+        },
+        "_custom_dictionary_data": {
+            "myKey": 8
+        }
+    },
+    "/foo/otherFoo.foo:bar3": {
+        "targetPaths": {
+            "explicit": ["/one/path/ref/to/rule/them/all"]
+        }
+    }
+}

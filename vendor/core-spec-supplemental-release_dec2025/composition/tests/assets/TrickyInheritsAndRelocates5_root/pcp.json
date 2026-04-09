@@ -1,0 +1,297 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/CharRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig"
+            },
+            "Child names": [
+                "Anim",
+                "Rig"
+            ]
+        },
+        "/CharRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Anim"
+            },
+            "Child names": [
+                "Arms"
+            ]
+        },
+        "/CharRig/Anim/Arms": {
+            "Prim Stack": {
+                "TentaclesRig.usd": "/TentaclesRig/Arms"
+            },
+            "Child names": [
+                "R1Arm"
+            ]
+        },
+        "/CharRig/Anim/Arms/R1Arm": {
+            "Prim Stack": {
+                "TentacleRig.usd": "/TentacleRig/Tentacle"
+            },
+            "Child names": [
+                "Knot03"
+            ]
+        },
+        "/CharRig/Anim/Arms/R1Arm/Knot03": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Anim/Arms/R1Arm/Knot03.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig"
+            },
+            "Child names": [
+                "TentaclesRig"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig",
+                "TentaclesRig.usd": "/TentaclesRig"
+            },
+            "Child names": [
+                "TentacleRigs"
+            ],
+            "Prohibited child names": [
+                "Arms"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs",
+                "TentaclesRig.usd": "/TentaclesRig/TentacleRigs"
+            },
+            "Child names": [
+                "_Class_TentacleRig",
+                "Sym1TentacleRig",
+                "R1TentacleRig"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentaclesRig.usd": "/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentacleRig.usd": "/TentacleRig"
+            },
+            "Child names": [
+                "TentacleInterface",
+                "Tentacle"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface"
+            },
+            "Child names": [
+                "_Class_KnotRig",
+                "Knot03Rig"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/Knot03Rig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle": {
+            "Prim Stack": {
+                "TentacleRig.usd": "/TentacleRig/Tentacle"
+            },
+            "Child names": [
+                "Knot03"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle/Knot03": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/Tentacle/Knot03.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentaclesRig.usd": "/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentacleRig.usd": "/TentacleRig"
+            },
+            "Child names": [
+                "TentacleInterface",
+                "Tentacle"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface"
+            },
+            "Child names": [
+                "_Class_KnotRig",
+                "Knot03Rig"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/TentacleInterface/Knot03Rig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle": {
+            "Prim Stack": {
+                "TentacleRig.usd": "/TentacleRig/Tentacle"
+            },
+            "Child names": [
+                "Knot03"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle/Knot03": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/TentaclesRig/TentacleRigs/Sym1TentacleRig/Tentacle/Knot03.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentaclesRig.usd": "/TentaclesRig/TentacleRigs/_Class_TentacleRig",
+                "TentacleRig.usd": "/TentacleRig"
+            },
+            "Child names": [
+                "TentacleInterface"
+            ],
+            "Prohibited child names": [
+                "Tentacle"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface"
+            },
+            "Child names": [
+                "_Class_KnotRig",
+                "Knot03Rig"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Child names": [
+                "Anim"
+            ]
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig/Anim": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim"
+            },
+            "Property names": [
+                "foo"
+            ],
+            "Property stacks": {
+                "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo": {
+                    "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo",
+                    "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig/Anim.foo"
+                }
+            }
+        },
+        "/CharRig/Rig/TentaclesRig/TentacleRigs/R1TentacleRig/TentacleInterface/Knot03Rig": {
+            "Prim Stack": {
+                "root.usd": "/CharRig/Rig/TentaclesRig/TentacleRigs/_Class_TentacleRig/TentacleInterface/_Class_KnotRig",
+                "TentacleRig.usd": "/TentacleRig/TentacleInterface/_Class_KnotRig"
+            },
+            "Prohibited child names": [
+                "Anim"
+            ]
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

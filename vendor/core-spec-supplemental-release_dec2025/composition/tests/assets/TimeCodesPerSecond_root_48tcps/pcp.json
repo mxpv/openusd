@@ -1,0 +1,1668 @@
+{
+    "Entry": "root_48tcps.usd",
+    "Composing": {
+        "/SS4": {
+            "Prim Stack": {
+                "ss_12fps.usd": "/SS4",
+                "ref.usd": "/Ref",
+                "ref_s.usd": "/Ref",
+                "ref_s_48tcps.usd": "/Ref",
+                "ref_s_24tcps_12fps.usd": "/Ref",
+                "ref_s_12fps.usd": "/Ref",
+                "ref_48tcps.usd": "/Ref",
+                "ref_24tcps_12fps.usd": "/Ref",
+                "ref_12fps.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/SS4",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "210.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "4.00"
+                        }
+                    ],
+                    "layer": "ref_48tcps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "210.00",
+                    "scale": "8.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref_24tcps_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "210.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.25"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "ref_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "210.00",
+                    "scale": "32.00"
+                }
+            ]
+        },
+        "/SS3": {
+            "Prim Stack": {
+                "ss_24tcps_12fps.usd": "/SS3",
+                "ref.usd": "/Ref",
+                "ref_s.usd": "/Ref",
+                "ref_s_48tcps.usd": "/Ref",
+                "ref_s_24tcps_12fps.usd": "/Ref",
+                "ref_s_12fps.usd": "/Ref",
+                "ref_48tcps.usd": "/Ref",
+                "ref_24tcps_12fps.usd": "/Ref",
+                "ref_12fps.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/SS3",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "4.00"
+                        }
+                    ],
+                    "layer": "ref_48tcps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "8.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref_24tcps_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.25"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "ref_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "32.00"
+                }
+            ]
+        },
+        "/SS2": {
+            "Prim Stack": {
+                "ss_48tcps.usd": "/SS2",
+                "ref.usd": "/Ref",
+                "ref_s.usd": "/Ref",
+                "ref_s_48tcps.usd": "/Ref",
+                "ref_s_24tcps_12fps.usd": "/Ref",
+                "ref_s_12fps.usd": "/Ref",
+                "ref_48tcps.usd": "/Ref",
+                "ref_24tcps_12fps.usd": "/Ref",
+                "ref_12fps.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/SS2",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "90.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "4.00"
+                        }
+                    ],
+                    "layer": "ref_48tcps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "90.00",
+                    "scale": "8.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref_24tcps_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "90.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.25"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "ref_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "90.00",
+                    "scale": "32.00"
+                }
+            ]
+        },
+        "/SS1": {
+            "Prim Stack": {
+                "ss.usd": "/SS1",
+                "ref.usd": "/Ref",
+                "ref_s.usd": "/Ref",
+                "ref_s_48tcps.usd": "/Ref",
+                "ref_s_24tcps_12fps.usd": "/Ref",
+                "ref_s_12fps.usd": "/Ref",
+                "ref_48tcps.usd": "/Ref",
+                "ref_24tcps_12fps.usd": "/Ref",
+                "ref_12fps.usd": "/Ref"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/SS1",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "4.00"
+                        }
+                    ],
+                    "layer": "ref_48tcps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "8.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "2.00"
+                        }
+                    ],
+                    "layer": "ref_24tcps_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "16.00"
+                },
+                {
+                    "children": [
+                        {
+                            "layer": "ref_s.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        },
+                        {
+                            "layer": "ref_s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.25"
+                        },
+                        {
+                            "layer": "ref_s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "0.00",
+                            "scale": "0.50"
+                        }
+                    ],
+                    "layer": "ref_12fps.usd",
+                    "prim": "/Ref",
+                    "type": "reference",
+                    "offset": "130.00",
+                    "scale": "32.00"
+                }
+            ]
+        },
+        "/S4": {
+            "Prim Stack": {
+                "s_12fps.usd": "/S4"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/S4",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/S3": {
+            "Prim Stack": {
+                "s_24tcps_12fps.usd": "/S3"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/S3",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/S2": {
+            "Prim Stack": {
+                "s_48tcps.usd": "/S2"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/S2",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/S1": {
+            "Prim Stack": {
+                "s.usd": "/S1"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/S1",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        },
+        "/Root": {
+            "Prim Stack": {
+                "root_48tcps.usd": "/Root"
+            },
+            "Time Offsets": [
+                {
+                    "children": [
+                        {
+                            "layer": "s.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "2.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "30.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "50.00",
+                            "scale": "16.00"
+                        },
+                        {
+                            "layer": "s_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "10.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_48tcps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "4.00"
+                        },
+                        {
+                            "layer": "ss_24tcps_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "8.00"
+                        },
+                        {
+                            "layer": "ss_12fps.usd",
+                            "type": "sublayer",
+                            "offset": "90.00",
+                            "scale": "16.00"
+                        }
+                    ],
+                    "layer": "root_48tcps.usd",
+                    "prim": "/Root",
+                    "type": "root",
+                    "offset": "0.00",
+                    "scale": "1.00"
+                }
+            ]
+        }
+    },
+    "Layer Stack": [
+        "root_48tcps.usd",
+        "s.usd",
+        "ss.usd",
+        "ss_48tcps.usd",
+        "ss_24tcps_12fps.usd",
+        "ss_12fps.usd",
+        "s_48tcps.usd",
+        "ss.usd",
+        "ss_48tcps.usd",
+        "ss_24tcps_12fps.usd",
+        "ss_12fps.usd",
+        "s_24tcps_12fps.usd",
+        "ss.usd",
+        "ss_48tcps.usd",
+        "ss_24tcps_12fps.usd",
+        "ss_12fps.usd",
+        "s_12fps.usd",
+        "ss.usd",
+        "ss_48tcps.usd",
+        "ss_24tcps_12fps.usd",
+        "ss_12fps.usd"
+    ]
+}

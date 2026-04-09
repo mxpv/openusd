@@ -1,0 +1,343 @@
+Loading @composition/tests/assets/ImpliedAndAncestralInherits_ComplexEvaluation_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    root.usd             /_X
+
+Child names:
+     ['_Y', 'B']
+
+------------------------------------------------------------------------
+Results for composing </Root/_Y>
+
+Prim Stack:
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </Root/_Y/C>
+
+Prim Stack:
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </Root/_Y/C/_Z>
+
+Prim Stack:
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/Root/_Y/C/_Z.prop:
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </Root/_Y/C/D>
+
+Prim Stack:
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/Root/_Y/C/D.prop:
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </Root/B>
+
+Prim Stack:
+    root.usd             /Root/B
+    root.usd             /_X/B
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </Root/B/C>
+
+Prim Stack:
+    root.usd             /Root/B/C
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </Root/B/C/_Z>
+
+Prim Stack:
+    root.usd             /Root/B/C/_Z
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/Root/B/C/_Z.prop:
+    root.usd             /Root/B/C/_Z.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </Root/B/C/D>
+
+Prim Stack:
+    root.usd             /Root/B/C/D
+    root.usd             /Root/B/C/_Z
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/Root/B/C/D.prop:
+    root.usd             /Root/B/C/D.prop
+    root.usd             /Root/B/C/_Z.prop
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </_X>
+
+Prim Stack:
+    root.usd             /_X
+
+Child names:
+     ['_Y', 'B']
+
+------------------------------------------------------------------------
+Results for composing </_X/_Y>
+
+Prim Stack:
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </_X/_Y/C>
+
+Prim Stack:
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </_X/_Y/C/_Z>
+
+Prim Stack:
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/_X/_Y/C/_Z.prop:
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </_X/_Y/C/D>
+
+Prim Stack:
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/_X/_Y/C/D.prop:
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </_X/B>
+
+Prim Stack:
+    root.usd             /_X/B
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </_X/B/C>
+
+Prim Stack:
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </_X/B/C/_Z>
+
+Prim Stack:
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/_X/B/C/_Z.prop:
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </_X/B/C/D>
+
+Prim Stack:
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/_X/B/C/D.prop:
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot>
+
+Prim Stack:
+    root.usd             /RefToRoot
+    root.usd             /Root
+    root.usd             /_X
+
+Child names:
+     ['_Y', 'B']
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/_Y>
+
+Prim Stack:
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/_Y/C>
+
+Prim Stack:
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/_Y/C/_Z>
+
+Prim Stack:
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/RefToRoot/_Y/C/_Z.prop:
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/_Y/C/D>
+
+Prim Stack:
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/RefToRoot/_Y/C/D.prop:
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/B>
+
+Prim Stack:
+    root.usd             /Root/B
+    root.usd             /_X/B
+    root.usd             /_X/_Y
+    ref.usd              /Ref
+
+Child names:
+     ['C']
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/B/C>
+
+Prim Stack:
+    root.usd             /Root/B/C
+    ref.usd              /Ref/C
+    ref.usd              /_G
+
+Child names:
+     ['_Z', 'D']
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/B/C/_Z>
+
+Prim Stack:
+    root.usd             /Root/B/C/_Z
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/RefToRoot/B/C/_Z.prop:
+    root.usd             /Root/B/C/_Z.prop
+    ref.usd              /Ref/C/_Z.prop
+
+------------------------------------------------------------------------
+Results for composing </RefToRoot/B/C/D>
+
+Prim Stack:
+    root.usd             /Root/B/C/D
+    root.usd             /Root/B/C/_Z
+    ref.usd              /Ref/C/D
+    ref.usd              /Ref/C/_Z
+
+Property names:
+     ['prop']
+
+Property stacks:
+/RefToRoot/B/C/D.prop:
+    root.usd             /Root/B/C/D.prop
+    root.usd             /Root/B/C/_Z.prop
+    ref.usd              /Ref/C/D.prop
+    ref.usd              /Ref/C/_Z.prop
+

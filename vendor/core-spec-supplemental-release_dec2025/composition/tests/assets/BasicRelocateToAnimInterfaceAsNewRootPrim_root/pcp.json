@@ -1,0 +1,96 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Model": {
+            "Prim Stack": {
+                "root.usd": "/Model",
+                "charRig.usd": "/CharRig"
+            },
+            "Child names": [
+                "Anim",
+                "Rig"
+            ]
+        },
+        "/Model/Anim": {
+            "Prim Stack": {
+                "root.usd": "/Model/Anim",
+                "charRig.usd": "/CharRig/Anim"
+            },
+            "Child names": [
+                "Path"
+            ]
+        },
+        "/Model/Anim/Path": {
+            "Prim Stack": {
+                "root.usd": "/Model/Anim/Path",
+                "charRig.usd": "/Path",
+                "pathRig.usd": "/PathRig/Path"
+            },
+            "Child names": [
+                "AnimScope"
+            ],
+            "Prohibited child names": [
+                "Anim"
+            ]
+        },
+        "/Model/Anim/Path/AnimScope": {
+            "Prim Stack": {
+                "root.usd": "/Model/Anim/Path/AnimScope",
+                "charRig.usd": "/Path/AnimScope",
+                "pathRig.usd": "/PathRig/Path/Anim"
+            },
+            "Property names": [
+                "track"
+            ],
+            "Property stacks": {
+                "/Model/Anim/Path/AnimScope.track": {
+                    "root.usd": "/Model/Anim/Path/AnimScope.track",
+                    "charRig.usd": "/Path/AnimScope.track",
+                    "pathRig.usd": "/PathRig/Path/Anim.track"
+                }
+            }
+        },
+        "/Model/Rig": {
+            "Prim Stack": {
+                "root.usd": "/Model/Rig",
+                "charRig.usd": "/CharRig/Rig"
+            },
+            "Child names": [
+                "PathRig"
+            ]
+        },
+        "/Model/Rig/PathRig": {
+            "Prim Stack": {
+                "root.usd": "/Model/Rig/PathRig",
+                "charRig.usd": "/CharRig/Rig/PathRig",
+                "pathRig.usd": "/PathRig"
+            },
+            "Prohibited child names": [
+                "Path"
+            ],
+            "Property names": [
+                "relationshipToPathAvar",
+                "relationshipToPathAvar2"
+            ],
+            "Property stacks": {
+                "/Model/Rig/PathRig.relationshipToPathAvar": {
+                    "pathRig.usd": "/PathRig.relationshipToPathAvar"
+                },
+                "/Model/Rig/PathRig.relationshipToPathAvar2": {
+                    "charRig.usd": "/CharRig/Rig/PathRig.relationshipToPathAvar2"
+                }
+            },
+            "Relationship targets": {
+                "/Model/Rig/PathRig.relationshipToPathAvar2": [
+                    "/Model/Rig/PathRig/Path/Anim.track"
+                ]
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ],
+    "Errors": [
+        "Errors while composing </Model/Rig/PathRig>\nThe relationship target </PathRig/Path/Anim.track> from </PathRig.relationshipToPathAvar> in layer @composition/tests/assets/BasicRelocateToAnimInterfaceAsNewRootPrim_root/usda/pathRig.usd@ refers to a path outside the scope of the reference from </CharRig/Rig/PathRig>.  Ignoring. ERROR: Unexpected error(s) encountered during test!"
+    ]
+}

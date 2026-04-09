@@ -1,0 +1,246 @@
+Loading @composition/tests/assets/BasicTimeOffset_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Root>
+
+Prim Stack:
+    root.usd             /Root
+    A.usd                /Model
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /Root           root       (offset=0.00, scale=1.00)
+    A.usd                /Model          reference  (offset=10.00, scale=1.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </Root/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /Root/Anim      root       (offset=0.00, scale=1.00)
+    A.usd                /Model/Anim     reference  (offset=10.00, scale=1.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </Root/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /Root/Frame     root       (offset=0.00, scale=1.00)
+    A.usd                /Model/Frame    reference  (offset=10.00, scale=1.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </RefPayload>
+
+Prim Stack:
+    root.usd             /RefPayload
+    ref_sub.usd          /Ref
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /RefPayload     root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref            reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model          payload    (offset=30.00, scale=1.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </RefPayload/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /RefPayload/Anim root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref/Anim       reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Anim     payload    (offset=30.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </RefPayload/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /RefPayload/Frame root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref/Frame      reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Frame    payload    (offset=30.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </MultiRef>
+
+Prim Stack:
+    root.usd             /MultiRef
+    ref_sub.usd          /Ref2
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /MultiRef       root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2           reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model          reference  (offset=30.00, scale=1.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </MultiRef/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /MultiRef/Anim  root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2/Anim      reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Anim     reference  (offset=30.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </MultiRef/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /MultiRef/Frame root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2/Frame     reference  (offset=10.00, scale=1.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Frame    reference  (offset=30.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadRoot>
+
+Prim Stack:
+    root.usd             /PayloadRoot
+    A.usd                /Model
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /PayloadRoot    root       (offset=0.00, scale=1.00)
+    A.usd                /Model          payload    (offset=10.00, scale=2.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </PayloadRoot/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /PayloadRoot/Anim root       (offset=0.00, scale=1.00)
+    A.usd                /Model/Anim     payload    (offset=10.00, scale=2.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadRoot/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /PayloadRoot/Frame root       (offset=0.00, scale=1.00)
+    A.usd                /Model/Frame    payload    (offset=10.00, scale=2.00)
+        B.usd                            sublayer   (offset=20.00, scale=1.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadRefPayload>
+
+Prim Stack:
+    root.usd             /PayloadRefPayload
+    ref_sub.usd          /Ref
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /PayloadRefPayload root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref            payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model          payload    (offset=50.00, scale=2.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </PayloadRefPayload/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /PayloadRefPayload/Anim root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref/Anim       payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Anim     payload    (offset=50.00, scale=2.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadRefPayload/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /PayloadRefPayload/Frame root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref/Frame      payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Frame    payload    (offset=50.00, scale=2.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadMultiRef>
+
+Prim Stack:
+    root.usd             /PayloadMultiRef
+    ref_sub.usd          /Ref2
+    B.usd                /Model
+
+Time Offsets:
+    root.usd             /PayloadMultiRef root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2           payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model          reference  (offset=50.00, scale=2.00)
+
+Child names:
+     ['Anim', 'Frame']
+
+------------------------------------------------------------------------
+Results for composing </PayloadMultiRef/Anim>
+
+Prim Stack:
+    B.usd                /Model/Anim
+
+Time Offsets:
+    root.usd             /PayloadMultiRef/Anim root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2/Anim      payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Anim     reference  (offset=50.00, scale=2.00)
+
+------------------------------------------------------------------------
+Results for composing </PayloadMultiRef/Frame>
+
+Prim Stack:
+    B.usd                /Model/Frame
+
+Time Offsets:
+    root.usd             /PayloadMultiRef/Frame root       (offset=0.00, scale=1.00)
+    ref.usd              /Ref2/Frame     payload    (offset=10.00, scale=2.00)
+        ref_sub.usd                      sublayer   (offset=20.00, scale=1.00)
+    B.usd                /Model/Frame    reference  (offset=50.00, scale=2.00)
+

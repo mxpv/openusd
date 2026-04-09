@@ -1,0 +1,42 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Specializes": {
+            "Prim Stack": {
+                "root.usd": "/Specializes"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/Specializes/Child": {
+            "Prim Stack": {
+                "root.usd": "/Specializes/Child"
+            }
+        },
+        "/Class": {
+            "Prim Stack": {
+                "root.usd": "/Class"
+            }
+        },
+        "/AncestralReference": {
+            "Prim Stack": {
+                "root.usd": "/Specializes",
+                "ref.usd": "/Specializes"
+            },
+            "Child names": [
+                "Child"
+            ]
+        },
+        "/AncestralReference/Child": {
+            "Prim Stack": {
+                "root.usd": "/Class",
+                "ref.usd": "/Class",
+                "ref2.usd": "/Class"
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

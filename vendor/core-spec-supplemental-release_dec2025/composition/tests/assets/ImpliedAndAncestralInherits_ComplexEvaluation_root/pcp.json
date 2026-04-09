@@ -1,0 +1,309 @@
+{
+    "Entry": "root.usd",
+    "Composing": {
+        "/Root": {
+            "Prim Stack": {
+                "root.usd": "/_X"
+            },
+            "Child names": [
+                "_Y",
+                "B"
+            ]
+        },
+        "/Root/_Y": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/Root/_Y/C": {
+            "Prim Stack": {
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/Root/_Y/C/_Z": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/Root/_Y/C/_Z.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/Root/_Y/C/D": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/Root/_Y/C/D.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/Root/B": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/Root/B/C": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C",
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/Root/B/C/_Z": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C/_Z",
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/Root/B/C/_Z.prop": {
+                    "root.usd": "/Root/B/C/_Z.prop",
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/Root/B/C/D": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C/_Z",
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/Root/B/C/D.prop": {
+                    "root.usd": "/Root/B/C/_Z.prop",
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/_X": {
+            "Prim Stack": {
+                "root.usd": "/_X"
+            },
+            "Child names": [
+                "_Y",
+                "B"
+            ]
+        },
+        "/_X/_Y": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/_X/_Y/C": {
+            "Prim Stack": {
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/_X/_Y/C/_Z": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/_X/_Y/C/_Z.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/_X/_Y/C/D": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/_X/_Y/C/D.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/_X/B": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/_X/B/C": {
+            "Prim Stack": {
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/_X/B/C/_Z": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/_X/B/C/_Z.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/_X/B/C/D": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/_X/B/C/D.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/RefToRoot": {
+            "Prim Stack": {
+                "root.usd": "/_X"
+            },
+            "Child names": [
+                "_Y",
+                "B"
+            ]
+        },
+        "/RefToRoot/_Y": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/RefToRoot/_Y/C": {
+            "Prim Stack": {
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/RefToRoot/_Y/C/_Z": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/RefToRoot/_Y/C/_Z.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/RefToRoot/_Y/C/D": {
+            "Prim Stack": {
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/RefToRoot/_Y/C/D.prop": {
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/RefToRoot/B": {
+            "Prim Stack": {
+                "root.usd": "/_X/_Y",
+                "ref.usd": "/Ref"
+            },
+            "Child names": [
+                "C"
+            ]
+        },
+        "/RefToRoot/B/C": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C",
+                "ref.usd": "/_G"
+            },
+            "Child names": [
+                "_Z",
+                "D"
+            ]
+        },
+        "/RefToRoot/B/C/_Z": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C/_Z",
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/RefToRoot/B/C/_Z.prop": {
+                    "root.usd": "/Root/B/C/_Z.prop",
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        },
+        "/RefToRoot/B/C/D": {
+            "Prim Stack": {
+                "root.usd": "/Root/B/C/_Z",
+                "ref.usd": "/Ref/C/_Z"
+            },
+            "Property names": [
+                "prop"
+            ],
+            "Property stacks": {
+                "/RefToRoot/B/C/D.prop": {
+                    "root.usd": "/Root/B/C/_Z.prop",
+                    "ref.usd": "/Ref/C/_Z.prop"
+                }
+            }
+        }
+    },
+    "Layer Stack": [
+        "root.usd"
+    ]
+}

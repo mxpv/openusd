@@ -1,0 +1,109 @@
+Loading @composition/tests/assets/TrickyNestedClasses3_root/usda/root.usd@
+
+------------------------------------------------------------------------
+Layer Stack:
+     root.usd
+
+------------------------------------------------------------------------
+Results for composing </Rig>
+
+Prim Stack:
+    root.usd             /Rig
+    rig.usd              /Rig
+
+Child names:
+     ['SymRig', '_class_SubRig', 'LRig', 'RRig']
+
+------------------------------------------------------------------------
+Results for composing </Rig/SymRig>
+
+Prim Stack:
+    root.usd             /Rig/SymRig
+    rig.usd              /Rig/SymRig
+
+Child names:
+     ['SubRig1', 'SubRig2']
+
+------------------------------------------------------------------------
+Results for composing </Rig/SymRig/SubRig1>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig1
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig1
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/SymRig/SubRig2>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig2
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig2
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/_class_SubRig>
+
+Prim Stack:
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/LRig>
+
+Prim Stack:
+    root.usd             /Rig/SymRig
+    rig.usd              /Rig/LRig
+    rig.usd              /Rig/SymRig
+
+Child names:
+     ['SubRig1', 'SubRig2']
+
+------------------------------------------------------------------------
+Results for composing </Rig/LRig/SubRig1>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig1
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig1
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/LRig/SubRig2>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig2
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig2
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/RRig>
+
+Prim Stack:
+    root.usd             /Rig/SymRig
+    rig.usd              /Rig/RRig
+    rig.usd              /Rig/SymRig
+
+Child names:
+     ['SubRig1', 'SubRig2']
+
+------------------------------------------------------------------------
+Results for composing </Rig/RRig/SubRig1>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig1
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig1
+    rig.usd              /Rig/_class_SubRig
+
+------------------------------------------------------------------------
+Results for composing </Rig/RRig/SubRig2>
+
+Prim Stack:
+    root.usd             /Rig/SymRig/SubRig2
+    root.usd             /Rig/_class_SubRig
+    rig.usd              /Rig/SymRig/SubRig2
+    rig.usd              /Rig/_class_SubRig
+
