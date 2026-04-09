@@ -171,6 +171,10 @@ impl<'a> Parser<'a> {
 
     /// Parses a single item or a bracketed array of items.
     fn one_or_list<T>(&mut self, mut parse: impl FnMut(&mut Self) -> Result<T>) -> Result<Vec<T>> {
+        if self.is_next(Token::None) {
+            self.fetch_next()?;
+            return Ok(Vec::new());
+        }
         if self.is_next(Token::Punctuation('[')) {
             let mut out = Vec::new();
             self.parse_block('[', ']', |this| {
@@ -242,7 +246,7 @@ impl<'a> Parser<'a> {
                 Token::Doc => {
                     this.ensure_pun('=')?;
                     let value = this.fetch_str()?;
-                    root.add("doc", value);
+                    root.add(FieldKey::Documentation, value);
                 }
                 Token::SubLayers => {
                     this.ensure_pun('=')?;
@@ -359,7 +363,7 @@ impl<'a> Parser<'a> {
                 }
                 Token::Rel => {
                     this.fetch_next()?;
-                    this.read_relationship(path, &mut properties, data)?;
+                    this.read_relationship(path, false, &mut properties, data)?;
                 }
                 _ => {
                     this.read_attribute(path, &mut properties, data)?;
@@ -436,8 +440,13 @@ impl<'a> Parser<'a> {
         let mut variability = sdf::Variability::Varying;
 
         if self.is_next(Token::Custom) {
-            custom = true;
             self.fetch_next()?;
+            // `custom` can prefix relationships as well as attributes.
+            if self.is_next(Token::Rel) {
+                self.fetch_next()?;
+                return self.read_relationship(current_path, true, properties, data);
+            }
+            custom = true;
         }
 
         if self.is_next(Token::Varying) {
@@ -544,7 +553,7 @@ impl<'a> Parser<'a> {
         sdf::Path::new(path_str)
     }
 
-    /// Parse the metadata block attached to an attribute and stash entries on the spec.
+    /// Parse the metadata block attached to a property and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
         self.parse_block('(', ')', |this| {
             let name_token = this.fetch_next()?;
@@ -598,6 +607,7 @@ impl<'a> Parser<'a> {
 
         let token = self.fetch_next()?;
         match token {
+            Token::None => Ok(sdf::Value::ValueBlock),
             Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
             Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::Token(value.to_owned())),
             Token::Number(raw) => {
@@ -650,12 +660,16 @@ impl<'a> Parser<'a> {
     fn read_relationship(
         &mut self,
         current_path: &sdf::Path,
+        custom: bool,
         properties: &mut Vec<String>,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<()> {
         let name = self.expect_identifier().context("relationship name expected")?;
 
         let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
+        if custom {
+            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+        }
 
         // Check for metadata before or instead of assignment
         if self.is_next(Token::Punctuation('(')) {
@@ -703,6 +717,11 @@ impl<'a> Parser<'a> {
         let name_token = self.fetch_next()?;
 
         let name = match name_token {
+            // Bare string in metadata is a comment.
+            Token::String(s) => {
+                spec.add(FieldKey::Comment, sdf::Value::String(s.to_owned()));
+                return Ok(());
+            }
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
             Token::Kind => FieldKey::Kind.as_str(),
             Token::References => FieldKey::References.as_str(),
@@ -848,28 +867,42 @@ impl<'a> Parser<'a> {
         }
 
         if self.is_next(Token::Punctuation('(')) {
-            self.parse_reference_layer_offset(&mut reference.layer_offset)
+            let (offset, custom_data) = self
+                .parse_reference_layer_offset()
                 .context("Unable to parse reference layer offset")?;
+            reference.layer_offset = offset;
+            reference.custom_data = custom_data;
         }
 
         Ok(reference)
     }
 
-    /// Parse `(offset = ...; scale = ...)` blocks attached to references or sublayers.
-    fn parse_reference_layer_offset(&mut self, layer_offset: &mut sdf::LayerOffset) -> Result<()> {
-        self.ensure_pun('(')?;
+    /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to
+    /// references or sublayers.
+    fn parse_reference_layer_offset(
+        &mut self,
+    ) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>)> {
+        let mut layer_offset = sdf::LayerOffset::default();
+        let mut custom_data = HashMap::new();
 
         self.parse_seq_fn(';', |this, _index| {
             let token = this.fetch_next()?;
             this.ensure_pun('=')?;
-            let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
 
             match token {
                 Token::Offset => {
+                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
                     layer_offset.offset = value.try_as_double().context("Expected double for offset")?;
                 }
                 Token::Scale => {
+                    let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
                     layer_offset.scale = value.try_as_double().context("Expected double for scale")?;
+                }
+                Token::CustomData => {
+                    let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
+                        unreachable!("parse_dictionary always returns Dictionary");
+                    };
+                    custom_data = dict;
                 }
                 unexpected => bail!("Unexpected token in layer offset: {unexpected:?}"),
             }
@@ -877,7 +910,7 @@ impl<'a> Parser<'a> {
             Ok(())
         })?;
 
-        Ok(())
+        Ok((layer_offset, custom_data))
     }
 
     /// Parse one payload entry, including optional target prim path and layer offset.
@@ -905,8 +938,8 @@ impl<'a> Parser<'a> {
         }
 
         if self.is_next(Token::Punctuation('(')) {
-            let mut offset = sdf::LayerOffset::default();
-            self.parse_reference_layer_offset(&mut offset)
+            let (offset, _custom_data) = self
+                .parse_reference_layer_offset()
                 .context("Unable to parse payload layer offset")?;
             payload.layer_offset = Some(offset);
         }
@@ -1210,11 +1243,9 @@ impl<'a> Parser<'a> {
                     let value = this.parse_value(TypeInfo::scalar(Type::Double))?;
                     match token {
                         Token::Offset => {
-                            ensure!(offset.is_none(), "offset specified twice");
                             offset = Some(value);
                         }
                         Token::Scale => {
-                            ensure!(scale.is_none(), "scale specified twice");
                             scale = Some(value);
                         }
                         _ => bail!("Unexpected token type: {token:?}"),
@@ -1254,8 +1285,8 @@ impl<'a> Parser<'a> {
                 break;
             }
             entry(self)?;
-            // Consume optional comma separator.
-            if self.is_next(Token::Punctuation(',')) {
+            // Consume optional separator (comma or semicolon).
+            while self.is_next(Token::Punctuation(',')) || self.is_next(Token::Punctuation(';')) {
                 self.fetch_next()?;
             }
         }
@@ -1280,10 +1311,9 @@ impl<'a> Parser<'a> {
             read_element(self, index).with_context(|| format!("Unable to read element {index}"))?;
             index += 1;
 
-            match self.fetch_next()? {
-                Token::Punctuation(')') => break,
-                Token::Punctuation(d) if d == delim => continue,
-                t => bail!("Unexpected token between (): {t:?}"),
+            // Consume optional delimiter between entries.
+            while self.is_next(Token::Punctuation(delim)) {
+                self.fetch_next()?;
             }
         }
         Ok(())
@@ -1556,7 +1586,7 @@ mod tests {
 
         assert!(pseudo_root
             .fields
-            .get("doc")
+            .get(FieldKey::Documentation.as_str())
             .and_then(|v| v.try_as_string_ref())
             .unwrap()
             .eq("test string"));

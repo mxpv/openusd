@@ -8,8 +8,8 @@ use logos::Logos;
 
 #[derive(Logos, Debug, Clone, PartialEq, Eq, Hash, strum::Display, strum::EnumIs, strum::EnumTryAs)]
 #[logos(skip r"[ \t\r\n\f]+")] // Skip whitespace
-#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip line comments
-#[logos(skip(r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/", allow_greedy = true))] // Skip block comments
+#[logos(skip(r"#[^\r\n]*", allow_greedy = true))] // Skip line and block comments
+#[logos(skip r"/\*[^*]*\*+(?:[^/*][^*]*\*+)*/")]
 pub enum Token<'source> {
     /// Magic header - extract version number.
     /// Example: "#usda 1.0" -> "1.0", "#usda 1.0.32" -> "1.0.32"
@@ -29,9 +29,9 @@ pub enum Token<'source> {
     /// Triple-quoted strings
     /// Example: """multi-line string""" -> multi-line string
     #[regex(r#""""([^"]|"[^"]|""[^"])*""""#, |lex| trim_chars(lex.slice(), 3))]
-    /// Triple-@ delimited strings
-    /// Example: @@@raw string@@@ -> raw string
-    #[regex(r#"@@@([^@]|@[^@]|@@[^@])*@@@"#, |lex| trim_chars(lex.slice(), 3))]
+    /// Triple-single-quoted strings
+    /// Example: '''multi-line string''' -> multi-line string
+    #[regex(r"'''([^']|'[^']|''[^'])*'''", |lex| trim_chars(lex.slice(), 3))]
     String(&'source str),
 
     // Keywords must come before Number to ensure "inf" is matched as a keyword, not an identifier
@@ -134,6 +134,7 @@ pub enum Token<'source> {
     /// Asset references
     /// Example: "@./textures/wood.jpg@" -> ./textures/wood.jpg
     #[regex(r"@[^@]*@", |lex| trim_chars(lex.slice(), 1))]
+    #[regex(r#"@@@([^@]|@[^@]|@@[^@])*@@@"#, |lex| trim_chars(lex.slice(), 3))]
     AssetRef(&'source str),
 
     /// Punctuation characters
@@ -437,8 +438,9 @@ mod tests {
         let token = lexer.next().unwrap().unwrap();
         assert_eq!(token, Token::String("triple quote"));
 
+        // Triple-@ is an asset reference, not a string.
         let token = lexer.next().unwrap().unwrap();
-        assert_eq!(token, Token::String("asset"));
+        assert_eq!(token, Token::AssetRef("asset"));
     }
 
     #[test]

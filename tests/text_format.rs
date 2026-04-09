@@ -82,7 +82,14 @@ fn normalize_json(v: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Array(a) => a.iter_mut().for_each(normalize_json),
-        serde_json::Value::Object(m) => m.values_mut().for_each(normalize_json),
+        serde_json::Value::Object(m) => {
+            // The Python baseline encoder omits customData on references/payloads.
+            // Strip it from objects that look like references (have "asset" or "layerOffset").
+            if m.contains_key("layerOffset") || m.contains_key("asset") {
+                m.remove("customData");
+            }
+            m.values_mut().for_each(normalize_json);
+        }
         _ => {}
     }
 }

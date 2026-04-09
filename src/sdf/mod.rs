@@ -153,7 +153,7 @@ pub struct Reference {
     #[cfg_attr(feature = "serde", serde(rename = "layerOffset"))]
     pub layer_offset: LayerOffset,
     /// The custom data associated with the reference.
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
+    #[cfg_attr(feature = "serde", serde(rename = "customData", skip_serializing_if = "HashMap::is_empty"))]
     pub custom_data: HashMap<String, Value>,
 }
 
