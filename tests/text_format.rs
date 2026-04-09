@@ -15,7 +15,6 @@ const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/file_formats
 ///
 /// Builds a `{ path: { field: value, ... }, ... }` map from the parsed data
 /// and asserts it matches the expected baseline.
-#[cfg(feature = "serde")]
 fn assert_text_format(name: &str) {
     let assets = Path::new(ASSETS);
     let usda = assets.join("usda").join(format!("{name}.usda"));
@@ -61,7 +60,6 @@ fn assert_text_format(name: &str) {
 ///    to JSON it round-trips through `f64`, exposing representation noise
 ///    (e.g. `0.4f32` becomes `0.4000000059604645`). We re-round such values
 ///    through their shortest `f32` representation to recover the original text.
-#[cfg(feature = "serde")]
 fn normalize_json(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Number(n) if n.is_f64() => {
@@ -94,7 +92,6 @@ fn normalize_json(v: &mut serde_json::Value) {
     }
 }
 
-#[cfg(feature = "serde")]
 mod text_parser {
     use super::*;
 
