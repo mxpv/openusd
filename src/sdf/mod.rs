@@ -70,10 +70,11 @@ pub enum Permission {
 /// value coordinates, and if its value comes through authoring or
 /// or from its owner.
 #[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub enum Variability {
+    #[default]
     Varying,
     Uniform,
 }

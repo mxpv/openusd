@@ -198,7 +198,9 @@ impl<'a> Parser<'a> {
             self.read_prim(&current_path, &mut root_children, &mut data)?;
         }
 
-        pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(root_children));
+        if !root_children.is_empty() {
+            pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(root_children));
+        }
         data.insert(current_path.clone(), pseudo_root_spec);
         Ok(data)
     }
@@ -312,11 +314,15 @@ impl<'a> Parser<'a> {
         }
 
         let (children, props) = self.read_prim_body(&prim_path, data)?;
-        spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+        if !children.is_empty() {
+            spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+        }
         properties.extend(props);
 
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
-        spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+        if !properties.is_empty() {
+            spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+        }
         data.insert(prim_path, spec);
 
         Ok(())
@@ -394,8 +400,12 @@ impl<'a> Parser<'a> {
 
             // Variant body.
             let (children, properties) = this.read_prim_body(&variant_path, data)?;
-            variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
-            variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+            if !children.is_empty() {
+                variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+            }
+            if !properties.is_empty() {
+                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+            }
             data.insert(variant_path, variant_spec);
             Ok(())
         })?;
@@ -454,8 +464,12 @@ impl<'a> Parser<'a> {
                 let path = current_path.append_property(name)?;
                 properties.push(name.to_string());
 
-                spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
-                spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+                if custom {
+                    spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+                }
+                if variability != sdf::Variability::default() {
+                    spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+                }
                 spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
 
                 let list_op = self
@@ -472,8 +486,12 @@ impl<'a> Parser<'a> {
             let path = current_path.append_property(name)?;
             properties.push(name.to_string());
 
-            spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
-            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+            if custom {
+                spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+            }
+            if variability != sdf::Variability::default() {
+                spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+            }
             spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
             data.insert(path, spec);
             return Ok(());
@@ -491,8 +509,12 @@ impl<'a> Parser<'a> {
 
         properties.push(name.to_string());
 
-        spec.add(FieldKey::Custom, sdf::Value::Bool(custom));
-        spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+        if custom {
+            spec.add(FieldKey::Custom, sdf::Value::Bool(true));
+        }
+        if variability != sdf::Variability::default() {
+            spec.add(FieldKey::Variability, sdf::Value::Variability(variability));
+        }
         spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
         spec.add(FieldKey::Default, value);
         data.insert(path, spec);
@@ -638,12 +660,6 @@ impl<'a> Parser<'a> {
             let path = current_path.append_property(name)?;
             properties.push(name.to_string());
 
-            spec.add(FieldKey::Custom, sdf::Value::Bool(false));
-            spec.add(
-                FieldKey::Variability,
-                sdf::Value::Variability(sdf::Variability::Varying),
-            );
-
             data.insert(path, spec);
             return Ok(());
         }
@@ -661,11 +677,6 @@ impl<'a> Parser<'a> {
             .apply_list_op(list_op, targets)
             .context("Unable to build relationship targets listOp")?;
         spec.add(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
-        spec.add(FieldKey::Custom, sdf::Value::Bool(false));
-        spec.add(
-            FieldKey::Variability,
-            sdf::Value::Variability(sdf::Variability::Varying),
-        );
 
         if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
