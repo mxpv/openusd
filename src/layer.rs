@@ -38,16 +38,20 @@ impl std::fmt::Display for DependencyKind {
     }
 }
 
-/// An error encountered during stage composition that may be recoverable.
+/// An error encountered during layer collection that may be recoverable.
 ///
 /// When opening a stage, some errors (such as missing referenced files) can be
 /// tolerated so that the stage is partially constructed. A callback provided via
 /// [`StageBuilder::on_error`](crate::stage::StageBuilder::on_error) receives
 /// these errors and decides whether to continue or abort.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompositionError {
+pub enum Error {
     /// An asset path could not be resolved to a physical location.
+    #[error(
+        "failed to resolve {kind} asset: {asset_path} (referenced by {referencing_layer}{})",
+        "prim_path.as_ref().map(|p| format!(\" at {p}\")).unwrap_or_default()"
+    )]
     UnresolvedAsset {
         /// The asset path that could not be resolved.
         asset_path: String,
@@ -59,30 +63,6 @@ pub enum CompositionError {
         prim_path: Option<Path>,
     },
 }
-
-impl std::fmt::Display for CompositionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnresolvedAsset {
-                asset_path,
-                referencing_layer,
-                kind,
-                prim_path,
-            } => {
-                write!(
-                    f,
-                    "failed to resolve {kind} asset: {asset_path} (referenced by {referencing_layer}"
-                )?;
-                if let Some(prim) = prim_path {
-                    write!(f, " at {prim}")?;
-                }
-                write!(f, ")")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CompositionError {}
 
 /// A single loaded layer in the composition.
 pub struct Layer {
@@ -137,7 +117,7 @@ pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<L
 pub fn collect_layers_with_handler(
     resolver: &impl Resolver,
     root_path: &str,
-    on_error: impl Fn(CompositionError) -> Result<()>,
+    on_error: impl Fn(Error) -> Result<()>,
 ) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     let mut visited = HashSet::new();
@@ -157,7 +137,7 @@ fn collect_recursive(
     anchor: Option<&ar::ResolvedPath>,
     layers: &mut Vec<Layer>,
     visited: &mut HashSet<String>,
-    on_error: &dyn Fn(CompositionError) -> Result<()>,
+    on_error: &dyn Fn(Error) -> Result<()>,
 ) -> Result<()> {
     // Create an anchored identifier so relative paths resolve correctly.
     let identifier = resolver.create_identifier(asset_path, anchor);
@@ -200,7 +180,7 @@ fn collect_recursive(
         // Check if this dependency resolves before recursing.
         let dep_id = resolver.create_identifier(&dep_asset, Some(&resolved));
         if !visited.contains(&dep_id) && resolver.resolve(&dep_id).is_none() {
-            on_error(CompositionError::UnresolvedAsset {
+            on_error(Error::UnresolvedAsset {
                 asset_path: dep_asset,
                 referencing_layer: identifier.clone(),
                 kind: dep.kind,
@@ -635,19 +615,19 @@ mod tests {
         let errors = errors.into_inner();
         assert_eq!(errors.len(), 3);
 
-        let CompositionError::UnresolvedAsset {
+        let Error::UnresolvedAsset {
             kind, ref prim_path, ..
         } = errors[0];
         assert_eq!(kind, DependencyKind::Reference);
         assert_eq!(prim_path.as_ref().unwrap().as_str(), "/World/invalid_reference");
 
-        let CompositionError::UnresolvedAsset {
+        let Error::UnresolvedAsset {
             kind, ref prim_path, ..
         } = errors[1];
         assert_eq!(kind, DependencyKind::Payload);
         assert_eq!(prim_path.as_ref().unwrap().as_str(), "/World/invalid_payload");
 
-        let CompositionError::UnresolvedAsset {
+        let Error::UnresolvedAsset {
             kind, ref prim_path, ..
         } = errors[2];
         assert_eq!(kind, DependencyKind::SubLayer);

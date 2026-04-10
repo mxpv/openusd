@@ -28,9 +28,8 @@ use std::cell::RefCell;
 use anyhow::Result;
 
 use crate::ar::{DefaultResolver, Resolver};
-use crate::layer;
-use crate::pcp;
 use crate::sdf::{Path, SpecType, Value};
+use crate::{layer, pcp, CompositionError};
 
 /// A composed USD stage.
 ///
@@ -40,6 +39,8 @@ use crate::sdf::{Path, SpecType, Value};
 pub struct Stage {
     /// Lazily-built composition graph caching per-prim indices and contexts.
     graph: RefCell<pcp::Cache>,
+    /// PCP error handler wrapping the user's unified callback.
+    on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
 }
 
 impl Stage {
@@ -70,8 +71,8 @@ impl Stage {
         StageBuilder::new()
     }
 
-    /// Constructs a stage from pre-collected layers.
-    fn from_layers(collected: Vec<layer::Layer>) -> Self {
+    /// Constructs a stage from pre-collected layers and a PCP error handler.
+    fn from_layers(collected: Vec<layer::Layer>, on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>) -> Self {
         let mut identifiers = Vec::with_capacity(collected.len());
         let mut layers = Vec::with_capacity(collected.len());
 
@@ -82,6 +83,7 @@ impl Stage {
 
         Self {
             graph: RefCell::new(pcp::Cache::new(layers, identifiers)),
+            on_composition_error,
         }
     }
 
@@ -102,7 +104,7 @@ impl Stage {
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
-        self.graph.borrow_mut().prim_children(&Path::abs_root())
+        self.try_or_handle(|cache| cache.prim_children(&Path::abs_root()))
     }
 
     /// Returns the composed list of child prim names for a given prim path.
@@ -111,25 +113,25 @@ impl Stage {
     /// path, collecting the union of child names while preserving the order
     /// from the strongest layer.
     pub fn prim_children(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.graph.borrow_mut().prim_children(&path.into())
+        self.try_or_handle(|cache| cache.prim_children(&path.into()))
     }
 
     /// Returns the composed list of property names for a given prim path.
     pub fn prim_properties(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.graph.borrow_mut().prim_properties(&path.into())
+        self.try_or_handle(|cache| cache.prim_properties(&path.into()))
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub fn has_spec(&self, path: impl Into<Path>) -> bool {
-        self.graph.borrow_mut().has_spec(&path.into())
+    pub fn has_spec(&self, path: impl Into<Path>) -> Result<bool> {
+        self.try_or_handle(|cache| cache.has_spec(&path.into()))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub fn spec_type(&self, path: impl Into<Path>) -> Option<SpecType> {
-        self.graph.borrow_mut().spec_type(&path.into())
+    pub fn spec_type(&self, path: impl Into<Path>) -> Result<Option<SpecType>> {
+        self.try_or_handle(|cache| cache.spec_type(&path.into()))
     }
 
     /// Resolves a field value by walking the prim index from strongest to weakest.
@@ -159,10 +161,26 @@ impl Stage {
         T: TryFrom<Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
-        let raw = self.graph.borrow_mut().resolve_field(&path.into(), field.as_ref())?;
+        let raw = self.try_or_handle(|cache| cache.resolve_field(&path.into(), field.as_ref()))?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
+        }
+    }
+
+    /// Calls `f` with a mutable reference to the composition cache. If `f`
+    /// returns a [`pcp::Error`], the error handler decides whether to skip
+    /// (returning a default value) or abort (propagating the error).
+    fn try_or_handle<T: Default>(&self, f: impl FnOnce(&mut pcp::Cache) -> Result<T>) -> Result<T> {
+        match f(&mut self.graph.borrow_mut()) {
+            Ok(val) => Ok(val),
+            Err(e) => match e.downcast::<pcp::Error>() {
+                Ok(pcp_err) => {
+                    (self.on_composition_error)(pcp_err)?;
+                    Ok(T::default())
+                }
+                Err(other) => Err(other),
+            },
         }
     }
 
@@ -177,7 +195,7 @@ impl Stage {
                 visitor(&path);
             }
 
-            let children = self.graph.borrow_mut().prim_children(&path)?;
+            let children = self.try_or_handle(|cache| cache.prim_children(&path))?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
@@ -191,10 +209,10 @@ impl Stage {
 }
 
 /// Default composition error handler that treats all errors as fatal.
-type StrictErrorHandler = fn(layer::CompositionError) -> Result<()>;
+type StrictErrorHandler = fn(CompositionError) -> Result<()>;
 
 /// Converts a composition error into a hard failure.
-fn strict_composition_error(e: layer::CompositionError) -> Result<()> {
+fn strict_composition_error(e: CompositionError) -> Result<()> {
     Err(anyhow::anyhow!("{e}"))
 }
 
@@ -202,10 +220,7 @@ fn strict_composition_error(e: layer::CompositionError) -> Result<()> {
 ///
 /// Created via [`Stage::builder`]. Allows setting a custom asset resolver
 /// and an error handler for recoverable composition failures.
-pub struct StageBuilder<
-    R: Resolver = DefaultResolver,
-    E: Fn(layer::CompositionError) -> Result<()> = StrictErrorHandler,
-> {
+pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -> Result<()> = StrictErrorHandler> {
     resolver: R,
     on_error: E,
 }
@@ -219,7 +234,7 @@ impl StageBuilder {
     }
 }
 
-impl<R: Resolver, E: Fn(layer::CompositionError) -> Result<()>> StageBuilder<R, E> {
+impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// Sets a custom asset resolver.
     pub fn resolver<R2: Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
         StageBuilder {
@@ -234,7 +249,7 @@ impl<R: Resolver, E: Fn(layer::CompositionError) -> Result<()>> StageBuilder<R, 
     /// or `Err(...)` to abort composition.
     ///
     /// By default, all composition errors are fatal.
-    pub fn on_error<E2: Fn(layer::CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
+    pub fn on_error<E2: Fn(CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
         StageBuilder {
             resolver: self.resolver,
             on_error: handler,
@@ -242,9 +257,15 @@ impl<R: Resolver, E: Fn(layer::CompositionError) -> Result<()>> StageBuilder<R, 
     }
 
     /// Opens a stage from a root layer file.
-    pub fn open(self, root_path: &str) -> Result<Stage> {
-        let collected = layer::collect_layers_with_handler(&self.resolver, root_path, self.on_error)?;
-        Ok(Stage::from_layers(collected))
+    pub fn open(self, root_path: &str) -> Result<Stage>
+    where
+        E: 'static,
+    {
+        let on_error = self.on_error;
+        let collected =
+            layer::collect_layers_with_handler(&self.resolver, root_path, |e| on_error(CompositionError::Layer(e)))?;
+        let pcp_handler = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
+        Ok(Stage::from_layers(collected, pcp_handler))
     }
 }
 
@@ -414,7 +435,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // /World/MyPrim should exist via the reference.
-        assert!(stage.has_spec("/World/MyPrim"));
+        assert!(stage.has_spec("/World/MyPrim")?);
 
         // /World/MyPrim/Child should be reachable via namespace remapping.
         let children = stage.prim_children("/World/MyPrim")?;

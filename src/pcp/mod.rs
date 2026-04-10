@@ -23,6 +23,7 @@
 //! | Module | C++ equivalent | Description |
 //! |--------|---------------|-------------|
 //! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
+//! | [`error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | [`index`] | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
@@ -50,10 +51,17 @@
 //! takes only shared references, making it suitable for future parallel
 //! execution.
 //!
+//! Composition errors ([`Error`]) are returned from [`Cache`](cache::Cache)
+//! methods and handled by the [`Stage`](crate::Stage)'s error callback.
+//! The callback decides whether to skip the broken arc and continue or
+//! abort composition entirely.
+//!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
 pub(crate) mod cache;
+mod error;
 pub(crate) mod index;
 
 pub(crate) use cache::Cache;
+pub use error::Error;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
