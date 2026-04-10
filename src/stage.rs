@@ -128,11 +128,33 @@ impl Stage {
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
+    ///
+    /// For property paths (e.g. `/Prim.attr`), checks whether the property
+    /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&self, path: impl Into<Path>) -> bool {
         let path = path.into();
-        self.update_index(&path);
-        let cache = self.prim_indices.borrow();
-        !cache[&path].is_empty()
+        if path.is_property_path() {
+            let prim_path = path.prim_path();
+            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
+            self.update_index(&prim_path);
+            let cache = self.prim_indices.borrow();
+            let Some(index) = cache.get(&prim_path) else {
+                return false;
+            };
+            for node in &index.nodes {
+                let prop_path = format!("{}{prop_suffix}", node.path);
+                if let Ok(p) = Path::new(&prop_path) {
+                    if self.layers[node.layer_index].has_spec(&p) {
+                        return true;
+                    }
+                }
+            }
+            false
+        } else {
+            self.update_index(&path);
+            let cache = self.prim_indices.borrow();
+            !cache[&path].is_empty()
+        }
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.

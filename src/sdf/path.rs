@@ -113,9 +113,12 @@ impl Path {
             None => return false,
         };
 
-        // Make sure path ends with a valid property name (e.g. "xyz.chars").
+        // Make sure the dot is preceded by a prim name character (not a variant
+        // selection closing brace or another dot) and followed by a valid
+        // property name. Property names may contain alphanumerics, underscores,
+        // and colons (for namespaced properties like `primvars:displayColor`).
         let tail = &self.path[pos + 1..];
-        tail.chars().all(char::is_alphanumeric)
+        !tail.is_empty() && tail.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
     }
 
     pub fn prim_path(&self) -> Path {
