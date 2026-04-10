@@ -12,7 +12,7 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, Path, SpecType, Value};
 
-use super::index::{CompositionContext, PrimIndex};
+use super::index::{CompositionContext, PrimIndex, SublayerStacks};
 
 /// Cached entry for a composed prim: its index and the context its children need.
 struct CachedPrim {
@@ -30,18 +30,19 @@ pub struct Cache {
     layers: Vec<LayerData>,
     identifiers: Vec<String>,
     cache: HashMap<Path, CachedPrim>,
-    /// Shared caches reused across per-prim builds.
-    shared: super::index::SharedCaches,
+    /// Precomputed sublayer stacks shared by all per-prim builds.
+    sublayer_stacks: SublayerStacks,
 }
 
 impl Cache {
     /// Creates a new composition graph for the given layer stack.
     pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
+        let sublayer_stacks = super::index::precompute_sublayer_stacks(&layers, &identifiers);
         Self {
             layers,
             identifiers,
             cache: HashMap::new(),
-            shared: super::index::SharedCaches::default(),
+            sublayer_stacks,
         }
     }
 
@@ -67,7 +68,7 @@ impl Cache {
             let Some(entry) = self.cache.get(&prim_path) else {
                 return false;
             };
-            for node in &entry.index.nodes {
+            for node in entry.index.nodes() {
                 let prop_path = format!("{}{prop_suffix}", node.path);
                 if let Ok(p) = Path::new(&prop_path) {
                     if self.layers[node.layer_index].has_spec(&p) {
@@ -86,7 +87,7 @@ impl Cache {
     pub fn spec_type(&mut self, path: &Path) -> Option<SpecType> {
         self.ensure_index(path);
         let entry = self.cache.get(path)?;
-        for node in &entry.index.nodes {
+        for node in entry.index.nodes() {
             if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
                 return Some(ty);
             }
@@ -145,7 +146,13 @@ impl Cache {
             .map(|e| e.child_context.clone())
             .unwrap_or_default();
 
-        let index = PrimIndex::build_with_context(path, &self.layers, &self.identifiers, &parent_ctx, &mut self.shared);
+        let index = PrimIndex::build_with_context(
+            path,
+            &self.layers,
+            &self.identifiers,
+            &parent_ctx,
+            &self.sublayer_stacks,
+        );
         let child_context = index.context_for_children(path, &self.layers, &parent_ctx);
 
         self.cache.insert(path.clone(), CachedPrim { index, child_context });
@@ -157,7 +164,7 @@ impl Cache {
         let entry = &self.cache[path];
         let mut result: Vec<String> = Vec::new();
 
-        for node in &entry.index.nodes {
+        for node in entry.index.nodes() {
             if let Ok(value) = self.layers[node.layer_index].get(&node.path, children_field.as_str()) {
                 if let Value::TokenVec(names) = value.into_owned() {
                     for name in names {

@@ -23,8 +23,8 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
 - **`layer`** - Layer collection: `collect_layers` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads. Corresponds to C++ `PcpLayerStack`.
 
 - **`pcp/`** - Prim Cache Population (composition engine): Implements LIVRPS strength ordering to compose opinions across layers. Corresponds to C++ `Pcp` module.
-  - `pcp/cache.rs` — `Cache`: lazily-built per-prim composition cache (C++ `PcpCache`).
-  - `pcp/index.rs` — `PrimIndex`, `Node`, `ArcType`: per-prim strength-ordered node list (C++ `PcpPrimIndex`). `IndexBuilder` evaluates LIVRPS inline with a `CompositionContext` flowing from parent to child.
+  - `pcp/cache.rs` — `Cache`: lazily-built per-prim composition cache (C++ `PcpCache`). Precomputes `SublayerStacks` once and passes them by shared reference to each build.
+  - `pcp/index.rs` — `PrimIndex`, `Node`, `NodeIndex`, `ArcType`: per-prim composition graph (C++ `PcpPrimIndex`). Nodes are stored in an arena-based DAG (`PrimIndexGraph`) with parent/child/sibling links and origin tracking for implied inherits. `IndexBuilder` evaluates LIVRPS with a `CompositionContext` flowing from parent to child; each build takes only `&` references (Rayon-friendly).
 
 - **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`.
 
