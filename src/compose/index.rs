@@ -698,11 +698,14 @@ fn add_arc_nodes_recursive(
 ) {
     if asset_path.is_empty() {
         // Internal reference — target is within the same layer stack.
+        // Use seed expansion so ancestor arcs (e.g. variants) are propagated.
         if prim_path.is_empty() {
             return;
         }
-        let stack: Vec<usize> = (0..layers.len()).collect();
-        build_recursive(prim_path, &stack, arc, layers, identifiers, nodes, depth + 1);
+        let seeds = collect_seeds(prim_path, layers, identifiers);
+        for (stack, spath, _) in &seeds {
+            build_recursive(spath, stack, arc, layers, identifiers, nodes, depth + 1);
+        }
     } else {
         // External reference — find the target layer and its sublayer stack.
         let Some(layer_index) = find_layer(asset_path, identifiers) else {
@@ -723,9 +726,14 @@ fn add_arc_nodes_recursive(
             prim_path.clone()
         };
 
-        // Build the target's sublayer stack and recurse.
+        // Use seed expansion so ancestor arcs in the target layer are propagated.
         let target_stack = find_sublayer_stack(layer_index, layers, identifiers);
-        build_recursive(&source, &target_stack, arc, layers, identifiers, nodes, depth + 1);
+        let seeds = collect_seeds(&source, layers, identifiers);
+        // First seed is always the root stack; replace it with the target's sublayer stack.
+        for (i, (stack, spath, _)) in seeds.iter().enumerate() {
+            let effective_stack = if i == 0 { &target_stack } else { stack };
+            build_recursive(spath, effective_stack, arc, layers, identifiers, nodes, depth + 1);
+        }
     }
 }
 
