@@ -206,15 +206,21 @@ impl serde::Serialize for Value {
             Value::Matrix2d(v) => v.chunks(2).collect::<Vec<_>>().serialize(serializer),
             Value::Matrix3d(v) => v.chunks(3).collect::<Vec<_>>().serialize(serializer),
             Value::Matrix4d(v) => v.chunks(4).collect::<Vec<_>>().serialize(serializer),
-            Value::Matrix2dVec(v) => {
-                v.iter().map(|m| m.chunks(2).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
-            }
-            Value::Matrix3dVec(v) => {
-                v.iter().map(|m| m.chunks(3).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
-            }
-            Value::Matrix4dVec(v) => {
-                v.iter().map(|m| m.chunks(4).collect::<Vec<_>>()).collect::<Vec<_>>().serialize(serializer)
-            }
+            Value::Matrix2dVec(v) => v
+                .iter()
+                .map(|m| m.chunks(2).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .serialize(serializer),
+            Value::Matrix3dVec(v) => v
+                .iter()
+                .map(|m| m.chunks(3).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .serialize(serializer),
+            Value::Matrix4dVec(v) => v
+                .iter()
+                .map(|m| m.chunks(4).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .serialize(serializer),
 
             Value::Specifier(v) => v.serialize(serializer),
             Value::Permission(v) => v.serialize(serializer),

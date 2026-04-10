@@ -248,7 +248,9 @@ impl Path {
         let mut rest = s;
         while let Some(tail) = rest.strip_prefix("..") {
             // Strip one parent from anchor.
-            anchor = anchor.rsplit_once('/').map_or("/", |(pre, _)| if pre.is_empty() { "/" } else { pre });
+            anchor = anchor
+                .rsplit_once('/')
+                .map_or("/", |(pre, _)| if pre.is_empty() { "/" } else { pre });
             rest = tail.strip_prefix('/').unwrap_or(tail);
         }
 

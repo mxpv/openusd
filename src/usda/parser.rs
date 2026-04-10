@@ -511,7 +511,8 @@ impl<'a> Parser<'a> {
         let name_token = self.fetch_next()?;
         let name = match name_token {
             Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            _ => name_token.keyword_lexeme()
+            _ => name_token
+                .keyword_lexeme()
                 .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
         };
 
@@ -630,7 +631,8 @@ impl<'a> Parser<'a> {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::CustomData => "customData".to_owned(),
                 Token::Doc => FieldKey::Documentation.as_str().to_owned(),
-                other => other.keyword_lexeme()
+                other => other
+                    .keyword_lexeme()
                     .map(str::to_owned)
                     .ok_or_else(|| anyhow!("Unexpected attribute metadata name token: {other:?}"))?,
             };
@@ -670,10 +672,16 @@ impl<'a> Parser<'a> {
             // Infer the array type from the first element.
             return Ok(match values.first() {
                 Some(sdf::Value::Double(_)) => sdf::Value::DoubleVec(
-                    values.into_iter().map(|v| v.try_as_double().unwrap_or_default()).collect(),
+                    values
+                        .into_iter()
+                        .map(|v| v.try_as_double().unwrap_or_default())
+                        .collect(),
                 ),
                 Some(sdf::Value::Int64(_)) => sdf::Value::Int64Vec(
-                    values.into_iter().map(|v| v.try_as_int_64().unwrap_or_default()).collect(),
+                    values
+                        .into_iter()
+                        .map(|v| v.try_as_int_64().unwrap_or_default())
+                        .collect(),
                 ),
                 _ => sdf::Value::StringVec(
                     values
@@ -721,7 +729,8 @@ impl<'a> Parser<'a> {
             let key_token = this.fetch_next()?;
             let key = match key_token {
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) | Token::String(s) => s.to_owned(),
-                other => other.keyword_lexeme()
+                other => other
+                    .keyword_lexeme()
                     .map(str::to_owned)
                     .ok_or_else(|| anyhow!("Expected identifier as dictionary key, got: {other:?}"))?,
             };
@@ -963,8 +972,7 @@ impl<'a> Parser<'a> {
             match token {
                 // Curve type: `bezier`, `hermite`, etc.
                 Token::Identifier(name)
-                    if !matches!(name, "pre" | "post" | "loop")
-                        && !this.is_next(Token::Punctuation(':')) =>
+                    if !matches!(name, "pre" | "post" | "loop") && !this.is_next(Token::Punctuation(':')) =>
                 {
                     curve_type = Some(name.to_owned());
                 }
@@ -972,7 +980,11 @@ impl<'a> Parser<'a> {
                 // With no space, the tokenizer produces `NamespacedIdentifier("pre:")`.
                 Token::Identifier(dir @ ("pre" | "post")) if this.try_consume(Token::Punctuation(':')) => {
                     let extrap = this.parse_extrapolation()?;
-                    if dir == "pre" { pre_extrapolation = extrap; } else { post_extrapolation = extrap; }
+                    if dir == "pre" {
+                        pre_extrapolation = extrap;
+                    } else {
+                        post_extrapolation = extrap;
+                    }
                 }
                 Token::NamespacedIdentifier("pre:") => {
                     pre_extrapolation = this.parse_extrapolation()?;
@@ -1016,7 +1028,6 @@ impl<'a> Parser<'a> {
 
                     // Optional semicolon-separated knot attributes
                     while this.try_consume(Token::Punctuation(';')) {
-
                         if this.is_next(Token::Punctuation('{')) {
                             // Per-knot custom data
                             let sdf::Value::Dictionary(dict) = this.parse_dictionary()? else {
@@ -1069,7 +1080,10 @@ impl<'a> Parser<'a> {
         })?;
 
         Ok(sdf::Value::Dictionary(HashMap::from([
-            ("curveType".to_owned(), sdf::Value::Token(curve_type.unwrap_or_else(|| "bezier".to_owned()))),
+            (
+                "curveType".to_owned(),
+                sdf::Value::Token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
+            ),
             ("preExtrapolation".to_owned(), pre_extrapolation),
             ("postExtrapolation".to_owned(), post_extrapolation),
             ("loopParameters".to_owned(), loop_params),
@@ -1128,9 +1142,7 @@ impl<'a> Parser<'a> {
 
     /// Parse `(offset = ...; scale = ...; customData = {...})` blocks attached to
     /// references or sublayers.
-    fn parse_reference_layer_offset(
-        &mut self,
-    ) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>)> {
+    fn parse_reference_layer_offset(&mut self) -> Result<(sdf::LayerOffset, HashMap<String, sdf::Value>)> {
         let mut layer_offset = sdf::LayerOffset::default();
         let mut custom_data = HashMap::new();
 
@@ -1191,7 +1203,6 @@ impl<'a> Parser<'a> {
 
         Ok(payload)
     }
-
 
     fn apply_list_op<T: Default + Clone + PartialEq>(
         &mut self,
@@ -1606,14 +1617,12 @@ impl<'a> Parser<'a> {
     }
 }
 
-
 /// Push a string into a Vec if it's not already present.
 fn push_unique(vec: &mut Vec<String>, name: &str) {
     if !vec.iter().any(|s| s == name) {
         vec.push(name.to_owned());
     }
 }
-
 
 /// Result of parsing a type declaration, holding the parsed base type,
 /// the original token text, and whether `[]` was present.
@@ -1689,7 +1698,6 @@ enum Type {
     /// Unrecognized type name; the raw name is preserved in `TypeInfo::type_name`.
     Custom,
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2855,13 +2863,20 @@ def Scope "Root" (
 
     #[test]
     fn parse_spline_empty() {
-        let mut parser = Parser::new(r#"#usda 1.0
+        let mut parser = Parser::new(
+            r#"#usda 1.0
 def "p" { double x.spline = {} }
-"#);
+"#,
+        );
         let data = parser.parse().unwrap();
-        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
-            .fields.get("spline").unwrap()
-            .try_as_dictionary_ref().unwrap();
+        let d = data
+            .get(&sdf::path("/p.x").unwrap())
+            .unwrap()
+            .fields
+            .get("spline")
+            .unwrap()
+            .try_as_dictionary_ref()
+            .unwrap();
         assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("bezier".into())));
         assert_eq!(d.get("preExtrapolation"), Some(&sdf::Value::ValueBlock));
         assert!(d.get("knots").unwrap().try_as_value_vec_ref().unwrap().is_empty());
@@ -2869,18 +2884,25 @@ def "p" { double x.spline = {} }
 
     #[test]
     fn parse_spline_knot_with_tangents() {
-        let mut parser = Parser::new(r#"#usda 1.0
+        let mut parser = Parser::new(
+            r#"#usda 1.0
 def "p" {
     float x.spline = {
         hermite,
         10 : 5.0 ; pre (1.0, 2.0) ; post curve (3.0, 4.0)
     }
 }
-"#);
+"#,
+        );
         let data = parser.parse().unwrap();
-        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
-            .fields.get("spline").unwrap()
-            .try_as_dictionary_ref().unwrap();
+        let d = data
+            .get(&sdf::path("/p.x").unwrap())
+            .unwrap()
+            .fields
+            .get("spline")
+            .unwrap()
+            .try_as_dictionary_ref()
+            .unwrap();
         assert_eq!(d.get("curveType"), Some(&sdf::Value::Token("hermite".into())));
 
         let knots = d.get("knots").unwrap().try_as_value_vec_ref().unwrap();
@@ -2893,12 +2915,16 @@ def "p" {
         assert_eq!(knot.get("preTangentWidth"), Some(&sdf::Value::Double(2.0)));
         assert_eq!(knot.get("postTangentSlope"), Some(&sdf::Value::Double(3.0)));
         assert_eq!(knot.get("postTangentWidth"), Some(&sdf::Value::Double(4.0)));
-        assert_eq!(knot.get("nextInterpolationMode"), Some(&sdf::Value::Token("curve".into())));
+        assert_eq!(
+            knot.get("nextInterpolationMode"),
+            Some(&sdf::Value::Token("curve".into()))
+        );
     }
 
     #[test]
     fn parse_spline_extrapolation_and_loop() {
-        let mut parser = Parser::new(r#"#usda 1.0
+        let mut parser = Parser::new(
+            r#"#usda 1.0
 def "p" {
     double x.spline = {
         pre: sloped (2.5),
@@ -2907,11 +2933,17 @@ def "p" {
         5 : 1.0 & 9.0
     }
 }
-"#);
+"#,
+        );
         let data = parser.parse().unwrap();
-        let d = data.get(&sdf::path("/p.x").unwrap()).unwrap()
-            .fields.get("spline").unwrap()
-            .try_as_dictionary_ref().unwrap();
+        let d = data
+            .get(&sdf::path("/p.x").unwrap())
+            .unwrap()
+            .fields
+            .get("spline")
+            .unwrap()
+            .try_as_dictionary_ref()
+            .unwrap();
 
         let pre = d.get("preExtrapolation").unwrap().try_as_dictionary_ref().unwrap();
         assert_eq!(pre.get("mode"), Some(&sdf::Value::Token("sloped".into())));
@@ -2928,7 +2960,8 @@ def "p" {
 
         // `5 : 1.0 & 9.0` — preValue is 1.0, value is 9.0.
         let knot = d.get("knots").unwrap().try_as_value_vec_ref().unwrap()[0]
-            .try_as_dictionary_ref().unwrap();
+            .try_as_dictionary_ref()
+            .unwrap();
         assert_eq!(knot.get("preValue"), Some(&sdf::Value::Double(1.0)));
         assert_eq!(knot.get("value"), Some(&sdf::Value::Double(9.0)));
     }

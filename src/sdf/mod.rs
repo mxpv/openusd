@@ -130,7 +130,10 @@ pub struct Payload {
     #[cfg_attr(feature = "serde", serde(rename = "path", skip_serializing_if = "Path::is_empty"))]
     pub prim_path: Path,
     /// The layer offset to transform time.
-    #[cfg_attr(feature = "serde", serde(rename = "layerOffset", skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(rename = "layerOffset", skip_serializing_if = "Option::is_none")
+    )]
     pub layer_offset: Option<LayerOffset>,
 }
 
@@ -153,7 +156,10 @@ pub struct Reference {
     #[cfg_attr(feature = "serde", serde(rename = "layerOffset"))]
     pub layer_offset: LayerOffset,
     /// The custom data associated with the reference.
-    #[cfg_attr(feature = "serde", serde(rename = "customData", skip_serializing_if = "HashMap::is_empty"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(rename = "customData", skip_serializing_if = "HashMap::is_empty")
+    )]
     pub custom_data: HashMap<String, Value>,
 }
 
