@@ -1,17 +1,194 @@
 //! Prim composition index.
 //!
 //! A [`PrimIndex`] records, for a single composed prim, the ordered list of
-//! layer specs that contribute opinions — from strongest to weakest. The
-//! ordering follows USD's LIVERPS strength rules:
+//! layer specs that contribute opinions — from strongest to weakest. Value
+//! resolution walks this list and returns the first opinion found.
 //!
-//! 1. **L**ocal opinions (root layer stack / sublayers)
-//! 2. **I**nherits
-//! 3. **V**ariant sets
-//! 4. **R**eferences
-//! 5. **P**ayloads
-//! 6. **S**pecializes
+//! # LIVRPS strength ordering
 //!
-//! See <https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html>
+//! USD composes opinions using six arc types, ordered by strength:
+//!
+//! 1. **L**ocal — direct opinions in the root layer stack (sublayers)
+//! 2. **I**nherits — opinions from class prims (`inherits = </Class>`)
+//! 3. **V**ariants — opinions from the selected variant (`variants = { string v = "sel" }`)
+//! 4. **R**eferences — opinions from referenced layers (`references = @model.usd@</Prim>`)
+//! 5. **P**ayloads — like references but deferred (`payload = @heavy.usd@</Prim>`)
+//! 6. **S**pecializes — like inherits but weakest (`specializes = </Base>`)
+//!
+//! Within each arc type, opinions are ordered by layer strength (root layer
+//! strongest, deepest sublayer weakest).
+//!
+//! # How composition works
+//!
+//! ## Direct arcs
+//!
+//! Given a simple scene:
+//!
+//! ```text
+//! # root.usda
+//! def "Model" (
+//!     references = @model.usd@</Model>
+//! ) {
+//!     string name = "local_opinion"    # L — strongest
+//! }
+//! ```
+//!
+//! ```text
+//! # model.usd
+//! def "Model" {
+//!     string name = "from_reference"   # R — weaker
+//! }
+//! ```
+//!
+//! The prim index for `/Model` contains two nodes: `root.usda:/Model` (Root)
+//! and `model.usd:/Model` (Reference). Querying `name` returns `"local_opinion"`
+//! because local opinions are stronger than references.
+//!
+//! ## Recursive arc processing
+//!
+//! Arcs are followed transitively. If a referenced layer introduces an
+//! inherit, that inherit is resolved within the referenced layer's context:
+//!
+//! ```text
+//! # root.usda
+//! def "Model" (references = @model.usd@</Model>) { }
+//! class "Class" { }
+//! ```
+//!
+//! ```text
+//! # model.usd
+//! def "Model" (inherits = </Class>) { }
+//! class "Class" { double x = 1.0 }
+//! ```
+//!
+//! The index for `/Model` includes: `root.usda:/Model` (Root),
+//! `model.usd:/Model` (Reference), and `model.usd:/Class` (Inherit — discovered
+//! by recursively processing arcs on the reference node).
+//!
+//! ## Sublayer stacks for external arcs
+//!
+//! When a reference or payload points to an external layer, that layer may
+//! have its own sublayers. The target's full sublayer stack is included:
+//!
+//! ```text
+//! # root.usda
+//! def "Model" (references = @A.usd@</Model>) { }
+//! ```
+//!
+//! ```text
+//! # A.usd
+//! (subLayers = [@B.usd@])
+//! def "Model" { }
+//! ```
+//!
+//! ```text
+//! # B.usd
+//! def "Model" { string x = "from_sublayer" }
+//! ```
+//!
+//! The reference to `A.usd` brings in both `A.usd` and `B.usd` as the
+//! target's layer stack, so `/Model.x` resolves to `"from_sublayer"`.
+//!
+//! ## Ancestral arc propagation (seeds)
+//!
+//! When a parent prim has composition arcs, descendants automatically pick
+//! up opinions from the corresponding descendant path in the arc's target.
+//! This is handled by "seed" collection — before building the index for a
+//! prim, we walk its ancestors to find arcs that introduce remapped paths:
+//!
+//! ```text
+//! # root.usda
+//! def "Set" (payload = @set.usd@</Set>) { }
+//! ```
+//!
+//! ```text
+//! # set.usd
+//! def "Set" {
+//!     def "Prop" { string x = "from_payload" }
+//! }
+//! ```
+//!
+//! Building the index for `/Set/Prop`: the ancestor `/Set` has a payload arc.
+//! The seed collector remaps `/Set/Prop` through the payload to produce
+//! `set.usd:/Set/Prop`, so the property `x` is found.
+//!
+//! Seeds are expanded iteratively — if a seed introduces further arcs (e.g.
+//! a reference inside a variant in a referenced layer), those are expanded
+//! too, to arbitrary depth.
+//!
+//! ## Variant resolution
+//!
+//! Variant selections are gathered from all accumulated nodes (L + I),
+//! following first-opinion-wins. The selection is applied by appending
+//! `{setName=selection}` to each existing node's path, since the variant
+//! set may be defined on the prim itself or on an inherited class:
+//!
+//! ```text
+//! class "_class" (
+//!     variantSets = "color"
+//!     variants = { string color = "red" }
+//! ) {
+//!     variantSet "color" = {
+//!         "red"  { string paint = "crimson" }
+//!         "blue" { string paint = "navy" }
+//!     }
+//! }
+//! def "Model" (inherits = </_class>) { }
+//! ```
+//!
+//! The variant set lives on `/_class`, so variant resolution appends
+//! `{color=red}` to the class path: `/_class{color=red}`.
+//!
+//! Variant sets can be nested (a variant spec defines another variant set),
+//! so resolution loops until no new variant nodes are produced. When no
+//! explicit selection is authored, the first variant in the set is used as
+//! the default.
+//!
+//! ## Cross-seed variant resolution
+//!
+//! A variant selection authored in one composition context (e.g. an
+//! ancestral variant override) may apply to a variant set introduced by a
+//! different context (e.g. a reference). After all seeds are processed, a
+//! final pass gathers all variant selections from the full node set and
+//! resolves any remaining unprocessed variant sets:
+//!
+//! ```text
+//! # root.usda
+//! def "Group" (
+//!     references = @group.usd@</Group>
+//!     variants = { string standin = "sim" }
+//! ) { }
+//! ```
+//!
+//! ```text
+//! # group.usd
+//! def "Group" (variantSets = "standin") {
+//!     variantSet "standin" = {
+//!         "sim" { over "Model" (variants = { string v = "sim" }) { } }
+//!     }
+//!     def "Model" (references = @model.usd@</Model>) { }
+//! }
+//! ```
+//!
+//! The variant selection `standin=sim` comes from root.usda (one seed), but
+//! the variant set is defined in group.usd (loaded via reference — another
+//! seed). The cross-seed pass connects them.
+//!
+//! # Implementation structure
+//!
+//! - [`PrimIndex::build`] — entry point. Collects seeds, runs LIVRPS per
+//!   seed, applies cross-seed variant resolution, then deduplicates nodes.
+//! - [`build_recursive`] — runs the LIVRPS algorithm for a single path
+//!   within a given layer stack. Called once per seed and recursively for
+//!   each arc target.
+//! - [`collect_seeds`] — walks ancestor prims to find composition arcs that
+//!   introduce remapped paths for the target prim. Expands iteratively.
+//! - [`resolve_cross_seed_variants`] — post-pass that resolves variant
+//!   selections spanning multiple seed contexts.
+//! - [`resolve_variant_selections_in`] — gathers explicit variant selections
+//!   from nodes, with fallback to the first variant as default.
+//!
+//! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
