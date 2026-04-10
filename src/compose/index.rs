@@ -14,12 +14,12 @@
 //! See <https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html>
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{AbstractData, LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 /// The type of composition arc that introduced a [`Node`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,10 +78,26 @@ impl PrimIndex {
     /// Composition arcs are processed recursively: when a reference or payload
     /// introduces nodes from another layer stack, the arcs on those nodes
     /// (inherits, variants, nested references, etc.) are followed as well.
+    ///
+    /// Ancestral arcs are also propagated: if a parent prim has a reference or
+    /// payload, the descendant prim picks up the corresponding descendant spec
+    /// from the referenced layer.
     pub(crate) fn build(path: &Path, layers: &[LayerData], identifiers: &[String]) -> Self {
-        let root_stack: Vec<usize> = (0..layers.len()).collect();
         let mut nodes = Vec::new();
-        build_recursive(path, &root_stack, ArcType::Root, layers, identifiers, &mut nodes, 0);
+
+        // Collect all (layer_index, source_path, arc_type) seeds by walking
+        // both the root layer stack and ancestral composition arcs.
+        let seeds = collect_seeds(path, layers, identifiers);
+
+        // Run LIVRPS on each seed context.
+        for (layer_indices, source_path, arc) in &seeds {
+            build_recursive(source_path, layer_indices, *arc, layers, identifiers, &mut nodes, 0);
+        }
+
+        // Overlapping ancestor walks can produce the same node from multiple seeds.
+        let mut seen = HashSet::new();
+        nodes.retain(|n| seen.insert((n.layer_index, n.path.clone())));
+
         PrimIndex { nodes }
     }
 
@@ -135,9 +151,10 @@ fn build_recursive(
     nodes: &mut Vec<Node>,
     depth: usize,
 ) {
-    if depth > MAX_COMPOSITION_DEPTH {
-        return;
-    }
+    assert!(
+        depth <= MAX_COMPOSITION_DEPTH,
+        "composition depth exceeded {MAX_COMPOSITION_DEPTH} for {path} — possible cycle"
+    );
 
     // L — Local opinions within this layer stack.
     let local_start = nodes.len();
@@ -152,13 +169,19 @@ fn build_recursive(
     }
     let local_nodes_range = local_start..nodes.len();
 
-    // I — Inherits: compose PathListOp across local nodes, then add nodes
-    // from the inherited prims within this layer stack.
+    // I — Inherits: compose PathListOp across local nodes, then recursively
+    // build for each inherited prim within this layer stack.
     let inherits = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::InheritPaths, layers);
     for inherit_path in &inherits {
-        for &i in layer_stack {
-            add_remapped_nodes(layers[i].as_ref(), i, inherit_path, ArcType::Inherit, nodes);
-        }
+        build_recursive(
+            inherit_path,
+            layer_stack,
+            ArcType::Inherit,
+            layers,
+            identifiers,
+            nodes,
+            depth + 1,
+        );
     }
 
     // V — Variants: resolve variant selection (first opinion wins), then
@@ -178,9 +201,13 @@ fn build_recursive(
         }
     }
 
-    // R — References: compose ReferenceListOp across local nodes, then
+    // Collect the range of all nodes added so far (L + I + V) for arc lookups.
+    // In LIVRPS, arcs introduced by variants must also be followed.
+    let all_opinion_nodes = local_start..nodes.len();
+
+    // R — References: compose ReferenceListOp across L+I+V nodes, then
     // recursively build for each referenced layer stack.
-    let references = compose_arc_list_in::<Reference>(&nodes[local_nodes_range.clone()], FieldKey::References, layers);
+    let references = compose_arc_list_in::<Reference>(&nodes[all_opinion_nodes.clone()], FieldKey::References, layers);
     for reference in &references {
         add_arc_nodes_recursive(
             &reference.asset_path,
@@ -194,7 +221,7 @@ fn build_recursive(
     }
 
     // P — Payloads: same as references but weaker.
-    let payloads = collect_payloads_in(&nodes[local_nodes_range.clone()], layers);
+    let payloads = collect_payloads_in(&nodes[all_opinion_nodes.clone()], layers);
     for payload in &payloads {
         add_arc_nodes_recursive(
             &payload.asset_path,
@@ -207,13 +234,79 @@ fn build_recursive(
         );
     }
 
-    // S — Specializes: same as inherits but weakest in LIVERPS.
-    let specializes = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::Specializes, layers);
+    // S — Specializes: composed across L+I+V nodes, recursively build
+    // for each specialized prim within this layer stack.
+    let specializes = compose_arc_list_in::<Path>(&nodes[all_opinion_nodes], FieldKey::Specializes, layers);
     for specialize_path in &specializes {
-        for &i in layer_stack {
-            add_remapped_nodes(layers[i].as_ref(), i, specialize_path, ArcType::Specialize, nodes);
+        build_recursive(
+            specialize_path,
+            layer_stack,
+            ArcType::Specialize,
+            layers,
+            identifiers,
+            nodes,
+            depth + 1,
+        );
+    }
+}
+
+/// Collects seed contexts for building a prim's composition index.
+///
+/// Returns `(layer_stack, source_path, arc_type)` tuples. The first entry is
+/// always the root layer stack at the original path. Additional entries come
+/// from ancestors that have composition arcs — the descendant suffix is
+/// appended to the ancestor's remapped path.
+fn collect_seeds(path: &Path, layers: &[LayerData], identifiers: &[String]) -> Vec<(Vec<usize>, Path, ArcType)> {
+    let root_stack: Vec<usize> = (0..layers.len()).collect();
+    let mut seeds = vec![(root_stack, path.clone(), ArcType::Root)];
+    let mut seen = HashSet::new();
+
+    // Iteratively expand seeds: for each seed, walk its remapped path's
+    // ancestors within its layer stack to discover further arc mappings.
+    let mut i = 0;
+    while i < seeds.len() {
+        let (ref layer_stack, ref seed_path, _) = seeds[i];
+        let layer_stack = layer_stack.clone();
+        let seed_path = seed_path.clone();
+        i += 1;
+
+        let mut ancestor_opt = seed_path.parent();
+        while let Some(ancestor) = ancestor_opt {
+            if ancestor == Path::abs_root() {
+                break;
+            }
+
+            if layer_stack.iter().any(|&li| layers[li].has_spec(&ancestor)) {
+                let mut ancestor_nodes = Vec::new();
+                build_recursive(
+                    &ancestor,
+                    &layer_stack,
+                    ArcType::Root,
+                    layers,
+                    identifiers,
+                    &mut ancestor_nodes,
+                    0,
+                );
+
+                for anode in &ancestor_nodes {
+                    if anode.arc == ArcType::Root {
+                        continue;
+                    }
+                    let Some(remapped_path) = seed_path.replace_prefix(&ancestor, &anode.path) else {
+                        continue;
+                    };
+                    let key = (vec![anode.layer_index], remapped_path.clone());
+                    if seen.insert(key) {
+                        seeds.push((vec![anode.layer_index], remapped_path, anode.arc));
+                    }
+                }
+            }
+
+            ancestor_opt = ancestor.parent();
         }
     }
+
+    seeds
 }
 
 /// Resolves variant selections by walking nodes strongest-to-weakest.
@@ -315,7 +408,6 @@ fn add_arc_nodes_recursive(
         if prim_path.is_empty() {
             return;
         }
-        // Use the full layer list as the stack (same composition context).
         let stack: Vec<usize> = (0..layers.len()).collect();
         build_recursive(prim_path, &stack, arc, layers, identifiers, nodes, depth + 1);
     } else {
@@ -369,25 +461,6 @@ fn find_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[S
     }
 
     stack
-}
-
-/// Adds nodes from a single layer with namespace remapping.
-///
-/// Maps `composed_path` and its children from `source_path` in the layer.
-fn add_remapped_nodes(
-    layer: &dyn AbstractData,
-    layer_index: usize,
-    source_path: &Path,
-    arc: ArcType,
-    nodes: &mut Vec<Node>,
-) {
-    if layer.has_spec(source_path) {
-        nodes.push(Node {
-            layer_index,
-            path: source_path.clone(),
-            arc,
-        });
-    }
 }
 
 /// Finds a layer index whose identifier matches `asset_path`.
@@ -619,6 +692,34 @@ mod tests {
         assert!(
             layers[a_idx].has_spec(&a_attr_path),
             "A.usd should have spec at /A.A_attr"
+        );
+        Ok(())
+    }
+
+    /// Variant that introduces a specializes arc should propagate the
+    /// specialized prim's variant opinions to the composing prim.
+    #[test]
+    fn specializes_from_variant() -> Result<()> {
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/SpecializesAndVariants_root/usda/root.usd",
+            manifest_dir()
+        );
+        let (layers, ids) = load_layers(&path)?;
+        let index = build(&layers, &ids, "/B");
+
+        // /B has variant introducingVariantSet=introducingVariant which specializes /A.
+        // /A has variant nestedVariantSet=nestedVariant with property "test".
+        assert!(
+            index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
+            "should have specialize node from variant"
+        );
+        // The /A variant should also be present.
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|n| n.path.as_str().contains("{nestedVariantSet=nestedVariant}")),
+            "should have /A's variant node"
         );
         Ok(())
     }
