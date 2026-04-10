@@ -378,6 +378,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
                 self.paths[path_indexes[this_index] as usize] = if is_prim_property_path {
                     parent_path.append_property(element_token)?
+                } else if element_token.starts_with('{') {
+                    // Variant segments are appended directly without a separator
+                    // to produce canonical paths like /Prim{set=sel}.
+                    parent_path.append_variant_segment(element_token)
                 } else {
                     parent_path.append_path(element_token)?
                 };
