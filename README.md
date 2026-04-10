@@ -21,15 +21,47 @@ For a detailed comparison with the C++ reference implementation and current prog
 
 ## Features
 
-- Reads all major USD formats: `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
-- Composed [`Stage`](src/stage.rs) with full [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering (sublayers, inherits, variants, references, payloads, specializes).
-- Recursive [layer collection](src/layer.rs) with cycle detection, format auto-detection, and expression evaluation.
-- List-edit composition (`prepend`, `append`, `add`, `delete`, `explicit`) across layers.
-- Generic typed field access via `Stage::field<T>` with `TryFrom<Value>` conversion.
-- [Variable expression](src/expr.rs) evaluator for USD's [expression syntax](https://openusd.org/dev/user_guides/variable_expressions.html).
-- [Asset resolution](src/ar.rs) with pluggable `Resolver` trait, filesystem `DefaultResolver`, and search paths.
+- File formats — reads `.usda` (text), `.usdc` (binary), and `.usdz` (archive) with format auto-detection.
+- Composition engine ([`pcp`](src/pcp))
+  - Full [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering: sublayers, inherits, variants, references, payloads, specializes.
+  - List-edit composition (`prepend`, `append`, `add`, `delete`, `explicit`) across layers.
+  - Arena-based node DAG with parent/child/sibling and origin links.
+  - Cycle detection and structured error reporting via `StageBuilder::on_error` callback.
+  - Passes composition [compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
+- Composed [`Stage`](src/stage.rs)
+  - Lazy per-prim composition with caching.
+  - Depth-first traversal, child/property queries, typed field access via `Stage::field<T>`.
+- [Layer collection](src/layer.rs) — recursive loading with cycle detection, format auto-detection, and expression evaluation.
+- [Asset resolution](src/ar.rs) — pluggable `Resolver` trait, filesystem `DefaultResolver`, search paths, and package-relative paths.
+- [Variable expressions](src/expr.rs) — USD's [expression syntax](https://openusd.org/dev/user_guides/variable_expressions.html) with 13 built-in functions and string interpolation.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
+
+## Compliance
+
+The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d-development-introducing-aousd-core-specification-1-0/) has been officially ratified. As part of the specification, sample implementations for compliance testing are provided as Python scripts with JSON baselines. We test the `openusd` crate against a subset of these — where JSON baselines are available, we parse them and verify our output matches.
+
+| Area | Status | Notes |
+|------|--------|-------|
+| [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark: Passes | 10 tests against JSON baselines |
+| [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :construction: Planned | Baselines are Python-generated; needs backporting or bridge layer |
+| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark: Passes | All 276 tests covering text and binary formats |
+| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :construction: Planned | |
+| [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark: Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
+
+## Getting started
+
+To begin, simply clone the repository including its submodules.
+Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
+
+```bash
+# Clone the project
+git clone --recurse-submodules https://github.com/mxpv/openusd.git
+cd openusd
+
+# Run examples
+cargo run --example dump_usdc -- ~/caldera/layers/cameras.usd
+```
 
 ## Example
 
@@ -61,24 +93,6 @@ let active: Option<bool> = stage.field("/World/Cube", FieldKey::Active)?;
 // Access children composed across layers, references, and payloads.
 let children = stage.prim_children("/World/Cube")?;
 let properties = stage.prim_properties("/World/Cube")?;
-```
-
-## Getting started
-
-To begin, simply clone the repository including its submodules.
-Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
-
-```bash
-# Clone the project
-git clone --recurse-submodules https://github.com/mxpv/openusd.git
-cd openusd
-
-# Use cargo to build, test, lint, etc.
-cargo build
-cargo clippy
-
-# Run examples
-cargo run --example dump_usdc -- ~/caldera/layers/cameras.usd
 ```
 
 ## Minimum supported Rust version (MSRV)
