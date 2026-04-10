@@ -21,6 +21,16 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | :white_check_mark: Supported | 0.2.0 | |
 | LIVERPS strength ordering | :white_check_mark: Supported | 0.2.0 | [What is LIVERPS?](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) |
 | [List editing](https://openusd.org/release/glossary.html#usdglossary-listediting) (prepend/append/add/delete/explicit) | :white_check_mark: Supported | 0.2.0 | |
+| Composition error reporting | :white_check_mark: Supported | | `pcp::Error` with `StageBuilder::on_error` callback |
+| Node DAG (PrimIndex graph) | :white_check_mark: Supported | | Arena-based DAG with parent/child/sibling/origin links |
+| Variant fallbacks | :construction: Planned | | `PcpVariantFallbackMap` — application-level default selections |
+| [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :construction: Planned | | Non-destructive override layer on top of root |
+| [Layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset) | :construction: Planned | | Time scale/offset for sublayers and references (already parsed) |
+| [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | :construction: Planned | | Dynamic include/exclude set for deferred payloads |
+| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :construction: Planned | | Non-destructive namespace reorganization |
+| [Incremental invalidation](https://openusd.org/release/api/class_pcp_changes.html) | :thinking: Considering | | Dependency tracking and change processing (`PcpChanges`) |
+| Composition graph visualization | :thinking: Considering | | `dot` format export for debugging composition |
+| [Map expressions](https://openusd.org/release/api/class_pcp_map_expression.html) | :thinking: Considering | | `mapToParent`/`mapToRoot` namespace translation on nodes |
 | **Scene Graph (Usd)** | | | |
 | Composed stage | :white_check_mark: Supported | 0.2.0 | `Stage::open`, traverse, field queries |
 | Generic field access | :white_check_mark: Supported | 0.2.0 | `Stage::field<T>` with path and field key |
@@ -30,7 +40,7 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | Property typed wrapper | :construction: Planned | | `UsdProperty` base for attributes and relationships |
 | Attribute typed wrapper | :construction: Planned | | `UsdAttribute` with value type, connections, interpolation |
 | Relationship typed wrapper | :construction: Planned | | `UsdRelationship` with targets |
-| [Native instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | :construction: Planned | | `instanceable` field is readable |
+| [Native instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | :construction: Planned | | `instanceable` field is readable; composition sharing requires Node DAG |
 | [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | :construction: Planned | | |
 | [Flatten / export](https://openusd.org/release/api/flatten_utils_8h.html) | :construction: Planned | | |
 | [Namespace editing](https://openusd.org/release/api/class_usd_namespace_editor.html) | :construction: Planned | | |
