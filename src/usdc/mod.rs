@@ -826,7 +826,9 @@ mod tests {
     /// String arrays should have a readable default value.
     #[test]
     fn test_read_string_array_default() -> Result<()> {
-        let data = read_file("vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/gen_string.usdc")?;
+        let data = read_file(
+            "vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/gen_string.usdc",
+        )?;
 
         let array = data
             .get(&sdf::path("/root.array")?, "default")?
@@ -842,7 +844,8 @@ mod tests {
     /// Vec2h single value should read half-floats, not raw integers.
     #[test]
     fn test_read_vec2h_single() -> Result<()> {
-        let data = read_file("vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/gen_vec2h.usdc")?;
+        let data =
+            read_file("vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/gen_vec2h.usdc")?;
 
         let single = data
             .get(&sdf::path("/root.single")?, "default")?

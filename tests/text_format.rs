@@ -20,14 +20,12 @@ fn assert_text_format(name: &str) {
     let usda = assets.join("usda").join(format!("{name}.usda"));
     let baseline = assets.join("baseline").join(format!("{name}.json"));
 
-    let reader =
-        TextReader::read(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
+    let reader = TextReader::read(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
 
     // Build actual output as a sorted map of path → fields.
     let mut actual: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
-        let fields: BTreeMap<&str, &sdf::Value> =
-            spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
         actual.insert(path.to_string(), fields);
     }
 

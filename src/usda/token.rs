@@ -331,10 +331,7 @@ mod tests {
             (Token::String("st"), "st"),
             // token outputs:surface.connect = </TexModel/boardMat/PBRShader.outputs:surface>
             (Token::Identifier("token"), "token"),
-            (
-                Token::NamespacedIdentifier("outputs:surface"),
-                "outputs:surface",
-            ),
+            (Token::NamespacedIdentifier("outputs:surface"), "outputs:surface"),
             (Token::Punctuation('.'), "."),
             (Token::Connect, "connect"),
             (Token::Punctuation('='), "="),
@@ -597,19 +594,13 @@ mod tests {
         // Multiline block comment.
         assert_tokens(
             "float /* multi\nline\ncomment */ x",
-            &[
-                (Token::Identifier("float"), "float"),
-                (Token::Identifier("x"), "x"),
-            ],
+            &[(Token::Identifier("float"), "float"), (Token::Identifier("x"), "x")],
         );
 
         // Adjacent block comments.
         assert_tokens(
             "a /* one */ /* two */ b",
-            &[
-                (Token::Identifier("a"), "a"),
-                (Token::Identifier("b"), "b"),
-            ],
+            &[(Token::Identifier("a"), "a"), (Token::Identifier("b"), "b")],
         );
     }
 }
