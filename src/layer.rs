@@ -1,13 +1,10 @@
-//! Layer collection and composition.
+//! Layer stack collection.
 //!
 //! Given a root USD file, [`collect_layers`] uses an [`ar::Resolver`] to recursively
 //! resolve and load every layer the stage depends on — following sublayers, references,
 //! and payloads across files and formats (`.usda`, `.usdc`, `.usd`, `.usdz`). The result
 //! is a [`Vec`] of [`Layer`]s, each wrapping a parsed [`AbstractData`] with its resolved
 //! identity. Cycles are detected and skipped automatically.
-
-pub(crate) mod graph;
-pub(crate) mod index;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -137,7 +134,7 @@ pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<L
 ///
 /// The `on_error` callback decides whether to continue (`Ok(())`) or abort
 /// (`Err(...)`) for each composition error encountered.
-pub(crate) fn collect_layers_with_handler(
+pub fn collect_layers_with_handler(
     resolver: &impl Resolver,
     root_path: &str,
     on_error: impl Fn(CompositionError) -> Result<()>,

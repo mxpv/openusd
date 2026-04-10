@@ -12,7 +12,8 @@
 //! | [`usdc`] | Binary format reader. [`CrateData`](usdc::CrateData) parses `.usdc` files into [`AbstractData`](sdf::AbstractData). |
 //! | [`usdz`] | Archive format reader. [`Archive`](usdz::Archive) extracts layers from `.usdz` packages. |
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |
-//! | [`compose`] | Layer collection. [`collect_layers`](compose::collect_layers) recursively resolves and loads the full layer stack from a root file. |
+//! | [`layer`] | Layer collection. [`collect_layers`](layer::collect_layers) recursively loads all layers from a root file. |
+//! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering and per-prim index caching. |
 //! | [`stage`] | Composed stage. [`Stage`](stage::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`expr`] | Variable expression parser and evaluator for USD's `\`...\`` expression syntax. |
 //!
@@ -29,14 +30,15 @@
 //! ```
 
 pub mod ar;
-pub mod compose;
 pub mod expr;
+pub mod layer;
+pub mod pcp;
 pub mod sdf;
 pub mod stage;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;
 
-pub use compose::{CompositionError, DependencyKind};
 pub use half::f16;
+pub use layer::{CompositionError, DependencyKind};
 pub use stage::{Stage, StageBuilder};
