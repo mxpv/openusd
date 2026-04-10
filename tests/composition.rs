@@ -112,20 +112,22 @@ fn run(name: &str, format: Format) {
 
 macro_rules! composition_tests {
     ($($name:ident),* $(,)?) => {
-        paste::paste! {
-            $(
-                #[test]
-                #[allow(non_snake_case)]
-                fn [<$name _text>]() {
-                    run(stringify!($name), Format::Text);
-                }
-
-                #[test]
-                #[allow(non_snake_case)]
-                fn [<$name _binary>]() {
-                    run(stringify!($name), Format::Binary);
-                }
-            )*
+        composition_tests!(@expand $($name),*);
+    };
+    (@expand $($name:ident),*) => {
+        $(
+            composition_tests!(@one $name);
+        )*
+    };
+    (@one $name:ident) => {
+        #[cfg(test)]
+        #[allow(non_snake_case)]
+        mod $name {
+            use super::*;
+            #[test]
+            fn text() { run(stringify!($name), Format::Text); }
+            #[test]
+            fn binary() { run(stringify!($name), Format::Binary); }
         }
     };
 }
