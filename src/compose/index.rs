@@ -356,7 +356,8 @@ fn build_recursive(
     // full index (with ancestral seed expansion) for each inherited prim.
     let inherits = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::InheritPaths, layers);
     for inherit_path in &inherits {
-        let seeds = collect_seeds(inherit_path, layers, identifiers);
+        let resolved = path.make_absolute(inherit_path);
+        let seeds = collect_seeds(&resolved, layers, identifiers);
         for (stack, spath, _) in &seeds {
             build_recursive(spath, stack, ArcType::Inherit, layers, identifiers, nodes, depth + 1);
         }
@@ -439,7 +440,8 @@ fn build_recursive(
     // (with ancestral seed expansion) for each specialized prim.
     let specializes = compose_arc_list_in::<Path>(&nodes[all_opinion_nodes], FieldKey::Specializes, layers);
     for specialize_path in &specializes {
-        let seeds = collect_seeds(specialize_path, layers, identifiers);
+        let resolved = path.make_absolute(specialize_path);
+        let seeds = collect_seeds(&resolved, layers, identifiers);
         for (stack, spath, _) in &seeds {
             build_recursive(spath, stack, ArcType::Specialize, layers, identifiers, nodes, depth + 1);
         }
@@ -483,7 +485,9 @@ fn collect_seeds(path: &Path, layers: &[LayerData], identifiers: &[String]) -> V
                     &mut ancestor_nodes,
                     0,
                 );
-
+                // Variant sets from referenced layers need cross-seed resolution
+                // to match with local variant selections.
+                resolve_cross_seed_variants(&mut ancestor_nodes, layers, identifiers);
                 for anode in &ancestor_nodes {
                     if anode.arc == ArcType::Root {
                         continue;
