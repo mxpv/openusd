@@ -169,19 +169,14 @@ fn build_recursive(
     }
     let local_nodes_range = local_start..nodes.len();
 
-    // I — Inherits: compose PathListOp across local nodes, then recursively
-    // build for each inherited prim within this layer stack.
+    // I — Inherits: compose PathListOp across local nodes, then build
+    // full index (with ancestral seed expansion) for each inherited prim.
     let inherits = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::InheritPaths, layers);
     for inherit_path in &inherits {
-        build_recursive(
-            inherit_path,
-            layer_stack,
-            ArcType::Inherit,
-            layers,
-            identifiers,
-            nodes,
-            depth + 1,
-        );
+        let seeds = collect_seeds(inherit_path, layers, identifiers);
+        for (stack, spath, _) in &seeds {
+            build_recursive(spath, stack, ArcType::Inherit, layers, identifiers, nodes, depth + 1);
+        }
     }
 
     // V — Variants: resolve variant selections iteratively. Variant specs
@@ -255,19 +250,14 @@ fn build_recursive(
         );
     }
 
-    // S — Specializes: composed across L+I+V nodes, recursively build
-    // for each specialized prim within this layer stack.
+    // S — Specializes: composed across L+I+V nodes, build full index
+    // (with ancestral seed expansion) for each specialized prim.
     let specializes = compose_arc_list_in::<Path>(&nodes[all_opinion_nodes], FieldKey::Specializes, layers);
     for specialize_path in &specializes {
-        build_recursive(
-            specialize_path,
-            layer_stack,
-            ArcType::Specialize,
-            layers,
-            identifiers,
-            nodes,
-            depth + 1,
-        );
+        let seeds = collect_seeds(specialize_path, layers, identifiers);
+        for (stack, spath, _) in &seeds {
+            build_recursive(spath, stack, ArcType::Specialize, layers, identifiers, nodes, depth + 1);
+        }
     }
 }
 
