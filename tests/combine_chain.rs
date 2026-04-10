@@ -7,8 +7,7 @@ use std::path::Path;
 
 use openusd::sdf::ListOp;
 
-const COMBINE_CHAIN: &str =
-    "vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain";
+const COMBINE_CHAIN: &str = "vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain";
 
 /// JSON schema for loading vendor test fixtures.
 mod schema {

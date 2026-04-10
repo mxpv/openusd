@@ -243,4 +243,3 @@ impl Spec {
         self.fields.insert(key.as_ref().to_owned(), value.into());
     }
 }
-
