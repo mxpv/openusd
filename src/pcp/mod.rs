@@ -22,12 +22,17 @@
 //!
 //! | Module | C++ equivalent | Description |
 //! |--------|---------------|-------------|
-//! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). |
-//! | [`index`] | `PcpPrimIndex` | Per-prim composition index: strength-ordered list of contributing specs. |
+//! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
+//! | [`index`] | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
 //!
 //! # Architecture
+//!
+//! Each [`PrimIndex`](index::PrimIndex) is an arena-based graph of [`Node`]s.
+//! Nodes carry parent/child/sibling links (forming a tree) and an `origin`
+//! link (forming a DAG for implied-inherit tracking). After construction,
+//! nodes are ordered strongest-to-weakest so value resolution is a linear scan.
 //!
 //! Composition is driven by a [`CompositionContext`](index::CompositionContext)
 //! that flows from parent prims to children. The context carries:
@@ -41,7 +46,9 @@
 //! The [`Cache`](cache::Cache) stores both the [`PrimIndex`](index::PrimIndex)
 //! and the [`CompositionContext`](index::CompositionContext) for each composed
 //! prim. During depth-first traversal, parents are always composed before
-//! children, so the context chain is always populated.
+//! children, so the context chain is always populated. Each per-prim build
+//! takes only shared references, making it suitable for future parallel
+//! execution.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -49,3 +56,4 @@ pub(crate) mod cache;
 pub(crate) mod index;
 
 pub(crate) use cache::Cache;
+pub use index::{ArcType, Node, NodeIndex, PrimIndex};

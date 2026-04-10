@@ -30,11 +30,36 @@ pub enum ArcType {
     Specialize,
 }
 
-/// A single contributing spec in the composition index.
+/// Compact index into the graph's node arena.
 ///
-/// Each node points to a specific layer (by index) and the path within that
-/// layer where the prim's opinions live. The path may differ from the
-/// composed prim path when namespace remapping is involved (e.g. references).
+/// A lightweight handle identifying a single [`Node`] within a
+/// [`PrimIndex`]'s composition graph. The sentinel value [`INVALID`](Self::INVALID)
+/// represents "no node" (analogous to C++ `_invalidNodeIndex`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeIndex(u32);
+
+impl NodeIndex {
+    /// Sentinel: no node.
+    pub const INVALID: Self = Self(u32::MAX);
+
+    /// Returns `true` if this index points to an actual node.
+    pub fn is_valid(self) -> bool {
+        self.0 != u32::MAX
+    }
+
+    /// Converts to a `usize` for indexing into a `Vec`.
+    pub(crate) fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A single node in the composition graph.
+///
+/// Each node represents a site (layer + path) contributing opinions to a
+/// composed prim. The three identity fields (`layer_index`, `path`, `arc`)
+/// define *what* this node contributes. The link fields define the graph
+/// structure — parent/child/sibling relationships form a tree, while
+/// `origin` adds a second edge set forming a DAG for implied-arc tracking.
 #[derive(Debug, Clone)]
 pub struct Node {
     /// Index into the stage's layer list.
@@ -44,22 +69,118 @@ pub struct Node {
     /// The composition arc that introduced this node.
     #[allow(dead_code)] // Part of the public data model; read by tests and downstream users.
     pub arc: ArcType,
+    /// Structural parent in the composition tree.
+    pub parent: NodeIndex,
+    /// The node that caused this one to be added. Equals `parent` for direct
+    /// arcs; differs for implied inherits/specializes (points to the original
+    /// class arc that triggered propagation).
+    pub origin: NodeIndex,
+    pub first_child: NodeIndex,
+    pub last_child: NodeIndex,
+    pub prev_sibling: NodeIndex,
+    pub next_sibling: NodeIndex,
+}
+
+impl Node {
+    /// Creates a new unlinked node with all graph links set to [`NodeIndex::INVALID`].
+    fn new(layer_index: usize, path: Path, arc: ArcType) -> Self {
+        Self {
+            layer_index,
+            path,
+            arc,
+            parent: NodeIndex::INVALID,
+            origin: NodeIndex::INVALID,
+            first_child: NodeIndex::INVALID,
+            last_child: NodeIndex::INVALID,
+            prev_sibling: NodeIndex::INVALID,
+            next_sibling: NodeIndex::INVALID,
+        }
+    }
+}
+
+/// Arena-based composition graph.
+///
+/// Stores [`Node`]s in a flat `Vec` where links between nodes are encoded
+/// as [`NodeIndex`] values. Nodes are ordered strongest-to-weakest by
+/// insertion order (matching the LIVRPS evaluation sequence).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrimIndexGraph {
+    nodes: Vec<Node>,
+}
+
+impl PrimIndexGraph {
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Creates a node as a child of `parent` (or a root node if parent is
+    /// [`NodeIndex::INVALID`]) and wires the doubly-linked sibling chain.
+    fn add_child(
+        &mut self,
+        parent: NodeIndex,
+        origin: NodeIndex,
+        layer_index: usize,
+        path: Path,
+        arc: ArcType,
+    ) -> NodeIndex {
+        let mut node = Node::new(layer_index, path, arc);
+        node.parent = parent;
+        node.origin = if origin.is_valid() { origin } else { parent };
+        let idx = NodeIndex(self.nodes.len() as u32);
+
+        if parent.is_valid() {
+            let parent_node = &self.nodes[parent.idx()];
+            if parent_node.last_child.is_valid() {
+                // Append after existing last child.
+                let prev = parent_node.last_child;
+                node.prev_sibling = prev;
+                self.nodes.push(node);
+                self.nodes[prev.idx()].next_sibling = idx;
+            } else {
+                // First child.
+                self.nodes.push(node);
+                self.nodes[parent.idx()].first_child = idx;
+            }
+            self.nodes[parent.idx()].last_child = idx;
+        } else {
+            self.nodes.push(node);
+        }
+
+        idx
+    }
+}
+
+impl std::ops::Deref for PrimIndexGraph {
+    type Target = [Node];
+    fn deref(&self) -> &[Node] {
+        &self.nodes
+    }
 }
 
 /// Composition index for a single prim.
 ///
-/// Contains an ordered list of [`Node`]s from strongest to weakest.
-/// Value resolution walks this list and takes the first opinion found.
+/// Contains a graph of [`Node`]s ordered from strongest to weakest.
+/// Value resolution walks nodes in strength order and takes the first
+/// opinion found.
 #[derive(Debug, Clone)]
 pub struct PrimIndex {
-    /// Nodes ordered from strongest to weakest.
-    pub nodes: Vec<Node>,
+    /// Composition graph with nodes in strength order.
+    graph: PrimIndexGraph,
 }
 
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.graph.is_empty()
+    }
+
+    /// Returns the nodes in strength order (index 0 = strongest).
+    pub fn nodes(&self) -> &[Node] {
+        &self.graph
     }
 
     /// Builds a prim index using composition context from the parent prim.
@@ -71,11 +192,11 @@ impl PrimIndex {
         layers: &[LayerData],
         identifiers: &[String],
         ctx: &CompositionContext,
-        shared: &mut SharedCaches,
+        sublayer_stacks: &SublayerStacks,
     ) -> Self {
-        let mut builder = IndexBuilder::new(layers, identifiers, ctx, shared);
+        let mut builder = IndexBuilder::new(layers, identifiers, ctx, sublayer_stacks);
         builder.build(path);
-        PrimIndex { nodes: builder.output }
+        PrimIndex { graph: builder.output }
     }
 
     /// Returns the composition context derived from this prim's index.
@@ -89,12 +210,12 @@ impl PrimIndex {
         parent_ctx: &CompositionContext,
     ) -> CompositionContext {
         // Gather variant selections from this prim's nodes.
-        let selections = resolve_variant_selections_in(&self.nodes, layers);
+        let selections = resolve_variant_selections_in(self.nodes(), layers);
 
         // Build arc mappings: for each non-Root node, record the prefix mapping.
         let mut arc_mappings = parent_ctx.arc_mappings.clone();
         let prim_prefix = path.as_str();
-        for node in &self.nodes {
+        for node in self.nodes() {
             if node.arc == ArcType::Root {
                 continue;
             }
@@ -134,7 +255,7 @@ impl PrimIndex {
         layers: &[LayerData],
         prop_suffix: Option<&str>,
     ) -> Result<Option<Value>> {
-        for node in &self.nodes {
+        for node in self.nodes() {
             let query_path = match prop_suffix {
                 Some(suffix) => Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?),
                 None => Cow::Borrowed(&node.path),
@@ -198,31 +319,39 @@ pub(crate) struct ArcMapping {
 /// Maximum recursion depth for nested composition arcs.
 const MAX_COMPOSITION_DEPTH: usize = 100;
 
-/// Caches shared across per-prim builds within a [`CompositionGraph`].
+/// Precomputed sublayer stacks, keyed by root layer index.
 ///
-/// Persists across sibling prims so repeated targets (e.g. inherited classes)
-/// and sublayer stacks aren't recomputed.
-#[derive(Default)]
-pub(crate) struct SharedCaches {
-    /// Target indices for inherit/specialize/internal-ref targets.
-    pub target_indices: HashMap<Path, PrimIndex>,
-    /// Sublayer stacks keyed by root layer index.
-    pub sublayer_stacks: HashMap<usize, Vec<usize>>,
+/// Built once by [`Cache::new`](super::cache::Cache) and passed by shared
+/// reference to every [`IndexBuilder`]. Each entry maps a root layer to
+/// the full list of layer indices forming its sublayer stack.
+pub(crate) type SublayerStacks = HashMap<usize, Vec<usize>>;
+
+/// Precomputes sublayer stacks for every layer in the stage.
+pub(crate) fn precompute_sublayer_stacks(layers: &[LayerData], identifiers: &[String]) -> SublayerStacks {
+    (0..layers.len())
+        .map(|i| (i, find_sublayer_stack(i, layers, identifiers)))
+        .collect()
 }
 
 /// Builds a prim index by evaluating LIVRPS for each composition site.
+///
+/// All inputs are immutable shared references, making each build an
+/// independent pure function (suitable for future parallel execution).
 struct IndexBuilder<'a> {
     layers: &'a [LayerData],
     identifiers: &'a [String],
     ctx: &'a CompositionContext,
-    /// Strength-ordered output nodes.
-    output: Vec<Node>,
+    /// Precomputed sublayer stacks (shared across all builds).
+    sublayer_stacks: &'a SublayerStacks,
+    /// Strength-ordered composition graph.
+    output: PrimIndexGraph,
     /// Deduplication: (layer_index, path, arc) triples already emitted.
     /// Arc-type-aware dedup allows the same (layer, path) to appear under
     /// different arc types (e.g. Root and Reference), matching C++ PCP behavior.
     seen: HashSet<(usize, Path, ArcType)>,
-    /// Shared caches persisting across builds.
-    shared: &'a mut SharedCaches,
+    /// Builder-local cache of target indices for inherit/specialize/internal-ref
+    /// targets. Avoids rebuilding the same target within a single prim's composition.
+    target_indices: HashMap<Path, PrimIndex>,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -230,15 +359,16 @@ impl<'a> IndexBuilder<'a> {
         layers: &'a [LayerData],
         identifiers: &'a [String],
         ctx: &'a CompositionContext,
-        shared: &'a mut SharedCaches,
+        sublayer_stacks: &'a SublayerStacks,
     ) -> Self {
         Self {
             layers,
             identifiers,
             ctx,
-            output: Vec::new(),
+            sublayer_stacks,
+            output: PrimIndexGraph::default(),
             seen: HashSet::new(),
-            shared,
+            target_indices: HashMap::new(),
         }
     }
 
@@ -251,8 +381,8 @@ impl<'a> IndexBuilder<'a> {
     fn build(&mut self, path: &Path) {
         let root_stack: Vec<usize> = (0..self.layers.len()).collect();
 
-        // Evaluate root composition site.
-        self.eval_site(path, &root_stack, ArcType::Root, 0);
+        // Evaluate root composition site (no parent — this is the graph root).
+        self.eval_site(path, &root_stack, ArcType::Root, 0, NodeIndex::INVALID);
 
         // Propagate ancestor arcs from context.
         let child_name = path.as_str().rsplit('/').next().unwrap_or("");
@@ -271,7 +401,7 @@ impl<'a> IndexBuilder<'a> {
                 })
                 .collect();
             for (rpath, li, arc) in &ancestor_sites {
-                self.eval_site(rpath, &[*li], *arc, 0);
+                self.eval_site(rpath, &[*li], *arc, 0, NodeIndex::INVALID);
             }
         }
 
@@ -307,16 +437,21 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
+                    // The base node whose variant is being expanded serves as
+                    // the parent for new variant nodes in the stabilization pass.
+                    let base_node = NodeIndex(idx as u32);
                     let start = self.output.len();
                     for (i, layer) in self.layers.iter().enumerate() {
                         if layer.has_spec(&variant_path)
                             && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
                         {
-                            self.output.push(Node {
-                                layer_index: i,
-                                path: variant_path.clone(),
-                                arc: ArcType::Variant,
-                            });
+                            self.output.add_child(
+                                base_node,
+                                NodeIndex::INVALID,
+                                i,
+                                variant_path.clone(),
+                                ArcType::Variant,
+                            );
                         }
                     }
                     let end = self.output.len();
@@ -332,6 +467,7 @@ impl<'a> IndexBuilder<'a> {
                                 ArcType::Reference,
                                 &Path::abs_root(),
                                 0,
+                                base_node,
                             );
                         }
                         for payload in &payloads {
@@ -341,6 +477,7 @@ impl<'a> IndexBuilder<'a> {
                                 ArcType::Payload,
                                 &Path::abs_root(),
                                 0,
+                                base_node,
                             );
                         }
                     }
@@ -356,7 +493,7 @@ impl<'a> IndexBuilder<'a> {
 
     /// Evaluate a single composition site: run LIVRPS for `path` within
     /// `layer_stack`. Called recursively for each arc target.
-    fn eval_site(&mut self, path: &Path, layer_stack: &[usize], arc: ArcType, depth: usize) {
+    fn eval_site(&mut self, path: &Path, layer_stack: &[usize], arc: ArcType, depth: usize, parent: NodeIndex) {
         assert!(
             depth <= MAX_COMPOSITION_DEPTH,
             "composition depth exceeded {MAX_COMPOSITION_DEPTH} for {path} — possible cycle"
@@ -365,13 +502,15 @@ impl<'a> IndexBuilder<'a> {
         let site_start = self.output.len();
 
         // L — Local opinions: check each layer in the stack for a spec.
+        // The first L node becomes the "site representative" — parent for
+        // subsequent arcs discovered at this site.
+        let mut site_node = NodeIndex::INVALID;
         for &i in layer_stack {
             if self.layers[i].has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
-                self.output.push(Node {
-                    layer_index: i,
-                    path: path.clone(),
-                    arc,
-                });
+                let idx = self.output.add_child(parent, NodeIndex::INVALID, i, path.clone(), arc);
+                if !site_node.is_valid() {
+                    site_node = idx;
+                }
             }
         }
 
@@ -382,17 +521,17 @@ impl<'a> IndexBuilder<'a> {
         for inherit_path in &inherits {
             let resolved = path.make_absolute(inherit_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Inherit);
-            self.add_implied_nodes(before, ArcType::Inherit);
+            self.merge_full_index(&resolved, ArcType::Inherit, site_node);
+            self.add_implied_nodes(before, ArcType::Inherit, site_node);
             for vt in variant_expanded_targets(path, &resolved) {
                 let before = self.output.len();
-                self.merge_full_index(&vt, ArcType::Inherit);
-                self.add_implied_nodes(before, ArcType::Inherit);
+                self.merge_full_index(&vt, ArcType::Inherit, site_node);
+                self.add_implied_nodes(before, ArcType::Inherit, site_node);
             }
         }
 
         // V — Variants: resolve selections iteratively (nested variant sets).
-        self.eval_variants(site_start);
+        self.eval_variants(site_start, site_node);
 
         // Collect range of all opinion nodes (L + I + V) for R/P/S lookups.
         let opinion_end = self.output.len();
@@ -407,13 +546,21 @@ impl<'a> IndexBuilder<'a> {
                 ArcType::Reference,
                 path,
                 depth,
+                site_node,
             );
         }
 
         // P — Payloads.
         let payloads = collect_payloads_in(&self.output[site_start..opinion_end], self.layers);
         for payload in &payloads {
-            self.eval_arc_target(&payload.asset_path, &payload.prim_path, ArcType::Payload, path, depth);
+            self.eval_arc_target(
+                &payload.asset_path,
+                &payload.prim_path,
+                ArcType::Payload,
+                path,
+                depth,
+                site_node,
+            );
         }
 
         // S — Specializes.
@@ -425,14 +572,14 @@ impl<'a> IndexBuilder<'a> {
         for specialize_path in &specializes {
             let resolved = path.make_absolute(specialize_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Specialize);
-            self.add_implied_nodes(before, ArcType::Specialize);
+            self.merge_full_index(&resolved, ArcType::Specialize, site_node);
+            self.add_implied_nodes(before, ArcType::Specialize, site_node);
         }
     }
 
     /// Propagate implied arcs for inherit/specialize nodes added since `start`.
     /// Remaps through ancestor arc prefix equivalences inline.
-    fn add_implied_nodes(&mut self, start: usize, arc: ArcType) {
+    fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeIndex) {
         if self.ctx.arc_mappings.is_empty() {
             return;
         }
@@ -459,11 +606,8 @@ impl<'a> IndexBuilder<'a> {
                 let remapped = Path::from(format!("{composed}{rest}"));
                 for li in 0..self.layers.len() {
                     if self.layers[li].has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
-                        self.output.push(Node {
-                            layer_index: li,
-                            path: remapped.clone(),
-                            arc,
-                        });
+                        self.output
+                            .add_child(NodeIndex::INVALID, origin, li, remapped.clone(), arc);
                     }
                 }
 
@@ -477,46 +621,42 @@ impl<'a> IndexBuilder<'a> {
                     let li = other.layer_index;
                     if self.layers[li].has_spec(&other_remapped) && self.seen.insert((li, other_remapped.clone(), arc))
                     {
-                        self.output.push(Node {
-                            layer_index: li,
-                            path: other_remapped,
-                            arc,
-                        });
+                        self.output
+                            .add_child(NodeIndex::INVALID, origin, li, other_remapped, arc);
                     }
                 }
             }
         }
     }
 
-    fn get_sublayer_stack(&mut self, root_layer: usize) -> Vec<usize> {
-        self.shared
-            .sublayer_stacks
-            .entry(root_layer)
-            .or_insert_with(|| find_sublayer_stack(root_layer, self.layers, self.identifiers))
-            .clone()
+    fn get_sublayer_stack(&self, root_layer: usize) -> Vec<usize> {
+        self.sublayer_stacks
+            .get(&root_layer)
+            .cloned()
+            .unwrap_or_else(|| find_sublayer_stack(root_layer, self.layers, self.identifiers))
     }
 
     /// Build a full PrimIndex for a target path (with ancestor context) and
     /// merge its nodes into this builder's output. Used for inherit/specialize
     /// targets that need their own ancestor propagation.
-    fn merge_full_index(&mut self, target: &Path, arc: ArcType) {
-        // Check shared cache first — avoids rebuilding the same target
-        // across sibling prims and recursive compositions.
-        if !self.shared.target_indices.contains_key(target) {
+    fn merge_full_index(&mut self, target: &Path, arc: ArcType, parent: NodeIndex) {
+        // Check builder-local cache first — avoids rebuilding the same target
+        // within a single prim's composition.
+        if !self.target_indices.contains_key(target) {
             // Build the target's own ancestor context.
             let ctx = if let Some(parent) = target.parent() {
                 if parent != Path::abs_root() {
-                    if !self.shared.target_indices.contains_key(&parent) {
+                    if !self.target_indices.contains_key(&parent) {
                         let parent_idx = PrimIndex::build_with_context(
                             &parent,
                             self.layers,
                             self.identifiers,
                             &CompositionContext::default(),
-                            self.shared,
+                            self.sublayer_stacks,
                         );
-                        self.shared.target_indices.insert(parent.clone(), parent_idx);
+                        self.target_indices.insert(parent.clone(), parent_idx);
                     }
-                    let parent_idx = &self.shared.target_indices[&parent];
+                    let parent_idx = &self.target_indices[&parent];
                     parent_idx.context_for_children(&parent, self.layers, &CompositionContext::default())
                 } else {
                     CompositionContext::default()
@@ -524,24 +664,21 @@ impl<'a> IndexBuilder<'a> {
             } else {
                 CompositionContext::default()
             };
-            let idx = PrimIndex::build_with_context(target, self.layers, self.identifiers, &ctx, self.shared);
-            self.shared.target_indices.insert(target.clone(), idx);
+            let idx = PrimIndex::build_with_context(target, self.layers, self.identifiers, &ctx, self.sublayer_stacks);
+            self.target_indices.insert(target.clone(), idx);
         }
-        let target_index = &self.shared.target_indices[target];
-        for node in &target_index.nodes {
+        let target_index = &self.target_indices[target];
+        for node in target_index.nodes() {
             if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                self.output.push(Node {
-                    layer_index: node.layer_index,
-                    path: node.path.clone(),
-                    arc,
-                });
+                self.output
+                    .add_child(parent, NodeIndex::INVALID, node.layer_index, node.path.clone(), arc);
             }
         }
     }
 
     /// Resolve variant selections iteratively, handling nested variant sets
     /// and variant sets on inherited classes.
-    fn eval_variants(&mut self, site_start: usize) {
+    fn eval_variants(&mut self, site_start: usize, parent: NodeIndex) {
         let mut processed = HashSet::new();
         loop {
             let current_end = self.output.len();
@@ -571,11 +708,13 @@ impl<'a> IndexBuilder<'a> {
                         if layer.has_spec(&variant_path)
                             && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
                         {
-                            self.output.push(Node {
-                                layer_index: i,
-                                path: variant_path.clone(),
-                                arc: ArcType::Variant,
-                            });
+                            self.output.add_child(
+                                parent,
+                                NodeIndex::INVALID,
+                                i,
+                                variant_path.clone(),
+                                ArcType::Variant,
+                            );
                         }
                     }
                 }
@@ -588,16 +727,24 @@ impl<'a> IndexBuilder<'a> {
     }
 
     /// Evaluate a reference or payload target.
-    fn eval_arc_target(&mut self, asset_path: &str, prim_path: &Path, arc: ArcType, context_path: &Path, depth: usize) {
+    fn eval_arc_target(
+        &mut self,
+        asset_path: &str,
+        prim_path: &Path,
+        arc: ArcType,
+        context_path: &Path,
+        depth: usize,
+        parent: NodeIndex,
+    ) {
         if asset_path.is_empty() {
             // Internal reference — build full index for target (with ancestor
             // context) so variant selections and arc mappings propagate.
             if prim_path.is_empty() {
                 return;
             }
-            self.merge_full_index(prim_path, arc);
+            self.merge_full_index(prim_path, arc, parent);
             for vt in variant_expanded_targets(context_path, prim_path) {
-                self.merge_full_index(&vt, arc);
+                self.merge_full_index(&vt, arc, parent);
             }
         } else {
             // External reference — evaluate in a fresh sub-builder so the
@@ -621,15 +768,20 @@ impl<'a> IndexBuilder<'a> {
             let target_stack = self.get_sublayer_stack(layer_index);
             // Evaluate directly — arc-type-aware dedup allows the same
             // (layer, path) to appear under different arc types.
-            self.eval_site(&source, &target_stack, arc, depth + 1);
+            self.eval_site(&source, &target_stack, arc, depth + 1, parent);
             // Also propagate ancestor arcs within the target layer.
-            if let Some(parent) = source.parent() {
-                if parent != Path::abs_root() {
+            if let Some(source_parent) = source.parent() {
+                if source_parent != Path::abs_root() {
                     let child_name = source.as_str().rsplit('/').next().unwrap_or("");
-                    let parent_index =
-                        PrimIndex::build_with_context(&parent, self.layers, self.identifiers, self.ctx, self.shared);
+                    let parent_index = PrimIndex::build_with_context(
+                        &source_parent,
+                        self.layers,
+                        self.identifiers,
+                        self.ctx,
+                        self.sublayer_stacks,
+                    );
                     let ancestor_sites: Vec<_> = parent_index
-                        .nodes
+                        .nodes()
                         .iter()
                         .filter(|n| n.arc != ArcType::Root)
                         .filter_map(|n| {
@@ -639,7 +791,7 @@ impl<'a> IndexBuilder<'a> {
                         })
                         .collect();
                     for (rpath, li, a) in &ancestor_sites {
-                        self.eval_site(rpath, &[*li], *a, depth + 1);
+                        self.eval_site(rpath, &[*li], *a, depth + 1, parent);
                     }
                 }
             }
@@ -884,7 +1036,7 @@ mod tests {
     /// Builds a prim index for a given path string.
     fn build(layers: &[LayerData], identifiers: &[String], prim: &str) -> PrimIndex {
         let path = Path::from(prim);
-        let mut shared = SharedCaches::default();
+        let stacks = precompute_sublayer_stacks(layers, identifiers);
         let ctx = if let Some(parent) = path.parent() {
             if parent != Path::abs_root() {
                 let parent_index = PrimIndex::build_with_context(
@@ -892,7 +1044,7 @@ mod tests {
                     layers,
                     identifiers,
                     &CompositionContext::default(),
-                    &mut shared,
+                    &stacks,
                 );
                 parent_index.context_for_children(&parent, layers, &CompositionContext::default())
             } else {
@@ -901,7 +1053,7 @@ mod tests {
         } else {
             CompositionContext::default()
         };
-        PrimIndex::build_with_context(&path, layers, identifiers, &ctx, &mut shared)
+        PrimIndex::build_with_context(&path, layers, identifiers, &ctx, &stacks)
     }
 
     #[test]
@@ -909,9 +1061,9 @@ mod tests {
         let (layers, ids) = load_layers(&composition_path("active.usda"))?;
         let index = build(&layers, &ids, "/World");
 
-        assert_eq!(index.nodes.len(), 1);
-        assert_eq!(index.nodes[0].layer_index, 0);
-        assert_eq!(index.nodes[0].arc, ArcType::Root);
+        assert_eq!(index.nodes().len(), 1);
+        assert_eq!(index.nodes()[0].layer_index, 0);
+        assert_eq!(index.nodes()[0].arc, ArcType::Root);
         Ok(())
     }
 
@@ -920,9 +1072,9 @@ mod tests {
         let (layers, ids) = load_layers(&fixture_path("sublayer_override.usda"))?;
         let index = build(&layers, &ids, "/World");
 
-        assert_eq!(index.nodes.len(), 2, "both layers should have /World");
-        assert_eq!(index.nodes[0].layer_index, 0, "stronger layer first");
-        assert_eq!(index.nodes[1].layer_index, 1, "weaker layer second");
+        assert_eq!(index.nodes().len(), 2, "both layers should have /World");
+        assert_eq!(index.nodes()[0].layer_index, 0, "stronger layer first");
+        assert_eq!(index.nodes()[1].layer_index, 1, "weaker layer second");
         Ok(())
     }
 
@@ -931,8 +1083,8 @@ mod tests {
         let (layers, ids) = load_layers(&fixture_path("sublayer_override.usda"))?;
         let index = build(&layers, &ids, "/World/Sphere");
 
-        assert_eq!(index.nodes.len(), 1);
-        assert_eq!(index.nodes[0].layer_index, 0);
+        assert_eq!(index.nodes().len(), 1);
+        assert_eq!(index.nodes()[0].layer_index, 0);
         Ok(())
     }
 
@@ -950,7 +1102,7 @@ mod tests {
         let (layers, ids) = load_layers(&fixture_path("ref_external.usda"))?;
         let index = build(&layers, &ids, "/World/MyPrim");
 
-        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Reference));
+        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Reference));
         Ok(())
     }
 
@@ -959,7 +1111,7 @@ mod tests {
         let (layers, ids) = load_layers(&composition_path("class_inherit.usda"))?;
         let index = build(&layers, &ids, "/World/cubeWithoutSetColor");
 
-        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Inherit));
+        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Inherit));
         Ok(())
     }
 
@@ -967,7 +1119,7 @@ mod tests {
     fn inherit_root_is_strongest() -> Result<()> {
         let (layers, ids) = load_layers(&composition_path("class_inherit.usda"))?;
         let index = build(&layers, &ids, "/World/cubeWithSetColor");
-        let arcs: Vec<_> = index.nodes.iter().map(|n| n.arc).collect();
+        let arcs: Vec<_> = index.nodes().iter().map(|n| n.arc).collect();
 
         assert_eq!(arcs[0], ArcType::Root);
         assert!(arcs.contains(&ArcType::Inherit));
@@ -983,9 +1135,9 @@ mod tests {
         let (layers, ids) = load_layers(&path)?;
         let index = build(&layers, &ids, "/World/Sphere");
 
-        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Variant));
+        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Variant));
 
-        let variant_node = index.nodes.iter().find(|n| n.arc == ArcType::Variant).unwrap();
+        let variant_node = index.nodes().iter().find(|n| n.arc == ArcType::Variant).unwrap();
         assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
         Ok(())
     }
@@ -995,7 +1147,7 @@ mod tests {
         let (layers, ids) = load_layers(&composition_path("inherit_and_specialize.usda"))?;
         let index = build(&layers, &ids, "/World/cubeScene/specializes");
 
-        assert!(index.nodes.iter().any(|n| n.arc == ArcType::Specialize));
+        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Specialize));
         Ok(())
     }
 
@@ -1040,21 +1192,21 @@ mod tests {
 
         assert!(
             index
-                .nodes
+                .nodes()
                 .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/A"),
             "should have node from A.usd"
         );
         assert!(
             index
-                .nodes
+                .nodes()
                 .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/B"),
             "should have node from B.usd"
         );
         assert!(
             index
-                .nodes
+                .nodes()
                 .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/C"),
             "should have node from C.usd via nested reference"
@@ -1081,12 +1233,12 @@ mod tests {
         let index = build(&layers, &ids, "/B");
 
         assert!(
-            index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
+            index.nodes().iter().any(|n| n.arc == ArcType::Specialize),
             "should have specialize node from variant"
         );
         assert!(
             index
-                .nodes
+                .nodes()
                 .iter()
                 .any(|n| n.path.as_str().contains("{nestedVariantSet=nestedVariant}")),
             "should have /A's variant node"
@@ -1113,7 +1265,7 @@ mod tests {
         let index = build(&layers, &ids, "/main_cam/Lens");
         assert!(
             index
-                .nodes
+                .nodes()
                 .iter()
                 .any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
             "should have inherit node for _localclass_Lens"
@@ -1134,7 +1286,7 @@ mod tests {
         let index = build(&layers, &ids, "/bob");
 
         assert!(
-            index.nodes.iter().any(|n| n.path.as_str().contains("{geotype=cube}")),
+            index.nodes().iter().any(|n| n.path.as_str().contains("{geotype=cube}")),
             "should have geotype=cube variant node from inherited selection"
         );
         Ok(())
