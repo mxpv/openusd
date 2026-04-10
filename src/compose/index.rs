@@ -94,6 +94,11 @@ impl PrimIndex {
             build_recursive(source_path, layer_indices, *arc, layers, identifiers, &mut nodes, 0);
         }
 
+        // Post-process: resolve variant selections that span across seeds.
+        // A variant selection from one seed (e.g. ancestral variant override)
+        // may apply to a variant set introduced by another seed (e.g. reference).
+        resolve_cross_seed_variants(&mut nodes, layers, identifiers);
+
         // Overlapping ancestor walks can produce the same node from multiple seeds.
         let mut seen = HashSet::new();
         nodes.retain(|n| seen.insert((n.layer_index, n.path.clone())));
@@ -320,6 +325,78 @@ fn collect_seeds(path: &Path, layers: &[LayerData], identifiers: &[String]) -> V
     }
 
     seeds
+}
+
+/// Resolves variant selections that span across seeds.
+///
+/// After all seeds have been processed, there may be variant selections
+/// authored in one seed's context (e.g. an ancestral variant override)
+/// that should apply to variant sets introduced by another seed (e.g.
+/// a reference). This pass gathers all variant selections from existing
+/// nodes and resolves any unprocessed variant sets.
+fn resolve_cross_seed_variants(nodes: &mut Vec<Node>, layers: &[LayerData], identifiers: &[String]) {
+    let mut processed = HashSet::new();
+    for node in nodes.iter() {
+        if node.arc == ArcType::Variant {
+            processed.insert(node.path.clone());
+        }
+    }
+
+    let selections = resolve_variant_selections_in(nodes, layers);
+    if selections.is_empty() {
+        return;
+    }
+
+    let orig_len = nodes.len();
+    for (set_name, selection) in &selections {
+        for idx in 0..orig_len {
+            let variant_path = nodes[idx].path.append_variant_selection(set_name, selection);
+            if !processed.insert(variant_path.clone()) {
+                continue;
+            }
+
+            let start = nodes.len();
+            for (i, layer) in layers.iter().enumerate() {
+                if layer.has_spec(&variant_path) {
+                    nodes.push(Node {
+                        layer_index: i,
+                        path: variant_path.clone(),
+                        arc: ArcType::Variant,
+                    });
+                }
+            }
+            let end = nodes.len();
+
+            if start < end {
+                // Collect arcs from new variant nodes before mutating `nodes`.
+                let new_variant_nodes: Vec<Node> = nodes[start..end].to_vec();
+                let refs = compose_arc_list_in::<Reference>(&new_variant_nodes, FieldKey::References, layers);
+                let payloads = collect_payloads_in(&new_variant_nodes, layers);
+                for reference in &refs {
+                    add_arc_nodes_recursive(
+                        &reference.asset_path,
+                        &reference.prim_path,
+                        ArcType::Reference,
+                        nodes,
+                        layers,
+                        identifiers,
+                        0,
+                    );
+                }
+                for payload in &payloads {
+                    add_arc_nodes_recursive(
+                        &payload.asset_path,
+                        &payload.prim_path,
+                        ArcType::Payload,
+                        nodes,
+                        layers,
+                        identifiers,
+                        0,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Resolves variant selections by walking nodes strongest-to-weakest.
