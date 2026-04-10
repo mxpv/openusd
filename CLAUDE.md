@@ -8,15 +8,25 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 ## Architecture
 
-The codebase is organized into five modules:
+The codebase follows the same module structure as the C++ OpenUSD SDK:
 
-- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions corresponding to USD's SDF module. Contains the `AbstractData` trait, `Value` enum (60+ variants covering all USD data types), `Path`, `Spec`, and list operation types.
+- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys.
 
-- **`usda/`** - Text format (`.usda`) reader: Parser implementation using logos for tokenization and a recursive descent parser. `TextReader` provides helpers for prim traversal and typed attribute access.
+- **`usda/`** - Text format (`.usda`) reader: Lexer (logos) + recursive descent parser. `TextReader` implements `AbstractData`.
 
-- **`usdc/`** - Binary format (`.usdc`) reader: Implementation for USD's binary crate format, including compressed data handling and efficient memory layout parsing.
+- **`usdc/`** - Binary format (`.usdc`) reader: USD's crate format with compressed data handling. `CrateData` implements `AbstractData`.
 
-- **`usdz`** - Archive format (`.usdz`) reader: ZIP-based package reader that returns a `dyn AbstractData`.
+- **`usdz/`** - Archive format (`.usdz`) reader: ZIP-based package reader.
+
+- **`ar/`** - Asset Resolution: `Resolver` trait maps asset paths (`@...@`) to physical locations. `DefaultResolver` searches the filesystem.
+
+- **`layer`** - Layer collection: `collect_layers` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads. Corresponds to C++ `PcpLayerStack`.
+
+- **`pcp/`** - Prim Cache Population (composition engine): Implements LIVRPS strength ordering to compose opinions across layers. Corresponds to C++ `Pcp` module.
+  - `pcp/cache.rs` — `Cache`: lazily-built per-prim composition cache (C++ `PcpCache`).
+  - `pcp/index.rs` — `PrimIndex`, `Node`, `ArcType`: per-prim strength-ordered node list (C++ `PcpPrimIndex`). `IndexBuilder` evaluates LIVRPS inline with a `CompositionContext` flowing from parent to child.
+
+- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`.
 
 - **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
 
