@@ -7,8 +7,7 @@ use std::path::Path;
 
 use openusd::{sdf, Stage};
 
-const ASSETS: &str =
-    "vendor/core-spec-supplemental-release_dec2025/composition/tests/assets";
+const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/composition/tests/assets";
 
 /// JSON schema for loading pcp.json baselines.
 mod schema {
@@ -42,8 +41,8 @@ enum Format {
 fn run(name: &str, format: Format) {
     let test_dir = Path::new(ASSETS).join(name);
     let baseline_path = test_dir.join("pcp.json");
-    let json = std::fs::read_to_string(&baseline_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", baseline_path.display()));
+    let json =
+        std::fs::read_to_string(&baseline_path).unwrap_or_else(|e| panic!("read {}: {e}", baseline_path.display()));
     let baseline: schema::Baseline = serde_json::from_str(&json).expect("parse pcp.json");
 
     // Skip error test cases — they test failure modes we don't validate yet.
@@ -65,10 +64,7 @@ fn run(name: &str, format: Format) {
         return;
     }
 
-    let stage = match Stage::builder()
-        .on_error(|_| Ok(()))
-        .open(entry.to_str().unwrap())
-    {
+    let stage = match Stage::builder().on_error(|_| Ok(())).open(entry.to_str().unwrap()) {
         Ok(s) => s,
         Err(_) => return, // Skip tests that fail to open (unsupported features).
     };
@@ -97,12 +93,7 @@ fn run(name: &str, format: Format) {
         // Check property names.
         for prop in &expected.property_names {
             let prop_path = format!("{prim_path}.{prop}");
-            let path = sdf::path(&prop_path).unwrap();
-            let has_prop = stage.field::<String>(&path, "typeName")
-                .ok()
-                .and_then(|v| v)
-                .is_some();
-            if !has_prop {
+            if !stage.has_spec(sdf::path(&prop_path).unwrap()) {
                 failures.push(format!("missing property: {prop_path}"));
             }
         }

@@ -78,6 +78,11 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                         && !self.appended_items.contains(e)
                 }))
                 .chain(self.appended_items.iter())
+                .chain(self.added_items.iter().filter(|e| {
+                    !self.prepended_items.contains(e)
+                        && !self.appended_items.contains(e)
+                        && !weaker.explicit_items.contains(e)
+                }))
                 .cloned()
                 .collect();
             return Self {
@@ -107,14 +112,30 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .cloned()
             .collect();
 
+        let added_items = weaker
+            .added_items
+            .iter()
+            .filter(|e| {
+                !self.deleted_items.contains(e)
+                    && !self.prepended_items.contains(e)
+                    && !self.appended_items.contains(e)
+                    && !self.added_items.contains(e)
+            })
+            .chain(self.added_items.iter())
+            .cloned()
+            .collect();
+
         let deleted_items = weaker
             .deleted_items
             .iter()
-            .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e))
+            .filter(|e| {
+                !self.prepended_items.contains(e) && !self.appended_items.contains(e) && !self.added_items.contains(e)
+            })
             .chain(self.deleted_items.iter().filter(|e| {
                 !weaker.deleted_items.contains(e)
                     && !self.prepended_items.contains(e)
                     && !self.appended_items.contains(e)
+                    && !self.added_items.contains(e)
             }))
             .cloned()
             .collect();
@@ -122,6 +143,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         Self {
             prepended_items,
             appended_items,
+            added_items,
             deleted_items,
             ..Default::default()
         }
@@ -147,11 +169,24 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 .filter(|e| !self.appended_items.contains(e))
                 .cloned()
                 .collect(),
-            appended_items: self.appended_items.clone(),
+            appended_items: self
+                .appended_items
+                .iter()
+                .chain(
+                    self.added_items
+                        .iter()
+                        .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
+                )
+                .cloned()
+                .collect(),
             deleted_items: self
                 .deleted_items
                 .iter()
-                .filter(|e| !self.appended_items.contains(e) && !self.prepended_items.contains(e))
+                .filter(|e| {
+                    !self.appended_items.contains(e)
+                        && !self.prepended_items.contains(e)
+                        && !self.added_items.contains(e)
+                })
                 .cloned()
                 .collect(),
             ..Default::default()
@@ -168,8 +203,13 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
         self.prepended_items
             .iter()
-            .filter(|e| !self.appended_items.contains(e))
+            .filter(|e| !self.appended_items.contains(e) && !self.added_items.contains(e))
             .chain(self.appended_items.iter())
+            .chain(
+                self.added_items
+                    .iter()
+                    .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
+            )
             .cloned()
             .collect()
     }

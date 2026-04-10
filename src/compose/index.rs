@@ -74,80 +74,14 @@ impl PrimIndex {
     ///
     /// Follows LIVERPS ordering:
     /// Local (sublayers) > Inherits > Variants > References > Payloads > Specializes.
+    ///
+    /// Composition arcs are processed recursively: when a reference or payload
+    /// introduces nodes from another layer stack, the arcs on those nodes
+    /// (inherits, variants, nested references, etc.) are followed as well.
     pub(crate) fn build(path: &Path, layers: &[LayerData], identifiers: &[String]) -> Self {
+        let root_stack: Vec<usize> = (0..layers.len()).collect();
         let mut nodes = Vec::new();
-
-        // L — Root / sublayer opinions: check each layer in strength order.
-        for (i, layer) in layers.iter().enumerate() {
-            if layer.has_spec(path) {
-                nodes.push(Node {
-                    layer_index: i,
-                    path: path.clone(),
-                    arc: ArcType::Root,
-                });
-            }
-        }
-
-        // I — Inherits: compose PathListOp across root nodes, then add nodes
-        // from the inherited prims within the same layer stack.
-        let inherits = compose_arc_list::<Path>(&nodes, FieldKey::InheritPaths, layers);
-        for inherit_path in &inherits {
-            for (i, layer) in layers.iter().enumerate() {
-                add_remapped_nodes(layer.as_ref(), i, inherit_path, ArcType::Inherit, &mut nodes);
-            }
-        }
-
-        // V — Variants: resolve variant selection (first opinion wins), then
-        // add specs from the selected variant path in each layer.
-        let selections = resolve_variant_selections(&nodes, layers);
-        for (set_name, selection) in &selections {
-            let variant_path = path.append_variant_selection(set_name, selection);
-            for (i, layer) in layers.iter().enumerate() {
-                if layer.has_spec(&variant_path) {
-                    nodes.push(Node {
-                        layer_index: i,
-                        path: variant_path.clone(),
-                        arc: ArcType::Variant,
-                    });
-                }
-            }
-        }
-
-        // R — References: compose ReferenceListOp across root nodes, then add
-        // nodes from referenced layers with namespace remapping.
-        let references = compose_arc_list::<Reference>(&nodes, FieldKey::References, layers);
-        for reference in &references {
-            add_arc_nodes(
-                &reference.asset_path,
-                &reference.prim_path,
-                ArcType::Reference,
-                &mut nodes,
-                layers,
-                identifiers,
-            );
-        }
-
-        // P — Payloads: same as references but weaker.
-        let payloads = collect_payloads(&nodes, layers);
-        for payload in &payloads {
-            add_arc_nodes(
-                &payload.asset_path,
-                &payload.prim_path,
-                ArcType::Payload,
-                &mut nodes,
-                layers,
-                identifiers,
-            );
-        }
-
-        // S — Specializes: same as inherits but weakest in LIVERPS.
-        let specializes = compose_arc_list::<Path>(&nodes, FieldKey::Specializes, layers);
-        for specialize_path in &specializes {
-            for (i, layer) in layers.iter().enumerate() {
-                add_remapped_nodes(layer.as_ref(), i, specialize_path, ArcType::Specialize, &mut nodes);
-            }
-        }
-
+        build_recursive(path, &root_stack, ArcType::Root, layers, identifiers, &mut nodes, 0);
         PrimIndex { nodes }
     }
 
@@ -184,13 +118,111 @@ impl PrimIndex {
     }
 }
 
-/// Resolves variant selections by walking root nodes strongest-to-weakest.
+/// Maximum recursion depth for nested composition arcs.
+const MAX_COMPOSITION_DEPTH: usize = 100;
+
+/// Recursively builds the LIVRPS index for a prim within a given layer stack.
+///
+/// `layer_stack` contains the indices into `layers` that form the current
+/// composition context (e.g. the root layer + sublayers, or a referenced
+/// layer + its sublayers). `arc` is the arc type that introduced this context.
+fn build_recursive(
+    path: &Path,
+    layer_stack: &[usize],
+    arc: ArcType,
+    layers: &[LayerData],
+    identifiers: &[String],
+    nodes: &mut Vec<Node>,
+    depth: usize,
+) {
+    if depth > MAX_COMPOSITION_DEPTH {
+        return;
+    }
+
+    // L — Local opinions within this layer stack.
+    let local_start = nodes.len();
+    for &i in layer_stack {
+        if layers[i].has_spec(path) {
+            nodes.push(Node {
+                layer_index: i,
+                path: path.clone(),
+                arc,
+            });
+        }
+    }
+    let local_nodes_range = local_start..nodes.len();
+
+    // I — Inherits: compose PathListOp across local nodes, then add nodes
+    // from the inherited prims within this layer stack.
+    let inherits = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::InheritPaths, layers);
+    for inherit_path in &inherits {
+        for &i in layer_stack {
+            add_remapped_nodes(layers[i].as_ref(), i, inherit_path, ArcType::Inherit, nodes);
+        }
+    }
+
+    // V — Variants: resolve variant selection (first opinion wins), then
+    // add specs from the selected variant path in each layer.
+    let all_nodes_so_far = local_start..nodes.len();
+    let selections = resolve_variant_selections_in(&nodes[all_nodes_so_far], layers);
+    for (set_name, selection) in &selections {
+        let variant_path = path.append_variant_selection(set_name, selection);
+        for &i in layer_stack {
+            if layers[i].has_spec(&variant_path) {
+                nodes.push(Node {
+                    layer_index: i,
+                    path: variant_path.clone(),
+                    arc: ArcType::Variant,
+                });
+            }
+        }
+    }
+
+    // R — References: compose ReferenceListOp across local nodes, then
+    // recursively build for each referenced layer stack.
+    let references = compose_arc_list_in::<Reference>(&nodes[local_nodes_range.clone()], FieldKey::References, layers);
+    for reference in &references {
+        add_arc_nodes_recursive(
+            &reference.asset_path,
+            &reference.prim_path,
+            ArcType::Reference,
+            nodes,
+            layers,
+            identifiers,
+            depth,
+        );
+    }
+
+    // P — Payloads: same as references but weaker.
+    let payloads = collect_payloads_in(&nodes[local_nodes_range.clone()], layers);
+    for payload in &payloads {
+        add_arc_nodes_recursive(
+            &payload.asset_path,
+            &payload.prim_path,
+            ArcType::Payload,
+            nodes,
+            layers,
+            identifiers,
+            depth,
+        );
+    }
+
+    // S — Specializes: same as inherits but weakest in LIVERPS.
+    let specializes = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::Specializes, layers);
+    for specialize_path in &specializes {
+        for &i in layer_stack {
+            add_remapped_nodes(layers[i].as_ref(), i, specialize_path, ArcType::Specialize, nodes);
+        }
+    }
+}
+
+/// Resolves variant selections by walking nodes strongest-to-weakest.
 ///
 /// For each variant set, the first opinion wins.
-fn resolve_variant_selections(root_nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
+fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
-    for node in root_nodes {
+    for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) else {
             continue;
@@ -207,12 +239,8 @@ fn resolve_variant_selections(root_nodes: &[Node], layers: &[LayerData]) -> Hash
     selections
 }
 
-/// Composes a list-op field across root nodes, returning the flattened list.
-fn compose_arc_list<T: Default + Clone + PartialEq>(
-    root_nodes: &[Node],
-    field: FieldKey,
-    layers: &[LayerData],
-) -> Vec<T>
+/// Composes a list-op field across nodes, returning the flattened list.
+fn compose_arc_list_in<T: Default + Clone + PartialEq>(nodes: &[Node], field: FieldKey, layers: &[LayerData]) -> Vec<T>
 where
     Value: TryInto<ListOp<T>>,
 {
@@ -220,7 +248,7 @@ where
     let mut combined: Option<ListOp<T>> = None;
 
     // Walk from strongest to weakest, combining ListOps into a single reduced op.
-    for node in root_nodes {
+    for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, field) else {
             continue;
@@ -237,12 +265,12 @@ where
     combined.map(|op| op.reduced().flatten()).unwrap_or_default()
 }
 
-/// Collects payloads from root nodes, handling both single `Payload` and `PayloadListOp`.
-fn collect_payloads(root_nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
+/// Collects payloads from nodes, handling both single `Payload` and `PayloadListOp`.
+fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
     let mut combined: Option<PayloadListOp> = None;
 
     // Walk from strongest to weakest, combining payload ListOps.
-    for node in root_nodes {
+    for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, FieldKey::Payload.as_str()) else {
             continue;
@@ -267,52 +295,80 @@ fn collect_payloads(root_nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
     combined.map(|op| op.reduced().flatten()).unwrap_or_default()
 }
 
-/// Adds nodes from a referenced or payloaded layer for a given prim path.
+/// Adds nodes from a referenced or payloaded layer, then recursively
+/// processes composition arcs on the target's layer stack.
 ///
 /// If `asset_path` is empty, the target is internal (same layer stack).
 /// `prim_path` is used for namespace remapping; if empty, the target
 /// layer's `defaultPrim` is used.
-fn add_arc_nodes(
+fn add_arc_nodes_recursive(
     asset_path: &str,
     prim_path: &Path,
     arc: ArcType,
     nodes: &mut Vec<Node>,
     layers: &[LayerData],
     identifiers: &[String],
+    depth: usize,
 ) {
     if asset_path.is_empty() {
         // Internal reference — target is within the same layer stack.
         if prim_path.is_empty() {
             return;
         }
-        for (i, layer) in layers.iter().enumerate() {
-            add_remapped_nodes(layer.as_ref(), i, prim_path, arc, nodes);
-        }
+        // Use the full layer list as the stack (same composition context).
+        let stack: Vec<usize> = (0..layers.len()).collect();
+        build_recursive(prim_path, &stack, arc, layers, identifiers, nodes, depth + 1);
     } else {
-        // External reference — find the target layer by identifier.
+        // External reference — find the target layer and its sublayer stack.
         let Some(layer_index) = find_layer(asset_path, identifiers) else {
             return;
         };
-        let layer = layers[layer_index].as_ref();
 
         let source = if prim_path.is_empty() {
             // Use the target layer's defaultPrim.
             let root = Path::abs_root();
-            let Ok(value) = layer.get(&root, FieldKey::DefaultPrim.as_str()) else {
+            let Ok(value) = layers[layer_index].get(&root, FieldKey::DefaultPrim.as_str()) else {
                 return;
             };
             match value.into_owned() {
-                Value::Token(name) | Value::String(name) => {
-                    Cow::Owned(Path::new(&format!("/{name}")).unwrap_or_default())
-                }
+                Value::Token(name) | Value::String(name) => Path::new(&format!("/{name}")).unwrap_or_default(),
                 _ => return,
             }
         } else {
-            Cow::Borrowed(prim_path)
+            prim_path.clone()
         };
 
-        add_remapped_nodes(layer, layer_index, &source, arc, nodes);
+        // Build the target's sublayer stack and recurse.
+        let target_stack = find_sublayer_stack(layer_index, layers, identifiers);
+        build_recursive(&source, &target_stack, arc, layers, identifiers, nodes, depth + 1);
     }
+}
+
+/// Returns the layer indices forming a sublayer stack rooted at `root_layer`.
+///
+/// Walks the `subLayers` field recursively to find all sublayers.
+fn find_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[String]) -> Vec<usize> {
+    let mut stack = vec![root_layer];
+    let mut queue = vec![root_layer];
+
+    while let Some(idx) = queue.pop() {
+        let root = Path::abs_root();
+        let Ok(value) = layers[idx].get(&root, FieldKey::SubLayers.as_str()) else {
+            continue;
+        };
+        if let Value::StringVec(sub_paths) = value.into_owned() {
+            for sub_path in sub_paths {
+                if let Some(sub_idx) = find_layer(&sub_path, identifiers) {
+                    if !stack.contains(&sub_idx) {
+                        stack.push(sub_idx);
+                        queue.push(sub_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    stack
 }
 
 /// Adds nodes from a single layer with namespace remapping.
@@ -338,18 +394,19 @@ fn add_remapped_nodes(
 ///
 /// Tries an exact match first, then falls back to suffix matching at a
 /// path separator boundary (so `_stage.usda` matches `/abs/path/_stage.usda`
-/// but not `/abs/path/not_stage.usda`).
+/// but not `/abs/path/not_stage.usda`). Strips leading `./` before matching.
 fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
     let sep = std::path::MAIN_SEPARATOR as u8;
+    let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
 
     for (i, id) in identifiers.iter().enumerate() {
-        if *id == asset_path {
+        if *id == needle {
             return Some(i);
         }
 
-        if id.ends_with(asset_path) {
-            let prefix_len = id.len() - asset_path.len();
-            if id.as_bytes()[prefix_len - 1] == sep {
+        if id.ends_with(needle) {
+            let prefix_len = id.len() - needle.len();
+            if prefix_len > 0 && id.as_bytes()[prefix_len - 1] == sep {
                 return Some(i);
             }
         }
@@ -519,6 +576,50 @@ mod tests {
     fn find_layer_not_found() -> Result<()> {
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
         assert!(find_layer("nonexistent.usda", &ids).is_none());
+        Ok(())
+    }
+
+    /// External references with `./` relative paths and nested references
+    /// should be followed recursively (diamond pattern: Root -> A,B -> C).
+    #[test]
+    fn reference_diamond_recursive() -> Result<()> {
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/BasicReferenceDiamond_root/usda/root.usd",
+            manifest_dir()
+        );
+        let (layers, ids) = load_layers(&path)?;
+        let index = build(&layers, &ids, "/Root");
+
+        // Root references A.usd</A> and B.usd</B>, both of which reference C.usd</C>.
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/A"),
+            "should have node from A.usd"
+        );
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/B"),
+            "should have node from B.usd"
+        );
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/C"),
+            "should have node from C.usd via nested reference"
+        );
+
+        // A.usd defines A_attr on /A — verify the property spec is accessible.
+        let a_idx = find_layer("A.usd", &ids).unwrap();
+        let a_attr_path = Path::new("/A.A_attr").unwrap();
+        assert!(
+            layers[a_idx].has_spec(&a_attr_path),
+            "A.usd should have spec at /A.A_attr"
+        );
         Ok(())
     }
 }
