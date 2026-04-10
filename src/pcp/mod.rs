@@ -1,0 +1,51 @@
+//! Prim Cache Population (PCP) — the composition engine.
+//!
+//! This module implements USD's composition algorithm, which merges opinions
+//! from multiple layers into a single composed scene graph. It is the Rust
+//! equivalent of [Pixar's PCP module](https://openusd.org/dev/api/pcp_page_front.html).
+//!
+//! # LIVRPS strength ordering
+//!
+//! USD composes opinions using six arc types, ordered by strength:
+//!
+//! 1. **L**ocal — direct opinions in the root layer stack (sublayers)
+//! 2. **I**nherits — opinions from class prims (`inherits = </Class>`)
+//! 3. **V**ariants — opinions from the selected variant (`variants = { string v = "sel" }`)
+//! 4. **R**eferences — opinions from referenced layers (`references = @model.usd@</Prim>`)
+//! 5. **P**ayloads — like references but deferred (`payload = @heavy.usd@</Prim>`)
+//! 6. **S**pecializes — like inherits but weakest (`specializes = </Base>`)
+//!
+//! Within each arc type, opinions are ordered by layer strength (root layer
+//! strongest, deepest sublayer weakest).
+//!
+//! # Module structure
+//!
+//! | Module | C++ equivalent | Description |
+//! |--------|---------------|-------------|
+//! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). |
+//! | [`index`] | `PcpPrimIndex` | Per-prim composition index: strength-ordered list of contributing specs. |
+//!
+//! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
+//!
+//! # Architecture
+//!
+//! Composition is driven by a [`CompositionContext`](index::CompositionContext)
+//! that flows from parent prims to children. The context carries:
+//!
+//! - **Variant selections** from all ancestors, so descendant prims resolve
+//!   variant sets without recomputing ancestor composition.
+//! - **Arc mappings** from ancestors, recording how composed paths map to
+//!   paths in other layers. Used for descendant namespace remapping and
+//!   implied inherit propagation.
+//!
+//! The [`Cache`](cache::Cache) stores both the [`PrimIndex`](index::PrimIndex)
+//! and the [`CompositionContext`](index::CompositionContext) for each composed
+//! prim. During depth-first traversal, parents are always composed before
+//! children, so the context chain is always populated.
+//!
+//! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
+
+pub(crate) mod cache;
+pub(crate) mod index;
+
+pub(crate) use cache::Cache;

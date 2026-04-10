@@ -28,19 +28,18 @@ use std::cell::RefCell;
 use anyhow::Result;
 
 use crate::ar::{DefaultResolver, Resolver};
-use crate::compose;
-use crate::compose::graph::CompositionGraph;
-use crate::compose::CompositionError;
+use crate::layer;
+use crate::pcp;
 use crate::sdf::{Path, SpecType, Value};
 
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
 /// properties, and metadata. Composition indices are built lazily and
-/// cached in the [`CompositionGraph`].
+/// cached in the [`Cache`].
 pub struct Stage {
     /// Lazily-built composition graph caching per-prim indices and contexts.
-    graph: RefCell<CompositionGraph>,
+    graph: RefCell<pcp::Cache>,
 }
 
 impl Stage {
@@ -72,7 +71,7 @@ impl Stage {
     }
 
     /// Constructs a stage from pre-collected layers.
-    fn from_layers(collected: Vec<compose::Layer>) -> Self {
+    fn from_layers(collected: Vec<layer::Layer>) -> Self {
         let mut identifiers = Vec::with_capacity(collected.len());
         let mut layers = Vec::with_capacity(collected.len());
 
@@ -82,7 +81,7 @@ impl Stage {
         }
 
         Self {
-            graph: RefCell::new(CompositionGraph::new(layers, identifiers)),
+            graph: RefCell::new(pcp::Cache::new(layers, identifiers)),
         }
     }
 
@@ -192,10 +191,10 @@ impl Stage {
 }
 
 /// Default composition error handler that treats all errors as fatal.
-type StrictErrorHandler = fn(CompositionError) -> Result<()>;
+type StrictErrorHandler = fn(layer::CompositionError) -> Result<()>;
 
 /// Converts a composition error into a hard failure.
-fn strict_composition_error(e: CompositionError) -> Result<()> {
+fn strict_composition_error(e: layer::CompositionError) -> Result<()> {
     Err(anyhow::anyhow!("{e}"))
 }
 
@@ -203,7 +202,10 @@ fn strict_composition_error(e: CompositionError) -> Result<()> {
 ///
 /// Created via [`Stage::builder`]. Allows setting a custom asset resolver
 /// and an error handler for recoverable composition failures.
-pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -> Result<()> = StrictErrorHandler> {
+pub struct StageBuilder<
+    R: Resolver = DefaultResolver,
+    E: Fn(layer::CompositionError) -> Result<()> = StrictErrorHandler,
+> {
     resolver: R,
     on_error: E,
 }
@@ -217,7 +219,7 @@ impl StageBuilder {
     }
 }
 
-impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
+impl<R: Resolver, E: Fn(layer::CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// Sets a custom asset resolver.
     pub fn resolver<R2: Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
         StageBuilder {
@@ -232,7 +234,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// or `Err(...)` to abort composition.
     ///
     /// By default, all composition errors are fatal.
-    pub fn on_error<E2: Fn(CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
+    pub fn on_error<E2: Fn(layer::CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
         StageBuilder {
             resolver: self.resolver,
             on_error: handler,
@@ -241,7 +243,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
 
     /// Opens a stage from a root layer file.
     pub fn open(self, root_path: &str) -> Result<Stage> {
-        let collected = compose::collect_layers_with_handler(&self.resolver, root_path, self.on_error)?;
+        let collected = layer::collect_layers_with_handler(&self.resolver, root_path, self.on_error)?;
         Ok(Stage::from_layers(collected))
     }
 }

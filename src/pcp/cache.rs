@@ -1,6 +1,6 @@
 //! Composition graph: lazily-built cache of per-prim composition indices.
 //!
-//! The [`CompositionGraph`] is the primary interface between [`Stage`](crate::Stage)
+//! The [`Cache`] is the primary interface between [`Stage`](crate::Stage)
 //! and the composition engine. It caches [`PrimIndex`] results alongside the
 //! [`CompositionContext`] that flows from parent prims to children, so ancestor
 //! composition is never recomputed.
@@ -26,7 +26,7 @@ struct CachedPrim {
 /// for the first time, its index is built using the parent's cached context
 /// (if available). During depth-first traversal, parents are always composed
 /// before children, so the context chain is always populated.
-pub struct CompositionGraph {
+pub struct Cache {
     layers: Vec<LayerData>,
     identifiers: Vec<String>,
     cache: HashMap<Path, CachedPrim>,
@@ -34,7 +34,7 @@ pub struct CompositionGraph {
     shared: super::index::SharedCaches,
 }
 
-impl CompositionGraph {
+impl Cache {
     /// Creates a new composition graph for the given layer stack.
     pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
         Self {

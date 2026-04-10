@@ -23,7 +23,7 @@ For a detailed comparison with the C++ reference implementation and current prog
 
 - Reads all major USD formats: `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
 - Composed [`Stage`](src/stage.rs) with full [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering (sublayers, inherits, variants, references, payloads, specializes).
-- Recursive [layer collection](src/compose) with cycle detection, format auto-detection, and expression evaluation.
+- Recursive [layer collection](src/layer.rs) with cycle detection, format auto-detection, and expression evaluation.
 - List-edit composition (`prepend`, `append`, `add`, `delete`, `explicit`) across layers.
 - Generic typed field access via `Stage::field<T>` with `TryFrom<Value>` conversion.
 - [Variable expression](src/expr.rs) evaluator for USD's [expression syntax](https://openusd.org/dev/user_guides/variable_expressions.html).
