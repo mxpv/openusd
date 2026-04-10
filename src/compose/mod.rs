@@ -282,7 +282,8 @@ fn collect_dependencies(data: &dyn AbstractData) -> Vec<Dependency> {
     deps
 }
 
-/// Collects all prim paths by walking the `primChildren` hierarchy.
+/// Collects all prim and variant spec paths by walking `primChildren`,
+/// `variantSetChildren`, and `variantChildren` hierarchies.
 fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
     let mut result = Vec::new();
     let mut queue = vec![Path::abs_root()];
@@ -297,11 +298,30 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
             result.push(path.clone());
         }
 
+        // Regular prim children.
         if let Ok(value) = data.get(&path, ChildrenKey::PrimChildren.as_str()) {
             if let Value::TokenVec(children) = value.into_owned() {
                 for name in children.iter().rev() {
                     if let Ok(child) = path.append_path(name.as_str()) {
                         queue.push(child);
+                    }
+                }
+            }
+        }
+
+        // Variant set children (e.g. /Prim -> /Prim{setName=}).
+        if let Ok(value) = data.get(&path, ChildrenKey::VariantSetChildren.as_str()) {
+            if let Value::TokenVec(set_names) = value.into_owned() {
+                for set_name in &set_names {
+                    // Variant children within each set (e.g. /Prim{setName=selA}).
+                    let set_path = path.append_variant_selection(set_name, "");
+                    if let Ok(value) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) {
+                        if let Value::TokenVec(variant_names) = value.into_owned() {
+                            for variant_name in &variant_names {
+                                let variant_path = path.append_variant_selection(set_name, variant_name);
+                                queue.push(variant_path);
+                            }
+                        }
                     }
                 }
             }

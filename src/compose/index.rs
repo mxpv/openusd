@@ -184,20 +184,41 @@ fn build_recursive(
         );
     }
 
-    // V — Variants: resolve variant selection (first opinion wins), then
-    // add specs from the selected variant path in each layer.
-    let all_nodes_so_far = local_start..nodes.len();
-    let selections = resolve_variant_selections_in(&nodes[all_nodes_so_far], layers);
-    for (set_name, selection) in &selections {
-        let variant_path = path.append_variant_selection(set_name, selection);
-        for &i in layer_stack {
-            if layers[i].has_spec(&variant_path) {
-                nodes.push(Node {
-                    layer_index: i,
-                    path: variant_path.clone(),
-                    arc: ArcType::Variant,
-                });
+    // V — Variants: resolve variant selections iteratively. Variant specs
+    // can themselves define nested variant sets, so we loop until no new
+    // variant nodes are added.
+    loop {
+        let all_nodes_so_far = local_start..nodes.len();
+        let selections = resolve_variant_selections_in(&nodes[all_nodes_so_far], layers);
+        if selections.is_empty() {
+            break;
+        }
+
+        let before = nodes.len();
+        for (set_name, selection) in &selections {
+            // Build the variant path by appending to the deepest existing variant
+            // path, or the prim path if no variant nodes exist yet.
+            let base = nodes[local_start..before]
+                .iter()
+                .rev()
+                .find(|n| n.arc == ArcType::Variant)
+                .map(|n| &n.path)
+                .unwrap_or(path);
+            let variant_path = base.append_variant_selection(set_name, selection);
+            for &i in layer_stack {
+                if layers[i].has_spec(&variant_path) {
+                    nodes.push(Node {
+                        layer_index: i,
+                        path: variant_path.clone(),
+                        arc: ArcType::Variant,
+                    });
+                }
             }
+        }
+
+        // No new nodes added — all selections already processed.
+        if nodes.len() == before {
+            break;
         }
     }
 
@@ -720,6 +741,35 @@ mod tests {
                 .iter()
                 .any(|n| n.path.as_str().contains("{nestedVariantSet=nestedVariant}")),
             "should have /A's variant node"
+        );
+        Ok(())
+    }
+
+    /// References inside variant specs should be collected as dependencies
+    /// so the target layers are loaded. Descendant prims should then pick up
+    /// inherit arcs from the referenced layer through ancestral propagation.
+    #[test]
+    fn variant_reference_and_inherit_propagation() -> Result<()> {
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/BasicVariantWithConnections_root/usda/root.usd",
+            manifest_dir()
+        );
+        let (layers, ids) = load_layers(&path)?;
+
+        // camera_perspective.usd should be loaded (referenced from inside a variant).
+        assert!(
+            find_layer("camera_perspective.usd", &ids).is_some(),
+            "camera_perspective.usd should be collected from variant reference"
+        );
+
+        // /main_cam/Lens should inherit /camera/_localclass_Lens from camera_perspective.usd.
+        let index = build(&layers, &ids, "/main_cam/Lens");
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
+            "should have inherit node for _localclass_Lens"
         );
         Ok(())
     }
