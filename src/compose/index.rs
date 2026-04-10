@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{AbstractData, LayerData, ListOp, Path, Payload, Reference, Value};
+use crate::sdf::{AbstractData, LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 /// The type of composition arc that introduced a [`Node`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,49 +217,54 @@ where
     Value: TryInto<ListOp<T>>,
 {
     let field = field.as_str();
-    let mut result: Vec<T> = Vec::new();
+    let mut combined: Option<ListOp<T>> = None;
 
-    // Walk from weakest to strongest, composing each ListOp on top.
-    for node in root_nodes.iter().rev() {
+    // Walk from strongest to weakest, combining ListOps into a single reduced op.
+    for node in root_nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, field) else {
             continue;
         };
-
         let Ok(list_op) = value.into_owned().try_into() else {
             continue;
         };
-
-        result = list_op.compose_over(&result);
+        combined = Some(match combined {
+            Some(stronger) => stronger.combined_with(&list_op),
+            None => list_op,
+        });
     }
 
-    result
+    combined.map(|op| op.reduced().flatten()).unwrap_or_default()
 }
 
 /// Collects payloads from root nodes, handling both single `Payload` and `PayloadListOp`.
 fn collect_payloads(root_nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
-    let mut result: Vec<Payload> = Vec::new();
+    let mut combined: Option<PayloadListOp> = None;
 
-    for node in root_nodes.iter().rev() {
+    // Walk from strongest to weakest, combining payload ListOps.
+    for node in root_nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, FieldKey::Payload.as_str()) else {
             continue;
         };
 
-        match value.into_owned() {
-            Value::Payload(p) => {
-                if !result.contains(&p) {
-                    result.push(p);
-                }
-            }
-            Value::PayloadListOp(list_op) => {
-                result = list_op.compose_over(&result);
-            }
-            _ => {}
-        }
+        let list_op = match value.into_owned() {
+            Value::Payload(p) => PayloadListOp {
+                explicit: true,
+                explicit_items: vec![p],
+                ..Default::default()
+            },
+            Value::PayloadListOp(op) => op,
+            _ => continue,
+        };
+
+        combined = Some(match combined {
+            Some(stronger) => stronger.combined_with(&list_op),
+            None => list_op,
+        });
     }
 
-    result
+    combined.map(|op| op.reduced().flatten()).unwrap_or_default()
 }
 
 /// Adds nodes from a referenced or payloaded layer for a given prim path.

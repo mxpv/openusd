@@ -200,6 +200,158 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .chain(&self.added_items)
     }
 
+    /// Returns true if this list op has no effect (all fields empty, not explicit).
+    pub fn is_empty(&self) -> bool {
+        !self.explicit
+            && self.explicit_items.is_empty()
+            && self.added_items.is_empty()
+            && self.prepended_items.is_empty()
+            && self.appended_items.is_empty()
+            && self.deleted_items.is_empty()
+            && self.ordered_items.is_empty()
+    }
+
+    /// Compose this (stronger) list op with a weaker one, producing a single
+    /// equivalent list op.
+    ///
+    /// This is the Rust equivalent of `SdfListOp::ComposeAndReduce`.
+    pub fn combined_with(&self, weaker: &Self) -> Self {
+        if self.is_empty() {
+            return weaker.clone();
+        }
+        // Stronger is explicit → weaker is irrelevant.
+        if self.explicit {
+            return Self {
+                explicit: true,
+                explicit_items: self.explicit_items.clone(),
+                ..Default::default()
+            };
+        }
+        // Weaker is inert → copy stronger.
+        if weaker.is_empty() {
+            return self.clone();
+        }
+        // Stronger composable over weaker explicit.
+        if weaker.explicit {
+            let explicit_items = self
+                .prepended_items
+                .iter()
+                .filter(|e| !self.appended_items.contains(e))
+                .chain(
+                    weaker
+                        .explicit_items
+                        .iter()
+                        .filter(|e| {
+                            !self.deleted_items.contains(e)
+                                && !self.prepended_items.contains(e)
+                                && !self.appended_items.contains(e)
+                        }),
+                )
+                .chain(self.appended_items.iter())
+                .cloned()
+                .collect();
+            return Self {
+                explicit: true,
+                explicit_items,
+                ..Default::default()
+            };
+        }
+        // Both composable.
+        let prepended_items = self
+            .prepended_items
+            .iter()
+            .filter(|e| !self.appended_items.contains(e))
+            .chain(weaker.prepended_items.iter().filter(|e| {
+                !self.deleted_items.contains(e)
+                    && !self.prepended_items.contains(e)
+                    && !self.appended_items.contains(e)
+            }))
+            .cloned()
+            .collect();
+
+        let appended_items = weaker
+            .appended_items
+            .iter()
+            .filter(|e| {
+                !self.deleted_items.contains(e)
+                    && !self.prepended_items.contains(e)
+                    && !self.appended_items.contains(e)
+            })
+            .chain(self.appended_items.iter())
+            .cloned()
+            .collect();
+
+        let deleted_items = weaker
+            .deleted_items
+            .iter()
+            .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e))
+            .chain(
+                self.deleted_items
+                    .iter()
+                    .filter(|e| {
+                        !weaker.deleted_items.contains(e)
+                            && !self.prepended_items.contains(e)
+                            && !self.appended_items.contains(e)
+                    }),
+            )
+            .cloned()
+            .collect();
+
+        Self {
+            prepended_items,
+            appended_items,
+            deleted_items,
+            ..Default::default()
+        }
+    }
+
+    /// Remove spurious duplicates within this list op.
+    ///
+    /// Items that appear in `appended_items` are removed from `prepended_items`.
+    /// Items that appear in `appended_items` or `prepended_items` are removed
+    /// from `deleted_items`.
+    pub fn reduced(&self) -> Self {
+        if self.explicit {
+            return Self {
+                explicit: true,
+                explicit_items: self.explicit_items.clone(),
+                ..Default::default()
+            };
+        }
+        Self {
+            prepended_items: self
+                .prepended_items
+                .iter()
+                .filter(|e| !self.appended_items.contains(e))
+                .cloned()
+                .collect(),
+            appended_items: self.appended_items.clone(),
+            deleted_items: self
+                .deleted_items
+                .iter()
+                .filter(|e| !self.appended_items.contains(e) && !self.prepended_items.contains(e))
+                .cloned()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Flatten this list op into its final item list.
+    ///
+    /// Equivalent to `self.reduced().compose_over(&[])` but avoids the
+    /// intermediate allocation.
+    pub fn flatten(&self) -> Vec<T> {
+        if self.explicit {
+            return self.explicit_items.clone();
+        }
+        self.prepended_items
+            .iter()
+            .filter(|e| !self.appended_items.contains(e))
+            .chain(self.appended_items.iter())
+            .cloned()
+            .collect()
+    }
+
     /// Applies this list operation on top of a weaker list, producing the composed result.
     ///
     /// Follows USD's list-editing semantics:
