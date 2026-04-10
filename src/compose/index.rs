@@ -179,9 +179,12 @@ fn build_recursive(
         }
     }
 
-    // V — Variants: resolve variant selections iteratively. Variant specs
-    // can themselves define nested variant sets, so we loop until no new
-    // variant nodes are added.
+    // V — Variants: resolve variant selections iteratively. For each
+    // selection, try appending it to every existing node's path (the
+    // variant set may be defined on the prim itself or an inherited class).
+    // Variant specs can themselves define nested variant sets, so we loop
+    // until no new variant nodes are added.
+    let mut processed_variants = HashSet::new();
     loop {
         let all_nodes_so_far = local_start..nodes.len();
         let selections = resolve_variant_selections_in(&nodes[all_nodes_so_far], layers);
@@ -191,27 +194,26 @@ fn build_recursive(
 
         let before = nodes.len();
         for (set_name, selection) in &selections {
-            // Build the variant path by appending to the deepest existing variant
-            // path, or the prim path if no variant nodes exist yet.
-            let base = nodes[local_start..before]
-                .iter()
-                .rev()
-                .find(|n| n.arc == ArcType::Variant)
-                .map(|n| &n.path)
-                .unwrap_or(path);
-            let variant_path = base.append_variant_selection(set_name, selection);
-            for &i in layer_stack {
-                if layers[i].has_spec(&variant_path) {
-                    nodes.push(Node {
-                        layer_index: i,
-                        path: variant_path.clone(),
-                        arc: ArcType::Variant,
-                    });
+            // Snapshot paths before mutating `nodes` in the inner loop.
+            let bases: Vec<Path> = nodes[local_start..before].iter().map(|n| n.path.clone()).collect();
+            for base in &bases {
+                let variant_path = base.append_variant_selection(set_name, selection);
+                if !processed_variants.insert(variant_path.clone()) {
+                    continue;
+                }
+                for &i in layer_stack {
+                    if layers[i].has_spec(&variant_path) {
+                        nodes.push(Node {
+                            layer_index: i,
+                            path: variant_path.clone(),
+                            arc: ArcType::Variant,
+                        });
+                    }
                 }
             }
         }
 
-        // No new nodes added — all selections already processed.
+        // No new variant nodes — all selections fully resolved.
         if nodes.len() == before {
             break;
         }
@@ -760,6 +762,28 @@ mod tests {
                 .iter()
                 .any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
             "should have inherit node for _localclass_Lens"
+        );
+        Ok(())
+    }
+
+    /// Variant selections from inherited classes should propagate to
+    /// the inheriting prim, including selections nested inside the
+    /// class's own variant specs.
+    #[test]
+    fn inherited_variant_selection_propagation() -> Result<()> {
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/TrickyVariantWeakerSelection2_root/usda/root.usd",
+            manifest_dir()
+        );
+        let (layers, ids) = load_layers(&path)?;
+        let index = build(&layers, &ids, "/bob");
+
+        // /bob inherits _class_geotype which has geotype_selector=select_cube.
+        // That variant sets geotype=cube. /bob's geotype=cube variant payloads geo.usd.
+        // /bob/bob_body should exist from the payload.
+        assert!(
+            index.nodes.iter().any(|n| n.path.as_str().contains("{geotype=cube}")),
+            "should have geotype=cube variant node from inherited selection"
         );
         Ok(())
     }
