@@ -26,6 +26,10 @@ struct CachedPrim {
 /// for the first time, its index is built using the parent's cached context
 /// (if available). During depth-first traversal, parents are always composed
 /// before children, so the context chain is always populated.
+///
+/// All public methods return `Result` — a [`pcp::Error`](super::Error) is
+/// returned when composition fails. The caller ([`Stage`](crate::Stage))
+/// decides whether to skip or abort via its error handler.
 pub struct Cache {
     layers: Vec<LayerData>,
     identifiers: Vec<String>,
@@ -60,39 +64,41 @@ impl Cache {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition.
-    pub fn has_spec(&mut self, path: &Path) -> bool {
+    pub fn has_spec(&mut self, path: &Path) -> Result<bool> {
         if path.is_property_path() {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-            self.ensure_index(&prim_path);
+            self.ensure_index(&prim_path)?;
             let Some(entry) = self.cache.get(&prim_path) else {
-                return false;
+                return Ok(false);
             };
             for node in entry.index.nodes() {
                 let prop_path = format!("{}{prop_suffix}", node.path);
                 if let Ok(p) = Path::new(&prop_path) {
                     if self.layers[node.layer_index].has_spec(&p) {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
-            false
+            Ok(false)
         } else {
-            self.ensure_index(path);
-            self.cache.get(path).is_some_and(|e| !e.index.is_empty())
+            self.ensure_index(path)?;
+            Ok(self.cache.get(path).is_some_and(|e| !e.index.is_empty()))
         }
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub fn spec_type(&mut self, path: &Path) -> Option<SpecType> {
-        self.ensure_index(path);
-        let entry = self.cache.get(path)?;
+    pub fn spec_type(&mut self, path: &Path) -> Result<Option<SpecType>> {
+        self.ensure_index(path)?;
+        let Some(entry) = self.cache.get(path) else {
+            return Ok(None);
+        };
         for node in entry.index.nodes() {
             if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
-                return Some(ty);
+                return Ok(Some(ty));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Resolves a field value from the strongest opinion across all composition nodes.
@@ -100,11 +106,11 @@ impl Cache {
         if path.is_property_path() {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-            self.ensure_index(&prim_path);
+            self.ensure_index(&prim_path)?;
             let entry = &self.cache[&prim_path];
             entry.index.resolve_field(field, &self.layers, Some(prop_suffix))
         } else {
-            self.ensure_index(path);
+            self.ensure_index(path)?;
             let entry = &self.cache[path];
             entry.index.resolve_field(field, &self.layers, None)
         }
@@ -134,9 +140,12 @@ impl Cache {
     }
 
     /// Ensures the prim index for `path` is built and cached.
-    fn ensure_index(&mut self, path: &Path) {
+    ///
+    /// On a composition error, caches an empty index (so the path is not
+    /// retried) and returns the error for the caller to handle.
+    fn ensure_index(&mut self, path: &Path) -> Result<()> {
         if self.cache.contains_key(path) {
-            return;
+            return Ok(());
         }
 
         // Look up parent's context (available if parent was composed first).
@@ -146,21 +155,25 @@ impl Cache {
             .map(|e| e.child_context.clone())
             .unwrap_or_default();
 
-        let index = PrimIndex::build_with_context(
+        match PrimIndex::build_with_context(
             path,
             &self.layers,
             &self.identifiers,
             &parent_ctx,
             &self.sublayer_stacks,
-        );
-        let child_context = index.context_for_children(path, &self.layers, &parent_ctx);
-
-        self.cache.insert(path.clone(), CachedPrim { index, child_context });
+        ) {
+            Ok(index) => {
+                let child_context = index.context_for_children(path, &self.layers, &parent_ctx);
+                self.cache.insert(path.clone(), CachedPrim { index, child_context });
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Merges a children field across all nodes in the prim index.
     fn composed_children(&mut self, path: &Path, children_field: ChildrenKey) -> Result<Vec<String>> {
-        self.ensure_index(path);
+        self.ensure_index(path)?;
         let entry = &self.cache[path];
         let mut result: Vec<String> = Vec::new();
 

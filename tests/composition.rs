@@ -93,7 +93,7 @@ fn run(name: &str, format: Format) {
         // Check property names.
         for prop in &expected.property_names {
             let prop_path = format!("{prim_path}.{prop}");
-            if !stage.has_spec(sdf::path(&prop_path).unwrap()) {
+            if !stage.has_spec(sdf::path(&prop_path).unwrap()).unwrap_or(false) {
                 failures.push(format!("missing property: {prop_path}"));
             }
         }

@@ -40,5 +40,21 @@ pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
-pub use layer::{CompositionError, DependencyKind};
+pub use layer::DependencyKind;
 pub use stage::{Stage, StageBuilder};
+
+/// A recoverable error encountered during stage composition.
+///
+/// Wraps errors from both layer collection ([`layer::Error`]) and prim
+/// composition ([`pcp::Error`]). The error handler provided via
+/// [`StageBuilder::on_error`] decides whether to skip and continue or abort.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompositionError {
+    /// Error during layer collection (e.g. unresolved asset path).
+    #[error(transparent)]
+    Layer(#[from] layer::Error),
+    /// Error during prim composition (e.g. missing defaultPrim, arc cycle).
+    #[error(transparent)]
+    Pcp(#[from] pcp::Error),
+}
