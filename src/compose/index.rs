@@ -273,9 +273,12 @@ impl PrimIndex {
         }
 
         // Post-process: resolve variant selections that span across seeds.
-        // A variant selection from one seed (e.g. ancestral variant override)
-        // may apply to a variant set introduced by another seed (e.g. reference).
         resolve_cross_seed_variants(&mut nodes, layers, identifiers);
+
+        // Propagate implied inherits/specializes through prefix equivalences.
+        // Seeds encode equivalent prefixes (e.g. /Rig ↔ /_class ↔ /CharRig).
+        // Inherit targets under one prefix should also resolve under the others.
+        propagate_implied_arcs(&seeds, &mut nodes, layers);
 
         // Overlapping ancestor walks can produce the same node from multiple seeds.
         let mut seen = HashSet::new();
@@ -507,6 +510,83 @@ fn collect_seeds(path: &Path, layers: &[LayerData], identifiers: &[String]) -> V
     }
 
     seeds
+}
+
+/// Propagates implied inherit and specialize arcs through prefix equivalences.
+///
+/// Seeds for a composed prim encode a chain of path mappings:
+///
+/// ```text
+/// /Rig/SymToesRig → /_class_CharRig/SymToesRig → /CharRig/SymToesRig
+///       (root)             (inherit)                 (reference)
+/// ```
+///
+/// All share suffix `/SymToesRig` with different prefixes. When an
+/// inherit target `/CharRig/_Class_ToesRig` is found on a node from one
+/// prefix, implied arcs at the equivalent prefixes (`/_class_CharRig/_Class_ToesRig`,
+/// `/Rig/_Class_ToesRig`) must also be added.
+fn propagate_implied_arcs(seeds: &[(Vec<usize>, Path, ArcType)], nodes: &mut Vec<Node>, layers: &[LayerData]) {
+    if seeds.len() <= 1 {
+        return;
+    }
+
+    // Seeds encode prefix equivalences — each seed's path is the composed
+    // path with its ancestor portion remapped through a composition arc.
+    // Extract prefixes by stripping the composed path's prim name suffix.
+    let composed = seeds[0].1.as_str();
+    let Some(last_slash) = composed.rfind('/') else {
+        return;
+    };
+    let suffix = &composed[last_slash..];
+
+    let mut prefix_map: Vec<(&str, &[usize])> = Vec::new();
+    for (stack, spath, _) in seeds {
+        let s = spath.as_str();
+        if let Some(stripped) = s.strip_suffix(suffix) {
+            prefix_map.push((stripped, stack));
+        }
+    }
+
+    if prefix_map.len() <= 1 {
+        return;
+    }
+
+    // Collect new implied nodes into a separate vec, then extend.
+    let mut seen: HashSet<(usize, Path)> = nodes.iter().map(|n| (n.layer_index, n.path.clone())).collect();
+    let mut new_nodes = Vec::new();
+
+    for node in nodes.iter() {
+        if node.arc != ArcType::Inherit && node.arc != ArcType::Specialize {
+            continue;
+        }
+        let node_path = node.path.as_str();
+
+        for &(prefix, _) in &prefix_map {
+            // Skip empty prefix to avoid false positives on root paths.
+            if prefix.is_empty() || !node_path.starts_with(prefix) {
+                continue;
+            }
+            let tail = &node_path[prefix.len()..];
+
+            for &(other_prefix, other_stack) in &prefix_map {
+                if other_prefix == prefix {
+                    continue;
+                }
+                let remapped = Path::from(format!("{other_prefix}{tail}"));
+                for &li in other_stack {
+                    if layers[li].has_spec(&remapped) && seen.insert((li, remapped.clone())) {
+                        new_nodes.push(Node {
+                            layer_index: li,
+                            path: remapped.clone(),
+                            arc: node.arc,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    nodes.append(&mut new_nodes);
 }
 
 /// Resolves variant selections that span across seeds.
