@@ -227,6 +227,15 @@ impl Path {
         Path::from_str_unchecked(&format!("{}{{{set}={selection}}}", self.path))
     }
 
+    /// Appends a raw variant segment (e.g. `{set=sel}`) directly to this path.
+    ///
+    /// Unlike [`append_path`], no `/` separator is inserted — variant segments
+    /// attach directly to the prim path to produce canonical forms like
+    /// `/Prim{set=sel}`.
+    pub fn append_variant_segment(&self, segment: &str) -> Path {
+        Path::from_str_unchecked(&format!("{}{segment}", self.path))
+    }
+
     /// Resolve a relative path against this path as anchor.
     ///
     /// Absolute paths are returned as-is. Relative segments (`..`) walk up
@@ -590,5 +599,21 @@ mod tests {
         assert_eq!(abs("/A", "../X").as_str(), "/X");
         assert_eq!(abs("/A/B", "..").as_str(), "/A");
         assert_eq!(abs("/A/B", "C/D").as_str(), "/A/B/C/D");
+    }
+
+    #[test]
+    fn append_variant_segment() {
+        let p = |s| Path::from_str_unchecked(s);
+
+        // Variant set and selection attach directly without a slash separator.
+        assert_eq!(p("/A").append_variant_segment("{v=sel}").as_str(), "/A{v=sel}");
+        assert_eq!(
+            p("/A/B").append_variant_segment("{color=red}").as_str(),
+            "/A/B{color=red}"
+        );
+        // Empty selection (variant set path).
+        assert_eq!(p("/A").append_variant_segment("{v=}").as_str(), "/A{v=}");
+        // Nested variant segments stack.
+        assert_eq!(p("/A{v=x}").append_variant_segment("{w=y}").as_str(), "/A{v=x}{w=y}");
     }
 }
