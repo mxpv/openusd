@@ -14,11 +14,12 @@
 //! See <https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html>
 
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::sdf::schema::FieldKey;
+use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 /// The type of composition arc that introduced a [`Node`].
@@ -405,16 +406,41 @@ fn resolve_cross_seed_variants(nodes: &mut Vec<Node>, layers: &[LayerData], iden
 fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
+    // Gather explicit selections (first opinion wins).
     for node in nodes {
         let data = &layers[node.layer_index];
-        let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) else {
+        if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
+            if let Value::VariantSelectionMap(map) = value.into_owned() {
+                for (set_name, selection) in map {
+                    selections.entry(set_name).or_insert(selection);
+                }
+            }
+        }
+    }
+
+    // For variant sets without an explicit selection, use the first variant
+    // name as the default (matches USD's behavior).
+    for node in nodes {
+        let data = &layers[node.layer_index];
+        let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
             continue;
         };
-
-        if let Value::VariantSelectionMap(map) = value.into_owned() {
-            for (set_name, selection) in map {
-                // First opinion wins.
-                selections.entry(set_name).or_insert(selection);
+        let Value::TokenVec(set_names) = value.into_owned() else {
+            continue;
+        };
+        for set_name in set_names {
+            let Entry::Vacant(entry) = selections.entry(set_name) else {
+                continue;
+            };
+            let set_path = node.path.append_variant_selection(entry.key(), "");
+            let Ok(val) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) else {
+                continue;
+            };
+            let Value::TokenVec(variants) = val.into_owned() else {
+                continue;
+            };
+            if let Some(first) = variants.into_iter().next() {
+                entry.insert(first);
             }
         }
     }
