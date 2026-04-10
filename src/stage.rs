@@ -24,28 +24,23 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use anyhow::Result;
 
 use crate::ar::{DefaultResolver, Resolver};
 use crate::compose;
-use crate::compose::index::PrimIndex;
+use crate::compose::graph::CompositionGraph;
 use crate::compose::CompositionError;
-use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerData, Path, SpecType, Value};
+use crate::sdf::{Path, SpecType, Value};
 
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
-/// properties, and metadata.
+/// properties, and metadata. Composition indices are built lazily and
+/// cached in the [`CompositionGraph`].
 pub struct Stage {
-    /// All layers, root (strongest) first.
-    layers: Vec<LayerData>,
-    /// Layer identifiers, parallel to `layers`.
-    identifiers: Vec<String>,
-    /// Cached prim indices, built lazily per prim.
-    prim_indices: RefCell<HashMap<Path, PrimIndex>>,
+    /// Lazily-built composition graph caching per-prim indices and contexts.
+    graph: RefCell<CompositionGraph>,
 }
 
 impl Stage {
@@ -87,30 +82,28 @@ impl Stage {
         }
 
         Self {
-            layers,
-            identifiers,
-            prim_indices: RefCell::new(HashMap::new()),
+            graph: RefCell::new(CompositionGraph::new(layers, identifiers)),
         }
     }
 
     /// Returns the number of layers in the stage.
     pub fn layer_count(&self) -> usize {
-        self.layers.len()
+        self.graph.borrow().layer_count()
     }
 
     /// Returns the layer identifiers in strength order (root first).
-    pub fn layer_identifiers(&self) -> &[String] {
-        &self.identifiers
+    pub fn layer_identifiers(&self) -> Vec<String> {
+        self.graph.borrow().layer_identifiers().to_vec()
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
     pub fn default_prim(&self) -> Option<String> {
-        self.field::<String>(&Path::abs_root(), FieldKey::DefaultPrim).ok()?
+        self.graph.borrow().default_prim()
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
-        self.prim_children(Path::abs_root())
+        self.graph.borrow_mut().prim_children(&Path::abs_root())
     }
 
     /// Returns the composed list of child prim names for a given prim path.
@@ -119,12 +112,12 @@ impl Stage {
     /// path, collecting the union of child names while preserving the order
     /// from the strongest layer.
     pub fn prim_children(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.composed_children(&path.into(), ChildrenKey::PrimChildren)
+        self.graph.borrow_mut().prim_children(&path.into())
     }
 
     /// Returns the composed list of property names for a given prim path.
     pub fn prim_properties(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.composed_children(&path.into(), ChildrenKey::PropertyChildren)
+        self.graph.borrow_mut().prim_properties(&path.into())
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -132,42 +125,12 @@ impl Stage {
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&self, path: impl Into<Path>) -> bool {
-        let path = path.into();
-        if path.is_property_path() {
-            let prim_path = path.prim_path();
-            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-            self.update_index(&prim_path);
-            let cache = self.prim_indices.borrow();
-            let Some(index) = cache.get(&prim_path) else {
-                return false;
-            };
-            for node in &index.nodes {
-                let prop_path = format!("{}{prop_suffix}", node.path);
-                if let Ok(p) = Path::new(&prop_path) {
-                    if self.layers[node.layer_index].has_spec(&p) {
-                        return true;
-                    }
-                }
-            }
-            false
-        } else {
-            self.update_index(&path);
-            let cache = self.prim_indices.borrow();
-            !cache[&path].is_empty()
-        }
+        self.graph.borrow_mut().has_spec(&path.into())
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub fn spec_type(&self, path: impl Into<Path>) -> Option<SpecType> {
-        let path = path.into();
-        self.update_index(&path);
-        let cache = self.prim_indices.borrow();
-        for node in &cache[&path].nodes {
-            if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
-                return Some(ty);
-            }
-        }
-        None
+        self.graph.borrow_mut().spec_type(&path.into())
     }
 
     /// Resolves a field value by walking the prim index from strongest to weakest.
@@ -197,37 +160,11 @@ impl Stage {
         T: TryFrom<Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
-        let path: Path = path.into();
-        let field: &str = field.as_ref();
-        let raw = if path.is_property_path() {
-            self.property_field(&path, field)?
-        } else {
-            self.resolve_field(&path, field)?
-        };
-
+        let raw = self.graph.borrow_mut().resolve_field(&path.into(), field.as_ref())?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
         }
-    }
-
-    /// Walks the prim index for a prim path, returning the first opinion for `field`.
-    fn resolve_field(&self, path: &Path, field: &str) -> Result<Option<Value>> {
-        self.update_index(path);
-        let cache = self.prim_indices.borrow();
-        cache[path].resolve_field(field, &self.layers, None)
-    }
-
-    /// Resolves a field on a property spec (attribute or relationship).
-    ///
-    /// Uses the owning prim's index to determine layer ordering, then builds
-    /// the property path within each layer and queries for the field.
-    fn property_field(&self, prop_path: &Path, field: &str) -> Result<Option<Value>> {
-        let prim_path = prop_path.prim_path();
-        let prop_suffix = &prop_path.as_str()[prim_path.as_str().len()..];
-        self.update_index(&prim_path);
-        let cache = self.prim_indices.borrow();
-        cache[&prim_path].resolve_field(field, &self.layers, Some(prop_suffix))
     }
 
     /// Traverses all composed prims depth-first, calling `visitor` for each.
@@ -241,7 +178,7 @@ impl Stage {
                 visitor(&path);
             }
 
-            let children = self.prim_children(&path)?;
+            let children = self.graph.borrow_mut().prim_children(&path)?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
@@ -251,38 +188,6 @@ impl Stage {
         }
 
         Ok(())
-    }
-
-    /// Ensures the prim index for `path` is built and cached.
-    fn update_index(&self, path: &Path) {
-        if self.prim_indices.borrow().contains_key(path) {
-            return;
-        }
-        let index = PrimIndex::build(path, &self.layers, &self.identifiers);
-        self.prim_indices.borrow_mut().insert(path.clone(), index);
-    }
-
-    /// Merges a children field (e.g. `primChildren`, `properties`) across all
-    /// nodes in the prim index, returning the union with strongest-first ordering.
-    fn composed_children(&self, path: &Path, children_field: impl AsRef<str>) -> Result<Vec<String>> {
-        let children_field: &str = children_field.as_ref();
-        self.update_index(path);
-        let cache = self.prim_indices.borrow();
-        let mut result: Vec<String> = Vec::new();
-
-        for node in &cache[path].nodes {
-            if let Ok(value) = self.layers[node.layer_index].get(&node.path, children_field) {
-                if let Value::TokenVec(names) = value.into_owned() {
-                    for name in names {
-                        if !result.contains(&name) {
-                            result.push(name);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(result)
     }
 }
 
@@ -344,6 +249,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdf::schema::FieldKey;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 

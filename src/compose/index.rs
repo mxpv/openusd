@@ -89,12 +89,10 @@
 //! The reference to `A.usd` brings in both `A.usd` and `B.usd` as the
 //! target's layer stack, so `/Model.x` resolves to `"from_sublayer"`.
 //!
-//! ## Ancestral arc propagation (seeds)
+//! ## Ancestral arc propagation
 //!
 //! When a parent prim has composition arcs, descendants automatically pick
-//! up opinions from the corresponding descendant path in the arc's target.
-//! This is handled by "seed" collection — before building the index for a
-//! prim, we walk its ancestors to find arcs that introduce remapped paths:
+//! up opinions from the corresponding path in the arc's target:
 //!
 //! ```text
 //! # root.usda
@@ -108,13 +106,9 @@
 //! }
 //! ```
 //!
-//! Building the index for `/Set/Prop`: the ancestor `/Set` has a payload arc.
-//! The seed collector remaps `/Set/Prop` through the payload to produce
-//! `set.usd:/Set/Prop`, so the property `x` is found.
-//!
-//! Seeds are expanded iteratively — if a seed introduces further arcs (e.g.
-//! a reference inside a variant in a referenced layer), those are expanded
-//! too, to arbitrary depth.
+//! Building the index for `/Set/Prop`: the parent `/Set` has a payload arc.
+//! The parent's [`CompositionContext`] carries an arc mapping that remaps
+//! child paths through the payload, so the child finds `set.usd:/Set/Prop`.
 //!
 //! ## Variant resolution
 //!
@@ -142,51 +136,96 @@
 //! Variant sets can be nested (a variant spec defines another variant set),
 //! so resolution loops until no new variant nodes are produced. When no
 //! explicit selection is authored, the first variant in the set is used as
-//! the default.
+//! the default. Ancestor variant selections are inherited through the
+//! composition context, so a parent's selection is visible when resolving
+//! a child's variant sets.
 //!
-//! ## Cross-seed variant resolution
+//! ## Variant context for internal references
 //!
-//! A variant selection authored in one composition context (e.g. an
-//! ancestral variant override) may apply to a variant set introduced by a
-//! different context (e.g. a reference). After all seeds are processed, a
-//! final pass gathers all variant selections from the full node set and
-//! resolves any remaining unprocessed variant sets:
-//!
-//! ```text
-//! # root.usda
-//! def "Group" (
-//!     references = @group.usd@</Group>
-//!     variants = { string standin = "sim" }
-//! ) { }
-//! ```
+//! Internal references within a variant spec target paths that may only
+//! exist inside the enclosing variant. The variant segments from the
+//! current node's path are inserted into the target:
 //!
 //! ```text
-//! # group.usd
-//! def "Group" (variantSets = "standin") {
-//!     variantSet "standin" = {
-//!         "sim" { over "Model" (variants = { string v = "sim" }) { } }
+//! def "Model" (variantSets = "v", variants = { string v = "a" }) {
+//!     variantSet "v" = {
+//!         "a" {
+//!             def "_proto" { int x = 1 }
+//!             def "Instance" (references = </Model/_proto>) { }
+//!         }
 //!     }
-//!     def "Model" (references = @model.usd@</Model>) { }
 //! }
 //! ```
 //!
-//! The variant selection `standin=sim` comes from root.usda (one seed), but
-//! the variant set is defined in group.usd (loaded via reference — another
-//! seed). The cross-seed pass connects them.
+//! `Instance` references `</Model/_proto>`, but `_proto` only exists at
+//! `/Model{v=a}/_proto`. The variant segment `{v=a}` from the enclosing
+//! context is inserted to produce the correct target path.
 //!
-//! # Implementation structure
+//! ## Implied inherit propagation
 //!
-//! - [`PrimIndex::build`] — entry point. Collects seeds, runs LIVRPS per
-//!   seed, applies cross-seed variant resolution, then deduplicates nodes.
-//! - [`build_recursive`] — runs the LIVRPS algorithm for a single path
-//!   within a given layer stack. Called once per seed and recursively for
-//!   each arc target.
-//! - [`collect_seeds`] — walks ancestor prims to find composition arcs that
-//!   introduce remapped paths for the target prim. Expands iteratively.
-//! - [`resolve_cross_seed_variants`] — post-pass that resolves variant
-//!   selections spanning multiple seed contexts.
-//! - [`resolve_variant_selections_in`] — gathers explicit variant selections
-//!   from nodes, with fallback to the first variant as default.
+//! When an inherit target's path prefix matches an ancestor arc mapping,
+//! implied arcs at all equivalent prefixes are added:
+//!
+//! ```text
+//! # root.usda
+//! class "_class" (references = @ref.usd@</CharRig>) { }
+//! def "Rig" (inherits = </_class>) {
+//!     over "_ToesRig" {
+//!         def "Thumb" (inherits = </Rig/_ToesRig/_Toe>) { }
+//!     }
+//! }
+//! ```
+//!
+//! ```text
+//! # ref.usd
+//! def "CharRig" {
+//!     class "_ToesRig" { def "_Toe" { } }
+//!     def "SymToes" (inherits = </CharRig/_ToesRig>) { }
+//! }
+//! ```
+//!
+//! The context for `/Rig/SymToes` records arc mappings:
+//! `/Rig` → `/_class` (inherit) and `/Rig` → `/CharRig` (reference).
+//! An inherit at `/CharRig/_ToesRig` is propagated through these mappings
+//! to produce implied nodes at `/_class/_ToesRig` and `/Rig/_ToesRig`.
+//!
+//! # Architecture
+//!
+//! Composition is driven by a [`CompositionContext`] that flows from parent
+//! prims to children. The context carries:
+//!
+//! - **Variant selections** from all ancestors, so descendant prims resolve
+//!   variant sets without recomputing ancestor composition.
+//! - **Arc mappings** from ancestors, recording how composed paths map to
+//!   paths in other layers. Used for descendant namespace remapping and
+//!   implied inherit propagation.
+//!
+//! The [`Stage`](crate::Stage) caches both the [`PrimIndex`] and the
+//! [`CompositionContext`] for each composed prim. During depth-first
+//! traversal, parents are always composed before children, so the context
+//! is always available.
+//!
+//! ## Implementation structure
+//!
+//! - [`PrimIndex::build_with_context`] — entry point. Creates an
+//!   [`IndexBuilder`] and evaluates all composition sites.
+//! - [`IndexBuilder::eval_site`] — runs LIVRPS for a single composition
+//!   site (path + layer stack). Arcs are followed inline: inherits and
+//!   specializes use [`IndexBuilder::merge_full_index`] (full ancestor
+//!   context), references and payloads use a sub-builder (own dedup scope).
+//! - [`IndexBuilder::add_implied_nodes`] — called inline after each
+//!   inherit/specialize merge to propagate implied arcs through ancestor
+//!   arc prefix equivalences.
+//! - [`IndexBuilder::eval_variants`] — iterative variant resolution within
+//!   a site, using all accumulated selections (including from other sites
+//!   and ancestor context).
+//! - [`IndexBuilder::stabilize`] — loop-until-stable: re-resolves variants
+//!   across all nodes and follows any newly discovered arcs. Handles the
+//!   LIVRPS ordering gap where V runs before R/P but variant sets may come
+//!   from referenced/payloaded layers.
+//! - [`PrimIndex::context_for_children`] — derives the context a prim's
+//!   children should use, including this prim's variant selections and
+//!   arc mappings.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -200,7 +239,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 /// The type of composition arc that introduced a [`Node`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArcType {
     /// Direct opinions from the root layer stack (sublayers).
     Root,
@@ -248,43 +287,65 @@ impl PrimIndex {
         self.nodes.is_empty()
     }
 
-    /// Builds a prim index for the given path across the layer stack.
+    /// Builds a prim index using composition context from the parent prim.
     ///
-    /// Follows LIVERPS ordering:
-    /// Local (sublayers) > Inherits > Variants > References > Payloads > Specializes.
-    ///
-    /// Composition arcs are processed recursively: when a reference or payload
-    /// introduces nodes from another layer stack, the arcs on those nodes
-    /// (inherits, variants, nested references, etc.) are followed as well.
-    ///
-    /// Ancestral arcs are also propagated: if a parent prim has a reference or
-    /// payload, the descendant prim picks up the corresponding descendant spec
-    /// from the referenced layer.
-    pub(crate) fn build(path: &Path, layers: &[LayerData], identifiers: &[String]) -> Self {
-        let mut nodes = Vec::new();
+    /// The context carries variant selections and arc mappings from ancestors,
+    /// enabling single-pass composition without post-processing.
+    pub(crate) fn build_with_context(
+        path: &Path,
+        layers: &[LayerData],
+        identifiers: &[String],
+        ctx: &CompositionContext,
+        shared: &mut SharedCaches,
+    ) -> Self {
+        let mut builder = IndexBuilder::new(layers, identifiers, ctx, shared);
+        builder.build(path);
+        PrimIndex { nodes: builder.output }
+    }
 
-        // Collect all (layer_index, source_path, arc_type) seeds by walking
-        // both the root layer stack and ancestral composition arcs.
-        let seeds = collect_seeds(path, layers, identifiers);
+    /// Returns the composition context derived from this prim's index.
+    ///
+    /// Child prims use this context to inherit ancestor arc mappings and
+    /// variant selections without recomputing them.
+    pub(crate) fn context_for_children(
+        &self,
+        path: &Path,
+        layers: &[LayerData],
+        parent_ctx: &CompositionContext,
+    ) -> CompositionContext {
+        // Gather variant selections from this prim's nodes.
+        let selections = resolve_variant_selections_in(&self.nodes, layers);
 
-        // Run LIVRPS on each seed context.
-        for (layer_indices, source_path, arc) in &seeds {
-            build_recursive(source_path, layer_indices, *arc, layers, identifiers, &mut nodes, 0);
+        // Build arc mappings: for each non-Root node, record the prefix mapping.
+        let mut arc_mappings = parent_ctx.arc_mappings.clone();
+        let prim_prefix = path.as_str();
+        for node in &self.nodes {
+            if node.arc == ArcType::Root {
+                continue;
+            }
+            // The node's path may have a different prefix than the composed path.
+            // Record the mapping so children can remap through it.
+            let node_prefix = node.path.as_str();
+            if node_prefix != prim_prefix {
+                arc_mappings.push(ArcMapping {
+                    composed_prefix: path.clone(),
+                    target_prefix: node.path.clone(),
+                    layer_index: node.layer_index,
+                    arc: node.arc,
+                });
+            }
         }
 
-        // Post-process: resolve variant selections that span across seeds.
-        resolve_cross_seed_variants(&mut nodes, layers, identifiers);
+        // Merge parent's selections (weaker) with this prim's (stronger).
+        let mut merged_selections = parent_ctx.selections.clone();
+        for (k, v) in selections {
+            merged_selections.entry(k).or_insert(v);
+        }
 
-        // Propagate implied inherits/specializes through prefix equivalences.
-        // Seeds encode equivalent prefixes (e.g. /Rig ↔ /_class ↔ /CharRig).
-        // Inherit targets under one prefix should also resolve under the others.
-        propagate_implied_arcs(&seeds, &mut nodes, layers);
-
-        // Overlapping ancestor walks can produce the same node from multiple seeds.
-        let mut seen = HashSet::new();
-        nodes.retain(|n| seen.insert((n.layer_index, n.path.clone())));
-
-        PrimIndex { nodes }
+        CompositionContext {
+            selections: merged_selections,
+            arc_mappings,
+        }
     }
 
     /// Resolves a field by walking nodes from strongest to weakest, returning the first opinion.
@@ -320,265 +381,331 @@ impl PrimIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Composition context: flows from parent to child prim
+// ---------------------------------------------------------------------------
+
+/// Composition context carried from parent prims to children.
+///
+/// Contains accumulated variant selections and arc mappings that enable
+/// single-pass composition without cross-prim post-processing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompositionContext {
+    /// Variant selections accumulated from all ancestor compositions.
+    /// First-opinion-wins: strongest ancestor's selection takes priority.
+    pub selections: HashMap<String, String>,
+    /// Arc mappings from ancestors: maps composed prefix → target prefix.
+    /// Used for descendant namespace remapping and implied inherit propagation.
+    pub arc_mappings: Vec<ArcMapping>,
+}
+
+/// Records a namespace mapping introduced by a composition arc.
+///
+/// When `/Rig` inherits `/_class` which references `ref.usd /CharRig`,
+/// the arc mappings record `/Rig` → `/_class` and `/Rig` → `/CharRig`.
+/// Children of `/Rig` use these to find their composition sites in other layers.
+#[derive(Debug, Clone)]
+pub(crate) struct ArcMapping {
+    /// Prefix in the composed namespace (e.g. `/Rig`).
+    pub composed_prefix: Path,
+    /// Prefix in the arc target's namespace (e.g. `/CharRig`).
+    pub target_prefix: Path,
+    /// Layer index where the target lives.
+    pub layer_index: usize,
+    /// Arc type that introduced this mapping.
+    pub arc: ArcType,
+}
+
+// ---------------------------------------------------------------------------
+// IndexBuilder: single-pass LIVRPS composition
+// ---------------------------------------------------------------------------
+
 /// Maximum recursion depth for nested composition arcs.
 const MAX_COMPOSITION_DEPTH: usize = 100;
 
-/// Recursively builds the LIVRPS index for a prim within a given layer stack.
+/// Caches shared across per-prim builds within a [`CompositionGraph`].
 ///
-/// `layer_stack` contains the indices into `layers` that form the current
-/// composition context (e.g. the root layer + sublayers, or a referenced
-/// layer + its sublayers). `arc` is the arc type that introduced this context.
-fn build_recursive(
-    path: &Path,
-    layer_stack: &[usize],
-    arc: ArcType,
-    layers: &[LayerData],
-    identifiers: &[String],
-    nodes: &mut Vec<Node>,
-    depth: usize,
-) {
-    assert!(
-        depth <= MAX_COMPOSITION_DEPTH,
-        "composition depth exceeded {MAX_COMPOSITION_DEPTH} for {path} — possible cycle"
-    );
+/// Persists across sibling prims so repeated targets (e.g. inherited classes)
+/// and sublayer stacks aren't recomputed.
+#[derive(Default)]
+pub(crate) struct SharedCaches {
+    /// Target indices for inherit/specialize/internal-ref targets.
+    pub target_indices: HashMap<Path, PrimIndex>,
+    /// Sublayer stacks keyed by root layer index.
+    pub sublayer_stacks: HashMap<usize, Vec<usize>>,
+}
 
-    // L — Local opinions within this layer stack.
-    let local_start = nodes.len();
-    for &i in layer_stack {
-        if layers[i].has_spec(path) {
-            nodes.push(Node {
-                layer_index: i,
-                path: path.clone(),
-                arc,
-            });
+/// Builds a prim index by evaluating LIVRPS for each composition site.
+struct IndexBuilder<'a> {
+    layers: &'a [LayerData],
+    identifiers: &'a [String],
+    ctx: &'a CompositionContext,
+    /// Strength-ordered output nodes.
+    output: Vec<Node>,
+    /// Deduplication: (layer_index, path, arc) triples already emitted.
+    /// Arc-type-aware dedup allows the same (layer, path) to appear under
+    /// different arc types (e.g. Root and Reference), matching C++ PCP behavior.
+    seen: HashSet<(usize, Path, ArcType)>,
+    /// Shared caches persisting across builds.
+    shared: &'a mut SharedCaches,
+}
+
+impl<'a> IndexBuilder<'a> {
+    fn new(
+        layers: &'a [LayerData],
+        identifiers: &'a [String],
+        ctx: &'a CompositionContext,
+        shared: &'a mut SharedCaches,
+    ) -> Self {
+        Self {
+            layers,
+            identifiers,
+            ctx,
+            output: Vec::new(),
+            seen: HashSet::new(),
+            shared,
         }
     }
-    let local_nodes_range = local_start..nodes.len();
 
-    // I — Inherits: compose PathListOp across local nodes, then build
-    // full index (with ancestral seed expansion) for each inherited prim.
-    let inherits = compose_arc_list_in::<Path>(&nodes[local_nodes_range.clone()], FieldKey::InheritPaths, layers);
-    for inherit_path in &inherits {
-        let resolved = path.make_absolute(inherit_path);
-        let seeds = collect_seeds(&resolved, layers, identifiers);
-        for (stack, spath, _) in &seeds {
-            build_recursive(spath, stack, ArcType::Inherit, layers, identifiers, nodes, depth + 1);
-        }
-    }
+    /// Build the prim index for the given composed path.
+    ///
+    /// Evaluates all composition sites (root + ancestor-derived), then loops
+    /// until stable: if variant resolution produces new nodes (because R/P
+    /// arcs introduced variant sets that V hadn't seen), their arcs are
+    /// followed and variants re-resolved.
+    fn build(&mut self, path: &Path) {
+        let root_stack: Vec<usize> = (0..self.layers.len()).collect();
 
-    // V — Variants: resolve variant selections iteratively. For each
-    // selection, try appending it to every existing node's path (the
-    // variant set may be defined on the prim itself or an inherited class).
-    // Variant specs can themselves define nested variant sets, so we loop
-    // until no new variant nodes are added.
-    let mut processed_variants = HashSet::new();
-    loop {
-        let all_nodes_so_far = local_start..nodes.len();
-        let selections = resolve_variant_selections_in(&nodes[all_nodes_so_far], layers);
-        if selections.is_empty() {
-            break;
-        }
+        // Evaluate root composition site.
+        self.eval_site(path, &root_stack, ArcType::Root, 0);
 
-        let before = nodes.len();
-        for (set_name, selection) in &selections {
-            // Snapshot paths before mutating `nodes` in the inner loop.
-            let bases: Vec<Path> = nodes[local_start..before].iter().map(|n| n.path.clone()).collect();
-            for base in &bases {
-                let variant_path = base.append_variant_selection(set_name, selection);
-                if !processed_variants.insert(variant_path.clone()) {
-                    continue;
-                }
-                for &i in layer_stack {
-                    if layers[i].has_spec(&variant_path) {
-                        nodes.push(Node {
-                            layer_index: i,
-                            path: variant_path.clone(),
-                            arc: ArcType::Variant,
-                        });
+        // Propagate ancestor arcs from context.
+        let child_name = path.as_str().rsplit('/').next().unwrap_or("");
+        if !child_name.is_empty() {
+            let ancestor_sites: Vec<_> = self
+                .ctx
+                .arc_mappings
+                .iter()
+                .filter_map(|m| {
+                    let parent = path.parent()?;
+                    if m.composed_prefix != parent {
+                        return None;
                     }
-                }
+                    let remapped = format!("{}/{child_name}", m.target_prefix);
+                    Path::new(&remapped).ok().map(|p| (p, m.layer_index, m.arc))
+                })
+                .collect();
+            for (rpath, li, arc) in &ancestor_sites {
+                self.eval_site(rpath, &[*li], *arc, 0);
             }
         }
 
-        // No new variant nodes — all selections fully resolved.
-        if nodes.len() == before {
-            break;
-        }
+        // Loop until stable: R/P arcs may introduce variant sets that V
+        // hadn't seen. Re-resolve variants and follow any new arcs.
+        self.stabilize();
     }
 
-    // Collect the range of all nodes added so far (L + I + V) for arc lookups.
-    // In LIVRPS, arcs introduced by variants must also be followed.
-    let all_opinion_nodes = local_start..nodes.len();
+    /// Re-resolve variants across all accumulated nodes until no new nodes
+    /// are produced. Handles the LIVRPS ordering gap where V runs before R/P
+    /// but variant sets may come from referenced/payloaded layers.
+    fn stabilize(&mut self) {
+        // Track already-processed variant paths across loop iterations.
+        let mut processed: HashSet<Path> = self
+            .output
+            .iter()
+            .filter(|n| n.arc == ArcType::Variant)
+            .map(|n| n.path.clone())
+            .collect();
 
-    // R — References: compose ReferenceListOp across L+I+V nodes, then
-    // recursively build for each referenced layer stack.
-    let references = compose_arc_list_in::<Reference>(&nodes[all_opinion_nodes.clone()], FieldKey::References, layers);
-    for reference in &references {
-        add_arc_nodes_recursive(
-            &reference.asset_path,
-            &reference.prim_path,
-            ArcType::Reference,
-            nodes,
-            layers,
-            identifiers,
-            depth,
-        );
-    }
+        loop {
+            let before = self.output.len();
 
-    // P — Payloads: same as references but weaker.
-    let payloads = collect_payloads_in(&nodes[all_opinion_nodes.clone()], layers);
-    for payload in &payloads {
-        add_arc_nodes_recursive(
-            &payload.asset_path,
-            &payload.prim_path,
-            ArcType::Payload,
-            nodes,
-            layers,
-            identifiers,
-            depth,
-        );
-    }
+            let mut selections = resolve_variant_selections_in(&self.output, self.layers);
+            for (set, sel) in &self.ctx.selections {
+                selections.entry(set.clone()).or_insert_with(|| sel.clone());
+            }
 
-    // S — Specializes: composed across L+I+V nodes, build full index
-    // (with ancestral seed expansion) for each specialized prim.
-    let specializes = compose_arc_list_in::<Path>(&nodes[all_opinion_nodes], FieldKey::Specializes, layers);
-    for specialize_path in &specializes {
-        let resolved = path.make_absolute(specialize_path);
-        let seeds = collect_seeds(&resolved, layers, identifiers);
-        for (stack, spath, _) in &seeds {
-            build_recursive(spath, stack, ArcType::Specialize, layers, identifiers, nodes, depth + 1);
-        }
-    }
-}
+            let orig_len = self.output.len();
+            for (set_name, selection) in &selections {
+                for idx in 0..orig_len {
+                    let variant_path = self.output[idx].path.append_variant_selection(set_name, selection);
+                    if !processed.insert(variant_path.clone()) {
+                        continue;
+                    }
+                    let start = self.output.len();
+                    for (i, layer) in self.layers.iter().enumerate() {
+                        if layer.has_spec(&variant_path)
+                            && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
+                        {
+                            self.output.push(Node {
+                                layer_index: i,
+                                path: variant_path.clone(),
+                                arc: ArcType::Variant,
+                            });
+                        }
+                    }
+                    let end = self.output.len();
+                    // Follow arcs from newly discovered variant nodes.
+                    if start < end {
+                        let new_nodes: Vec<Node> = self.output[start..end].to_vec();
+                        let refs = compose_arc_list_in::<Reference>(&new_nodes, FieldKey::References, self.layers);
+                        let payloads = collect_payloads_in(&new_nodes, self.layers);
+                        for reference in &refs {
+                            self.eval_arc_target(
+                                &reference.asset_path,
+                                &reference.prim_path,
+                                ArcType::Reference,
+                                &Path::abs_root(),
+                                0,
+                            );
+                        }
+                        for payload in &payloads {
+                            self.eval_arc_target(
+                                &payload.asset_path,
+                                &payload.prim_path,
+                                ArcType::Payload,
+                                &Path::abs_root(),
+                                0,
+                            );
+                        }
+                    }
+                }
+            }
 
-/// Collects seed contexts for building a prim's composition index.
-///
-/// Returns `(layer_stack, source_path, arc_type)` tuples. The first entry is
-/// always the root layer stack at the original path. Additional entries come
-/// from ancestors that have composition arcs — the descendant suffix is
-/// appended to the ancestor's remapped path.
-fn collect_seeds(path: &Path, layers: &[LayerData], identifiers: &[String]) -> Vec<(Vec<usize>, Path, ArcType)> {
-    let root_stack: Vec<usize> = (0..layers.len()).collect();
-    let mut seeds = vec![(root_stack, path.clone(), ArcType::Root)];
-    let mut seen = HashSet::new();
-
-    // Iteratively expand seeds: for each seed, walk its remapped path's
-    // ancestors within its layer stack to discover further arc mappings.
-    let mut i = 0;
-    while i < seeds.len() {
-        let (ref layer_stack, ref seed_path, _) = seeds[i];
-        let layer_stack = layer_stack.clone();
-        let seed_path = seed_path.clone();
-        i += 1;
-
-        let mut ancestor_opt = seed_path.parent();
-        while let Some(ancestor) = ancestor_opt {
-            if ancestor == Path::abs_root() {
+            // Stable — no new nodes produced.
+            if self.output.len() == before {
                 break;
             }
+        }
+    }
 
-            if layer_stack.iter().any(|&li| layers[li].has_spec(&ancestor)) {
-                let mut ancestor_nodes = Vec::new();
-                build_recursive(
-                    &ancestor,
-                    &layer_stack,
-                    ArcType::Root,
-                    layers,
-                    identifiers,
-                    &mut ancestor_nodes,
-                    0,
-                );
-                // Variant sets from referenced layers need cross-seed resolution
-                // to match with local variant selections.
-                resolve_cross_seed_variants(&mut ancestor_nodes, layers, identifiers);
-                for anode in &ancestor_nodes {
-                    if anode.arc == ArcType::Root {
-                        continue;
-                    }
-                    let Some(remapped_path) = seed_path.replace_prefix(&ancestor, &anode.path) else {
-                        continue;
-                    };
-                    let key = (vec![anode.layer_index], remapped_path.clone());
-                    if seen.insert(key) {
-                        seeds.push((vec![anode.layer_index], remapped_path, anode.arc));
-                    }
-                }
+    /// Evaluate a single composition site: run LIVRPS for `path` within
+    /// `layer_stack`. Called recursively for each arc target.
+    fn eval_site(&mut self, path: &Path, layer_stack: &[usize], arc: ArcType, depth: usize) {
+        assert!(
+            depth <= MAX_COMPOSITION_DEPTH,
+            "composition depth exceeded {MAX_COMPOSITION_DEPTH} for {path} — possible cycle"
+        );
+
+        let site_start = self.output.len();
+
+        // L — Local opinions: check each layer in the stack for a spec.
+        for &i in layer_stack {
+            if self.layers[i].has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
+                self.output.push(Node {
+                    layer_index: i,
+                    path: path.clone(),
+                    arc,
+                });
             }
-
-            ancestor_opt = ancestor.parent();
         }
-    }
 
-    seeds
-}
-
-/// Propagates implied inherit and specialize arcs through prefix equivalences.
-///
-/// Seeds for a composed prim encode a chain of path mappings:
-///
-/// ```text
-/// /Rig/SymToesRig → /_class_CharRig/SymToesRig → /CharRig/SymToesRig
-///       (root)             (inherit)                 (reference)
-/// ```
-///
-/// All share suffix `/SymToesRig` with different prefixes. When an
-/// inherit target `/CharRig/_Class_ToesRig` is found on a node from one
-/// prefix, implied arcs at the equivalent prefixes (`/_class_CharRig/_Class_ToesRig`,
-/// `/Rig/_Class_ToesRig`) must also be added.
-fn propagate_implied_arcs(seeds: &[(Vec<usize>, Path, ArcType)], nodes: &mut Vec<Node>, layers: &[LayerData]) {
-    if seeds.len() <= 1 {
-        return;
-    }
-
-    // Seeds encode prefix equivalences — each seed's path is the composed
-    // path with its ancestor portion remapped through a composition arc.
-    // Extract prefixes by stripping the composed path's prim name suffix.
-    let composed = seeds[0].1.as_str();
-    let Some(last_slash) = composed.rfind('/') else {
-        return;
-    };
-    let suffix = &composed[last_slash..];
-
-    let mut prefix_map: Vec<(&str, &[usize])> = Vec::new();
-    for (stack, spath, _) in seeds {
-        let s = spath.as_str();
-        if let Some(stripped) = s.strip_suffix(suffix) {
-            prefix_map.push((stripped, stack));
-        }
-    }
-
-    if prefix_map.len() <= 1 {
-        return;
-    }
-
-    // Collect new implied nodes into a separate vec, then extend.
-    let mut seen: HashSet<(usize, Path)> = nodes.iter().map(|n| (n.layer_index, n.path.clone())).collect();
-    let mut new_nodes = Vec::new();
-
-    for node in nodes.iter() {
-        if node.arc != ArcType::Inherit && node.arc != ArcType::Specialize {
-            continue;
-        }
-        let node_path = node.path.as_str();
-
-        for &(prefix, _) in &prefix_map {
-            // Skip empty prefix to avoid false positives on root paths.
-            if prefix.is_empty() || !node_path.starts_with(prefix) {
-                continue;
+        // I — Inherits: compose InheritPaths. Build a full index for each
+        // target (which includes ancestor context) and merge its nodes.
+        // Implied arcs are propagated inline through ancestor arc mappings.
+        let inherits = compose_arc_list_in::<Path>(&self.output[site_start..], FieldKey::InheritPaths, self.layers);
+        for inherit_path in &inherits {
+            let resolved = path.make_absolute(inherit_path);
+            let before = self.output.len();
+            self.merge_full_index(&resolved, ArcType::Inherit);
+            self.add_implied_nodes(before, ArcType::Inherit);
+            for vt in variant_expanded_targets(path, &resolved) {
+                let before = self.output.len();
+                self.merge_full_index(&vt, ArcType::Inherit);
+                self.add_implied_nodes(before, ArcType::Inherit);
             }
-            let tail = &node_path[prefix.len()..];
+        }
 
-            for &(other_prefix, other_stack) in &prefix_map {
-                if other_prefix == prefix {
+        // V — Variants: resolve selections iteratively (nested variant sets).
+        self.eval_variants(site_start);
+
+        // Collect range of all opinion nodes (L + I + V) for R/P/S lookups.
+        let opinion_end = self.output.len();
+
+        // R — References.
+        let references =
+            compose_arc_list_in::<Reference>(&self.output[site_start..opinion_end], FieldKey::References, self.layers);
+        for reference in &references {
+            self.eval_arc_target(
+                &reference.asset_path,
+                &reference.prim_path,
+                ArcType::Reference,
+                path,
+                depth,
+            );
+        }
+
+        // P — Payloads.
+        let payloads = collect_payloads_in(&self.output[site_start..opinion_end], self.layers);
+        for payload in &payloads {
+            self.eval_arc_target(&payload.asset_path, &payload.prim_path, ArcType::Payload, path, depth);
+        }
+
+        // S — Specializes.
+        let specializes = compose_arc_list_in::<Path>(
+            &self.output[site_start..opinion_end],
+            FieldKey::Specializes,
+            self.layers,
+        );
+        for specialize_path in &specializes {
+            let resolved = path.make_absolute(specialize_path);
+            let before = self.output.len();
+            self.merge_full_index(&resolved, ArcType::Specialize);
+            self.add_implied_nodes(before, ArcType::Specialize);
+        }
+    }
+
+    /// Propagate implied arcs for inherit/specialize nodes added since `start`.
+    /// Remaps through ancestor arc prefix equivalences inline.
+    fn add_implied_nodes(&mut self, start: usize, arc: ArcType) {
+        if self.ctx.arc_mappings.is_empty() {
+            return;
+        }
+        // Snapshot the nodes to check (can't iterate self.output while pushing).
+        let paths_to_check: Vec<String> = self.output[start..]
+            .iter()
+            .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
+            .map(|n| n.path.as_str().to_string())
+            .collect();
+
+        for node_path in &paths_to_check {
+            for mapping in &self.ctx.arc_mappings {
+                let target = mapping.target_prefix.as_str();
+                if target.is_empty() || !node_path.starts_with(target) {
                     continue;
                 }
-                let remapped = Path::from(format!("{other_prefix}{tail}"));
-                for &li in other_stack {
-                    if layers[li].has_spec(&remapped) && seen.insert((li, remapped.clone())) {
-                        new_nodes.push(Node {
+                let rest = &node_path[target.len()..];
+                if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('{') {
+                    continue;
+                }
+
+                // Remap through composed prefix.
+                let composed = mapping.composed_prefix.as_str();
+                let remapped = Path::from(format!("{composed}{rest}"));
+                for li in 0..self.layers.len() {
+                    if self.layers[li].has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
+                        self.output.push(Node {
                             layer_index: li,
                             path: remapped.clone(),
-                            arc: node.arc,
+                            arc,
+                        });
+                    }
+                }
+
+                // Also remap through other arc mappings sharing the same composed prefix.
+                for other in &self.ctx.arc_mappings {
+                    if other.target_prefix == mapping.target_prefix {
+                        continue;
+                    }
+                    let other_target = other.target_prefix.as_str();
+                    let other_remapped = Path::from(format!("{other_target}{rest}"));
+                    let li = other.layer_index;
+                    if self.layers[li].has_spec(&other_remapped) && self.seen.insert((li, other_remapped.clone(), arc))
+                    {
+                        self.output.push(Node {
+                            layer_index: li,
+                            path: other_remapped,
+                            arc,
                         });
                     }
                 }
@@ -586,84 +713,211 @@ fn propagate_implied_arcs(seeds: &[(Vec<usize>, Path, ArcType)], nodes: &mut Vec
         }
     }
 
-    nodes.append(&mut new_nodes);
+    fn get_sublayer_stack(&mut self, root_layer: usize) -> Vec<usize> {
+        self.shared
+            .sublayer_stacks
+            .entry(root_layer)
+            .or_insert_with(|| find_sublayer_stack(root_layer, self.layers, self.identifiers))
+            .clone()
+    }
+
+    /// Build a full PrimIndex for a target path (with ancestor context) and
+    /// merge its nodes into this builder's output. Used for inherit/specialize
+    /// targets that need their own ancestor propagation.
+    fn merge_full_index(&mut self, target: &Path, arc: ArcType) {
+        // Check shared cache first — avoids rebuilding the same target
+        // across sibling prims and recursive compositions.
+        if !self.shared.target_indices.contains_key(target) {
+            // Build the target's own ancestor context.
+            let ctx = if let Some(parent) = target.parent() {
+                if parent != Path::abs_root() {
+                    if !self.shared.target_indices.contains_key(&parent) {
+                        let parent_idx = PrimIndex::build_with_context(
+                            &parent,
+                            self.layers,
+                            self.identifiers,
+                            &CompositionContext::default(),
+                            self.shared,
+                        );
+                        self.shared.target_indices.insert(parent.clone(), parent_idx);
+                    }
+                    let parent_idx = &self.shared.target_indices[&parent];
+                    parent_idx.context_for_children(&parent, self.layers, &CompositionContext::default())
+                } else {
+                    CompositionContext::default()
+                }
+            } else {
+                CompositionContext::default()
+            };
+            let idx = PrimIndex::build_with_context(target, self.layers, self.identifiers, &ctx, self.shared);
+            self.shared.target_indices.insert(target.clone(), idx);
+        }
+        let target_index = &self.shared.target_indices[target];
+        for node in &target_index.nodes {
+            if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
+                self.output.push(Node {
+                    layer_index: node.layer_index,
+                    path: node.path.clone(),
+                    arc,
+                });
+            }
+        }
+    }
+
+    /// Resolve variant selections iteratively, handling nested variant sets
+    /// and variant sets on inherited classes.
+    fn eval_variants(&mut self, site_start: usize) {
+        let mut processed = HashSet::new();
+        loop {
+            let current_end = self.output.len();
+            // Gather selections from ALL output nodes (not just this site) so
+            // cross-site selections are visible during the first pass.
+            let mut selections = resolve_variant_selections_in(&self.output[..current_end], self.layers);
+            // Merge accumulated selections (includes ancestor context).
+            for (set, sel) in &self.ctx.selections {
+                selections.entry(set.clone()).or_insert_with(|| sel.clone());
+            }
+            if selections.is_empty() {
+                break;
+            }
+            let before = self.output.len();
+            for (set_name, selection) in &selections {
+                // Try appending variant to every node in this site (not all output —
+                // variant sets belong to this site's paths).
+                let bases: Vec<Path> = self.output[site_start..before].iter().map(|n| n.path.clone()).collect();
+                for base in &bases {
+                    let variant_path = base.append_variant_selection(set_name, selection);
+                    if !processed.insert(variant_path.clone()) {
+                        continue;
+                    }
+                    // Search ALL layers for variant specs (not just the site's
+                    // stack) so cross-site variants are resolved inline.
+                    for (i, layer) in self.layers.iter().enumerate() {
+                        if layer.has_spec(&variant_path)
+                            && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
+                        {
+                            self.output.push(Node {
+                                layer_index: i,
+                                path: variant_path.clone(),
+                                arc: ArcType::Variant,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if self.output.len() == before {
+                break;
+            }
+        }
+    }
+
+    /// Evaluate a reference or payload target.
+    fn eval_arc_target(&mut self, asset_path: &str, prim_path: &Path, arc: ArcType, context_path: &Path, depth: usize) {
+        if asset_path.is_empty() {
+            // Internal reference — build full index for target (with ancestor
+            // context) so variant selections and arc mappings propagate.
+            if prim_path.is_empty() {
+                return;
+            }
+            self.merge_full_index(prim_path, arc);
+            for vt in variant_expanded_targets(context_path, prim_path) {
+                self.merge_full_index(&vt, arc);
+            }
+        } else {
+            // External reference — evaluate in a fresh sub-builder so the
+            // target's layer stack doesn't share our `seen` set. The sub-builder
+            // uses its own ancestor context derived from the target path.
+            let Some(layer_index) = find_layer(asset_path, self.identifiers) else {
+                return;
+            };
+            let source = if prim_path.is_empty() {
+                let root = Path::abs_root();
+                let Ok(value) = self.layers[layer_index].get(&root, FieldKey::DefaultPrim.as_str()) else {
+                    return;
+                };
+                match value.into_owned() {
+                    Value::Token(name) | Value::String(name) => Path::new(&format!("/{name}")).unwrap_or_default(),
+                    _ => return,
+                }
+            } else {
+                prim_path.clone()
+            };
+            let target_stack = self.get_sublayer_stack(layer_index);
+            // Evaluate directly — arc-type-aware dedup allows the same
+            // (layer, path) to appear under different arc types.
+            self.eval_site(&source, &target_stack, arc, depth + 1);
+            // Also propagate ancestor arcs within the target layer.
+            if let Some(parent) = source.parent() {
+                if parent != Path::abs_root() {
+                    let child_name = source.as_str().rsplit('/').next().unwrap_or("");
+                    let parent_index =
+                        PrimIndex::build_with_context(&parent, self.layers, self.identifiers, self.ctx, self.shared);
+                    let ancestor_sites: Vec<_> = parent_index
+                        .nodes
+                        .iter()
+                        .filter(|n| n.arc != ArcType::Root)
+                        .filter_map(|n| {
+                            Path::new(&format!("{}/{child_name}", n.path))
+                                .ok()
+                                .map(|p| (p, n.layer_index, n.arc))
+                        })
+                        .collect();
+                    for (rpath, li, a) in &ancestor_sites {
+                        self.eval_site(rpath, &[*li], *a, depth + 1);
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// Resolves variant selections that span across seeds.
+// ---------------------------------------------------------------------------
+// Shared helpers (used by IndexBuilder and Stage)
+// ---------------------------------------------------------------------------
+
+/// Expands an internal reference target by inserting variant segments from
+/// the context path.
 ///
-/// After all seeds have been processed, there may be variant selections
-/// authored in one seed's context (e.g. an ancestral variant override)
-/// that should apply to variant sets introduced by another seed (e.g.
-/// a reference). This pass gathers all variant selections from existing
-/// nodes and resolves any unprocessed variant sets.
-fn resolve_cross_seed_variants(nodes: &mut Vec<Node>, layers: &[LayerData], identifiers: &[String]) {
-    let mut processed = HashSet::new();
-    for node in nodes.iter() {
-        if node.arc == ArcType::Variant {
-            processed.insert(node.path.clone());
-        }
+/// If the context is `/Model{vset=with_children}/Foo` and the target is
+/// `/Model/_prototype`, returns `[/Model{vset=with_children}/_prototype]`.
+fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
+    let ctx = context.as_str();
+    if !ctx.contains('{') {
+        return Vec::new();
     }
+    let tgt = target.as_str();
+    let mut results = Vec::new();
 
-    let selections = resolve_variant_selections_in(nodes, layers);
-    if selections.is_empty() {
-        return;
-    }
+    let mut pos = 0;
+    while let Some(open) = ctx[pos..].find('{') {
+        let open = pos + open;
+        let Some(close) = ctx[open..].find('}') else {
+            break;
+        };
+        let close = open + close;
+        let prim_prefix = &ctx[..open];
+        let variant_segment = &ctx[open..=close];
 
-    let orig_len = nodes.len();
-    for (set_name, selection) in &selections {
-        for idx in 0..orig_len {
-            let variant_path = nodes[idx].path.append_variant_selection(set_name, selection);
-            if !processed.insert(variant_path.clone()) {
-                continue;
-            }
-
-            let start = nodes.len();
-            for (i, layer) in layers.iter().enumerate() {
-                if layer.has_spec(&variant_path) {
-                    nodes.push(Node {
-                        layer_index: i,
-                        path: variant_path.clone(),
-                        arc: ArcType::Variant,
-                    });
-                }
-            }
-            let end = nodes.len();
-
-            if start < end {
-                // Collect arcs from new variant nodes before mutating `nodes`.
-                let new_variant_nodes: Vec<Node> = nodes[start..end].to_vec();
-                let refs = compose_arc_list_in::<Reference>(&new_variant_nodes, FieldKey::References, layers);
-                let payloads = collect_payloads_in(&new_variant_nodes, layers);
-                for reference in &refs {
-                    add_arc_nodes_recursive(
-                        &reference.asset_path,
-                        &reference.prim_path,
-                        ArcType::Reference,
-                        nodes,
-                        layers,
-                        identifiers,
-                        0,
-                    );
-                }
-                for payload in &payloads {
-                    add_arc_nodes_recursive(
-                        &payload.asset_path,
-                        &payload.prim_path,
-                        ArcType::Payload,
-                        nodes,
-                        layers,
-                        identifiers,
-                        0,
-                    );
+        if let Some(after_prefix) = tgt.strip_prefix(prim_prefix) {
+            if !after_prefix.starts_with('{') {
+                let expanded = format!("{prim_prefix}{variant_segment}{after_prefix}");
+                if let Ok(p) = Path::new(&expanded) {
+                    results.push(p);
                 }
             }
         }
+
+        pos = close + 1;
     }
+
+    results
 }
 
 /// Resolves variant selections by walking nodes strongest-to-weakest.
 ///
-/// For each variant set, the first opinion wins.
+/// Gathers explicit selections (first opinion wins), then falls back to
+/// the first variant name in each variant set as the default.
 fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
@@ -680,7 +934,7 @@ fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMa
     }
 
     // For variant sets without an explicit selection, use the first variant
-    // name as the default (matches USD's behavior).
+    // name as the default.
     for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
@@ -717,7 +971,6 @@ where
     let field = field.as_str();
     let mut combined: Option<ListOp<T>> = None;
 
-    // Walk from strongest to weakest, combining ListOps into a single reduced op.
     for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, field) else {
@@ -739,7 +992,6 @@ where
 fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
     let mut combined: Option<PayloadListOp> = None;
 
-    // Walk from strongest to weakest, combining payload ListOps.
     for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, FieldKey::Payload.as_str()) else {
@@ -765,65 +1017,7 @@ fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
     combined.map(|op| op.reduced().flatten()).unwrap_or_default()
 }
 
-/// Adds nodes from a referenced or payloaded layer, then recursively
-/// processes composition arcs on the target's layer stack.
-///
-/// If `asset_path` is empty, the target is internal (same layer stack).
-/// `prim_path` is used for namespace remapping; if empty, the target
-/// layer's `defaultPrim` is used.
-fn add_arc_nodes_recursive(
-    asset_path: &str,
-    prim_path: &Path,
-    arc: ArcType,
-    nodes: &mut Vec<Node>,
-    layers: &[LayerData],
-    identifiers: &[String],
-    depth: usize,
-) {
-    if asset_path.is_empty() {
-        // Internal reference — target is within the same layer stack.
-        // Use seed expansion so ancestor arcs (e.g. variants) are propagated.
-        if prim_path.is_empty() {
-            return;
-        }
-        let seeds = collect_seeds(prim_path, layers, identifiers);
-        for (stack, spath, _) in &seeds {
-            build_recursive(spath, stack, arc, layers, identifiers, nodes, depth + 1);
-        }
-    } else {
-        // External reference — find the target layer and its sublayer stack.
-        let Some(layer_index) = find_layer(asset_path, identifiers) else {
-            return;
-        };
-
-        let source = if prim_path.is_empty() {
-            // Use the target layer's defaultPrim.
-            let root = Path::abs_root();
-            let Ok(value) = layers[layer_index].get(&root, FieldKey::DefaultPrim.as_str()) else {
-                return;
-            };
-            match value.into_owned() {
-                Value::Token(name) | Value::String(name) => Path::new(&format!("/{name}")).unwrap_or_default(),
-                _ => return,
-            }
-        } else {
-            prim_path.clone()
-        };
-
-        // Use seed expansion so ancestor arcs in the target layer are propagated.
-        let target_stack = find_sublayer_stack(layer_index, layers, identifiers);
-        let seeds = collect_seeds(&source, layers, identifiers);
-        // First seed is always the root stack; replace it with the target's sublayer stack.
-        for (i, (stack, spath, _)) in seeds.iter().enumerate() {
-            let effective_stack = if i == 0 { &target_stack } else { stack };
-            build_recursive(spath, effective_stack, arc, layers, identifiers, nodes, depth + 1);
-        }
-    }
-}
-
 /// Returns the layer indices forming a sublayer stack rooted at `root_layer`.
-///
-/// Walks the `subLayers` field recursively to find all sublayers.
 fn find_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[String]) -> Vec<usize> {
     let mut stack = vec![root_layer];
     let mut queue = vec![root_layer];
@@ -851,8 +1045,7 @@ fn find_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[S
 /// Finds a layer index whose identifier matches `asset_path`.
 ///
 /// Tries an exact match first, then falls back to suffix matching at a
-/// path separator boundary (so `_stage.usda` matches `/abs/path/_stage.usda`
-/// but not `/abs/path/not_stage.usda`). Strips leading `./` before matching.
+/// path separator boundary. Strips leading `./` before matching.
 fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
     let sep = std::path::MAIN_SEPARATOR as u8;
     let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
@@ -872,6 +1065,10 @@ fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
 
     None
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -911,7 +1108,25 @@ mod tests {
 
     /// Builds a prim index for a given path string.
     fn build(layers: &[LayerData], identifiers: &[String], prim: &str) -> PrimIndex {
-        PrimIndex::build(&Path::from(prim), layers, identifiers)
+        let path = Path::from(prim);
+        let mut shared = SharedCaches::default();
+        let ctx = if let Some(parent) = path.parent() {
+            if parent != Path::abs_root() {
+                let parent_index = PrimIndex::build_with_context(
+                    &parent,
+                    layers,
+                    identifiers,
+                    &CompositionContext::default(),
+                    &mut shared,
+                );
+                parent_index.context_for_children(&parent, layers, &CompositionContext::default())
+            } else {
+                CompositionContext::default()
+            }
+        } else {
+            CompositionContext::default()
+        };
+        PrimIndex::build_with_context(&path, layers, identifiers, &ctx, &mut shared)
     }
 
     #[test]
@@ -1048,7 +1263,6 @@ mod tests {
         let (layers, ids) = load_layers(&path)?;
         let index = build(&layers, &ids, "/Root");
 
-        // Root references A.usd</A> and B.usd</B>, both of which reference C.usd</C>.
         assert!(
             index
                 .nodes
@@ -1071,7 +1285,6 @@ mod tests {
             "should have node from C.usd via nested reference"
         );
 
-        // A.usd defines A_attr on /A — verify the property spec is accessible.
         let a_idx = find_layer("A.usd", &ids).unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
@@ -1092,13 +1305,10 @@ mod tests {
         let (layers, ids) = load_layers(&path)?;
         let index = build(&layers, &ids, "/B");
 
-        // /B has variant introducingVariantSet=introducingVariant which specializes /A.
-        // /A has variant nestedVariantSet=nestedVariant with property "test".
         assert!(
             index.nodes.iter().any(|n| n.arc == ArcType::Specialize),
             "should have specialize node from variant"
         );
-        // The /A variant should also be present.
         assert!(
             index
                 .nodes
@@ -1120,13 +1330,11 @@ mod tests {
         );
         let (layers, ids) = load_layers(&path)?;
 
-        // camera_perspective.usd should be loaded (referenced from inside a variant).
         assert!(
             find_layer("camera_perspective.usd", &ids).is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
-        // /main_cam/Lens should inherit /camera/_localclass_Lens from camera_perspective.usd.
         let index = build(&layers, &ids, "/main_cam/Lens");
         assert!(
             index
@@ -1150,9 +1358,6 @@ mod tests {
         let (layers, ids) = load_layers(&path)?;
         let index = build(&layers, &ids, "/bob");
 
-        // /bob inherits _class_geotype which has geotype_selector=select_cube.
-        // That variant sets geotype=cube. /bob's geotype=cube variant payloads geo.usd.
-        // /bob/bob_body should exist from the payload.
         assert!(
             index.nodes.iter().any(|n| n.path.as_str().contains("{geotype=cube}")),
             "should have geotype=cube variant node from inherited selection"
