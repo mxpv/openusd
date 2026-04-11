@@ -618,4 +618,81 @@ mod tests {
 
         Ok(())
     }
+
+    // --- Inherit child propagation ---
+
+    /// A prim that inherits a class should expose the class's children even
+    /// when the inheriting prim has no local override for them.
+    #[test]
+    fn inherit_child_exists_without_local_override() -> Result<()> {
+        let path = fixture_path("inherit_child_propagation.usda");
+        let stage = Stage::open(&path)?;
+
+        // /Instance inherits /BaseClass which has child /BaseClass/Child.
+        // /Instance/Child should exist even though Instance has no local "Child".
+        let children = stage.prim_children("/Instance")?;
+        assert!(
+            children.contains(&"Child".to_string()),
+            "inherited child should appear: got {children:?}"
+        );
+
+        // The inherited property should be accessible.
+        assert!(
+            stage.has_spec(Path::new("/Instance/Child.name")?)?,
+            "property from inherited child should be visible"
+        );
+
+        Ok(())
+    }
+
+    /// Nested children from an inherited class should propagate through
+    /// multiple levels even without local overrides at any level.
+    #[test]
+    fn inherit_nested_child_propagation() -> Result<()> {
+        let path = fixture_path("inherit_nested_child.usda");
+        let stage = Stage::open(&path)?;
+
+        // /Prim inherits /Base. /Base/A/B exists with val=1.0.
+        // /Prim/A should exist, /Prim/A/B should exist.
+        let a_children = stage.prim_children("/Prim")?;
+        assert!(
+            a_children.contains(&"A".to_string()),
+            "first-level child: got {a_children:?}"
+        );
+
+        let b_children = stage.prim_children("/Prim/A")?;
+        assert!(
+            b_children.contains(&"B".to_string()),
+            "second-level child: got {b_children:?}"
+        );
+
+        assert!(
+            stage.has_spec(Path::new("/Prim/A/B.val")?)?,
+            "deeply nested inherited property should be visible"
+        );
+
+        Ok(())
+    }
+
+    /// Children should propagate through an inherit chain (Leaf → Middle → GrandBase).
+    #[test]
+    fn inherit_chain_child_propagation() -> Result<()> {
+        let path = fixture_path("inherit_chain_child.usda");
+        let stage = Stage::open(&path)?;
+
+        // /Leaf inherits /Middle which inherits /GrandBase.
+        // /GrandBase/Deep exists with x=42. /Leaf/Deep should exist.
+        let children = stage.prim_children("/Leaf")?;
+        assert!(
+            children.contains(&"Deep".to_string()),
+            "chain-inherited child: got {children:?}"
+        );
+
+        assert!(
+            stage.has_spec(Path::new("/Leaf/Deep.x")?)?,
+            "property from chain-inherited child should be visible"
+        );
+
+        Ok(())
+    }
 }

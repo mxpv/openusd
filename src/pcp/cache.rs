@@ -12,7 +12,8 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, Path, SpecType, Value};
 
-use super::index::{CompositionContext, PrimIndex, SublayerStacks};
+use super::index::{ArcType, CompositionContext, Node, PrimIndex, SublayerStacks};
+use super::map_function::MapFunction;
 
 /// Cached entry for a composed prim: its index and the context its children need.
 struct CachedPrim {
@@ -63,7 +64,7 @@ impl Cache {
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
-    /// exists in any layer contributing to the owning prim's composition.
+    /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&mut self, path: &Path) -> Result<bool> {
         if path.is_property_path() {
             let prim_path = path.prim_path();
@@ -141,8 +142,10 @@ impl Cache {
 
     /// Ensures the prim index for `path` is built and cached.
     ///
-    /// On a composition error, caches an empty index (so the path is not
-    /// retried) and returns the error for the caller to handle.
+    /// When LIVRPS composition produces an empty index (no layer has a direct
+    /// spec at the composed path), parent composition nodes are checked for
+    /// child specs at their respective paths. This handles prims that only
+    /// exist through ancestor inherit, specialize, or reference arcs.
     fn ensure_index(&mut self, path: &Path) -> Result<()> {
         if self.cache.contains_key(path) {
             return Ok(());
@@ -162,12 +165,65 @@ impl Cache {
             &parent_ctx,
             &self.sublayer_stacks,
         ) {
-            Ok(index) => {
+            Ok(mut index) => {
+                // When no layer has a direct spec at the composed path, the
+                // prim may still exist through ancestor composition arcs
+                // (inherit, specialize, reference, etc.). Propagate specs from
+                // the parent's nodes: for each parent node, check if a child
+                // spec exists at `parent_node.path / child_name` in that layer.
+                if index.is_empty() {
+                    if let Some(name) = path.name() {
+                        self.propagate_parent_specs(path, name, &mut index);
+                    }
+                }
+
                 let child_context = index.context_for_children(&self.layers, &parent_ctx);
                 self.cache.insert(path.clone(), CachedPrim { index, child_context });
                 Ok(())
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Propagates child specs from the parent's composition nodes.
+    ///
+    /// When a child prim has no direct spec in any layer, it may exist through
+    /// ancestor composition arcs (e.g. a child of an inherited class that has
+    /// no local override). For each non-Root node in the parent's index, check
+    /// if the node's layer has a spec at `node.path / child_name`. If so, add
+    /// it as an implied node, carrying the parent node's arc type and namespace
+    /// mapping adjusted for the child.
+    fn propagate_parent_specs(&self, child_path: &Path, child_name: &str, index: &mut PrimIndex) {
+        let Some(parent_path) = child_path.parent() else {
+            return;
+        };
+        let Some(parent_entry) = self.cache.get(&parent_path) else {
+            return;
+        };
+
+        for parent_node in parent_entry.index.nodes() {
+            // Skip Root nodes — they're already checked by the L phase.
+            if parent_node.arc == ArcType::Root {
+                continue;
+            }
+
+            let Ok(node_child_path) = parent_node.path.append_path(child_name) else {
+                continue;
+            };
+
+            // Check all layers for a spec at this node-relative child path.
+            for li in 0..self.layers.len() {
+                if self.layers[li].has_spec(&node_child_path) {
+                    let map = MapFunction::from_pair(node_child_path.clone(), child_path.clone());
+                    index.push_node(Node {
+                        layer_index: li,
+                        path: node_child_path.clone(),
+                        arc: parent_node.arc,
+                        map_to_parent: map.clone(),
+                        map_to_root: map,
+                    });
+                }
+            }
         }
     }
 
