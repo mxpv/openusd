@@ -1286,6 +1286,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 sdf::Value::UnregisteredValueListOp(list)
             }
 
+            Type::Relocates => {
+                ensure!(!value.is_inlined());
+                self.set_position(value.payload())?;
+                let count = self.reader.read_count()?;
+                let mut pairs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let src_idx: u32 = self.reader.read_pod()?;
+                    let tgt_idx: u32 = self.reader.read_pod()?;
+                    let src = self.paths[src_idx as usize].clone();
+                    let tgt = self.paths[tgt_idx as usize].clone();
+                    pairs.push((src, tgt));
+                }
+                sdf::Value::Relocates(pairs)
+            }
+
             _ => bail!("Unsupported value type: {ty}"),
         };
 

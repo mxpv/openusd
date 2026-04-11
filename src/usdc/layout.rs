@@ -312,6 +312,7 @@ pub enum Type {
     // These array types appear here since the greatest enumerant value must be last.
     TimeCode = 56,
     PathExpression = 57,
+    Relocates = 58,
 }
 
 #[cfg(test)]
