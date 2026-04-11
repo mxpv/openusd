@@ -35,7 +35,7 @@
 //! Nodes carry two namespace mappings: `map_to_parent` (translates paths to
 //! the parent node's namespace) and `map_to_root` (translates directly to the
 //! root namespace). These [`MapFunction`]s are the foundation for namespace
-//! remapping across composition arcs and will be used by relocates. After
+//! remapping across composition arcs (including relocates). After
 //! construction, nodes are ordered strongest-to-weakest so value resolution
 //! is a linear scan.
 //!

@@ -31,6 +31,8 @@ pub enum ArcType {
     Payload,
     /// Contributed by a specializes arc (weakest).
     Specialize,
+    /// Contributed by a relocate (non-destructive namespace remapping).
+    Relocate,
 }
 
 /// Compact index into the graph's node arena.
@@ -140,7 +142,7 @@ impl std::ops::Deref for PrimIndexGraph {
 /// Contains a graph of [`Node`]s ordered from strongest to weakest.
 /// Value resolution walks nodes in strength order and takes the first
 /// opinion found.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PrimIndex {
     /// Composition graph with nodes in strength order.
     graph: PrimIndexGraph,
@@ -155,6 +157,11 @@ impl PrimIndex {
     /// Returns the nodes in strength order (index 0 = strongest).
     pub fn nodes(&self) -> &[Node] {
         &self.graph
+    }
+
+    /// Appends a node to the end of the composition graph.
+    pub(crate) fn push_node(&mut self, node: Node) {
+        self.graph.nodes.push(node);
     }
 
     /// Builds a prim index using composition context from the parent prim.

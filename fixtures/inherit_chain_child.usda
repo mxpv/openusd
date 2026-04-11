@@ -1,0 +1,21 @@
+#usda 1.0
+
+class "GrandBase"
+{
+    def Scope "Deep"
+    {
+        custom int x = 42
+    }
+}
+
+class "Middle" (
+    inherits = </GrandBase>
+)
+{
+}
+
+def "Leaf" (
+    inherits = </Middle>
+)
+{
+}
