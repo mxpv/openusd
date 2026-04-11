@@ -25,7 +25,7 @@ For a detailed comparison with the C++ reference implementation and current prog
 - Composition engine ([`pcp`](src/pcp))
   - Full [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering: sublayers, inherits, variants, references, payloads, specializes.
   - List-edit composition (`prepend`, `append`, `add`, `delete`, `explicit`) across layers.
-  - Arena-based node DAG with parent/child/sibling and origin links.
+  - Arena-based node graph with per-node namespace mapping (`map_to_parent`/`map_to_root`).
   - Cycle detection and structured error reporting via `StageBuilder::on_error` callback.
   - Passes composition [compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
 - Composed [`Stage`](src/stage.rs)

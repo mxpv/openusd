@@ -207,10 +207,20 @@ impl Path {
             return Some(new_prefix.clone());
         }
 
-        // Must start with old_prefix followed by '/'.
+        // Must start with old_prefix followed by '/' or '{' (variant segment).
         let suffix = me.strip_prefix(old)?;
-        if !suffix.starts_with('/') {
+        // The absolute root "/" is a prefix of all absolute paths; after
+        // stripping it the remainder won't start with '/' (e.g. "Foo/Bar").
+        if old != "/" && !suffix.starts_with('/') && !suffix.starts_with('{') {
             return None;
+        }
+        // Ensure a separator between new prefix and suffix for non-root.
+        if old == "/" && !suffix.is_empty() {
+            let new = new_prefix.as_str();
+            if new == "/" {
+                return Some(Path::from_str_unchecked(&format!("/{suffix}")));
+            }
+            return Some(Path::from_str_unchecked(&format!("{new}/{suffix}")));
         }
 
         let new = new_prefix.as_str();

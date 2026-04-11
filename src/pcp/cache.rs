@@ -163,7 +163,7 @@ impl Cache {
             &self.sublayer_stacks,
         ) {
             Ok(index) => {
-                let child_context = index.context_for_children(path, &self.layers, &parent_ctx);
+                let child_context = index.context_for_children(&self.layers, &parent_ctx);
                 self.cache.insert(path.clone(), CachedPrim { index, child_context });
                 Ok(())
             }

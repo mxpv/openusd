@@ -25,22 +25,26 @@
 //! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
 //! | [`error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | [`index`] | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
+//! | [`map_function`] | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
 //!
 //! # Architecture
 //!
 //! Each [`PrimIndex`](index::PrimIndex) is an arena-based graph of [`Node`]s.
-//! Nodes carry parent/child/sibling links (forming a tree) and an `origin`
-//! link (forming a DAG for implied-inherit tracking). After construction,
-//! nodes are ordered strongest-to-weakest so value resolution is a linear scan.
+//! Nodes carry two namespace mappings: `map_to_parent` (translates paths to
+//! the parent node's namespace) and `map_to_root` (translates directly to the
+//! root namespace). These [`MapFunction`]s are the foundation for namespace
+//! remapping across composition arcs and will be used by relocates. After
+//! construction, nodes are ordered strongest-to-weakest so value resolution
+//! is a linear scan.
 //!
 //! Composition is driven by a [`CompositionContext`](index::CompositionContext)
 //! that flows from parent prims to children. The context carries:
 //!
-//! - **Variant selections** from all ancestors, so descendant prims resolve
+//! - Variant selections from all ancestors, so descendant prims resolve
 //!   variant sets without recomputing ancestor composition.
-//! - **Arc mappings** from ancestors, recording how composed paths map to
+//! - Arc mappings from ancestors, recording how composed paths map to
 //!   paths in other layers. Used for descendant namespace remapping and
 //!   implied inherit propagation.
 //!
@@ -61,7 +65,9 @@
 pub(crate) mod cache;
 mod error;
 pub(crate) mod index;
+mod map_function;
 
 pub(crate) use cache::Cache;
 pub use error::Error;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
+pub use map_function::MapFunction;

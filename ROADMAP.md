@@ -22,7 +22,7 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | LIVERPS strength ordering | :white_check_mark: Supported | 0.2.0 | [What is LIVERPS?](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) |
 | [List editing](https://openusd.org/release/glossary.html#usdglossary-listediting) (prepend/append/add/delete/explicit) | :white_check_mark: Supported | 0.2.0 | |
 | Composition error reporting | :white_check_mark: Supported | | `pcp::Error` with `StageBuilder::on_error` callback |
-| Node DAG (PrimIndex graph) | :white_check_mark: Supported | | Arena-based DAG with parent/child/sibling/origin links |
+| Node graph (PrimIndex) | :white_check_mark: Supported | | Arena-based node graph with per-node namespace mapping |
 | Variant fallbacks | :construction: Planned | | `PcpVariantFallbackMap` — application-level default selections |
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :construction: Planned | | Non-destructive override layer on top of root |
 | [Layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset) | :construction: Planned | | Time scale/offset for sublayers and references (already parsed) |
@@ -30,7 +30,7 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :construction: Planned | | Non-destructive namespace reorganization |
 | [Incremental invalidation](https://openusd.org/release/api/class_pcp_changes.html) | :thinking: Considering | | Dependency tracking and change processing (`PcpChanges`) |
 | Composition graph visualization | :thinking: Considering | | `dot` format export for debugging composition |
-| [Map expressions](https://openusd.org/release/api/class_pcp_map_expression.html) | :thinking: Considering | | `mapToParent`/`mapToRoot` namespace translation on nodes |
+| [Map functions](https://openusd.org/release/api/class_pcp_map_function.html) | :white_check_mark: Supported | | `map_to_parent`/`map_to_root` namespace translation on nodes via `MapFunction` |
 | **Scene Graph (Usd)** | | | |
 | Composed stage | :white_check_mark: Supported | 0.2.0 | `Stage::open`, traverse, field queries |
 | Generic field access | :white_check_mark: Supported | 0.2.0 | `Stage::field<T>` with path and field key |

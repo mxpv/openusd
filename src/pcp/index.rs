@@ -13,6 +13,7 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
+use super::map_function::MapFunction;
 use super::Error;
 
 /// The type of composition arc that introduced a [`Node`].
@@ -58,10 +59,9 @@ impl NodeIndex {
 /// A single node in the composition graph.
 ///
 /// Each node represents a site (layer + path) contributing opinions to a
-/// composed prim. The three identity fields (`layer_index`, `path`, `arc`)
-/// define *what* this node contributes. The link fields define the graph
-/// structure — parent/child/sibling relationships form a tree, while
-/// `origin` adds a second edge set forming a DAG for implied-arc tracking.
+/// composed prim. The identity fields (`layer_index`, `path`, `arc`)
+/// define *what* this node contributes. The namespace mappings
+/// (`map_to_parent`, `map_to_root`) translate paths across composition arcs.
 #[derive(Debug, Clone)]
 pub struct Node {
     /// Index into the stage's layer list.
@@ -69,35 +69,12 @@ pub struct Node {
     /// The path within that layer (may differ from composed path due to remapping).
     pub path: Path,
     /// The composition arc that introduced this node.
-    #[allow(dead_code)] // Part of the public data model; read by tests and downstream users.
     pub arc: ArcType,
-    /// Structural parent in the composition tree.
-    pub parent: NodeIndex,
-    /// The node that caused this one to be added. Equals `parent` for direct
-    /// arcs; differs for implied inherits/specializes (points to the original
-    /// class arc that triggered propagation).
-    pub origin: NodeIndex,
-    pub first_child: NodeIndex,
-    pub last_child: NodeIndex,
-    pub prev_sibling: NodeIndex,
-    pub next_sibling: NodeIndex,
-}
-
-impl Node {
-    /// Creates a new unlinked node with all graph links set to [`NodeIndex::INVALID`].
-    fn new(layer_index: usize, path: Path, arc: ArcType) -> Self {
-        Self {
-            layer_index,
-            path,
-            arc,
-            parent: NodeIndex::INVALID,
-            origin: NodeIndex::INVALID,
-            first_child: NodeIndex::INVALID,
-            last_child: NodeIndex::INVALID,
-            prev_sibling: NodeIndex::INVALID,
-            next_sibling: NodeIndex::INVALID,
-        }
-    }
+    /// Maps paths from this node's namespace to its parent's namespace.
+    pub map_to_parent: MapFunction,
+    /// Maps paths from this node's namespace directly to the root namespace.
+    /// Computed as `parent.map_to_root.compose(self.map_to_parent)`.
+    pub map_to_root: MapFunction,
 }
 
 /// Arena-based composition graph.
@@ -119,39 +96,34 @@ impl PrimIndexGraph {
         self.nodes.is_empty()
     }
 
-    /// Creates a node as a child of `parent` (or a root node if parent is
-    /// [`NodeIndex::INVALID`]) and wires the doubly-linked sibling chain.
+    /// Appends a node to the graph and computes its `map_to_root`.
+    ///
+    /// `parent` identifies the structural parent in the composition graph.
+    /// When valid, `map_to_root` is composed from the parent's `map_to_root`
+    /// and the new node's `map_to_parent`. Nodes are ordered by insertion
+    /// (strongest to weakest).
     fn add_child(
         &mut self,
         parent: NodeIndex,
-        origin: NodeIndex,
+        _origin: NodeIndex,
         layer_index: usize,
         path: Path,
         arc: ArcType,
+        map_to_parent: MapFunction,
     ) -> NodeIndex {
-        let mut node = Node::new(layer_index, path, arc);
-        node.parent = parent;
-        node.origin = if origin.is_valid() { origin } else { parent };
-        let idx = NodeIndex(self.nodes.len() as u32);
-
-        if parent.is_valid() {
-            let parent_node = &self.nodes[parent.idx()];
-            if parent_node.last_child.is_valid() {
-                // Append after existing last child.
-                let prev = parent_node.last_child;
-                node.prev_sibling = prev;
-                self.nodes.push(node);
-                self.nodes[prev.idx()].next_sibling = idx;
-            } else {
-                // First child.
-                self.nodes.push(node);
-                self.nodes[parent.idx()].first_child = idx;
-            }
-            self.nodes[parent.idx()].last_child = idx;
+        let map_to_root = if parent.is_valid() {
+            self.nodes[parent.idx()].map_to_root.compose(&map_to_parent)
         } else {
-            self.nodes.push(node);
-        }
-
+            map_to_parent.clone()
+        };
+        let idx = NodeIndex(self.nodes.len() as u32);
+        self.nodes.push(Node {
+            layer_index,
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+        });
         idx
     }
 }
@@ -207,31 +179,26 @@ impl PrimIndex {
     /// variant selections without recomputing them.
     pub(crate) fn context_for_children(
         &self,
-        path: &Path,
         layers: &[LayerData],
         parent_ctx: &CompositionContext,
     ) -> CompositionContext {
         // Gather variant selections from this prim's nodes.
         let selections = resolve_variant_selections_in(self.nodes(), layers);
 
-        // Build arc mappings: for each non-Root node, record the prefix mapping.
-        let mut arc_mappings = parent_ctx.arc_mappings.clone();
-        let prim_prefix = path.as_str();
+        // Build ancestor arcs: for each non-Root node whose map_to_root is
+        // not a no-op, record it so children can remap through it.
+        // We use map_to_root (not map_to_parent) because ancestor propagation
+        // needs to translate all the way to the composed namespace.
+        let mut ancestor_arcs = parent_ctx.ancestor_arcs.clone();
         for node in self.nodes() {
-            if node.arc == ArcType::Root {
+            if node.arc == ArcType::Root || node.map_to_root.is_noop() {
                 continue;
             }
-            // The node's path may have a different prefix than the composed path.
-            // Record the mapping so children can remap through it.
-            let node_prefix = node.path.as_str();
-            if node_prefix != prim_prefix {
-                arc_mappings.push(ArcMapping {
-                    composed_prefix: path.clone(),
-                    target_prefix: node.path.clone(),
-                    layer_index: node.layer_index,
-                    arc: node.arc,
-                });
-            }
+            ancestor_arcs.push(AncestorArc {
+                map: node.map_to_root.clone(),
+                layer_index: node.layer_index,
+                arc: node.arc,
+            });
         }
 
         // Merge parent's selections (weaker) with this prim's (stronger).
@@ -242,7 +209,7 @@ impl PrimIndex {
 
         CompositionContext {
             selections: merged_selections,
-            arc_mappings,
+            ancestor_arcs,
         }
     }
 
@@ -292,23 +259,23 @@ pub(crate) struct CompositionContext {
     /// Variant selections accumulated from all ancestor compositions.
     /// First-opinion-wins: strongest ancestor's selection takes priority.
     pub selections: HashMap<String, String>,
-    /// Arc mappings from ancestors: maps composed prefix → target prefix.
+    /// Ancestor composition arcs with namespace mappings.
     /// Used for descendant namespace remapping and implied inherit propagation.
-    pub arc_mappings: Vec<ArcMapping>,
+    pub ancestor_arcs: Vec<AncestorArc>,
 }
 
-/// Records a namespace mapping introduced by a composition arc.
+/// Records an ancestor composition arc for descendant namespace remapping.
 ///
 /// When `/Rig` inherits `/_class` which references `ref.usd /CharRig`,
-/// the arc mappings record `/Rig` → `/_class` and `/Rig` → `/CharRig`.
-/// Children of `/Rig` use these to find their composition sites in other layers.
+/// the ancestor arcs record the namespace mappings `/_class → /Rig` and
+/// `/CharRig → /Rig`. Children of `/Rig` use these to find their
+/// composition sites in other layers via [`MapFunction`] methods.
 #[derive(Debug, Clone)]
-pub(crate) struct ArcMapping {
-    /// Prefix in the composed namespace (e.g. `/Rig`).
-    pub composed_prefix: Path,
-    /// Prefix in the arc target's namespace (e.g. `/CharRig`).
-    pub target_prefix: Path,
-    /// Layer index where the target lives.
+pub(crate) struct AncestorArc {
+    /// Namespace mapping from this arc's source to the composed namespace.
+    /// Convention: source is the arc target's namespace, target is composed.
+    pub map: MapFunction,
+    /// Layer index where the arc target lives.
     pub layer_index: usize,
     /// Arc type that introduced this mapping.
     pub arc: ArcType,
@@ -389,26 +356,36 @@ impl<'a> IndexBuilder<'a> {
         let root_stack: Vec<usize> = (0..self.layers.len()).collect();
 
         // Evaluate root composition site (no parent — this is the graph root).
-        self.eval_site(path, &root_stack, ArcType::Root, 0, NodeIndex::INVALID)?;
+        self.eval_site(
+            path,
+            &root_stack,
+            ArcType::Root,
+            0,
+            NodeIndex::INVALID,
+            MapFunction::identity(),
+        )?;
 
-        // Propagate ancestor arcs from context.
+        // Propagate ancestor arcs: only match arcs whose target (composed)
+        // prefix equals the parent path, then remap by appending the child name.
+        // This mirrors C++ behavior where each level only uses its direct
+        // parent's arc mappings for descendant propagation.
         let child_name = path.as_str().rsplit('/').next().unwrap_or("");
         if !child_name.is_empty() {
+            let parent = path.parent();
             let ancestor_sites: Vec<_> = self
                 .ctx
-                .arc_mappings
+                .ancestor_arcs
                 .iter()
-                .filter_map(|m| {
-                    let parent = path.parent()?;
-                    if m.composed_prefix != parent {
-                        return None;
-                    }
-                    let remapped = format!("{}/{child_name}", m.target_prefix);
-                    Path::new(&remapped).ok().map(|p| (p, m.layer_index, m.arc))
+                .filter_map(|a| {
+                    // Map the parent path through this arc. Only arcs whose target
+                    // prefix matches the parent will succeed.
+                    let parent_in_source = a.map.map_target_to_source(parent.as_ref()?)?;
+                    let remapped = Path::new(&format!("{parent_in_source}/{child_name}")).ok()?;
+                    Some((remapped, a.layer_index, a.arc, a.map.clone()))
                 })
                 .collect();
-            for (rpath, li, arc) in &ancestor_sites {
-                self.eval_site(rpath, &[*li], *arc, 0, NodeIndex::INVALID)?;
+            for (rpath, li, arc, map) in &ancestor_sites {
+                self.eval_site(rpath, &[*li], *arc, 0, NodeIndex::INVALID, map.clone())?;
             }
         }
 
@@ -448,6 +425,8 @@ impl<'a> IndexBuilder<'a> {
                     // the parent for new variant nodes in the stabilization pass.
                     let base_node = NodeIndex(idx as u32);
                     let start = self.output.len();
+                    let base_prim_path = self.output[idx].path.clone();
+                    let variant_map = MapFunction::from_pair(variant_path.clone(), base_prim_path);
                     for (i, layer) in self.layers.iter().enumerate() {
                         if layer.has_spec(&variant_path)
                             && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
@@ -458,6 +437,7 @@ impl<'a> IndexBuilder<'a> {
                                 i,
                                 variant_path.clone(),
                                 ArcType::Variant,
+                                variant_map.clone(),
                             );
                         }
                     }
@@ -501,6 +481,9 @@ impl<'a> IndexBuilder<'a> {
 
     /// Evaluate a single composition site: run LIVRPS for `path` within
     /// `layer_stack`. Called recursively for each arc target.
+    ///
+    /// `map_to_parent` is the namespace mapping for L nodes created at this
+    /// site (translates from `path`'s namespace to the parent node's namespace).
     fn eval_site(
         &mut self,
         path: &Path,
@@ -508,6 +491,7 @@ impl<'a> IndexBuilder<'a> {
         arc: ArcType,
         depth: usize,
         parent: NodeIndex,
+        map_to_parent: MapFunction,
     ) -> Result<(), Error> {
         if depth > MAX_COMPOSITION_DEPTH {
             return Err(Error::ArcCycle {
@@ -529,7 +513,7 @@ impl<'a> IndexBuilder<'a> {
             });
         }
 
-        let result = self.eval_site_body(path, layer_stack, arc, depth, parent);
+        let result = self.eval_site_body(path, layer_stack, arc, depth, parent, map_to_parent);
         self.eval_stack.remove(&site_key);
         result
     }
@@ -541,6 +525,7 @@ impl<'a> IndexBuilder<'a> {
         arc: ArcType,
         depth: usize,
         parent: NodeIndex,
+        map_to_parent: MapFunction,
     ) -> Result<(), Error> {
         let site_start = self.output.len();
 
@@ -550,7 +535,9 @@ impl<'a> IndexBuilder<'a> {
         let mut site_node = NodeIndex::INVALID;
         for &i in layer_stack {
             if self.layers[i].has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
-                let idx = self.output.add_child(parent, NodeIndex::INVALID, i, path.clone(), arc);
+                let idx =
+                    self.output
+                        .add_child(parent, NodeIndex::INVALID, i, path.clone(), arc, map_to_parent.clone());
                 if !site_node.is_valid() {
                     site_node = idx;
                 }
@@ -623,51 +610,52 @@ impl<'a> IndexBuilder<'a> {
     }
 
     /// Propagate implied arcs for inherit/specialize nodes added since `start`.
-    /// Remaps through ancestor arc prefix equivalences inline.
+    /// Remaps through ancestor arc namespace mappings inline.
     fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeIndex) {
-        if self.ctx.arc_mappings.is_empty() {
+        if self.ctx.ancestor_arcs.is_empty() {
             return;
         }
         // Snapshot the nodes to check (can't iterate self.output while pushing).
-        let paths_to_check: Vec<String> = self.output[start..]
+        let paths_to_check: Vec<Path> = self.output[start..]
             .iter()
             .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
-            .map(|n| n.path.as_str().to_string())
+            .map(|n| n.path.clone())
             .collect();
 
         for node_path in &paths_to_check {
-            for mapping in &self.ctx.arc_mappings {
-                let target = mapping.target_prefix.as_str();
-                if target.is_empty() || !node_path.starts_with(target) {
+            for (idx, mapping) in self.ctx.ancestor_arcs.iter().enumerate() {
+                // map_source_to_target: arc target namespace → composed namespace.
+                let Some(remapped) = mapping.map.map_source_to_target(node_path) else {
                     continue;
-                }
-                let rest = &node_path[target.len()..];
-                if !rest.is_empty() && !rest.starts_with('/') && !rest.starts_with('{') {
-                    continue;
-                }
-
-                // Remap through composed prefix.
-                let composed = mapping.composed_prefix.as_str();
-                let remapped = Path::from(format!("{composed}{rest}"));
+                };
+                let implied_map = MapFunction::from_pair(node_path.clone(), remapped.clone());
                 for li in 0..self.layers.len() {
                     if self.layers[li].has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
-                        self.output
-                            .add_child(NodeIndex::INVALID, origin, li, remapped.clone(), arc);
+                        self.output.add_child(
+                            NodeIndex::INVALID,
+                            origin,
+                            li,
+                            remapped.clone(),
+                            arc,
+                            implied_map.clone(),
+                        );
                     }
                 }
 
-                // Also remap through other arc mappings sharing the same composed prefix.
-                for other in &self.ctx.arc_mappings {
-                    if other.target_prefix == mapping.target_prefix {
+                // Cross-remap through other ancestor arcs: composed → other source namespace.
+                for (other_idx, other) in self.ctx.ancestor_arcs.iter().enumerate() {
+                    if other_idx == idx {
                         continue;
                     }
-                    let other_target = other.target_prefix.as_str();
-                    let other_remapped = Path::from(format!("{other_target}{rest}"));
+                    let Some(other_remapped) = other.map.map_target_to_source(&remapped) else {
+                        continue;
+                    };
                     let li = other.layer_index;
                     if self.layers[li].has_spec(&other_remapped) && self.seen.insert((li, other_remapped.clone(), arc))
                     {
+                        let other_map = MapFunction::from_pair(node_path.clone(), other_remapped.clone());
                         self.output
-                            .add_child(NodeIndex::INVALID, origin, li, other_remapped, arc);
+                            .add_child(NodeIndex::INVALID, origin, li, other_remapped, arc, other_map);
                     }
                 }
             }
@@ -702,7 +690,7 @@ impl<'a> IndexBuilder<'a> {
                         self.target_indices.insert(parent.clone(), parent_idx);
                     }
                     let parent_idx = &self.target_indices[&parent];
-                    parent_idx.context_for_children(&parent, self.layers, &CompositionContext::default())
+                    parent_idx.context_for_children(self.layers, &CompositionContext::default())
                 } else {
                     CompositionContext::default()
                 }
@@ -713,10 +701,25 @@ impl<'a> IndexBuilder<'a> {
             self.target_indices.insert(target.clone(), idx);
         }
         let target_index = &self.target_indices[target];
+        // The mapping for merged nodes translates from the target's namespace
+        // to the parent node's namespace (the inheriting/specializing prim).
+        let parent_path = if parent.is_valid() {
+            self.output[parent.idx()].path.clone()
+        } else {
+            target.clone()
+        };
         for node in target_index.nodes() {
             if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                self.output
-                    .add_child(parent, NodeIndex::INVALID, node.layer_index, node.path.clone(), arc);
+                // Each node maps from its own path to the parent's composed path.
+                let node_map = MapFunction::from_pair(node.path.clone(), parent_path.clone());
+                self.output.add_child(
+                    parent,
+                    NodeIndex::INVALID,
+                    node.layer_index,
+                    node.path.clone(),
+                    arc,
+                    node_map,
+                );
             }
         }
         Ok(())
@@ -748,6 +751,7 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
+                    let variant_map = MapFunction::from_pair(variant_path.clone(), base.clone());
                     // Search ALL layers for variant specs (not just the site's
                     // stack) so cross-site variants are resolved inline.
                     for (i, layer) in self.layers.iter().enumerate() {
@@ -760,6 +764,7 @@ impl<'a> IndexBuilder<'a> {
                                 i,
                                 variant_path.clone(),
                                 ArcType::Variant,
+                                variant_map.clone(),
                             );
                         }
                     }
@@ -836,9 +841,10 @@ impl<'a> IndexBuilder<'a> {
                 prim_path.clone()
             };
             let target_stack = self.get_sublayer_stack(layer_index);
+            let arc_map = MapFunction::from_pair(source.clone(), context_path.clone());
             // Evaluate directly — arc-type-aware dedup allows the same
             // (layer, path) to appear under different arc types.
-            self.eval_site(&source, &target_stack, arc, depth + 1, parent)?;
+            self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map)?;
             // Also propagate ancestor arcs within the target layer.
             if let Some(source_parent) = source.parent() {
                 if source_parent != Path::abs_root() {
@@ -857,11 +863,12 @@ impl<'a> IndexBuilder<'a> {
                         .filter_map(|n| {
                             Path::new(&format!("{}/{child_name}", n.path))
                                 .ok()
-                                .map(|p| (p, n.layer_index, n.arc))
+                                .map(|p| (p, n.layer_index, n.arc, n.path.clone()))
                         })
                         .collect();
-                    for (rpath, li, a) in &ancestor_sites {
-                        self.eval_site(rpath, &[*li], *a, depth + 1, parent)?;
+                    for (rpath, li, a, node_path) in &ancestor_sites {
+                        let ancestor_map = MapFunction::from_pair(node_path.clone(), context_path.clone());
+                        self.eval_site(rpath, &[*li], *a, depth + 1, parent, ancestor_map)?;
                     }
                 }
             }
@@ -1118,7 +1125,7 @@ mod tests {
                     &stacks,
                 )
                 .expect("parent index build failed");
-                parent_index.context_for_children(&parent, layers, &CompositionContext::default())
+                parent_index.context_for_children(layers, &CompositionContext::default())
             } else {
                 CompositionContext::default()
             }
