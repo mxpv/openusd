@@ -118,6 +118,8 @@ pub enum Value {
 
     Payload(Payload),
     PathVec(Vec<Path>),
+    /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
+    Relocates(Vec<(Path, Path)>),
     VariantSelectionMap(HashMap<String, String>),
     TimeSamples(TimeSampleMap),
 
@@ -238,6 +240,13 @@ impl serde::Serialize for Value {
 
             Value::Payload(v) => v.serialize(serializer),
             Value::PathVec(v) => v.serialize(serializer),
+            Value::Relocates(v) => {
+                let mut map = serializer.serialize_map(Some(v.len()))?;
+                for (src, tgt) in v {
+                    map.serialize_entry(src.as_str(), tgt.as_str())?;
+                }
+                map.end()
+            }
             Value::VariantSelectionMap(v) => v.serialize(serializer),
             Value::LayerOffsetVec(v) => v.serialize(serializer),
 

@@ -271,6 +271,11 @@ impl<'a> Parser<'a> {
                     root.add(FieldKey::SubLayers, sublayers);
                     root.add(FieldKey::SubLayerOffsets, sublayer_offsets);
                 }
+                Token::Relocates => {
+                    this.ensure_pun('=')?;
+                    let pairs = this.parse_relocates_dict().context("Unable to parse relocates")?;
+                    root.add(FieldKey::LayerRelocates, sdf::Value::Relocates(pairs));
+                }
                 Token::Identifier(name) => {
                     this.ensure_pun('=')?;
                     if let Some(&(known_name, info)) = KNOWN_PROPS.iter().find(|(n, _)| *n == name) {
@@ -621,6 +626,22 @@ impl<'a> Parser<'a> {
         sdf::Path::new(self.fetch_path_ref()?)
     }
 
+    /// Parses a relocates dictionary: `{ <source>: <target>, ... }`.
+    fn parse_relocates_dict(&mut self) -> Result<Vec<(sdf::Path, sdf::Path)>> {
+        let mut pairs = Vec::new();
+        self.parse_block('{', '}', |this| {
+            let src = this.fetch_path_ref().context("Expected relocate source path")?;
+            this.ensure_pun(':')
+                .context("Expected ':' between relocate source and target")?;
+            let tgt = this.fetch_path_ref().context("Expected relocate target path")?;
+            let src_path = sdf::Path::new(src)?;
+            let tgt_path = sdf::Path::from(tgt);
+            pairs.push((src_path, tgt_path));
+            Ok(())
+        })?;
+        Ok(pairs)
+    }
+
     /// Parse the metadata block attached to a property and stash entries on the spec.
     fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
         self.parse_block('(', ')', |this| {
@@ -824,6 +845,7 @@ impl<'a> Parser<'a> {
             Token::Specializes => FieldKey::Specializes.as_str(),
             Token::Variants => FieldKey::VariantSelection.as_str(),
             Token::VariantSets => FieldKey::VariantSetNames.as_str(),
+            Token::Relocates => FieldKey::Relocates.as_str(),
             Token::CustomData => "customData",
             Token::Doc => FieldKey::Documentation.as_str(),
             other => bail!("Unexpected metadata name token: {other:?}"),
@@ -923,6 +945,11 @@ impl<'a> Parser<'a> {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
                 let value = self.parse_bool().context("Unable to parse instanceable flag")?;
                 spec.add(FieldKey::Instanceable, sdf::Value::Bool(value));
+            }
+            n if n == FieldKey::Relocates.as_str() => {
+                ensure!(list_op.is_none(), "relocates does not support list ops");
+                let pairs = self.parse_relocates_dict().context("Unable to parse relocates")?;
+                spec.add(FieldKey::Relocates, sdf::Value::Relocates(pairs));
             }
             "displayName" => {
                 ensure!(list_op.is_none(), "displayName does not support list ops");
