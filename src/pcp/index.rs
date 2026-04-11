@@ -175,7 +175,25 @@ impl PrimIndex {
         ctx: &CompositionContext,
         sublayer_stacks: &SublayerStacks,
     ) -> Result<Self, Error> {
-        let mut builder = IndexBuilder::new(layers, identifiers, ctx, sublayer_stacks);
+        Self::build_with_cache(path, layers, identifiers, ctx, sublayer_stacks, &HashMap::new())
+    }
+
+    /// Like [`build_with_context`](Self::build_with_context) but with access to
+    /// previously-composed prim indices. Cached indices are checked before
+    /// building from scratch, ensuring inherit/specialize targets use the
+    /// fully-composed result (including ancestor-propagated specs).
+    pub(crate) fn build_with_cache(
+        path: &Path,
+        layers: &[LayerData],
+        identifiers: &[String],
+        ctx: &CompositionContext,
+        sublayer_stacks: &SublayerStacks,
+        cached_indices: &HashMap<Path, PrimIndex>,
+    ) -> Result<Self, Error> {
+        if let Some(cached) = cached_indices.get(path) {
+            return Ok(cached.clone());
+        }
+        let mut builder = IndexBuilder::new(layers, identifiers, ctx, sublayer_stacks, cached_indices);
         builder.build(path)?;
         Ok(PrimIndex { graph: builder.output })
     }
@@ -319,15 +337,15 @@ struct IndexBuilder<'a> {
     ctx: &'a CompositionContext,
     /// Precomputed sublayer stacks (shared across all builds).
     sublayer_stacks: &'a SublayerStacks,
+    /// Cached prim indices from the composition cache. Used by
+    /// `merge_full_index` and `add_implied_nodes` to resolve targets
+    /// with full context (including ancestor-propagated specs).
+    cached_indices: &'a HashMap<Path, PrimIndex>,
     /// Strength-ordered composition graph.
     output: PrimIndexGraph,
     /// Deduplication: (layer_index, path, arc) triples already emitted.
-    /// Arc-type-aware dedup allows the same (layer, path) to appear under
-    /// different arc types (e.g. Root and Reference), matching C++ PCP behavior.
     seen: HashSet<(usize, Path, ArcType)>,
-    /// Sites currently being evaluated (on the call stack). Used for cycle
-    /// detection: if `eval_site` is called for a site already on the stack,
-    /// a composition cycle has been found. Keyed by (root layer of the stack, path).
+    /// Sites currently being evaluated (on the call stack).
     eval_stack: HashSet<(usize, Path)>,
     /// Builder-local cache of target indices for inherit/specialize/internal-ref
     /// targets. Avoids rebuilding the same target within a single prim's composition.
@@ -340,12 +358,14 @@ impl<'a> IndexBuilder<'a> {
         identifiers: &'a [String],
         ctx: &'a CompositionContext,
         sublayer_stacks: &'a SublayerStacks,
+        cached_indices: &'a HashMap<Path, PrimIndex>,
     ) -> Self {
         Self {
             layers,
             identifiers,
             ctx,
             sublayer_stacks,
+            cached_indices,
             output: PrimIndexGraph::default(),
             seen: HashSet::new(),
             eval_stack: HashSet::new(),
@@ -599,12 +619,15 @@ impl<'a> IndexBuilder<'a> {
     }
 
     /// Propagate implied arcs for inherit/specialize nodes added since `start`.
-    /// Remaps through ancestor arc namespace mappings inline.
+    ///
+    /// Remaps through ancestor arc namespace mappings. For each remapped path,
+    /// uses the cached index if available (giving full LIVRPS evaluation
+    /// matching C++ PCP's `EvalImpliedClasses`), otherwise falls back to
+    /// direct layer spec lookups.
     fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeIndex) {
         if self.ctx.ancestor_arcs.is_empty() {
             return;
         }
-        // Snapshot the nodes to check (can't iterate self.output while pushing).
         let paths_to_check: Vec<Path> = self.output[start..]
             .iter()
             .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
@@ -613,21 +636,42 @@ impl<'a> IndexBuilder<'a> {
 
         for node_path in &paths_to_check {
             for (idx, mapping) in self.ctx.ancestor_arcs.iter().enumerate() {
-                // map_source_to_target: arc target namespace → composed namespace.
                 let Some(remapped) = mapping.map.map_source_to_target(node_path) else {
                     continue;
                 };
-                let implied_map = MapFunction::from_pair(node_path.clone(), remapped.clone());
-                for li in 0..self.layers.len() {
-                    if self.layers[li].has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
-                        self.output.add_child(
-                            NodeIndex::INVALID,
-                            origin,
-                            li,
-                            remapped.clone(),
-                            arc,
-                            implied_map.clone(),
-                        );
+                if remapped == *node_path {
+                    continue;
+                }
+
+                // Use cached index for full LIVRPS evaluation when available.
+                if let Some(cached) = self.cached_indices.get(&remapped) {
+                    for node in cached.nodes() {
+                        if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
+                            let implied_map = MapFunction::from_pair(node.path.clone(), remapped.clone());
+                            self.output.add_child(
+                                NodeIndex::INVALID,
+                                origin,
+                                node.layer_index,
+                                node.path.clone(),
+                                arc,
+                                implied_map,
+                            );
+                        }
+                    }
+                } else {
+                    // Fallback: check individual layers for direct specs.
+                    let implied_map = MapFunction::from_pair(node_path.clone(), remapped.clone());
+                    for li in 0..self.layers.len() {
+                        if self.layers[li].has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
+                            self.output.add_child(
+                                NodeIndex::INVALID,
+                                origin,
+                                li,
+                                remapped.clone(),
+                                arc,
+                                implied_map.clone(),
+                            );
+                        }
                     }
                 }
 
@@ -658,36 +702,50 @@ impl<'a> IndexBuilder<'a> {
             .unwrap_or_else(|| find_sublayer_stack(root_layer, self.layers, self.identifiers))
     }
 
-    /// Build a full PrimIndex for a target path (with ancestor context) and
-    /// merge its nodes into this builder's output. Used for inherit/specialize
-    /// targets that need their own ancestor propagation.
+    /// Build a full PrimIndex for a target path and merge its nodes into this
+    /// builder's output. Used for inherit/specialize targets that need their
+    /// own ancestor propagation.
+    ///
+    /// Checks the composition cache first (for fully-composed indices including
+    /// ancestor-propagated specs), then the builder-local cache, and finally
+    /// builds from scratch with the current prim's context.
     fn merge_full_index(&mut self, target: &Path, arc: ArcType, parent: NodeIndex) -> Result<(), Error> {
-        // Check builder-local cache first — avoids rebuilding the same target
-        // within a single prim's composition.
         if !self.target_indices.contains_key(target) {
-            // Build the target's own ancestor context.
-            let ctx = if let Some(parent) = target.parent() {
-                if parent != Path::abs_root() {
-                    if !self.target_indices.contains_key(&parent) {
-                        let parent_idx = PrimIndex::build_with_context(
-                            &parent,
-                            self.layers,
-                            self.identifiers,
-                            &CompositionContext::default(),
-                            self.sublayer_stacks,
-                        )?;
-                        self.target_indices.insert(parent.clone(), parent_idx);
+            // Prefer the composition cache — it has the fully-composed result
+            // including propagate_parent_specs.
+            if let Some(cached) = self.cached_indices.get(target) {
+                self.target_indices.insert(target.clone(), cached.clone());
+            } else {
+                // Build the target's ancestor context using the current prim's
+                // context so ancestor arcs are available.
+                let ctx = if let Some(parent) = target.parent() {
+                    if parent != Path::abs_root() {
+                        if !self.target_indices.contains_key(&parent) {
+                            let parent_idx = if let Some(cp) = self.cached_indices.get(&parent) {
+                                cp.clone()
+                            } else {
+                                PrimIndex::build_with_context(
+                                    &parent,
+                                    self.layers,
+                                    self.identifiers,
+                                    self.ctx,
+                                    self.sublayer_stacks,
+                                )?
+                            };
+                            self.target_indices.insert(parent.clone(), parent_idx);
+                        }
+                        let parent_idx = &self.target_indices[&parent];
+                        parent_idx.context_for_children(self.layers, self.ctx)
+                    } else {
+                        CompositionContext::default()
                     }
-                    let parent_idx = &self.target_indices[&parent];
-                    parent_idx.context_for_children(self.layers, &CompositionContext::default())
                 } else {
                     CompositionContext::default()
-                }
-            } else {
-                CompositionContext::default()
-            };
-            let idx = PrimIndex::build_with_context(target, self.layers, self.identifiers, &ctx, self.sublayer_stacks)?;
-            self.target_indices.insert(target.clone(), idx);
+                };
+                let idx =
+                    PrimIndex::build_with_context(target, self.layers, self.identifiers, &ctx, self.sublayer_stacks)?;
+                self.target_indices.insert(target.clone(), idx);
+            }
         }
         let target_index = &self.target_indices[target];
         // The mapping for merged nodes translates from the target's namespace

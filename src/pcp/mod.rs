@@ -18,6 +18,24 @@
 //! Within each arc type, opinions are ordered by layer strength (root layer
 //! strongest, deepest sublayer weakest).
 //!
+//! # Relocates
+//!
+//! Relocates are non-destructive namespace remapping authored via
+//! `relocates = { </Source>: </Target> }` in a layer's metadata. They
+//! allow moving prims in the composed namespace without modifying the
+//! underlying layers. The `Cache` handles relocates at the scene graph
+//! level:
+//!
+//! - `layerRelocates` are extracted from each layer's pseudoroot at
+//!   construction and mapped into the composed namespace through each
+//!   layer's namespace mapping.
+//! - When composing a prim that is a relocate target, the cache finds the
+//!   pre-relocation source path, builds a full composition index for it,
+//!   and merges the resulting nodes as `Relocate` arc nodes.
+//! - Prim children are adjusted to hide relocated source children and
+//!   expose target children, including children created by relocates
+//!   within referenced layers.
+//!
 //! # Module structure
 //!
 //! | Module | C++ equivalent | Description |
