@@ -421,27 +421,9 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
-                    // The base node whose variant is being expanded serves as
-                    // the parent for new variant nodes in the stabilization pass.
                     let base_node = NodeIndex(idx as u32);
-                    let start = self.output.len();
                     let base_prim_path = self.output[idx].path.clone();
-                    let variant_map = MapFunction::from_pair(variant_path.clone(), base_prim_path);
-                    for (i, layer) in self.layers.iter().enumerate() {
-                        if layer.has_spec(&variant_path)
-                            && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
-                        {
-                            self.output.add_child(
-                                base_node,
-                                NodeIndex::INVALID,
-                                i,
-                                variant_path.clone(),
-                                ArcType::Variant,
-                                variant_map.clone(),
-                            );
-                        }
-                    }
-                    let end = self.output.len();
+                    let (start, end) = self.add_variant_nodes(&variant_path, &base_prim_path, base_node);
                     // Follow arcs from newly discovered variant nodes.
                     if start < end {
                         let new_nodes: Vec<Node> = self.output[start..end].to_vec();
@@ -725,6 +707,26 @@ impl<'a> IndexBuilder<'a> {
         Ok(())
     }
 
+    /// Adds variant nodes for `variant_path` across all layers. Returns
+    /// the index range of newly added nodes.
+    fn add_variant_nodes(&mut self, variant_path: &Path, base: &Path, parent: NodeIndex) -> (usize, usize) {
+        let start = self.output.len();
+        let variant_map = MapFunction::from_pair(variant_path.clone(), base.clone());
+        for (i, layer) in self.layers.iter().enumerate() {
+            if layer.has_spec(variant_path) && self.seen.insert((i, variant_path.clone(), ArcType::Variant)) {
+                self.output.add_child(
+                    parent,
+                    NodeIndex::INVALID,
+                    i,
+                    variant_path.clone(),
+                    ArcType::Variant,
+                    variant_map.clone(),
+                );
+            }
+        }
+        (start, self.output.len())
+    }
+
     /// Resolve variant selections iteratively, handling nested variant sets
     /// and variant sets on inherited classes.
     fn eval_variants(&mut self, site_start: usize, parent: NodeIndex) {
@@ -751,23 +753,7 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
-                    let variant_map = MapFunction::from_pair(variant_path.clone(), base.clone());
-                    // Search ALL layers for variant specs (not just the site's
-                    // stack) so cross-site variants are resolved inline.
-                    for (i, layer) in self.layers.iter().enumerate() {
-                        if layer.has_spec(&variant_path)
-                            && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
-                        {
-                            self.output.add_child(
-                                parent,
-                                NodeIndex::INVALID,
-                                i,
-                                variant_path.clone(),
-                                ArcType::Variant,
-                                variant_map.clone(),
-                            );
-                        }
-                    }
+                    self.add_variant_nodes(&variant_path, base, parent);
                 }
             }
 
