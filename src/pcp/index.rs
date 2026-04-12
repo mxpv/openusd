@@ -17,7 +17,12 @@ use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
 
 /// The type of composition arc that introduced a [`Node`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Variants are ordered by LIVERPS strength (strongest first). The
+/// derived `PartialOrd`/`Ord` use the discriminant, so
+/// `Root < Inherit < … < Specialize`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArcType {
     /// Direct opinions from the root layer stack (sublayers).
     Root,
@@ -25,14 +30,14 @@ pub enum ArcType {
     Inherit,
     /// Contributed by a selected variant.
     Variant,
+    /// Contributed by a relocate (non-destructive namespace remapping).
+    Relocate,
     /// Brought in via a reference arc.
     Reference,
     /// Brought in via a payload arc.
     Payload,
     /// Contributed by a specializes arc (weakest).
     Specialize,
-    /// Contributed by a relocate (non-destructive namespace remapping).
-    Relocate,
 }
 
 /// Compact index into the graph's node arena.
@@ -162,6 +167,20 @@ impl PrimIndex {
     /// Appends a node to the end of the composition graph.
     pub(crate) fn push_node(&mut self, node: Node) {
         self.graph.nodes.push(node);
+    }
+
+    /// Inserts a relocate node at the correct LIVERPS strength position.
+    ///
+    /// Finds the first node whose arc type is weaker than `Relocate`
+    /// (i.e. `Reference`, `Payload`, or `Specialize`) and inserts before it.
+    pub(crate) fn insert_relocate_node(&mut self, node: Node) {
+        let pos = self
+            .graph
+            .nodes
+            .iter()
+            .position(|n| n.arc > ArcType::Relocate)
+            .unwrap_or(self.graph.nodes.len());
+        self.graph.nodes.insert(pos, node);
     }
 
     /// Builds a prim index using composition context from the parent prim.
@@ -1567,5 +1586,75 @@ def "Prim" (
             "all fallbacks invalid — should use first variant 'full': got {paths:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn arc_type_liverps_ordering() {
+        assert!(ArcType::Root < ArcType::Inherit);
+        assert!(ArcType::Inherit < ArcType::Variant);
+        assert!(ArcType::Variant < ArcType::Relocate);
+        assert!(ArcType::Relocate < ArcType::Reference);
+        assert!(ArcType::Reference < ArcType::Payload);
+        assert!(ArcType::Payload < ArcType::Specialize);
+    }
+
+    #[test]
+    fn insert_relocate_node_before_references() {
+        let p = |s: &str| Path::from(s.to_string());
+        let node = |arc: ArcType| Node {
+            layer_index: 0,
+            path: p("/X"),
+            arc,
+            map_to_parent: MapFunction::identity(),
+            map_to_root: MapFunction::identity(),
+        };
+
+        let mut index = PrimIndex::default();
+        index.push_node(node(ArcType::Root));
+        index.push_node(node(ArcType::Inherit));
+        index.push_node(node(ArcType::Variant));
+        index.push_node(node(ArcType::Reference));
+        index.push_node(node(ArcType::Payload));
+        index.push_node(node(ArcType::Specialize));
+
+        // Insert two relocate nodes — both should land between Variant and Reference.
+        index.insert_relocate_node(node(ArcType::Relocate));
+        index.insert_relocate_node(node(ArcType::Relocate));
+
+        let arcs: Vec<ArcType> = index.nodes().iter().map(|n| n.arc).collect();
+        assert_eq!(
+            arcs,
+            vec![
+                ArcType::Root,
+                ArcType::Inherit,
+                ArcType::Variant,
+                ArcType::Relocate,
+                ArcType::Relocate,
+                ArcType::Reference,
+                ArcType::Payload,
+                ArcType::Specialize,
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_relocate_node_appends_when_no_rps() {
+        let p = |s: &str| Path::from(s.to_string());
+        let node = |arc: ArcType| Node {
+            layer_index: 0,
+            path: p("/X"),
+            arc,
+            map_to_parent: MapFunction::identity(),
+            map_to_root: MapFunction::identity(),
+        };
+
+        let mut index = PrimIndex::default();
+        index.push_node(node(ArcType::Root));
+        index.push_node(node(ArcType::Variant));
+
+        index.insert_relocate_node(node(ArcType::Relocate));
+
+        let arcs: Vec<ArcType> = index.nodes().iter().map(|n| n.arc).collect();
+        assert_eq!(arcs, vec![ArcType::Root, ArcType::Variant, ArcType::Relocate]);
     }
 }

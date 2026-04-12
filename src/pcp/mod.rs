@@ -4,16 +4,18 @@
 //! from multiple layers into a single composed scene graph. It is the Rust
 //! equivalent of [Pixar's PCP module](https://openusd.org/dev/api/pcp_page_front.html).
 //!
-//! # LIVRPS strength ordering
+//! # LIVERPS strength ordering
 //!
-//! USD composes opinions using six arc types, ordered by strength:
+//! USD composes opinions using seven arc types, ordered by strength
+//! (mnemonic "liver-peas"):
 //!
 //! 1. **L**ocal — direct opinions in the root layer stack (sublayers)
 //! 2. **I**nherits — opinions from class prims (`inherits = </Class>`)
 //! 3. **V**ariants — opinions from the selected variant (`variants = { string v = "sel" }`)
-//! 4. **R**eferences — opinions from referenced layers (`references = @model.usd@</Prim>`)
-//! 5. **P**ayloads — like references but deferred (`payload = @heavy.usd@</Prim>`)
-//! 6. **S**pecializes — like inherits but weakest (`specializes = </Base>`)
+//! 4. **R**elocates — non-destructive namespace remapping (`relocates = { </Src>: </Tgt> }`)
+//! 5. **R**eferences — opinions from referenced layers (`references = @model.usd@</Prim>`)
+//! 6. **P**ayloads — like references but deferred (`payload = @heavy.usd@</Prim>`)
+//! 7. **S**pecializes — like inherits but weakest (`specializes = </Base>`)
 //!
 //! Within each arc type, opinions are ordered by layer strength (root layer
 //! strongest, deepest sublayer weakest).
