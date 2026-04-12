@@ -38,12 +38,13 @@
 //!
 //! # Module structure
 //!
-//! | Module | C++ equivalent | Description |
-//! |--------|---------------|-------------|
-//! | [`cache`] | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
-//! | [`error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
-//! | [`index`] | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
-//! | [`map_function`] | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
+//! | Item | C++ equivalent | Description |
+//! |------|---------------|-------------|
+//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
+//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
+//! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
+//! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
+//! | `rel` | — | Relocates: non-destructive namespace remapping. Methods on `Cache` for resolving source paths and adjusting child names. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
 //!
@@ -81,11 +82,66 @@
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
 pub(crate) mod cache;
-mod error;
 pub(crate) mod index;
-mod map_function;
+mod mapping;
+mod rel;
+
+use crate::sdf::Path;
 
 pub(crate) use cache::Cache;
-pub use error::Error;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
-pub use map_function::MapFunction;
+pub use mapping::MapFunction;
+
+/// An error encountered while building a [`PrimIndex`](index::PrimIndex).
+///
+/// These errors represent recoverable composition failures — a missing
+/// layer or invalid metadata does not have to be fatal. The error handler
+/// provided via [`StageBuilder::on_error`](crate::StageBuilder::on_error)
+/// decides whether to skip the broken arc and continue, or abort.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// A composition arc cycle was detected.
+    #[error("composition arc cycle at {path} (depth {depth})")]
+    ArcCycle {
+        /// The prim path where the cycle was detected.
+        path: Path,
+        /// Recursion depth when the cycle was detected.
+        depth: usize,
+    },
+
+    /// A layer referenced by a composition arc was not found among loaded layers.
+    #[error("unresolved {arc:?} layer @{asset_path}@ at {site_path}")]
+    UnresolvedLayer {
+        /// The asset path that could not be matched.
+        asset_path: String,
+        /// The composition arc type that introduced this dependency.
+        arc: ArcType,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+    },
+
+    /// An external reference/payload targets a layer without specifying a prim
+    /// path, but the target layer has no `defaultPrim` metadata.
+    #[error("{arc:?} target @{layer_id}@ has no defaultPrim (at {site_path})")]
+    MissingDefaultPrim {
+        /// Identifier of the target layer.
+        layer_id: String,
+        /// The composition arc type.
+        arc: ArcType,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+    },
+
+    /// The `defaultPrim` metadata on a target layer has an invalid or
+    /// unexpected value.
+    #[error("{arc:?} target @{layer_id}@ has invalid defaultPrim (at {site_path})")]
+    InvalidDefaultPrim {
+        /// Identifier of the target layer.
+        layer_id: String,
+        /// The composition arc type.
+        arc: ArcType,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+    },
+}

@@ -13,7 +13,7 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
-use super::map_function::MapFunction;
+use super::mapping::MapFunction;
 use super::Error;
 
 /// The type of composition arc that introduced a [`Node`].
