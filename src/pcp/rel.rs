@@ -8,14 +8,14 @@
 //! external data (layer stack, cached indices, cached contexts) is passed
 //! in through method parameters.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{LayerData, Path, Value};
 
 use super::index::{ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
-use super::LayerStack;
+use super::{Error, LayerStack};
 
 /// Per-layer relocates and operations for namespace remapping.
 ///
@@ -26,6 +26,9 @@ pub(super) struct Relocates {
     /// Per-layer relocates: `layerRelocates` extracted from each layer's pseudoroot.
     layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
 }
+
+/// Hard limit on relocate chaining depth to avoid stack overflow on malformed inputs.
+const MAX_RELOCATE_CHAIN: usize = 128;
 
 impl Relocates {
     /// Creates a new `Relocates` by extracting `layerRelocates` from every
@@ -64,8 +67,36 @@ impl Relocates {
         composed_path: &Path,
         stack: &LayerStack,
         indices: &HashMap<Path, PrimIndex>,
-    ) -> Option<Path> {
-        let parent = composed_path.parent()?;
+    ) -> Result<Option<Path>, Error> {
+        let mut visited = HashSet::new();
+        self.find_source_path_inner(composed_path, stack, indices, &mut visited, 0)
+    }
+
+    fn find_source_path_inner(
+        &self,
+        composed_path: &Path,
+        stack: &LayerStack,
+        indices: &HashMap<Path, PrimIndex>,
+        visited: &mut HashSet<Path>,
+        depth: usize,
+    ) -> Result<Option<Path>, Error> {
+        if depth >= MAX_RELOCATE_CHAIN {
+            return Err(Error::ArcCycle {
+                path: composed_path.clone(),
+                depth,
+            });
+        }
+        if !visited.insert(composed_path.clone()) {
+            return Err(Error::ArcCycle {
+                path: composed_path.clone(),
+                depth,
+            });
+        }
+
+        let Some(parent) = composed_path.parent() else {
+            visited.remove(composed_path);
+            return Ok(None);
+        };
 
         // Try raw (unchained) relocates first.
         let raw_relocates = self.raw_effective_relocates(&parent, indices);
@@ -101,14 +132,16 @@ impl Relocates {
         // to avoid incorrectly reversing relocates for prims authored in
         // the post-relocation namespace.
         if let Some(ref source) = result {
-            if let Some(deeper) = self.find_source_path(source, stack, indices) {
+            if let Some(deeper) = self.find_source_path_inner(source, stack, indices, visited, depth + 1)? {
                 let has_spec = stack.layers.iter().any(|l| l.has_spec(&deeper));
                 if has_spec {
-                    return Some(deeper);
+                    visited.remove(composed_path);
+                    return Ok(Some(deeper));
                 }
             }
         }
-        result
+        visited.remove(composed_path);
+        Ok(result)
     }
 
     // ------------------------------------------------------------------
@@ -130,13 +163,13 @@ impl Relocates {
         stack: &LayerStack,
         indices: &HashMap<Path, PrimIndex>,
         contexts: &HashMap<Path, CompositionContext>,
-    ) {
-        let Some(source_path) = self.find_source_path(composed_path, stack, indices) else {
-            return;
+    ) -> Result<(), Error> {
+        let Some(source_path) = self.find_source_path(composed_path, stack, indices)? else {
+            return Ok(());
         };
         let source_ctx = Self::build_source_context(&source_path, stack, contexts);
         let Ok(source_index) = PrimIndex::build_with_cache(&source_path, stack, &source_ctx, indices) else {
-            return;
+            return Ok(());
         };
 
         // Merge source nodes.
@@ -236,7 +269,7 @@ impl Relocates {
             let mut current = source_path;
             let mut visited = vec![composed_path.clone(), current.clone()];
             while index.is_empty() {
-                let Some(deeper) = self.find_source_path(&current, stack, indices) else {
+                let Some(deeper) = self.find_source_path(&current, stack, indices)? else {
                     break;
                 };
                 if visited.contains(&deeper) {
@@ -247,6 +280,8 @@ impl Relocates {
                 current = deeper;
             }
         }
+
+        Ok(())
     }
 
     /// Builds a source index at the given source path and merges relocate

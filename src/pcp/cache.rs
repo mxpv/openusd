@@ -263,31 +263,31 @@ impl Cache {
             .cloned()
             .unwrap_or_default();
 
-        match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
-            Ok(mut index) => {
-                // Propagate specs from parent nodes for inherit-only children.
-                if index.is_empty() {
-                    if let Some(name) = path.name() {
-                        self.propagate_parent_specs(path, name, &mut index);
-                    }
-                }
+        let mut index = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
+            Ok(idx) => idx,
+            Err(e) => return Err(e.into()),
+        };
 
-                // For relocated prims, merge source path opinions.
-                if !self.relocates.is_empty() {
-                    if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices) {
-                        self.precache_path(&source);
-                    }
-                    self.relocates
-                        .add_relocate_nodes(path, &mut index, &self.stack, &self.indices, &self.contexts);
-                }
-
-                let child_context = index.context_for_children(&self.stack, &parent_ctx);
-                self.indices.insert(path.clone(), index);
-                self.contexts.insert(path.clone(), child_context);
-                Ok(())
+        // Propagate specs from parent nodes for inherit-only children.
+        if index.is_empty() {
+            if let Some(name) = path.name() {
+                self.propagate_parent_specs(path, name, &mut index);
             }
-            Err(e) => Err(e.into()),
         }
+
+        // For relocated prims, merge source path opinions.
+        if !self.relocates.is_empty() {
+            if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices)? {
+                self.precache_path(&source);
+            }
+            self.relocates
+                .add_relocate_nodes(path, &mut index, &self.stack, &self.indices, &self.contexts)?;
+        }
+
+        let child_context = index.context_for_children(&self.stack, &parent_ctx);
+        self.indices.insert(path.clone(), index);
+        self.contexts.insert(path.clone(), child_context);
+        Ok(())
     }
 
     /// Ensures a path and all its ancestors are cached (built on the fly if needed).
