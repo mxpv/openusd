@@ -155,14 +155,15 @@ impl Cache {
     }
 
     /// Collects ancestor arcs from all cached ancestors of `path`.
-    fn collect_ancestor_arcs(&self, path: &Path) -> Vec<AncestorArc> {
+    ///
+    /// Returns references into the cached contexts, avoiding allocation
+    /// of `AncestorArc` (which contains `MapFunction` with a `Vec`).
+    fn collect_ancestor_arcs(&self, path: &Path) -> Vec<&AncestorArc> {
         let mut arcs = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
             if let Some(ctx) = self.contexts.get(&pp) {
-                for a in &ctx.ancestor_arcs {
-                    arcs.push(a.clone());
-                }
+                arcs.extend(&ctx.ancestor_arcs);
             }
             p = pp.parent();
         }
@@ -372,21 +373,17 @@ impl Cache {
         // merge_full_index produced empty indices for inherit targets
         // (due to building with default context that misses ancestor arcs).
         if index.is_empty() {
-            let mut all_ancestor_arcs = self
-                .contexts
-                .get(&parent_path)
-                .map(|c| c.ancestor_arcs.clone())
-                .unwrap_or_default();
-            let mut ap = parent_path.clone();
-            while let Some(pp) = ap.parent() {
+            let mut all_ancestor_arcs: Vec<&AncestorArc> = Vec::new();
+            let mut ap = Some(parent_path.clone());
+            while let Some(pp) = ap {
                 if let Some(ctx) = self.contexts.get(&pp) {
                     for a in &ctx.ancestor_arcs {
                         if !all_ancestor_arcs.iter().any(|x| x.map == a.map) {
-                            all_ancestor_arcs.push(a.clone());
+                            all_ancestor_arcs.push(a);
                         }
                     }
                 }
-                ap = pp;
+                ap = pp.parent();
             }
             for ancestor in &all_ancestor_arcs {
                 let Some(alt_path) = ancestor.map.map_target_to_source(child_path) else {
@@ -416,13 +413,11 @@ impl Cache {
         // (merge_full_index with default context) and ancestor_arcs don't
         // have the mapping.
         if index.is_empty() {
-            let mut grandparent_arcs = Vec::new();
+            let mut grandparent_arcs: Vec<&AncestorArc> = Vec::new();
             let mut p = parent_path.parent();
             while let Some(pp) = p {
                 if let Some(ctx) = self.contexts.get(&pp) {
-                    for a in &ctx.ancestor_arcs {
-                        grandparent_arcs.push(a.clone());
-                    }
+                    grandparent_arcs.extend(&ctx.ancestor_arcs);
                 }
                 p = pp.parent();
             }
@@ -535,8 +530,7 @@ impl Cache {
 
         let ancestor_arcs = self.collect_ancestor_arcs(path);
 
-        let nodes: Vec<Node> = index.nodes().to_vec();
-        for node in &nodes {
+        for node in index.nodes() {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
                 let Ok(val) = self.stack.layer(node.layer_index).get(&node.path, field.as_str()) else {
                     continue;
@@ -611,7 +605,7 @@ impl Cache {
         &self,
         path: &Path,
         result: &mut Vec<String>,
-        ancestor_arcs: &[AncestorArc],
+        ancestor_arcs: &[&AncestorArc],
         visited: &mut Vec<Path>,
     ) {
         if visited.contains(path) {
