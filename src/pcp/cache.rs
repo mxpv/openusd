@@ -19,13 +19,8 @@ use crate::sdf::{LayerData, Path, SpecType, Value};
 
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
+use super::rel::Relocates;
 use super::LayerStack;
-
-/// Cached entry for a composed prim: its index and the context its children need.
-pub(super) struct CachedPrim {
-    pub(super) index: PrimIndex,
-    pub(super) child_context: CompositionContext,
-}
 
 /// Lazily-built composition graph.
 ///
@@ -38,21 +33,25 @@ pub(super) struct CachedPrim {
 /// returned when composition fails. The caller ([`Stage`](crate::Stage))
 /// decides whether to skip or abort via its error handler.
 pub struct Cache {
-    pub(super) stack: LayerStack,
-    pub(super) cache: HashMap<Path, CachedPrim>,
-    /// Per-layer relocates: `layerRelocates` extracted from each layer's pseudoroot.
-    pub(super) layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
+    stack: LayerStack,
+    /// Per-prim composition indices, keyed by composed path.
+    indices: HashMap<Path, PrimIndex>,
+    /// Per-prim composition contexts for child propagation.
+    contexts: HashMap<Path, CompositionContext>,
+    /// Relocate namespace remapping state.
+    relocates: Relocates,
 }
 
 impl Cache {
     /// Creates a new composition graph for the given layer stack.
     pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
-        let layer_relocates = super::rel::collect_layer_relocates(&layers);
+        let relocates = Relocates::new(&layers);
         let stack = LayerStack::new(layers, identifiers);
         Self {
             stack,
-            cache: HashMap::new(),
-            layer_relocates,
+            indices: HashMap::new(),
+            contexts: HashMap::new(),
+            relocates,
         }
     }
 
@@ -75,10 +74,10 @@ impl Cache {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
             self.ensure_index(&prim_path)?;
-            let Some(entry) = self.cache.get(&prim_path) else {
+            let Some(index) = self.indices.get(&prim_path) else {
                 return Ok(false);
             };
-            for node in entry.index.nodes() {
+            for node in index.nodes() {
                 let prop_path = format!("{}{prop_suffix}", node.path);
                 if let Ok(p) = Path::new(&prop_path) {
                     if self.stack.layer(node.layer_index).has_spec(&p) {
@@ -89,17 +88,17 @@ impl Cache {
             Ok(false)
         } else {
             self.ensure_index(path)?;
-            Ok(self.cache.get(path).is_some_and(|e| !e.index.is_empty()))
+            Ok(self.indices.get(path).is_some_and(|idx| !idx.is_empty()))
         }
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub fn spec_type(&mut self, path: &Path) -> Result<Option<SpecType>> {
         self.ensure_index(path)?;
-        let Some(entry) = self.cache.get(path) else {
+        let Some(index) = self.indices.get(path) else {
             return Ok(None);
         };
-        for node in entry.index.nodes() {
+        for node in index.nodes() {
             if let Some(ty) = self.stack.layer(node.layer_index).spec_type(&node.path) {
                 return Ok(Some(ty));
             }
@@ -113,12 +112,10 @@ impl Cache {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
             self.ensure_index(&prim_path)?;
-            let entry = &self.cache[&prim_path];
-            entry.index.resolve_field(field, &self.stack, Some(prop_suffix))
+            self.indices[&prim_path].resolve_field(field, &self.stack, Some(prop_suffix))
         } else {
             self.ensure_index(path)?;
-            let entry = &self.cache[path];
-            entry.index.resolve_field(field, &self.stack, None)
+            self.indices[path].resolve_field(field, &self.stack, None)
         }
     }
 
@@ -130,7 +127,7 @@ impl Cache {
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let mut children = self.composed_children(path, ChildrenKey::PrimChildren)?;
 
-        if !self.layer_relocates.is_empty() {
+        if !self.relocates.is_empty() {
             self.apply_relocates_to_children(path, &mut children);
         }
 
@@ -162,8 +159,8 @@ impl Cache {
         let mut arcs = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
-            if let Some(e) = self.cache.get(&pp) {
-                for a in &e.child_context.ancestor_arcs {
+            if let Some(ctx) = self.contexts.get(&pp) {
+                for a in &ctx.ancestor_arcs {
                     arcs.push(a.clone());
                 }
             }
@@ -179,7 +176,7 @@ impl Cache {
         let Some(parent) = path.parent() else {
             return;
         };
-        let Some(parent_entry) = self.cache.get(&parent) else {
+        let Some(parent_index) = self.indices.get(&parent) else {
             return;
         };
 
@@ -188,7 +185,7 @@ impl Cache {
         // Scan both the parent's nodes and the prim's own specs (if any) for
         // inherit/specialize targets.
         let mut nodes_to_scan: Vec<(Path, usize)> = Vec::new();
-        for node in parent_entry.index.nodes() {
+        for node in parent_index.nodes() {
             nodes_to_scan.push((node.path.clone(), node.layer_index));
             // Also check the node's child path (the prim itself in this node's namespace).
             if let Some(name) = path.name() {
@@ -233,7 +230,7 @@ impl Cache {
         for target in targets_to_cache {
             self.precache_path(&target);
             // Recursively precache the target's own inherit targets.
-            if self.cache.contains_key(&target) {
+            if self.indices.contains_key(&target) {
                 self.precache_inherit_targets(&target);
             }
         }
@@ -250,7 +247,7 @@ impl Cache {
     /// child specs at their respective paths. This handles prims that only
     /// exist through ancestor inherit, specialize, or reference arcs.
     pub(super) fn ensure_index(&mut self, path: &Path) -> Result<()> {
-        if self.cache.contains_key(path) {
+        if self.indices.contains_key(path) {
             return Ok(());
         }
 
@@ -261,16 +258,11 @@ impl Cache {
 
         let parent_ctx = path
             .parent()
-            .and_then(|p| self.cache.get(&p))
-            .map(|e| e.child_context.clone())
+            .and_then(|p| self.contexts.get(&p))
+            .cloned()
             .unwrap_or_default();
 
-        // Provide the composition cache to the index builder so that
-        // merge_full_index can use fully-composed indices for inherit/
-        // specialize targets instead of building them from scratch.
-        let index_cache: HashMap<Path, PrimIndex> = self.index_snapshot();
-
-        match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &index_cache) {
+        match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
             Ok(mut index) => {
                 // Propagate specs from parent nodes for inherit-only children.
                 if index.is_empty() {
@@ -280,18 +272,54 @@ impl Cache {
                 }
 
                 // For relocated prims, merge source path opinions.
-                if !self.layer_relocates.is_empty() {
-                    if let Some(source) = self.find_source_path(path) {
+                if !self.relocates.is_empty() {
+                    if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices) {
                         self.precache_path(&source);
                     }
-                    self.add_relocate_nodes(path, &mut index);
+                    self.relocates
+                        .add_relocate_nodes(path, &mut index, &self.stack, &self.indices, &self.contexts);
                 }
 
                 let child_context = index.context_for_children(&self.stack, &parent_ctx);
-                self.cache.insert(path.clone(), CachedPrim { index, child_context });
+                self.indices.insert(path.clone(), index);
+                self.contexts.insert(path.clone(), child_context);
                 Ok(())
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Ensures a path and all its ancestors are cached (built on the fly if needed).
+    fn precache_path(&mut self, path: &Path) {
+        let mut to_build = Vec::new();
+        let mut p = Some(path.clone());
+        while let Some(pp) = p {
+            if pp == Path::abs_root() || self.indices.contains_key(&pp) {
+                break;
+            }
+            to_build.push(pp.clone());
+            p = pp.parent();
+        }
+        for pp in to_build.into_iter().rev() {
+            let _ = self.ensure_index(&pp);
+        }
+    }
+
+    /// Applies relocate namespace remapping to a list of child names.
+    ///
+    /// Per-node layer relocates are applied first, then effective relocates
+    /// remap source children to targets and add cross-hierarchy targets.
+    /// Source ancestor chains are pre-cached so their prim indices are
+    /// available when building relocated target indices later.
+    fn apply_relocates_to_children(&mut self, path: &Path, children: &mut Vec<String>) {
+        self.relocates.apply_node_relocates(path, children, &self.indices);
+
+        let effective = self.relocates.effective_relocates(path, &self.indices);
+        if !effective.is_empty() {
+            for (src, _) in &effective {
+                self.precache_path(src);
+            }
+            Relocates::apply_children_remapping(path, children, &effective);
         }
     }
 
@@ -311,12 +339,12 @@ impl Cache {
         let Some(parent_path) = child_path.parent() else {
             return;
         };
-        let Some(parent_entry) = self.cache.get(&parent_path) else {
+        let Some(parent_index) = self.indices.get(&parent_path) else {
             return;
         };
 
         // Phase 1: Check non-Root nodes from the parent's index.
-        for parent_node in parent_entry.index.nodes() {
+        for parent_node in parent_index.nodes() {
             if parent_node.arc == ArcType::Root {
                 continue;
             }
@@ -344,11 +372,15 @@ impl Cache {
         // merge_full_index produced empty indices for inherit targets
         // (due to building with default context that misses ancestor arcs).
         if index.is_empty() {
-            let mut all_ancestor_arcs = parent_entry.child_context.ancestor_arcs.clone();
+            let mut all_ancestor_arcs = self
+                .contexts
+                .get(&parent_path)
+                .map(|c| c.ancestor_arcs.clone())
+                .unwrap_or_default();
             let mut ap = parent_path.clone();
             while let Some(pp) = ap.parent() {
-                if let Some(e) = self.cache.get(&pp) {
-                    for a in &e.child_context.ancestor_arcs {
+                if let Some(ctx) = self.contexts.get(&pp) {
+                    for a in &ctx.ancestor_arcs {
                         if !all_ancestor_arcs.iter().any(|x| x.map == a.map) {
                             all_ancestor_arcs.push(a.clone());
                         }
@@ -387,15 +419,15 @@ impl Cache {
             let mut grandparent_arcs = Vec::new();
             let mut p = parent_path.parent();
             while let Some(pp) = p {
-                if let Some(entry) = self.cache.get(&pp) {
-                    for a in &entry.child_context.ancestor_arcs {
+                if let Some(ctx) = self.contexts.get(&pp) {
+                    for a in &ctx.ancestor_arcs {
                         grandparent_arcs.push(a.clone());
                     }
                 }
                 p = pp.parent();
             }
 
-            for parent_node in parent_entry.index.nodes() {
+            for parent_node in parent_index.nodes() {
                 for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
                     let arc = if field.as_str() == FieldKey::InheritPaths.as_str() {
                         ArcType::Inherit
@@ -455,10 +487,10 @@ impl Cache {
     /// composition needed to discover class children.
     fn composed_children(&mut self, path: &Path, children_field: ChildrenKey) -> Result<Vec<String>> {
         self.ensure_index(path)?;
-        let entry = &self.cache[path];
+        let index = &self.indices[path];
         let mut result: Vec<String> = Vec::new();
 
-        for node in entry.index.nodes() {
+        for node in index.nodes() {
             if let Ok(value) = self
                 .stack
                 .layer(node.layer_index)
@@ -497,13 +529,13 @@ impl Cache {
         }
         visited.push(path.clone());
 
-        let Some(entry) = self.cache.get(path) else {
+        let Some(index) = self.indices.get(path) else {
             return;
         };
 
         let ancestor_arcs = self.collect_ancestor_arcs(path);
 
-        let nodes: Vec<Node> = entry.index.nodes().to_vec();
+        let nodes: Vec<Node> = index.nodes().to_vec();
         for node in &nodes {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
                 let Ok(val) = self.stack.layer(node.layer_index).get(&node.path, field.as_str()) else {
@@ -533,8 +565,8 @@ impl Cache {
                     // Add children from inherit targets — check both cached
                     // entries and raw layer data (for uncached targets).
                     for tgt in &targets {
-                        if let Some(tgt_entry) = self.cache.get(tgt) {
-                            for tgt_node in tgt_entry.index.nodes() {
+                        if let Some(tgt_index) = self.indices.get(tgt) {
+                            for tgt_node in tgt_index.nodes() {
                                 if let Ok(val) = self
                                     .stack
                                     .layer(tgt_node.layer_index)

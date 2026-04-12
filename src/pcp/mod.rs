@@ -45,7 +45,7 @@
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
-//! | `rel` | — | Relocates: non-destructive namespace remapping. Methods on `Cache` for resolving source paths and adjusting child names. |
+//! | `rel` | — | [`Relocates`](rel::Relocates): isolated relocate state and logic. Owned by `Cache`, receives external data through parameters. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
 //!
