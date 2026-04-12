@@ -365,11 +365,7 @@ impl Resolver for DefaultResolver {
         // every identifier is stable and absolute (matching canonicalized dependencies).
         if let Ok(cwd) = std::env::current_dir() {
             let joined = cwd.join(path);
-            return joined
-                .canonicalize()
-                .unwrap_or(joined)
-                .to_string_lossy()
-                .into_owned();
+            return joined.canonicalize().unwrap_or(joined).to_string_lossy().into_owned();
         }
 
         asset_path.to_string()
