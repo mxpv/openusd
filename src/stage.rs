@@ -84,36 +84,62 @@ impl Stage {
     }
 
     /// Constructs a stage from pre-collected layers and a PCP error handler.
+    ///
+    /// `session_layers` are prepended at the front of the layer stack so they
+    /// hold the strongest opinions (stronger than the root layer).
     fn from_layers(
-        collected: Vec<layer::Layer>,
+        session_layers: Vec<layer::Layer>,
+        root_layers: Vec<layer::Layer>,
         on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
         variant_fallbacks: pcp::VariantFallbackMap,
     ) -> Self {
-        let mut identifiers = Vec::with_capacity(collected.len());
-        let mut layers = Vec::with_capacity(collected.len());
+        let session_layer_count = session_layers.len();
+        let total = session_layer_count + root_layers.len();
+        let mut identifiers = Vec::with_capacity(total);
+        let mut layers = Vec::with_capacity(total);
 
-        for layer in collected {
+        for layer in session_layers.into_iter().chain(root_layers) {
             identifiers.push(layer.identifier);
             layers.push(layer.data);
         }
 
+        let stack = pcp::LayerStack::new(layers, identifiers, session_layer_count);
         Self {
-            graph: RefCell::new(pcp::Cache::new(layers, identifiers, variant_fallbacks)),
+            graph: RefCell::new(pcp::Cache::new(stack, variant_fallbacks)),
             on_composition_error,
         }
     }
 
-    /// Returns the number of layers in the stage.
+    /// Returns the number of layers in the stage (including session layers).
     pub fn layer_count(&self) -> usize {
         self.graph.borrow().layer_count()
     }
 
-    /// Returns the layer identifiers in strength order (root first).
+    /// Returns the layer identifiers in strength order (session layers first,
+    /// then root layer and its sublayers).
     pub fn layer_identifiers(&self) -> Vec<String> {
         self.graph.borrow().layer_identifiers().to_vec()
     }
 
+    /// Returns `true` if the stage has a session layer.
+    pub fn has_session_layer(&self) -> bool {
+        self.graph.borrow().session_layer_count() > 0
+    }
+
+    /// Returns the session layer identifier, if one was provided.
+    pub fn session_layer(&self) -> Option<String> {
+        let cache = self.graph.borrow();
+        if cache.session_layer_count() > 0 {
+            Some(cache.layer_identifiers()[0].clone())
+        } else {
+            None
+        }
+    }
+
     /// Returns the `defaultPrim` metadata from the root layer, if set.
+    ///
+    /// When a session layer is present, `defaultPrim` is still read from
+    /// the root layer (not the session layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<String> {
         self.graph.borrow().default_prim()
     }
@@ -240,6 +266,7 @@ pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -
     resolver: R,
     on_error: E,
     variant_fallbacks: pcp::VariantFallbackMap,
+    session_layer: Option<String>,
 }
 
 impl StageBuilder {
@@ -248,6 +275,7 @@ impl StageBuilder {
             resolver: DefaultResolver::new(),
             on_error: strict_composition_error,
             variant_fallbacks: pcp::VariantFallbackMap::new(),
+            session_layer: None,
         }
     }
 }
@@ -259,6 +287,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             resolver,
             on_error: self.on_error,
             variant_fallbacks: self.variant_fallbacks,
+            session_layer: self.session_layer,
         }
     }
 
@@ -273,7 +302,35 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             resolver: self.resolver,
             on_error: handler,
             variant_fallbacks: self.variant_fallbacks,
+            session_layer: self.session_layer,
         }
+    }
+
+    /// Sets the session layer for the stage.
+    ///
+    /// The session layer provides the strongest opinions in the composition,
+    /// stronger than even the root layer. It is typically used for temporary,
+    /// non-persistent overrides such as variant selections, visibility toggles,
+    /// or LOD settings.
+    ///
+    /// The session layer and its sublayers are collected and prepended to the
+    /// layer stack before the root layer.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::Stage;
+    ///
+    /// let stage = Stage::builder()
+    ///     .session_layer("session.usda")
+    ///     .open("scene.usda")
+    ///     .unwrap();
+    ///
+    /// assert!(stage.has_session_layer());
+    /// ```
+    pub fn session_layer(mut self, path: impl Into<String>) -> Self {
+        self.session_layer = Some(path.into());
+        self
     }
 
     /// Sets the variant fallback map for the stage.
@@ -309,10 +366,24 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     {
         let on_error = self.on_error;
         let variant_fallbacks = self.variant_fallbacks;
-        let collected =
+
+        // Collect session layers first (if any), then root layers.
+        let session_layers = if let Some(ref session_path) = self.session_layer {
+            layer::collect_layers_with_handler(&self.resolver, session_path, |e| on_error(CompositionError::Layer(e)))?
+        } else {
+            Vec::new()
+        };
+
+        let root_layers =
             layer::collect_layers_with_handler(&self.resolver, root_path, |e| on_error(CompositionError::Layer(e)))?;
+
         let pcp_handler = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
-        Ok(Stage::from_layers(collected, pcp_handler, variant_fallbacks))
+        Ok(Stage::from_layers(
+            session_layers,
+            root_layers,
+            pcp_handler,
+            variant_fallbacks,
+        ))
     }
 }
 
@@ -774,6 +845,90 @@ mod tests {
         assert!(
             stage.has_spec(Path::new("/Leaf/Deep.x")?)?,
             "property from chain-inherited child should be visible"
+        );
+
+        Ok(())
+    }
+
+    // --- Session layer ---
+
+    /// Opens a stage with session_layer.usda over session_root.usda.
+    fn open_with_session() -> Result<Stage> {
+        let root = fixture_path("session_root.usda");
+        let session = fixture_path("session_layer.usda");
+        Stage::builder().session_layer(&session).open(&root)
+    }
+
+    /// A stage opened without a session layer should report no session layer.
+    #[test]
+    fn no_session_layer_by_default() -> Result<()> {
+        let stage = Stage::open(&fixture_path("session_root.usda"))?;
+
+        assert!(!stage.has_session_layer());
+        assert_eq!(stage.session_layer(), None);
+        assert_eq!(stage.layer_count(), 1);
+
+        Ok(())
+    }
+
+    /// A session layer's opinions should be stronger than the root layer's.
+    #[test]
+    fn session_layer_opinion_wins() -> Result<()> {
+        let stage = open_with_session()?;
+
+        assert!(stage.has_session_layer());
+        assert_eq!(stage.layer_count(), 2);
+
+        let prop = Path::new("/World")?.append_property("radius")?;
+        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some(99.0), "session layer opinion should win");
+
+        Ok(())
+    }
+
+    /// The session layer can add properties not present in the root layer.
+    #[test]
+    fn session_layer_adds_properties() -> Result<()> {
+        let stage = open_with_session()?;
+
+        let prop = Path::new("/World")?.append_property("visibility")?;
+        let value = stage.field::<String>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some("hidden".to_string()));
+
+        Ok(())
+    }
+
+    /// The root layer's properties not overridden by the session layer
+    /// should still be accessible.
+    #[test]
+    fn session_layer_preserves_root_opinions() -> Result<()> {
+        let stage = open_with_session()?;
+
+        let prop = Path::new("/World")?.append_property("name")?;
+        let value = stage.field::<String>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some("root".to_string()));
+
+        Ok(())
+    }
+
+    /// `defaultPrim` should come from the root layer, not the session layer.
+    #[test]
+    fn session_layer_does_not_affect_default_prim() -> Result<()> {
+        let stage = open_with_session()?;
+        assert_eq!(stage.default_prim(), Some("World".to_string()));
+        Ok(())
+    }
+
+    /// Children defined only in the root layer should still be visible
+    /// when a session layer is present.
+    #[test]
+    fn session_layer_preserves_children() -> Result<()> {
+        let stage = open_with_session()?;
+
+        let children = stage.prim_children("/World")?;
+        assert!(
+            children.contains(&"Child".to_string()),
+            "root layer's children should be visible: got {children:?}"
         );
 
         Ok(())

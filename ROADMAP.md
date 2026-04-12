@@ -21,16 +21,16 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | :white_check_mark: Supported | 0.2.0 | |
 | LIVERPS strength ordering | :white_check_mark: Supported | 0.2.0 | [What is LIVERPS?](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) |
 | [List editing](https://openusd.org/release/glossary.html#usdglossary-listediting) (prepend/append/add/delete/explicit) | :white_check_mark: Supported | 0.2.0 | |
-| Composition error reporting | :white_check_mark: Supported | | `pcp::Error` with `StageBuilder::on_error` callback |
-| Node graph (PrimIndex) | :white_check_mark: Supported | | Arena-based node graph with per-node namespace mapping |
-| Variant fallbacks | :white_check_mark: Supported | 0.2.0 | `VariantFallbackMap` via `StageBuilder::variant_fallbacks` |
-| [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :construction: Planned | | Non-destructive override layer on top of root |
+| Composition error reporting | :white_check_mark: Supported | next | `pcp::Error` with `StageBuilder::on_error` callback |
+| Node graph (PrimIndex) | :white_check_mark: Supported | next | Arena-based node graph with per-node namespace mapping |
+| Variant fallbacks | :white_check_mark: Supported | next | `VariantFallbackMap` via `StageBuilder::variant_fallbacks` |
+| [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :white_check_mark: Supported | next | `StageBuilder::session_layer` — strongest opinions above root |
 | [Layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset) | :construction: Planned | | Time scale/offset for sublayers and references (already parsed) |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | :construction: Planned | | Dynamic include/exclude set for deferred payloads |
-| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :white_check_mark: Supported | | Non-destructive namespace remapping via `layerRelocates` |
+| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :white_check_mark: Supported | next | Non-destructive namespace remapping via `layerRelocates` |
 | [Incremental invalidation](https://openusd.org/release/api/class_pcp_changes.html) | :thinking: Considering | | Dependency tracking and change processing (`PcpChanges`) |
 | Composition graph visualization | :thinking: Considering | | `dot` format export for debugging composition |
-| [Map functions](https://openusd.org/release/api/class_pcp_map_function.html) | :white_check_mark: Supported | | `map_to_parent`/`map_to_root` namespace translation on nodes via `MapFunction` |
+| [Map functions](https://openusd.org/release/api/class_pcp_map_function.html) | :white_check_mark: Supported | next | `map_to_parent`/`map_to_root` namespace translation on nodes via `MapFunction` |
 | **Scene Graph (Usd)** | | | |
 | Composed stage | :white_check_mark: Supported | 0.2.0 | `Stage::open`, traverse, field queries |
 | Generic field access | :white_check_mark: Supported | 0.2.0 | `Stage::field<T>` with path and field key |

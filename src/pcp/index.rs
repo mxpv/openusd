@@ -1144,7 +1144,7 @@ mod tests {
     /// Helper: loads layers and creates a [`LayerStack`].
     fn load_stack(path: &str) -> anyhow::Result<LayerStack> {
         let (layers, identifiers) = load_layers(path)?;
-        Ok(LayerStack::new(layers, identifiers))
+        Ok(LayerStack::new(layers, identifiers, 0))
     }
 
     #[test]
@@ -1421,7 +1421,7 @@ def "Root" (
         );
         let layers = vec![a, b];
         let ids = vec!["a.usd".to_string(), "b.usd".to_string()];
-        let stack = LayerStack::new(layers, ids);
+        let stack = LayerStack::new(layers, ids, 0);
 
         let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
         assert!(
@@ -1445,7 +1445,7 @@ def "Prim" (
         );
         let layers = vec![layer];
         let ids = vec!["test.usda".to_string()];
-        let stack = LayerStack::new(layers, ids);
+        let stack = LayerStack::new(layers, ids, 0);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(
@@ -1471,7 +1471,7 @@ def "Prim" (
         let target = parse_usda("#usda 1.0\ndef \"Foo\" {}\n");
         let layers = vec![root, target];
         let ids = vec!["root.usda".to_string(), "target.usda".to_string()];
-        let stack = LayerStack::new(layers, ids);
+        let stack = LayerStack::new(layers, ids, 0);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(

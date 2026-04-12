@@ -1,0 +1,15 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def "World"
+{
+    double radius = 1.0
+    string name = "root"
+
+    def "Child"
+    {
+        double height = 2.0
+    }
+}

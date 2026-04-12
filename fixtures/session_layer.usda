@@ -1,0 +1,7 @@
+#usda 1.0
+
+over "World"
+{
+    double radius = 99.0
+    string visibility = "hidden"
+}

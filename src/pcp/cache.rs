@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerData, Path, SpecType, Value};
+use crate::sdf::{Path, SpecType, Value};
 
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -49,10 +49,9 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Creates a new composition graph for the given layer stack.
-    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>, variant_fallbacks: VariantFallbackMap) -> Self {
-        let relocates = Relocates::new(&layers);
-        let stack = LayerStack::new(layers, identifiers);
+    /// Creates a new composition graph from a prebuilt layer stack.
+    pub fn new(stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
+        let relocates = Relocates::new(&stack.layers);
         Self {
             stack,
             indices: HashMap::new(),
@@ -60,6 +59,11 @@ impl Cache {
             relocates,
             variant_fallbacks,
         }
+    }
+
+    /// Returns the number of session layers at the front of the layer stack.
+    pub fn session_layer_count(&self) -> usize {
+        self.stack.session_layer_count
     }
 
     /// Returns the number of layers in the stage.
@@ -147,14 +151,13 @@ impl Cache {
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
+    ///
+    /// When session layers are present, `defaultPrim` is read from the
+    /// first non-session layer (the root layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<String> {
         let root = Path::abs_root();
-        let value = self
-            .stack
-            .layers
-            .first()?
-            .get(&root, FieldKey::DefaultPrim.as_str())
-            .ok()?;
+        let root_layer = self.stack.layers.get(self.stack.session_layer_count)?;
+        let value = root_layer.get(&root, FieldKey::DefaultPrim.as_str()).ok()?;
         match value.into_owned() {
             Value::Token(s) | Value::String(s) => Some(s),
             _ => None,

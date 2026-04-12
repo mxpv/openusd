@@ -167,17 +167,19 @@ pub(crate) type SublayerStacks = HashMap<usize, Vec<usize>>;
 /// into a single unit passed through the composition engine. Corresponds
 /// to a simplified C++ `PcpLayerStack`.
 pub(crate) struct LayerStack {
-    /// Layer data in strength order (root layer first).
+    /// Layer data in strength order (session layers first, then root layer).
     pub layers: Vec<LayerData>,
     /// Layer identifiers (asset paths) matching the `layers` order.
     pub identifiers: Vec<String>,
     /// Precomputed sublayer stacks keyed by root layer index.
     pub sublayer_stacks: SublayerStacks,
+    /// Number of session layers at the front of the layer stack.
+    pub session_layer_count: usize,
 }
 
 impl LayerStack {
     /// Creates a new layer stack, precomputing sublayer ordering.
-    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
+    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>, session_layer_count: usize) -> Self {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers)))
             .collect();
@@ -185,6 +187,7 @@ impl LayerStack {
             layers,
             identifiers,
             sublayer_stacks,
+            session_layer_count,
         }
     }
 

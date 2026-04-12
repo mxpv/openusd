@@ -28,6 +28,7 @@ For a detailed comparison with the C++ reference implementation and current prog
   - Arena-based node graph with per-node namespace mapping (`map_to_parent`/`map_to_root`).
   - Relocates: non-destructive namespace remapping across layers (`layerRelocates`).
   - Variant fallbacks (`VariantFallbackMap`) for application-level default variant selections.
+  - Session layer support via `StageBuilder::session_layer` for non-persistent overrides.
   - Cycle detection and structured error reporting via `StageBuilder::on_error` callback.
   - Passes composition [compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
 - Composed [`Stage`](src/stage.rs)

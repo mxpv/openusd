@@ -29,7 +29,7 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
   - `pcp/mapping.rs` — `MapFunction`: namespace mapping between composition arcs (C++ `PcpMapFunction`). Stores (source, target) path pairs with longest-prefix matching. Supports compose, inverse, and identity operations.
   - `pcp/rel.rs` — `Relocates`: isolated relocate object owning per-layer `layerRelocates`. Resolves pre-relocation source paths, builds relocated prim indices, and adjusts child name lists. Receives external data (`&LayerStack`, cached indices/contexts) through method parameters; does not reference `Cache` directly.
 
-- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), and variant fallback selections (`variant_fallbacks`).
+- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), variant fallback selections (`variant_fallbacks`), and an optional session layer (`session_layer`).
 
 - **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
 
