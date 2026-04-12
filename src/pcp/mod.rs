@@ -45,6 +45,7 @@
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
+//! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
 //! | `rel` | — | [`Relocates`](rel::Relocates): isolated relocate state and logic. Owned by `Cache`, receives external data through parameters. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
@@ -67,6 +68,15 @@
 //! - Arc mappings from ancestors, recording how composed paths map to
 //!   paths in other layers. Used for descendant namespace remapping and
 //!   implied inherit propagation.
+//!
+//! # Variant fallbacks
+//!
+//! A [`VariantFallbackMap`] can be provided when opening a stage via
+//! [`StageBuilder::variant_fallbacks`](crate::StageBuilder::variant_fallbacks).
+//! When a prim has a variant set but no authored selection, the engine tries
+//! each fallback in order. The first fallback matching an existing variant in
+//! the set is used; if none match, the first variant in the set is the default.
+//! Authored selections always take priority over fallbacks.
 //!
 //! The [`Cache`](cache::Cache) stores both the [`PrimIndex`](index::PrimIndex)
 //! and the [`CompositionContext`](index::CompositionContext) for each composed
@@ -95,6 +105,55 @@ use crate::sdf::{LayerData, Path, Value};
 pub(crate) use cache::Cache;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
 pub use mapping::MapFunction;
+
+/// Maps variant set names to ordered lists of fallback selections.
+///
+/// When a prim has a variant set but no authored selection, the composition
+/// engine tries each fallback in order before falling back to the first
+/// variant defined in the set.
+///
+/// This is the Rust equivalent of C++ `PcpVariantFallbackMap`.
+///
+/// # Example
+///
+/// ```
+/// use openusd::pcp::VariantFallbackMap;
+///
+/// let fallbacks = VariantFallbackMap::new()
+///     .add("shadingComplexity", ["full", "simple"])
+///     .add("renderQuality", ["high", "medium", "low"]);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct VariantFallbackMap(HashMap<String, Vec<String>>);
+
+impl VariantFallbackMap {
+    /// Creates an empty variant fallback map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds fallback selections for a variant set.
+    ///
+    /// The selections are tried in order — the first one matching an existing
+    /// variant in the set is used.
+    pub fn add(mut self, set_name: impl Into<String>, selections: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.0
+            .insert(set_name.into(), selections.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Returns the fallback selections for a variant set.
+    ///
+    /// Returns an empty slice if no fallbacks are registered for the set.
+    pub fn get(&self, set_name: &str) -> &[String] {
+        self.0.get(set_name).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Returns `true` if no fallbacks have been registered.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Precomputed sublayer stacks, keyed by root layer index.
 ///

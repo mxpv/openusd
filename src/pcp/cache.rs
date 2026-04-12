@@ -20,7 +20,7 @@ use crate::sdf::{LayerData, Path, SpecType, Value};
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
 use super::rel::Relocates;
-use super::LayerStack;
+use super::{LayerStack, VariantFallbackMap};
 
 /// Lazily-built composition graph.
 ///
@@ -28,6 +28,10 @@ use super::LayerStack;
 /// for the first time, its index is built using the parent's cached context
 /// (if available). During depth-first traversal, parents are always composed
 /// before children, so the context chain is always populated.
+///
+/// An optional [`VariantFallbackMap`] provides fallback selections for variant
+/// sets that have no authored opinion. Authored selections always take priority;
+/// fallbacks are tried in order before the default (first variant in the set).
 ///
 /// All public methods return `Result` — a [`pcp::Error`](super::Error) is
 /// returned when composition fails. The caller ([`Stage`](crate::Stage))
@@ -40,11 +44,13 @@ pub struct Cache {
     contexts: HashMap<Path, CompositionContext>,
     /// Relocate namespace remapping state.
     relocates: Relocates,
+    /// Variant fallback selections tried when no authored selection exists.
+    variant_fallbacks: VariantFallbackMap,
 }
 
 impl Cache {
     /// Creates a new composition graph for the given layer stack.
-    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
+    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>, variant_fallbacks: VariantFallbackMap) -> Self {
         let relocates = Relocates::new(&layers);
         let stack = LayerStack::new(layers, identifiers);
         Self {
@@ -52,6 +58,7 @@ impl Cache {
             indices: HashMap::new(),
             contexts: HashMap::new(),
             relocates,
+            variant_fallbacks,
         }
     }
 
@@ -261,7 +268,10 @@ impl Cache {
             .parent()
             .and_then(|p| self.contexts.get(&p))
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| CompositionContext {
+                variant_fallbacks: self.variant_fallbacks.clone(),
+                ..Default::default()
+            });
 
         let mut index = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
             Ok(idx) => idx,

@@ -1,0 +1,41 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def "Root" (
+    variants = {
+        string shadingComplexity = "full"
+    }
+    prepend variantSets = "shadingComplexity"
+)
+{
+    variantSet "shadingComplexity" = {
+        "full" {
+            double complexity = 1.0
+        }
+        "simple" {
+            double complexity = 0.5
+        }
+        "none" {
+            double complexity = 0.0
+        }
+    }
+}
+
+def "NoSelection" (
+    prepend variantSets = "shadingComplexity"
+)
+{
+    variantSet "shadingComplexity" = {
+        "full" {
+            double complexity = 1.0
+        }
+        "simple" {
+            double complexity = 0.5
+        }
+        "none" {
+            double complexity = 0.0
+        }
+    }
+}

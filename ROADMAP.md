@@ -23,7 +23,7 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | [List editing](https://openusd.org/release/glossary.html#usdglossary-listediting) (prepend/append/add/delete/explicit) | :white_check_mark: Supported | 0.2.0 | |
 | Composition error reporting | :white_check_mark: Supported | | `pcp::Error` with `StageBuilder::on_error` callback |
 | Node graph (PrimIndex) | :white_check_mark: Supported | | Arena-based node graph with per-node namespace mapping |
-| Variant fallbacks | :construction: Planned | | `PcpVariantFallbackMap` — application-level default selections |
+| Variant fallbacks | :white_check_mark: Supported | 0.2.0 | `VariantFallbackMap` via `StageBuilder::variant_fallbacks` |
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :construction: Planned | | Non-destructive override layer on top of root |
 | [Layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset) | :construction: Planned | | Time scale/offset for sublayers and references (already parsed) |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | :construction: Planned | | Dynamic include/exclude set for deferred payloads |

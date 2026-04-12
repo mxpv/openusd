@@ -14,7 +14,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 use super::mapping::MapFunction;
-use super::{Error, LayerStack};
+use super::{Error, LayerStack, VariantFallbackMap};
 
 /// The type of composition arc that introduced a [`Node`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -200,7 +200,7 @@ impl PrimIndex {
         parent_ctx: &CompositionContext,
     ) -> CompositionContext {
         // Gather variant selections from this prim's nodes.
-        let selections = resolve_variant_selections_in(self.nodes(), &stack.layers);
+        let selections = resolve_variant_selections_in(self.nodes(), &stack.layers, &parent_ctx.variant_fallbacks);
 
         // Build ancestor arcs: for each non-Root node whose map_to_root is
         // not a no-op, record it so children can remap through it.
@@ -227,6 +227,7 @@ impl PrimIndex {
         CompositionContext {
             selections: merged_selections,
             ancestor_arcs,
+            variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
         }
     }
 
@@ -269,8 +270,9 @@ impl PrimIndex {
 
 /// Composition context carried from parent prims to children.
 ///
-/// Contains accumulated variant selections and arc mappings that enable
-/// single-pass composition without cross-prim post-processing.
+/// Contains accumulated variant selections, arc mappings, and variant
+/// fallbacks that enable single-pass composition without cross-prim
+/// post-processing.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CompositionContext {
     /// Variant selections accumulated from all ancestor compositions.
@@ -279,6 +281,9 @@ pub(crate) struct CompositionContext {
     /// Ancestor composition arcs with namespace mappings.
     /// Used for descendant namespace remapping and implied inherit propagation.
     pub ancestor_arcs: Vec<AncestorArc>,
+    /// Variant fallback selections for sets without authored opinions.
+    /// Propagated unchanged from the stage configuration.
+    pub variant_fallbacks: VariantFallbackMap,
 }
 
 /// Records an ancestor composition arc for descendant namespace remapping.
@@ -403,7 +408,8 @@ impl<'a> IndexBuilder<'a> {
         loop {
             let before = self.output.len();
 
-            let mut selections = resolve_variant_selections_in(&self.output, &self.stack.layers);
+            let mut selections =
+                resolve_variant_selections_in(&self.output, &self.stack.layers, &self.ctx.variant_fallbacks);
             for (set, sel) in &self.ctx.selections {
                 selections.entry(set.clone()).or_insert_with(|| sel.clone());
             }
@@ -765,7 +771,11 @@ impl<'a> IndexBuilder<'a> {
             let current_end = self.output.len();
             // Gather selections from ALL output nodes (not just this site) so
             // cross-site selections are visible during the first pass.
-            let mut selections = resolve_variant_selections_in(&self.output[..current_end], &self.stack.layers);
+            let mut selections = resolve_variant_selections_in(
+                &self.output[..current_end],
+                &self.stack.layers,
+                &self.ctx.variant_fallbacks,
+            );
             // Merge accumulated selections (includes ancestor context).
             for (set, sel) in &self.ctx.selections {
                 selections.entry(set.clone()).or_insert_with(|| sel.clone());
@@ -933,7 +943,11 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 ///
 /// Gathers explicit selections (first opinion wins), then falls back to
 /// the first variant name in each variant set as the default.
-fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMap<String, String> {
+fn resolve_variant_selections_in(
+    nodes: &[Node],
+    layers: &[LayerData],
+    variant_fallbacks: &VariantFallbackMap,
+) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
     // Gather explicit selections (first opinion wins).
@@ -948,8 +962,8 @@ fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMa
         }
     }
 
-    // For variant sets without an explicit selection, use the first variant
-    // name as the default.
+    // For variant sets without an explicit selection, try the fallback map
+    // first, then fall back to the first variant name in the set.
     for node in nodes {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
@@ -969,6 +983,14 @@ fn resolve_variant_selections_in(nodes: &[Node], layers: &[LayerData]) -> HashMa
             let Value::TokenVec(variants) = val.into_owned() else {
                 continue;
             };
+            // Try fallback selections in order — use the first one that
+            // exists in this variant set.
+            let fallbacks = variant_fallbacks.get(entry.key());
+            if let Some(fb) = fallbacks.iter().find(|fb| variants.contains(fb)) {
+                entry.insert(fb.clone());
+                continue;
+            }
+            // No fallback matched — default to the first variant.
             if let Some(first) = variants.into_iter().next() {
                 entry.insert(first);
             }
@@ -1098,8 +1120,13 @@ mod tests {
 
     /// Builds a prim index for a given path string.
     fn build(stack: &LayerStack, prim: &str) -> PrimIndex {
+        build_with_fallbacks(stack, prim, VariantFallbackMap::new())
+    }
+
+    /// Builds a prim index with variant fallbacks applied.
+    fn build_with_fallbacks(stack: &LayerStack, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
         let path = Path::from(prim);
-        let ctx = if let Some(parent) = path.parent() {
+        let mut ctx = if let Some(parent) = path.parent() {
             if parent != Path::abs_root() {
                 let parent_index = PrimIndex::build_with_context(&parent, stack, &CompositionContext::default())
                     .expect("parent index build failed");
@@ -1110,6 +1137,7 @@ mod tests {
         } else {
             CompositionContext::default()
         };
+        ctx.variant_fallbacks = fallbacks;
         PrimIndex::build_with_context(&path, stack, &ctx).expect("index build failed")
     }
 
@@ -1449,6 +1477,94 @@ def "Prim" (
         assert!(
             matches!(result, Err(Error::MissingDefaultPrim { .. })),
             "expected MissingDefaultPrim error, got {result:?}"
+        );
+        Ok(())
+    }
+
+    // --- Variant fallbacks ---
+
+    /// Collects variant-arc paths from a prim index.
+    fn variant_paths(index: &PrimIndex) -> Vec<String> {
+        index
+            .nodes()
+            .iter()
+            .filter(|n| n.arc == ArcType::Variant)
+            .map(|n| n.path.as_str().to_string())
+            .collect()
+    }
+
+    /// When no fallback is provided and no authored selection exists, the first
+    /// variant in the set should be selected by default.
+    #[test]
+    fn variant_default_without_fallback() -> Result<()> {
+        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let index = build(&stack, "/NoSelection");
+        let paths = variant_paths(&index);
+        assert!(
+            paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
+            "default should be 'full' (first variant): got {paths:?}"
+        );
+        Ok(())
+    }
+
+    /// When a fallback map specifies "simple" as the preferred fallback, and no
+    /// authored selection exists, the composition should select "simple".
+    #[test]
+    fn variant_fallback_overrides_default() -> Result<()> {
+        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let fb = VariantFallbackMap::new().add("shadingComplexity", ["simple"]);
+        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let paths = variant_paths(&index);
+        assert!(
+            paths.iter().any(|p| p.contains("{shadingComplexity=simple}")),
+            "fallback should select 'simple': got {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
+            "'full' should NOT be selected when fallback says 'simple'"
+        );
+        Ok(())
+    }
+
+    /// An authored selection should take priority over a variant fallback.
+    #[test]
+    fn variant_authored_selection_beats_fallback() -> Result<()> {
+        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let fb = VariantFallbackMap::new().add("shadingComplexity", ["none"]);
+        let index = build_with_fallbacks(&stack, "/Root", fb);
+        let paths = variant_paths(&index);
+        assert!(
+            paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
+            "authored selection 'full' should win over fallback 'none': got {paths:?}"
+        );
+        Ok(())
+    }
+
+    /// When the fallback specifies a variant name that doesn't exist in the set,
+    /// it should be skipped and the next fallback (or default) should be used.
+    #[test]
+    fn variant_fallback_skips_nonexistent() -> Result<()> {
+        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let fb = VariantFallbackMap::new().add("shadingComplexity", ["ultra", "simple"]);
+        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let paths = variant_paths(&index);
+        assert!(
+            paths.iter().any(|p| p.contains("{shadingComplexity=simple}")),
+            "should skip 'ultra' and use 'simple': got {paths:?}"
+        );
+        Ok(())
+    }
+
+    /// When all fallback names are invalid, the first variant in the set is used.
+    #[test]
+    fn variant_fallback_all_invalid_uses_first() -> Result<()> {
+        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let fb = VariantFallbackMap::new().add("shadingComplexity", ["ultra", "mega"]);
+        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let paths = variant_paths(&index);
+        assert!(
+            paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
+            "all fallbacks invalid — should use first variant 'full': got {paths:?}"
         );
         Ok(())
     }

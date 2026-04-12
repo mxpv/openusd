@@ -23,13 +23,13 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
 - **`layer`** - Layer collection: `collect_layers` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads. Corresponds to C++ `PcpLayerStack`. Defines `layer::Error` for recoverable collection failures (e.g. unresolved assets).
 
 - **`pcp/`** - Prim Cache Population (composition engine): Implements LIVRPS strength ordering to compose opinions across layers. Corresponds to C++ `Pcp` module.
-  - `pcp/mod.rs` — `pcp::Error`: composition errors (arc cycles, unresolved layers, missing/invalid `defaultPrim`). `LayerStack`: bundles layers, identifiers, and precomputed sublayer stacks (C++ `PcpLayerStack`).
+  - `pcp/mod.rs` — `pcp::Error`: composition errors (arc cycles, unresolved layers, missing/invalid `defaultPrim`). `LayerStack`: bundles layers, identifiers, and precomputed sublayer stacks (C++ `PcpLayerStack`). `VariantFallbackMap`: maps variant set names to ordered fallback selections (C++ `PcpVariantFallbackMap`).
   - `pcp/cache.rs` — `Cache`: lazily-built per-prim composition cache (C++ `PcpCache`). Owns a `LayerStack` and passes it by shared reference to each build. Returns `Result` from all public methods.
   - `pcp/index.rs` — `PrimIndex`, `Node`, `NodeIndex`, `ArcType`: per-prim composition graph (C++ `PcpPrimIndex`). Nodes are stored in a flat arena (`PrimIndexGraph`) ordered strongest-to-weakest. Each node carries `map_to_parent` and `map_to_root` (`MapFunction`) for namespace translation across arcs. `IndexBuilder` takes a `&LayerStack` and evaluates LIVRPS with a `CompositionContext` flowing from parent to child; each build takes only `&` references (Rayon-friendly).
   - `pcp/mapping.rs` — `MapFunction`: namespace mapping between composition arcs (C++ `PcpMapFunction`). Stores (source, target) path pairs with longest-prefix matching. Supports compose, inverse, and identity operations.
   - `pcp/rel.rs` — `Relocates`: isolated relocate object owning per-layer `layerRelocates`. Resolves pre-relocation source paths, builds relocated prim indices, and adjusts child name lists. Receives external data (`&LayerStack`, cached indices/contexts) through method parameters; does not reference `Cache` directly.
 
-- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder::on_error` provides a unified `CompositionError` callback for both layer collection and PCP composition errors.
+- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), and variant fallback selections (`variant_fallbacks`).
 
 - **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
 
@@ -77,6 +77,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Less is better - prefer functionality offered by stdlib
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
+- Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead
 - Never remove comments during refactoring if they are still applicable
 - Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
 

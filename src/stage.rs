@@ -21,6 +21,18 @@
 //! - Payloads are composed
 //! - Specialize arcs provide fallback values
 //!
+//! # Configuration
+//!
+//! Use [`StageBuilder`] to customize stage behavior before opening:
+//!
+//! - [`StageBuilder::resolver`] sets a custom
+//!   [`Resolver`](crate::ar::Resolver) for mapping asset paths to files.
+//! - [`StageBuilder::on_error`] sets a callback for recoverable composition
+//!   errors (missing layers, arc cycles, etc.).
+//! - [`StageBuilder::variant_fallbacks`] provides a
+//!   [`VariantFallbackMap`](crate::pcp::VariantFallbackMap) with preferred
+//!   selections for variant sets that have no authored opinion.
+//!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::RefCell;
@@ -72,7 +84,11 @@ impl Stage {
     }
 
     /// Constructs a stage from pre-collected layers and a PCP error handler.
-    fn from_layers(collected: Vec<layer::Layer>, on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>) -> Self {
+    fn from_layers(
+        collected: Vec<layer::Layer>,
+        on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
+        variant_fallbacks: pcp::VariantFallbackMap,
+    ) -> Self {
         let mut identifiers = Vec::with_capacity(collected.len());
         let mut layers = Vec::with_capacity(collected.len());
 
@@ -82,7 +98,7 @@ impl Stage {
         }
 
         Self {
-            graph: RefCell::new(pcp::Cache::new(layers, identifiers)),
+            graph: RefCell::new(pcp::Cache::new(layers, identifiers, variant_fallbacks)),
             on_composition_error,
         }
     }
@@ -223,6 +239,7 @@ fn strict_composition_error(e: CompositionError) -> Result<()> {
 pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -> Result<()> = StrictErrorHandler> {
     resolver: R,
     on_error: E,
+    variant_fallbacks: pcp::VariantFallbackMap,
 }
 
 impl StageBuilder {
@@ -230,6 +247,7 @@ impl StageBuilder {
         Self {
             resolver: DefaultResolver::new(),
             on_error: strict_composition_error,
+            variant_fallbacks: pcp::VariantFallbackMap::new(),
         }
     }
 }
@@ -240,6 +258,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         StageBuilder {
             resolver,
             on_error: self.on_error,
+            variant_fallbacks: self.variant_fallbacks,
         }
     }
 
@@ -253,7 +272,34 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         StageBuilder {
             resolver: self.resolver,
             on_error: handler,
+            variant_fallbacks: self.variant_fallbacks,
         }
+    }
+
+    /// Sets the variant fallback map for the stage.
+    ///
+    /// When a prim has a variant set but no authored selection, the
+    /// composition engine tries each fallback in order. The first fallback
+    /// matching an existing variant in the set is used; if none match, the
+    /// first variant in the set is used as default.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::Stage;
+    /// use openusd::pcp::VariantFallbackMap;
+    ///
+    /// let fallbacks = VariantFallbackMap::new()
+    ///     .add("shadingComplexity", ["full", "simple"]);
+    ///
+    /// let stage = Stage::builder()
+    ///     .variant_fallbacks(fallbacks)
+    ///     .open("scene.usda")
+    ///     .unwrap();
+    /// ```
+    pub fn variant_fallbacks(mut self, fallbacks: pcp::VariantFallbackMap) -> Self {
+        self.variant_fallbacks = fallbacks;
+        self
     }
 
     /// Opens a stage from a root layer file.
@@ -262,10 +308,11 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         E: 'static,
     {
         let on_error = self.on_error;
+        let variant_fallbacks = self.variant_fallbacks;
         let collected =
             layer::collect_layers_with_handler(&self.resolver, root_path, |e| on_error(CompositionError::Layer(e)))?;
         let pcp_handler = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
-        Ok(Stage::from_layers(collected, pcp_handler))
+        Ok(Stage::from_layers(collected, pcp_handler, variant_fallbacks))
     }
 }
 
@@ -615,6 +662,42 @@ mod tests {
 
         let value = stage.field::<bool>("/Root", FieldKey::Instanceable)?;
         assert_eq!(value, None, "instanceable should be None when not authored");
+
+        Ok(())
+    }
+
+    // --- Variant fallback selection ---
+
+    /// A variant fallback should select the specified variant when no authored
+    /// selection exists. The prim should expose opinions from the fallback variant.
+    #[test]
+    fn variant_fallback_selects_preferred() -> Result<()> {
+        let path = fixture_path("variant_fallback.usda");
+        let fallbacks = crate::pcp::VariantFallbackMap::new().add("shadingComplexity", ["simple"]);
+        let stage = Stage::builder().variant_fallbacks(fallbacks).open(&path)?;
+
+        // /NoSelection has no authored selection. With fallback "simple",
+        // the complexity field should be 0.5 (not 1.0 from "full").
+        let prop = Path::new("/NoSelection")?.append_property("complexity")?;
+        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some(0.5), "fallback 'simple' should give complexity=0.5");
+
+        Ok(())
+    }
+
+    /// An authored selection should take priority over a variant fallback at the
+    /// stage level.
+    #[test]
+    fn variant_fallback_does_not_override_authored() -> Result<()> {
+        let path = fixture_path("variant_fallback.usda");
+        let fallbacks = crate::pcp::VariantFallbackMap::new().add("shadingComplexity", ["none"]);
+        let stage = Stage::builder().variant_fallbacks(fallbacks).open(&path)?;
+
+        // /Root has authored selection "full". Even with fallback "none",
+        // the authored selection should win.
+        let prop = Path::new("/Root")?.append_property("complexity")?;
+        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        assert_eq!(value, Some(1.0), "authored 'full' should win over fallback 'none'");
 
         Ok(())
     }
