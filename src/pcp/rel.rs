@@ -43,14 +43,10 @@ impl Cache {
             return entry.index.nodes().to_vec();
         }
         let ctx = self.build_source_context(path);
-        PrimIndex::build_with_context(path, &self.layers, &self.identifiers, &ctx, &self.sublayer_stacks)
+        PrimIndex::build_with_context(path, &self.stack, &ctx)
             .map(|idx| idx.nodes().to_vec())
             .unwrap_or_default()
     }
-
-    // ------------------------------------------------------------------
-    // Relocates
-    // ------------------------------------------------------------------
 
     /// Computes effective relocates for a parent prim in composed namespace.
     ///
@@ -211,7 +207,7 @@ impl Cache {
         // the post-relocation namespace.
         if let Some(ref source) = result {
             if let Some(deeper) = self.find_source_path(source) {
-                let has_spec = self.layers.iter().any(|l| l.has_spec(&deeper));
+                let has_spec = self.stack.layers.iter().any(|l| l.has_spec(&deeper));
                 if has_spec {
                     return Some(deeper);
                 }
@@ -255,16 +251,10 @@ impl Cache {
         // get the correct variant selections for this specific path rather
         // than reusing cached indices with potentially different selections.
         let grandparent_ctx = self.build_source_context(&parent);
-        let Ok(parent_index) = PrimIndex::build_with_context(
-            &parent,
-            &self.layers,
-            &self.identifiers,
-            &grandparent_ctx,
-            &self.sublayer_stacks,
-        ) else {
+        let Ok(parent_index) = PrimIndex::build_with_context(&parent, &self.stack, &grandparent_ctx) else {
             return CompositionContext::default();
         };
-        parent_index.context_for_children(&self.layers, &grandparent_ctx)
+        parent_index.context_for_children(&self.stack, &grandparent_ctx)
     }
 
     /// Adds relocate nodes to a prim index for a relocated prim.
@@ -281,14 +271,8 @@ impl Cache {
         };
         let source_ctx = self.build_source_context(&source_path);
         let source_cache: HashMap<Path, PrimIndex> = self.index_snapshot();
-        let Ok(source_index) = PrimIndex::build_with_cache(
-            &source_path,
-            &self.layers,
-            &self.identifiers,
-            &source_ctx,
-            &self.sublayer_stacks,
-            &source_cache,
-        ) else {
+        let Ok(source_index) = PrimIndex::build_with_cache(&source_path, &self.stack, &source_ctx, &source_cache)
+        else {
             return;
         };
 
@@ -308,16 +292,9 @@ impl Cache {
                     entry.index.nodes().to_vec()
                 } else {
                     let ctx = self.build_source_context(&source_parent);
-                    PrimIndex::build_with_cache(
-                        &source_parent,
-                        &self.layers,
-                        &self.identifiers,
-                        &ctx,
-                        &self.sublayer_stacks,
-                        &index_cache,
-                    )
-                    .map(|idx| idx.nodes().to_vec())
-                    .unwrap_or_default()
+                    PrimIndex::build_with_cache(&source_parent, &self.stack, &ctx, &index_cache)
+                        .map(|idx| idx.nodes().to_vec())
+                        .unwrap_or_default()
                 };
 
                 for pn in &parent_nodes {
@@ -327,8 +304,8 @@ impl Cache {
                     let Ok(child_path) = pn.path.append_path(source_name) else {
                         continue;
                     };
-                    for li in 0..self.layers.len() {
-                        if self.layers[li].has_spec(&child_path) {
+                    for li in 0..self.stack.len() {
+                        if self.stack.layer(li).has_spec(&child_path) {
                             Self::push_relocate_node(index, li, &child_path, composed_path);
                         }
                     }
@@ -346,15 +323,9 @@ impl Cache {
                     entry.index.nodes().to_vec()
                 } else {
                     let ctx = self.build_source_context(&source_parent);
-                    PrimIndex::build_with_context(
-                        &source_parent,
-                        &self.layers,
-                        &self.identifiers,
-                        &ctx,
-                        &self.sublayer_stacks,
-                    )
-                    .map(|idx| idx.nodes().to_vec())
-                    .unwrap_or_default()
+                    PrimIndex::build_with_context(&source_parent, &self.stack, &ctx)
+                        .map(|idx| idx.nodes().to_vec())
+                        .unwrap_or_default()
                 };
 
                 for pn in &parent_nodes {
@@ -366,14 +337,9 @@ impl Cache {
                     };
                     let class_ctx = self.build_source_context(&class_child);
                     let class_cache: HashMap<Path, PrimIndex> = self.index_snapshot();
-                    let Ok(class_index) = PrimIndex::build_with_cache(
-                        &class_child,
-                        &self.layers,
-                        &self.identifiers,
-                        &class_ctx,
-                        &self.sublayer_stacks,
-                        &class_cache,
-                    ) else {
+                    let Ok(class_index) =
+                        PrimIndex::build_with_cache(&class_child, &self.stack, &class_ctx, &class_cache)
+                    else {
                         continue;
                     };
                     for node in class_index.nodes() {
@@ -447,14 +413,7 @@ impl Cache {
     fn add_relocate_nodes_at(&self, source_path: &Path, composed_path: &Path, index: &mut PrimIndex) {
         let source_ctx = self.build_source_context(source_path);
         let source_cache: HashMap<Path, PrimIndex> = self.index_snapshot();
-        let Ok(source_index) = PrimIndex::build_with_cache(
-            source_path,
-            &self.layers,
-            &self.identifiers,
-            &source_ctx,
-            &self.sublayer_stacks,
-            &source_cache,
-        ) else {
+        let Ok(source_index) = PrimIndex::build_with_cache(source_path, &self.stack, &source_ctx, &source_cache) else {
             return;
         };
         for node in source_index.nodes() {
@@ -472,8 +431,8 @@ impl Cache {
                         let Ok(child_path) = pn.path.append_path(sn) else {
                             continue;
                         };
-                        for li in 0..self.layers.len() {
-                            if self.layers[li].has_spec(&child_path) {
+                        for li in 0..self.stack.len() {
+                            if self.stack.layer(li).has_spec(&child_path) {
                                 Self::push_relocate_node(index, li, &child_path, composed_path);
                             }
                         }

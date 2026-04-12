@@ -17,8 +17,9 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, Path, SpecType, Value};
 
-use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex, SublayerStacks};
+use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
+use super::LayerStack;
 
 /// Cached entry for a composed prim: its index and the context its children need.
 pub(super) struct CachedPrim {
@@ -37,11 +38,8 @@ pub(super) struct CachedPrim {
 /// returned when composition fails. The caller ([`Stage`](crate::Stage))
 /// decides whether to skip or abort via its error handler.
 pub struct Cache {
-    pub(super) layers: Vec<LayerData>,
-    pub(super) identifiers: Vec<String>,
+    pub(super) stack: LayerStack,
     pub(super) cache: HashMap<Path, CachedPrim>,
-    /// Precomputed sublayer stacks shared by all per-prim builds.
-    pub(super) sublayer_stacks: SublayerStacks,
     /// Per-layer relocates: `layerRelocates` extracted from each layer's pseudoroot.
     pub(super) layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
 }
@@ -49,25 +47,23 @@ pub struct Cache {
 impl Cache {
     /// Creates a new composition graph for the given layer stack.
     pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
-        let sublayer_stacks = super::index::precompute_sublayer_stacks(&layers, &identifiers);
         let layer_relocates = super::rel::collect_layer_relocates(&layers);
+        let stack = LayerStack::new(layers, identifiers);
         Self {
-            layers,
-            identifiers,
+            stack,
             cache: HashMap::new(),
-            sublayer_stacks,
             layer_relocates,
         }
     }
 
     /// Returns the number of layers in the stage.
     pub fn layer_count(&self) -> usize {
-        self.layers.len()
+        self.stack.len()
     }
 
     /// Returns the layer identifiers in strength order (root first).
     pub fn layer_identifiers(&self) -> &[String] {
-        &self.identifiers
+        &self.stack.identifiers
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -85,7 +81,7 @@ impl Cache {
             for node in entry.index.nodes() {
                 let prop_path = format!("{}{prop_suffix}", node.path);
                 if let Ok(p) = Path::new(&prop_path) {
-                    if self.layers[node.layer_index].has_spec(&p) {
+                    if self.stack.layer(node.layer_index).has_spec(&p) {
                         return Ok(true);
                     }
                 }
@@ -104,7 +100,7 @@ impl Cache {
             return Ok(None);
         };
         for node in entry.index.nodes() {
-            if let Some(ty) = self.layers[node.layer_index].spec_type(&node.path) {
+            if let Some(ty) = self.stack.layer(node.layer_index).spec_type(&node.path) {
                 return Ok(Some(ty));
             }
         }
@@ -118,11 +114,11 @@ impl Cache {
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
             self.ensure_index(&prim_path)?;
             let entry = &self.cache[&prim_path];
-            entry.index.resolve_field(field, &self.layers, Some(prop_suffix))
+            entry.index.resolve_field(field, &self.stack, Some(prop_suffix))
         } else {
             self.ensure_index(path)?;
             let entry = &self.cache[path];
-            entry.index.resolve_field(field, &self.layers, None)
+            entry.index.resolve_field(field, &self.stack, None)
         }
     }
 
@@ -149,7 +145,12 @@ impl Cache {
     /// Returns the `defaultPrim` metadata from the root layer, if set.
     pub fn default_prim(&self) -> Option<String> {
         let root = Path::abs_root();
-        let value = self.layers.first()?.get(&root, FieldKey::DefaultPrim.as_str()).ok()?;
+        let value = self
+            .stack
+            .layers
+            .first()?
+            .get(&root, FieldKey::DefaultPrim.as_str())
+            .ok()?;
         match value.into_owned() {
             Value::Token(s) | Value::String(s) => Some(s),
             _ => None,
@@ -197,8 +198,8 @@ impl Cache {
             }
         }
         // Also check the prim's own path in all layers.
-        for li in 0..self.layers.len() {
-            if self.layers[li].has_spec(path) {
+        for li in 0..self.stack.len() {
+            if self.stack.layer(li).has_spec(path) {
                 nodes_to_scan.push((path.clone(), li));
             }
         }
@@ -206,7 +207,7 @@ impl Cache {
         let mut targets_to_cache = Vec::new();
         for (scan_path, scan_layer) in &nodes_to_scan {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = self.layers[*scan_layer].get(scan_path, field.as_str()) else {
+                let Ok(val) = self.stack.layer(*scan_layer).get(scan_path, field.as_str()) else {
                     continue;
                 };
                 let Value::PathListOp(list_op) = val.into_owned() else {
@@ -269,14 +270,7 @@ impl Cache {
         // specialize targets instead of building them from scratch.
         let index_cache: HashMap<Path, PrimIndex> = self.index_snapshot();
 
-        match PrimIndex::build_with_cache(
-            path,
-            &self.layers,
-            &self.identifiers,
-            &parent_ctx,
-            &self.sublayer_stacks,
-            &index_cache,
-        ) {
+        match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &index_cache) {
             Ok(mut index) => {
                 // Propagate specs from parent nodes for inherit-only children.
                 if index.is_empty() {
@@ -293,7 +287,7 @@ impl Cache {
                     self.add_relocate_nodes(path, &mut index);
                 }
 
-                let child_context = index.context_for_children(&self.layers, &parent_ctx);
+                let child_context = index.context_for_children(&self.stack, &parent_ctx);
                 self.cache.insert(path.clone(), CachedPrim { index, child_context });
                 Ok(())
             }
@@ -331,8 +325,8 @@ impl Cache {
                 continue;
             };
 
-            for li in 0..self.layers.len() {
-                if self.layers[li].has_spec(&node_child_path) {
+            for li in 0..self.stack.len() {
+                if self.stack.layer(li).has_spec(&node_child_path) {
                     let map = MapFunction::from_pair(node_child_path.clone(), child_path.clone());
                     index.push_node(Node {
                         layer_index: li,
@@ -369,8 +363,8 @@ impl Cache {
                 if alt_path == *child_path {
                     continue;
                 }
-                for li in 0..self.layers.len() {
-                    if self.layers[li].has_spec(&alt_path) {
+                for li in 0..self.stack.len() {
+                    if self.stack.layer(li).has_spec(&alt_path) {
                         let map = MapFunction::from_pair(alt_path.clone(), child_path.clone());
                         index.push_node(Node {
                             layer_index: li,
@@ -408,7 +402,11 @@ impl Cache {
                     } else {
                         ArcType::Specialize
                     };
-                    let Ok(val) = self.layers[parent_node.layer_index].get(&parent_node.path, field.as_str()) else {
+                    let Ok(val) = self
+                        .stack
+                        .layer(parent_node.layer_index)
+                        .get(&parent_node.path, field.as_str())
+                    else {
                         continue;
                     };
                     let Value::PathListOp(list_op) = val.into_owned() else {
@@ -429,8 +427,8 @@ impl Cache {
                             }
                         }
                         for check in &paths_to_check {
-                            for li in 0..self.layers.len() {
-                                if self.layers[li].has_spec(check) {
+                            for li in 0..self.stack.len() {
+                                if self.stack.layer(li).has_spec(check) {
                                     let map = MapFunction::from_pair(check.clone(), child_path.clone());
                                     index.push_node(Node {
                                         layer_index: li,
@@ -461,7 +459,11 @@ impl Cache {
         let mut result: Vec<String> = Vec::new();
 
         for node in entry.index.nodes() {
-            if let Ok(value) = self.layers[node.layer_index].get(&node.path, children_field.as_str()) {
+            if let Ok(value) = self
+                .stack
+                .layer(node.layer_index)
+                .get(&node.path, children_field.as_str())
+            {
                 if let Value::TokenVec(names) = value.into_owned() {
                     for name in names {
                         if !result.contains(&name) {
@@ -504,7 +506,7 @@ impl Cache {
         let nodes: Vec<Node> = entry.index.nodes().to_vec();
         for node in &nodes {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = self.layers[node.layer_index].get(&node.path, field.as_str()) else {
+                let Ok(val) = self.stack.layer(node.layer_index).get(&node.path, field.as_str()) else {
                     continue;
                 };
                 let Value::PathListOp(list_op) = val.into_owned() else {
@@ -533,7 +535,9 @@ impl Cache {
                     for tgt in &targets {
                         if let Some(tgt_entry) = self.cache.get(tgt) {
                             for tgt_node in tgt_entry.index.nodes() {
-                                if let Ok(val) = self.layers[tgt_node.layer_index]
+                                if let Ok(val) = self
+                                    .stack
+                                    .layer(tgt_node.layer_index)
                                     .get(&tgt_node.path, ChildrenKey::PrimChildren.as_str())
                                 {
                                     if let Value::TokenVec(names) = val.into_owned() {
@@ -551,8 +555,8 @@ impl Cache {
                     }
 
                     for tgt in &targets {
-                        for li in 0..self.layers.len() {
-                            if let Ok(val) = self.layers[li].get(tgt, ChildrenKey::PrimChildren.as_str()) {
+                        for li in 0..self.stack.len() {
+                            if let Ok(val) = self.stack.layer(li).get(tgt, ChildrenKey::PrimChildren.as_str()) {
                                 if let Value::TokenVec(names) = val.into_owned() {
                                     for name in names {
                                         if !result.contains(&name) {
@@ -584,8 +588,8 @@ impl Cache {
         visited.push(path.clone());
 
         // Direct children at this path in any layer.
-        for li in 0..self.layers.len() {
-            if let Ok(val) = self.layers[li].get(path, ChildrenKey::PrimChildren.as_str()) {
+        for li in 0..self.stack.len() {
+            if let Ok(val) = self.stack.layer(li).get(path, ChildrenKey::PrimChildren.as_str()) {
                 if let Value::TokenVec(names) = val.into_owned() {
                     for name in names {
                         if !result.contains(&name) {
@@ -598,9 +602,9 @@ impl Cache {
 
         // If no direct children found, follow the path's own inherit targets.
         if result.is_empty() {
-            for li in 0..self.layers.len() {
+            for li in 0..self.stack.len() {
                 for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                    let Ok(val) = self.layers[li].get(path, field.as_str()) else {
+                    let Ok(val) = self.stack.layer(li).get(path, field.as_str()) else {
                         continue;
                     };
                     let Value::PathListOp(list_op) = val.into_owned() else {

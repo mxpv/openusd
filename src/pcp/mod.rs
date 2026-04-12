@@ -40,7 +40,8 @@
 //!
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
-//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Precomputes sublayer stacks. |
+//! | `LayerStack` | `PcpLayerStack` | Layers, identifiers, and precomputed sublayer stacks bundled into a single unit. |
+//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
@@ -86,11 +87,94 @@ pub(crate) mod index;
 mod mapping;
 mod rel;
 
-use crate::sdf::Path;
+use std::collections::HashMap;
+
+use crate::sdf::schema::FieldKey;
+use crate::sdf::{LayerData, Path, Value};
 
 pub(crate) use cache::Cache;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
 pub use mapping::MapFunction;
+
+/// Precomputed sublayer stacks, keyed by root layer index.
+///
+/// Each entry maps a root layer to the full list of layer indices forming
+/// its sublayer stack.
+pub(crate) type SublayerStacks = HashMap<usize, Vec<usize>>;
+
+/// Loaded layers with precomputed sublayer ordering.
+///
+/// Bundles layers, their identifiers, and the precomputed sublayer stacks
+/// into a single unit passed through the composition engine. Corresponds
+/// to a simplified C++ `PcpLayerStack`.
+pub(crate) struct LayerStack {
+    /// Layer data in strength order (root layer first).
+    pub layers: Vec<LayerData>,
+    /// Layer identifiers (asset paths) matching the `layers` order.
+    pub identifiers: Vec<String>,
+    /// Precomputed sublayer stacks keyed by root layer index.
+    pub sublayer_stacks: SublayerStacks,
+}
+
+impl LayerStack {
+    /// Creates a new layer stack, precomputing sublayer ordering.
+    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>) -> Self {
+        let sublayer_stacks: SublayerStacks = (0..layers.len())
+            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers)))
+            .collect();
+        Self {
+            layers,
+            identifiers,
+            sublayer_stacks,
+        }
+    }
+
+    /// Returns the number of layers.
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// Returns `true` if there are no layers.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// Returns the layer data at the given index.
+    pub fn layer(&self, index: usize) -> &LayerData {
+        &self.layers[index]
+    }
+
+    /// Returns the layer identifier at the given index.
+    pub fn identifier(&self, index: usize) -> &str {
+        &self.identifiers[index]
+    }
+
+    /// Returns the layer indices forming a sublayer stack rooted at `root_layer`.
+    pub(crate) fn build_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[String]) -> Vec<usize> {
+        let mut stack = vec![root_layer];
+        let mut queue = vec![root_layer];
+
+        while let Some(idx) = queue.pop() {
+            let root = Path::abs_root();
+            let Ok(value) = layers[idx].get(&root, FieldKey::SubLayers.as_str()) else {
+                continue;
+            };
+            if let Value::StringVec(sub_paths) = value.into_owned() {
+                for sub_path in sub_paths {
+                    if let Some(sub_idx) = index::find_layer(&sub_path, identifiers) {
+                        if !stack.contains(&sub_idx) {
+                            stack.push(sub_idx);
+                            queue.push(sub_idx);
+                        }
+                    }
+                }
+            }
+        }
+
+        stack
+    }
+}
 
 /// An error encountered while building a [`PrimIndex`](index::PrimIndex).
 ///
