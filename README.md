@@ -22,21 +22,18 @@ For a detailed comparison with the C++ reference implementation and current prog
 ## Features
 
 - File formats — reads `.usda` (text), `.usdc` (binary), and `.usdz` (archive) with format auto-detection.
-- Composition engine ([`pcp`](src/pcp))
-  - Full [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering: sublayers, inherits, variants, references, payloads, specializes.
-  - List-edit composition (`prepend`, `append`, `add`, `delete`, `explicit`) across layers.
-  - Arena-based node graph with per-node namespace mapping (`map_to_parent`/`map_to_root`).
-  - Relocates: non-destructive namespace remapping across layers (`layerRelocates`).
-  - Variant fallbacks (`VariantFallbackMap`) for application-level default variant selections.
-  - Session layer support via `StageBuilder::session_layer` for non-persistent overrides.
-  - Cycle detection and structured error reporting via `StageBuilder::on_error` callback.
-  - Passes composition [compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
+- Fully featured [composition engine](src/pcp)
+  - [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering with sublayers, inherits, variants, references, payloads, and specializes.
+  - [List-edit composition](https://openusd.org/release/glossary.html#usdglossary-listediting) across layers.
+  - Per-prim node graph with namespace mapping across composition arcs.
+  - Non-destructive namespace remapping via [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates).
+  - [Variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html) with string interpolation and built-in functions.
+  - Passes [AOUSD compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
 - Composed [`Stage`](src/stage.rs)
-  - Lazy per-prim composition with caching.
-  - Depth-first traversal, child/property queries, typed field access via `Stage::field<T>`.
-- [Layer collection](src/layer.rs) — recursive loading with cycle detection, format auto-detection, and expression evaluation.
-- [Asset resolution](src/ar.rs) — pluggable `Resolver` trait, filesystem `DefaultResolver`, search paths, and package-relative paths.
-- [Variable expressions](src/expr.rs) — USD's [expression syntax](https://openusd.org/dev/user_guides/variable_expressions.html) with 13 built-in functions and string interpolation.
+  - Recursive layer collection with cycle detection and pluggable asset resolution.
+  - Lazy per-prim composition with caching, depth-first traversal, and typed field access.
+  - [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) and [variant fallback](https://openusd.org/release/glossary.html#usdglossary-variantset) selections via `StageBuilder`.
+  - Recoverable error handling via `StageBuilder::on_error` callback.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
