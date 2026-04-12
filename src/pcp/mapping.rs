@@ -11,29 +11,69 @@
 
 use crate::sdf::Path;
 
+/// Internal storage for path mapping pairs.
+///
+/// The single-pair variant avoids a heap allocation for the common case
+/// (one composition arc = one pair). `from_pair` and `identity` use this.
+#[derive(Debug, Clone, PartialEq)]
+enum PathMap {
+    /// No pairs (null mapping).
+    Empty,
+    /// Exactly one pair, stored inline without heap allocation.
+    Single((Path, Path)),
+    /// Multiple pairs sorted by source path length descending.
+    Multi(Vec<(Path, Path)>),
+}
+
+impl PathMap {
+    fn as_slice(&self) -> &[(Path, Path)] {
+        match self {
+            PathMap::Empty => &[],
+            PathMap::Single(pair) => std::slice::from_ref(pair),
+            PathMap::Multi(pairs) => pairs,
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            PathMap::Empty => 0,
+            PathMap::Single(_) => 1,
+            PathMap::Multi(pairs) => pairs.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, PathMap::Empty)
+    }
+}
+
 /// A namespace mapping function.
 ///
-/// Stores (source, target) path pairs sorted by source length descending
-/// for longest-prefix-first matching. The identity mapping maps `/` → `/`.
+/// Stores (source, target) path pairs for longest-prefix matching.
+/// The identity mapping maps `/` → `/`.
+///
+/// Single-pair mappings (the common case for composition arcs) are
+/// stored inline without heap allocation.
 ///
 /// Equivalent to C++ [`PcpMapFunction`](https://openusd.org/dev/api/class_pcp_map_function.html).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapFunction {
-    /// (source, target) pairs sorted by source path length descending.
-    path_map: Vec<(Path, Path)>,
+    path_map: PathMap,
 }
 
 impl MapFunction {
     /// The identity mapping: maps every absolute path to itself.
     pub fn identity() -> Self {
         Self {
-            path_map: vec![(Path::abs_root(), Path::abs_root())],
+            path_map: PathMap::Single((Path::abs_root(), Path::abs_root())),
         }
     }
 
     /// A null mapping that maps nothing.
     pub fn null() -> Self {
-        Self { path_map: Vec::new() }
+        Self {
+            path_map: PathMap::Empty,
+        }
     }
 
     /// Creates a mapping from the given (source, target) path pairs.
@@ -41,22 +81,34 @@ impl MapFunction {
     /// Pairs are sorted by source path length descending so that
     /// longest-prefix matching is a simple linear scan.
     pub fn new(pairs: impl Into<Vec<(Path, Path)>>) -> Self {
-        let mut path_map: Vec<(Path, Path)> = pairs.into();
-        // Sort by source path length descending for longest-prefix-first.
-        path_map.sort_by(|a, b| b.0.as_str().len().cmp(&a.0.as_str().len()));
-        Self { path_map }
+        let mut pairs: Vec<(Path, Path)> = pairs.into();
+        match pairs.len() {
+            0 => Self::null(),
+            1 => Self {
+                path_map: PathMap::Single(pairs.remove(0)),
+            },
+            _ => {
+                // Sort by source path length descending for longest-prefix-first.
+                pairs.sort_by(|a, b| b.0.as_str().len().cmp(&a.0.as_str().len()));
+                Self {
+                    path_map: PathMap::Multi(pairs),
+                }
+            }
+        }
     }
 
     /// Creates a single-pair mapping (the common case for composition arcs).
     pub fn from_pair(source: Path, target: Path) -> Self {
         Self {
-            path_map: vec![(source, target)],
+            path_map: PathMap::Single((source, target)),
         }
     }
 
     /// Returns `true` if this is an identity mapping.
     pub fn is_identity(&self) -> bool {
-        self.path_map.len() == 1 && self.path_map[0].0.as_str() == "/" && self.path_map[0].1.as_str() == "/"
+        self.path_map.len() == 1
+            && self.path_map.as_slice()[0].0.as_str() == "/"
+            && self.path_map.as_slice()[0].1.as_str() == "/"
     }
 
     /// Returns `true` if this mapping has pairs but none of them remap.
@@ -65,7 +117,7 @@ impl MapFunction {
     /// identity. Returns `false` for null (empty) mappings — a null mapping
     /// maps *nothing*, which is distinct from "maps but changes nothing".
     pub fn is_noop(&self) -> bool {
-        !self.path_map.is_empty() && self.path_map.iter().all(|(s, t)| s == t)
+        !self.path_map.is_empty() && self.path_map.as_slice().iter().all(|(s, t)| s == t)
     }
 
     /// Returns `true` if this mapping maps nothing.
@@ -75,7 +127,7 @@ impl MapFunction {
 
     /// Returns the (source, target) path pairs.
     pub fn path_pairs(&self) -> &[(Path, Path)] {
-        &self.path_map
+        self.path_map.as_slice()
     }
 
     /// Maps a path from the source namespace to the target namespace.
@@ -83,7 +135,7 @@ impl MapFunction {
     /// Finds the longest source prefix that matches `path` and applies
     /// [`Path::replace_prefix`] to translate it.
     pub fn map_source_to_target(&self, path: &Path) -> Option<Path> {
-        for (source, target) in &self.path_map {
+        for (source, target) in self.path_map.as_slice() {
             if let Some(mapped) = path.replace_prefix(source, target) {
                 return Some(mapped);
             }
@@ -99,7 +151,7 @@ impl MapFunction {
         // Target entries are not sorted by length, so find the longest match.
         let mut best: Option<Path> = None;
         let mut best_len = 0;
-        for (source, target) in &self.path_map {
+        for (source, target) in self.path_map.as_slice() {
             let tgt_len = target.as_str().len();
             if tgt_len > best_len {
                 if let Some(mapped) = path.replace_prefix(target, source) {
@@ -126,7 +178,7 @@ impl MapFunction {
         }
 
         let mut pairs = Vec::new();
-        for (inner_src, inner_tgt) in &inner.path_map {
+        for (inner_src, inner_tgt) in inner.path_map.as_slice() {
             if let Some(composed_tgt) = self.map_source_to_target(inner_tgt) {
                 pairs.push((inner_src.clone(), composed_tgt));
             }
@@ -136,7 +188,12 @@ impl MapFunction {
 
     /// Returns the inverse mapping (swaps source and target in each pair).
     pub fn inverse(&self) -> MapFunction {
-        let pairs: Vec<_> = self.path_map.iter().map(|(s, t)| (t.clone(), s.clone())).collect();
+        let pairs: Vec<_> = self
+            .path_map
+            .as_slice()
+            .iter()
+            .map(|(s, t)| (t.clone(), s.clone()))
+            .collect();
         MapFunction::new(pairs)
     }
 }
@@ -241,5 +298,20 @@ mod tests {
         let outer = MapFunction::new(vec![(p("/C"), p("/D"))]);
         let composed = outer.compose(&inner);
         assert_eq!(composed.map_source_to_target(&p("/A")), None);
+    }
+
+    #[test]
+    fn from_pair_is_single() {
+        let m = MapFunction::from_pair(p("/A"), p("/B"));
+        assert!(matches!(m.path_map, PathMap::Single(_)));
+        assert_eq!(m.map_source_to_target(&p("/A")), Some(p("/B")));
+        assert_eq!(m.map_source_to_target(&p("/A/C")), Some(p("/B/C")));
+        assert_eq!(m.map_target_to_source(&p("/B")), Some(p("/A")));
+    }
+
+    #[test]
+    fn new_single_pair_uses_single_variant() {
+        let m = MapFunction::new(vec![(p("/X"), p("/Y"))]);
+        assert!(matches!(m.path_map, PathMap::Single(_)));
     }
 }
