@@ -27,7 +27,7 @@ Comparison with the C++ reference implementation ([OpenUSD](https://github.com/P
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | :construction: Planned | | Non-destructive override layer on top of root |
 | [Layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset) | :construction: Planned | | Time scale/offset for sublayers and references (already parsed) |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | :construction: Planned | | Dynamic include/exclude set for deferred payloads |
-| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :construction: Planned | | Non-destructive namespace reorganization |
+| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | :white_check_mark: Supported | | Non-destructive namespace remapping via `layerRelocates` |
 | [Incremental invalidation](https://openusd.org/release/api/class_pcp_changes.html) | :thinking: Considering | | Dependency tracking and change processing (`PcpChanges`) |
 | Composition graph visualization | :thinking: Considering | | `dot` format export for debugging composition |
 | [Map functions](https://openusd.org/release/api/class_pcp_map_function.html) | :white_check_mark: Supported | | `map_to_parent`/`map_to_root` namespace translation on nodes via `MapFunction` |
