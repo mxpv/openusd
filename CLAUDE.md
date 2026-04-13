@@ -63,6 +63,14 @@ cargo deny check
 cargo run --example dump_usdc -- path/to/file.usd
 ```
 
+## Planning New Features
+
+When implementing a new feature from the spec:
+
+1. Read `docs/aousd_core_spec_1.0.1.pdf` to understand how the feature works and what it does
+2. Research how the C++ OpenUSD implementation handles it: https://github.com/PixarAnimationStudios/OpenUSD
+3. Review the Python reference implementation if applicable: `vendor/core-spec-supplemental-release_dec2025/`
+
 ## Code Standards
 
 - Project targets Rust version specified in `rust-toolchain.toml` with MSRV defined in `clippy.toml`
@@ -80,6 +88,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead
 - Never remove comments during refactoring if they are still applicable
 - Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
+- Avoid raw path string manipulations; use `Path` methods instead of building or parsing path strings manually
 - Don't add "Generated with Claude Code" or "Co-Authored-By: Claude" to commits, PRs, or release notes
 
 ## Testing

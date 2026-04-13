@@ -10,13 +10,14 @@ Commit the current changes. Additional context from the user: $ARGUMENTS
 
 Follow these steps:
 
-1. **Pre-flight checks**: Run these in parallel:
+1. **Pre-flight checks** (skip if no `.rs`, `Cargo.toml`, or `Cargo.lock` files were changed):
+   Run these in parallel:
    - `cargo fmt --all -- --check --files-with-diff`
    - `cargo clippy --all-targets --all-features -- -D warnings`
    - `cargo test --all-targets --all-features`
    - If a check fails, try to fix it automatically for simple cases (e.g. run `cargo fmt` for formatting failures). For complex failures, stop and report.
 
-2. **Verify test coverage**:
+2. **Verify test coverage** (skip if no code changes):
    - Check if the changes are covered by existing tests.
    - If new functionality was added without tests, add them before proceeding.
 
