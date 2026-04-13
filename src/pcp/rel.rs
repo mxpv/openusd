@@ -583,7 +583,7 @@ impl Relocates {
     /// Pushes a Relocate-arc node into the index, mapping `source_path` to
     /// `composed_path`.
     fn push_relocate_node(index: &mut PrimIndex, layer_index: usize, source_path: &Path, composed_path: &Path) {
-        let m = MapFunction::from_pair(source_path.clone(), composed_path.clone());
+        let m = MapFunction::from_pair_identity(source_path.clone(), composed_path.clone());
         index.insert_relocate_node(Node {
             layer_index,
             path: source_path.clone(),

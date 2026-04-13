@@ -644,7 +644,7 @@ impl<'a> IndexBuilder<'a> {
                 if let Some(cached) = self.cached_indices.get(&remapped) {
                     for node in cached.nodes() {
                         if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                            let implied_map = MapFunction::from_pair(node.path.clone(), remapped.clone());
+                            let implied_map = MapFunction::from_pair_identity(node.path.clone(), remapped.clone());
                             self.output.add_child(
                                 NodeIndex::INVALID,
                                 origin,
@@ -657,7 +657,7 @@ impl<'a> IndexBuilder<'a> {
                     }
                 } else {
                     // Fallback: check individual layers for direct specs.
-                    let implied_map = MapFunction::from_pair(node_path.clone(), remapped.clone());
+                    let implied_map = MapFunction::from_pair_identity(node_path.clone(), remapped.clone());
                     for li in 0..self.stack.len() {
                         if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
                             self.output.add_child(
@@ -684,7 +684,7 @@ impl<'a> IndexBuilder<'a> {
                     if self.stack.layer(li).has_spec(&other_remapped)
                         && self.seen.insert((li, other_remapped.clone(), arc))
                     {
-                        let other_map = MapFunction::from_pair(node_path.clone(), other_remapped.clone());
+                        let other_map = MapFunction::from_pair_identity(node_path.clone(), other_remapped.clone());
                         self.output
                             .add_child(NodeIndex::INVALID, origin, li, other_remapped, arc, other_map);
                     }
@@ -748,7 +748,7 @@ impl<'a> IndexBuilder<'a> {
         for node in target_index.nodes() {
             if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
                 // Each node maps from its own path to the parent's composed path.
-                let node_map = MapFunction::from_pair(node.path.clone(), parent_path.clone());
+                let node_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone());
                 self.output.add_child(
                     parent,
                     NodeIndex::INVALID,
@@ -766,7 +766,7 @@ impl<'a> IndexBuilder<'a> {
     /// the index range of newly added nodes.
     fn add_variant_nodes(&mut self, variant_path: &Path, base: &Path, parent: NodeIndex) -> (usize, usize) {
         let start = self.output.len();
-        let variant_map = MapFunction::from_pair(variant_path.clone(), base.clone());
+        let variant_map = MapFunction::from_pair_identity(variant_path.clone(), base.clone());
         for (i, layer) in self.stack.layers.iter().enumerate() {
             if layer.has_spec(variant_path) && self.seen.insert((i, variant_path.clone(), ArcType::Variant)) {
                 self.output.add_child(

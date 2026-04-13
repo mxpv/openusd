@@ -14,7 +14,10 @@ use crate::sdf::Path;
 /// Internal storage for path mapping pairs.
 ///
 /// The single-pair variant avoids a heap allocation for the common case
-/// (one composition arc = one pair). `from_pair` and `identity` use this.
+/// (one composition arc = one pair). [`from_pair`](MapFunction::from_pair)
+/// and [`identity`](MapFunction::identity) use this.
+/// [`from_pair_identity`](MapFunction::from_pair_identity) uses the multi
+/// variant to store the explicit pair alongside the `(/, /)` catch-all.
 #[derive(Debug, Clone, PartialEq)]
 enum PathMap {
     /// No pairs (null mapping).
@@ -97,11 +100,33 @@ impl MapFunction {
         }
     }
 
-    /// Creates a single-pair mapping (the common case for composition arcs).
+    /// Creates a single-pair mapping without the `(/, /)` identity catch-all.
+    ///
+    /// Paths outside the explicit domain return `None` from
+    /// [`map_source_to_target`]. Used for external references and payloads
+    /// where the mapping crosses layer stack boundaries and the domain is
+    /// restricted to the referenced prim's namespace (spec 10.3.2.1.1).
+    ///
+    /// See [`from_pair_identity`](Self::from_pair_identity) for the variant
+    /// with identity, used for most composition arcs.
     pub fn from_pair(source: Path, target: Path) -> Self {
         Self {
             path_map: PathMap::Single((source, target)),
         }
+    }
+
+    /// Creates a mapping with one explicit pair plus the `(/, /)` identity
+    /// catch-all so that paths outside the explicit domain map to themselves.
+    ///
+    /// This is the standard mapping for composition arcs that operate within
+    /// the same layer stack: inherits (spec 10.3.2.3.1), specializes
+    /// (10.3.2.4.1), internal references (10.3.2.1.1), variants, and
+    /// relocates.
+    ///
+    /// See [`from_pair`](Self::from_pair) for the variant without identity,
+    /// used for external references and payloads.
+    pub fn from_pair_identity(source: Path, target: Path) -> Self {
+        Self::new(vec![(source, target), (Path::abs_root(), Path::abs_root())])
     }
 
     /// Returns `true` if this is an identity mapping.
@@ -306,7 +331,63 @@ mod tests {
         assert!(matches!(m.path_map, PathMap::Single(_)));
         assert_eq!(m.map_source_to_target(&p("/A")), Some(p("/B")));
         assert_eq!(m.map_source_to_target(&p("/A/C")), Some(p("/B/C")));
+        assert_eq!(m.map_source_to_target(&p("/Other")), None);
         assert_eq!(m.map_target_to_source(&p("/B")), Some(p("/A")));
+    }
+
+    #[test]
+    fn from_pair_identity_includes_catch_all() {
+        let m = MapFunction::from_pair_identity(p("/A"), p("/B"));
+        // Explicit pair maps normally.
+        assert_eq!(m.map_source_to_target(&p("/A")), Some(p("/B")));
+        assert_eq!(m.map_source_to_target(&p("/A/C")), Some(p("/B/C")));
+        // Identity catch-all passes through unmatched paths.
+        assert_eq!(m.map_source_to_target(&p("/Other")), Some(p("/Other")));
+        assert_eq!(m.map_source_to_target(&p("/Other/D")), Some(p("/Other/D")));
+        // Reverse mapping works the same way.
+        assert_eq!(m.map_target_to_source(&p("/B")), Some(p("/A")));
+        assert_eq!(m.map_target_to_source(&p("/Other")), Some(p("/Other")));
+    }
+
+    #[test]
+    fn from_pair_identity_is_not_identity() {
+        let m = MapFunction::from_pair_identity(p("/A"), p("/B"));
+        assert!(!m.is_identity());
+        assert!(!m.is_noop());
+        assert!(!m.is_null());
+    }
+
+    #[test]
+    fn from_pair_identity_noop_when_same_source_target() {
+        // When source == target, the explicit pair is a no-op but the
+        // mapping still carries the identity catch-all.
+        let m = MapFunction::from_pair_identity(p("/A"), p("/A"));
+        assert!(!m.is_identity());
+        assert!(m.is_noop());
+        assert_eq!(m.map_source_to_target(&p("/A")), Some(p("/A")));
+        assert_eq!(m.map_source_to_target(&p("/Other")), Some(p("/Other")));
+    }
+
+    #[test]
+    fn compose_with_identity_pairs() {
+        // Both mappings carry the identity catch-all.
+        let inner = MapFunction::from_pair_identity(p("/B"), p("/A"));
+        let outer = MapFunction::from_pair_identity(p("/A"), p("/C"));
+        let composed = outer.compose(&inner);
+        assert_eq!(composed.map_source_to_target(&p("/B")), Some(p("/C")));
+        assert_eq!(composed.map_source_to_target(&p("/B/X")), Some(p("/C/X")));
+        // Identity catch-all propagates through composition.
+        assert_eq!(composed.map_source_to_target(&p("/Other")), Some(p("/Other")));
+    }
+
+    #[test]
+    fn inverse_preserves_identity_pair() {
+        let m = MapFunction::from_pair_identity(p("/Src"), p("/Tgt"));
+        let inv = m.inverse();
+        assert_eq!(inv.map_source_to_target(&p("/Tgt")), Some(p("/Src")));
+        assert_eq!(inv.map_source_to_target(&p("/Tgt/Child")), Some(p("/Src/Child")));
+        // Identity catch-all survives inversion.
+        assert_eq!(inv.map_source_to_target(&p("/Other")), Some(p("/Other")));
     }
 
     #[test]
