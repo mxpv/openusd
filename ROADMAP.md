@@ -67,24 +67,24 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | [Sublayers](https://openusd.org/release/glossary.html#usdglossary-sublayers) | `10.3.1` | :white_check_mark: | `0.1.2` | Layer stack construction |
 | Sublayer time offsets | `10.3.1.1` | :construction: | | Parsed but not applied during composition |
 | [References](https://openusd.org/release/api/class_usd_references.html) (internal + external) | `10.3.2.1` | :white_check_mark: | `0.1.2` | Including `defaultPrim` fallback |
-| Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `main` | `MapFunction` with source/target pairs |
+| Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
 | Reference time offsets | `10.3.2.1.2` | :construction: | | Parsed but not applied during composition |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :construction: | | No mechanism to exclude payloads |
 | Payload time offsets | `10.3.2.2.2` | :construction: | | Parsed but not applied during composition |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
-| Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `main` | `from_pair_identity` adds `(/, /)` catch-all |
+| Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |
-| Specializes global weakness | `10.4.1` | :white_check_mark: | `main` | Stable-partition reorders specialize-introduced nodes after all others |
+| Specializes global weakness | `10.4.1` | :white_check_mark: | `0.3.0` | Stable-partition reorders specialize-introduced nodes after all others |
 | [Variants](https://openusd.org/release/api/class_usd_variant_sets.html) | `10.3.2.5` | :white_check_mark: | `0.2.0` | Including deferred evaluation after R/P |
 | Variant selection computation | `10.3.2.5.1` | :white_check_mark: | `0.2.0` | Strongest opinion wins, fallback to first variant |
-| Variant fallback map | `10.3.2.5.1` | :white_check_mark: | `main` | `VariantFallbackMap` via `StageBuilder` |
-| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | `10.3.2.6` | :white_check_mark: | `main` | `layerRelocates`, source path resolution, child remapping |
+| Variant fallback map | `10.3.2.5.1` | :white_check_mark: | `0.3.0` | `VariantFallbackMap` via `StageBuilder` |
+| [Relocates](https://openusd.org/release/glossary.html#usdglossary-relocates) | `10.3.2.6` | :white_check_mark: | `0.3.0` | `layerRelocates`, source path resolution, child remapping |
 | Relocates validation rules | `10.3.2.6` | :construction: | | 7 restriction checks not enforced |
-| Relocates namespace mapping | `10.3.2.6.1` | :white_check_mark: | `main` | Composed with reference arc mappings |
-| [LIVERPS strength ordering](https://openusd.org/release/glossary.html#livrps-strength-ordering) | `10.4` | :white_check_mark: | `main` | `ArcType` with `Ord` derived from discriminant |
-| [Namespace mappings](https://openusd.org/release/api/class_pcp_map_function.html) (MapFunction) | `10.5` | :white_check_mark: | `main` | Compose, inverse, longest-prefix matching |
-| Composition errors (non-fatal) | `10.6` | :white_check_mark: | `main` | `pcp::Error` with `StageBuilder::on_error` callback |
+| Relocates namespace mapping | `10.3.2.6.1` | :white_check_mark: | `0.3.0` | Composed with reference arc mappings |
+| [LIVERPS strength ordering](https://openusd.org/release/glossary.html#livrps-strength-ordering) | `10.4` | :white_check_mark: | `0.3.0` | `ArcType` with `Ord` derived from discriminant |
+| [Namespace mappings](https://openusd.org/release/api/class_pcp_map_function.html) (MapFunction) | `10.5` | :white_check_mark: | `0.3.0` | Compose, inverse, longest-prefix matching |
+| Composition errors (non-fatal) | `10.6` | :white_check_mark: | `0.3.0` | `pcp::Error` with `StageBuilder::on_error` callback |
 | List op arc computation | `10.3.2` | :white_check_mark: | `0.2.0` | Weakest-to-strongest list-op chaining |
 
 ## Stage Population (Spec 11)
@@ -101,7 +101,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :construction: | | `instanceable` readable; shared representation not implemented |
 | Model hierarchy (kind) | `11.4` | :construction: | | `kind` readable; hierarchy validation not implemented |
 | [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :construction: | | Predicate flags for traversal filtering |
-| [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | `11.2` | :white_check_mark: | `main` | `StageBuilder::session_layer` |
+| [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | `11.2` | :white_check_mark: | `0.3.0` | `StageBuilder::session_layer` |
 
 ## Value Resolution (Spec 12)
 
