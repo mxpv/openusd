@@ -82,6 +82,10 @@ pub struct Node {
     /// Maps paths from this node's namespace directly to the root namespace.
     /// Computed as `parent.map_to_root.compose(self.map_to_parent)`.
     pub map_to_root: MapFunction,
+    /// True when this node was introduced through a specializes composition
+    /// arc (directly or transitively). Nodes with this flag are globally
+    /// weaker than all other opinions per spec section 10.4.1.
+    pub(crate) introduced_by_specialize: bool,
 }
 
 /// Arena-based composition graph.
@@ -112,11 +116,11 @@ impl PrimIndexGraph {
     fn add_child(
         &mut self,
         parent: NodeIndex,
-        _origin: NodeIndex,
         layer_index: usize,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
+        introduced_by_specialize: bool,
     ) -> NodeIndex {
         let map_to_root = if parent.is_valid() {
             self.nodes[parent.idx()].map_to_root.compose(&map_to_parent)
@@ -130,6 +134,7 @@ impl PrimIndexGraph {
             arc,
             map_to_parent,
             map_to_root,
+            introduced_by_specialize,
         });
         idx
     }
@@ -349,6 +354,10 @@ struct IndexBuilder<'a> {
     /// Builder-local cache of target indices for inherit/specialize/internal-ref
     /// targets. Avoids rebuilding the same target within a single prim's composition.
     target_indices: HashMap<Path, PrimIndex>,
+    /// True when evaluation is within a specializes arc context.
+    /// All nodes created while true are marked for global weakness
+    /// reordering per spec section 10.4.1.
+    in_specialize: bool,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -361,6 +370,7 @@ impl<'a> IndexBuilder<'a> {
             seen: HashSet::new(),
             eval_stack: HashSet::new(),
             target_indices: HashMap::new(),
+            in_specialize: false,
         }
     }
 
@@ -409,7 +419,24 @@ impl<'a> IndexBuilder<'a> {
 
         // Loop until stable: R/P arcs may introduce variant sets that V
         // hadn't seen. Re-resolve variants and follow any new arcs.
-        self.stabilize()
+        self.stabilize()?;
+
+        // Global weakness: specializes opinions are globally weaker than all
+        // other opinions (spec 10.4.1). Stable-partition so non-specialize
+        // nodes come first, preserving relative order within each group.
+        self.apply_specialize_weakness();
+
+        Ok(())
+    }
+
+    /// Reorders nodes so that all opinions introduced through specializes arcs
+    /// appear after all other opinions, implementing the global weakness
+    /// requirement from spec section 10.4.1.
+    fn apply_specialize_weakness(&mut self) {
+        // Stable sort with a bool key (false < true) acts as an in-place
+        // stable partition: non-specialize nodes stay first, specialize nodes
+        // move to the end, and relative order within each group is preserved.
+        self.output.nodes.sort_by_key(|n| n.introduced_by_specialize);
     }
 
     /// Re-resolve variants across all accumulated nodes until no new nodes
@@ -442,6 +469,13 @@ impl<'a> IndexBuilder<'a> {
                     }
                     let base_node = NodeIndex(idx as u32);
                     let base_prim_path = self.output[idx].path.clone();
+
+                    // Propagate specialize context from base node for global weakness.
+                    let prev_in_specialize = self.in_specialize;
+                    if self.output[idx].introduced_by_specialize {
+                        self.in_specialize = true;
+                    }
+
                     let (start, end) = self.add_variant_nodes(&variant_path, &base_prim_path, base_node);
                     // Follow arcs from newly discovered variant nodes.
                     if start < end {
@@ -470,6 +504,8 @@ impl<'a> IndexBuilder<'a> {
                             )?;
                         }
                     }
+
+                    self.in_specialize = prev_in_specialize;
                 }
             }
 
@@ -515,7 +551,14 @@ impl<'a> IndexBuilder<'a> {
             });
         }
 
+        // Track specialize context for global weakness (spec 10.4.1).
+        let prev_in_specialize = self.in_specialize;
+        if arc == ArcType::Specialize {
+            self.in_specialize = true;
+        }
+
         let result = self.eval_site_body(path, layer_stack, arc, depth, parent, map_to_parent);
+        self.in_specialize = prev_in_specialize;
         self.eval_stack.remove(&site_key);
         result
     }
@@ -539,7 +582,7 @@ impl<'a> IndexBuilder<'a> {
             if self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
                 let idx =
                     self.output
-                        .add_child(parent, NodeIndex::INVALID, i, path.clone(), arc, map_to_parent.clone());
+                        .add_child(parent, i, path.clone(), arc, map_to_parent.clone(), self.in_specialize);
                 if !site_node.is_valid() {
                     site_node = idx;
                 }
@@ -625,6 +668,13 @@ impl<'a> IndexBuilder<'a> {
         if self.ctx.ancestor_arcs.is_empty() {
             return;
         }
+
+        // Track specialize context for global weakness (spec 10.4.1).
+        let prev_in_specialize = self.in_specialize;
+        if arc == ArcType::Specialize {
+            self.in_specialize = true;
+        }
+
         let paths_to_check: Vec<Path> = self.output[start..]
             .iter()
             .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
@@ -647,11 +697,11 @@ impl<'a> IndexBuilder<'a> {
                             let implied_map = MapFunction::from_pair_identity(node.path.clone(), remapped.clone());
                             self.output.add_child(
                                 NodeIndex::INVALID,
-                                origin,
                                 node.layer_index,
                                 node.path.clone(),
                                 arc,
                                 implied_map,
+                                self.in_specialize,
                             );
                         }
                     }
@@ -662,11 +712,11 @@ impl<'a> IndexBuilder<'a> {
                         if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
                             self.output.add_child(
                                 NodeIndex::INVALID,
-                                origin,
                                 li,
                                 remapped.clone(),
                                 arc,
                                 implied_map.clone(),
+                                self.in_specialize,
                             );
                         }
                     }
@@ -686,11 +736,13 @@ impl<'a> IndexBuilder<'a> {
                     {
                         let other_map = MapFunction::from_pair_identity(node_path.clone(), other_remapped.clone());
                         self.output
-                            .add_child(NodeIndex::INVALID, origin, li, other_remapped, arc, other_map);
+                            .add_child(origin, li, other_remapped, arc, other_map, self.in_specialize);
                     }
                 }
             }
         }
+
+        self.in_specialize = prev_in_specialize;
     }
 
     fn get_sublayer_stack(&self, root_layer: usize) -> Vec<usize> {
@@ -707,6 +759,12 @@ impl<'a> IndexBuilder<'a> {
     /// ancestor-propagated specs), then the builder-local cache, and finally
     /// builds from scratch with the current prim's context.
     fn merge_full_index(&mut self, target: &Path, arc: ArcType, parent: NodeIndex) -> Result<(), Error> {
+        // Track specialize context for global weakness (spec 10.4.1).
+        let prev_in_specialize = self.in_specialize;
+        if arc == ArcType::Specialize {
+            self.in_specialize = true;
+        }
+
         if !self.target_indices.contains_key(target) {
             // Prefer the composition cache — it has the fully-composed result
             // including propagate_parent_specs.
@@ -751,14 +809,16 @@ impl<'a> IndexBuilder<'a> {
                 let node_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone());
                 self.output.add_child(
                     parent,
-                    NodeIndex::INVALID,
                     node.layer_index,
                     node.path.clone(),
                     arc,
                     node_map,
+                    self.in_specialize,
                 );
             }
         }
+
+        self.in_specialize = prev_in_specialize;
         Ok(())
     }
 
@@ -771,11 +831,11 @@ impl<'a> IndexBuilder<'a> {
             if layer.has_spec(variant_path) && self.seen.insert((i, variant_path.clone(), ArcType::Variant)) {
                 self.output.add_child(
                     parent,
-                    NodeIndex::INVALID,
                     i,
                     variant_path.clone(),
                     ArcType::Variant,
                     variant_map.clone(),
+                    self.in_specialize,
                 );
             }
         }
@@ -1607,6 +1667,7 @@ def "Prim" (
             arc,
             map_to_parent: MapFunction::identity(),
             map_to_root: MapFunction::identity(),
+            introduced_by_specialize: false,
         };
 
         let mut index = PrimIndex::default();
@@ -1637,6 +1698,136 @@ def "Prim" (
         );
     }
 
+    /// Helper: path into the spec supplemental composition test assets.
+    fn spec_composition_path(relative: &str) -> String {
+        format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/{relative}",
+            manifest_dir()
+        )
+    }
+
+    /// Helper: extracts filename from an identifier (e.g. "/path/to/root.usd" → "root.usd").
+    fn layer_name(identifier: &str) -> &str {
+        identifier.rsplit('/').next().unwrap_or(identifier)
+    }
+
+    /// Formats a prim stack as a vec of (layer_name, path) pairs for assertion.
+    fn prim_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String)> {
+        index
+            .nodes()
+            .iter()
+            .map(|n| {
+                (
+                    layer_name(stack.identifier(n.layer_index)).to_owned(),
+                    n.path.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Validates that specializes opinions are globally weaker than all other
+    /// opinions. Matches the expected prim stack from the vendor test baseline
+    /// (spec 10.4.1 — specializes global weakness).
+    #[test]
+    fn specialize_global_weakness_basic() -> Result<()> {
+        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&stack, "/Root");
+
+        // Expected from pcp.txt:
+        //   root.usd  /Root          (Root)
+        //   ref.usd   /Ref           (Reference)
+        //   ref2.usd  /Ref           (Reference)
+        //   root.usd  /Specializes   (Specialize — globally weak)
+        //   ref.usd   /Specializes   (Specialize)
+        //   ref2.usd  /Specializes   (Specialize)
+        //   root.usd  /Base          (Specialize)
+        //   ref.usd   /Base          (Specialize)
+        //   ref2.usd  /Base          (Specialize)
+        let ps = prim_stack(&index, &stack);
+        assert_eq!(
+            ps,
+            vec![
+                ("root.usd".into(), "/Root".into()),
+                ("ref.usd".into(), "/Ref".into()),
+                ("ref2.usd".into(), "/Ref".into()),
+                ("root.usd".into(), "/Specializes".into()),
+                ("ref.usd".into(), "/Specializes".into()),
+                ("ref2.usd".into(), "/Specializes".into()),
+                ("root.usd".into(), "/Base".into()),
+                ("ref.usd".into(), "/Base".into()),
+                ("ref2.usd".into(), "/Base".into()),
+            ]
+        );
+
+        // Verify the introduced_by_specialize flag: first 3 nodes are non-specialize,
+        // remaining 6 are specialize.
+        for node in &index.nodes()[..3] {
+            assert!(
+                !node.introduced_by_specialize,
+                "node {:?} should not be specialize",
+                node.path
+            );
+        }
+        for node in &index.nodes()[3..] {
+            assert!(
+                node.introduced_by_specialize,
+                "node {:?} should be specialize",
+                node.path
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Validates global weakness with multiple specializes arcs. Specializes
+    /// opinions from both targets appear after all reference opinions.
+    #[test]
+    fn specialize_global_weakness_multiple() -> Result<()> {
+        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&stack, "/MultipleSpecializes");
+
+        // Non-specialize opinions must come before all specialize opinions.
+        let first_spec = index
+            .nodes()
+            .iter()
+            .position(|n| n.introduced_by_specialize)
+            .expect("should have specialize nodes");
+        assert!(first_spec >= 2, "at least Root + Reference before specializes");
+
+        // All nodes after the first specialize must also be specialize.
+        for node in &index.nodes()[first_spec..] {
+            assert!(
+                node.introduced_by_specialize,
+                "node {:?} should be globally weak",
+                node.path
+            );
+        }
+        Ok(())
+    }
+
+    /// Without references, specializes still appear after local opinions in
+    /// the correct chain order.
+    #[test]
+    fn specialize_chain_ordering() -> Result<()> {
+        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&stack, "/Basic");
+
+        // Expected from pcp.txt:
+        //   root.usd  /Basic               (Root)
+        //   root.usd  /BasicSpecializes1   (Specialize)
+        //   root.usd  /BasicSpecializes2   (Specialize)
+        let ps = prim_stack(&index, &stack);
+        assert_eq!(
+            ps,
+            vec![
+                ("root.usd".into(), "/Basic".into()),
+                ("root.usd".into(), "/BasicSpecializes1".into()),
+                ("root.usd".into(), "/BasicSpecializes2".into()),
+            ]
+        );
+        Ok(())
+    }
+
     #[test]
     fn insert_relocate_node_appends_when_no_rps() {
         let p = |s: &str| Path::from(s.to_string());
@@ -1646,6 +1837,7 @@ def "Prim" (
             arc,
             map_to_parent: MapFunction::identity(),
             map_to_root: MapFunction::identity(),
+            introduced_by_specialize: false,
         };
 
         let mut index = PrimIndex::default();

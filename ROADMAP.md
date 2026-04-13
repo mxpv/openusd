@@ -75,7 +75,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `main` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |
-| Specializes global weakness | `10.4.1` | :construction: | | Spec requires specializes opinions to be globally weaker |
+| Specializes global weakness | `10.4.1` | :white_check_mark: | `main` | Stable-partition reorders specialize-introduced nodes after all others |
 | [Variants](https://openusd.org/release/api/class_usd_variant_sets.html) | `10.3.2.5` | :white_check_mark: | `0.2.0` | Including deferred evaluation after R/P |
 | Variant selection computation | `10.3.2.5.1` | :white_check_mark: | `0.2.0` | Strongest opinion wins, fallback to first variant |
 | Variant fallback map | `10.3.2.5.1` | :white_check_mark: | `main` | `VariantFallbackMap` via `StageBuilder` |

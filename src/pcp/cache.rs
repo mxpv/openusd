@@ -376,6 +376,7 @@ impl Cache {
                         arc: parent_node.arc,
                         map_to_parent: map.clone(),
                         map_to_root: map,
+                        introduced_by_specialize: parent_node.introduced_by_specialize,
                     });
                 }
             }
@@ -414,6 +415,7 @@ impl Cache {
                             arc: ancestor.arc,
                             map_to_parent: map.clone(),
                             map_to_root: map,
+                            introduced_by_specialize: ancestor.arc == ArcType::Specialize,
                         });
                     }
                 }
@@ -476,6 +478,8 @@ impl Cache {
                                         arc,
                                         map_to_parent: map.clone(),
                                         map_to_root: map,
+                                        introduced_by_specialize: arc == ArcType::Specialize
+                                            || parent_node.introduced_by_specialize,
                                     });
                                 }
                             }

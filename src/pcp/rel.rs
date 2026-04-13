@@ -590,6 +590,7 @@ impl Relocates {
             arc: ArcType::Relocate,
             map_to_parent: m.clone(),
             map_to_root: m,
+            introduced_by_specialize: false,
         });
     }
 }
