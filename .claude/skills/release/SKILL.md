@@ -20,6 +20,7 @@ Follow these steps:
 3. **Generate changelog**:
    - Run `git describe --tags --abbrev=0` to find the previous tag, then `git log <prev_tag>..HEAD --pretty=format:"- %s (%h)"` to list commits.
    - Start with a brief, natural summary (2-4 sentences). Write it like a human would in a project update — e.g. "This release introduces the PCP composition engine with full LIVRPS arc support including relocates." Don't enumerate changes in the summary — capture the overall narrative in plain language.
+   - After the summary, add a "Compliance" section. Introduce it with "New [AOUSD Core Spec](docs/aousd_core_spec_1.0.1.pdf) coverage in this release:" then list newly covered spec items. Check ROADMAP.md for features marked with `main` (about to become this version). Format each item as `` `<section>` <name> `` (e.g. `` `10.3.2.6` Relocates ``). Skip this section if no new spec coverage was added.
    - Then list the detailed changes: group commits by area (composition engine, text parser, binary reader, stage, asset resolution, etc.) and then by type (features, fixes, dependencies). Keep each commit as its own line — do not merge distinct features into one bullet.
    - Filter out noise (formatting, CI, README updates, CLAUDE.md).
    - Wrap code identifiers (types, functions, methods, traits, modules, flags, etc.) and crate names/versions in backticks, e.g. `- Add \`ListOp::compose_over\` for list-edit composition (82845fd)`.
