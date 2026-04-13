@@ -177,6 +177,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consumes and returns an identifier or keyword-as-name token.
+    ///
+    /// Unlike `expect_identifier`, this also accepts keyword tokens (e.g. `rel`, `kind`)
+    /// via `keyword_lexeme`, allowing them to be used as property or relationship names.
+    fn expect_name(&mut self) -> Result<&'a str> {
+        let token = self.fetch_next()?;
+        match token {
+            Token::Identifier(s) | Token::NamespacedIdentifier(s) => Ok(s),
+            other => other
+                .keyword_lexeme()
+                .ok_or_else(|| anyhow!("expected name, got {other:?}")),
+        }
+    }
+
     /// Tries to consume a list-op keyword (`add`, `append`, `prepend`, `delete`, `reorder`).
     fn try_list_op(&mut self) -> Option<Token<'a>> {
         match self.peek_next() {
@@ -243,13 +257,13 @@ impl<'a> Parser<'a> {
 
         const KNOWN_PROPS: &[(&str, TypeInfo)] = &[
             (FieldKey::DefaultPrim.as_str(), TypeInfo::scalar(Type::Token)),
-            (FieldKey::StartTimeCode.as_str(), TypeInfo::scalar(Type::Uint64)),
-            (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::array(Type::String)),
+            (FieldKey::StartTimeCode.as_str(), TypeInfo::scalar(Type::Double)),
+            (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::scalar(Type::Bool)),
             ("doc", TypeInfo::scalar(Type::String)),
-            ("endTimeCode", TypeInfo::scalar(Type::Uint64)),
-            ("framesPerSecond", TypeInfo::scalar(Type::Uint64)),
+            ("endTimeCode", TypeInfo::scalar(Type::Double)),
+            ("framesPerSecond", TypeInfo::scalar(Type::Double)),
             ("metersPerUnit", TypeInfo::scalar(Type::Double)),
-            ("timeCodesPerSecond", TypeInfo::scalar(Type::Uint64)),
+            ("timeCodesPerSecond", TypeInfo::scalar(Type::Double)),
             ("upAxis", TypeInfo::scalar(Type::Token)),
         ];
 
@@ -388,6 +402,9 @@ impl<'a> Parser<'a> {
                     this.fetch_next()?;
                     this.read_relationship(path, false, &mut properties, data, None)?;
                 }
+                Token::Reorder => {
+                    this.read_reorder(path, data)?;
+                }
                 _ => {
                     this.read_attribute(path, &mut properties, &mut suffixed_properties, data)?;
                 }
@@ -402,6 +419,36 @@ impl<'a> Parser<'a> {
         }
 
         Ok((children, properties, variant_sets))
+    }
+
+    /// Parse `reorder nameChildren = [...]` or `reorder properties = [...]`.
+    ///
+    /// These statements set the `primOrder` or `propertyOrder` fields on the
+    /// owning prim spec, controlling child/property display order.
+    fn read_reorder(&mut self, path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<()> {
+        self.fetch_next()?; // consume `reorder`
+
+        let token = self
+            .fetch_next()
+            .context("Expected 'nameChildren' or 'properties' after 'reorder'")?;
+        let field_key = match token {
+            Token::NameChildren => FieldKey::PrimOrder,
+            Token::Properties => FieldKey::PropertyOrder,
+            other => bail!("Unsupported reorder target: {other:?}"),
+        };
+
+        self.ensure_pun('=')?;
+
+        let names = self.one_or_list(|this| Ok(this.fetch_str()?.to_owned()))?;
+        if let Some(spec) = data.get_mut(path) {
+            spec.add(field_key, sdf::Value::TokenVec(names));
+        } else {
+            let mut spec = sdf::Spec::new(sdf::SpecType::Prim);
+            spec.add(field_key, sdf::Value::TokenVec(names));
+            data.insert(path.clone(), spec);
+        }
+
+        Ok(())
     }
 
     /// Parse a `variantSet "name" = { "variant1" (...) { ... } ... }` block.
@@ -513,13 +560,7 @@ impl<'a> Parser<'a> {
 
         let type_info = self.try_parse_type()?.context("attribute type expected")?;
 
-        let name_token = self.fetch_next()?;
-        let name = match name_token {
-            Token::Identifier(s) | Token::NamespacedIdentifier(s) => s,
-            _ => name_token
-                .keyword_lexeme()
-                .ok_or_else(|| anyhow!("Unexpected token type for attribute name: {name_token:?}"))?,
-        };
+        let name = self.expect_name().context("attribute name expected")?;
 
         // Read optional `.suffix` (e.g. `.connect`, `.timeSamples`, `.spline`).
         let suffix = if self.try_consume(Token::Punctuation('.')) {
@@ -649,6 +690,11 @@ impl<'a> Parser<'a> {
 
             let name_token = this.fetch_next()?;
             let name = match name_token {
+                // Bare string in property metadata is a comment.
+                Token::String(s) => {
+                    spec.add(FieldKey::Comment, sdf::Value::String(s.to_owned()));
+                    return Ok(());
+                }
                 Token::Identifier(s) | Token::NamespacedIdentifier(s) => s.to_owned(),
                 Token::CustomData => "customData".to_owned(),
                 Token::Doc => FieldKey::Documentation.as_str().to_owned(),
@@ -778,7 +824,7 @@ impl<'a> Parser<'a> {
         data: &mut HashMap<sdf::Path, sdf::Spec>,
         outer_list_op: Option<Token<'a>>,
     ) -> Result<()> {
-        let name = self.expect_identifier().context("relationship name expected")?;
+        let name = self.expect_name().context("relationship name expected")?;
 
         let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
         if custom {
@@ -848,6 +894,7 @@ impl<'a> Parser<'a> {
             Token::Relocates => FieldKey::Relocates.as_str(),
             Token::CustomData => "customData",
             Token::Doc => FieldKey::Documentation.as_str(),
+            Token::Permission => FieldKey::Permission.as_str(),
             other => bail!("Unexpected metadata name token: {other:?}"),
         };
 
@@ -955,6 +1002,21 @@ impl<'a> Parser<'a> {
                 ensure!(list_op.is_none(), "displayName does not support list ops");
                 let value = self.fetch_str().context("Unable to parse displayName")?;
                 spec.add("displayName", sdf::Value::String(value.to_owned()));
+            }
+            n if n == FieldKey::Permission.as_str() => {
+                ensure!(list_op.is_none(), "permission does not support list ops");
+                let value = self.expect_identifier().context("Unable to parse permission")?;
+                let perm = match value {
+                    "public" => sdf::Permission::Public,
+                    "private" => sdf::Permission::Private,
+                    other => bail!("Invalid permission value: {other}"),
+                };
+                spec.add(FieldKey::Permission, sdf::Value::Permission(perm));
+            }
+            n if n == FieldKey::Prefix.as_str() => {
+                ensure!(list_op.is_none(), "prefix does not support list ops");
+                let value = self.fetch_str().context("Unable to parse prefix")?;
+                spec.add(FieldKey::Prefix, sdf::Value::String(value.to_owned()));
             }
             other => bail!("Unsupported prim metadata: {other}"),
         }
@@ -1665,14 +1727,6 @@ impl<'a> TypeInfo<'a> {
             ty,
             type_name: "",
             is_array: false,
-        }
-    }
-
-    const fn array(ty: Type) -> TypeInfo<'a> {
-        TypeInfo {
-            ty,
-            type_name: "",
-            is_array: true,
         }
     }
 }
