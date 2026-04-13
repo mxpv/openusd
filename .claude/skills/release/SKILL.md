@@ -19,25 +19,24 @@ Follow these steps:
 
 3. **Generate changelog**:
    - Run `git describe --tags --abbrev=0` to find the previous tag, then `git log <prev_tag>..HEAD --pretty=format:"- %s (%h)"` to list commits.
-   - Start with a brief summary (2-3 sentences) describing the release theme, e.g. "This release focuses on composition engine correctness" or "This release introduces session layer support and variant fallbacks." Don't enumerate changes — capture the overall narrative.
-   - Next, add a "Compliance" section listing which AOUSD Core Spec sections this release covers, derived from the features marked with this version in ROADMAP.md. Skip if no new spec coverage was added.
-   - Then list the detailed changes: group commits by area (composition engine, text parser, binary reader, stage, asset resolution, etc.) and then by type (features, fixes, dependencies).
+   - Start with a brief, natural summary (2-4 sentences). Write it like a human would in a project update — e.g. "This release introduces the PCP composition engine with full LIVRPS arc support including relocates." Don't enumerate changes in the summary — capture the overall narrative in plain language.
+   - Then list the detailed changes: group commits by area (composition engine, text parser, binary reader, stage, asset resolution, etc.) and then by type (features, fixes, dependencies). Keep each commit as its own line — do not merge distinct features into one bullet.
    - Filter out noise (formatting, CI, README updates, CLAUDE.md).
    - Wrap code identifiers (types, functions, methods, traits, modules, flags, etc.) and crate names/versions in backticks, e.g. `- Add \`ListOp::compose_over\` for list-edit composition (82845fd)`.
-   - Write the result to CHANGELOG.md.
+   - Write the changelog to a temp file (e.g. `/tmp/CHANGELOG-<version>.md`), NOT to the repo. It is only used for the GitHub release notes.
    - Show the changelog to the user and wait for confirmation before proceeding.
 
-4. **Bump version and commit**: Edit the `version` field in Cargo.toml to `<version>`. Stage Cargo.toml, Cargo.lock (if changed), and CHANGELOG.md. Commit with message `Bump crate version to <version>`.
+4. **Bump version and commit**: Edit the `version` field in Cargo.toml to `<version>`. Stage Cargo.toml (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
 
-5. **Tag**: Create tag `v<version>` on the version bump commit.
+5. **Tag**: Create tag `v<version>` on the version bump commit. Do NOT move the tag later — it must stay on this commit.
 
-6. **Update roadmap**: In ROADMAP.md, replace all occurrences of `main` in the Version column with the release version (e.g. `0.3.0`). Stage ROADMAP.md and commit with message `Update ROADMAP`.
+6. **Update roadmap**: In ROADMAP.md, replace all occurrences of `main` in the Version column with the release version (e.g. `0.3.0`). Stage ROADMAP.md and commit with message `Update ROADMAP`. This commit comes after the tag, which is intentional.
 
-7. **Publish to crates.io**: Run `cargo publish --allow-dirty`. Wait for confirmation from the user before running this step.
+7. **Publish to crates.io**: Run `cargo publish`. Wait for confirmation from the user before running this step.
 
 8. **Push**: Run `git push --atomic origin HEAD v<version>` to push commits and tag together. Wait for confirmation from the user before running this step.
 
-9. **Create GitHub release**: Run `gh release create v<version> --notes-file CHANGELOG.md --latest`.
+9. **Create GitHub release**: Run `gh release create v<version> --notes-file /tmp/CHANGELOG-<version>.md --latest`.
 
 Important:
 - Always wait for user confirmation before publishing to crates.io (step 7) and pushing (step 8).
