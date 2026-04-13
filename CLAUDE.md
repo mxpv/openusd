@@ -25,7 +25,7 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
 - **`pcp/`** - Prim Cache Population (composition engine): Implements LIVRPS strength ordering to compose opinions across layers. Corresponds to C++ `Pcp` module.
   - `pcp/mod.rs` — `pcp::Error`: composition errors (arc cycles, unresolved layers, missing/invalid `defaultPrim`). `LayerStack`: bundles layers, identifiers, and precomputed sublayer stacks (C++ `PcpLayerStack`). `VariantFallbackMap`: maps variant set names to ordered fallback selections (C++ `PcpVariantFallbackMap`).
   - `pcp/cache.rs` — `Cache`: lazily-built per-prim composition cache (C++ `PcpCache`). Owns a `LayerStack` and passes it by shared reference to each build. Returns `Result` from all public methods.
-  - `pcp/index.rs` — `PrimIndex`, `Node`, `NodeIndex`, `ArcType`: per-prim composition graph (C++ `PcpPrimIndex`). Nodes are stored in a flat arena (`PrimIndexGraph`) ordered strongest-to-weakest. Each node carries `map_to_parent` and `map_to_root` (`MapFunction`) for namespace translation across arcs. `IndexBuilder` takes a `&LayerStack` and evaluates LIVRPS with a `CompositionContext` flowing from parent to child; each build takes only `&` references (Rayon-friendly).
+  - `pcp/index.rs` — `PrimIndex`, `Node`, `NodeIndex`, `ArcType`: per-prim composition graph (C++ `PcpPrimIndex`). `ArcType` variants are ordered by LIVERPS strength via `#[repr(u8)]` + derived `Ord`. Nodes are stored in a flat arena (`PrimIndexGraph`) ordered strongest-to-weakest. Each node carries `map_to_parent` and `map_to_root` (`MapFunction`) for namespace translation across arcs. `IndexBuilder` takes a `&LayerStack` and evaluates LIVRPS with a `CompositionContext` flowing from parent to child; each build takes only `&` references (Rayon-friendly).
   - `pcp/mapping.rs` — `MapFunction`: namespace mapping between composition arcs (C++ `PcpMapFunction`). Stores (source, target) path pairs with longest-prefix matching. Supports compose, inverse, and identity operations.
   - `pcp/rel.rs` — `Relocates`: isolated relocate object owning per-layer `layerRelocates`. Resolves pre-relocation source paths, builds relocated prim indices, and adjusts child name lists. Receives external data (`&LayerStack`, cached indices/contexts) through method parameters; does not reference `Cache` directly.
 
@@ -80,16 +80,7 @@ cargo run --example dump_usdc -- path/to/file.usd
 - Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead
 - Never remove comments during refactoring if they are still applicable
 - Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
-
-## Git
-
-- Keep commit messages brief and to the point
-- Use a short, descriptive commit title (50 characters or less)
-- Include a brief commit body that summarizes changes in 1-3 sentences when needed (wrap at 120 characters)
-- Keep commits focused and atomic - one logical change per commit
-- Don't add "Generated with Claude Code" to commit messages or pull request descriptions
-- Don't add "Co-Authored-By: Claude noreply@anthropic.com" to commit messages or pull request descriptions
-- Before opening a PR or making a commit, run `cargo fmt`, `cargo clippy`, and `cargo test` to ensure code passes formatting, lint, and unit tests
+- Don't add "Generated with Claude Code" or "Co-Authored-By: Claude" to commits, PRs, or release notes
 
 ## Testing
 
