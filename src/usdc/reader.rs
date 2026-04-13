@@ -19,9 +19,12 @@ use crate::{
 
 use super::layout::*;
 
-// Currently supported USDC version.
-// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L340>
-const SW_VERSION: Version = version(0, 10, 0);
+// Maximum supported USDC crate version.
+// See USD Core Specification v1.0.1 §16.3.8.2 for version history:
+//   0.10.0 — Path Expression value types
+//   0.11.0 — Relocates in layer metadata
+//   0.12.0 — Splines
+const SW_VERSION: Version = version(0, 12, 0);
 
 /// Crate file represents structural data loaded from a USDC file on disk.
 #[derive(Debug)]

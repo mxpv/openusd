@@ -64,10 +64,10 @@ fn run(name: &str, format: Format) {
         return;
     }
 
-    let stage = match Stage::builder().on_error(|_| Ok(())).open(entry.to_str().unwrap()) {
-        Ok(s) => s,
-        Err(_) => return, // Skip tests that fail to open (unsupported features).
-    };
+    let stage = Stage::builder()
+        .on_error(|_| Ok(()))
+        .open(entry.to_str().unwrap())
+        .unwrap();
 
     // Collect all prims via traversal.
     let mut prims = Vec::new();

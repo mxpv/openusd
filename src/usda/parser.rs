@@ -1447,11 +1447,15 @@ impl<'a> Parser<'a> {
     fn parse_bool(&mut self) -> Result<bool> {
         let token = self.fetch_next()?;
         match token {
-            Token::Identifier(value) | Token::NamespacedIdentifier(value) => match value {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                other => bail!("Unexpected identifier for bool literal: {other}"),
-            },
+            Token::Identifier(value) | Token::NamespacedIdentifier(value) | Token::String(value) => {
+                if value.eq_ignore_ascii_case("true") {
+                    Ok(true)
+                } else if value.eq_ignore_ascii_case("false") {
+                    Ok(false)
+                } else {
+                    bail!("Unexpected value for bool literal: {value}")
+                }
+            }
             Token::Number(value) => {
                 let parsed = value.parse::<f64>().context("Unable to parse numeric bool")?;
                 if parsed == 0.0 {
@@ -1462,11 +1466,6 @@ impl<'a> Parser<'a> {
                     bail!("Numeric bool literals must be 0 or 1, got {value}");
                 }
             }
-            Token::String(value) => match value {
-                "true" => Ok(true),
-                "false" => Ok(false),
-                other => bail!("Unexpected string for bool literal: {other}"),
-            },
             other => bail!("Unexpected token for bool literal: {other:?}"),
         }
     }
