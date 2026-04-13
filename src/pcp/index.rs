@@ -1708,7 +1708,10 @@ def "Prim" (
 
     /// Helper: extracts filename from an identifier (e.g. "/path/to/root.usd" → "root.usd").
     fn layer_name(identifier: &str) -> &str {
-        identifier.rsplit('/').next().unwrap_or(identifier)
+        std::path::Path::new(identifier)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(identifier)
     }
 
     /// Formats a prim stack as a vec of (layer_name, path) pairs for assertion.
