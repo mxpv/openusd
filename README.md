@@ -8,15 +8,6 @@
 
 `openusd` is a Rust implementation of Pixar's [Universal Scene Description](https://openusd.org/release/index.html) (USD) format with no C++ dependencies.
 
-## Documentation
-
-The following list of docs was used during crate development:
-
-- [User documentation](https://openusd.org/release/index.html)
-- [Book of USD](https://remedy-entertainment.github.io/USDBook/)
-- [API Documentation](https://openusd.org/release/api/index.html)
-- [USD Cookbook](https://github.com/ColinKennedy/USD-Cookbook)
-
 For a detailed comparison with the C++ reference implementation and current progress, see the [Roadmap](ROADMAP.md).
 
 ## Features
