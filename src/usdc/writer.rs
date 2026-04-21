@@ -17,7 +17,9 @@ use num_traits::{AsPrimitive, PrimInt};
 use crate::sdf::{AbstractData, LayerOffset, ListOp, Path, Payload, Reference, Value};
 
 use super::coding;
-use super::layout::{version, Bootstrap, Section, Spec as FileSpec, Type, ValueRep, Version, SECTION_NAME_MAX_LENGTH};
+use super::layout::{
+    version, Bootstrap, ListOpHeader, Section, Spec as FileSpec, Type, ValueRep, Version, SECTION_NAME_MAX_LENGTH,
+};
 
 /// Crate format version this writer emits. Supports all features the reader
 /// handles (time samples, relocates, path expressions, etc.).
@@ -93,21 +95,22 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         // Intern every path referenced by the data in one sweep. This seeds
         // `paths` before any field that may reference paths is serialized.
-        for path in data.paths() {
-            self.intern_path(path);
+        let paths = data.paths();
+        for path in &paths {
+            self.intern_path(path.clone());
         }
 
         // Walk specs and build the fieldsets + specs tables.
-        for path in data.paths() {
+        for path in &paths {
             let ty = data
-                .spec_type(&path)
+                .spec_type(path)
                 .ok_or_else(|| anyhow::anyhow!("path {path} reported by paths() has no spec"))?;
             let path_idx = self.intern_path(path.clone());
 
             let fieldset_idx = self.fieldsets.len() as u32;
-            if let Some(field_names) = data.list(&path) {
+            if let Some(field_names) = data.list(path) {
                 for name in field_names {
-                    let value = data.get(&path, &name)?.into_owned();
+                    let value = data.get(path, &name)?.into_owned();
                     let token_idx = self.tokens.intern(name);
                     let rep = self.write_value(&value)?;
                     let field_idx = self.fields.intern((token_idx, rep.0));
@@ -127,13 +130,16 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         // before the TOKENS section is written. `encode_paths` would intern
         // them later otherwise, and those extra tokens would never make it
         // into the file.
-        let paths_snapshot = self.paths.items.clone();
-        for p in &paths_snapshot {
-            if p.as_str() == "/" {
-                continue;
-            }
-            let (segment, _) = last_segment(p);
-            self.tokens.intern(segment.to_owned());
+        for i in 0..self.paths.items.len() {
+            let segment = {
+                let p = &self.paths.items[i];
+                if p.as_str() == "/" {
+                    continue;
+                }
+                let (segment, _) = last_segment(p);
+                segment.to_owned()
+            };
+            self.tokens.intern(segment);
         }
 
         Ok(())
@@ -226,10 +232,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     fn write_strings_section(&mut self) -> Result<()> {
         self.begin_section(Section::STRINGS)?;
-        let items = self.strings.items.clone();
-        self.write_count(items.len() as u64)?;
-        for idx in &items {
-            self.write_pod(idx)?;
+        let n = self.strings.items.len();
+        self.write_count(n as u64)?;
+        for i in 0..n {
+            let idx = self.strings.items[i];
+            self.write_pod(&idx)?;
         }
         self.end_section()
     }
@@ -296,7 +303,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     fn write_toc(&mut self) -> Result<()> {
-        let sections = self.sections_written.clone();
+        // `finish()` consumes `self` immediately after this call, so taking
+        // the vec out is fine; it lets us iterate without a pre-copy.
+        let sections = std::mem::take(&mut self.sections_written);
         self.write_count(sections.len() as u64)?;
         for (name, start, size) in &sections {
             let mut name_buf = [0_u8; SECTION_NAME_MAX_LENGTH + 1];
@@ -772,11 +781,16 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     }
 
     fn write_dictionary(&mut self, d: &HashMap<String, Value>) -> Result<ValueRep> {
-        // Pre-serialize each value so we know the offset for the recursive-offset prefix.
-        // Reader expects:
-        //   count (u64)
-        //   for each: string_idx (u32), recursive_offset (i64), ValueRep
         let off = self.pos()?;
+        self.write_dictionary_entries(d)?;
+        Ok(rep_heap(Type::Dictionary, off, false))
+    }
+
+    /// Serialize a dictionary payload: `count (u64)` followed by
+    /// `(string_idx (u32), recursive_offset (i64), ValueRep)` per entry in
+    /// sorted key order. Used both for standalone dictionaries and inlined
+    /// under a reference's `customData`.
+    fn write_dictionary_entries(&mut self, d: &HashMap<String, Value>) -> Result<()> {
         self.write_count(d.len() as u64)?;
 
         // Stable order for determinism (HashMap is unordered).
@@ -787,26 +801,17 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let sidx = self.intern_string(k);
             self.write_pod(&sidx)?;
 
-            // The dictionary value layout is: i64 recursive_offset, then the
-            // ValueRep at the target. For us, the ValueRep sits immediately
-            // after the i64, so recursive_offset = 8 (relative to the offset
-            // itself, per reader's `apply_recursive_offset`).
+            // Layout per entry: i64 recursive_offset, then ValueRep at the
+            // target. The reader does `seek(Current(offset - 8))` after
+            // consuming the i64, so `recursive_offset = pre_rep - offset_slot`.
             let offset_slot = self.pos()?;
             self.write_pod(&0_i64)?; // placeholder
 
-            // Serialize the inner value (which may itself write heap data).
             let rep = self.write_value(&d[k.as_str()])?;
 
-            // We need to emit the ValueRep right here, at `offset_slot + 8`,
-            // because the reader reads a ValueRep immediately after jumping.
             let pre_rep = self.pos()?;
             self.write_pod(&rep.0)?;
 
-            // Rewrite the recursive offset to point at pre_rep relative to
-            // offset_slot. Reader: `reader.seek(Current(offset - 8))` after
-            // having consumed the i64 (8 bytes). So current position is at
-            // offset_slot + 8 after reading; target is pre_rep.
-            // Offset to write = (pre_rep - offset_slot).
             let end = self.pos()?;
             let recursive_offset = (pre_rep as i64) - (offset_slot as i64);
             self.out.seek(SeekFrom::Start(offset_slot))?;
@@ -814,7 +819,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.out.seek(SeekFrom::Start(end))?;
         }
 
-        Ok(rep_heap(Type::Dictionary, off, false))
+        Ok(())
     }
 
     fn write_path_vec(&mut self, v: &[Path]) -> Result<ValueRep> {
@@ -884,25 +889,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         let prim_idx = self.intern_path(r.prim_path.clone());
         self.write_pod(&prim_idx)?;
         self.write_pod(&r.layer_offset)?;
-        // Reference custom_data: write a dictionary inline (count + entries).
-        self.write_count(r.custom_data.len() as u64)?;
-        let mut keys: Vec<&String> = r.custom_data.keys().collect();
-        keys.sort();
-        for k in keys {
-            let sidx = self.intern_string(k);
-            self.write_pod(&sidx)?;
-            let offset_slot = self.pos()?;
-            self.write_pod(&0_i64)?;
-            let rep = self.write_value(&r.custom_data[k.as_str()])?;
-            let pre_rep = self.pos()?;
-            self.write_pod(&rep.0)?;
-            let end = self.pos()?;
-            let rel = (pre_rep as i64) - (offset_slot as i64);
-            self.out.seek(SeekFrom::Start(offset_slot))?;
-            self.write_pod(&rel)?;
-            self.out.seek(SeekFrom::Start(end))?;
-        }
-        Ok(())
+        self.write_dictionary_entries(&r.custom_data)
     }
 
     fn write_listop<T, F>(&mut self, ty: Type, op: &ListOp<T>, mut write_items: F) -> Result<ValueRep>
@@ -914,25 +901,25 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         let mut bits: u8 = 0;
         if op.explicit {
-            bits |= 1 << 0;
+            bits |= ListOpHeader::IS_EXPLICIT;
         }
         if !op.explicit_items.is_empty() {
-            bits |= 1 << 1;
+            bits |= ListOpHeader::HAS_EXPLICIT_ITEMS;
         }
         if !op.added_items.is_empty() {
-            bits |= 1 << 2;
+            bits |= ListOpHeader::HAS_ADDED_ITEMS;
         }
         if !op.deleted_items.is_empty() {
-            bits |= 1 << 3;
+            bits |= ListOpHeader::HAS_DELETED_ITEMS;
         }
         if !op.ordered_items.is_empty() {
-            bits |= 1 << 4;
+            bits |= ListOpHeader::HAS_ORDERED_ITEMS;
         }
         if !op.prepended_items.is_empty() {
-            bits |= 1 << 5;
+            bits |= ListOpHeader::HAS_PREPEND_ITEMS;
         }
         if !op.appended_items.is_empty() {
-            bits |= 1 << 6;
+            bits |= ListOpHeader::HAS_APPENDED_ITEMS;
         }
         self.write_pod(&bits)?;
 

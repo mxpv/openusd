@@ -196,7 +196,10 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             );
 
             if buffer.is_empty() {
-                ensure!(count == 0, "Tokens section claims {count} tokens but the buffer is empty");
+                ensure!(
+                    count == 0,
+                    "Tokens section claims {count} tokens but the buffer is empty"
+                );
                 Vec::new()
             } else {
                 ensure!(

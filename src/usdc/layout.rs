@@ -135,13 +135,13 @@ pub struct ListOpHeader {
 }
 
 impl ListOpHeader {
-    const IS_EXPLICIT: u8 = 1 << 0;
-    const HAS_EXPLICIT_ITEMS: u8 = 1 << 1;
-    const HAS_ADDED_ITEMS: u8 = 1 << 2;
-    const HAS_DELETED_ITEMS: u8 = 1 << 3;
-    const HAS_ORDERED_ITEMS: u8 = 1 << 4;
-    const HAS_PREPEND_ITEMS: u8 = 1 << 5;
-    const HAS_APPENDED_ITEMS: u8 = 1 << 6;
+    pub(crate) const IS_EXPLICIT: u8 = 1 << 0;
+    pub(crate) const HAS_EXPLICIT_ITEMS: u8 = 1 << 1;
+    pub(crate) const HAS_ADDED_ITEMS: u8 = 1 << 2;
+    pub(crate) const HAS_DELETED_ITEMS: u8 = 1 << 3;
+    pub(crate) const HAS_ORDERED_ITEMS: u8 = 1 << 4;
+    pub(crate) const HAS_PREPEND_ITEMS: u8 = 1 << 5;
+    pub(crate) const HAS_APPENDED_ITEMS: u8 = 1 << 6;
 
     #[inline]
     pub fn is_explicit(self) -> bool {

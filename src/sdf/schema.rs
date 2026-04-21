@@ -168,7 +168,7 @@ impl AsRef<str> for ChildrenKey {
 }
 
 impl ChildrenKey {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             ChildrenKey::ConnectionChildren => "connectionChildren",
             ChildrenKey::ExpressionChildren => "expressionChildren",

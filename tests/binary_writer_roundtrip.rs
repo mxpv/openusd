@@ -108,8 +108,14 @@ fn compressed_int_array_roundtrips() {
     );
 
     let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
-    let round_short = (&round as &dyn AbstractData).get(&short_prop, "default").unwrap().into_owned();
-    let round_long = (&round as &dyn AbstractData).get(&long_prop, "default").unwrap().into_owned();
+    let round_short = (&round as &dyn AbstractData)
+        .get(&short_prop, "default")
+        .unwrap()
+        .into_owned();
+    let round_long = (&round as &dyn AbstractData)
+        .get(&long_prop, "default")
+        .unwrap()
+        .into_owned();
     assert_eq!(round_short, Value::IntVec(vec![1, 2, 3]));
     assert_eq!(round_long, Value::IntVec(long));
 }
@@ -132,7 +138,11 @@ fn empty_layer_roundtrips_through_crate_writer() {
     let orig_json = snapshot(&data as &dyn AbstractData);
     let round_json = snapshot(&round as &dyn AbstractData);
     let diffs = diff_json::compare_values(&orig_json, &round_json);
-    assert!(diffs.is_empty(), "empty-layer mismatch:\n{}", diff_json::DiffFormatter::new().format(&diffs));
+    assert!(
+        diffs.is_empty(),
+        "empty-layer mismatch:\n{}",
+        diff_json::DiffFormatter::new().format(&diffs)
+    );
 }
 
 binary_tests! {

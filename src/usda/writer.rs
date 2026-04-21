@@ -217,7 +217,7 @@ impl<W: Write> Emitter<'_, W> {
 
         let default = get_value(data, path, FieldKey::Default.as_str());
         let time_samples = get_value(data, path, FieldKey::TimeSamples.as_str());
-        let spline = get_value(data, path, "spline");
+        let spline = get_value(data, path, SPLINE_FIELD);
 
         if let Some(v) = default {
             self.out.write_all(b" = ")?;
@@ -847,9 +847,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
         Value::Uint64(n) => write!(s, "{n}")?,
         Value::Uint64Vec(v) => format_vec(s, v, |s, n| write!(s, "{n}").map_err(Into::into))?,
 
-        Value::Half(h) => format_double(s, f64::from(h.to_f32())),
+        Value::Half(h) => format_double(s, h.to_f64()),
         Value::HalfVec(v) => format_vec(s, v, |s, h| {
-            format_double(s, f64::from(h.to_f32()));
+            format_double(s, h.to_f64());
             Ok(())
         })?,
         Value::Float(f) => format_double(s, f64::from(*f)),
@@ -1027,7 +1027,7 @@ fn format_tuple_half<const N: usize>(s: &mut String, a: &[half::f16; N]) -> Resu
         if i > 0 {
             s.push_str(", ");
         }
-        format_double(s, f64::from(v.to_f32()));
+        format_double(s, v.to_f64());
     }
     s.push(')');
     Ok(())
@@ -1354,29 +1354,47 @@ fn property_children(data: &dyn AbstractData, path: &Path) -> Vec<String> {
 
 // Field classifiers. Match C++ `Sdf_Is{Prim,Attribute,Relationship}MetadataField`.
 
+/// `spline` names the in-memory spline dictionary slot but isn't yet defined
+/// in [`FieldKey`]. Keep it local until promoted into the schema.
+const SPLINE_FIELD: &str = "spline";
+
+const PRIM_STRUCTURAL_FIELDS: &[&str] = &[
+    FieldKey::Specifier.as_str(),
+    FieldKey::TypeName.as_str(),
+    ChildrenKey::PrimChildren.as_str(),
+    ChildrenKey::PropertyChildren.as_str(),
+    ChildrenKey::VariantChildren.as_str(),
+    ChildrenKey::VariantSetChildren.as_str(),
+];
+
+const ATTRIBUTE_STRUCTURAL_FIELDS: &[&str] = &[
+    FieldKey::TypeName.as_str(),
+    FieldKey::Default.as_str(),
+    FieldKey::Custom.as_str(),
+    FieldKey::Variability.as_str(),
+    FieldKey::TimeSamples.as_str(),
+    FieldKey::ConnectionPaths.as_str(),
+    ChildrenKey::ConnectionChildren.as_str(),
+    SPLINE_FIELD,
+];
+
+const RELATIONSHIP_STRUCTURAL_FIELDS: &[&str] = &[
+    FieldKey::Custom.as_str(),
+    FieldKey::Variability.as_str(),
+    FieldKey::TargetPaths.as_str(),
+    ChildrenKey::RelationshipTargetChildren.as_str(),
+];
+
 fn is_prim_structural_field(name: &str) -> bool {
-    matches!(
-        name,
-        "specifier" | "typeName" | "primChildren" | "propertyChildren" | "variantChildren" | "variantSetChildren"
-    )
+    PRIM_STRUCTURAL_FIELDS.contains(&name)
 }
 
 fn is_attribute_structural_field(name: &str) -> bool {
-    matches!(
-        name,
-        "typeName"
-            | "default"
-            | "custom"
-            | "variability"
-            | "timeSamples"
-            | "connectionPaths"
-            | "connectionChildren"
-            | "spline"
-    )
+    ATTRIBUTE_STRUCTURAL_FIELDS.contains(&name)
 }
 
 fn is_relationship_structural_field(name: &str) -> bool {
-    matches!(name, "custom" | "variability" | "targetPaths" | "targetChildren")
+    RELATIONSHIP_STRUCTURAL_FIELDS.contains(&name)
 }
 
 #[cfg(test)]
@@ -1418,7 +1436,10 @@ mod tests {
 
         let mut lexer = Token::lexer(&out);
         let first = lexer.next().expect("lexer produced no token").expect("lexer error");
-        assert!(lexer.next().is_none(), "expected a single token, got trailing input: {out:?}");
+        assert!(
+            lexer.next().is_none(),
+            "expected a single token, got trailing input: {out:?}"
+        );
         match first {
             Token::String(s) => s.to_owned(),
             other => panic!("expected Token::String, got {other:?} for output {out:?}"),
@@ -1435,17 +1456,11 @@ mod tests {
         assert_eq!(write_quoted_and_reparse("has 'apostrophes'"), "has 'apostrophes'");
         // Contains both kinds of quotes on one line — no single-char delimiter works,
         // so the emitter must fall back to triple quotes.
-        assert_eq!(
-            write_quoted_and_reparse(r#"mix "dq" and 'sq'"#),
-            r#"mix "dq" and 'sq'"#
-        );
+        assert_eq!(write_quoted_and_reparse(r#"mix "dq" and 'sq'"#), r#"mix "dq" and 'sq'"#);
         // Contains a newline — must use triple quotes.
         assert_eq!(write_quoted_and_reparse("line1\nline2"), "line1\nline2");
         // Contains a newline and `"""` — must switch to triple single-quote.
-        assert_eq!(
-            write_quoted_and_reparse("pre\n\"\"\"post"),
-            "pre\n\"\"\"post"
-        );
+        assert_eq!(write_quoted_and_reparse("pre\n\"\"\"post"), "pre\n\"\"\"post");
         // Contains a newline and `'''` — must use triple double-quote.
         assert_eq!(write_quoted_and_reparse("pre\n'''post"), "pre\n'''post");
         // Worst case: newline plus both `"""` and `'''`. No USDA delimiter can wrap
@@ -1489,7 +1504,11 @@ mod tests {
             panic!("expected Dictionary, got {got:?}");
         };
         for k in ["simple", "ns:colon:key", "key with space", "1leading-digit"] {
-            assert!(got.contains_key(k), "lost key {k:?}; roundtripped keys: {:?}", got.keys().collect::<Vec<_>>());
+            assert!(
+                got.contains_key(k),
+                "lost key {k:?}; roundtripped keys: {:?}",
+                got.keys().collect::<Vec<_>>()
+            );
         }
     }
 }
