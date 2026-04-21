@@ -40,7 +40,7 @@ pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
-pub use layer::DependencyKind;
+pub use layer::{DependencyKind, LayerFormat};
 pub use stage::{Stage, StageBuilder};
 
 /// A recoverable error encountered during stage composition.

@@ -72,6 +72,39 @@ pub struct Layer {
     pub data: LayerData,
 }
 
+/// Persistent format for a saved layer.
+///
+/// Used by [`Layer::save_as`] and [`infer_format`] to make the writer's format
+/// choice explicit. For `.usd` — which the AOUSD Core Spec permits to be
+/// either text (§16.2) or binary (§16.3) — this lets the caller pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerFormat {
+    /// Text format (`.usda`).
+    Usda,
+    /// Binary crate format (`.usdc`).
+    Usdc,
+    /// Archive/package format (`.usdz`).
+    Usdz,
+}
+
+impl LayerFormat {
+    /// Infer the most likely format from a file extension.
+    ///
+    /// `.usda` → [`LayerFormat::Usda`], `.usdc` → [`LayerFormat::Usdc`],
+    /// `.usdz` → [`LayerFormat::Usdz`]. The ambiguous `.usd` extension defaults
+    /// to [`LayerFormat::Usdc`], matching the C++ reference implementation
+    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). Unknown or missing
+    /// extensions return `None`.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "usda" => Some(Self::Usda),
+            "usdc" | "usd" => Some(Self::Usdc),
+            "usdz" => Some(Self::Usdz),
+            _ => None,
+        }
+    }
+}
+
 impl Layer {
     fn new(identifier: impl Into<String>, data: LayerData) -> Self {
         Self {
@@ -95,22 +128,37 @@ impl Layer {
     /// (§16.3: "represented with the .usdc or .usd extension"). The reader
     /// side auto-detects via magic-byte sniffing.
     ///
-    /// On write we default to binary, matching Pixar's C++ USD default
-    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). Callers who want text form
-    /// should name the file `.usda` explicitly or call
-    /// [`usda::TextWriter::write_to_file`] directly.
+    /// `save()` defaults to binary for `.usd`, matching Pixar's C++ USD default
+    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). To force a specific format
+    /// — for example, to save text to a `.usd` path — use [`Layer::save_as`].
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let format = LayerFormat::from_extension(ext).ok_or_else(|| match ext {
+            "" => anyhow::anyhow!("layer path {} has no extension; cannot choose format", path.display()),
+            other => anyhow::anyhow!("unsupported layer extension {other:?} for save (expected usda/usdc/usd/usdz)"),
+        })?;
+        self.save_as(path, format)
+    }
 
-        match ext.as_str() {
-            "usda" => usda::TextWriter::write_to_file(self.data.as_ref(), path),
-            "usdc" | "usd" => usdc::CrateWriter::write_to_file(self.data.as_ref(), path),
-            "usdz" => {
+    /// Save the layer to disk using an explicit format.
+    ///
+    /// Unlike [`Layer::save`], the destination path's extension is not
+    /// consulted — the writer strictly uses `format`. This is the path for:
+    ///
+    /// - Writing text to a `.usd` file: `save_as(path, LayerFormat::Usda)`
+    /// - Writing binary to a `.usd` file (explicit, not just default):
+    ///   `save_as(path, LayerFormat::Usdc)`
+    /// - Emitting an atypical extension in general.
+    ///
+    /// Note that the reader's magic-byte auto-detection will still read the
+    /// result correctly regardless of the filename extension.
+    pub fn save_as(&self, path: impl AsRef<std::path::Path>, format: LayerFormat) -> Result<()> {
+        let path = path.as_ref();
+        match format {
+            LayerFormat::Usda => usda::TextWriter::write_to_file(self.data.as_ref(), path),
+            LayerFormat::Usdc => usdc::CrateWriter::write_to_file(self.data.as_ref(), path),
+            LayerFormat::Usdz => {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
                 let mut buf = Vec::new();
                 usdc::CrateWriter::write(self.data.as_ref(), &mut Cursor::new(&mut buf))?;
@@ -119,8 +167,6 @@ impl Layer {
                 archive.finish()?;
                 Ok(())
             }
-            "" => bail!("layer path {} has no extension; cannot choose format", path.display()),
-            other => bail!("unsupported layer extension {other:?} for save (expected usda/usdc/usd/usdz)"),
         }
     }
 }
@@ -779,5 +825,58 @@ mod tests {
         let layer = Layer::new("test://layer", Box::new(data));
         let err = layer.save("/tmp/openusd-bad.xyz").unwrap_err();
         assert!(err.to_string().contains("unsupported"));
+    }
+
+    /// Per spec §16.2, `.usd` is a valid extension for text layers. Verify we
+    /// can force-write text to a `.usd` file and the reader correctly
+    /// auto-detects it as text via the absence of the USDC magic.
+    #[test]
+    fn save_as_forces_text_to_usd_extension() -> Result<()> {
+        use crate::sdf::{self, SpecType, Value};
+
+        let mut data = sdf::Data::new();
+        let root = sdf::Path::abs_root();
+        let ps = data.create_spec(root, SpecType::PseudoRoot);
+        ps.add("primChildren", Value::TokenVec(vec!["Text".into()]));
+        let prim = sdf::path("/Text")?;
+        let sp = data.create_spec(prim.clone(), SpecType::Prim);
+        sp.add("specifier", Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", Value::Token("Xform".into()));
+
+        let layer = Layer::new("test://text-as-usd", Box::new(data));
+        let path = std::env::temp_dir().join("openusd-text-as-usd.usd");
+        layer.save_as(&path, LayerFormat::Usda)?;
+
+        // Emitted bytes must NOT start with the binary magic — they're text.
+        let bytes = std::fs::read(&path)?;
+        assert!(
+            !bytes.starts_with(crate::usdc::MAGIC),
+            "save_as(Usda) should produce text, but output begins with USDC magic",
+        );
+        assert!(bytes.starts_with(b"#usda"), "text output must start with #usda header");
+
+        // Reader auto-detect (magic-byte sniff) accepts it as text.
+        let resolver = DefaultResolver::new();
+        let resolved = resolver.resolve(path.to_str().unwrap()).unwrap();
+        let round = open_layer(&resolver, &resolved)?;
+        assert_eq!(round.spec_type(&prim), Some(SpecType::Prim));
+        assert_eq!(
+            round.get(&prim, "typeName").unwrap().into_owned(),
+            Value::Token("Xform".into())
+        );
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn layer_format_from_extension_matches_spec() {
+        assert_eq!(LayerFormat::from_extension("usda"), Some(LayerFormat::Usda));
+        assert_eq!(LayerFormat::from_extension("usdc"), Some(LayerFormat::Usdc));
+        assert_eq!(LayerFormat::from_extension("usd"), Some(LayerFormat::Usdc));
+        assert_eq!(LayerFormat::from_extension("USDA"), Some(LayerFormat::Usda));
+        assert_eq!(LayerFormat::from_extension("usdz"), Some(LayerFormat::Usdz));
+        assert_eq!(LayerFormat::from_extension("xyz"), None);
+        assert_eq!(LayerFormat::from_extension(""), None);
     }
 }
