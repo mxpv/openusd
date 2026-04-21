@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
-use openusd::sdf::{self, AbstractData};
+use openusd::sdf::{self, AbstractData, Data};
 use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
@@ -61,6 +61,27 @@ macro_rules! binary_tests {
             }
         )*
     };
+}
+
+#[test]
+fn empty_layer_roundtrips_through_crate_writer() {
+    // `cross_empty` covers USDA -> USDC. Make sure a programmatically
+    // constructed empty `Data` also writes and reads back successfully, as
+    // the writer has conditional branches for empty path/token/field tables.
+    let data = Data::new();
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("empty layer write");
+
+    let round = CrateData::open(Cursor::new(&buf), true).expect("empty layer re-parse");
+
+    let orig_paths = (&data as &dyn AbstractData).paths();
+    let round_paths = (&round as &dyn AbstractData).paths();
+    assert_eq!(orig_paths, round_paths);
+
+    let orig_json = snapshot(&data as &dyn AbstractData);
+    let round_json = snapshot(&round as &dyn AbstractData);
+    let diffs = diff_json::compare_values(&orig_json, &round_json);
+    assert!(diffs.is_empty(), "empty-layer mismatch:\n{}", diff_json::DiffFormatter::new().format(&diffs));
 }
 
 binary_tests! {

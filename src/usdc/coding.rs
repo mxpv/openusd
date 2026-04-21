@@ -221,6 +221,18 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_fieldset_sentinel() {
+        // Fieldsets store `None` terminators as `u32::MAX`. Verify that value
+        // survives encode_ints/decode_ints round-trip unchanged, including
+        // when it appears next to small indices that would otherwise push it
+        // into a different integer-coding bucket.
+        let values: &[u32] = &[0, 1, 2, u32::MAX, 3, 4, u32::MAX, u32::MAX];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<u32>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
     fn roundtrip_u32_common_delta_exceeds_i32_max() {
         // Deltas exceeding i32 range (here, ±3_000_000_000) still round-trip
         // for 32-bit T: the common slot is stored as i32 and LARGE payloads
