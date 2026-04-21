@@ -1148,13 +1148,29 @@ fn format_dictionary(s: &mut String, dict: &HashMap<String, Value>) -> Result<()
             s.push_str(ty);
             s.push(' ');
         }
-        s.push_str(k);
+        if is_bare_dict_key(k) {
+            s.push_str(k);
+        } else {
+            write_quoted(s, k)?;
+        }
         s.push_str(" = ");
         format_value(s, value)?;
         s.push('\n');
     }
     s.push('}');
     Ok(())
+}
+
+/// A dictionary key can be emitted unquoted only when it tokenizes as a USDA
+/// `Identifier` or `NamespacedIdentifier`: starts with a letter/underscore and
+/// continues with alphanumerics, underscores, or colons.
+fn is_bare_dict_key(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
 fn format_layer_offset(s: &mut String, o: &LayerOffset) {

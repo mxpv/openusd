@@ -27,6 +27,10 @@ pub fn decode_ints<T: PrimInt + 'static>(data: &[u8], count: usize) -> Result<Ve
 where
     i64: AsPrimitive<T>,
 {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
     let is_64_bit = mem::size_of::<T>() == 8;
 
     let mut codes_reader = io::Cursor::new(&data[0..]);

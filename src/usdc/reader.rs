@@ -195,28 +195,33 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 buffer.len(),
             );
 
-            ensure!(
-                buffer.last() == Some(&b'\0'),
-                "Tokens section not null-terminated in crate file"
-            );
+            if buffer.is_empty() {
+                ensure!(count == 0, "Tokens section claims {count} tokens but the buffer is empty");
+                Vec::new()
+            } else {
+                ensure!(
+                    buffer.last() == Some(&b'\0'),
+                    "Tokens section not null-terminated in crate file"
+                );
 
-            // Pop last \0 byte to split strings without empty one at the end.
-            buffer.pop();
+                // Pop last \0 byte to split strings without empty one at the end.
+                buffer.pop();
 
-            let strings = buffer
-                .split(|c| *c == b'\0')
-                .map(|buf| str::from_utf8(buf).map(|str| str.to_string()))
-                .collect::<Result<Vec<_>, str::Utf8Error>>()
-                .context("Failed to parse TOKENS section")?;
+                let strings = buffer
+                    .split(|c| *c == b'\0')
+                    .map(|buf| str::from_utf8(buf).map(|str| str.to_string()))
+                    .collect::<Result<Vec<_>, str::Utf8Error>>()
+                    .context("Failed to parse TOKENS section")?;
 
-            ensure!(
-                strings.len() == count,
-                "Crate file claims {} tokens, but found {}",
-                count,
-                strings.len(),
-            );
+                ensure!(
+                    strings.len() == count,
+                    "Crate file claims {} tokens, but found {}",
+                    count,
+                    strings.len(),
+                );
 
-            strings
+                strings
+            }
         };
 
         Ok(())
