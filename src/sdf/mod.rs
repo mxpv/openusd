@@ -9,10 +9,12 @@ use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
+mod data;
 mod path;
 pub mod schema;
 mod value;
 
+pub use data::Data;
 pub use path::{path, Path};
 pub use schema::{ChildrenKey, FieldKey};
 pub use value::{Value, ValueConversionError};
@@ -210,8 +212,14 @@ pub trait AbstractData {
     /// a borrowed value will be returned to avoid unnecessary copies.
     fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>>;
 
-    /// Returns the names of the fields for the given path.
+    /// Returns the field names for a given path in authored order.
     fn list(&self, path: &Path) -> Option<Vec<String>>;
+
+    /// Returns every authored path, sorted lexicographically.
+    ///
+    /// The order is deterministic and stable across repeated calls. Emitters
+    /// rely on this for reproducible output.
+    fn paths(&self) -> Vec<Path>;
 }
 
 /// A boxed layer data source, used throughout the layer stack.
@@ -220,26 +228,55 @@ pub type LayerData = Box<dyn AbstractData>;
 /// A single spec in a scene description layer, consisting of a type and a set of fields.
 ///
 /// See [SdfSpec](https://openusd.org/dev/api/class_sdf_spec.html) in the USD documentation.
+///
+/// Fields are stored in authored order. This mirrors the C++ `SdfData`
+/// representation and is required for faithful text round-tripping.
 #[derive(Debug, Clone)]
 pub struct Spec {
     /// The type of this spec (prim, attribute, relationship, etc.).
     pub ty: SpecType,
-    /// The fields stored on this spec, keyed by field name.
-    pub fields: HashMap<String, Value>,
+    /// The fields stored on this spec, in authored order.
+    pub fields: Vec<(String, Value)>,
 }
 
 impl Spec {
     /// Creates a new empty spec of the given type.
     pub fn new(ty: SpecType) -> Self {
-        Self {
-            ty,
-            fields: Default::default(),
+        Self { ty, fields: Vec::new() }
+    }
+
+    /// Insert or replace a field. If the key already exists, its value is
+    /// overwritten in place and its position is preserved.
+    pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<Value>) {
+        let key = key.as_ref();
+        let value = value.into();
+        if let Some(slot) = self.fields.iter_mut().find(|(k, _)| k == key) {
+            slot.1 = value;
+        } else {
+            self.fields.push((key.to_owned(), value));
         }
     }
 
-    /// Add a new field to the spec.
-    #[inline]
-    pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<Value>) {
-        self.fields.insert(key.as_ref().to_owned(), value.into());
+    /// Look up a field by name.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// Returns `true` if the spec has a field with the given name.
+    pub fn contains(&self, key: &str) -> bool {
+        self.fields.iter().any(|(k, _)| k == key)
+    }
+
+    /// Remove a field by name, returning its value if present.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let idx = self.fields.iter().position(|(k, _)| k == key)?;
+        Some(self.fields.remove(idx).1)
+    }
+
+    /// Merge fields from `other` into `self`, upserting each by name.
+    pub fn extend_from(&mut self, other: Spec) {
+        for (k, v) in other.fields {
+            self.add(k, v);
+        }
     }
 }
