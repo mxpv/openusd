@@ -440,7 +440,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
     fn write_value(&mut self, value: &Value) -> Result<ValueRep> {
         match value {
-            Value::None => Ok(rep_inline(Type::Invalid, 0)),
+            // `Value::None` represents an absent opinion and has no crate
+            // representation — `Type::Invalid` would fail validation on read.
+            Value::None => bail!("Value::None cannot be serialized to USDC"),
             Value::ValueBlock => Ok(rep_inline(Type::ValueBlock, 0)),
             Value::Value => Ok(rep_inline(Type::Value, 0)),
 

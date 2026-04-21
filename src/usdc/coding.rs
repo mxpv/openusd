@@ -169,7 +169,19 @@ fn most_common(deltas: &[i64]) -> i64 {
     for &d in deltas {
         *counts.entry(d).or_insert(0) += 1;
     }
-    counts.into_iter().max_by_key(|(_, c)| *c).map(|(v, _)| v).unwrap_or(0)
+    // Tie-break by smallest value so the output is byte-deterministic across
+    // runs regardless of `HashMap` iteration order.
+    let mut best: Option<(i64, usize)> = None;
+    for (value, count) in counts {
+        match best {
+            None => best = Some((value, count)),
+            Some((bv, bc)) if count > bc || (count == bc && value < bv) => {
+                best = Some((value, count));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(v, _)| v).unwrap_or(0)
 }
 
 fn fits_in_i8(v: i64) -> bool {
@@ -221,6 +233,20 @@ mod tests {
         let values: &[i64] = &[-1_000_000, -999_999, 0, 1_000_000_000_000];
         let encoded = encode_ints(values);
         let decoded = decode_ints::<i64>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn most_common_tie_break_is_deterministic() {
+        // Two deltas tied at frequency 2: smallest wins so the encoded output
+        // is byte-identical across runs regardless of HashMap iteration order.
+        // Values crafted so deltas are [2, 2, 2, 5, 5, 5] — 2 wins on size.
+        let values: &[i32] = &[0, 2, 4, 6, 11, 16, 21];
+        let a = encode_ints(values);
+        let b = encode_ints(values);
+        assert_eq!(a, b, "encode_ints output must be byte-deterministic");
+        // Sanity: round-trip still works.
+        let decoded = decode_ints::<i32>(&a, values.len()).unwrap();
         assert_eq!(decoded, values);
     }
 
