@@ -1,8 +1,4 @@
-//! USDZ archive format reader.
-//!
-//! USDZ is a compressed ZIP archive containing either USDA or USDC files.
-//! According to the USD specification, USDZ files are zero-compression, unencrypted
-//! ZIP archives designed for efficient direct consumption without extraction.
+//! USDZ archive reader.
 
 use std::{
     fs::File,
