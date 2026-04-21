@@ -8,9 +8,11 @@ use layout::ValueRep;
 mod coding;
 mod layout;
 mod reader;
+mod writer;
 
 pub use layout::{version, Version};
 pub use reader::{CrateFile, ReadExt};
+pub use writer::CrateWriter;
 
 use crate::sdf;
 
