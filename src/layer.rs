@@ -74,9 +74,10 @@ pub struct Layer {
 
 /// Persistent format for a saved layer.
 ///
-/// Used by [`Layer::save_as`] and [`infer_format`] to make the writer's format
-/// choice explicit. For `.usd` — which the AOUSD Core Spec permits to be
-/// either text (§16.2) or binary (§16.3) — this lets the caller pick.
+/// Used by [`Layer::save_as`] and [`LayerFormat::from_extension`] to make
+/// the writer's format choice explicit. For `.usd` — which the AOUSD Core
+/// Spec permits to be either text (§16.2) or binary (§16.3) — this lets the
+/// caller pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerFormat {
     /// Text format (`.usda`).

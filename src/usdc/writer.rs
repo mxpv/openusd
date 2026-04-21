@@ -33,7 +33,7 @@ impl CrateWriter {
     pub fn write_to_file(data: &dyn AbstractData, path: impl AsRef<std::path::Path>) -> Result<()> {
         let mut file = std::fs::File::create(path).context("failed to create usdc file")?;
         Self::write(data, &mut file)?;
-        file.sync_all().ok();
+        file.sync_all().context("failed to sync usdc file to disk")?;
         Ok(())
     }
 
