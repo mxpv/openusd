@@ -89,7 +89,8 @@ fn roundtrip_usdc_layer_bytes() {
 
 #[test]
 fn create_method_writes_to_disk_and_reads_back() {
-    let tmp = std::env::temp_dir().join("openusd-archive-roundtrip.usdz");
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp = tmp_dir.path().join("archive-roundtrip.usdz");
     {
         let mut w = ArchiveWriter::create(&tmp).unwrap();
         w.add_layer("scene.usdc", &usdc_bytes()).unwrap();
@@ -100,8 +101,6 @@ fn create_method_writes_to_disk_and_reads_back() {
     assert_eq!(archive.first_layer_name().as_deref(), Some("scene.usdc"));
     let layer = archive.read("scene.usdc").unwrap();
     assert!(layer.has_spec(&sdf::Path::abs_root()));
-
-    std::fs::remove_file(&tmp).ok();
 }
 
 #[test]

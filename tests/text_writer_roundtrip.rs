@@ -27,7 +27,8 @@ fn assert_roundtrip_path(usda: &Path, name: &str) {
     let emitted =
         TextWriter::write_to_string(&reader as &dyn sdf::AbstractData).unwrap_or_else(|e| panic!("emit failed: {e:#}"));
 
-    let tmp_path = std::env::temp_dir().join(format!("openusd-roundtrip-{name}.usda"));
+    let tmp_dir = tempfile::tempdir().expect("create tempdir");
+    let tmp_path = tmp_dir.path().join(format!("{name}.usda"));
     std::fs::write(&tmp_path, &emitted).expect("write temp file");
 
     let re_reader = TextReader::read(&tmp_path)
