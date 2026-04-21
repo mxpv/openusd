@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::sdf::{
     self, AbstractData, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType, Specifier,
@@ -1175,34 +1175,35 @@ fn write_quoted(s: &mut String, text: &str) -> Result<()> {
     let has_triple_dq = text.contains("\"\"\"");
     let has_triple_sq = text.contains("'''");
 
-    if has_newline && !has_triple_dq {
-        s.push_str("\"\"\"");
-        s.push_str(text);
-        s.push_str("\"\"\"");
-        return Ok(());
+    // A single-character delimiter works only if the text contains no newline
+    // and does not include that delimiter. Otherwise we need triple quotes.
+    if has_newline || (has_dq && has_sq) {
+        if !has_triple_dq {
+            s.push_str("\"\"\"");
+            s.push_str(text);
+            s.push_str("\"\"\"");
+            return Ok(());
+        }
+        if !has_triple_sq {
+            s.push_str("'''");
+            s.push_str(text);
+            s.push_str("'''");
+            return Ok(());
+        }
+        bail!("cannot emit USDA string containing both \"\"\" and '''");
     }
-    if has_newline && !has_triple_sq {
-        s.push_str("'''");
-        s.push_str(text);
-        s.push_str("'''");
-        return Ok(());
-    }
-    if has_dq && !has_sq {
+
+    // Single-line text with at most one kind of quote present: use the
+    // opposite single-character delimiter.
+    if has_dq {
         s.push('\'');
         s.push_str(text);
         s.push('\'');
-        return Ok(());
-    }
-    if has_sq && !has_dq {
+    } else {
         s.push('"');
         s.push_str(text);
         s.push('"');
-        return Ok(());
     }
-    // Fallback for strings without newlines/quotes (the common case): plain "..."
-    s.push('"');
-    s.push_str(text);
-    s.push('"');
     Ok(())
 }
 
@@ -1441,5 +1442,57 @@ mod tests {
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         assert!(text.contains("def Xform \"Foo\""));
+    }
+
+    /// Emit `text` via `write_quoted` then re-tokenize the output and return
+    /// what the lexer recovered.
+    fn write_quoted_and_reparse(text: &str) -> String {
+        use crate::usda::token::Token;
+        use logos::Logos;
+
+        let mut out = String::new();
+        write_quoted(&mut out, text).unwrap();
+
+        let mut lexer = Token::lexer(&out);
+        let first = lexer.next().expect("lexer produced no token").expect("lexer error");
+        assert!(lexer.next().is_none(), "expected a single token, got trailing input: {out:?}");
+        match first {
+            Token::String(s) => s.to_owned(),
+            other => panic!("expected Token::String, got {other:?} for output {out:?}"),
+        }
+    }
+
+    #[test]
+    fn write_quoted_roundtrips_tricky_strings() {
+        // Plain text.
+        assert_eq!(write_quoted_and_reparse("hello"), "hello");
+        // Contains only double quotes — must be wrapped in single quotes.
+        assert_eq!(write_quoted_and_reparse(r#"has "quotes""#), r#"has "quotes""#);
+        // Contains only single quotes — must be wrapped in double quotes.
+        assert_eq!(write_quoted_and_reparse("has 'apostrophes'"), "has 'apostrophes'");
+        // Contains both kinds of quotes on one line — no single-char delimiter works,
+        // so the emitter must fall back to triple quotes.
+        assert_eq!(
+            write_quoted_and_reparse(r#"mix "dq" and 'sq'"#),
+            r#"mix "dq" and 'sq'"#
+        );
+        // Contains a newline — must use triple quotes.
+        assert_eq!(write_quoted_and_reparse("line1\nline2"), "line1\nline2");
+        // Contains a newline and `"""` — must switch to triple single-quote.
+        assert_eq!(
+            write_quoted_and_reparse("pre\n\"\"\"post"),
+            "pre\n\"\"\"post"
+        );
+        // Contains a newline and `'''` — must use triple double-quote.
+        assert_eq!(write_quoted_and_reparse("pre\n'''post"), "pre\n'''post");
+        // Worst case: newline plus both `"""` and `'''`. No USDA delimiter can wrap
+        // this losslessly; the writer must report an error rather than emit output
+        // the lexer will reject.
+        let worst = "line\n\"\"\"and'''both";
+        let mut out = String::new();
+        assert!(
+            write_quoted(&mut out, worst).is_err(),
+            "expected error for un-quotable string, got output {out:?}"
+        );
     }
 }
