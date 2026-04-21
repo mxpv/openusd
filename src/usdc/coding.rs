@@ -2,7 +2,7 @@
 //!
 //! See <https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/integerCoding.cpp#L40>
 
-use std::{io, mem};
+use std::{collections::HashMap, io, mem};
 
 use anyhow::{bail, Result};
 use num_traits::{AsPrimitive, PrimInt};
@@ -73,9 +73,152 @@ where
     Ok(output)
 }
 
+/// Encode a sequence of integers using the crate file delta/common-value
+/// coding scheme. Inverse of [`decode_ints`].
+///
+/// Format:
+/// 1. Common value (i32 for 32-bit T, i64 for 64-bit T)
+/// 2. Code bytes: 2 bits per integer, packed 4 per byte, little-endian
+/// 3. Payload: variable-width deltas (COMMON omits, SMALL/MEDIUM/LARGE vary by bit-width)
+pub fn encode_ints<T>(values: &[T]) -> Vec<u8>
+where
+    T: PrimInt + 'static + AsPrimitive<i64>,
+{
+    let count = values.len();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let is_64_bit = mem::size_of::<T>() == 8;
+
+    // Compute deltas.
+    let mut deltas = Vec::with_capacity(count);
+    let mut prev = 0_i64;
+    for v in values {
+        let cur: i64 = (*v).as_();
+        deltas.push(cur.wrapping_sub(prev));
+        prev = cur;
+    }
+
+    // Pick the most frequent delta as the common value.
+    let common = most_common(&deltas);
+
+    // Classify each delta.
+    let codes: Vec<u8> = deltas
+        .iter()
+        .map(|&d| {
+            if d == common {
+                COMMON
+            } else if is_64_bit {
+                if fits_in_i16(d) {
+                    SMALL
+                } else if fits_in_i32(d) {
+                    MEDIUM
+                } else {
+                    LARGE
+                }
+            } else if fits_in_i8(d) {
+                SMALL
+            } else if fits_in_i16(d) {
+                MEDIUM
+            } else {
+                LARGE
+            }
+        })
+        .collect();
+
+    // Assemble output.
+    let mut out = Vec::new();
+    if is_64_bit {
+        out.extend_from_slice(&common.to_le_bytes());
+    } else {
+        out.extend_from_slice(&(common as i32).to_le_bytes());
+    }
+
+    let num_code_bytes = (count * 2).div_ceil(8);
+    let mut code_table = vec![0_u8; num_code_bytes];
+    for (i, code) in codes.iter().enumerate() {
+        let byte_idx = i / 4;
+        let slot = i % 4;
+        code_table[byte_idx] |= (code & 0b11) << (2 * slot);
+    }
+    out.extend_from_slice(&code_table);
+
+    for (code, delta) in codes.iter().zip(deltas.iter()) {
+        match (*code, is_64_bit) {
+            (COMMON, _) => {}
+            (SMALL, true) => out.extend_from_slice(&(*delta as i16).to_le_bytes()),
+            (SMALL, false) => out.extend_from_slice(&(*delta as i8).to_le_bytes()),
+            (MEDIUM, true) => out.extend_from_slice(&(*delta as i32).to_le_bytes()),
+            (MEDIUM, false) => out.extend_from_slice(&(*delta as i16).to_le_bytes()),
+            (LARGE, true) => out.extend_from_slice(&(*delta).to_le_bytes()),
+            (LARGE, false) => out.extend_from_slice(&(*delta as i32).to_le_bytes()),
+            _ => unreachable!(),
+        }
+    }
+
+    out
+}
+
+fn most_common(deltas: &[i64]) -> i64 {
+    let mut counts: HashMap<i64, usize> = HashMap::new();
+    for &d in deltas {
+        *counts.entry(d).or_insert(0) += 1;
+    }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(v, _)| v).unwrap_or(0)
+}
+
+fn fits_in_i8(v: i64) -> bool {
+    v >= i8::MIN as i64 && v <= i8::MAX as i64
+}
+fn fits_in_i16(v: i64) -> bool {
+    v >= i16::MIN as i64 && v <= i16::MAX as i64
+}
+fn fits_in_i32(v: i64) -> bool {
+    v >= i32::MIN as i64 && v <= i32::MAX as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roundtrip_empty() {
+        let out = encode_ints::<i32>(&[]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_u32() {
+        let values: &[u32] = &[123, 124, 125, 100125, 100125, 100126, 100126];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<u32>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn roundtrip_i32_with_negative_deltas() {
+        let values: &[i32] = &[10, 5, 3, 100, 99, 200, -50];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<i32>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn roundtrip_u64_large_values() {
+        let values: &[u64] = &[0, 1_000_000_000, 5_000_000_000, 9_000_000_000_000];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<u64>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn roundtrip_i64_negative() {
+        let values: &[i64] = &[-1_000_000, -999_999, 0, 1_000_000_000_000];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<i64>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
 
     #[test]
     fn test_decode() {

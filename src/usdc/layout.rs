@@ -75,7 +75,7 @@ impl PartialOrd for Version {
 }
 
 /// Max section's name length.
-const SECTION_NAME_MAX_LENGTH: usize = 15;
+pub(crate) const SECTION_NAME_MAX_LENGTH: usize = 15;
 
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy, Pod, Zeroable)]

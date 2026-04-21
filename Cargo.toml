@@ -36,3 +36,11 @@ required-features = ["serde"]
 [[test]]
 name = "text_writer_roundtrip"
 required-features = ["serde"]
+
+[[test]]
+name = "binary_writer_roundtrip"
+required-features = ["serde"]
+
+[[test]]
+name = "cross_format_roundtrip"
+required-features = ["serde"]
