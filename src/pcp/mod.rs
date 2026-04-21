@@ -99,10 +99,10 @@ pub(crate) mod index;
 mod mapping;
 mod rel;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{LayerData, Path, Value};
+use crate::sdf::{self, LayerData, Path, Value};
 
 pub(crate) use cache::Cache;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
@@ -159,9 +159,11 @@ impl VariantFallbackMap {
 
 /// Precomputed sublayer stacks, keyed by root layer index.
 ///
-/// Each entry maps a root layer to the full list of layer indices forming
-/// its sublayer stack.
-pub(crate) type SublayerStacks = HashMap<usize, Vec<usize>>;
+/// Each entry maps a root layer to its full sublayer stack. Each entry pairs
+/// a layer index with the effective layer offset for that layer relative to
+/// the stack's root (composed through nested sublayers per spec 10.3.1.1).
+/// The stack root itself has [`sdf::LayerOffset::IDENTITY`].
+pub(crate) type SublayerStacks = HashMap<usize, Vec<(usize, sdf::LayerOffset)>>;
 
 /// Loaded layers with precomputed sublayer ordering.
 ///
@@ -177,6 +179,10 @@ pub(crate) struct LayerStack {
     pub sublayer_stacks: SublayerStacks,
     /// Number of session layers at the front of the layer stack.
     pub session_layer_count: usize,
+    /// O(1) lookup: effective sublayer offset of each layer in the first
+    /// stack that contains it. Precomputed from `sublayer_stacks` to keep
+    /// per-prim composition off the linear-scan hot path.
+    layer_offsets: HashMap<usize, sdf::LayerOffset>,
 }
 
 impl LayerStack {
@@ -185,11 +191,18 @@ impl LayerStack {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers)))
             .collect();
+        let mut layer_offsets: HashMap<usize, sdf::LayerOffset> = HashMap::new();
+        for stack in sublayer_stacks.values() {
+            for &(li, off) in stack {
+                layer_offsets.entry(li).or_insert(off);
+            }
+        }
         Self {
             layers,
             identifiers,
             sublayer_stacks,
             session_layer_count,
+            layer_offsets,
         }
     }
 
@@ -214,25 +227,66 @@ impl LayerStack {
         &self.identifiers[index]
     }
 
-    /// Returns the layer indices forming a sublayer stack rooted at `root_layer`.
-    pub(crate) fn build_sublayer_stack(root_layer: usize, layers: &[LayerData], identifiers: &[String]) -> Vec<usize> {
-        let mut stack = vec![root_layer];
-        let mut queue = vec![root_layer];
+    /// Returns the effective sublayer offset for `layer_index` relative to
+    /// whichever stack first contains it.
+    ///
+    /// Intended for call sites that discover a layer without threading the
+    /// full stack context (ancestor-arc propagation, `cache.rs` scans, and
+    /// the flat L-stage scan used by [`IndexBuilder::build`]). O(1) — backed
+    /// by a map precomputed in [`LayerStack::new`].
+    pub(crate) fn effective_offset_for_layer(&self, layer_index: usize) -> sdf::LayerOffset {
+        self.layer_offsets
+            .get(&layer_index)
+            .copied()
+            .unwrap_or(sdf::LayerOffset::IDENTITY)
+    }
 
-        while let Some(idx) = queue.pop() {
+    /// Returns the layer indices + effective offsets for a sublayer stack
+    /// rooted at `root_layer`. Each entry's offset is composed from the
+    /// root through all nested sublayers per spec 10.3.1.1.
+    pub(crate) fn build_sublayer_stack(
+        root_layer: usize,
+        layers: &[LayerData],
+        identifiers: &[String],
+    ) -> Vec<(usize, sdf::LayerOffset)> {
+        let mut stack: Vec<(usize, sdf::LayerOffset)> = vec![(root_layer, sdf::LayerOffset::IDENTITY)];
+        let mut seen: HashSet<usize> = HashSet::new();
+        seen.insert(root_layer);
+        // BFS so offsets compose with their direct parent sublayer.
+        let mut queue: VecDeque<(usize, sdf::LayerOffset)> = VecDeque::new();
+        queue.push_back((root_layer, sdf::LayerOffset::IDENTITY));
+
+        while let Some((idx, parent_effective)) = queue.pop_front() {
             let root = Path::abs_root();
             let Ok(value) = layers[idx].get(&root, FieldKey::SubLayers.as_str()) else {
                 continue;
             };
-            if let Value::StringVec(sub_paths) = value.into_owned() {
-                for sub_path in sub_paths {
-                    if let Some(sub_idx) = index::find_layer(&sub_path, identifiers) {
-                        if !stack.contains(&sub_idx) {
-                            stack.push(sub_idx);
-                            queue.push(sub_idx);
-                        }
-                    }
+            let Value::StringVec(sub_paths) = value.into_owned() else {
+                continue;
+            };
+
+            // Offsets live in a parallel field; missing entries fall back to
+            // the identity offset per spec 16.2.18.3.
+            let offsets: Vec<sdf::LayerOffset> = layers[idx]
+                .get(&root, FieldKey::SubLayerOffsets.as_str())
+                .ok()
+                .and_then(|v| match v.into_owned() {
+                    Value::LayerOffsetVec(v) => Some(v),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            for (i, sub_path) in sub_paths.into_iter().enumerate() {
+                let Some(sub_idx) = index::find_layer(&sub_path, identifiers) else {
+                    continue;
+                };
+                if !seen.insert(sub_idx) {
+                    continue;
                 }
+                let local = offsets.get(i).copied().unwrap_or_default().sanitized();
+                let effective = parent_effective.concatenate(&local);
+                stack.push((sub_idx, effective));
+                queue.push_back((sub_idx, effective));
             }
         }
 
