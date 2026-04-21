@@ -163,7 +163,7 @@ impl<W: Write> Emitter<'_, W> {
         // Variant sets
         if let Some(Value::TokenVec(vset_names)) = get_value(data, path, ChildrenKey::VariantSetChildren.as_str()) {
             for vset in &vset_names {
-                let vset_path = build_variant_set_path(path, vset);
+                let vset_path = path.append_variant_selection(vset, "");
                 self.emit_variant_set(data, &vset_path, vset)?;
             }
         }
@@ -537,8 +537,9 @@ impl<W: Write> Emitter<'_, W> {
 
         if let Some(Value::TokenVec(variant_names)) = get_value(data, vset_path, ChildrenKey::VariantChildren.as_str())
         {
+            let prim = vset_path.prim_path();
             for v_name in &variant_names {
-                let v_path = build_variant_path(vset_path, v_name);
+                let v_path = prim.append_variant_selection(name, v_name);
                 self.emit_variant(data, &v_path, v_name)?;
             }
         }
@@ -703,76 +704,44 @@ impl<W: Write> Emitter<'_, W> {
     fn try_emit_listop_metadata(&mut self, name: &str, value: &Value) -> Result<Option<bool>> {
         match value {
             Value::TokenListOp(op) | Value::StringListOp(op) => {
-                self.emit_named_listop(name, op, |s, t| write_quoted(s, t))?;
+                self.emit_listop_statement(name, op, |s, t| write_quoted(s, t))?;
                 Ok(Some(true))
             }
             Value::PathListOp(op) => {
-                self.emit_named_listop(name, op, |s, p| {
+                self.emit_listop_statement(name, op, |s, p| {
                     write!(s, "<{}>", p.as_str())?;
                     Ok(())
                 })?;
                 Ok(Some(true))
             }
             Value::ReferenceListOp(op) => {
-                self.emit_named_listop(name, op, write_reference)?;
+                self.emit_listop_statement(name, op, write_reference)?;
                 Ok(Some(true))
             }
             Value::PayloadListOp(op) => {
-                self.emit_named_listop(name, op, write_payload)?;
+                self.emit_listop_statement(name, op, write_payload)?;
                 Ok(Some(true))
             }
             Value::IntListOp(op) => {
-                self.emit_named_listop(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
+                self.emit_listop_statement(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
                 Ok(Some(true))
             }
             Value::Int64ListOp(op) => {
-                self.emit_named_listop(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
+                self.emit_listop_statement(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
                 Ok(Some(true))
             }
             Value::UIntListOp(op) => {
-                self.emit_named_listop(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
+                self.emit_listop_statement(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
                 Ok(Some(true))
             }
             Value::UInt64ListOp(op) => {
-                self.emit_named_listop(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
+                self.emit_listop_statement(name, op, |s, v| write!(s, "{v}").map_err(Into::into))?;
                 Ok(Some(true))
             }
             _ => Ok(None),
         }
     }
 
-    fn emit_named_listop<T, F>(&mut self, name: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<()>
-    where
-        T: Default + Clone + PartialEq,
-        F: FnMut(&mut String, &T) -> Result<()>,
-    {
-        if op.explicit {
-            self.write_indent()?;
-            write!(self.out, "{name} = ")?;
-            self.write_listop_items(&op.explicit_items, &mut fmt_item)?;
-            writeln!(self.out)?;
-            return Ok(());
-        }
-
-        for (kw, items) in [
-            ("delete", &op.deleted_items),
-            ("add", &op.added_items),
-            ("prepend", &op.prepended_items),
-            ("append", &op.appended_items),
-            ("reorder", &op.ordered_items),
-        ] {
-            if !items.is_empty() {
-                self.write_indent()?;
-                write!(self.out, "{kw} {name} = ")?;
-                self.write_listop_items(items, &mut fmt_item)?;
-                writeln!(self.out)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Same as [`emit_named_listop`] but writes to the current line (for standalone
-    /// statements like `rel targets`, `float attr.connect`).
     fn emit_listop_statement<T, F>(&mut self, prefix: &str, op: &ListOp<T>, mut fmt_item: F) -> Result<()>
     where
         T: Default + Clone + PartialEq,
@@ -1381,28 +1350,6 @@ fn property_children(data: &dyn AbstractData, path: &Path) -> Vec<String> {
         Some(Value::TokenVec(v)) => v,
         _ => Vec::new(),
     }
-}
-
-fn build_variant_set_path(prim_path: &Path, vset_name: &str) -> Path {
-    // Variant set specs live at `primPath{vsetName=}`, but the emitter only
-    // needs a key that `AbstractData` will accept; concrete storage uses the
-    // `{vset=variant}` syntax. Since our data model stores variant sets as
-    // regular specs at `<prim>{<vset>=}`, we mimic that.
-    let mut raw = prim_path.as_str().to_owned();
-    raw.push('{');
-    raw.push_str(vset_name);
-    raw.push_str("=}");
-    Path::new(&raw).unwrap_or_else(|_| prim_path.clone())
-}
-
-fn build_variant_path(vset_path: &Path, variant_name: &str) -> Path {
-    let raw = vset_path.as_str().to_owned();
-    // vset_path ends with `=}`; replace closing `}` with `<name>}`.
-    let trimmed = raw.strip_suffix('}').unwrap_or(raw.as_str());
-    let mut s = String::from(trimmed);
-    s.push_str(variant_name);
-    s.push('}');
-    Path::new(&s).unwrap_or_else(|_| vset_path.clone())
 }
 
 // Field classifiers. Match C++ `Sdf_Is{Prim,Attribute,Relationship}MetadataField`.
