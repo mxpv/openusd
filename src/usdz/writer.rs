@@ -14,7 +14,7 @@
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -47,7 +47,13 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// `bytes` is the raw file content. The first call should typically be a
     /// `.usda`/`.usdc`/`.usd` layer — per the USDZ spec, the first file in
     /// the archive is the package's root layer.
+    ///
+    /// `name` must be an archive-relative forward-slash path: non-empty, not
+    /// absolute, and containing no `..` segments or backslashes. Archives
+    /// with path-traversing entries are rejected.
     pub fn add_layer(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_entry_name(name)?;
+
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .with_alignment(USDZ_ALIGNMENT);
@@ -76,5 +82,72 @@ impl ArchiveWriter<std::fs::File> {
         let file = std::fs::File::create(path)
             .with_context(|| format!("failed to create USDZ archive: {}", path.display()))?;
         Ok(Self::new(file))
+    }
+}
+
+/// Validate that `name` is safe to use as a ZIP entry path: a non-empty
+/// relative path whose segments are all concrete filenames. USDZ archives
+/// consumed by other tools interpret entry names as filesystem paths, so
+/// absolute, traversing, directory-like, or double-separator forms can
+/// escape the extraction root or produce ambiguous results.
+fn validate_entry_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("USDZ entry name cannot be empty");
+    }
+    if name.contains('\\') {
+        bail!("USDZ entry name {name:?} must not contain backslashes");
+    }
+    if name.starts_with('/') {
+        bail!("USDZ entry name {name:?} must be relative, not absolute");
+    }
+    if name.ends_with('/') {
+        bail!("USDZ entry name {name:?} must name a file, not a directory");
+    }
+    for seg in name.split('/') {
+        match seg {
+            "" => bail!("USDZ entry name {name:?} has an empty path segment"),
+            "." | ".." => {
+                bail!("USDZ entry name {name:?} must not contain `{seg}` segments")
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn writer() -> ArchiveWriter<Cursor<Vec<u8>>> {
+        ArchiveWriter::new(Cursor::new(Vec::new()))
+    }
+
+    #[test]
+    fn rejects_unsafe_entry_names() {
+        for name in [
+            "",
+            "/absolute",
+            "..",
+            "a/../b",
+            "win\\style",
+            "a//b",
+            "a/",
+            "./a",
+            "a/.",
+        ] {
+            assert!(
+                writer().add_layer(name, b"").is_err(),
+                "expected rejection for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_safe_relative_entry_names() {
+        for name in ["scene.usdc", "Textures/Material/base.jpg", "nested/a.b.c"] {
+            writer().add_layer(name, b"dummy").expect(name);
+        }
     }
 }

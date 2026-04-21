@@ -303,8 +303,8 @@ impl<W: Write> Emitter<'_, W> {
 
         // Knots
         let knot_custom = match dict.get("knotCustomData") {
-            Some(Value::Dictionary(m)) => m,
-            _ => &HashMap::new(),
+            Some(Value::Dictionary(m)) => Some(m),
+            _ => None,
         };
         if let Some(Value::ValueVec(knots)) = dict.get("knots") {
             for knot in knots {
@@ -377,7 +377,11 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn write_knot(&mut self, knot: &HashMap<String, Value>, knot_custom: &HashMap<String, Value>) -> Result<()> {
+    fn write_knot(
+        &mut self,
+        knot: &HashMap<String, Value>,
+        knot_custom: Option<&HashMap<String, Value>>,
+    ) -> Result<()> {
         let d = |k: &str| -> f64 {
             match knot.get(k) {
                 Some(Value::Double(v)) => *v,
@@ -433,7 +437,7 @@ impl<W: Write> Emitter<'_, W> {
         } else {
             format!("{time}")
         };
-        if let Some(Value::Dictionary(custom)) = knot_custom.get(&time_key) {
+        if let Some(Value::Dictionary(custom)) = knot_custom.and_then(|m| m.get(&time_key)) {
             buf.push_str("; ");
             let mut dict_str = String::new();
             format_dictionary(&mut dict_str, custom)?;

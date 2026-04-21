@@ -754,11 +754,11 @@ mod tests {
         sp.add("typeName", Value::Token("Xform".into()));
 
         let layer = Layer::new("test://layer", Box::new(data));
-        let dir = std::env::temp_dir();
+        let dir = tempfile::tempdir()?;
 
-        let usda_path = dir.join("openusd-layer-save.usda");
-        let usdc_path = dir.join("openusd-layer-save.usdc");
-        let usdz_path = dir.join("openusd-layer-save.usdz");
+        let usda_path = dir.path().join("layer-save.usda");
+        let usdc_path = dir.path().join("layer-save.usdc");
+        let usdz_path = dir.path().join("layer-save.usdz");
 
         layer.save(&usda_path)?;
         layer.save(&usdc_path)?;
@@ -772,10 +772,6 @@ mod tests {
         let archive = crate::usdz::Archive::open(&usdz_path)?;
         let name = archive.first_layer_name().expect("usdz has a layer");
         assert!(name.ends_with(".usdc"));
-
-        std::fs::remove_file(&usda_path).ok();
-        std::fs::remove_file(&usdc_path).ok();
-        std::fs::remove_file(&usdz_path).ok();
         Ok(())
     }
 
@@ -793,7 +789,8 @@ mod tests {
         sp.add("typeName", Value::Token("Cube".into()));
 
         let layer = Layer::new("test://layer-usd", Box::new(data));
-        let path = std::env::temp_dir().join("openusd-layer-save.usd");
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("layer-save.usd");
         layer.save(&path)?;
 
         // Writer chose binary for `.usd` — first bytes must be the USDC magic.
@@ -813,8 +810,6 @@ mod tests {
             round.get(&bar, "typeName").unwrap().into_owned(),
             Value::Token("Cube".into())
         );
-
-        std::fs::remove_file(&path).ok();
         Ok(())
     }
 
@@ -845,7 +840,8 @@ mod tests {
         sp.add("typeName", Value::Token("Xform".into()));
 
         let layer = Layer::new("test://text-as-usd", Box::new(data));
-        let path = std::env::temp_dir().join("openusd-text-as-usd.usd");
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("text-as-usd.usd");
         layer.save_as(&path, LayerFormat::Usda)?;
 
         // Emitted bytes must NOT start with the binary magic — they're text.
@@ -865,8 +861,6 @@ mod tests {
             round.get(&prim, "typeName").unwrap().into_owned(),
             Value::Token("Xform".into())
         );
-
-        std::fs::remove_file(&path).ok();
         Ok(())
     }
 
