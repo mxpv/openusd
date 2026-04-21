@@ -79,6 +79,50 @@ impl Layer {
             data,
         }
     }
+
+    /// Save the layer to disk, dispatching on the destination's extension.
+    ///
+    /// - `.usda` → text writer
+    /// - `.usdc` → binary crate writer
+    /// - `.usd` → binary crate writer (see below)
+    /// - `.usdz` → archive containing one `.usdc` entry named after the layer's
+    ///   final path component (with the extension swapped to `.usdc`)
+    ///
+    /// # `.usd` format choice
+    ///
+    /// Per the AOUSD Core Specification, `.usd` is valid for **either** text
+    /// (§16.2: "stored with the .usda or .usd extension") **or** binary
+    /// (§16.3: "represented with the .usdc or .usd extension"). The reader
+    /// side auto-detects via magic-byte sniffing.
+    ///
+    /// On write we default to binary, matching Pixar's C++ USD default
+    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). Callers who want text form
+    /// should name the file `.usda` explicitly or call
+    /// [`usda::TextWriter::write_to_file`] directly.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let path = path.as_ref();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        match ext.as_str() {
+            "usda" => usda::TextWriter::write_to_file(self.data.as_ref(), path),
+            "usdc" | "usd" => usdc::CrateWriter::write_to_file(self.data.as_ref(), path),
+            "usdz" => {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
+                let mut buf = Vec::new();
+                usdc::CrateWriter::write(self.data.as_ref(), &mut Cursor::new(&mut buf))?;
+                let mut archive = crate::usdz::ArchiveWriter::create(path)?;
+                archive.add_layer(&format!("{stem}.usdc"), &buf)?;
+                archive.finish()?;
+                Ok(())
+            }
+            "" => bail!("layer path {} has no extension; cannot choose format", path.display()),
+            other => bail!("unsupported layer extension {other:?} for save (expected usda/usdc/usd/usdz)"),
+        }
+    }
 }
 
 impl std::fmt::Debug for Layer {
@@ -647,5 +691,93 @@ mod tests {
         assert_eq!(layers.len(), 1);
         assert!(layers[0].identifier.contains("reference_invalid.usda"));
         Ok(())
+    }
+
+    #[test]
+    fn save_dispatches_on_extension() -> Result<()> {
+        use crate::sdf::{self, SpecType, Value};
+
+        let mut data = sdf::Data::new();
+        let root = sdf::Path::abs_root();
+        let ps = data.create_spec(root, SpecType::PseudoRoot);
+        ps.add("primChildren", Value::TokenVec(vec!["Foo".into()]));
+        let foo = sdf::path("/Foo")?;
+        let sp = data.create_spec(foo, SpecType::Prim);
+        sp.add("specifier", Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", Value::Token("Xform".into()));
+
+        let layer = Layer::new("test://layer", Box::new(data));
+        let dir = std::env::temp_dir();
+
+        let usda_path = dir.join("openusd-layer-save.usda");
+        let usdc_path = dir.join("openusd-layer-save.usdc");
+        let usdz_path = dir.join("openusd-layer-save.usdz");
+
+        layer.save(&usda_path)?;
+        layer.save(&usdc_path)?;
+        layer.save(&usdz_path)?;
+
+        assert!(std::fs::metadata(&usda_path)?.len() > 0);
+        assert!(std::fs::metadata(&usdc_path)?.len() > 0);
+        assert!(std::fs::metadata(&usdz_path)?.len() > 0);
+
+        // The usdz should contain an entry we can read back.
+        let archive = crate::usdz::Archive::open(&usdz_path)?;
+        let name = archive.first_layer_name().expect("usdz has a layer");
+        assert!(name.ends_with(".usdc"));
+
+        std::fs::remove_file(&usda_path).ok();
+        std::fs::remove_file(&usdc_path).ok();
+        std::fs::remove_file(&usdz_path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn save_as_usd_writes_binary_and_roundtrips() -> Result<()> {
+        use crate::sdf::{self, SpecType, Value};
+
+        let mut data = sdf::Data::new();
+        let root = sdf::Path::abs_root();
+        let ps = data.create_spec(root, SpecType::PseudoRoot);
+        ps.add("primChildren", Value::TokenVec(vec!["Bar".into()]));
+        let bar = sdf::path("/Bar")?;
+        let sp = data.create_spec(bar.clone(), SpecType::Prim);
+        sp.add("specifier", Value::Specifier(sdf::Specifier::Def));
+        sp.add("typeName", Value::Token("Cube".into()));
+
+        let layer = Layer::new("test://layer-usd", Box::new(data));
+        let path = std::env::temp_dir().join("openusd-layer-save.usd");
+        layer.save(&path)?;
+
+        // Writer chose binary for `.usd` — first bytes must be the USDC magic.
+        let bytes = std::fs::read(&path)?;
+        assert!(
+            bytes.starts_with(crate::usdc::MAGIC),
+            "writer should emit binary for .usd, got magic {:?}",
+            &bytes[..crate::usdc::MAGIC.len().min(bytes.len())],
+        );
+
+        // Reader's magic-byte auto-detection must accept it.
+        let resolver = DefaultResolver::new();
+        let resolved = resolver.resolve(path.to_str().unwrap()).unwrap();
+        let round = open_layer(&resolver, &resolved)?;
+        assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
+        assert_eq!(
+            round.get(&bar, "typeName").unwrap().into_owned(),
+            Value::Token("Cube".into())
+        );
+
+        std::fs::remove_file(&path).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn save_rejects_unknown_extension() {
+        use crate::sdf::{self, SpecType};
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
+        let layer = Layer::new("test://layer", Box::new(data));
+        let err = layer.save("/tmp/openusd-bad.xyz").unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
     }
 }

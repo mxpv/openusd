@@ -74,6 +74,16 @@ impl Data {
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
+
+    /// Write the layer to a `.usda` file on disk.
+    pub fn write_usda(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        crate::usda::TextWriter::write_to_file(self as &dyn AbstractData, path)
+    }
+
+    /// Write the layer to a `.usdc` file on disk.
+    pub fn write_usdc(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        crate::usdc::CrateWriter::write_to_file(self as &dyn AbstractData, path)
+    }
 }
 
 impl AbstractData for Data {

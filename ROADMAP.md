@@ -159,11 +159,11 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | USDA (text) reading | `16.2` | :white_check_mark: | `0.1.4` | Recursive descent parser with logos tokenizer |
-| USDA (text) writing | `16.2` | :construction: | | |
+| USDA (text) writing | `16.2` | :white_check_mark: | | `usda::TextWriter`; round-trips the compliance suite opinion-for-opinion |
 | USDC (binary) reading | `16.3` | :white_check_mark: | `0.1.1` | Crate format with LZ4/integer compression |
-| USDC (binary) writing | `16.3` | :construction: | | |
+| USDC (binary) writing | `16.3` | :white_check_mark: | | `usdc::CrateWriter`; streaming packer with integer compression, LZ4 blocks, DFS path encoder |
 | USDZ (package) reading | `16.4` | :white_check_mark: | `0.2.0` | ZIP-based package reader |
-| USDZ (package) writing | `16.4` | :construction: | | |
+| USDZ (package) writing | `16.4` | :white_check_mark: | | `usdz::ArchiveWriter`; STORED-only, 64-byte aligned entries |
 | Format auto-detection (`.usd`) | `16.1` | :white_check_mark: | `0.2.0` | Magic byte detection |
 
 ## Beyond Core Spec
