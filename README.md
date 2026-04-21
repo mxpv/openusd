@@ -12,7 +12,7 @@ For a detailed comparison with the C++ reference implementation and current prog
 
 ## Features
 
-- File formats — reads `.usda` (text), `.usdc` (binary), and `.usdz` (archive) with format auto-detection.
+- File formats — reads and writes `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
 - Fully featured [composition engine](src/pcp)
   - [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering with sublayers, inherits, variants, references, payloads, and specializes.
   - [List-edit composition](https://openusd.org/release/glossary.html#usdglossary-listediting) across layers.
