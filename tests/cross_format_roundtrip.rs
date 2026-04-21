@@ -28,8 +28,8 @@ fn is_default_layer_offset(v: &serde_json::Value) -> bool {
     let Some(obj) = v.as_object() else {
         return false;
     };
-    let offset = obj.get("offset").and_then(|n| n.as_f64()).unwrap_or(1.0);
-    let scale = obj.get("scale").and_then(|n| n.as_f64()).unwrap_or(0.0);
+    let offset = obj.get("offset").and_then(|n| n.as_f64()).unwrap_or(0.0);
+    let scale = obj.get("scale").and_then(|n| n.as_f64()).unwrap_or(1.0);
     offset == 0.0 && scale == 1.0
 }
 

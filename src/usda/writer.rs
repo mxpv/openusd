@@ -127,7 +127,9 @@ impl<W: Write> Emitter<'_, W> {
             }
         }
 
-        write!(self.out, " \"{}\"", escape_string(name))?;
+        let mut quoted = String::new();
+        write_quoted(&mut quoted, name)?;
+        write!(self.out, " {quoted}")?;
 
         let meta_fields: Vec<String> = data
             .list(path)
@@ -532,7 +534,9 @@ impl<W: Write> Emitter<'_, W> {
 
     fn emit_variant_set(&mut self, data: &dyn AbstractData, vset_path: &Path, name: &str) -> Result<()> {
         self.write_indent()?;
-        writeln!(self.out, "variantSet \"{}\" = {{", escape_string(name))?;
+        let mut quoted = String::new();
+        write_quoted(&mut quoted, name)?;
+        writeln!(self.out, "variantSet {quoted} = {{")?;
         self.indent += 1;
 
         if let Some(Value::TokenVec(variant_names)) = get_value(data, vset_path, ChildrenKey::VariantChildren.as_str())
@@ -552,7 +556,9 @@ impl<W: Write> Emitter<'_, W> {
 
     fn emit_variant(&mut self, data: &dyn AbstractData, path: &Path, name: &str) -> Result<()> {
         self.write_indent()?;
-        write!(self.out, "\"{}\"", escape_string(name))?;
+        let mut quoted = String::new();
+        write_quoted(&mut quoted, name)?;
+        self.out.write_all(quoted.as_bytes())?;
 
         let meta_fields: Vec<String> = data
             .list(path)
@@ -1317,21 +1323,6 @@ fn dict_value_type_name(v: &Value) -> Option<&'static str> {
         Value::Dictionary(_) => "dictionary",
         _ => return None,
     })
-}
-
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 fn get_value(data: &dyn AbstractData, path: &Path, field: &str) -> Option<Value> {
