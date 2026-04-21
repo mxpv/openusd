@@ -1495,4 +1495,38 @@ mod tests {
             "expected error for un-quotable string, got output {out:?}"
         );
     }
+
+    #[test]
+    fn dictionary_key_with_space_roundtrips() {
+        // The USDA parser accepts quoted strings, bare identifiers, and
+        // namespaced identifiers (with `:`) as dictionary keys. Keys that are
+        // none of those (spaces, hyphens, digit-leading, ...) must be emitted
+        // quoted or they will tokenize into multiple lexemes and fail to parse.
+        use crate::usda::parser::Parser;
+
+        let mut data = Data::new();
+        let root = Path::abs_root();
+        let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+
+        let mut dict = HashMap::new();
+        dict.insert("simple".to_string(), Value::Int(1));
+        dict.insert("ns:colon:key".to_string(), Value::Int(2));
+        dict.insert("key with space".to_string(), Value::Int(3));
+        dict.insert("1leading-digit".to_string(), Value::Int(4));
+        root_spec.add(FieldKey::CustomLayerData, Value::Dictionary(dict));
+
+        let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
+        let parsed = Parser::new(&text)
+            .parse()
+            .unwrap_or_else(|e| panic!("re-parse failed:\n---emitted---\n{text}\n---end---\n{e:#}"));
+
+        let spec = parsed.get(&root).expect("pseudo-root spec should round-trip");
+        let got = spec.get(FieldKey::CustomLayerData.as_str()).expect("customLayerData");
+        let Value::Dictionary(got) = got else {
+            panic!("expected Dictionary, got {got:?}");
+        };
+        for k in ["simple", "ns:colon:key", "key with space", "1leading-digit"] {
+            assert!(got.contains_key(k), "lost key {k:?}; roundtripped keys: {:?}", got.keys().collect::<Vec<_>>());
+        }
+    }
 }
