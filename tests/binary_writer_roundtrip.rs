@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
-use openusd::sdf::{self, AbstractData, Data};
+use openusd::sdf::{self, path, AbstractData, ChildrenKey, Data, FieldKey, SpecType, Specifier, Value};
 use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
@@ -61,6 +61,57 @@ macro_rules! binary_tests {
             }
         )*
     };
+}
+
+#[test]
+fn compressed_int_array_roundtrips() {
+    // Arrays of 4+ integers are emitted through `encode_ints` + LZ4 with
+    // the compressed bit set. Anything shorter falls through to a raw POD
+    // array. Cover both paths on the same layer.
+    let mut data = Data::new();
+    let root = sdf::Path::abs_root();
+    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    root_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["A".into()]));
+
+    let prim = path("/A").unwrap();
+    let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
+    prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
+    prim_spec.add(FieldKey::TypeName, Value::Token("Scope".into()));
+    prim_spec.add(
+        ChildrenKey::PropertyChildren,
+        Value::TokenVec(vec!["short".into(), "long".into()]),
+    );
+
+    let short_prop = prim.append_property("short").unwrap();
+    let short_spec = data.create_spec(short_prop.clone(), SpecType::Attribute);
+    short_spec.add(FieldKey::TypeName, Value::Token("int[]".into()));
+    short_spec.add(FieldKey::Default, Value::IntVec(vec![1, 2, 3]));
+
+    let long: Vec<i32> = (0..1000).collect();
+    let long_prop = prim.append_property("long").unwrap();
+    let long_spec = data.create_spec(long_prop.clone(), SpecType::Attribute);
+    long_spec.add(FieldKey::TypeName, Value::Token("int[]".into()));
+    long_spec.add(FieldKey::Default, Value::IntVec(long.clone()));
+
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
+
+    // The 1000-i32 monotonic sequence is 4000 bytes raw. With delta+common
+    // coding and LZ4 on top it collapses to a small constant. If this ever
+    // regresses past a few hundred bytes, compression is silently broken.
+    let raw_long_bytes = (long.len() * std::mem::size_of::<i32>()) as u64;
+    assert!(
+        (buf.len() as u64) < raw_long_bytes / 4,
+        "int array did not compress: total file size {} bytes vs {} raw payload",
+        buf.len(),
+        raw_long_bytes
+    );
+
+    let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
+    let round_short = (&round as &dyn AbstractData).get(&short_prop, "default").unwrap().into_owned();
+    let round_long = (&round as &dyn AbstractData).get(&long_prop, "default").unwrap().into_owned();
+    assert_eq!(round_short, Value::IntVec(vec![1, 2, 3]));
+    assert_eq!(round_long, Value::IntVec(long));
 }
 
 #[test]

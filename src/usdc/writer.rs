@@ -12,6 +12,7 @@ use std::io::{Seek, SeekFrom, Write};
 use anyhow::{bail, Context, Result};
 use bytemuck::{bytes_of, Pod};
 use half::f16;
+use num_traits::{AsPrimitive, PrimInt};
 
 use crate::sdf::{AbstractData, LayerOffset, ListOp, Path, Payload, Reference, Value};
 
@@ -494,13 +495,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_array(Type::Bool, v.len(), &bytes)
             }
             Value::UcharVec(v) => self.write_array(Type::Uchar, v.len(), v),
-            Value::IntVec(v) => self.write_array_le::<i32>(Type::Int, v),
-            Value::UintVec(v) => self.write_array_le::<u32>(Type::Uint, v),
-            Value::Int64Vec(v) => self.write_array_le::<i64>(Type::Int64, v),
-            Value::Uint64Vec(v) => self.write_array_le::<u64>(Type::Uint64, v),
+            Value::IntVec(v) => self.write_array_ints::<i32>(Type::Int, v),
+            Value::UintVec(v) => self.write_array_ints::<u32>(Type::Uint, v),
+            Value::Int64Vec(v) => self.write_array_ints::<i64>(Type::Int64, v),
+            Value::Uint64Vec(v) => self.write_array_ints::<u64>(Type::Uint64, v),
             Value::HalfVec(v) => self.write_array_le_half(v),
             Value::FloatVec(v) => self.write_array_f32(v),
-            Value::DoubleVec(v) => self.write_array_f64(v),
+            Value::DoubleVec(v) => self.write_array_f64_type(Type::Double, v),
 
             Value::Vec2hVec(v) => self.write_array_arr_half::<2>(Type::Vec2h, v),
             Value::Vec3hVec(v) => self.write_array_arr_half::<3>(Type::Vec3h, v),
@@ -523,7 +524,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::TimeCodeVec(v) => self.write_array_f64_type(Type::TimeCode, v),
 
             // Strings stored in their own arrays (StringVec also via token lookup).
-            Value::StringVec(v) => self.write_string_vec(Type::String, v, true),
+            Value::StringVec(v) => self.write_string_vec(Type::String, v),
             Value::TokenVec(v) => self.write_token_vec(Type::Token, v),
 
             // Complex heap types.
@@ -642,7 +643,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     fn write_pod_out<T: Pod>(&mut self, ty: Type, v: &T) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_pod(v)?;
-        Ok(rep_heap(ty, off, false, false))
+        Ok(rep_heap(ty, off, false))
     }
 
     fn write_array<T>(&mut self, ty: Type, count: usize, bytes: &[T]) -> Result<ValueRep>
@@ -652,16 +653,28 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         let off = self.pos()?;
         self.write_count(count as u64)?;
         self.write_bytes(bytemuck::cast_slice(bytes))?;
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
-    fn write_array_le<T: Pod>(&mut self, ty: Type, v: &[T]) -> Result<ValueRep> {
+    /// Write an integer array, applying the crate format's integer-coding +
+    /// LZ4 compression when the array is large enough for the reader to treat
+    /// it as compressed (see [`MIN_COMPRESSED_ARRAY_SIZE`]).
+    fn write_array_ints<T>(&mut self, ty: Type, v: &[T]) -> Result<ValueRep>
+    where
+        T: Pod + PrimInt + 'static + AsPrimitive<i64>,
+    {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
-        for item in v {
-            self.write_pod(item)?;
+        if v.len() >= MIN_COMPRESSED_ARRAY_SIZE {
+            let encoded = coding::encode_ints(v);
+            self.write_lz4_compressed(&encoded)?;
+            Ok(rep_heap_compressed(ty, off))
+        } else {
+            for item in v {
+                self.write_pod(item)?;
+            }
+            Ok(rep_heap(ty, off, true))
         }
-        Ok(rep_heap(ty, off, true, false))
     }
 
     fn write_array_le_half(&mut self, v: &[f16]) -> Result<ValueRep> {
@@ -670,7 +683,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         for h in v {
             self.write_pod(&h.to_bits())?;
         }
-        Ok(rep_heap(Type::Half, off, true, false))
+        Ok(rep_heap(Type::Half, off, true))
     }
 
     fn write_array_f32(&mut self, v: &[f32]) -> Result<ValueRep> {
@@ -679,11 +692,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         for f in v {
             self.write_pod(f)?;
         }
-        Ok(rep_heap(Type::Float, off, true, false))
-    }
-
-    fn write_array_f64(&mut self, v: &[f64]) -> Result<ValueRep> {
-        self.write_array_f64_type(Type::Double, v)
+        Ok(rep_heap(Type::Float, off, true))
     }
 
     fn write_array_f64_type(&mut self, ty: Type, v: &[f64]) -> Result<ValueRep> {
@@ -692,7 +701,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         for f in v {
             self.write_pod(f)?;
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_array_arr_half<const N: usize>(&mut self, ty: Type, v: &[[f16; N]]) -> Result<ValueRep> {
@@ -703,7 +712,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_pod(&h.to_bits())?;
             }
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_array_arr_f32<const N: usize>(&mut self, ty: Type, v: &[[f32; N]]) -> Result<ValueRep> {
@@ -714,7 +723,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_pod(f)?;
             }
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_array_arr_f64<const N: usize>(&mut self, ty: Type, v: &[[f64; N]]) -> Result<ValueRep> {
@@ -725,7 +734,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_pod(f)?;
             }
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_array_arr_i32<const N: usize>(&mut self, ty: Type, v: &[[i32; N]]) -> Result<ValueRep> {
@@ -736,7 +745,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 self.write_pod(i)?;
             }
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_token_vec(&mut self, ty: Type, v: &[String]) -> Result<ValueRep> {
@@ -749,17 +758,17 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let idx = self.tokens.intern(t.clone());
             self.write_pod(&idx)?;
         }
-        Ok(rep_heap(ty, off, true, false))
+        Ok(rep_heap(ty, off, true))
     }
 
-    fn write_string_vec(&mut self, ty: Type, v: &[String], is_array: bool) -> Result<ValueRep> {
+    fn write_string_vec(&mut self, ty: Type, v: &[String]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for s in v {
             let sidx = self.intern_string(s);
             self.write_pod(&sidx)?;
         }
-        Ok(rep_heap(ty, off, is_array, false))
+        Ok(rep_heap(ty, off, true))
     }
 
     fn write_dictionary(&mut self, d: &HashMap<String, Value>) -> Result<ValueRep> {
@@ -805,7 +814,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.out.seek(SeekFrom::Start(end))?;
         }
 
-        Ok(rep_heap(Type::Dictionary, off, false, false))
+        Ok(rep_heap(Type::Dictionary, off, false))
     }
 
     fn write_path_vec(&mut self, v: &[Path]) -> Result<ValueRep> {
@@ -815,7 +824,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let idx = self.intern_path(p.clone());
             self.write_pod(&idx)?;
         }
-        Ok(rep_heap(Type::PathVector, off, false, false))
+        Ok(rep_heap(Type::PathVector, off, false))
     }
 
     fn write_layer_offset_vec(&mut self, v: &[LayerOffset]) -> Result<ValueRep> {
@@ -824,7 +833,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         for o in v {
             self.write_pod(o)?;
         }
-        Ok(rep_heap(Type::LayerOffsetVector, off, false, false))
+        Ok(rep_heap(Type::LayerOffsetVector, off, false))
     }
 
     fn write_variant_selection_map(&mut self, m: &HashMap<String, String>) -> Result<ValueRep> {
@@ -838,7 +847,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.write_pod(&ki)?;
             self.write_pod(&vi)?;
         }
-        Ok(rep_heap(Type::VariantSelectionMap, off, false, false))
+        Ok(rep_heap(Type::VariantSelectionMap, off, false))
     }
 
     fn write_relocates(&mut self, v: &[(Path, Path)]) -> Result<ValueRep> {
@@ -850,13 +859,13 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             self.write_pod(&sidx)?;
             self.write_pod(&tidx)?;
         }
-        Ok(rep_heap(Type::Relocates, off, false, false))
+        Ok(rep_heap(Type::Relocates, off, false))
     }
 
     fn write_payload(&mut self, p: &Payload) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_payload_inline(p)?;
-        Ok(rep_heap(Type::Payload, off, false, false))
+        Ok(rep_heap(Type::Payload, off, false))
     }
 
     fn write_payload_inline(&mut self, p: &Payload) -> Result<()> {
@@ -946,7 +955,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             write_items(self, &op.ordered_items)?;
         }
 
-        Ok(rep_heap(ty, off, false, false))
+        Ok(rep_heap(ty, off, false))
     }
 
     fn write_time_samples(&mut self, samples: &[(f64, Value)]) -> Result<ValueRep> {
@@ -1003,7 +1012,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_pod(&rel2)?;
         self.out.seek(SeekFrom::Start(heap_end))?;
 
-        Ok(rep_heap(Type::TimeSamples, off, false, false))
+        Ok(rep_heap(Type::TimeSamples, off, false))
     }
 
     // -----------------------------------------------------------------
@@ -1052,12 +1061,25 @@ fn rep_inline(ty: Type, payload: u64) -> ValueRep {
     ValueRep(ty_bits | inlined | (payload & ((1 << 48) - 1)))
 }
 
-fn rep_heap(ty: Type, offset: u64, is_array: bool, is_compressed: bool) -> ValueRep {
+fn rep_heap(ty: Type, offset: u64, is_array: bool) -> ValueRep {
     let ty_bits = ((ty as u64) & 0xFF) << 48;
     let array_bit = if is_array { 1_u64 << 63 } else { 0 };
-    let compressed_bit = if is_compressed { 1_u64 << 61 } else { 0 };
+    ValueRep(ty_bits | array_bit | (offset & ((1 << 48) - 1)))
+}
+
+/// Heap array value with the compressed bit set. Used for integer arrays
+/// large enough to hit [`MIN_COMPRESSED_ARRAY_SIZE`].
+fn rep_heap_compressed(ty: Type, offset: u64) -> ValueRep {
+    let ty_bits = ((ty as u64) & 0xFF) << 48;
+    let array_bit = 1_u64 << 63;
+    let compressed_bit = 1_u64 << 61;
     ValueRep(ty_bits | array_bit | compressed_bit | (offset & ((1 << 48) - 1)))
 }
+
+/// Minimum element count at which an integer array is compressed. Matches
+/// `CrateFile::MIN_COMPRESSED_ARRAY_SIZE` on the reader side — below this, the
+/// reader forces the uncompressed path regardless of the compressed bit.
+const MIN_COMPRESSED_ARRAY_SIZE: usize = 4;
 
 fn compute_jump(has_child: bool, has_sibling: bool, sibling_offset: i32) -> i32 {
     match (has_child, has_sibling) {

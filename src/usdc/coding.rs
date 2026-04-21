@@ -68,7 +68,7 @@ where
                 _ => bail!("Unexpected code: {ty}"),
             };
 
-            prev += delta;
+            prev = prev.wrapping_add(delta);
             output.push(prev.as_());
         }
     }
@@ -219,6 +219,17 @@ mod tests {
     #[test]
     fn roundtrip_i64_negative() {
         let values: &[i64] = &[-1_000_000, -999_999, 0, 1_000_000_000_000];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<i64>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn roundtrip_i64_spans_full_range() {
+        // Deltas between extreme i64 values overflow signed addition. The
+        // decoder must use wrapping arithmetic to mirror the encoder's
+        // `wrapping_sub`. Prior to the fix this panicked in debug builds.
+        let values: &[i64] = &[i64::MIN, i64::MAX, 0, i64::MIN, i64::MAX];
         let encoded = encode_ints(values);
         let decoded = decode_ints::<i64>(&encoded, values.len()).unwrap();
         assert_eq!(decoded, values);
