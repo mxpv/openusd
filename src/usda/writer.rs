@@ -833,8 +833,13 @@ impl<W: Write> Emitter<'_, W> {
 
 fn format_value(s: &mut String, v: &Value) -> Result<()> {
     match v {
-        Value::None => s.push_str("None"),
-        Value::ValueBlock | Value::Value => s.push_str("None"),
+        // The USDA parser reads the `None` token as `Value::ValueBlock`. Emitting
+        // either `Value::None` (absent-opinion marker) or `Value::Value` (expression
+        // placeholder) as `None` would silently re-parse as `Value::ValueBlock` and
+        // drop the original variant.
+        Value::None => bail!("Value::None cannot be serialized to USDA"),
+        Value::Value => bail!("Value::Value cannot be serialized to USDA"),
+        Value::ValueBlock => s.push_str("None"),
 
         Value::Bool(b) => s.push_str(if *b { "true" } else { "false" }),
         Value::BoolVec(v) => format_vec(s, v, |s, b| {
