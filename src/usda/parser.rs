@@ -301,7 +301,7 @@ impl<'a> Parser<'a> {
                         let value = this
                             .parse_property_metadata_value()
                             .with_context(|| format!("Unable to parse pseudo root metadata value for {name}"))?;
-                        root.fields.insert(name.to_owned(), value);
+                        root.add(name, value);
                     }
                 }
                 _ => bail!("Unexpected token {next:?}"),
@@ -508,7 +508,7 @@ impl<'a> Parser<'a> {
     fn merge_spec(data: &mut HashMap<sdf::Path, sdf::Spec>, path: sdf::Path, spec: sdf::Spec) {
         use std::collections::hash_map::Entry;
         match data.entry(path) {
-            Entry::Occupied(mut e) => e.get_mut().fields.extend(spec.fields),
+            Entry::Occupied(mut e) => e.get_mut().extend_from(spec),
             Entry::Vacant(e) => {
                 e.insert(spec);
             }
@@ -634,7 +634,7 @@ impl<'a> Parser<'a> {
             }
 
             let mut base = Self::make_attribute_spec(&type_info, custom, variability);
-            base.fields.extend(spec.fields);
+            base.extend_from(spec);
             Self::merge_spec(data, path, base);
             return Ok(());
         }
@@ -651,7 +651,7 @@ impl<'a> Parser<'a> {
         push_unique(properties, name);
 
         let mut base = Self::make_attribute_spec(&type_info, custom, variability);
-        base.fields.extend(spec.fields);
+        base.extend_from(spec);
         base.add(FieldKey::Default, value);
         Self::merge_spec(data, path, base);
 
@@ -718,7 +718,7 @@ impl<'a> Parser<'a> {
                 _ => value,
             };
 
-            spec.fields.insert(name, value);
+            spec.add(name, value);
             Ok(())
         })?;
 
@@ -1833,14 +1833,12 @@ mod tests {
         let pseudo_root = parser.read_pseudo_root().unwrap();
 
         assert!(pseudo_root
-            .fields
             .get(FieldKey::Documentation.as_str())
             .and_then(|v| v.try_as_string_ref())
             .unwrap()
             .eq("test string"));
 
         assert!(pseudo_root
-            .fields
             .get("upAxis")
             .and_then(|v| v.try_as_token_ref())
             .unwrap()
@@ -1866,7 +1864,6 @@ mod tests {
 
         let pseudo_root = parser.read_pseudo_root().unwrap();
         let custom_layer_data = pseudo_root
-            .fields
             .get("customLayerData")
             .expect("customLayerData metadata present");
         let dict = match custom_layer_data {
@@ -1906,7 +1903,6 @@ mod tests {
         let pseudo_root = parser.read_pseudo_root().unwrap();
 
         let custom_layer_data = pseudo_root
-            .fields
             .get("customLayerData")
             .expect("customLayerData metadata present");
 
@@ -1966,7 +1962,6 @@ mod tests {
         let pseudo_root = parser.read_pseudo_root().unwrap();
 
         let expr_vars = pseudo_root
-            .fields
             .get("expressionVariables")
             .expect("expressionVariables metadata present");
 
@@ -2013,7 +2008,6 @@ mod tests {
         let pseudo_root = parser.read_pseudo_root().unwrap();
 
         let expr_vars = pseudo_root
-            .fields
             .get("expressionVariables")
             .expect("expressionVariables metadata present");
 
@@ -2071,14 +2065,14 @@ def Xform "Forest_set"
 
         let pseudo_root = data.get(&sdf::path("/").unwrap()).unwrap();
         assert_eq!(pseudo_root.ty, sdf::SpecType::PseudoRoot);
-        let prim_children = pseudo_root.fields.get("primChildren").unwrap().to_owned();
+        let prim_children = pseudo_root.get("primChildren").unwrap().to_owned();
         assert_eq!(
             prim_children.try_as_token_vec().unwrap(),
             vec![String::from("Forest_set")]
         );
 
         let forest_set_prim = data.get(&sdf::path("/Forest_set").unwrap()).unwrap();
-        let prim_children = forest_set_prim.fields.get("primChildren").unwrap().to_owned();
+        let prim_children = forest_set_prim.get("primChildren").unwrap().to_owned();
         assert_eq!(
             prim_children.try_as_token_vec().unwrap(),
             vec![String::from("Outskirts"), String::from("Glade")]
@@ -2109,7 +2103,6 @@ def Mesh "M"
         let normals = data.get(&sdf::path("/M.normals").unwrap()).unwrap();
 
         let interpolation = normals
-            .fields
             .get("interpolation")
             .expect("missing interpolation metadata")
             .try_as_string_ref()
@@ -2141,20 +2134,19 @@ def Shader "Image_Texture"
 
         let double_sided = data.get(&sdf::path("/Image_Texture.doubleSided").unwrap()).unwrap();
         assert!(matches!(
-            double_sided.fields.get(FieldKey::Default.as_str()),
+            double_sided.get(FieldKey::Default.as_str()),
             Some(sdf::Value::Bool(true))
         ));
 
         let info_spec = data.get(&sdf::path("/Image_Texture.info:id").unwrap()).unwrap();
         assert!(matches!(
-            info_spec.fields.get(FieldKey::Custom.as_str()),
+            info_spec.get(FieldKey::Custom.as_str()),
             Some(sdf::Value::Bool(true))
         ));
 
         let file_spec = data.get(&sdf::path("/Image_Texture.inputs:file").unwrap()).unwrap();
         assert!(matches!(
             file_spec
-                .fields
                 .get(FieldKey::Default.as_str()),
             Some(sdf::Value::AssetPath(path)) if path == "./texture.png"
         ));
@@ -2164,7 +2156,6 @@ def Shader "Image_Texture"
             .expect("missing outputs:surface spec");
         assert!(matches!(
             output_spec
-                .fields
                 .get(FieldKey::TypeName.as_str()),
             Some(sdf::Value::Token(t)) if t == "token"
         ));
@@ -2172,13 +2163,11 @@ def Shader "Image_Texture"
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
         assert!(matches!(
             output_spec
-                .fields
                 .get(FieldKey::ConnectionPaths.as_str()),
             Some(sdf::Value::PathListOp(op)) if op.explicit_items.len() == 1
         ));
 
         let props = shader
-            .fields
             .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
             .and_then(|value| match value {
                 sdf::Value::TokenVec(tokens) => Some(tokens.clone()),
@@ -2209,7 +2198,6 @@ def Xform "X" {
             .get(&sdf::path("/X.xformOp:transform").unwrap())
             .expect("transform spec missing");
         let matrix = transform
-            .fields
             .get(FieldKey::Default.as_str())
             .expect("matrix default missing");
 
@@ -2246,7 +2234,6 @@ def Scope "Root" {
             .get(&sdf::path("/Root.transforms").unwrap())
             .expect("transforms spec missing");
         let matrix = transforms
-            .fields
             .get(FieldKey::Default.as_str())
             .expect("matrix default missing");
 
@@ -2287,7 +2274,6 @@ def Material "Mat"
         let mat = data.get(&sdf::path("/Mat").unwrap()).unwrap();
 
         let props = mat
-            .fields
             .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
             // Clone because try_as_token_vec consumes the Value.
             .and_then(|value| value.clone().try_as_token_vec())
@@ -2298,12 +2284,12 @@ def Material "Mat"
             .get(&sdf::path("/Mat.outputs:surface").unwrap())
             .expect("missing outputs:surface spec");
         assert!(matches!(
-            output.fields.get(FieldKey::TypeName.as_str()),
+            output.get(FieldKey::TypeName.as_str()),
             Some(sdf::Value::Token(t)) if t == "token"
         ));
 
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
-        match output.fields.get(FieldKey::ConnectionPaths.as_str()) {
+        match output.get(FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
                 assert_eq!(op.explicit_items.len(), 1);
                 assert_eq!(op.explicit_items[0].as_str(), "/Mat/Preview.outputs:surface");
@@ -2331,7 +2317,6 @@ def Scope "Root"
             .get(&sdf::path("/Root.material:binding").unwrap())
             .expect("missing relationship spec");
         let targets = rel_spec
-            .fields
             .get(FieldKey::TargetPaths.as_str())
             .and_then(|v| v.try_as_path_list_op_ref())
             .expect("missing targets on relationship");
@@ -2420,7 +2405,6 @@ def Xform "World"
         let world = data.get(&sdf::path("/World").unwrap()).unwrap();
 
         let props = world
-            .fields
             .get(ChildrenKey::PropertyChildren.as_str())
             .unwrap()
             .to_owned()
@@ -2451,7 +2435,7 @@ def Xform "World"
         );
 
         let normals = data.get(&sdf::path("/World.normals").unwrap()).unwrap();
-        let value = normals.fields.get("default").unwrap();
+        let value = normals.get("default").unwrap();
 
         assert_eq!(
             value.try_as_vec_3f_vec_ref().unwrap(),
@@ -2469,13 +2453,7 @@ def Xform "World"
         let order = data.get(&sdf::path("/World.xformOpOrder").unwrap()).unwrap();
 
         assert_eq!(
-            order
-                .fields
-                .get("default")
-                .unwrap()
-                .to_owned()
-                .try_as_token_vec()
-                .unwrap(),
+            order.get("default").unwrap().to_owned().try_as_token_vec().unwrap(),
             vec![String::from("xformOp:translate"), String::from("xformOp:rotateXYZ")]
         )
     }
@@ -2529,7 +2507,6 @@ def Xform "World"
         let pseudo_root = data.get(&sdf::Path::abs_root()).unwrap();
 
         let sublayers = pseudo_root
-            .fields
             .get(FieldKey::SubLayers.as_str())
             .unwrap()
             .clone()
@@ -2541,7 +2518,6 @@ def Xform "World"
         );
 
         let offsets = pseudo_root
-            .fields
             .get(FieldKey::SubLayerOffsets.as_str())
             .unwrap()
             .clone()
@@ -2576,7 +2552,6 @@ def Mesh "Mesh_001" (
         let mesh = data.get(&sdf::path("/Mesh_001").unwrap()).unwrap();
 
         assert!(mesh
-            .fields
             .get(FieldKey::Active.as_str())
             .unwrap()
             .to_owned()
@@ -2584,7 +2559,6 @@ def Mesh "Mesh_001" (
             .unwrap());
 
         let api = mesh
-            .fields
             .get("apiSchemas")
             .unwrap()
             .to_owned()
@@ -2614,7 +2588,6 @@ def Mesh "visual" (
         let mesh = data.get(&sdf::path("/visual").unwrap()).unwrap();
 
         let references = mesh
-            .fields
             .get(FieldKey::References.as_str())
             .unwrap()
             .to_owned()
@@ -2678,10 +2651,7 @@ over "GLOBAL" (
         assert!(specs.contains_key(&global_path), "Should have /GLOBAL prim");
 
         let global_spec = &specs[&global_path];
-        assert!(
-            global_spec.fields.contains_key("customData"),
-            "GLOBAL should have customData"
-        );
+        assert!(global_spec.contains("customData"), "GLOBAL should have customData");
 
         // Check that PhysicsScene class exists
         let physics_scene_path = sdf::Path::from_str("/PhysicsScene").unwrap();
@@ -2692,7 +2662,7 @@ over "GLOBAL" (
 
         let physics_scene_spec = &specs[&physics_scene_path];
         assert!(
-            physics_scene_spec.fields.contains_key("customData"),
+            physics_scene_spec.contains("customData"),
             "PhysicsScene should have customData"
         );
 
@@ -2706,7 +2676,7 @@ over "GLOBAL" (
         // Check that the attribute has customData in its metadata
         let gravity_spec = &specs[&gravity_attr_path];
         assert!(
-            gravity_spec.fields.contains_key("customData"),
+            gravity_spec.contains("customData"),
             "gravity attribute should have customData"
         );
 
@@ -2738,7 +2708,6 @@ def Xform "root" {
         let relationship_spec = specs.get(&relationship_path).expect("relationship spec present");
 
         let bind_material_as = relationship_spec
-            .fields
             .get("bindMaterialAs")
             .expect("bindMaterialAs metadata present");
         assert_eq!(
@@ -2749,7 +2718,6 @@ def Xform "root" {
         );
 
         let targets = relationship_spec
-            .fields
             .get(FieldKey::TargetPaths.as_str())
             .expect("relationship targets present");
         let list_op = targets
@@ -2875,10 +2843,10 @@ def Scope "Root" {
         let path = sdf::path("/Root").unwrap().append_property("myList").unwrap();
         let spec = data.get(&path).expect("myList spec not found");
         assert_eq!(
-            spec.fields.get(FieldKey::TypeName.as_str()),
+            spec.get(FieldKey::TypeName.as_str()),
             Some(&sdf::Value::Token("int[]".into()))
         );
-        assert_eq!(spec.fields.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
+        assert_eq!(spec.get("default"), Some(&sdf::Value::IntVec(vec![5, 6, 7])));
     }
 
     /// `over` with a type name should parse the type and prim name.
@@ -2897,11 +2865,11 @@ over MfScope "TestOver"
         let path = sdf::path("/TestOver").unwrap();
         let spec = data.get(&path).expect("TestOver not found");
         assert_eq!(
-            spec.fields.get(FieldKey::Specifier.as_str()),
+            spec.get(FieldKey::Specifier.as_str()),
             Some(&sdf::Value::Specifier(sdf::Specifier::Over))
         );
         assert_eq!(
-            spec.fields.get(FieldKey::TypeName.as_str()),
+            spec.get(FieldKey::TypeName.as_str()),
             Some(&sdf::Value::Token("MfScope".into()))
         );
     }
@@ -2923,10 +2891,7 @@ def Scope "Root" (
         let data = parser.parse().unwrap();
         let path = sdf::path("/Root").unwrap();
         let spec = data.get(&path).unwrap();
-        assert_eq!(
-            spec.fields.get("displayName"),
-            Some(&sdf::Value::String("My Root".into()))
-        );
+        assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
     }
 
     #[test]
@@ -2935,10 +2900,7 @@ def Scope "Root" (
         let mut parser = Parser::new(input);
         let data = parser.parse().unwrap();
         let spec = data.get(&sdf::path("/R").unwrap()).unwrap();
-        assert_eq!(
-            spec.fields.get("displayName"),
-            Some(&sdf::Value::String("\u{1F680}".into()))
-        );
+        assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("\u{1F680}".into())));
     }
 
     #[test]
@@ -2952,7 +2914,6 @@ def "p" { double x.spline = {} }
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .fields
             .get("spline")
             .unwrap()
             .try_as_dictionary_ref()
@@ -2978,7 +2939,6 @@ def "p" {
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .fields
             .get("spline")
             .unwrap()
             .try_as_dictionary_ref()
@@ -3019,7 +2979,6 @@ def "p" {
         let d = data
             .get(&sdf::path("/p.x").unwrap())
             .unwrap()
-            .fields
             .get("spline")
             .unwrap()
             .try_as_dictionary_ref()

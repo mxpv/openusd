@@ -21,8 +21,18 @@ pub const MAGIC: &[u8] = b"PXR-USDC";
 struct Spec {
     /// Specifies the type of an object.
     ty: sdf::SpecType,
-    /// Spec properties.
-    fields: HashMap<String, ValueRep>,
+    /// Spec properties, in authored order.
+    fields: Vec<(String, ValueRep)>,
+}
+
+impl Spec {
+    fn get(&self, field: &str) -> Option<&ValueRep> {
+        self.fields.iter().find(|(k, _)| k == field).map(|(_, v)| v)
+    }
+
+    fn contains(&self, field: &str) -> bool {
+        self.fields.iter().any(|(k, _)| k == field)
+    }
 }
 
 /// High level interface to binary data.
@@ -52,7 +62,7 @@ where
             let path = file.paths[filespec.path_index].clone();
             let ty = filespec.spec_type;
 
-            let mut fields = HashMap::default();
+            let mut fields = Vec::new();
             let mut index = filespec.fieldset_index;
 
             while index < file.fieldsets.len() {
@@ -66,7 +76,7 @@ where
                 let field = &file.fields[current];
                 let name = file.tokens[field.token_index].clone();
 
-                fields.insert(name, field.value_rep);
+                fields.push((name, field.value_rep));
             }
 
             data.insert(path, Spec { ty, fields });
@@ -90,7 +100,7 @@ where
 
     #[inline]
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        self.data.get(path).is_some_and(|spec| spec.fields.contains_key(field))
+        self.data.get(path).is_some_and(|spec| spec.contains(field))
     }
 
     #[inline]
@@ -103,7 +113,7 @@ where
             bail!("No spec found for path: {path}")
         };
 
-        let Some(value_rep) = spec.fields.get(field).cloned() else {
+        let Some(value_rep) = spec.get(field).copied() else {
             bail!("No field found for path '{path}' and field '{field}'")
         };
 
@@ -114,7 +124,15 @@ where
 
     #[inline]
     fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
-        self.data.get(path).map(|spec| spec.fields.keys().cloned().collect())
+        self.data
+            .get(path)
+            .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
+    }
+
+    fn paths(&self) -> Vec<sdf::Path> {
+        let mut paths: Vec<sdf::Path> = self.data.keys().cloned().collect();
+        paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        paths
     }
 }
 

@@ -48,7 +48,7 @@ impl TextReader {
     pub fn prim_children(&self, path: &sdf::Path) -> Vec<sdf::Path> {
         use crate::sdf::schema::ChildrenKey;
         if let Some(spec) = self.data.get(path) {
-            if let Some(sdf::Value::TokenVec(children)) = spec.fields.get(ChildrenKey::PrimChildren.as_str()) {
+            if let Some(sdf::Value::TokenVec(children)) = spec.get(ChildrenKey::PrimChildren.as_str()) {
                 return children
                     .iter()
                     .filter_map(|name| path.append_path(name.as_str()).ok())
@@ -65,7 +65,7 @@ impl TextReader {
         T: TryFrom<sdf::Value>,
     {
         let spec = self.data.get(path)?;
-        let field = spec.fields.get("default")?;
+        let field = spec.get("default")?;
         T::try_from(field.clone()).ok()
     }
 
@@ -85,7 +85,7 @@ impl sdf::AbstractData for TextReader {
     }
 
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        self.data.get(path).is_some_and(|spec| spec.fields.contains_key(field))
+        self.data.get(path).is_some_and(|spec| spec.contains(field))
     }
 
     fn spec_type(&self, path: &sdf::Path) -> Option<sdf::SpecType> {
@@ -97,7 +97,7 @@ impl sdf::AbstractData for TextReader {
             bail!("No spec found for path: {path}")
         };
 
-        let Some(field) = spec.fields.get(field) else {
+        let Some(field) = spec.get(field) else {
             bail!("No field found for path '{path}' and field '{field}'")
         };
 
@@ -105,7 +105,15 @@ impl sdf::AbstractData for TextReader {
     }
 
     fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
-        self.data.get(path).map(|spec| spec.fields.keys().cloned().collect())
+        self.data
+            .get(path)
+            .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
+    }
+
+    fn paths(&self) -> Vec<sdf::Path> {
+        let mut paths: Vec<sdf::Path> = self.data.keys().cloned().collect();
+        paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        paths
     }
 }
 
@@ -118,13 +126,11 @@ mod tests {
     fn test_reader() -> TextReader {
         let root = sdf::path("/Root").unwrap();
         let mut prim_spec = sdf::Spec::new(SpecType::Prim);
-        prim_spec
-            .fields
-            .insert("primChildren".into(), sdf::Value::TokenVec(vec![]));
+        prim_spec.add("primChildren", sdf::Value::TokenVec(vec![]));
 
         let attr_path = root.append_property("size").unwrap();
         let mut attr_spec = sdf::Spec::new(SpecType::Attribute);
-        attr_spec.fields.insert("default".into(), sdf::Value::Float(2.5));
+        attr_spec.add("default", sdf::Value::Float(2.5));
 
         let data = HashMap::from([(root, prim_spec), (attr_path, attr_spec)]);
         TextReader::from_data(data)
