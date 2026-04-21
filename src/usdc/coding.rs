@@ -221,6 +221,18 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_u32_common_delta_exceeds_i32_max() {
+        // Deltas exceeding i32 range (here, ±3_000_000_000) still round-trip
+        // for 32-bit T: the common slot is stored as i32 and LARGE payloads
+        // are written with `as i32`, but the final `prev as T` cast reduces
+        // mod 2^32, preserving the correct low bits end-to-end.
+        let values: &[u32] = &[0, 3_000_000_000, 0, 3_000_000_000, 0, 3_000_000_000];
+        let encoded = encode_ints(values);
+        let decoded = decode_ints::<u32>(&encoded, values.len()).unwrap();
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
     fn test_decode() {
         /*
         See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/integerCoding.cpp#L85
