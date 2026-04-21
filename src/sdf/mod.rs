@@ -100,6 +100,12 @@ impl Default for LayerOffset {
 }
 
 impl LayerOffset {
+    /// Identity layer offset: offset 0, scale 1.
+    pub const IDENTITY: LayerOffset = LayerOffset {
+        offset: 0.0,
+        scale: 1.0,
+    };
+
     #[inline]
     pub fn new(offset: f64, scale: f64) -> Self {
         Self { offset, scale }
@@ -108,6 +114,54 @@ impl LayerOffset {
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.offset.is_finite() && self.scale.is_finite()
+    }
+
+    /// Returns `true` if this is the identity offset `(0.0, 1.0)`.
+    #[inline]
+    pub fn is_identity(&self) -> bool {
+        self.offset == 0.0 && self.scale == 1.0
+    }
+
+    /// Returns `true` if this offset is well-formed for composition:
+    /// finite `offset` and a strictly positive, finite `scale`.
+    ///
+    /// Per spec 10.3.1.1 / 10.3.2.1.2, a non-positive scale is a composition
+    /// error.
+    #[inline]
+    pub fn is_valid_composition(&self) -> bool {
+        self.offset.is_finite() && self.scale.is_finite() && self.scale > 0.0
+    }
+
+    /// Returns this offset if valid for composition, or the identity otherwise.
+    ///
+    /// Matches OpenUSD behaviour of silently dropping back to identity when a
+    /// non-positive or non-finite scale is authored.
+    #[inline]
+    pub fn sanitized(self) -> Self {
+        if self.is_valid_composition() {
+            self
+        } else {
+            Self::IDENTITY
+        }
+    }
+
+    /// Concatenates `self` (outer / closer to root) with `inner` (deeper).
+    ///
+    /// Given two offsets where a time value `t` in the inner frame maps to
+    /// the outer frame as `t * inner.scale + inner.offset`, and outer's own
+    /// transform is `t * outer.scale + outer.offset`, the composed transform
+    /// from the deepest frame to the outermost is:
+    ///
+    /// ```text
+    /// offset = outer.offset + outer.scale * inner.offset
+    /// scale  = outer.scale * inner.scale
+    /// ```
+    #[inline]
+    pub fn concatenate(&self, inner: &LayerOffset) -> LayerOffset {
+        LayerOffset {
+            offset: self.offset + self.scale * inner.offset,
+            scale: self.scale * inner.scale,
+        }
     }
 }
 
@@ -241,5 +295,60 @@ impl Spec {
     #[inline]
     pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<Value>) {
         self.fields.insert(key.as_ref().to_owned(), value.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layer_offset_identity_is_identity() {
+        assert!(LayerOffset::IDENTITY.is_identity());
+        assert!(LayerOffset::default().is_identity());
+        assert!(!LayerOffset::new(0.0, 2.0).is_identity());
+        assert!(!LayerOffset::new(1.0, 1.0).is_identity());
+    }
+
+    #[test]
+    fn layer_offset_valid_composition_rejects_non_positive_scale() {
+        assert!(LayerOffset::new(10.0, 1.0).is_valid_composition());
+        assert!(!LayerOffset::new(10.0, 0.0).is_valid_composition());
+        assert!(!LayerOffset::new(10.0, -1.0).is_valid_composition());
+        assert!(!LayerOffset::new(f64::INFINITY, 1.0).is_valid_composition());
+        assert!(!LayerOffset::new(0.0, f64::NAN).is_valid_composition());
+    }
+
+    #[test]
+    fn layer_offset_sanitized_drops_invalid_to_identity() {
+        assert_eq!(LayerOffset::new(10.0, 2.0).sanitized(), LayerOffset::new(10.0, 2.0));
+        assert_eq!(LayerOffset::new(5.0, -1.0).sanitized(), LayerOffset::IDENTITY);
+        assert_eq!(LayerOffset::new(5.0, 0.0).sanitized(), LayerOffset::IDENTITY);
+    }
+
+    #[test]
+    fn layer_offset_concatenate_matches_spec_formula() {
+        let outer = LayerOffset::new(10.0, 2.0);
+        let inner = LayerOffset::new(20.0, 1.0);
+        // Matches BasicTimeOffset_root pcp.txt: (10,2) concat (20,1) = (50, 2).
+        assert_eq!(outer.concatenate(&inner), LayerOffset::new(50.0, 2.0));
+    }
+
+    #[test]
+    fn layer_offset_concatenate_is_associative() {
+        let a = LayerOffset::new(10.0, 2.0);
+        let b = LayerOffset::new(20.0, 0.5);
+        let c = LayerOffset::new(5.0, 3.0);
+        let ab_c = a.concatenate(&b).concatenate(&c);
+        let a_bc = a.concatenate(&b.concatenate(&c));
+        assert!((ab_c.offset - a_bc.offset).abs() < 1e-12);
+        assert!((ab_c.scale - a_bc.scale).abs() < 1e-12);
+    }
+
+    #[test]
+    fn layer_offset_identity_is_neutral() {
+        let a = LayerOffset::new(10.0, 2.0);
+        assert_eq!(a.concatenate(&LayerOffset::IDENTITY), a);
+        assert_eq!(LayerOffset::IDENTITY.concatenate(&a), a);
     }
 }

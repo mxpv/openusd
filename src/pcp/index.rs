@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerData, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::sdf::{LayerData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
@@ -381,7 +381,15 @@ impl<'a> IndexBuilder<'a> {
     /// arcs introduced variant sets that V hadn't seen), their arcs are
     /// followed and variants re-resolved.
     fn build(&mut self, path: &Path) -> Result<(), Error> {
-        let root_stack: Vec<usize> = (0..self.stack.len()).collect();
+        // The root L stage conceptually scans the stage's root layer stack,
+        // but the existing engine approximates implied-arc propagation by
+        // scanning every loaded layer flat (so inherits/specializes pick up
+        // opinions from referenced layer stacks without a separate
+        // propagation pass). Each layer still carries its own effective
+        // sublayer offset so that retiming flows through correctly.
+        let root_stack: Vec<(usize, LayerOffset)> = (0..self.stack.len())
+            .map(|i| (i, self.stack.effective_offset_for_layer(i)))
+            .collect();
 
         // Evaluate root composition site (no parent — this is the graph root).
         self.eval_site(
@@ -413,7 +421,12 @@ impl<'a> IndexBuilder<'a> {
                 })
                 .collect();
             for (rpath, li, arc, map) in &ancestor_sites {
-                self.eval_site(rpath, &[*li], *arc, 0, NodeIndex::INVALID, map.clone())?;
+                // `map` carries the ancestor node's effective `map_to_root`,
+                // which already includes any sublayer offset applied to `li`.
+                // Pass IDENTITY for the per-layer sublayer offset so the
+                // L-loop doesn't compose the sublayer offset a second time.
+                let layer_entry = [(*li, LayerOffset::IDENTITY)];
+                self.eval_site(rpath, &layer_entry, *arc, 0, NodeIndex::INVALID, map.clone())?;
             }
         }
 
@@ -491,6 +504,7 @@ impl<'a> IndexBuilder<'a> {
                                 &Path::abs_root(),
                                 0,
                                 base_node,
+                                reference.layer_offset.sanitized(),
                             )?;
                         }
                         for payload in &payloads {
@@ -501,6 +515,7 @@ impl<'a> IndexBuilder<'a> {
                                 &Path::abs_root(),
                                 0,
                                 base_node,
+                                payload.layer_offset.unwrap_or_default().sanitized(),
                             )?;
                         }
                     }
@@ -522,10 +537,14 @@ impl<'a> IndexBuilder<'a> {
     ///
     /// `map_to_parent` is the namespace mapping for L nodes created at this
     /// site (translates from `path`'s namespace to the parent node's namespace).
+    /// The incoming time offset in `map_to_parent` represents the retiming
+    /// applied by the arc that introduced this site; each per-layer entry's
+    /// sublayer offset is composed on top for the L-node produced by that
+    /// layer.
     fn eval_site(
         &mut self,
         path: &Path,
-        layer_stack: &[usize],
+        layer_stack: &[(usize, LayerOffset)],
         arc: ArcType,
         depth: usize,
         parent: NodeIndex,
@@ -540,7 +559,7 @@ impl<'a> IndexBuilder<'a> {
 
         // Cycle detection: if this (root_layer, path) site is already being
         // evaluated somewhere up the call stack, we have a composition cycle.
-        let Some(&root_layer) = layer_stack.first() else {
+        let Some(&(root_layer, _)) = layer_stack.first() else {
             return Ok(());
         };
         let site_key = (root_layer, path.clone());
@@ -566,7 +585,7 @@ impl<'a> IndexBuilder<'a> {
     fn eval_site_body(
         &mut self,
         path: &Path,
-        layer_stack: &[usize],
+        layer_stack: &[(usize, LayerOffset)],
         arc: ArcType,
         depth: usize,
         parent: NodeIndex,
@@ -577,12 +596,19 @@ impl<'a> IndexBuilder<'a> {
         // L — Local opinions: check each layer in the stack for a spec.
         // The first L node becomes the "site representative" — parent for
         // subsequent arcs discovered at this site.
+        let base_time_offset = map_to_parent.time_offset();
         let mut site_node = NodeIndex::INVALID;
-        for &i in layer_stack {
+        for &(i, sub_offset) in layer_stack {
             if self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
-                let idx =
-                    self.output
-                        .add_child(parent, i, path.clone(), arc, map_to_parent.clone(), self.in_specialize);
+                // Compose the per-layer sublayer offset atop the arc's own
+                // time offset so this L-node's effective retiming flows through
+                // the usual map_to_root composition at add_child time.
+                let layer_map = map_to_parent
+                    .clone()
+                    .with_time_offset(base_time_offset.concatenate(&sub_offset));
+                let idx = self
+                    .output
+                    .add_child(parent, i, path.clone(), arc, layer_map, self.in_specialize);
                 if !site_node.is_valid() {
                     site_node = idx;
                 }
@@ -597,11 +623,11 @@ impl<'a> IndexBuilder<'a> {
         for inherit_path in &inherits {
             let resolved = path.make_absolute(inherit_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Inherit, site_node)?;
+            self.merge_full_index(&resolved, ArcType::Inherit, site_node, LayerOffset::IDENTITY)?;
             self.add_implied_nodes(before, ArcType::Inherit, site_node);
             for vt in variant_expanded_targets(path, &resolved) {
                 let before = self.output.len();
-                self.merge_full_index(&vt, ArcType::Inherit, site_node)?;
+                self.merge_full_index(&vt, ArcType::Inherit, site_node, LayerOffset::IDENTITY)?;
                 self.add_implied_nodes(before, ArcType::Inherit, site_node);
             }
         }
@@ -626,6 +652,7 @@ impl<'a> IndexBuilder<'a> {
                 path,
                 depth,
                 site_node,
+                reference.layer_offset.sanitized(),
             )?;
         }
 
@@ -639,6 +666,7 @@ impl<'a> IndexBuilder<'a> {
                 path,
                 depth,
                 site_node,
+                payload.layer_offset.unwrap_or_default().sanitized(),
             )?;
         }
 
@@ -651,7 +679,7 @@ impl<'a> IndexBuilder<'a> {
         for specialize_path in &specializes {
             let resolved = path.make_absolute(specialize_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Specialize, site_node)?;
+            self.merge_full_index(&resolved, ArcType::Specialize, site_node, LayerOffset::IDENTITY)?;
             self.add_implied_nodes(before, ArcType::Specialize, site_node);
         }
 
@@ -745,7 +773,7 @@ impl<'a> IndexBuilder<'a> {
         self.in_specialize = prev_in_specialize;
     }
 
-    fn get_sublayer_stack(&self, root_layer: usize) -> Vec<usize> {
+    fn get_sublayer_stack(&self, root_layer: usize) -> Vec<(usize, LayerOffset)> {
         self.stack.sublayer_stacks.get(&root_layer).cloned().unwrap_or_else(|| {
             LayerStack::build_sublayer_stack(root_layer, &self.stack.layers, &self.stack.identifiers)
         })
@@ -758,7 +786,19 @@ impl<'a> IndexBuilder<'a> {
     /// Checks the composition cache first (for fully-composed indices including
     /// ancestor-propagated specs), then the builder-local cache, and finally
     /// builds from scratch with the current prim's context.
-    fn merge_full_index(&mut self, target: &Path, arc: ArcType, parent: NodeIndex) -> Result<(), Error> {
+    ///
+    /// `arc_offset` is the layer offset of the arc introducing this merge
+    /// (identity for inherit/specialize, non-identity only for internal
+    /// references/payloads). Each merged node's internal time composition is
+    /// preserved by concatenating `arc_offset` with the target node's own
+    /// `map_to_root.time_offset()`.
+    fn merge_full_index(
+        &mut self,
+        target: &Path,
+        arc: ArcType,
+        parent: NodeIndex,
+        arc_offset: LayerOffset,
+    ) -> Result<(), Error> {
         // Track specialize context for global weakness (spec 10.4.1).
         let prev_in_specialize = self.in_specialize;
         if arc == ArcType::Specialize {
@@ -806,7 +846,11 @@ impl<'a> IndexBuilder<'a> {
         for node in target_index.nodes() {
             if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
                 // Each node maps from its own path to the parent's composed path.
-                let node_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone());
+                // Preserve the target node's internal time composition by
+                // concatenating `arc_offset` with its own `map_to_root` offset.
+                let composed_offset = arc_offset.concatenate(&node.map_to_root.time_offset());
+                let node_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone())
+                    .with_time_offset(composed_offset);
                 self.output.add_child(
                     parent,
                     node.layer_index,
@@ -883,6 +927,12 @@ impl<'a> IndexBuilder<'a> {
     }
 
     /// Evaluate a reference or payload target.
+    ///
+    /// `arc_offset` is the layer offset authored on the reference/payload
+    /// itself (spec 10.3.2.1.2 / 10.3.2.2.2). It composes with the per-layer
+    /// sublayer offsets inside `eval_site`'s L loop to produce the effective
+    /// retiming carried by `map_to_root`.
+    #[allow(clippy::too_many_arguments)]
     fn eval_arc_target(
         &mut self,
         asset_path: &str,
@@ -891,6 +941,7 @@ impl<'a> IndexBuilder<'a> {
         context_path: &Path,
         depth: usize,
         parent: NodeIndex,
+        arc_offset: LayerOffset,
     ) -> Result<(), Error> {
         if asset_path.is_empty() {
             // Internal reference — build full index for target (with ancestor
@@ -898,9 +949,9 @@ impl<'a> IndexBuilder<'a> {
             if prim_path.is_empty() {
                 return Ok(());
             }
-            self.merge_full_index(prim_path, arc, parent)?;
+            self.merge_full_index(prim_path, arc, parent, arc_offset)?;
             for vt in variant_expanded_targets(context_path, prim_path) {
-                self.merge_full_index(&vt, arc, parent)?;
+                self.merge_full_index(&vt, arc, parent, arc_offset)?;
             }
         } else {
             // External reference — evaluate in a fresh sub-builder so the
@@ -946,11 +997,13 @@ impl<'a> IndexBuilder<'a> {
                 prim_path.clone()
             };
             let target_stack = self.get_sublayer_stack(layer_index);
-            let arc_map = MapFunction::from_pair(source.clone(), context_path.clone());
+            let arc_map = MapFunction::from_pair(source.clone(), context_path.clone()).with_time_offset(arc_offset);
             // Evaluate directly — arc-type-aware dedup allows the same
             // (layer, path) to appear under different arc types.
             self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map)?;
-            // Also propagate ancestor arcs within the target layer.
+            // Also propagate ancestor arcs within the target layer. Each
+            // ancestor arc's layer lives in the target's own sublayer stack,
+            // so pair it with its target-stack sublayer offset.
             if let Some(source_parent) = source.parent() {
                 if source_parent != Path::abs_root() {
                     let child_name = source.as_str().rsplit('/').next().unwrap_or("");
@@ -966,8 +1019,15 @@ impl<'a> IndexBuilder<'a> {
                         })
                         .collect();
                     for (rpath, li, a, node_path) in &ancestor_sites {
-                        let ancestor_map = MapFunction::from_pair(node_path.clone(), context_path.clone());
-                        self.eval_site(rpath, &[*li], *a, depth + 1, parent, ancestor_map)?;
+                        let ancestor_map = MapFunction::from_pair(node_path.clone(), context_path.clone())
+                            .with_time_offset(arc_offset);
+                        let sub_off = target_stack
+                            .iter()
+                            .find(|(i, _)| *i == *li)
+                            .map(|(_, o)| *o)
+                            .unwrap_or_default();
+                        let layer_entry = [(*li, sub_off)];
+                        self.eval_site(rpath, &layer_entry, *a, depth + 1, parent, ancestor_map)?;
                     }
                 }
             }
@@ -1851,5 +1911,146 @@ def "Prim" (
 
         let arcs: Vec<ArcType> = index.nodes().iter().map(|n| n.arc).collect();
         assert_eq!(arcs, vec![ArcType::Root, ArcType::Variant, ArcType::Relocate]);
+    }
+
+    // -------------------------------------------------------------------
+    // Layer time offsets — spec 10.3.1.1 / 10.3.2.1.2 / 10.3.2.2.2
+    //
+    // Verified against the upstream core-spec vendor golden
+    // (`BasicTimeOffset_root/pcp.txt`). The fixture builds three arc
+    // variants from root.usd:
+    //   - /Root             : reference to A.usd (offset=10) which
+    //                          sublayers B.usd (offset=20).
+    //   - /PayloadRefPayload: payload to ref.usd (offset=10; scale=2) which
+    //                          sublayers ref_sub.usd (offset=20). ref_sub's
+    //                          /Ref has a payload to B.usd/Model.
+    //   - /PayloadMultiRef  : payload to ref.usd (offset=10; scale=2) which
+    //                          sublayers ref_sub.usd (offset=20). ref_sub's
+    //                          /Ref2 has a reference to B.usd/Model.
+    // -------------------------------------------------------------------
+
+    /// Returns `(layer_name, node_path, arc_type, offset, scale)` tuples for
+    /// every node in the prim stack. The offset/scale values are the effective
+    /// [`sdf::LayerOffset`] carried by the node — i.e., the composition of
+    /// every arc offset and sublayer offset from the stage root down to this
+    /// node's layer.
+    fn offset_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String, ArcType, f64, f64)> {
+        index
+            .nodes()
+            .iter()
+            .map(|n| {
+                let off = n.map_to_root.time_offset();
+                (
+                    layer_name(stack.identifier(n.layer_index)).to_owned(),
+                    n.path.to_string(),
+                    n.arc,
+                    off.offset,
+                    off.scale,
+                )
+            })
+            .collect()
+    }
+
+    fn basic_time_offset_stack() -> anyhow::Result<LayerStack> {
+        load_stack(&spec_composition_path("BasicTimeOffset_root/usda/root.usd"))
+    }
+
+    #[test]
+    fn time_offset_reference_then_sublayer() -> anyhow::Result<()> {
+        // /Root references A.usd (offset=10, scale=1).
+        // A.usd sublayers B.usd (offset=20, scale=1).
+        // Expected effective offsets (from pcp.txt):
+        //   root.usd /Root  (0, 1)
+        //   A.usd    /Model (10, 1)    [reference arc]
+        //   B.usd    /Model (30, 1)    [sublayer of A]  = (10,1) ∘ (20,1)
+        let stack = basic_time_offset_stack()?;
+        let index = build(&stack, "/Root");
+        assert_eq!(
+            offset_stack(&index, &stack),
+            vec![
+                ("root.usd".into(), "/Root".into(), ArcType::Root, 0.0, 1.0),
+                ("A.usd".into(), "/Model".into(), ArcType::Reference, 10.0, 1.0),
+                ("B.usd".into(), "/Model".into(), ArcType::Reference, 30.0, 1.0),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn time_offset_payload_with_scale_and_sublayer() -> anyhow::Result<()> {
+        // /PayloadRefPayload payload = ref.usd (offset=10, scale=2).
+        // ref.usd sublayers ref_sub.usd (offset=20, scale=1).
+        // ref_sub's /Ref payload = B.usd/Model (no offset).
+        // Expected from pcp.txt:
+        //   root.usd    /PayloadRefPayload (0, 1)
+        //   ref.usd     /Ref                (10, 2)    [payload arc; ref.usd has no /Ref spec → L empty]
+        //   ref_sub.usd /Ref                (50, 2)    [sublayer of ref.usd: (10,2) ∘ (20,1) = (50, 2)]
+        //   B.usd       /Model              (50, 2)    [payload from ref_sub.usd, default offset]
+        let stack = basic_time_offset_stack()?;
+        let index = build(&stack, "/PayloadRefPayload");
+        let got = offset_stack(&index, &stack);
+
+        // ref.usd has no /Ref spec (only ref_sub.usd does), so the
+        // effective-offset chain surfaces at ref_sub.usd. Assert the
+        // opinions that *must* be present with their effective offsets.
+        assert!(
+            got.contains(&("root.usd".into(), "/PayloadRefPayload".into(), ArcType::Root, 0.0, 1.0,)),
+            "missing root opinion: got {got:?}"
+        );
+        assert!(
+            got.contains(&("ref_sub.usd".into(), "/Ref".into(), ArcType::Payload, 50.0, 2.0)),
+            "missing ref_sub /Ref payload opinion at (50,2): got {got:?}"
+        );
+        assert!(
+            got.contains(&("B.usd".into(), "/Model".into(), ArcType::Payload, 50.0, 2.0)),
+            "missing B.usd /Model payload opinion at (50,2): got {got:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn time_offset_payload_with_nested_reference() -> anyhow::Result<()> {
+        // /PayloadMultiRef payload = ref.usd/Ref2 (offset=10, scale=2).
+        // ref.usd sublayers ref_sub.usd (offset=20, scale=1).
+        // ref_sub's /Ref2 references B.usd/Model (no offset).
+        // Expected from pcp.txt:
+        //   root.usd    /PayloadMultiRef (0, 1)
+        //   ref_sub.usd /Ref2             (50, 2)
+        //   B.usd       /Model            (50, 2)    [reference; scale carries through]
+        let stack = basic_time_offset_stack()?;
+        let index = build(&stack, "/PayloadMultiRef");
+        let got = offset_stack(&index, &stack);
+
+        assert!(
+            got.contains(&("root.usd".into(), "/PayloadMultiRef".into(), ArcType::Root, 0.0, 1.0,)),
+            "missing root opinion: got {got:?}"
+        );
+        assert!(
+            got.contains(&("ref_sub.usd".into(), "/Ref2".into(), ArcType::Payload, 50.0, 2.0)),
+            "missing ref_sub /Ref2 payload opinion: got {got:?}"
+        );
+        assert!(
+            got.contains(&("B.usd".into(), "/Model".into(), ArcType::Reference, 50.0, 2.0)),
+            "missing B.usd /Model ref opinion at (50,2): got {got:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn time_offset_descendant_inherits_parents_offset() -> anyhow::Result<()> {
+        // /Root/Anim is a descendant of /Root, which references A.usd
+        // (offset=10). A.usd sublayers B.usd (offset=20). /Model/Anim lives
+        // in B.usd only.
+        // Per pcp.txt, /Root/Anim should have:
+        //   B.usd /Model/Anim (30, 1)    [effective: ref 10 ∘ sublayer 20]
+        let stack = basic_time_offset_stack()?;
+        let index = build(&stack, "/Root/Anim");
+        let got = offset_stack(&index, &stack);
+
+        assert!(
+            got.contains(&("B.usd".into(), "/Model/Anim".into(), ArcType::Reference, 30.0, 1.0)),
+            "missing /Model/Anim at effective (30, 1): got {got:?}"
+        );
+        Ok(())
     }
 }

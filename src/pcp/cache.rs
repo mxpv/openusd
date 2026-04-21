@@ -369,7 +369,8 @@ impl Cache {
 
             for li in 0..self.stack.len() {
                 if self.stack.layer(li).has_spec(&node_child_path) {
-                    let map = MapFunction::from_pair_identity(node_child_path.clone(), child_path.clone());
+                    let map = MapFunction::from_pair_identity(node_child_path.clone(), child_path.clone())
+                        .with_time_offset(parent_node.map_to_root.time_offset());
                     index.push_node(Node {
                         layer_index: li,
                         path: node_child_path.clone(),
@@ -408,7 +409,8 @@ impl Cache {
                 }
                 for li in 0..self.stack.len() {
                     if self.stack.layer(li).has_spec(&alt_path) {
-                        let map = MapFunction::from_pair_identity(alt_path.clone(), child_path.clone());
+                        let map = MapFunction::from_pair_identity(alt_path.clone(), child_path.clone())
+                            .with_time_offset(ancestor.map.time_offset());
                         index.push_node(Node {
                             layer_index: li,
                             path: alt_path.clone(),
@@ -471,7 +473,8 @@ impl Cache {
                         for check in &paths_to_check {
                             for li in 0..self.stack.len() {
                                 if self.stack.layer(li).has_spec(check) {
-                                    let map = MapFunction::from_pair_identity(check.clone(), child_path.clone());
+                                    let map = MapFunction::from_pair_identity(check.clone(), child_path.clone())
+                                        .with_time_offset(parent_node.map_to_root.time_offset());
                                     index.push_node(Node {
                                         layer_index: li,
                                         path: check.clone(),

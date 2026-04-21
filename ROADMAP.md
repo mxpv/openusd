@@ -32,7 +32,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Core metadata fields (relationship spec) | `7.6.4` | :white_check_mark: | `0.1.2` | targetPaths, variability, custom |
 | Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `0.2.0` | |
 | Spline specialized type | `7.4.2.4` | :construction: | | SplineKnot, interpolation modes, extrapolation, looping |
-| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; not applied during composition |
+| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; composed through arcs as of `main`. |
 
 ## Paths (Spec 8)
 
@@ -65,13 +65,13 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | [Sublayers](https://openusd.org/release/glossary.html#usdglossary-sublayers) | `10.3.1` | :white_check_mark: | `0.1.2` | Layer stack construction |
-| Sublayer time offsets | `10.3.1.1` | :construction: | | Parsed but not applied during composition |
+| Sublayer time offsets | `10.3.1.1` | :white_check_mark: | `main` | Composed through nested sublayers; carried on each `Node` via `MapFunction::time_offset`. Value-resolution application pending. |
 | [References](https://openusd.org/release/api/class_usd_references.html) (internal + external) | `10.3.2.1` | :white_check_mark: | `0.1.2` | Including `defaultPrim` fallback |
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
-| Reference time offsets | `10.3.2.1.2` | :construction: | | Parsed but not applied during composition |
+| Reference time offsets | `10.3.2.1.2` | :white_check_mark: | `main` | Carried through reference arcs; composed with sublayer offsets on the target layer stack. Value-resolution application pending. |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :construction: | | No mechanism to exclude payloads |
-| Payload time offsets | `10.3.2.2.2` | :construction: | | Parsed but not applied during composition |
+| Payload time offsets | `10.3.2.2.2` | :white_check_mark: | `main` | Same composition as references; unloaded payloads' offsets are ignored. Value-resolution application pending. |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |

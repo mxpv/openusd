@@ -9,7 +9,7 @@
 //! that translates between the arc target's namespace and the referencing
 //! prim's namespace.
 
-use crate::sdf::Path;
+use crate::sdf::{self, Path};
 
 /// Internal storage for path mapping pairs.
 ///
@@ -62,6 +62,11 @@ impl PathMap {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapFunction {
     path_map: PathMap,
+    /// Layer time offset associated with this mapping. Composes multiplicatively
+    /// with other offsets when [`compose`](Self::compose) is called. Defaults to
+    /// [`sdf::LayerOffset::IDENTITY`] for constructors that do not explicitly
+    /// set it; callers attach an offset via [`with_time_offset`](Self::with_time_offset).
+    time_offset: sdf::LayerOffset,
 }
 
 impl MapFunction {
@@ -69,6 +74,7 @@ impl MapFunction {
     pub fn identity() -> Self {
         Self {
             path_map: PathMap::Single((Path::abs_root(), Path::abs_root())),
+            time_offset: sdf::LayerOffset::IDENTITY,
         }
     }
 
@@ -76,6 +82,7 @@ impl MapFunction {
     pub fn null() -> Self {
         Self {
             path_map: PathMap::Empty,
+            time_offset: sdf::LayerOffset::IDENTITY,
         }
     }
 
@@ -89,12 +96,14 @@ impl MapFunction {
             0 => Self::null(),
             1 => Self {
                 path_map: PathMap::Single(pairs.remove(0)),
+                time_offset: sdf::LayerOffset::IDENTITY,
             },
             _ => {
                 // Sort by source path length descending for longest-prefix-first.
                 pairs.sort_by(|a, b| b.0.as_str().len().cmp(&a.0.as_str().len()));
                 Self {
                     path_map: PathMap::Multi(pairs),
+                    time_offset: sdf::LayerOffset::IDENTITY,
                 }
             }
         }
@@ -112,6 +121,7 @@ impl MapFunction {
     pub fn from_pair(source: Path, target: Path) -> Self {
         Self {
             path_map: PathMap::Single((source, target)),
+            time_offset: sdf::LayerOffset::IDENTITY,
         }
     }
 
@@ -129,20 +139,42 @@ impl MapFunction {
         Self::new(vec![(source, target), (Path::abs_root(), Path::abs_root())])
     }
 
-    /// Returns `true` if this is an identity mapping.
+    /// Returns `true` if this is an identity mapping (identity paths *and*
+    /// identity time offset).
     pub fn is_identity(&self) -> bool {
-        self.path_map.len() == 1
-            && self.path_map.as_slice()[0].0.as_str() == "/"
-            && self.path_map.as_slice()[0].1.as_str() == "/"
+        self.path_map_is_path_identity() && self.time_offset.is_identity()
     }
 
-    /// Returns `true` if this mapping has pairs but none of them remap.
+    /// Returns `true` if this mapping has pairs but none of them remap,
+    /// and the time offset is identity — a non-identity offset retimes
+    /// values and is not a no-op.
     ///
     /// A weaker check than [`is_identity`]: `(/A, /A)` is a no-op but not
     /// identity. Returns `false` for null (empty) mappings — a null mapping
     /// maps *nothing*, which is distinct from "maps but changes nothing".
     pub fn is_noop(&self) -> bool {
-        !self.path_map.is_empty() && self.path_map.as_slice().iter().all(|(s, t)| s == t)
+        !self.path_map.is_empty()
+            && self.path_map.as_slice().iter().all(|(s, t)| s == t)
+            && self.time_offset.is_identity()
+    }
+
+    /// Returns the layer time offset associated with this mapping.
+    ///
+    /// Analogous to C++ `PcpMapFunction::GetTimeOffset`.
+    #[inline]
+    pub fn time_offset(&self) -> sdf::LayerOffset {
+        self.time_offset
+    }
+
+    /// Builder: returns this mapping with its time offset replaced.
+    ///
+    /// Callers that want to compose a new offset atop an existing one should
+    /// do the arithmetic explicitly — e.g.
+    /// `map.clone().with_time_offset(map.time_offset().concatenate(&sub))`.
+    #[inline]
+    pub fn with_time_offset(mut self, offset: sdf::LayerOffset) -> Self {
+        self.time_offset = offset;
+        self
     }
 
     /// Returns `true` if this mapping maps nothing.
@@ -194,12 +226,27 @@ impl MapFunction {
     /// target namespace. Each of `inner`'s target entries is mapped
     /// through `self` to produce the composed pairs. Pairs whose inner
     /// target falls outside `self`'s domain are silently dropped.
+    ///
+    /// Time offsets compose as well: the outer offset (`self`) is
+    /// concatenated with the deeper offset (`inner`) per the spec retiming
+    /// formula — see [`sdf::LayerOffset::concatenate`].
     pub fn compose(&self, inner: &MapFunction) -> MapFunction {
-        if self.is_identity() {
-            return inner.clone();
+        // Skip the concat in the overwhelmingly common case where neither
+        // side carries a retiming — composition gets called per Node at
+        // `add_child` time, so the four f64 ops per call add up.
+        let time_offset = if self.time_offset.is_identity() && inner.time_offset.is_identity() {
+            sdf::LayerOffset::IDENTITY
+        } else {
+            self.time_offset.concatenate(&inner.time_offset)
+        };
+
+        // Identity path-shortcuts still apply for paths, but we need to carry
+        // the composed time offset through.
+        if self.path_map_is_path_identity() {
+            return inner.clone().with_time_offset(time_offset);
         }
-        if inner.is_identity() {
-            return self.clone();
+        if inner.path_map_is_path_identity() {
+            return self.clone().with_time_offset(time_offset);
         }
 
         let mut pairs = Vec::new();
@@ -208,10 +255,23 @@ impl MapFunction {
                 pairs.push((inner_src.clone(), composed_tgt));
             }
         }
-        MapFunction::new(pairs)
+        MapFunction::new(pairs).with_time_offset(time_offset)
+    }
+
+    /// Internal helper: true iff the path portion is identity (regardless of
+    /// time offset). Used by `compose` to take the fast path without
+    /// prematurely discarding a non-identity time offset.
+    fn path_map_is_path_identity(&self) -> bool {
+        self.path_map.len() == 1
+            && self.path_map.as_slice()[0].0.as_str() == "/"
+            && self.path_map.as_slice()[0].1.as_str() == "/"
     }
 
     /// Returns the inverse mapping (swaps source and target in each pair).
+    ///
+    /// The time offset is left as identity because the inverse operation is
+    /// unused in time-offset-sensitive contexts and inverting a `scale = 0`
+    /// offset is undefined.
     pub fn inverse(&self) -> MapFunction {
         let pairs: Vec<_> = self
             .path_map
@@ -394,5 +454,62 @@ mod tests {
     fn new_single_pair_uses_single_variant() {
         let m = MapFunction::new(vec![(p("/X"), p("/Y"))]);
         assert!(matches!(m.path_map, PathMap::Single(_)));
+    }
+
+    // ---- Time offset ---------------------------------------------------
+
+    #[test]
+    fn default_time_offset_is_identity() {
+        assert!(MapFunction::identity().time_offset().is_identity());
+        assert!(MapFunction::from_pair(p("/A"), p("/B")).time_offset().is_identity());
+        assert!(MapFunction::from_pair_identity(p("/A"), p("/B"))
+            .time_offset()
+            .is_identity());
+    }
+
+    #[test]
+    fn with_time_offset_replaces() {
+        let o = sdf::LayerOffset::new(10.0, 2.0);
+        let m = MapFunction::from_pair(p("/A"), p("/B")).with_time_offset(o);
+        assert_eq!(m.time_offset(), o);
+        // Replacing again overwrites (not composes) — callers compose explicitly.
+        let o2 = sdf::LayerOffset::new(5.0, 3.0);
+        let m2 = m.with_time_offset(o2);
+        assert_eq!(m2.time_offset(), o2);
+    }
+
+    #[test]
+    fn compose_concatenates_time_offsets() {
+        // BasicTimeOffset_root: outer (10,2) compose inner (20,1) = (50,2).
+        let outer = MapFunction::identity().with_time_offset(sdf::LayerOffset::new(10.0, 2.0));
+        let inner = MapFunction::identity().with_time_offset(sdf::LayerOffset::new(20.0, 1.0));
+        let composed = outer.compose(&inner);
+        assert_eq!(composed.time_offset(), sdf::LayerOffset::new(50.0, 2.0));
+    }
+
+    #[test]
+    fn compose_carries_offset_through_path_identity_fast_path() {
+        // Outer has an explicit path pair + non-identity offset. Inner is
+        // path-identity with its own offset. Composition should keep outer's
+        // path and concatenate offsets.
+        let outer = MapFunction::from_pair(p("/A"), p("/B")).with_time_offset(sdf::LayerOffset::new(10.0, 2.0));
+        let inner = MapFunction::identity().with_time_offset(sdf::LayerOffset::new(20.0, 1.0));
+        let composed = outer.compose(&inner);
+        assert_eq!(composed.map_source_to_target(&p("/A")), Some(p("/B")));
+        assert_eq!(composed.time_offset(), sdf::LayerOffset::new(50.0, 2.0));
+
+        // Reverse order: outer is identity-path with offset, inner has pair.
+        let outer = MapFunction::identity().with_time_offset(sdf::LayerOffset::new(10.0, 2.0));
+        let inner = MapFunction::from_pair(p("/A"), p("/B")).with_time_offset(sdf::LayerOffset::new(20.0, 1.0));
+        let composed = outer.compose(&inner);
+        assert_eq!(composed.map_source_to_target(&p("/A")), Some(p("/B")));
+        assert_eq!(composed.time_offset(), sdf::LayerOffset::new(50.0, 2.0));
+    }
+
+    #[test]
+    fn is_identity_requires_identity_time_offset() {
+        let m = MapFunction::identity().with_time_offset(sdf::LayerOffset::new(10.0, 1.0));
+        assert!(!m.is_identity());
+        assert!(!m.is_noop());
     }
 }
