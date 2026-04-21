@@ -830,7 +830,6 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 let value = self.reader.read_pod::<ValueRep>()?;
 
                 ensure!(value.ty()? != Type::Invalid, "Can't parse dictionary value type");
-                ensure!(value.ty()? != Type::Dictionary, "Nested dictionaries are not supported");
 
                 // Save current position.
                 let saved_position = self.reader.stream_position()?;

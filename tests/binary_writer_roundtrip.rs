@@ -209,6 +209,15 @@ vendor_tests! {
     vendor_gen_vec4h,
     vendor_gen_vec4i,
     vendor_gen_vectors,
+    vendor_gen_dict,
+    vendor_fender_stratocaster,
+    vendor_toy_biplane_idle,
+}
+
+#[test]
+fn vendor_ball_maya() {
+    // Filename has a dot so it can't be expressed via the `vendor_` macro.
+    assert_roundtrip(Path::new(&format!("{VENDOR}/ball.maya.usdc")));
 }
 
 // Skipped fixtures — these fail during the *read* step, not during writing,
@@ -217,8 +226,5 @@ vendor_tests! {
 // - `gen_assetpath.usdc` / `gen_pathexpression.usdc`: reader has no branch for
 //   `AssetPath[]` / `PathExpression[]` array ValueReps (hits
 //   `Can't unpack array ... as inline value`).
-// - `gen_dict.usdc`, `ball.maya.usdc`, `toy_biplane_idle.usdc`,
-//   `fender_stratocaster.usdc`: reader explicitly bails on nested dictionaries
-//   with `"Nested dictionaries are not supported"` in `read_custom_data`.
 // - `gen_splines.usdc`: splines materialise as `Value::ValueVec`, which has no
 //   USDC type code (the binary format lacks a heterogeneous-array type).

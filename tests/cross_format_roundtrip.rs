@@ -119,10 +119,9 @@ cross_tests! {
     cross_layermetadata,
     cross_variants,
     cross_geometryattributes,
+    cross_dictionaries,
 }
 
 // Skipped fixtures:
 //   - `splines.usda`: splines materialise as `Value::ValueVec`, which the USDC
 //     writer rejects (no native heterogeneous-array type).
-//   - `dictionaries.usda`: the USDC reader bails on nested dictionaries
-//     (`"Nested dictionaries are not supported"` in `read_custom_data`).
