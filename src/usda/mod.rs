@@ -7,9 +7,12 @@ use anyhow::{bail, Result};
 
 pub mod parser;
 pub mod token;
+mod writer;
 
 use anyhow::Context;
 use parser::Parser;
+
+pub use writer::TextWriter;
 
 use crate::sdf;
 
