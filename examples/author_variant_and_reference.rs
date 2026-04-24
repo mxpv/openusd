@@ -1,11 +1,3 @@
-//! Build two USD scenes demonstrating cross-file references and variant sets.
-//!
-//! Creates `sphere.usda` with three colored spheres (blue is the default prim),
-//! then creates `scene.usda` with a `color` variant set whose three variants
-//! each reference a different sphere from `sphere.usda`.
-//!
-//! Usage: `cargo run --example referencing_usd`
-
 use std::collections::HashMap;
 
 use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier, Value};
@@ -16,7 +8,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write `sphere.usda` — three individually-coloured spheres, blue is defaultPrim.
 fn write_spheres(path: &str) -> anyhow::Result<()> {
     let mut data = sdf::Data::new();
 
@@ -37,7 +28,6 @@ fn write_spheres(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Add a Sphere prim at `prim_path` with the given `displayColor`.
 fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: [f32; 3]) -> anyhow::Result<()> {
     let prim = sdf::path(prim_path)?;
     let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
