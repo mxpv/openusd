@@ -672,10 +672,14 @@ impl<W: Write> Emitter<'_, W> {
             }
         }
 
-        // `layerRelocates` is stored with that name but the text keyword is
-        // plain `relocates` at layer scope.
+        // Several fields are stored under internal names that differ from the
+        // USD text grammar keywords. Map them back before emitting.
         let keyword = if name == FieldKey::LayerRelocates.as_str() {
             "relocates"
+        } else if name == FieldKey::VariantSetNames.as_str() {
+            "variantSets"
+        } else if name == FieldKey::VariantSelection.as_str() {
+            "variants"
         } else {
             name
         };
