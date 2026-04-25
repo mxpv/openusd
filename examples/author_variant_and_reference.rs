@@ -64,7 +64,10 @@ fn write_scene(path: &str) -> anyhow::Result<()> {
     // Declare the "color" variant set and choose "blue" as the default selection.
     sphere_spec.add(
         FieldKey::VariantSetNames,
-        Value::TokenListOp(ListOp { prepended_items: vec!["color".into()], ..Default::default() }),
+        Value::TokenListOp(ListOp {
+            prepended_items: vec!["color".into()],
+            ..Default::default()
+        }),
     );
     sphere_spec.add(
         FieldKey::VariantSelection,
