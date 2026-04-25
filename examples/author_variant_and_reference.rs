@@ -64,11 +64,7 @@ fn write_scene(path: &str) -> anyhow::Result<()> {
     // Declare the "color" variant set and choose "blue" as the default selection.
     sphere_spec.add(
         FieldKey::VariantSetNames,
-        Value::TokenListOp({
-            let mut op = ListOp::default();
-            op.prepended_items = vec!["color".into()];
-            op
-        }),
+        Value::TokenListOp(ListOp { prepended_items: vec!["color".into()], ..Default::default() }),
     );
     sphere_spec.add(
         FieldKey::VariantSelection,
@@ -116,13 +112,15 @@ fn add_variant(
         None => sdf::Path::default(),
     };
 
-    let mut ref_list = ListOp::<Reference>::default();
-    ref_list.prepended_items = vec![Reference {
-        asset_path: "./sphere.usda".into(),
-        prim_path,
-        layer_offset: LayerOffset::IDENTITY,
-        custom_data: HashMap::new(),
-    }];
+    let ref_list = ListOp::<Reference> {
+        prepended_items: vec![Reference {
+            asset_path: "./sphere.usda".into(),
+            prim_path,
+            layer_offset: LayerOffset::IDENTITY,
+            custom_data: HashMap::new(),
+        }],
+        ..Default::default()
+    };
     variant_spec.add(FieldKey::References, Value::ReferenceListOp(ref_list));
 
     Ok(())
