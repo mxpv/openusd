@@ -295,3 +295,65 @@ mod reorder {
         assert_eq!(props, vec!["y", "x", "z"]);
     }
 }
+
+#[cfg(test)]
+mod value_resolution {
+    use super::*;
+    use openusd::sdf::{FieldKey, Specifier, Value, Variability};
+
+    fn open_fixture() -> Stage {
+        Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")
+    }
+
+    #[test]
+    fn specifier_inherit_only_resolves_to_class() {
+        // Local `over` opinion plus an inherit from a `class`. With strongest-
+        // wins this would be `over`; per spec 12.2.1 it must be `class`.
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/InheritOnly").unwrap(), FieldKey::Specifier)
+            .unwrap();
+        assert_eq!(value, Some(Value::Specifier(Specifier::Class)));
+    }
+
+    #[test]
+    fn specifier_all_over_resolves_to_over() {
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/AllOver").unwrap(), FieldKey::Specifier)
+            .unwrap();
+        assert_eq!(value, Some(Value::Specifier(Specifier::Over)));
+    }
+
+    #[test]
+    fn specifier_def_resolves_to_def() {
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/DefPrim").unwrap(), FieldKey::Specifier)
+            .unwrap();
+        assert_eq!(value, Some(Value::Specifier(Specifier::Def)));
+    }
+
+    #[test]
+    fn variability_weakest_opinion_wins() {
+        // The weak sublayer authors `uniform` while the strong layer omits the
+        // field. Per spec 12.2.3 the resolved variability is the weakest
+        // authored opinion (`uniform`).
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/VarTest.attr").unwrap(), FieldKey::Variability)
+            .unwrap();
+        assert_eq!(value, Some(Value::Variability(Variability::Uniform)));
+    }
+
+    #[test]
+    fn custom_any_true() {
+        // Only the weak sublayer authors `custom`. Per spec 12.2.4 the
+        // resolved value is `true` because *any* opinion in the stack is true.
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/CustomTest.attr").unwrap(), FieldKey::Custom)
+            .unwrap();
+        assert_eq!(value, Some(Value::Bool(true)));
+    }
+}
