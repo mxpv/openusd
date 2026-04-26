@@ -155,6 +155,8 @@ impl<W: Write> Emitter<'_, W> {
         writeln!(self.out, "{{")?;
         self.indent += 1;
 
+        self.emit_body_reorders(data, path)?;
+
         // Properties
         let props = property_children(data, path);
         for name in &props {
@@ -181,6 +183,19 @@ impl<W: Write> Emitter<'_, W> {
         self.write_indent()?;
         writeln!(self.out, "}}")?;
 
+        Ok(())
+    }
+
+    /// Emit `reorder nameChildren / properties` statements (if authored) at
+    /// the top of a prim or variant body. The grammar only accepts these
+    /// inside `{...}`, not in the metadata block.
+    fn emit_body_reorders(&mut self, data: &dyn AbstractData, path: &Path) -> Result<()> {
+        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PrimOrder.as_str()) {
+            self.emit_reorder("nameChildren", &v)?;
+        }
+        if let Some(Value::TokenVec(v)) = get_value(data, path, FieldKey::PropertyOrder.as_str()) {
+            self.emit_reorder("properties", &v)?;
+        }
         Ok(())
     }
 
@@ -586,6 +601,8 @@ impl<W: Write> Emitter<'_, W> {
         writeln!(self.out, " {{")?;
         self.indent += 1;
 
+        self.emit_body_reorders(data, path)?;
+
         let props = property_children(data, path);
         for prop in &props {
             let prop_path = path.append_property(prop)?;
@@ -656,19 +673,6 @@ impl<W: Write> Emitter<'_, W> {
                 self.out.write_all(buf.as_bytes())?;
                 writeln!(self.out)?;
                 return Ok(());
-            }
-        }
-
-        // `primOrder` / `propertyOrder` are stored under those field names but
-        // the text grammar expresses them as `reorder nameChildren/properties`.
-        if name == FieldKey::PrimOrder.as_str() {
-            if let Value::TokenVec(v) = value {
-                return self.emit_reorder("nameChildren", v);
-            }
-        }
-        if name == FieldKey::PropertyOrder.as_str() {
-            if let Value::TokenVec(v) = value {
-                return self.emit_reorder("properties", v);
             }
         }
 
@@ -1365,6 +1369,8 @@ const SPLINE_FIELD: &str = "spline";
 const PRIM_STRUCTURAL_FIELDS: &[&str] = &[
     FieldKey::Specifier.as_str(),
     FieldKey::TypeName.as_str(),
+    FieldKey::PrimOrder.as_str(),
+    FieldKey::PropertyOrder.as_str(),
     ChildrenKey::PrimChildren.as_str(),
     ChildrenKey::PropertyChildren.as_str(),
     ChildrenKey::VariantChildren.as_str(),

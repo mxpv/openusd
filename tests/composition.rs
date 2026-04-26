@@ -272,3 +272,26 @@ composition_tests! {
     VariantSpecializesAndReference_root,
     VariantSpecializesAndReferenceSurprisingBehavior_root,
 }
+
+#[cfg(test)]
+mod reorder {
+    use super::*;
+
+    fn open_fixture() -> Stage {
+        Stage::open("fixtures/reorder.usda").expect("open reorder fixture")
+    }
+
+    #[test]
+    fn prim_order_reorders_named_children() {
+        let stage = open_fixture();
+        let children = stage.prim_children(sdf::path("/Root").unwrap()).unwrap();
+        assert_eq!(children, vec!["C", "B", "A", "D"]);
+    }
+
+    #[test]
+    fn property_order_reorders_named_properties() {
+        let stage = open_fixture();
+        let props = stage.prim_properties(sdf::path("/Props").unwrap()).unwrap();
+        assert_eq!(props, vec!["y", "x", "z"]);
+    }
+}

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{Path, SpecType, Value};
 
@@ -134,7 +135,15 @@ impl Cache {
     ///
     /// Merges the children field across all composition nodes, returning the
     /// union with strongest-first ordering. When relocates are present,
-    /// source children are hidden and target children are added.
+    /// source children are hidden and target children are added. Finally,
+    /// the strongest opinion of `primOrder` (if any) is applied to the
+    /// resulting list (see [`sdf::apply_ordering`]).
+    ///
+    /// Composition note: the strongest `primOrder` opinion wins outright,
+    /// matching how single-valued fields like `defaultPrim` compose. C++
+    /// `Pcp` instead folds each layer's order onto the running union as
+    /// nodes merge weakest-to-strongest, which can yield different results
+    /// when multiple sublayers contribute partial orderings.
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let mut children = self.composed_children(path, ChildrenKey::PrimChildren)?;
 
@@ -142,12 +151,27 @@ impl Cache {
             self.apply_relocates_to_children(path, &mut children);
         }
 
+        self.apply_order_field(path, FieldKey::PrimOrder, &mut children)?;
         Ok(children)
     }
 
     /// Returns the composed list of property names for a prim path.
+    ///
+    /// Applies the strongest `propertyOrder` opinion to the unioned property
+    /// list. See [`Cache::prim_children`] for the composition-rule caveat.
     pub fn prim_properties(&mut self, path: &Path) -> Result<Vec<String>> {
-        self.composed_children(path, ChildrenKey::PropertyChildren)
+        let mut properties = self.composed_children(path, ChildrenKey::PropertyChildren)?;
+        self.apply_order_field(path, FieldKey::PropertyOrder, &mut properties)?;
+        Ok(properties)
+    }
+
+    /// Apply the strongest opinion of `field` (a `TokenVec`) as a child-list
+    /// ordering. The index for `path` must already be cached.
+    fn apply_order_field(&self, path: &Path, field: FieldKey, items: &mut [String]) -> Result<()> {
+        if let Some(Value::TokenVec(order)) = self.indices[path].resolve_field(field.as_str(), &self.stack, None)? {
+            sdf::apply_ordering(items, &order);
+        }
+        Ok(())
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.

@@ -95,9 +95,9 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Populating the stage | `11.3` | :white_check_mark: | `0.2.0` | Lazy per-prim composition via `pcp::Cache` |
 | [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :construction: | | No subset-of-prims loading |
 | Ordered prim children | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment |
-| Ordered prim children (`primOrder` reordering) | `11.3.1` | :construction: | | `primOrder` field not applied |
+| Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |
-| Ordered property children (`propertyOrder` reordering) | `11.3.2` | :construction: | | `propertyOrder` field not applied |
+| Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :construction: | | `instanceable` readable; shared representation not implemented |
 | Model hierarchy (kind) | `11.4` | :construction: | | `kind` readable; hierarchy validation not implemented |
 | [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :construction: | | Predicate flags for traversal filtering |

@@ -169,6 +169,7 @@ fixture_tests! {
     fixture_instanceable_metadata,
     fixture_payload,
     fixture_reference,
+    fixture_reorder,
     fixture_ref_external,
     fixture_ref_prim,
     fixture_ref_target,
