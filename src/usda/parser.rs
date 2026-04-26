@@ -599,7 +599,7 @@ impl<'a> Parser<'a> {
         if matches!(suffix, Some(Token::TimeSamples)) {
             push_unique(suffixed_properties, name);
             self.ensure_pun('=')?;
-            let samples = self.parse_time_samples()?;
+            let samples = self.parse_time_samples(type_info)?;
             let path = current_path.append_property(name)?;
 
             let spec = data
@@ -1182,7 +1182,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a time sample map: `{ time : value, time : value, ... }`.
-    fn parse_time_samples(&mut self) -> Result<sdf::TimeSampleMap> {
+    ///
+    /// Each per-time value is dispatched through [`parse_value`] using
+    /// the property's declared type, so typed-value forms such as
+    /// `quatf[]` element tuples (`(w, x, y, z)`) and `matrix4d` rows
+    /// parse correctly. Without the type, the previous type-blind
+    /// path failed on Pixar's `HumanFemale.walk.usd` and other rigs
+    /// whose animation samples are arrays of tuples.
+    fn parse_time_samples(&mut self, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap> {
         let mut samples = Vec::new();
         self.parse_block('{', '}', |this| {
             let time_str = this.fetch_next()?;
@@ -1191,7 +1198,7 @@ impl<'a> Parser<'a> {
                 other => bail!("Expected time value, got {other:?}"),
             };
             this.ensure_pun(':')?;
-            let value = this.parse_property_metadata_value()?;
+            let value = this.parse_value(info)?;
             samples.push((time, value));
             Ok(())
         })?;
@@ -2731,6 +2738,88 @@ def Xform "root" {
                 .as_str(),
             "/root/Physics/PhysicsMaterial"
         );
+    }
+
+    /// Regression: per-time values inside `.timeSamples = { ... }` must be
+    /// parsed under the property's declared type so typed-tuple forms
+    /// (`(w, x, y, z)` for `quatf[]`, `(r, g, b)` for `float3[]`,
+    /// matrix rows for `matrix4d`) round-trip into the matching
+    /// `Value::QuatfVec` / `Vec3fVec` / `Matrix4d` variants. Pixar's
+    /// `UsdSkelExamples/HumanFemale.walk.usd` is the canonical example
+    /// — its rotation samples are arrays of quaternion tuples and
+    /// failed with `Unsupported property metadata value token: Punctuation('(')`
+    /// before the type-aware dispatch landed.
+    #[test]
+    fn parse_typed_tuple_time_samples() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def Xform "Anim"
+{
+    quatf[] rotations.timeSamples = {
+        0: [(1, 0, 0, 0), (0.7071, 0, 0.7071, 0)],
+        1: [(0.7071, 0, 0.7071, 0), (0, 0, 1, 0)],
+    }
+    float3[] translations.timeSamples = {
+        0: [(0, 0, 0), (1, 2, 3)],
+    }
+    matrix4d xformOp:transform.timeSamples = {
+        0: ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)),
+    }
+}
+"#,
+        );
+        let specs = parser.parse().expect("typed timeSamples parsed");
+
+        let rotations = specs
+            .get(&sdf::Path::new("/Anim.rotations").unwrap())
+            .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+            .expect("rotations.timeSamples present");
+        let samples = match rotations {
+            sdf::Value::TimeSamples(s) => s,
+            other => panic!("expected TimeSamples, got {other:?}"),
+        };
+        assert_eq!(samples.len(), 2);
+        match &samples[0].1 {
+            sdf::Value::QuatfVec(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[0], [1.0, 0.0, 0.0, 0.0]);
+            }
+            other => panic!("expected QuatfVec for quatf[] sample, got {other:?}"),
+        }
+
+        let translations = specs
+            .get(&sdf::Path::new("/Anim.translations").unwrap())
+            .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+            .expect("translations.timeSamples present");
+        let samples = match translations {
+            sdf::Value::TimeSamples(s) => s,
+            other => panic!("expected TimeSamples, got {other:?}"),
+        };
+        match &samples[0].1 {
+            sdf::Value::Vec3fVec(v) => {
+                assert_eq!(v.len(), 2);
+                assert_eq!(v[1], [1.0, 2.0, 3.0]);
+            }
+            other => panic!("expected Vec3fVec for float3[] sample, got {other:?}"),
+        }
+
+        let xform = specs
+            .get(&sdf::Path::new("/Anim.xformOp:transform").unwrap())
+            .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+            .expect("xformOp:transform.timeSamples present");
+        let samples = match xform {
+            sdf::Value::TimeSamples(s) => s,
+            other => panic!("expected TimeSamples, got {other:?}"),
+        };
+        match &samples[0].1 {
+            sdf::Value::Matrix4d(m) => {
+                assert_eq!(m[0], 1.0);
+                assert_eq!(m[5], 1.0);
+                assert_eq!(m[10], 1.0);
+                assert_eq!(m[15], 1.0);
+            }
+            other => panic!("expected Matrix4d for matrix4d sample, got {other:?}"),
+        }
     }
 
     #[test]
