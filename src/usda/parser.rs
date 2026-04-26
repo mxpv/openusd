@@ -1185,13 +1185,12 @@ impl<'a> Parser<'a> {
     ///
     /// Per-time values are dispatched two ways:
     ///
-    /// - When the property's declared type expects a tuple
-    ///   (`vector3f`, `quatf`, `matrix4d`, …) AND the next token
-    ///   actually opens a tuple / array-of-tuples (`(` or `[`),
-    ///   route through [`parse_value`] so the value lands in the
-    ///   matching `Value::Vec3f` / `QuatfVec` / `Matrix4d` variant.
-    ///   This is what makes Pixar's `HumanFemale.walk.usd` and
-    ///   every other UsdSkel rig parse.
+    /// - When the property's declared type and the next token agree
+    ///   on shape (a tuple type opening with `(` or `[`, or any
+    ///   array type opening with `[`), route through [`parse_value`]
+    ///   so the value lands in the matching typed variant
+    ///   (`Vec3f` / `QuatfVec` / `Matrix4d` / `IntVec` / `FloatVec` /
+    ///   `TokenVec` / …).
     ///
     /// - Otherwise fall through to [`parse_property_metadata_value`]
     ///   so malformed-but-historically-accepted samples still load
@@ -1207,7 +1206,7 @@ impl<'a> Parser<'a> {
                 other => bail!("Expected time value, got {other:?}"),
             };
             this.ensure_pun(':')?;
-            let value = if this.next_is_typed_tuple_value(info) {
+            let value = if this.next_is_typed_value(info) {
                 this.parse_value(info)?
             } else {
                 this.parse_property_metadata_value()?
@@ -1221,13 +1220,19 @@ impl<'a> Parser<'a> {
     /// Heuristic: should the next token be parsed under [`parse_value`]
     /// for `info`, or is the type-blind metadata-value path safer?
     ///
-    /// Returns `true` when the property's type expects a tuple
-    /// (vector / quat / matrix) AND the next token opens one
-    /// (`(`) or opens an array of them (`[`). Anything else
-    /// (scalar literal, `None`, identifier) flows through the
-    /// type-blind path.
-    fn next_is_typed_tuple_value(&mut self, info: TypeInfo<'_>) -> bool {
-        let wants_tuple = matches!(
+    /// Returns `true` when the next token opens a literal whose shape
+    /// matches the declared type:
+    ///
+    /// - `(` for a tuple type (vector / quat / matrix row / matrix).
+    /// - `[` for any array type (scalar arrays like `int[]`,
+    ///   `float[]`, `token[]`, as well as arrays of tuples like
+    ///   `quatf[]` or `matrix4d[]`).
+    ///
+    /// Anything else (scalar literal, `None`, identifier) flows
+    /// through the type-blind path so the spec corpus's lenient
+    /// `vector3f`-with-bare-scalar samples keep parsing.
+    fn next_is_typed_value(&mut self, info: TypeInfo<'_>) -> bool {
+        let is_tuple_type = matches!(
             info.ty,
             Type::Int2
                 | Type::Int3
@@ -1248,10 +1253,11 @@ impl<'a> Parser<'a> {
                 | Type::Matrix3d
                 | Type::Matrix4d
         );
-        if !wants_tuple {
-            return false;
+        match self.peek_next() {
+            Some(Ok(Token::Punctuation('('))) => is_tuple_type,
+            Some(Ok(Token::Punctuation('['))) => is_tuple_type || info.is_array,
+            _ => false,
         }
-        matches!(self.peek_next(), Some(Ok(Token::Punctuation('(' | '['))))
     }
 
     /// Parse one reference entry, including optional target prim path and layer offset.
@@ -2868,6 +2874,63 @@ def Xform "Anim"
                 assert_eq!(m[15], 1.0);
             }
             other => panic!("expected Matrix4d for matrix4d sample, got {other:?}"),
+        }
+    }
+
+    /// Regression: per-time values authored as scalar arrays against a
+    /// typed `T[]` property must land in the precise typed `Vec`
+    /// variant, not the type-blind `Int64Vec` / `DoubleVec` /
+    /// `StringVec` fallbacks that `parse_property_metadata_value`
+    /// produces.
+    #[test]
+    fn parse_typed_scalar_array_time_samples() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def Xform "Anim"
+{
+    int[] indices.timeSamples = {
+        0: [1, 2, 3],
+    }
+    float[] weights.timeSamples = {
+        0: [0.25, 0.5, 0.25],
+    }
+    token[] joints.timeSamples = {
+        0: ["Root", "Hip", "Knee"],
+    }
+    bool[] flags.timeSamples = {
+        0: [true, false, true],
+    }
+}
+"#,
+        );
+        let specs = parser.parse().expect("typed scalar-array timeSamples parsed");
+
+        let take = |path: &str| {
+            let value = specs
+                .get(&sdf::Path::new(path).unwrap())
+                .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+                .unwrap_or_else(|| panic!("{path}.timeSamples present"));
+            match value {
+                sdf::Value::TimeSamples(s) => s.clone(),
+                other => panic!("expected TimeSamples for {path}, got {other:?}"),
+            }
+        };
+
+        match &take("/Anim.indices")[0].1 {
+            sdf::Value::IntVec(v) => assert_eq!(v, &[1, 2, 3]),
+            other => panic!("expected IntVec for int[] sample, got {other:?}"),
+        }
+        match &take("/Anim.weights")[0].1 {
+            sdf::Value::FloatVec(v) => assert_eq!(v, &[0.25, 0.5, 0.25]),
+            other => panic!("expected FloatVec for float[] sample, got {other:?}"),
+        }
+        match &take("/Anim.joints")[0].1 {
+            sdf::Value::TokenVec(v) => assert_eq!(v, &["Root", "Hip", "Knee"]),
+            other => panic!("expected TokenVec for token[] sample, got {other:?}"),
+        }
+        match &take("/Anim.flags")[0].1 {
+            sdf::Value::BoolVec(v) => assert_eq!(v, &[true, false, true]),
+            other => panic!("expected BoolVec for bool[] sample, got {other:?}"),
         }
     }
 
