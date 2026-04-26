@@ -1183,12 +1183,21 @@ impl<'a> Parser<'a> {
 
     /// Parse a time sample map: `{ time : value, time : value, ... }`.
     ///
-    /// Each per-time value is dispatched through [`parse_value`] using
-    /// the property's declared type, so typed-value forms such as
-    /// `quatf[]` element tuples (`(w, x, y, z)`) and `matrix4d` rows
-    /// parse correctly. Without the type, the previous type-blind
-    /// path failed on Pixar's `HumanFemale.walk.usd` and other rigs
-    /// whose animation samples are arrays of tuples.
+    /// Per-time values are dispatched two ways:
+    ///
+    /// - When the property's declared type expects a tuple
+    ///   (`vector3f`, `quatf`, `matrix4d`, …) AND the next token
+    ///   actually opens a tuple / array-of-tuples (`(` or `[`),
+    ///   route through [`parse_value`] so the value lands in the
+    ///   matching `Value::Vec3f` / `QuatfVec` / `Matrix4d` variant.
+    ///   This is what makes Pixar's `HumanFemale.walk.usd` and
+    ///   every other UsdSkel rig parse.
+    ///
+    /// - Otherwise fall through to [`parse_property_metadata_value`]
+    ///   so malformed-but-historically-accepted samples still load
+    ///   — the spec corpus's `attributes.usda` deliberately authors
+    ///   bare scalars (`5.67`, `-7`) and `None` against typed
+    ///   `vector3f` properties to verify the parser's tolerance.
     fn parse_time_samples(&mut self, info: TypeInfo<'_>) -> Result<sdf::TimeSampleMap> {
         let mut samples = Vec::new();
         self.parse_block('{', '}', |this| {
@@ -1198,11 +1207,51 @@ impl<'a> Parser<'a> {
                 other => bail!("Expected time value, got {other:?}"),
             };
             this.ensure_pun(':')?;
-            let value = this.parse_value(info)?;
+            let value = if this.next_is_typed_tuple_value(info) {
+                this.parse_value(info)?
+            } else {
+                this.parse_property_metadata_value()?
+            };
             samples.push((time, value));
             Ok(())
         })?;
         Ok(samples)
+    }
+
+    /// Heuristic: should the next token be parsed under [`parse_value`]
+    /// for `info`, or is the type-blind metadata-value path safer?
+    ///
+    /// Returns `true` when the property's type expects a tuple
+    /// (vector / quat / matrix) AND the next token opens one
+    /// (`(`) or opens an array of them (`[`). Anything else
+    /// (scalar literal, `None`, identifier) flows through the
+    /// type-blind path.
+    fn next_is_typed_tuple_value(&mut self, info: TypeInfo<'_>) -> bool {
+        let wants_tuple = matches!(
+            info.ty,
+            Type::Int2
+                | Type::Int3
+                | Type::Int4
+                | Type::Half2
+                | Type::Half3
+                | Type::Half4
+                | Type::Float2
+                | Type::Float3
+                | Type::Float4
+                | Type::Double2
+                | Type::Double3
+                | Type::Double4
+                | Type::Quath
+                | Type::Quatf
+                | Type::Quatd
+                | Type::Matrix2d
+                | Type::Matrix3d
+                | Type::Matrix4d
+        );
+        if !wants_tuple {
+            return false;
+        }
+        matches!(self.peek_next(), Some(Ok(Token::Punctuation('(' | '['))))
     }
 
     /// Parse one reference entry, including optional target prim path and layer offset.
@@ -2820,6 +2869,39 @@ def Xform "Anim"
             }
             other => panic!("expected Matrix4d for matrix4d sample, got {other:?}"),
         }
+    }
+
+    /// Regression: bare scalars and `None` authored against a typed
+    /// vector property's `.timeSamples` must still parse — the spec
+    /// corpus's `attributes.usda` tests parser tolerance with
+    /// `vector3f my:attribute.timeSamples = { 3 : 5.67, 6.78 : None, ... }`,
+    /// and we don't want the type-aware tuple dispatch to regress
+    /// that.
+    #[test]
+    fn parse_lenient_time_samples_keep_scalar_and_none() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def Xform "X"
+{
+    custom uniform vector3f my:attribute.timeSamples = {
+        3 : 5.67,
+        6.78 : None,
+        3567.234: -7,
+    }
+}
+"#,
+        );
+        let specs = parser.parse().expect("lenient timeSamples parsed");
+        let value = specs
+            .get(&sdf::Path::new("/X.my:attribute").unwrap())
+            .and_then(|s| s.get(FieldKey::TimeSamples.as_str()))
+            .expect("timeSamples present");
+        let samples = match value {
+            sdf::Value::TimeSamples(s) => s,
+            other => panic!("expected TimeSamples, got {other:?}"),
+        };
+        assert_eq!(samples.len(), 3);
+        assert!(matches!(samples[1].1, sdf::Value::ValueBlock));
     }
 
     #[test]
