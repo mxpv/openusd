@@ -1,0 +1,15 @@
+#usda 1.0
+
+# Custom resolution (12.2.4): weak layer authors `custom`, strong layer omits it.
+# Result must be `true` (any-true) for the strong layer to inherit the marker.
+def "CustomTest"
+{
+    custom int attr
+}
+
+# Variability resolution (12.2.3): weak layer authors `uniform`, strong layer
+# omits variability. The weakest authored opinion wins.
+def "VarTest"
+{
+    uniform int attr
+}

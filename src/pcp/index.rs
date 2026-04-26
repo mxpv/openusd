@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::sdf::{LayerData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Specifier, Value};
 
 use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
@@ -255,36 +255,164 @@ impl PrimIndex {
         }
     }
 
-    /// Resolves a field by walking nodes from strongest to weakest, returning the first opinion.
+    /// Resolves a field across the composition graph.
+    ///
+    /// Most fields use strongest-opinion-wins (spec 12.2). Three fields have
+    /// special rules per spec 12.2.1, 12.2.3, 12.2.4:
+    ///
+    /// - `specifier`: precedence by `def`/`class`/`over` with direct-inherit handling
+    /// - `variability`: weakest authored opinion wins
+    /// - `custom`: any-true (logical OR across all authored opinions)
     ///
     /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
     /// When `Some`, appends the suffix to form a property path for each node.
-    /// A [`Value::ValueBlock`] explicitly blocks opinions from weaker layers.
+    /// A [`Value::ValueBlock`] blocks opinions from weaker layers.
     pub(crate) fn resolve_field(
         &self,
         field: &str,
         stack: &LayerStack,
         prop_suffix: Option<&str>,
     ) -> Result<Option<Value>> {
-        for node in self.nodes() {
-            let query_path = match prop_suffix {
-                Some(suffix) => Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?),
-                None => Cow::Borrowed(&node.path),
-            };
+        if field == FieldKey::Specifier.as_str() {
+            return self.resolve_specifier(stack, prop_suffix);
+        }
+        if field == FieldKey::Variability.as_str() {
+            return self.resolve_variability(stack, prop_suffix);
+        }
+        if field == FieldKey::Custom.as_str() {
+            return self.resolve_custom(stack, prop_suffix);
+        }
+        self.resolve_strongest(field, stack, prop_suffix)
+    }
 
+    /// Builds the query path for a node, applying `prop_suffix` if given.
+    /// Borrows the node's path when no suffix is needed (zero-copy).
+    fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>> {
+        match prop_suffix {
+            Some(suffix) => Ok(Cow::Owned(Path::new(&format!("{}{suffix}", node.path))?)),
+            None => Ok(Cow::Borrowed(&node.path)),
+        }
+    }
+
+    /// Walks nodes from strongest to weakest, returning the first opinion.
+    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers.
+    fn resolve_strongest(&self, field: &str, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
             if !data.has_field(&query_path, field) {
                 continue;
             }
-
             let value = data.get(&query_path, field)?;
             if matches!(value.as_ref(), Value::ValueBlock) {
                 return Ok(None);
             }
             return Ok(Some(value.into_owned()));
         }
-
         Ok(None)
+    }
+
+    /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
+    /// Iterates strongest-to-weakest tracking the latest match, so a
+    /// [`Value::ValueBlock`] still blocks weaker opinions.
+    fn resolve_variability(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+        let field = FieldKey::Variability.as_str();
+        let mut weakest = None;
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            if !data.has_field(&query_path, field) {
+                continue;
+            }
+            let value = data.get(&query_path, field)?;
+            if matches!(value.as_ref(), Value::ValueBlock) {
+                break;
+            }
+            if matches!(value.as_ref(), Value::Variability(_)) {
+                weakest = Some(value.into_owned());
+            }
+        }
+        Ok(weakest)
+    }
+
+    /// `custom` resolution per spec 12.2.4: any-true across authored opinions.
+    /// Returns `Bool(true)` as soon as any opinion is true, `Bool(false)` if
+    /// at least one opinion was authored but none were true, and `None`
+    /// otherwise.
+    fn resolve_custom(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+        let field = FieldKey::Custom.as_str();
+        let mut saw_opinion = false;
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            if !data.has_field(&query_path, field) {
+                continue;
+            }
+            let value = data.get(&query_path, field)?;
+            if matches!(value.as_ref(), Value::ValueBlock) {
+                break;
+            }
+            saw_opinion = true;
+            if matches!(value.as_ref(), Value::Bool(true)) {
+                return Ok(Some(Value::Bool(true)));
+            }
+        }
+        Ok(saw_opinion.then_some(Value::Bool(false)))
+    }
+
+    /// Specifier resolution per spec 12.2.1.
+    ///
+    /// `over` is undefining; `def` and `class` are defining. The composed
+    /// specifier is `def` if the strongest defining opinion is `def`, or if
+    /// the strongest defining opinion not from a direct inherit is `def`.
+    /// It is `class` if the strongest defining opinion not from a direct
+    /// inherit is `class`, or if every defining opinion is `class`. It is
+    /// `over` only when every authored opinion is `over`.
+    fn resolve_specifier(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+        let field = FieldKey::Specifier.as_str();
+        let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            if !data.has_field(&query_path, field) {
+                continue;
+            }
+            let value = data.get(&query_path, field)?;
+            if matches!(value.as_ref(), Value::ValueBlock) {
+                break;
+            }
+            if let Value::Specifier(s) = value.into_owned() {
+                specs.push((s, node.arc));
+            }
+        }
+        if specs.is_empty() {
+            return Ok(None);
+        }
+
+        let strongest_defining = specs.iter().find(|(s, _)| *s != Specifier::Over).map(|(s, _)| *s);
+        let Some(strongest) = strongest_defining else {
+            // All authored opinions are `over`.
+            return Ok(Some(Value::Specifier(Specifier::Over)));
+        };
+
+        let strongest_non_inherit_defining = specs
+            .iter()
+            .find(|(s, arc)| *s != Specifier::Over && *arc != ArcType::Inherit)
+            .map(|(s, _)| *s);
+
+        if strongest == Specifier::Def || strongest_non_inherit_defining == Some(Specifier::Def) {
+            return Ok(Some(Value::Specifier(Specifier::Def)));
+        }
+
+        let all_defining_class = specs
+            .iter()
+            .filter(|(s, _)| *s != Specifier::Over)
+            .all(|(s, _)| *s == Specifier::Class);
+        if strongest_non_inherit_defining == Some(Specifier::Class) || all_defining_class {
+            return Ok(Some(Value::Specifier(Specifier::Class)));
+        }
+
+        Ok(Some(Value::Specifier(strongest)))
     }
 }
 
