@@ -353,7 +353,7 @@ impl<'a> Parser<'a> {
             })?;
         }
 
-        let (children, props, variant_sets) = self.read_prim_body(&prim_path, data)?;
+        let (children, props, variant_sets) = self.read_prim_body(&prim_path, &mut spec, data)?;
         if !children.is_empty() {
             spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
         }
@@ -374,9 +374,12 @@ impl<'a> Parser<'a> {
     /// Parse the body of a prim or variant (`{ ... }`).
     ///
     /// Returns the child prim names and property names found in the body.
+    /// `owner_spec` is the in-progress prim/variant spec that owns this body;
+    /// `reorder` statements write `primOrder`/`propertyOrder` directly into it.
     fn read_prim_body(
         &mut self,
         path: &sdf::Path,
+        owner_spec: &mut sdf::Spec,
         data: &mut HashMap<sdf::Path, sdf::Spec>,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
         let mut children = Vec::new();
@@ -403,7 +406,7 @@ impl<'a> Parser<'a> {
                     this.read_relationship(path, false, &mut properties, data, None)?;
                 }
                 Token::Reorder => {
-                    this.read_reorder(path, data)?;
+                    this.read_reorder(owner_spec)?;
                 }
                 _ => {
                     this.read_attribute(path, &mut properties, &mut suffixed_properties, data)?;
@@ -424,8 +427,8 @@ impl<'a> Parser<'a> {
     /// Parse `reorder nameChildren = [...]` or `reorder properties = [...]`.
     ///
     /// These statements set the `primOrder` or `propertyOrder` fields on the
-    /// owning prim spec, controlling child/property display order.
-    fn read_reorder(&mut self, path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<()> {
+    /// owning prim/variant spec, controlling child/property display order.
+    fn read_reorder(&mut self, owner_spec: &mut sdf::Spec) -> Result<()> {
         self.fetch_next()?; // consume `reorder`
 
         let token = self
@@ -440,13 +443,7 @@ impl<'a> Parser<'a> {
         self.ensure_pun('=')?;
 
         let names = self.one_or_list(|this| Ok(this.fetch_str()?.to_owned()))?;
-        if let Some(spec) = data.get_mut(path) {
-            spec.add(field_key, sdf::Value::TokenVec(names));
-        } else {
-            let mut spec = sdf::Spec::new(sdf::SpecType::Prim);
-            spec.add(field_key, sdf::Value::TokenVec(names));
-            data.insert(path.clone(), spec);
-        }
+        owner_spec.add(field_key, sdf::Value::TokenVec(names));
 
         Ok(())
     }
@@ -484,7 +481,7 @@ impl<'a> Parser<'a> {
             }
 
             // Variant body.
-            let (children, properties, variant_sets) = this.read_prim_body(&variant_path, data)?;
+            let (children, properties, variant_sets) = this.read_prim_body(&variant_path, &mut variant_spec, data)?;
             if !children.is_empty() {
                 variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
             }

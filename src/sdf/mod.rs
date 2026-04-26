@@ -10,11 +10,13 @@ use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 mod data;
+mod ordering;
 mod path;
 pub mod schema;
 mod value;
 
 pub use data::Data;
+pub use ordering::apply_ordering;
 pub use path::{path, Path};
 pub use schema::{ChildrenKey, FieldKey};
 pub use value::{Value, ValueConversionError};
