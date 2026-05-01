@@ -480,17 +480,31 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec2h(a) => self.write_pod_out(Type::Vec2h, a),
             Value::Vec3h(a) => self.write_pod_out(Type::Vec3h, a),
             Value::Vec4h(a) => self.write_pod_out(Type::Vec4h, a),
-            Value::Quath(a) => self.write_pod_out(Type::Quath, a),
+            // openusd-rs stores `Value::Quat*` as `(w, x, y, z)`; Pixar's
+            // `GfQuat` lays out `(x, y, z, w)` on disk (see USDC reader
+            // for the symmetric reorder). Reorder before writing so
+            // round-trips with Pixar tools remain semantically correct
+            // and `write → read` round-trips here are identity.
+            Value::Quath(a) => {
+                let pixar = [a[1], a[2], a[3], a[0]];
+                self.write_pod_out(Type::Quath, &pixar)
+            }
 
             Value::Vec2f(a) => self.write_pod_out(Type::Vec2f, a),
             Value::Vec3f(a) => self.write_pod_out(Type::Vec3f, a),
             Value::Vec4f(a) => self.write_pod_out(Type::Vec4f, a),
-            Value::Quatf(a) => self.write_pod_out(Type::Quatf, a),
+            Value::Quatf(a) => {
+                let pixar = [a[1], a[2], a[3], a[0]];
+                self.write_pod_out(Type::Quatf, &pixar)
+            }
 
             Value::Vec2d(a) => self.write_pod_out(Type::Vec2d, a),
             Value::Vec3d(a) => self.write_pod_out(Type::Vec3d, a),
             Value::Vec4d(a) => self.write_pod_out(Type::Vec4d, a),
-            Value::Quatd(a) => self.write_pod_out(Type::Quatd, a),
+            Value::Quatd(a) => {
+                let pixar = [a[1], a[2], a[3], a[0]];
+                self.write_pod_out(Type::Quatd, &pixar)
+            }
 
             Value::Vec2i(a) => self.write_pod_out(Type::Vec2i, a),
             Value::Vec3i(a) => self.write_pod_out(Type::Vec3i, a),
@@ -517,15 +531,24 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec2hVec(v) => self.write_array_arr_half::<2>(Type::Vec2h, v),
             Value::Vec3hVec(v) => self.write_array_arr_half::<3>(Type::Vec3h, v),
             Value::Vec4hVec(v) => self.write_array_arr_half::<4>(Type::Vec4h, v),
-            Value::QuathVec(v) => self.write_array_arr_half::<4>(Type::Quath, v),
+            Value::QuathVec(v) => {
+                let reordered: Vec<[f16; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
+                self.write_array_arr_half::<4>(Type::Quath, &reordered)
+            }
             Value::Vec2fVec(v) => self.write_array_arr_f32::<2>(Type::Vec2f, v),
             Value::Vec3fVec(v) => self.write_array_arr_f32::<3>(Type::Vec3f, v),
             Value::Vec4fVec(v) => self.write_array_arr_f32::<4>(Type::Vec4f, v),
-            Value::QuatfVec(v) => self.write_array_arr_f32::<4>(Type::Quatf, v),
+            Value::QuatfVec(v) => {
+                let reordered: Vec<[f32; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
+                self.write_array_arr_f32::<4>(Type::Quatf, &reordered)
+            }
             Value::Vec2dVec(v) => self.write_array_arr_f64::<2>(Type::Vec2d, v),
             Value::Vec3dVec(v) => self.write_array_arr_f64::<3>(Type::Vec3d, v),
             Value::Vec4dVec(v) => self.write_array_arr_f64::<4>(Type::Vec4d, v),
-            Value::QuatdVec(v) => self.write_array_arr_f64::<4>(Type::Quatd, v),
+            Value::QuatdVec(v) => {
+                let reordered: Vec<[f64; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
+                self.write_array_arr_f64::<4>(Type::Quatd, &reordered)
+            }
             Value::Vec2iVec(v) => self.write_array_arr_i32::<2>(Type::Vec2i, v),
             Value::Vec3iVec(v) => self.write_array_arr_i32::<3>(Type::Vec3i, v),
             Value::Vec4iVec(v) => self.write_array_arr_i32::<4>(Type::Vec4i, v),
