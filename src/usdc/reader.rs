@@ -1051,14 +1051,47 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Quats
             //
-            Type::Quath if value.is_array() => Value::QuathVec(self.read_vec_array::<f16, 4>(value)?),
-            Type::Quath => sdf::Value::Quath(self.unpack_value::<[f16; 4]>(value)?),
+            // Pixar's GfQuat<T> declares `_imaginary: GfVec3<T>` then
+            // `_real: T`, so on-disk bytes are `[imag_x, imag_y, imag_z,
+            // real]` = `[x, y, z, w]`. The USDA textual form is
+            // `(real, i, j, k)` = `(w, x, y, z)`, which the USDA parser
+            // stores verbatim. Reorder USDC bytes here so `Value::Quat*`
+            // values are consistently `(w, x, y, z)` regardless of source
+            // — without this, binary USDC quats from real production
+            // assets (Isaac Sim Agilebot, Omniverse robotics scenes)
+            // come out with axes scrambled.
+            Type::Quath if value.is_array() => Value::QuathVec(
+                self.read_vec_array::<f16, 4>(value)?
+                    .into_iter()
+                    .map(|q| [q[3], q[0], q[1], q[2]])
+                    .collect(),
+            ),
+            Type::Quath => {
+                let raw = self.unpack_value::<[f16; 4]>(value)?;
+                sdf::Value::Quath([raw[3], raw[0], raw[1], raw[2]])
+            }
 
-            Type::Quatf if value.is_array() => Value::QuatfVec(self.read_vec_array::<f32, 4>(value)?),
-            Type::Quatf => sdf::Value::Quatf(self.unpack_value::<[f32; 4]>(value)?),
+            Type::Quatf if value.is_array() => Value::QuatfVec(
+                self.read_vec_array::<f32, 4>(value)?
+                    .into_iter()
+                    .map(|q| [q[3], q[0], q[1], q[2]])
+                    .collect(),
+            ),
+            Type::Quatf => {
+                let raw = self.unpack_value::<[f32; 4]>(value)?;
+                sdf::Value::Quatf([raw[3], raw[0], raw[1], raw[2]])
+            }
 
-            Type::Quatd if value.is_array() => Value::QuatdVec(self.read_vec_array::<f64, 4>(value)?),
-            Type::Quatd => sdf::Value::Quatd(self.unpack_value::<[f64; 4]>(value)?),
+            Type::Quatd if value.is_array() => Value::QuatdVec(
+                self.read_vec_array::<f64, 4>(value)?
+                    .into_iter()
+                    .map(|q| [q[3], q[0], q[1], q[2]])
+                    .collect(),
+            ),
+            Type::Quatd => {
+                let raw = self.unpack_value::<[f64; 4]>(value)?;
+                sdf::Value::Quatd([raw[3], raw[0], raw[1], raw[2]])
+            }
 
             //
             // ListOp

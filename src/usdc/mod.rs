@@ -277,7 +277,9 @@ mod tests {
             .try_as_quatf()
             .unwrap();
 
-        assert_eq!(quat, [2.9, 8.5, 4.6, 1.4]);
+        // USDC bytes are `[x, y, z, w]` (Pixar GfQuat layout); the
+        // reader reorders to `(w, x, y, z)` to match USDA convention.
+        assert_eq!(quat, [1.4, 2.9, 8.5, 4.6]);
 
         let quat = data
             .get(&sdf::path("/World.quatfArr")?, "default")?
@@ -288,9 +290,9 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [3.5, 2.6, 3.6, 4.2], // 1
-                [5.3, 6.3, 5.2, 2.4], // 2
-                [4.3, 2.4, 6.4, 7.1], // 3
+                [4.2, 3.5, 2.6, 3.6], // 1
+                [2.4, 5.3, 6.3, 5.2], // 2
+                [7.1, 4.3, 2.4, 6.4], // 3
             ]
         );
 
@@ -307,7 +309,8 @@ mod tests {
             .try_as_quatd()
             .unwrap();
 
-        assert_eq!(quat, [5.3, 6.3, 5.2, 2.4]);
+        // USDC bytes are `[x, y, z, w]`; reader returns `(w, x, y, z)`.
+        assert_eq!(quat, [2.4, 5.3, 6.3, 5.2]);
 
         let quat = data
             .get(&sdf::path("/World.quatdArr")?, "default")?
@@ -318,8 +321,8 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [3.5, 2.6, 3.6, 4.2], // 1
-                [4.3, 2.4, 6.4, 7.1], // 2
+                [4.2, 3.5, 2.6, 3.6], // 1
+                [7.1, 4.3, 2.4, 6.4], // 2
             ]
         );
 
@@ -336,7 +339,8 @@ mod tests {
             .try_as_quath()
             .unwrap();
 
-        assert_eq!(quat, [4.6, 2.5, 7.6, 3.5].map(f16::from_f32));
+        // USDC bytes are `[x, y, z, w]`; reader returns `(w, x, y, z)`.
+        assert_eq!(quat, [3.5, 4.6, 2.5, 7.6].map(f16::from_f32));
 
         let quat = data
             .get(&sdf::path("/World.quathArr")?, "default")?
@@ -347,8 +351,8 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [2.4, 7.8, 8.5, 4.7].map(f16::from_f32), // 1
-                [6.7, 5.6, 5.3, 4.6].map(f16::from_f32), // 2
+                [4.7, 2.4, 7.8, 8.5].map(f16::from_f32), // 1
+                [4.6, 6.7, 5.6, 5.3].map(f16::from_f32), // 2
             ]
         );
 
