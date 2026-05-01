@@ -1,0 +1,136 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    kilogramsPerUnit = 1.0
+    doc = "UsdPhysics reader integration test fixture: covers PhysicsScene, RigidBody+Mass+Collision, every joint kind, multi-apply LimitAPI + DriveAPI, PhysicsMaterial binding, CollisionGroup, FilteredPairsAPI, ArticulationRoot."
+)
+
+def Xform "World"
+{
+    def PhysicsScene "PhysicsScene"
+    {
+        vector3f physics:gravityDirection = (0, -1, 0)
+        float physics:gravityMagnitude = 9.81
+    }
+
+    def Material "Rubber" (
+        prepend apiSchemas = ["PhysicsMaterialAPI"]
+    )
+    {
+        float physics:dynamicFriction = 0.8
+        float physics:staticFriction = 0.9
+        float physics:restitution = 0.6
+        float physics:density = 1100
+    }
+
+    def Cube "Base" (
+        prepend apiSchemas = [
+            "PhysicsRigidBodyAPI",
+            "PhysicsMassAPI",
+            "PhysicsCollisionAPI",
+            "PhysicsArticulationRootAPI",
+        ]
+    )
+    {
+        double size = 1.0
+        float physics:mass = 2.5
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        bool physics:kinematicEnabled = 1
+        vector3f physics:velocity = (0, 0, 0)
+    }
+
+    def Cube "Arm" (
+        prepend apiSchemas = [
+            "PhysicsRigidBodyAPI",
+            "PhysicsCollisionAPI",
+            "MaterialBindingAPI",
+            "PhysicsFilteredPairsAPI",
+        ]
+    )
+    {
+        double size = 0.5
+        rel material:binding:physics = </World/Rubber>
+        rel physics:filteredPairs = </World/Base>
+        double3 xformOp:translate = (1, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def PhysicsRevoluteJoint "Hinge"
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        point3f physics:localPos0 = (0.5, 0.5, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        point3f physics:localPos1 = (-0.25, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        uniform token physics:axis = "Z"
+        float physics:lowerLimit = -45
+        float physics:upperLimit = 45
+        float physics:breakForce = 1000
+        float physics:breakTorque = 500
+    }
+
+    def PhysicsPrismaticJoint "Slider"
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        uniform token physics:axis = "X"
+        float physics:lowerLimit = -1
+        float physics:upperLimit = 1
+    }
+
+    def PhysicsSphericalJoint "Ball"
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        uniform token physics:axis = "Y"
+        float physics:coneAngle0Limit = 30
+        float physics:coneAngle1Limit = 45
+    }
+
+    def PhysicsDistanceJoint "Tether"
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        float physics:minDistance = 0.5
+        float physics:maxDistance = 2.0
+    }
+
+    def PhysicsFixedJoint "Lock"
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        bool physics:jointEnabled = 0
+    }
+
+    def PhysicsJoint "Generic" (
+        prepend apiSchemas = [
+            "PhysicsLimitAPI:transX",
+            "PhysicsLimitAPI:rotZ",
+            "PhysicsDriveAPI:rotZ",
+        ]
+    )
+    {
+        rel physics:body0 = </World/Base>
+        rel physics:body1 = </World/Arm>
+        float limit:transX:physics:low = 1
+        float limit:transX:physics:high = 0
+        float limit:rotZ:physics:low = -30
+        float limit:rotZ:physics:high = 30
+        uniform token drive:rotZ:physics:type = "force"
+        float drive:rotZ:physics:targetVelocity = 90
+        float drive:rotZ:physics:stiffness = 100
+        float drive:rotZ:physics:damping = 10
+        float drive:rotZ:physics:maxForce = 50
+    }
+
+    def PhysicsCollisionGroup "Group"
+    {
+        rel collection:colliders:includes = [</World/Base>, </World/Arm>]
+        string physics:mergeGroup = "default"
+    }
+}

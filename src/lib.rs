@@ -33,6 +33,7 @@ pub mod ar;
 pub mod expr;
 pub mod layer;
 pub mod pcp;
+pub mod physics;
 pub mod sdf;
 pub mod stage;
 pub mod usda;
