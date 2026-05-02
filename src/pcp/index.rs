@@ -1323,8 +1323,14 @@ fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
 
 /// Finds a layer index whose identifier matches `asset_path`.
 ///
-/// Tries an exact match first, then falls back to suffix matching at a
-/// path separator boundary. Strips leading `./` before matching.
+/// Tries an exact match first, then suffix-matches at a path-separator
+/// boundary. Relative paths (`./foo`, `../foo`) won't suffix-match a
+/// canonical absolute identifier; for those, anchor the needle against
+/// each candidate identifier's parent directory, canonicalize, and look
+/// the result back up in the layer stack. Without this, multi-file
+/// asset hierarchies whose sub-layers reference siblings via parent-
+/// traversal paths (e.g. `../Materials/Materials.usd` from a prop
+/// USD) fail every composition lookup with `UnresolvedLayer`.
 pub(super) fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
     let sep = std::path::MAIN_SEPARATOR as u8;
     let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
@@ -1338,6 +1344,29 @@ pub(super) fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usi
             let prefix_len = id.len() - needle.len();
             if prefix_len > 0 && id.as_bytes()[prefix_len - 1] == sep {
                 return Some(i);
+            }
+        }
+    }
+
+    let needs_anchor = needle.starts_with("./")
+        || needle.starts_with("../")
+        || needle.starts_with(".\\")
+        || needle.starts_with("..\\");
+    if needs_anchor {
+        let needle_path = std::path::Path::new(needle);
+        for id in identifiers.iter() {
+            let id_path = std::path::Path::new(id);
+            let Some(parent) = id_path.parent() else {
+                continue;
+            };
+            let candidate = parent.join(needle_path);
+            let Ok(canonical) = candidate.canonicalize() else {
+                continue;
+            };
+            for (j, other) in identifiers.iter().enumerate() {
+                if std::path::Path::new(other) == canonical {
+                    return Some(j);
+                }
             }
         }
     }
@@ -1534,6 +1563,37 @@ mod tests {
     fn find_layer_not_found() -> Result<()> {
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
         assert!(find_layer("nonexistent.usda", &ids).is_none());
+        Ok(())
+    }
+
+    /// Relative paths (`./foo`, `../foo`) must anchor against each
+    /// candidate identifier's parent directory. Without this, a
+    /// reference authored inside one sub-USD cannot be matched
+    /// against the loaded sibling layer's canonical identifier.
+    #[test]
+    fn find_layer_relative_parent_anchored() -> Result<()> {
+        // Fixture: two real files in different sibling dirs of the
+        // crate's `fixtures/` tree. We want a `../<other dir>/<file>`
+        // reference written from one to the other to resolve.
+        let tmp = tempfile::tempdir()?;
+        let a_dir = tmp.path().join("Props");
+        let b_dir = tmp.path().join("Materials");
+        std::fs::create_dir_all(&a_dir)?;
+        std::fs::create_dir_all(&b_dir)?;
+        let a = a_dir.join("link.usd");
+        let b = b_dir.join("Materials.usd");
+        std::fs::write(&a, b"placeholder")?;
+        std::fs::write(&b, b"placeholder")?;
+        let identifiers = vec![
+            a.canonicalize()?.to_string_lossy().into_owned(),
+            b.canonicalize()?.to_string_lossy().into_owned(),
+        ];
+        // `../Materials/Materials.usd` written inside `Props/link.usd`
+        // should resolve to identifier index 1 (the Materials.usd).
+        assert_eq!(
+            find_layer("../Materials/Materials.usd", &identifiers),
+            Some(1)
+        );
         Ok(())
     }
 
