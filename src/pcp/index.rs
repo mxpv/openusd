@@ -1590,10 +1590,7 @@ mod tests {
         ];
         // `../Materials/Materials.usd` written inside `Props/link.usd`
         // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(
-            find_layer("../Materials/Materials.usd", &identifiers),
-            Some(1)
-        );
+        assert_eq!(find_layer("../Materials/Materials.usd", &identifiers), Some(1));
         Ok(())
     }
 
