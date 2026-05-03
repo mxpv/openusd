@@ -2,7 +2,7 @@
 
 use std::{
     fs::File,
-    io::{Cursor, Read},
+    io::{Cursor, Read, Seek},
     path::Path,
 };
 
@@ -13,20 +13,33 @@ use crate::{sdf, usda, usdc};
 
 /// USDZ archive reader.
 ///
-/// Provides access to USD files within a USDZ archive.
-pub struct Archive {
-    archive: ZipArchive<File>,
+/// Provides access to USD files within a USDZ archive. The type parameter `R`
+/// is the underlying reader; it defaults to [`File`] for the common case of
+/// opening an archive from disk via [`Archive::open`]. Use
+/// [`Archive::from_reader`] to construct an archive from any `Read + Seek`
+/// source, such as an in-memory buffer supplied by a custom asset resolver.
+pub struct Archive<R: Read + Seek = File> {
+    archive: ZipArchive<R>,
 }
 
-impl Archive {
-    /// Open a USDZ archive from a file path.
+impl Archive<File> {
+    /// Opens a USDZ archive from a file path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file = File::open(path).with_context(|| format!("Failed to open USDZ archive: {}", path.display()))?;
-
         let archive =
             ZipArchive::new(file).with_context(|| format!("Failed to read ZIP archive: {}", path.display()))?;
+        Ok(Self { archive })
+    }
+}
 
+impl<R: Read + Seek> Archive<R> {
+    /// Creates an archive from any `Read + Seek` source.
+    ///
+    /// Use this when the archive bytes come from a custom asset resolver
+    /// rather than directly from the filesystem.
+    pub fn from_reader(reader: R) -> Result<Self> {
+        let archive = ZipArchive::new(reader).context("Failed to read ZIP archive")?;
         Ok(Self { archive })
     }
 

@@ -15,7 +15,7 @@ use crate::ar::{self, Resolver};
 use crate::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, LayerData, Path, Value};
-use crate::{usda, usdc};
+use crate::{usda, usdc, usdz};
 
 /// The kind of layer dependency that triggered a composition error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,15 +408,15 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
 pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData> {
     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or_default();
 
+    let mut asset = resolver.open_asset(resolved)?;
+    let bytes = asset.read_all()?;
+
     if ext == "usdz" {
-        let mut archive = crate::usdz::Archive::open(resolved)?;
+        let mut archive = usdz::Archive::from_reader(Cursor::new(bytes)).context("failed to open USDZ archive")?;
         return archive
             .read_first_layer()
             .context("failed to read first layer from USDZ archive");
     }
-
-    let mut asset = resolver.open_asset(resolved)?;
-    let bytes = asset.read_all()?;
 
     // For .usd files, sniff magic bytes to detect binary vs text format.
     let is_binary = ext == "usdc" || (ext == "usd" && bytes.starts_with(usdc::MAGIC));
