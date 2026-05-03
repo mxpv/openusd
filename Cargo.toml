@@ -10,6 +10,7 @@ categories = ["graphics", "rendering", "rendering::data-formats"]
 keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
 [features]
+physics = []
 serde = ["dep:serde", "half/serde"]
 
 [dependencies]
@@ -45,3 +46,7 @@ required-features = ["serde"]
 [[test]]
 name = "cross_format_roundtrip"
 required-features = ["serde"]
+
+[[test]]
+name = "physics_reader"
+required-features = ["physics"]
