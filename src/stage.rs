@@ -87,7 +87,8 @@ impl Stage {
     ///
     /// `session_layers` are prepended at the front of the layer stack so they
     /// hold the strongest opinions (stronger than the root layer).
-    fn from_layers(
+    fn from_layers<R: Resolver + 'static>(
+        resolver: R,
         session_layers: Vec<layer::Layer>,
         root_layers: Vec<layer::Layer>,
         on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
@@ -103,7 +104,7 @@ impl Stage {
             layers.push(layer.data);
         }
 
-        let stack = pcp::LayerStack::new(layers, identifiers, session_layer_count);
+        let stack = pcp::LayerStack::new(layers, identifiers, session_layer_count, Box::new(resolver));
         Self {
             graph: RefCell::new(pcp::Cache::new(stack, variant_fallbacks)),
             on_composition_error,
@@ -362,6 +363,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// Opens a stage from a root layer file.
     pub fn open(self, root_path: &str) -> Result<Stage>
     where
+        R: 'static,
         E: 'static,
     {
         let on_error = self.on_error;
@@ -379,6 +381,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
 
         let pcp_handler = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
         Ok(Stage::from_layers(
+            self.resolver,
             session_layers,
             root_layers,
             pcp_handler,
