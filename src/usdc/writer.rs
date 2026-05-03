@@ -531,24 +531,15 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec2hVec(v) => self.write_array_arr_half::<2>(Type::Vec2h, v),
             Value::Vec3hVec(v) => self.write_array_arr_half::<3>(Type::Vec3h, v),
             Value::Vec4hVec(v) => self.write_array_arr_half::<4>(Type::Vec4h, v),
-            Value::QuathVec(v) => {
-                let reordered: Vec<[f16; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
-                self.write_array_arr_half::<4>(Type::Quath, &reordered)
-            }
+            Value::QuathVec(v) => self.write_array_quat_wxyz(Type::Quath, v),
             Value::Vec2fVec(v) => self.write_array_arr_f32::<2>(Type::Vec2f, v),
             Value::Vec3fVec(v) => self.write_array_arr_f32::<3>(Type::Vec3f, v),
             Value::Vec4fVec(v) => self.write_array_arr_f32::<4>(Type::Vec4f, v),
-            Value::QuatfVec(v) => {
-                let reordered: Vec<[f32; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
-                self.write_array_arr_f32::<4>(Type::Quatf, &reordered)
-            }
+            Value::QuatfVec(v) => self.write_array_quat_wxyz(Type::Quatf, v),
             Value::Vec2dVec(v) => self.write_array_arr_f64::<2>(Type::Vec2d, v),
             Value::Vec3dVec(v) => self.write_array_arr_f64::<3>(Type::Vec3d, v),
             Value::Vec4dVec(v) => self.write_array_arr_f64::<4>(Type::Vec4d, v),
-            Value::QuatdVec(v) => {
-                let reordered: Vec<[f64; 4]> = v.iter().map(|q| [q[1], q[2], q[3], q[0]]).collect();
-                self.write_array_arr_f64::<4>(Type::Quatd, &reordered)
-            }
+            Value::QuatdVec(v) => self.write_array_quat_wxyz(Type::Quatd, v),
             Value::Vec2iVec(v) => self.write_array_arr_i32::<2>(Type::Vec2i, v),
             Value::Vec3iVec(v) => self.write_array_arr_i32::<3>(Type::Vec3i, v),
             Value::Vec4iVec(v) => self.write_array_arr_i32::<4>(Type::Vec4i, v),
@@ -734,6 +725,20 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_count(v.len() as u64)?;
         for f in v {
             self.write_pod(f)?;
+        }
+        Ok(rep_heap(ty, off, true))
+    }
+
+    /// Write a quat array, reordering each element from internal `(w, x, y, z)` to Pixar's
+    /// on-disk `[x, y, z, w]` layout (GfQuat stores imaginary before real).
+    fn write_array_quat_wxyz<T: Pod + Copy>(&mut self, ty: Type, v: &[[T; 4]]) -> Result<ValueRep> {
+        let off = self.pos()?;
+        self.write_count(v.len() as u64)?;
+        for q in v {
+            self.write_pod(&q[1])?;
+            self.write_pod(&q[2])?;
+            self.write_pod(&q[3])?;
+            self.write_pod(&q[0])?;
         }
         Ok(rep_heap(ty, off, true))
     }
