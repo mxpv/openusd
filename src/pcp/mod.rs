@@ -101,6 +101,7 @@ mod rel;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerData, Path, Value};
 
@@ -183,13 +184,20 @@ pub(crate) struct LayerStack {
     /// stack that contains it. Precomputed from `sublayer_stacks` to keep
     /// per-prim composition off the linear-scan hot path.
     layer_offsets: HashMap<usize, sdf::LayerOffset>,
+    /// Resolver used to anchor relative asset paths when locating layers.
+    pub(crate) resolver: Box<dyn Resolver>,
 }
 
 impl LayerStack {
     /// Creates a new layer stack, precomputing sublayer ordering.
-    pub fn new(layers: Vec<LayerData>, identifiers: Vec<String>, session_layer_count: usize) -> Self {
+    pub fn new(
+        layers: Vec<LayerData>,
+        identifiers: Vec<String>,
+        session_layer_count: usize,
+        resolver: Box<dyn Resolver>,
+    ) -> Self {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
-            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers)))
+            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers, &*resolver)))
             .collect();
         let mut layer_offsets: HashMap<usize, sdf::LayerOffset> = HashMap::new();
         for stack in sublayer_stacks.values() {
@@ -203,6 +211,7 @@ impl LayerStack {
             sublayer_stacks,
             session_layer_count,
             layer_offsets,
+            resolver,
         }
     }
 
@@ -248,6 +257,7 @@ impl LayerStack {
         root_layer: usize,
         layers: &[LayerData],
         identifiers: &[String],
+        resolver: &dyn Resolver,
     ) -> Vec<(usize, sdf::LayerOffset)> {
         let mut stack: Vec<(usize, sdf::LayerOffset)> = vec![(root_layer, sdf::LayerOffset::IDENTITY)];
         let mut seen: HashSet<usize> = HashSet::new();
@@ -277,7 +287,7 @@ impl LayerStack {
                 .unwrap_or_default();
 
             for (i, sub_path) in sub_paths.into_iter().enumerate() {
-                let Some(sub_idx) = index::find_layer(&sub_path, identifiers) else {
+                let Some(sub_idx) = index::find_layer(&sub_path, identifiers, resolver) else {
                     continue;
                 };
                 if !seen.insert(sub_idx) {

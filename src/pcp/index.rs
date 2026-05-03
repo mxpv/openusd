@@ -7,9 +7,11 @@
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::ar::Resolver;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Specifier, Value};
 
@@ -903,7 +905,12 @@ impl<'a> IndexBuilder<'a> {
 
     fn get_sublayer_stack(&self, root_layer: usize) -> Vec<(usize, LayerOffset)> {
         self.stack.sublayer_stacks.get(&root_layer).cloned().unwrap_or_else(|| {
-            LayerStack::build_sublayer_stack(root_layer, &self.stack.layers, &self.stack.identifiers)
+            LayerStack::build_sublayer_stack(
+                root_layer,
+                &self.stack.layers,
+                &self.stack.identifiers,
+                &*self.stack.resolver,
+            )
         })
     }
 
@@ -1085,7 +1092,7 @@ impl<'a> IndexBuilder<'a> {
             // External reference — evaluate in a fresh sub-builder so the
             // target's layer stack doesn't share our `seen` set. The sub-builder
             // uses its own ancestor context derived from the target path.
-            let Some(layer_index) = find_layer(asset_path, &self.stack.identifiers) else {
+            let Some(layer_index) = find_layer(asset_path, &self.stack.identifiers, &*self.stack.resolver) else {
                 return Err(Error::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
@@ -1324,17 +1331,18 @@ fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
 /// Finds a layer index whose identifier matches `asset_path`.
 ///
 /// Tries an exact match first, then suffix-matches at a path-separator
-/// boundary. Relative paths (`./foo`, `../foo`) won't suffix-match a
-/// canonical absolute identifier; for those, anchor the needle against
-/// each candidate identifier's parent directory, canonicalize, and look
-/// the result back up in the layer stack. Without this, multi-file
-/// asset hierarchies whose sub-layers reference siblings via parent-
-/// traversal paths (e.g. `../Materials/Materials.usd` from a prop
-/// USD) fail every composition lookup with `UnresolvedLayer`.
-pub(super) fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usize> {
+/// boundary. For relative paths that traverse parent directories (`../foo`,
+/// `..\foo`), these strategies fail against canonical absolute identifiers.
+/// The resolver anchors the path against each candidate identifier so that
+/// custom asset resolution backends work correctly without any filesystem
+/// access in this function.
+pub(super) fn find_layer(asset_path: &str, identifiers: &[String], resolver: &dyn Resolver) -> Option<usize> {
+    use crate::ar::ResolvedPath;
+
     let sep = std::path::MAIN_SEPARATOR as u8;
     let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
 
+    // Fast path: exact or suffix match against canonical identifiers.
     for (i, id) in identifiers.iter().enumerate() {
         if *id == needle {
             return Some(i);
@@ -1348,25 +1356,15 @@ pub(super) fn find_layer(asset_path: &str, identifiers: &[String]) -> Option<usi
         }
     }
 
-    let needs_anchor = needle.starts_with("./")
-        || needle.starts_with("../")
-        || needle.starts_with(".\\")
-        || needle.starts_with("..\\");
-    if needs_anchor {
-        let needle_path = std::path::Path::new(needle);
-        for id in identifiers.iter() {
-            let id_path = std::path::Path::new(id);
-            let Some(parent) = id_path.parent() else {
-                continue;
-            };
-            let candidate = parent.join(needle_path);
-            let Ok(canonical) = candidate.canonicalize() else {
-                continue;
-            };
-            for (j, other) in identifiers.iter().enumerate() {
-                if std::path::Path::new(other) == canonical {
-                    return Some(j);
-                }
+    // Relative paths traversing parent directories need anchoring. Delegate to
+    // the resolver so custom AR backends override path handling without any
+    // filesystem access here.
+    if needle.starts_with("../") || needle.starts_with("..\\") {
+        for anchor_id in identifiers {
+            let anchor = ResolvedPath::new(PathBuf::from(anchor_id));
+            let resolved = resolver.create_identifier(asset_path, Some(&anchor));
+            if let Some(pos) = identifiers.iter().position(|id| *id == resolved) {
+                return Some(pos);
             }
         }
     }
@@ -1440,7 +1438,12 @@ mod tests {
     /// Helper: loads layers and creates a [`LayerStack`].
     fn load_stack(path: &str) -> anyhow::Result<LayerStack> {
         let (layers, identifiers) = load_layers(path)?;
-        Ok(LayerStack::new(layers, identifiers, 0))
+        Ok(LayerStack::new(
+            layers,
+            identifiers,
+            0,
+            Box::new(DefaultResolver::new()),
+        ))
     }
 
     #[test]
@@ -1540,41 +1543,42 @@ mod tests {
 
     #[test]
     fn find_layer_exact_match() -> Result<()> {
+        let resolver = DefaultResolver::new();
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer(&ids[0], &ids).is_some());
+        assert!(find_layer(&ids[0], &ids, &resolver).is_some());
         Ok(())
     }
 
     #[test]
     fn find_layer_suffix_match() -> Result<()> {
+        let resolver = DefaultResolver::new();
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("ref_target.usda", &ids).is_some());
+        assert!(find_layer("ref_target.usda", &ids, &resolver).is_some());
         Ok(())
     }
 
     #[test]
     fn find_layer_no_partial_name_match() -> Result<()> {
+        let resolver = DefaultResolver::new();
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("target.usda", &ids).is_none());
+        assert!(find_layer("target.usda", &ids, &resolver).is_none());
         Ok(())
     }
 
     #[test]
     fn find_layer_not_found() -> Result<()> {
+        let resolver = DefaultResolver::new();
         let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("nonexistent.usda", &ids).is_none());
+        assert!(find_layer("nonexistent.usda", &ids, &resolver).is_none());
         Ok(())
     }
 
-    /// Relative paths (`./foo`, `../foo`) must anchor against each
-    /// candidate identifier's parent directory. Without this, a
-    /// reference authored inside one sub-USD cannot be matched
-    /// against the loaded sibling layer's canonical identifier.
+    /// Relative `../` paths must be anchored against each candidate
+    /// identifier's location via the resolver. Without this, a reference
+    /// like `../Materials/Materials.usd` authored inside a prop USD silently
+    /// fails every composition lookup with `UnresolvedLayer`.
     #[test]
     fn find_layer_relative_parent_anchored() -> Result<()> {
-        // Fixture: two real files in different sibling dirs of the
-        // crate's `fixtures/` tree. We want a `../<other dir>/<file>`
-        // reference written from one to the other to resolve.
         let tmp = tempfile::tempdir()?;
         let a_dir = tmp.path().join("Props");
         let b_dir = tmp.path().join("Materials");
@@ -1588,9 +1592,13 @@ mod tests {
             a.canonicalize()?.to_string_lossy().into_owned(),
             b.canonicalize()?.to_string_lossy().into_owned(),
         ];
+        let resolver = DefaultResolver::new();
         // `../Materials/Materials.usd` written inside `Props/link.usd`
         // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(find_layer("../Materials/Materials.usd", &identifiers), Some(1));
+        assert_eq!(
+            find_layer("../Materials/Materials.usd", &identifiers, &resolver),
+            Some(1)
+        );
         Ok(())
     }
 
@@ -1627,7 +1635,7 @@ mod tests {
             "should have node from C.usd via nested reference"
         );
 
-        let a_idx = find_layer("A.usd", &stack.identifiers).unwrap();
+        let a_idx = find_layer("A.usd", &stack.identifiers, &*stack.resolver).unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
             stack.layer(a_idx).has_spec(&a_attr_path),
@@ -1673,7 +1681,7 @@ mod tests {
         let stack = load_stack(&path)?;
 
         assert!(
-            find_layer("camera_perspective.usd", &stack.identifiers).is_some(),
+            find_layer("camera_perspective.usd", &stack.identifiers, &*stack.resolver).is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
@@ -1745,7 +1753,7 @@ def "Root" (
         );
         let layers = vec![a, b];
         let ids = vec!["a.usd".to_string(), "b.usd".to_string()];
-        let stack = LayerStack::new(layers, ids, 0);
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
 
         let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
         assert!(
@@ -1769,7 +1777,7 @@ def "Prim" (
         );
         let layers = vec![layer];
         let ids = vec!["test.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0);
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(
@@ -1795,7 +1803,7 @@ def "Prim" (
         let target = parse_usda("#usda 1.0\ndef \"Foo\" {}\n");
         let layers = vec![root, target];
         let ids = vec!["root.usda".to_string(), "target.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0);
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(
