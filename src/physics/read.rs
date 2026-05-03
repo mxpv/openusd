@@ -20,9 +20,7 @@ use super::types::*;
 
 /// Flattened list of API schemas applied to `prim`.
 pub fn read_api_schemas(stage: &Stage, prim: &Path) -> Result<Vec<String>> {
-    let raw = stage
-        .field::<Value>(prim.clone(), "apiSchemas")
-        ?;
+    let raw = stage.field::<Value>(prim.clone(), "apiSchemas")?;
     Ok(match raw {
         Some(Value::TokenListOp(op)) => op.flatten(),
         Some(Value::TokenVec(v)) => v,
@@ -51,11 +49,7 @@ pub fn read_has_articulation_root(stage: &Stage, prim: &Path) -> Result<bool> {
 /// for callers that don't need the gravity attributes; otherwise prefer
 /// [`read_physics_scene`].
 pub fn read_is_physics_scene(stage: &Stage, prim: &Path) -> Result<bool> {
-    Ok(stage
-        .field::<String>(prim.clone(), "typeName")
-        ?
-        .as_deref()
-        == Some(T_PHYSICS_SCENE))
+    Ok(stage.field::<String>(prim.clone(), "typeName")?.as_deref() == Some(T_PHYSICS_SCENE))
 }
 
 /// Read `PhysicsRigidBodyAPI` state from a prim. Returns `None` when
@@ -144,10 +138,7 @@ pub fn read_collision_shape(stage: &Stage, prim: &Path) -> Result<Option<ReadCol
 /// API is applied (regardless of the prim's typeName, so non-Material
 /// prims that carry it are also accepted).
 pub fn read_physics_material(stage: &Stage, prim: &Path) -> Result<Option<ReadPhysicsMaterial>> {
-    if !read_api_schemas(stage, prim)?
-        .iter()
-        .any(|s| s == API_PHYSICS_MATERIAL)
-    {
+    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_PHYSICS_MATERIAL) {
         return Ok(None);
     }
     Ok(Some(ReadPhysicsMaterial {
@@ -173,18 +164,8 @@ pub fn read_joint_limits(stage: &Stage, prim: &Path) -> Result<Vec<ReadLimit>> {
         let Some(dof) = Dof::from_token(dof_token) else {
             continue;
         };
-        let low = read_scalar_f32(
-            stage,
-            prim,
-            &format!("limit:{dof_token}:physics:{LIMIT_SUB_LOW}"),
-        )?
-        .unwrap_or(0.0);
-        let high = read_scalar_f32(
-            stage,
-            prim,
-            &format!("limit:{dof_token}:physics:{LIMIT_SUB_HIGH}"),
-        )?
-        .unwrap_or(0.0);
+        let low = read_scalar_f32(stage, prim, &format!("limit:{dof_token}:physics:{LIMIT_SUB_LOW}"))?.unwrap_or(0.0);
+        let high = read_scalar_f32(stage, prim, &format!("limit:{dof_token}:physics:{LIMIT_SUB_HIGH}"))?.unwrap_or(0.0);
         out.push(ReadLimit { dof, low, high });
     }
     Ok(out)
@@ -204,13 +185,9 @@ pub fn read_joint_drives(stage: &Stage, prim: &Path) -> Result<Vec<ReadDrive>> {
         let Some(dof) = Dof::from_token(dof_token) else {
             continue;
         };
-        let drive_type = read_token(
-            stage,
-            prim,
-            &format!("drive:{dof_token}:physics:{DRIVE_SUB_TYPE}"),
-        )?
-        .and_then(|s| DriveType::from_token(&s))
-        .unwrap_or(DriveType::Force);
+        let drive_type = read_token(stage, prim, &format!("drive:{dof_token}:physics:{DRIVE_SUB_TYPE}"))?
+            .and_then(|s| DriveType::from_token(&s))
+            .unwrap_or(DriveType::Force);
         let target_position = read_scalar_f32(
             stage,
             prim,
@@ -221,23 +198,11 @@ pub fn read_joint_drives(stage: &Stage, prim: &Path) -> Result<Vec<ReadDrive>> {
             prim,
             &format!("drive:{dof_token}:physics:{DRIVE_SUB_TARGET_VELOCITY}"),
         )?;
-        let damping = read_scalar_f32(
-            stage,
-            prim,
-            &format!("drive:{dof_token}:physics:{DRIVE_SUB_DAMPING}"),
-        )?
-        .unwrap_or(0.0);
-        let stiffness = read_scalar_f32(
-            stage,
-            prim,
-            &format!("drive:{dof_token}:physics:{DRIVE_SUB_STIFFNESS}"),
-        )?
-        .unwrap_or(0.0);
-        let max_force = read_scalar_f32(
-            stage,
-            prim,
-            &format!("drive:{dof_token}:physics:{DRIVE_SUB_MAX_FORCE}"),
-        )?;
+        let damping =
+            read_scalar_f32(stage, prim, &format!("drive:{dof_token}:physics:{DRIVE_SUB_DAMPING}"))?.unwrap_or(0.0);
+        let stiffness =
+            read_scalar_f32(stage, prim, &format!("drive:{dof_token}:physics:{DRIVE_SUB_STIFFNESS}"))?.unwrap_or(0.0);
+        let max_force = read_scalar_f32(stage, prim, &format!("drive:{dof_token}:physics:{DRIVE_SUB_MAX_FORCE}"))?;
         out.push(ReadDrive {
             dof,
             drive_type,
@@ -254,10 +219,7 @@ pub fn read_joint_drives(stage: &Stage, prim: &Path) -> Result<Vec<ReadDrive>> {
 /// Read any `Physics*Joint` prim. Returns `None` when the prim's
 /// typeName isn't a known joint type.
 pub fn read_joint(stage: &Stage, prim: &Path) -> Result<Option<ReadJoint>> {
-    let type_name = stage
-        .field::<String>(prim.clone(), "typeName")
-        ?
-        .unwrap_or_default();
+    let type_name = stage.field::<String>(prim.clone(), "typeName")?.unwrap_or_default();
     let kind = match type_name.as_str() {
         T_PHYSICS_FIXED_JOINT => JointKind::Fixed,
         T_PHYSICS_REVOLUTE_JOINT => JointKind::Revolute,
@@ -331,10 +293,7 @@ pub fn read_joint(stage: &Stage, prim: &Path) -> Result<Option<ReadJoint>> {
 /// reader returns the explicit `collection:colliders:includes` target
 /// list, adequate for the common authoring pattern.
 pub fn read_collision_group(stage: &Stage, prim: &Path) -> Result<Option<ReadCollisionGroup>> {
-    let type_name = stage
-        .field::<String>(prim.clone(), "typeName")
-        ?
-        .unwrap_or_default();
+    let type_name = stage.field::<String>(prim.clone(), "typeName")?.unwrap_or_default();
     if type_name != T_PHYSICS_COLLISION_GROUP {
         return Ok(None);
     }
@@ -357,10 +316,7 @@ pub fn read_collision_group(stage: &Stage, prim: &Path) -> Result<Option<ReadCol
 /// Read `PhysicsFilteredPairsAPI` from a body prim. Returns `None`
 /// unless the API is applied.
 pub fn read_filtered_pairs(stage: &Stage, prim: &Path) -> Result<Option<ReadFilteredPairs>> {
-    if !read_api_schemas(stage, prim)?
-        .iter()
-        .any(|s| s == API_FILTERED_PAIRS)
-    {
+    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_FILTERED_PAIRS) {
         return Ok(None);
     }
     let filtered = read_rel_all_targets(stage, prim, A_FILTERED_PAIRS)?;
@@ -374,43 +330,39 @@ pub fn read_filtered_pairs(stage: &Stage, prim: &Path) -> Result<Option<ReadFilt
 /// Saves callers from re-walking for every schema family.
 pub fn find_physics_prims(stage: &Stage) -> Result<PhysicsPrims> {
     let mut out = PhysicsPrims::default();
-    stage
-        .traverse(|path| {
-            if let Ok(Some(type_name)) = stage.field::<String>(path.clone(), "typeName") {
-                match type_name.as_str() {
-                    T_PHYSICS_SCENE => out.scenes.push(path.as_str().to_string()),
-                    T_PHYSICS_JOINT
-                    | T_PHYSICS_FIXED_JOINT
-                    | T_PHYSICS_REVOLUTE_JOINT
-                    | T_PHYSICS_PRISMATIC_JOINT
-                    | T_PHYSICS_SPHERICAL_JOINT
-                    | T_PHYSICS_DISTANCE_JOINT => out.joints.push(path.as_str().to_string()),
-                    T_PHYSICS_COLLISION_GROUP => {
-                        out.collision_groups.push(path.as_str().to_string())
-                    }
-                    _ => {}
-                }
+    stage.traverse(|path| {
+        if let Ok(Some(type_name)) = stage.field::<String>(path.clone(), "typeName") {
+            match type_name.as_str() {
+                T_PHYSICS_SCENE => out.scenes.push(path.as_str().to_string()),
+                T_PHYSICS_JOINT
+                | T_PHYSICS_FIXED_JOINT
+                | T_PHYSICS_REVOLUTE_JOINT
+                | T_PHYSICS_PRISMATIC_JOINT
+                | T_PHYSICS_SPHERICAL_JOINT
+                | T_PHYSICS_DISTANCE_JOINT => out.joints.push(path.as_str().to_string()),
+                T_PHYSICS_COLLISION_GROUP => out.collision_groups.push(path.as_str().to_string()),
+                _ => {}
             }
-            if let Ok(api) = read_api_schemas(stage, path) {
-                let p = path.as_str().to_string();
-                if api.iter().any(|s| s == API_RIGID_BODY) {
-                    out.rigid_bodies.push(p.clone());
-                }
-                if api.iter().any(|s| s == API_ARTICULATION_ROOT) {
-                    out.articulation_roots.push(p.clone());
-                }
-                if api.iter().any(|s| s == API_COLLISION) {
-                    out.colliders.push(p.clone());
-                }
-                if api.iter().any(|s| s == API_PHYSICS_MATERIAL) {
-                    out.materials.push(p.clone());
-                }
-                if api.iter().any(|s| s == API_FILTERED_PAIRS) {
-                    out.filtered_pairs.push(p);
-                }
+        }
+        if let Ok(api) = read_api_schemas(stage, path) {
+            let p = path.as_str().to_string();
+            if api.iter().any(|s| s == API_RIGID_BODY) {
+                out.rigid_bodies.push(p.clone());
             }
-        })
-        ?;
+            if api.iter().any(|s| s == API_ARTICULATION_ROOT) {
+                out.articulation_roots.push(p.clone());
+            }
+            if api.iter().any(|s| s == API_COLLISION) {
+                out.colliders.push(p.clone());
+            }
+            if api.iter().any(|s| s == API_PHYSICS_MATERIAL) {
+                out.materials.push(p.clone());
+            }
+            if api.iter().any(|s| s == API_FILTERED_PAIRS) {
+                out.filtered_pairs.push(p);
+            }
+        }
+    })?;
     Ok(out)
 }
 
@@ -420,9 +372,7 @@ pub fn find_physics_prims(stage: &Stage) -> Result<PhysicsPrims> {
 
 fn read_attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
     let attr_path = prim.append_property(name)?;
-    stage
-        .field::<Value>(attr_path, "default")
-        
+    stage.field::<Value>(attr_path, "default")
 }
 
 fn read_bool(stage: &Stage, prim: &Path, name: &str) -> Result<Option<bool>> {
@@ -464,16 +414,12 @@ fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
 }
 
 fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Option<String>> {
-    Ok(read_rel_all_targets(stage, prim, rel_name)?
-        .into_iter()
-        .next())
+    Ok(read_rel_all_targets(stage, prim, rel_name)?.into_iter().next())
 }
 
 fn read_rel_all_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<String>> {
     let rel_path = prim.append_property(rel_name)?;
-    let raw = stage
-        .field::<Value>(rel_path, "targetPaths")
-        ?;
+    let raw = stage.field::<Value>(rel_path, "targetPaths")?;
     let paths = match raw {
         Some(Value::PathListOp(op)) => op.flatten(),
         Some(Value::PathVec(v)) => v,
