@@ -1060,34 +1060,19 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // — without this, binary USDC quats from real production
             // assets (Isaac Sim Agilebot, Omniverse robotics scenes)
             // come out with axes scrambled.
-            Type::Quath if value.is_array() => Value::QuathVec(
-                self.read_vec_array::<f16, 4>(value)?
-                    .into_iter()
-                    .map(|q| [q[3], q[0], q[1], q[2]])
-                    .collect(),
-            ),
+            Type::Quath if value.is_array() => Value::QuathVec(xyzw_to_wxyz(self.read_vec_array::<f16, 4>(value)?)),
             Type::Quath => {
                 let raw = self.unpack_value::<[f16; 4]>(value)?;
                 sdf::Value::Quath([raw[3], raw[0], raw[1], raw[2]])
             }
 
-            Type::Quatf if value.is_array() => Value::QuatfVec(
-                self.read_vec_array::<f32, 4>(value)?
-                    .into_iter()
-                    .map(|q| [q[3], q[0], q[1], q[2]])
-                    .collect(),
-            ),
+            Type::Quatf if value.is_array() => Value::QuatfVec(xyzw_to_wxyz(self.read_vec_array::<f32, 4>(value)?)),
             Type::Quatf => {
                 let raw = self.unpack_value::<[f32; 4]>(value)?;
                 sdf::Value::Quatf([raw[3], raw[0], raw[1], raw[2]])
             }
 
-            Type::Quatd if value.is_array() => Value::QuatdVec(
-                self.read_vec_array::<f64, 4>(value)?
-                    .into_iter()
-                    .map(|q| [q[3], q[0], q[1], q[2]])
-                    .collect(),
-            ),
+            Type::Quatd if value.is_array() => Value::QuatdVec(xyzw_to_wxyz(self.read_vec_array::<f64, 4>(value)?)),
             Type::Quatd => {
                 let raw = self.unpack_value::<[f64; 4]>(value)?;
                 sdf::Value::Quatd([raw[3], raw[0], raw[1], raw[2]])
@@ -1356,6 +1341,17 @@ enum ArrayKind {
     #[allow(dead_code)]
     Floats,
     Other,
+}
+
+/// Pixar's `GfQuat<T>` stores components on disk as `[x, y, z, w]` (imaginary fields first,
+/// then real), because `GfVec3<T> _imaginary` is declared before `T _real` in the struct.
+/// Reorder each element to `[w, x, y, z]` in place so `Value::Quat*` is always
+/// `(real, i, j, k)` regardless of whether the value came from USDC or USDA.
+fn xyzw_to_wxyz<T: Copy>(mut v: Vec<[T; 4]>) -> Vec<[T; 4]> {
+    for q in &mut v {
+        *q = [q[3], q[0], q[1], q[2]];
+    }
+    v
 }
 
 fn to_vec<T: From<i8>, const N: usize>(data: [i8; N]) -> [T; N] {

@@ -239,19 +239,34 @@ fn quat_write_read_preserves_wxyz_convention() {
     let round: &dyn AbstractData = &round;
 
     // fields.usda: quatf quatfSingle = (1.4, 2.9, 8.5, 4.6)
-    let scalar = round.get(&sdf::path("/World.quatfSingle").unwrap(), "default").unwrap().into_owned();
+    let scalar = round
+        .get(&sdf::path("/World.quatfSingle").unwrap(), "default")
+        .unwrap()
+        .into_owned();
     assert_eq!(scalar, Value::Quatf([1.4, 2.9, 8.5, 4.6]));
 
     // fields.usda: quatf[] quatfArr = [(4.2, 3.5, 2.6, 3.6), (2.4, 5.3, 6.3, 5.2), (7.1, 4.3, 2.4, 6.4)]
-    let arr = round.get(&sdf::path("/World.quatfArr").unwrap(), "default").unwrap().into_owned();
-    assert_eq!(arr, Value::QuatfVec(vec![[4.2, 3.5, 2.6, 3.6], [2.4, 5.3, 6.3, 5.2], [7.1, 4.3, 2.4, 6.4]]));
+    let arr = round
+        .get(&sdf::path("/World.quatfArr").unwrap(), "default")
+        .unwrap()
+        .into_owned();
+    assert_eq!(
+        arr,
+        Value::QuatfVec(vec![[4.2, 3.5, 2.6, 3.6], [2.4, 5.3, 6.3, 5.2], [7.1, 4.3, 2.4, 6.4]])
+    );
 
     // fields.usda: quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
-    let scalar = round.get(&sdf::path("/World.quatdSingle").unwrap(), "default").unwrap().into_owned();
+    let scalar = round
+        .get(&sdf::path("/World.quatdSingle").unwrap(), "default")
+        .unwrap()
+        .into_owned();
     assert_eq!(scalar, Value::Quatd([2.4, 5.3, 6.3, 5.2]));
 
     // fields.usda: quatd[] quatdArr = [(4.2, 3.5, 2.6, 3.6), (7.1, 4.3, 2.4, 6.4)]
-    let arr = round.get(&sdf::path("/World.quatdArr").unwrap(), "default").unwrap().into_owned();
+    let arr = round
+        .get(&sdf::path("/World.quatdArr").unwrap(), "default")
+        .unwrap()
+        .into_owned();
     assert_eq!(arr, Value::QuatdVec(vec![[4.2, 3.5, 2.6, 3.6], [7.1, 4.3, 2.4, 6.4]]));
 }
 
