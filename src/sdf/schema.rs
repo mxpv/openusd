@@ -5,6 +5,7 @@
 pub enum FieldKey {
     Active,
     AllowedTokens,
+    ApiSchemas,
     AssetInfo,
     ColorConfiguration,
     ColorManagementSystem,
@@ -81,6 +82,7 @@ impl FieldKey {
         match self {
             FieldKey::Active => "active",
             FieldKey::AllowedTokens => "allowedTokens",
+            FieldKey::ApiSchemas => "apiSchemas",
             FieldKey::AssetInfo => "assetInfo",
             FieldKey::ColorConfiguration => "colorConfiguration",
             FieldKey::ColorManagementSystem => "colorManagementSystem",

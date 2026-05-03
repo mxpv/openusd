@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Mesh "Geo" (
+        prepend apiSchemas = ["MaterialBindingAPI", "SkelBindingAPI"]
+    )
+    {
+    }
+
+    def Scope "Props"
+    {
+    }
+}

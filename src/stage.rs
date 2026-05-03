@@ -211,6 +211,34 @@ impl Stage {
         }
     }
 
+    /// Returns the composed `apiSchemas` list for a prim, flattened across all
+    /// contributing layer opinions.
+    ///
+    /// Multi-apply schema instances (e.g. `PhysicsLimitAPI:rotZ`) are included
+    /// as-is; callers that need to match only the base name should strip the
+    /// instance suffix themselves.
+    pub fn api_schemas(&self, prim: &Path) -> Result<Vec<String>> {
+        let raw = self.field::<Value>(prim, "apiSchemas")?;
+        Ok(match raw {
+            Some(Value::TokenListOp(op)) => op.flatten(),
+            Some(Value::TokenVec(v)) => v,
+            _ => Vec::new(),
+        })
+    }
+
+    /// Returns `true` when `name` appears in the prim's composed `apiSchemas` list.
+    ///
+    /// For multi-apply schemas pass the full instance name (e.g.
+    /// `"PhysicsLimitAPI:rotZ"`), not just the base name.
+    pub fn has_api_schema(&self, prim: &Path, name: &str) -> Result<bool> {
+        Ok(self.api_schemas(prim)?.iter().any(|s| s == name))
+    }
+
+    /// Returns the composed `typeName` for a prim, if set.
+    pub fn type_name(&self, prim: &Path) -> Result<Option<String>> {
+        self.field::<String>(prim, "typeName")
+    }
+
     /// Calls `f` with a mutable reference to the composition cache. If `f`
     /// returns a [`pcp::Error`], the error handler decides whether to skip
     /// (returning a default value) or abort (propagating the error).
@@ -934,6 +962,41 @@ mod tests {
             "root layer's children should be visible: got {children:?}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn api_schemas_returns_applied_schemas() -> Result<()> {
+        let stage = Stage::open("fixtures/api_schemas.usda")?;
+        let geo = Path::new("/World/Geo")?;
+        let schemas = stage.api_schemas(&geo)?;
+        assert!(schemas.contains(&"MaterialBindingAPI".to_string()));
+        assert!(schemas.contains(&"SkelBindingAPI".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
+        let stage = Stage::open("fixtures/api_schemas.usda")?;
+        let props = Path::new("/World/Props")?;
+        assert!(stage.api_schemas(&props)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn has_api_schema_matches_applied() -> Result<()> {
+        let stage = Stage::open("fixtures/api_schemas.usda")?;
+        let geo = Path::new("/World/Geo")?;
+        assert!(stage.has_api_schema(&geo, "MaterialBindingAPI")?);
+        assert!(!stage.has_api_schema(&geo, "SkelRootAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn type_name_returns_prim_type() -> Result<()> {
+        let stage = Stage::open("fixtures/api_schemas.usda")?;
+        assert_eq!(stage.type_name(&Path::new("/World/Geo")?)?, Some("Mesh".to_string()));
+        assert_eq!(stage.type_name(&Path::new("/World")?)?, Some("Xform".to_string()));
         Ok(())
     }
 }
