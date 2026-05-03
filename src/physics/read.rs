@@ -18,44 +18,32 @@ use crate::Stage;
 use super::tokens::*;
 use super::types::*;
 
-/// Flattened list of API schemas applied to `prim`.
-pub fn read_api_schemas(stage: &Stage, prim: &Path) -> Result<Vec<String>> {
-    let raw = stage.field::<Value>(prim.clone(), "apiSchemas")?;
-    Ok(match raw {
-        Some(Value::TokenListOp(op)) => op.flatten(),
-        Some(Value::TokenVec(v)) => v,
-        _ => Vec::new(),
-    })
-}
-
 /// Returns `true` when `PhysicsRigidBodyAPI` is applied to the prim.
 pub fn read_has_rigid_body(stage: &Stage, prim: &Path) -> Result<bool> {
-    Ok(read_api_schemas(stage, prim)?.iter().any(|s| s == API_RIGID_BODY))
+    stage.has_api_schema(prim, API_RIGID_BODY)
 }
 
 /// Returns `true` when `PhysicsCollisionAPI` is applied to the prim.
 pub fn read_has_collision(stage: &Stage, prim: &Path) -> Result<bool> {
-    Ok(read_api_schemas(stage, prim)?.iter().any(|s| s == API_COLLISION))
+    stage.has_api_schema(prim, API_COLLISION)
 }
 
 /// Returns `true` when `PhysicsArticulationRootAPI` is applied to the prim.
 pub fn read_has_articulation_root(stage: &Stage, prim: &Path) -> Result<bool> {
-    Ok(read_api_schemas(stage, prim)?
-        .iter()
-        .any(|s| s == API_ARTICULATION_ROOT))
+    stage.has_api_schema(prim, API_ARTICULATION_ROOT)
 }
 
 /// Returns `true` when the prim is typed `PhysicsScene`. Predicate kept
 /// for callers that don't need the gravity attributes; otherwise prefer
 /// [`read_physics_scene`].
 pub fn read_is_physics_scene(stage: &Stage, prim: &Path) -> Result<bool> {
-    Ok(stage.field::<String>(prim.clone(), "typeName")?.as_deref() == Some(T_PHYSICS_SCENE))
+    Ok(stage.type_name(prim)?.as_deref() == Some(T_PHYSICS_SCENE))
 }
 
 /// Read `PhysicsRigidBodyAPI` state from a prim. Returns `None` when
 /// the API isn't applied.
 pub fn read_rigid_body(stage: &Stage, prim: &Path) -> Result<Option<ReadRigidBody>> {
-    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_RIGID_BODY) {
+    if !stage.has_api_schema(prim, API_RIGID_BODY)? {
         return Ok(None);
     }
     Ok(Some(ReadRigidBody {
@@ -72,7 +60,7 @@ pub fn read_rigid_body(stage: &Stage, prim: &Path) -> Result<Option<ReadRigidBod
 /// hasn't applied `MassAPI` (so callers can distinguish "unauthored"
 /// from "zero mass").
 pub fn read_mass(stage: &Stage, prim: &Path) -> Result<Option<ReadMass>> {
-    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_MASS) {
+    if !stage.has_api_schema(prim, API_MASS)? {
         return Ok(None);
     }
     Ok(Some(ReadMass {
@@ -107,7 +95,7 @@ pub fn read_physics_scene(stage: &Stage, prim: &Path) -> Result<Option<ReadPhysi
 /// `physics_material_path` is resolved through `material:binding:physics`
 /// first, then plain `material:binding`.
 pub fn read_collision_shape(stage: &Stage, prim: &Path) -> Result<Option<ReadCollisionShape>> {
-    let api = read_api_schemas(stage, prim)?;
+    let api = stage.api_schemas(prim)?;
     if !api.iter().any(|s| s == API_COLLISION) {
         return Ok(None);
     }
@@ -138,7 +126,7 @@ pub fn read_collision_shape(stage: &Stage, prim: &Path) -> Result<Option<ReadCol
 /// API is applied (regardless of the prim's typeName, so non-Material
 /// prims that carry it are also accepted).
 pub fn read_physics_material(stage: &Stage, prim: &Path) -> Result<Option<ReadPhysicsMaterial>> {
-    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_PHYSICS_MATERIAL) {
+    if !stage.has_api_schema(prim, API_PHYSICS_MATERIAL)? {
         return Ok(None);
     }
     Ok(Some(ReadPhysicsMaterial {
@@ -152,9 +140,8 @@ pub fn read_physics_material(stage: &Stage, prim: &Path) -> Result<Option<ReadPh
 
 /// Decode every multi-apply `PhysicsLimitAPI:<dof>` instance on a joint.
 pub fn read_joint_limits(stage: &Stage, prim: &Path) -> Result<Vec<ReadLimit>> {
-    let api = read_api_schemas(stage, prim)?;
     let mut out = Vec::new();
-    for name in api {
+    for name in stage.api_schemas(prim)? {
         let Some(rest) = name.strip_prefix(API_LIMIT) else {
             continue;
         };
@@ -173,9 +160,8 @@ pub fn read_joint_limits(stage: &Stage, prim: &Path) -> Result<Vec<ReadLimit>> {
 
 /// Decode every multi-apply `PhysicsDriveAPI:<dof>` instance on a joint.
 pub fn read_joint_drives(stage: &Stage, prim: &Path) -> Result<Vec<ReadDrive>> {
-    let api = read_api_schemas(stage, prim)?;
     let mut out = Vec::new();
-    for name in api {
+    for name in stage.api_schemas(prim)? {
         let Some(rest) = name.strip_prefix(API_DRIVE) else {
             continue;
         };
@@ -219,8 +205,7 @@ pub fn read_joint_drives(stage: &Stage, prim: &Path) -> Result<Vec<ReadDrive>> {
 /// Read any `Physics*Joint` prim. Returns `None` when the prim's
 /// typeName isn't a known joint type.
 pub fn read_joint(stage: &Stage, prim: &Path) -> Result<Option<ReadJoint>> {
-    let type_name = stage.field::<String>(prim.clone(), "typeName")?.unwrap_or_default();
-    let kind = match type_name.as_str() {
+    let kind = match stage.type_name(prim)?.as_deref().unwrap_or_default() {
         T_PHYSICS_FIXED_JOINT => JointKind::Fixed,
         T_PHYSICS_REVOLUTE_JOINT => JointKind::Revolute,
         T_PHYSICS_PRISMATIC_JOINT => JointKind::Prismatic,
@@ -293,8 +278,7 @@ pub fn read_joint(stage: &Stage, prim: &Path) -> Result<Option<ReadJoint>> {
 /// reader returns the explicit `collection:colliders:includes` target
 /// list, adequate for the common authoring pattern.
 pub fn read_collision_group(stage: &Stage, prim: &Path) -> Result<Option<ReadCollisionGroup>> {
-    let type_name = stage.field::<String>(prim.clone(), "typeName")?.unwrap_or_default();
-    if type_name != T_PHYSICS_COLLISION_GROUP {
+    if stage.type_name(prim)?.as_deref() != Some(T_PHYSICS_COLLISION_GROUP) {
         return Ok(None);
     }
     let members = read_rel_all_targets(stage, prim, "collection:colliders:includes")?;
@@ -316,7 +300,7 @@ pub fn read_collision_group(stage: &Stage, prim: &Path) -> Result<Option<ReadCol
 /// Read `PhysicsFilteredPairsAPI` from a body prim. Returns `None`
 /// unless the API is applied.
 pub fn read_filtered_pairs(stage: &Stage, prim: &Path) -> Result<Option<ReadFilteredPairs>> {
-    if !read_api_schemas(stage, prim)?.iter().any(|s| s == API_FILTERED_PAIRS) {
+    if !stage.has_api_schema(prim, API_FILTERED_PAIRS)? {
         return Ok(None);
     }
     let filtered = read_rel_all_targets(stage, prim, A_FILTERED_PAIRS)?;
@@ -331,7 +315,7 @@ pub fn read_filtered_pairs(stage: &Stage, prim: &Path) -> Result<Option<ReadFilt
 pub fn find_physics_prims(stage: &Stage) -> Result<PhysicsPrims> {
     let mut out = PhysicsPrims::default();
     stage.traverse(|path| {
-        if let Ok(Some(type_name)) = stage.field::<String>(path.clone(), "typeName") {
+        if let Ok(Some(type_name)) = stage.type_name(path) {
             match type_name.as_str() {
                 T_PHYSICS_SCENE => out.scenes.push(path.as_str().to_string()),
                 T_PHYSICS_JOINT
@@ -344,7 +328,7 @@ pub fn find_physics_prims(stage: &Stage) -> Result<PhysicsPrims> {
                 _ => {}
             }
         }
-        if let Ok(api) = read_api_schemas(stage, path) {
+        if let Ok(api) = stage.api_schemas(path) {
             let p = path.as_str().to_string();
             if api.iter().any(|s| s == API_RIGID_BODY) {
                 out.rigid_bodies.push(p.clone());
