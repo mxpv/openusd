@@ -180,7 +180,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [UsdLux](https://openusd.org/release/api/usd_lux_page_front.html) (lighting) | :construction: | | |
 | [UsdSkel](https://openusd.org/release/api/usd_skel_page_front.html) (skeletons, skinning) | :construction: | | |
 | [UsdVol](https://openusd.org/release/api/usd_vol_page_front.html) (volumes) | :construction: | | |
-| [UsdPhysics](https://openusd.org/release/api/usd_physics_page_front.html) | :construction: | | |
+| [UsdPhysics](https://openusd.org/release/api/usd_physics_page_front.html) | :white_check_mark: | `main` | Schema reader behind `physics` feature. Covers all 8 prim types, 7 single-apply APIs, `LimitAPI` + `DriveAPI` multi-apply. No authoring helpers; `CollisionGroup` returns raw collection targets only. |
 | [UsdRender](https://openusd.org/release/api/usd_render_page_front.html) | :construction: | | |
 | UsdMedia, UsdUI, UsdProc | :construction: | | |
 | [Flatten / export](https://openusd.org/release/api/flatten_utils_8h.html) | :construction: | | |
