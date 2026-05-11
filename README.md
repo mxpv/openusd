@@ -23,6 +23,9 @@ For a detailed comparison with the C++ reference implementation and current prog
 - Composed [`Stage`](src/stage.rs)
   - Recursive layer collection with cycle detection and pluggable asset resolution.
   - Lazy per-prim composition with caching, depth-first traversal, and typed field access.
+  - Prim status, schema, and model-hierarchy queries on composed prims.
+  - Predicate-based traversal that prunes inactive, unloaded, or abstract subtrees.
+  - Working-set control via population masks and initial payload-loading rules.
   - [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) and [variant fallback](https://openusd.org/release/glossary.html#usdglossary-variantset) selections via `StageBuilder`.
   - Recoverable error handling via `StageBuilder::on_error` callback.
 
@@ -60,9 +63,12 @@ cargo run --example dump_usdc -- ~/caldera/layers/cameras.usd
 ## Example
 
 ```rust,no_run
-use openusd::{ar, sdf::FieldKey, Stage};
+use openusd::{
+    ar, sdf::FieldKey,
+    InitialLoadSet, PrimPredicate, Stage, StagePopulationMask,
+};
 
-// Open a stage with default settings (DefaultResolver, strict errors).
+// Open a stage with default settings (DefaultResolver, strict errors, all payloads loaded).
 let stage = Stage::open("scene.usda")?;
 
 // Or configure via the builder:
@@ -74,19 +80,27 @@ let stage = Stage::builder()
         eprintln!("warning: {err}");
         Ok(()) // skip missing dependency and continue
     })
+    // Leave payload arcs unloaded (default: LoadAll).
+    .initial_load_set(InitialLoadSet::LoadNone)
+    // Restrict the stage to a subtree of interest.
+    .population_mask(StagePopulationMask::new(["/World/Hero"]))
     .open("scene.usda")?;
 
-// Traverse all prims in the composed scene graph.
-stage.traverse(|path| {
-    println!("{path}");
-})?;
+// Traverse all prims, or filter with a predicate (skips inactive/unloaded/abstract subtrees).
+stage.traverse(|path| println!("{path}"))?;
+stage.traverse_with_predicate(PrimPredicate::DEFAULT, |path| println!("{path}"))?;
+
+// Composed prim queries.
+let active = stage.is_active("/World/Hero")?;
+let is_model = stage.is_model("/World/Hero")?;
+let type_name = stage.type_name("/World/Hero")?;
 
 // Read a typed field value (generic over TryFrom<Value>).
-let active: Option<bool> = stage.field("/World/Cube", FieldKey::Active)?;
+let visible: Option<bool> = stage.field("/World/Hero", FieldKey::Active)?;
 
 // Access children composed across layers, references, and payloads.
-let children = stage.prim_children("/World/Cube")?;
-let properties = stage.prim_properties("/World/Cube")?;
+let children = stage.prim_children("/World/Hero")?;
+let properties = stage.prim_properties("/World/Hero")?;
 ```
 
 ## Minimum supported Rust version (MSRV)
