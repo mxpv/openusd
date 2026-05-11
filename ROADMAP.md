@@ -14,7 +14,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Semantic aliases (color, normal, point, vector, texCoord, frame) | `6.5` | :thinking: | | Parsed as underlying types; semantic role not tracked separately |
 | Arrays | `6.6.1` | :white_check_mark: | `0.1.2` | All scalar and dimensioned array variants |
 | Dictionaries | `6.6.2` | :white_check_mark: | `0.1.2` | Including nested dictionaries |
-| Dictionary combining | `6.6.2.1` | :construction: | | Recursive merge of stronger/weaker dictionaries during value resolution |
+| Dictionary combining | `6.6.2.1` | :white_check_mark: | `main` | Recursive merge of stronger/weaker dictionaries during value resolution |
 | [List operations](https://openusd.org/release/glossary.html#usdglossary-listediting) (explicit, composable) | `6.6.3` | :white_check_mark: | `0.2.0` | int, int64, uint, uint64, token, string, path, reference, payload |
 | List op combining | `6.6.3.6` | :white_check_mark: | `0.2.0` | `ListOp::combined_with` |
 | List op reducing | `6.6.3.8` | :white_check_mark: | `0.2.0` | `ListOp::reduced` |
@@ -112,7 +112,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | typeName resolution (from prim definition) | `12.2.2` | :construction: | | Uses strongest opinion, not prim definition |
 | variability resolution (weakest opinion) | `12.2.3` | :white_check_mark: | `main` | Weakest authored opinion via `PrimIndex::resolve_variability` |
 | custom field resolution (any-true) | `12.2.4` | :white_check_mark: | `main` | Logical OR across opinions via `PrimIndex::resolve_custom` |
-| Dictionary combining | `12.2.5` | :construction: | | Recursive merge across opinions |
+| Dictionary combining | `12.2.5` | :white_check_mark: | `main` | Recursive merge across dictionary-valued opinions |
 | List op resolution | `12.2.6` | :white_check_mark: | `0.2.0` | Combined stack of opinions |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
 | Fallback values | `12.2.8` | :construction: | | Requires schema registry |

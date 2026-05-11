@@ -235,6 +235,14 @@ impl LayerStack {
         &self.layers[index]
     }
 
+    /// Returns the root layer (the first non-session layer), if any.
+    ///
+    /// Per spec 12.2.7, layer metadata authored on the pseudo-root resolves
+    /// from this layer only and does not compose with sublayers or arcs.
+    pub fn root_layer(&self) -> Option<&LayerData> {
+        self.layers.get(self.session_layer_count)
+    }
+
     /// Returns the layer identifier at the given index.
     pub fn identifier(&self, index: usize) -> &str {
         &self.identifiers[index]

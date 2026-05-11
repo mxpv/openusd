@@ -1,5 +1,11 @@
 #usda 1.0
 (
+    customLayerData = {
+        string rootOnly = "root"
+        dictionary nested = {
+            string rootNested = "root"
+        }
+    }
     subLayers = [
         @./value_resolution_weak.usda@
     ]
@@ -39,4 +45,27 @@ def "CustomTest"
 def "VarTest"
 {
     int attr
+}
+
+# Dictionary resolution (12.2.5): strong and weak dictionary-valued
+# metadata compose recursively. Strong scalar values replace weak
+# dictionaries, and strong dictionaries replace weak scalar values.
+def "DictTest" (
+    customData = {
+        string strongOnly = "strong"
+        string strongOver = "strong"
+        dictionary nested = {
+            string strongNested = "strong"
+            dictionary deep = {
+                string conflict = "strong"
+                string strongDeep = "strong"
+            }
+        }
+        string strongScalarWins = "strong-scalar"
+        dictionary strongDictWins = {
+            string strongNested = "strong"
+        }
+    }
+)
+{
 }

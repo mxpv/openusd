@@ -64,6 +64,12 @@ impl Path {
         self.path.starts_with('/')
     }
 
+    /// Returns `true` if this is the absolute root path `/` (pseudo-root).
+    #[inline]
+    pub fn is_abs_root(&self) -> bool {
+        self.path == "/"
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.path.is_empty()

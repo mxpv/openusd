@@ -264,12 +264,13 @@ impl PrimIndex {
 
     /// Resolves a field across the composition graph.
     ///
-    /// Most fields use strongest-opinion-wins (spec 12.2). Three fields have
-    /// special rules per spec 12.2.1, 12.2.3, 12.2.4:
+    /// Most fields use strongest-opinion-wins (spec 12.2). Four field classes
+    /// have special rules:
     ///
     /// - `specifier`: precedence by `def`/`class`/`over` with direct-inherit handling
     /// - `variability`: weakest authored opinion wins
     /// - `custom`: any-true (logical OR across all authored opinions)
+    /// - dictionaries: recursive merge of stronger and weaker dictionary opinions
     ///
     /// When `prop_suffix` is `None`, queries use the node's path directly (zero-copy).
     /// When `Some`, appends the suffix to form a property path for each node.
@@ -302,21 +303,30 @@ impl PrimIndex {
     }
 
     /// Walks nodes from strongest to weakest, returning the first opinion.
-    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers.
+    /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. When
+    /// the strongest opinion is a dictionary, weaker dictionary opinions are
+    /// recursively merged into it (spec 12.2.5); a `ValueBlock` then blocks
+    /// only the remaining weaker opinions, and weaker non-dictionary opinions
+    /// are ignored.
     fn resolve_strongest(&self, field: &str, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+        let mut merged: Option<HashMap<String, Value>> = None;
         for node in self.nodes() {
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
             if !data.has_field(&query_path, field) {
                 continue;
             }
-            let value = data.get(&query_path, field)?;
-            if matches!(value.as_ref(), Value::ValueBlock) {
-                return Ok(None);
+            let value = data.get(&query_path, field)?.into_owned();
+            match (merged.as_mut(), value) {
+                (None, Value::ValueBlock) => return Ok(None),
+                (None, Value::Dictionary(dict)) => merged = Some(dict),
+                (None, other) => return Ok(Some(other)),
+                (Some(_), Value::ValueBlock) => break,
+                (Some(strong), Value::Dictionary(weaker)) => dictionary_over(strong, weaker),
+                (Some(_), _) => {}
             }
-            return Ok(Some(value.into_owned()));
         }
-        Ok(None)
+        Ok(merged.map(Value::Dictionary))
     }
 
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
@@ -1281,6 +1291,27 @@ fn resolve_variant_selections_in(
     }
 
     selections
+}
+
+/// Applies `strong over weak` dictionary composition in place.
+///
+/// Keys authored in the stronger dictionary win. If both dictionaries hold a
+/// dictionary at the same key, those nested dictionaries are composed
+/// recursively; otherwise the stronger value is kept.
+fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String, Value>) {
+    for (key, weaker_value) in weaker {
+        match stronger.entry(key) {
+            Entry::Occupied(mut entry) => {
+                if let (Value::Dictionary(strong_dict), Value::Dictionary(weak_dict)) = (entry.get_mut(), weaker_value)
+                {
+                    dictionary_over(strong_dict, weak_dict);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(weaker_value);
+            }
+        }
+    }
 }
 
 /// Composes a list-op field across nodes, returning the flattened list.

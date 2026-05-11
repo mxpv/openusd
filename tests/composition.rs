@@ -299,11 +299,27 @@ mod reorder {
 
 #[cfg(test)]
 mod value_resolution {
+    use std::collections::HashMap;
+
     use super::*;
     use openusd::sdf::{FieldKey, Specifier, Value, Variability};
 
     fn open_fixture() -> Stage {
         Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")
+    }
+
+    fn dictionary<'a>(dict: &'a HashMap<String, Value>, key: &str) -> &'a HashMap<String, Value> {
+        match dict.get(key) {
+            Some(Value::Dictionary(value)) => value,
+            other => panic!("expected dictionary at {key:?}, got {other:?}"),
+        }
+    }
+
+    fn string<'a>(dict: &'a HashMap<String, Value>, key: &str) -> &'a str {
+        match dict.get(key) {
+            Some(Value::String(value) | Value::Token(value)) => value,
+            other => panic!("expected string/token at {key:?}, got {other:?}"),
+        }
     }
 
     #[test]
@@ -356,5 +372,49 @@ mod value_resolution {
             .field(sdf::path("/CustomTest.attr").unwrap(), FieldKey::Custom)
             .unwrap();
         assert_eq!(value, Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn dictionary_values_compose_recursively() {
+        let stage = open_fixture();
+        let value: Option<Value> = stage
+            .field(sdf::path("/DictTest").unwrap(), FieldKey::CustomData)
+            .unwrap();
+        let Some(Value::Dictionary(dict)) = value else {
+            panic!("customData should resolve to a dictionary");
+        };
+
+        assert_eq!(string(&dict, "strongOnly"), "strong");
+        assert_eq!(string(&dict, "weakOnly"), "weak");
+        assert_eq!(string(&dict, "strongOver"), "strong");
+
+        let nested = dictionary(&dict, "nested");
+        assert_eq!(string(nested, "strongNested"), "strong");
+        assert_eq!(string(nested, "weakNested"), "weak");
+
+        let deep = dictionary(nested, "deep");
+        assert_eq!(string(deep, "conflict"), "strong");
+        assert_eq!(string(deep, "strongDeep"), "strong");
+        assert_eq!(string(deep, "weakDeep"), "weak");
+
+        assert_eq!(string(&dict, "strongScalarWins"), "strong-scalar");
+        let strong_dict = dictionary(&dict, "strongDictWins");
+        assert_eq!(string(strong_dict, "strongNested"), "strong");
+    }
+
+    #[test]
+    fn layer_metadata_dictionary_uses_root_layer_only() {
+        let stage = open_fixture();
+        let value: Option<Value> = stage.field(sdf::Path::abs_root(), FieldKey::CustomLayerData).unwrap();
+        let Some(Value::Dictionary(dict)) = value else {
+            panic!("customLayerData should resolve to a dictionary");
+        };
+
+        assert_eq!(string(&dict, "rootOnly"), "root");
+        assert!(!dict.contains_key("weakOnly"));
+
+        let nested = dictionary(&dict, "nested");
+        assert_eq!(string(nested, "rootNested"), "root");
+        assert!(!nested.contains_key("weakNested"));
     }
 }

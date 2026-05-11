@@ -1,4 +1,12 @@
 #usda 1.0
+(
+    customLayerData = {
+        string weakOnly = "weak"
+        dictionary nested = {
+            string weakNested = "weak"
+        }
+    }
+)
 
 # Custom resolution (12.2.4): weak layer authors `custom`, strong layer omits it.
 # Result must be `true` (any-true) for the strong layer to inherit the marker.
@@ -12,4 +20,25 @@ def "CustomTest"
 def "VarTest"
 {
     uniform int attr
+}
+
+def "DictTest" (
+    customData = {
+        string weakOnly = "weak"
+        string strongOver = "weak"
+        dictionary nested = {
+            string weakNested = "weak"
+            string strongNested = "weak"
+            dictionary deep = {
+                string conflict = "weak"
+                string weakDeep = "weak"
+            }
+        }
+        dictionary strongScalarWins = {
+            string ignored = "weak"
+        }
+        string strongDictWins = "weak-scalar"
+    }
+)
+{
 }

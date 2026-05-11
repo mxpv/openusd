@@ -125,7 +125,16 @@ impl Cache {
     }
 
     /// Resolves a field value from the strongest opinion across all composition nodes.
+    ///
+    /// Layer metadata authored on the pseudo-root is resolved directly from
+    /// the root layer and does not compose with sublayers or arcs. The
+    /// pseudo-root's `primChildren` field remains a child-list query and is
+    /// handled by normal composition.
     pub fn resolve_field(&mut self, path: &Path, field: &str) -> Result<Option<Value>> {
+        if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
+            return self.root_layer_field(field);
+        }
+
         if path.is_property_path() {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
@@ -135,6 +144,25 @@ impl Cache {
             self.ensure_index(path)?;
             self.indices[path].resolve_field(field, &self.stack, None)
         }
+    }
+
+    /// Returns pseudo-root layer metadata from the root layer only.
+    ///
+    /// Session-layer and sublayer opinions are intentionally ignored here,
+    /// matching spec 12.2.7.
+    fn root_layer_field(&self, field: &str) -> Result<Option<Value>> {
+        let root = Path::abs_root();
+        let Some(root_layer) = self.stack.root_layer() else {
+            return Ok(None);
+        };
+        if !root_layer.has_field(&root, field) {
+            return Ok(None);
+        }
+        let value = root_layer.get(&root, field)?;
+        if matches!(value.as_ref(), Value::ValueBlock) {
+            return Ok(None);
+        }
+        Ok(Some(value.into_owned()))
     }
 
     /// Returns the composed list of child names for a prim path.
@@ -186,8 +214,11 @@ impl Cache {
     /// first non-session layer (the root layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<String> {
         let root = Path::abs_root();
-        let root_layer = self.stack.layers.get(self.stack.session_layer_count)?;
-        let value = root_layer.get(&root, FieldKey::DefaultPrim.as_str()).ok()?;
+        let value = self
+            .stack
+            .root_layer()?
+            .get(&root, FieldKey::DefaultPrim.as_str())
+            .ok()?;
         match value.into_owned() {
             Value::Token(s) | Value::String(s) => Some(s),
             _ => None,
