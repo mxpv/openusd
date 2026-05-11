@@ -63,6 +63,61 @@ bitflags! {
     }
 }
 
+/// Predicate used to filter prim traversal by resolved status bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimPredicate {
+    required: PrimStatus,
+    rejected: PrimStatus,
+}
+
+impl PrimPredicate {
+    /// Status bits inherited from a prim's ancestors. Missing any of these on a
+    /// parent guarantees that no descendant can have them either, enabling
+    /// subtree pruning during traversal.
+    const INHERITED_REQUIRED: PrimStatus = PrimStatus::ACTIVE.union(PrimStatus::LOADED).union(PrimStatus::DEFINED);
+
+    /// Status bits that, once set on an ancestor, are inherited by every descendant.
+    const INHERITED_REJECTED: PrimStatus = PrimStatus::ABSTRACT;
+
+    /// Match every composed prim.
+    pub const ALL: Self = Self::new(PrimStatus::empty(), PrimStatus::empty());
+
+    /// OpenUSD-style default traversal predicate.
+    ///
+    /// Matches prims that are active, loaded, defined, and not abstract.
+    pub const DEFAULT: Self = Self::new(Self::INHERITED_REQUIRED, Self::INHERITED_REJECTED);
+
+    /// Creates a predicate with required and rejected status bits.
+    pub const fn new(required: PrimStatus, rejected: PrimStatus) -> Self {
+        Self { required, rejected }
+    }
+
+    /// Returns `true` if `status` satisfies the predicate.
+    pub const fn matches(self, status: PrimStatus) -> bool {
+        status.contains(self.required) && !status.intersects(self.rejected)
+    }
+
+    /// Returns the set of status bits this predicate actually consults.
+    fn consulted_bits(self) -> PrimStatus {
+        self.required.union(self.rejected)
+    }
+
+    /// Returns `true` if no descendant can satisfy this predicate.
+    fn prunes_descendants(self, status: PrimStatus) -> bool {
+        let required = self.required.intersection(Self::INHERITED_REQUIRED);
+        if !status.contains(required) {
+            return true;
+        }
+        status.intersects(self.rejected.intersection(Self::INHERITED_REJECTED))
+    }
+}
+
+impl Default for PrimPredicate {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
@@ -379,15 +434,31 @@ impl Stage {
 
     /// Returns the resolved stage status bits for a prim.
     pub fn prim_status(&self, prim: impl Into<Path>) -> Result<PrimStatus> {
-        let prim = prim.into().prim_path();
-        let active = self.is_active(&prim)?;
+        self.prim_status_masked(&prim.into().prim_path(), PrimStatus::all())
+    }
+
+    /// Computes only the status bits set in `mask`. Bits outside `mask` are
+    /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
+    /// for default traversal) are skipped.
+    fn prim_status_masked(&self, prim: &Path, mask: PrimStatus) -> Result<PrimStatus> {
         let mut status = PrimStatus::empty();
-        status.set(PrimStatus::ACTIVE, active);
-        status.set(PrimStatus::LOADED, active);
-        status.set(PrimStatus::DEFINED, self.is_defined(&prim)?);
-        status.set(PrimStatus::ABSTRACT, self.is_abstract(&prim)?);
-        status.set(PrimStatus::INSTANCE, self.is_instance(&prim)?);
-        status.set(PrimStatus::MODEL, self.is_model(&prim)?);
+        if mask.intersects(PrimStatus::ACTIVE | PrimStatus::LOADED) {
+            let active = self.is_active(prim)?;
+            status.set(PrimStatus::ACTIVE, active);
+            status.set(PrimStatus::LOADED, active);
+        }
+        if mask.contains(PrimStatus::DEFINED) {
+            status.set(PrimStatus::DEFINED, self.is_defined(prim)?);
+        }
+        if mask.contains(PrimStatus::ABSTRACT) {
+            status.set(PrimStatus::ABSTRACT, self.is_abstract(prim)?);
+        }
+        if mask.contains(PrimStatus::INSTANCE) {
+            status.set(PrimStatus::INSTANCE, self.is_instance(prim)?);
+        }
+        if mask.contains(PrimStatus::MODEL) {
+            status.set(PrimStatus::MODEL, self.is_model(prim)?);
+        }
         Ok(status)
     }
 
@@ -437,15 +508,37 @@ impl Stage {
         }
     }
 
-    /// Traverses all composed prims depth-first, calling `visitor` for each.
+    /// Traverses composed prims matching the default predicate.
     ///
-    /// The visitor receives the prim's composed path.
-    pub fn traverse(&self, mut visitor: impl FnMut(&Path)) -> Result<()> {
+    /// The default predicate matches OpenUSD's usual traversal region:
+    /// active, loaded, defined, and not abstract.
+    pub fn traverse(&self, visitor: impl FnMut(&Path)) -> Result<()> {
+        self.traverse_with_predicate(PrimPredicate::DEFAULT, visitor)
+    }
+
+    /// Traverses all composed prims depth-first, calling `visitor` for each.
+    pub fn traverse_all(&self, visitor: impl FnMut(&Path)) -> Result<()> {
+        self.traverse_with_predicate(PrimPredicate::ALL, visitor)
+    }
+
+    /// Traverses composed prims depth-first, visiting prims that match `predicate`.
+    ///
+    /// Descendants are pruned when inherited status bits make it impossible for
+    /// them to match, such as below inactive, unloaded, undefined, or abstract
+    /// prims when the predicate excludes those regions.
+    pub fn traverse_with_predicate(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&Path)) -> Result<()> {
+        let needed = predicate.consulted_bits();
         let mut stack = vec![Path::abs_root()];
 
         while let Some(path) = stack.pop() {
             if path != Path::abs_root() {
-                visitor(&path);
+                let status = self.prim_status_masked(&path, needed)?;
+                if predicate.matches(status) {
+                    visitor(&path);
+                }
+                if predicate.prunes_descendants(status) {
+                    continue;
+                }
             }
 
             let children = self.try_or_handle(|cache| cache.prim_children(&path))?;
@@ -635,14 +728,28 @@ mod tests {
         Ok(())
     }
 
-    /// Traverse should visit all prims depth-first.
+    /// Default traversal should visit active, loaded, defined, non-abstract prims.
     #[test]
-    fn traverse_single_layer() -> Result<()> {
+    fn traverse_uses_default_predicate() -> Result<()> {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
         let mut prims = Vec::new();
         stage.traverse(|p| prims.push(p.as_str().to_string()))?;
+
+        assert_eq!(prims, vec!["/World", "/World/CubeActive"]);
+
+        Ok(())
+    }
+
+    /// Exhaustive traversal should preserve raw composed hierarchy traversal.
+    #[test]
+    fn traverse_all_visits_every_composed_prim() -> Result<()> {
+        let path = composition_path("active.usda");
+        let stage = Stage::open(&path)?;
+
+        let mut prims = Vec::new();
+        stage.traverse_all(|p| prims.push(p.as_str().to_string()))?;
 
         assert_eq!(prims, vec!["/World", "/World/CubeInactive", "/World/CubeActive"]);
 
@@ -1187,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn active_and_loaded_are_ancestor_aware() -> Result<()> {
+    fn active_loaded() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
         assert!(stage.is_active("/World/ActiveParent/Child")?);
@@ -1202,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn defined_and_abstract_are_ancestor_aware() -> Result<()> {
+    fn defined_abstract() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
         assert_eq!(stage.specifier("/World/OverOnly")?, Some(Specifier::Over));
@@ -1218,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_requires_instanceable_and_composition_arc() -> Result<()> {
+    fn instance_flag() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
         assert!(stage.has_composition_arc("/World/Instance")?);
@@ -1230,7 +1337,7 @@ mod tests {
     }
 
     #[test]
-    fn model_queries_follow_contiguous_kind_hierarchy() -> Result<()> {
+    fn model_hierarchy() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
         assert_eq!(stage.kind("/World")?, Some("assembly".to_string()));
@@ -1255,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn prim_status_groups_query_bits() -> Result<()> {
+    fn prim_status_bits() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
         assert_eq!(
@@ -1267,6 +1374,59 @@ mod tests {
             stage.prim_status("/World/Instance")?,
             PrimStatus::ACTIVE | PrimStatus::LOADED | PrimStatus::DEFINED | PrimStatus::INSTANCE
         );
+        Ok(())
+    }
+
+    #[test]
+    fn traverse_default() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        let mut prims = Vec::new();
+        stage.traverse(|p| prims.push(p.as_str().to_string()))?;
+
+        assert!(prims.contains(&"/World".to_string()));
+        assert!(prims.contains(&"/World/ActiveParent".to_string()));
+        assert!(prims.contains(&"/World/ActiveParent/Child".to_string()));
+        assert!(prims.contains(&"/World/Instance".to_string()));
+
+        assert!(!prims.contains(&"/World/InactiveParent".to_string()));
+        assert!(!prims.contains(&"/World/InactiveParent/Child".to_string()));
+        assert!(!prims.contains(&"/World/OverOnly".to_string()));
+        assert!(!prims.contains(&"/World/OverParent".to_string()));
+        assert!(!prims.contains(&"/World/OverParent/Child".to_string()));
+        assert!(!prims.contains(&"/World/ClassParent".to_string()));
+        assert!(!prims.contains(&"/World/ClassParent/Child".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn traverse_all_predicate() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        let mut prims = Vec::new();
+        stage.traverse_with_predicate(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
+
+        assert!(prims.contains(&"/World/InactiveParent".to_string()));
+        assert!(prims.contains(&"/World/InactiveParent/Child".to_string()));
+        assert!(prims.contains(&"/World/OverOnly".to_string()));
+        assert!(prims.contains(&"/World/OverParent/Child".to_string()));
+        assert!(prims.contains(&"/World/ClassParent".to_string()));
+        assert!(prims.contains(&"/World/ClassParent/Child".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn custom_predicate() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+        let predicate = PrimPredicate::new(PrimStatus::ACTIVE | PrimStatus::DEFINED, PrimStatus::empty());
+
+        let mut prims = Vec::new();
+        stage.traverse_with_predicate(predicate, |p| prims.push(p.as_str().to_string()))?;
+
+        assert!(prims.contains(&"/World/ClassParent".to_string()));
+        assert!(prims.contains(&"/World/ClassParent/Child".to_string()));
+        assert!(!prims.contains(&"/World/InactiveParent".to_string()));
+        assert!(!prims.contains(&"/World/OverOnly".to_string()));
         Ok(())
     }
 }

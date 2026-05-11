@@ -100,7 +100,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :construction: | | `instanceable` readable; shared representation not implemented |
 | Model hierarchy (kind) | `11.4` | :white_check_mark: | `main` | `Stage::is_model`/`is_group`/`is_component`/`is_subcomponent` validate the contiguous kind hierarchy |
-| [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :white_check_mark: | `main` | `Stage::is_active`/`is_loaded`/`is_defined`/`is_abstract`/`is_instance` and `prim_status`; load rules pending |
+| [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :white_check_mark: | `main` | `Stage::is_active`/`is_loaded`/`is_defined`/`is_abstract`/`is_instance`, `prim_status`, and `PrimPredicate` traversal filtering; load rules pending |
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | `11.2` | :white_check_mark: | `0.3.0` | `StageBuilder::session_layer` |
 
 ## Value Resolution (Spec 12)

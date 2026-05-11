@@ -69,9 +69,10 @@ fn run(name: &str, format: Format) {
         .open(entry.to_str().unwrap())
         .unwrap();
 
-    // Collect all prims via traversal.
+    // Collect every prim, including inactive/class/over prims, so the PCP
+    // baselines can validate composition independent of stage traversal policy.
     let mut prims = Vec::new();
-    stage.traverse(|path| prims.push(path.to_string())).unwrap();
+    stage.traverse_all(|path| prims.push(path.to_string())).unwrap();
 
     let mut failures = Vec::new();
 
