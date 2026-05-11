@@ -630,7 +630,6 @@ impl<'a> IndexBuilder<'a> {
                         let new_nodes: Vec<Node> = self.output[start..end].to_vec();
                         let refs =
                             compose_arc_list_in::<Reference>(&new_nodes, FieldKey::References, &self.stack.layers);
-                        let payloads = collect_payloads_in(&new_nodes, &self.stack.layers);
                         for reference in &refs {
                             self.eval_arc_target(
                                 &reference.asset_path,
@@ -642,16 +641,19 @@ impl<'a> IndexBuilder<'a> {
                                 reference.layer_offset.sanitized(),
                             )?;
                         }
-                        for payload in &payloads {
-                            self.eval_arc_target(
-                                &payload.asset_path,
-                                &payload.prim_path,
-                                ArcType::Payload,
-                                &Path::abs_root(),
-                                0,
-                                base_node,
-                                payload.layer_offset.unwrap_or_default().sanitized(),
-                            )?;
+                        if self.stack.load_payloads {
+                            let payloads = collect_payloads_in(&new_nodes, &self.stack.layers);
+                            for payload in &payloads {
+                                self.eval_arc_target(
+                                    &payload.asset_path,
+                                    &payload.prim_path,
+                                    ArcType::Payload,
+                                    &Path::abs_root(),
+                                    0,
+                                    base_node,
+                                    payload.layer_offset.unwrap_or_default().sanitized(),
+                                )?;
+                            }
                         }
                     }
 
@@ -792,17 +794,19 @@ impl<'a> IndexBuilder<'a> {
         }
 
         // P — Payloads.
-        let payloads = collect_payloads_in(&self.output[site_start..opinion_end], &self.stack.layers);
-        for payload in &payloads {
-            self.eval_arc_target(
-                &payload.asset_path,
-                &payload.prim_path,
-                ArcType::Payload,
-                path,
-                depth,
-                site_node,
-                payload.layer_offset.unwrap_or_default().sanitized(),
-            )?;
+        if self.stack.load_payloads {
+            let payloads = collect_payloads_in(&self.output[site_start..opinion_end], &self.stack.layers);
+            for payload in &payloads {
+                self.eval_arc_target(
+                    &payload.asset_path,
+                    &payload.prim_path,
+                    ArcType::Payload,
+                    path,
+                    depth,
+                    site_node,
+                    payload.layer_offset.unwrap_or_default().sanitized(),
+                )?;
+            }
         }
 
         // S — Specializes.
@@ -1448,6 +1452,7 @@ mod tests {
             identifiers,
             0,
             Box::new(DefaultResolver::new()),
+            true,
         ))
     }
 
@@ -1758,7 +1763,7 @@ def "Root" (
         );
         let layers = vec![a, b];
         let ids = vec!["a.usd".to_string(), "b.usd".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
         assert!(
@@ -1782,7 +1787,7 @@ def "Prim" (
         );
         let layers = vec![layer];
         let ids = vec!["test.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(
@@ -1808,7 +1813,7 @@ def "Prim" (
         let target = parse_usda("#usda 1.0\ndef \"Foo\" {}\n");
         let layers = vec![root, target];
         let ids = vec!["root.usda".to_string(), "target.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()));
+        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(

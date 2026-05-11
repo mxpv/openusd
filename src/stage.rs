@@ -32,6 +32,10 @@
 //! - [`StageBuilder::variant_fallbacks`] provides a
 //!   [`VariantFallbackMap`](crate::pcp::VariantFallbackMap) with preferred
 //!   selections for variant sets that have no authored opinion.
+//! - [`StageBuilder::initial_load_set`] controls whether payload arcs are
+//!   loaded during stage population.
+//! - [`StageBuilder::population_mask`] limits the prim working set exposed by
+//!   stage queries and traversal.
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
@@ -41,7 +45,7 @@ use anyhow::Result;
 use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
-use crate::sdf::{FieldKey, Path, SpecType, Specifier, Value};
+use crate::sdf::{FieldKey, Path, Payload, SpecType, Specifier, Value};
 use crate::{layer, pcp, CompositionError};
 
 bitflags! {
@@ -118,6 +122,108 @@ impl Default for PrimPredicate {
     }
 }
 
+/// Initial payload loading behavior for a stage.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum InitialLoadSet {
+    /// Load all payload arcs during stage population.
+    #[default]
+    LoadAll,
+    /// Leave payload arcs unloaded during stage population.
+    LoadNone,
+}
+
+impl InitialLoadSet {
+    /// Returns `true` when payload arcs should be followed.
+    pub const fn load_payloads(self) -> bool {
+        matches!(self, Self::LoadAll)
+    }
+}
+
+/// Population mask limiting which prim paths are exposed by a [`Stage`].
+///
+/// A mask path includes that prim's subtree. Ancestors of masked paths are
+/// also included so traversal can reach the requested working set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagePopulationMask {
+    paths: Vec<Path>,
+}
+
+impl StagePopulationMask {
+    /// Creates a mask that includes the full stage.
+    pub fn all() -> Self {
+        Self {
+            paths: vec![Path::abs_root()],
+        }
+    }
+
+    /// Creates an empty mask.
+    pub fn empty() -> Self {
+        Self { paths: Vec::new() }
+    }
+
+    /// Creates a mask from prim paths.
+    pub fn new(paths: impl IntoIterator<Item = impl Into<Path>>) -> Self {
+        let mut mask = Self::empty();
+        for path in paths {
+            mask.add_path(path);
+        }
+        mask
+    }
+
+    /// Returns a copy of this mask with `path` added.
+    pub fn with_path(mut self, path: impl Into<Path>) -> Self {
+        self.add_path(path);
+        self
+    }
+
+    /// Adds a prim path to the mask.
+    pub fn add_path(&mut self, path: impl Into<Path>) -> &mut Self {
+        let path = Path::abs_root().make_absolute(&path.into().prim_path());
+        if path == Path::abs_root() {
+            self.paths.clear();
+            self.paths.push(path);
+        } else if !self.is_all() && !self.paths.contains(&path) {
+            self.paths.push(path);
+        }
+        self
+    }
+
+    /// Returns the authored mask paths.
+    pub fn paths(&self) -> &[Path] {
+        &self.paths
+    }
+
+    /// Returns `true` if the mask contains no paths.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Returns `true` if the mask includes the full stage.
+    ///
+    /// `add_path` clears `paths` to `[abs_root]` whenever the root is added,
+    /// so a single front-position check captures the invariant.
+    pub fn is_all(&self) -> bool {
+        self.paths.first() == Some(&Path::abs_root())
+    }
+
+    /// Returns `true` if `path` is inside the population mask.
+    pub fn includes(&self, path: &Path) -> bool {
+        if self.is_all() {
+            return true;
+        }
+        let path = path.prim_path();
+        self.paths
+            .iter()
+            .any(|mask_path| path.has_prefix(mask_path) || mask_path.has_prefix(&path))
+    }
+}
+
+impl Default for StagePopulationMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
@@ -126,6 +232,10 @@ impl Default for PrimPredicate {
 pub struct Stage {
     /// Lazily-built composition graph caching per-prim indices and contexts.
     graph: RefCell<pcp::Cache>,
+    /// Initial payload loading behavior for this stage.
+    initial_load_set: InitialLoadSet,
+    /// Population mask limiting stage-visible prims.
+    population_mask: StagePopulationMask,
     /// PCP error handler wrapping the user's unified callback.
     on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
 }
@@ -158,34 +268,6 @@ impl Stage {
         StageBuilder::new()
     }
 
-    /// Constructs a stage from pre-collected layers and a PCP error handler.
-    ///
-    /// `session_layers` are prepended at the front of the layer stack so they
-    /// hold the strongest opinions (stronger than the root layer).
-    fn from_layers<R: Resolver + 'static>(
-        resolver: R,
-        session_layers: Vec<layer::Layer>,
-        root_layers: Vec<layer::Layer>,
-        on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
-        variant_fallbacks: pcp::VariantFallbackMap,
-    ) -> Self {
-        let session_layer_count = session_layers.len();
-        let total = session_layer_count + root_layers.len();
-        let mut identifiers = Vec::with_capacity(total);
-        let mut layers = Vec::with_capacity(total);
-
-        for layer in session_layers.into_iter().chain(root_layers) {
-            identifiers.push(layer.identifier);
-            layers.push(layer.data);
-        }
-
-        let stack = pcp::LayerStack::new(layers, identifiers, session_layer_count, Box::new(resolver));
-        Self {
-            graph: RefCell::new(pcp::Cache::new(stack, variant_fallbacks)),
-            on_composition_error,
-        }
-    }
-
     /// Returns the number of layers in the stage (including session layers).
     pub fn layer_count(&self) -> usize {
         self.graph.borrow().layer_count()
@@ -200,6 +282,16 @@ impl Stage {
     /// Returns `true` if the stage has a session layer.
     pub fn has_session_layer(&self) -> bool {
         self.graph.borrow().session_layer_count() > 0
+    }
+
+    /// Returns the stage's initial payload loading behavior.
+    pub const fn initial_load_set(&self) -> InitialLoadSet {
+        self.initial_load_set
+    }
+
+    /// Returns the population mask used by this stage.
+    pub const fn population_mask(&self) -> &StagePopulationMask {
+        &self.population_mask
     }
 
     /// Returns the session layer identifier, if one was provided.
@@ -222,7 +314,9 @@ impl Stage {
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
-        self.try_or_handle(|cache| cache.prim_children(&Path::abs_root()))
+        let root = Path::abs_root();
+        let children = self.try_or_handle(|cache| cache.prim_children(&root))?;
+        Ok(self.filter_child_names(&root, children))
     }
 
     /// Returns the composed list of child prim names for a given prim path.
@@ -231,12 +325,21 @@ impl Stage {
     /// path, collecting the union of child names while preserving the order
     /// from the strongest layer.
     pub fn prim_children(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.try_or_handle(|cache| cache.prim_children(&path.into()))
+        let path = path.into().prim_path();
+        if !self.population_mask.includes(&path) {
+            return Ok(Vec::new());
+        }
+        let children = self.try_or_handle(|cache| cache.prim_children(&path))?;
+        Ok(self.filter_child_names(&path, children))
     }
 
     /// Returns the composed list of property names for a given prim path.
     pub fn prim_properties(&self, path: impl Into<Path>) -> Result<Vec<String>> {
-        self.try_or_handle(|cache| cache.prim_properties(&path.into()))
+        let path = path.into().prim_path();
+        if !self.population_mask.includes(&path) {
+            return Ok(Vec::new());
+        }
+        self.try_or_handle(|cache| cache.prim_properties(&path))
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -244,12 +347,20 @@ impl Stage {
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&self, path: impl Into<Path>) -> Result<bool> {
-        self.try_or_handle(|cache| cache.has_spec(&path.into()))
+        let path = path.into();
+        if !self.population_mask.includes(&path.prim_path()) {
+            return Ok(false);
+        }
+        self.try_or_handle(|cache| cache.has_spec(&path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub fn spec_type(&self, path: impl Into<Path>) -> Result<Option<SpecType>> {
-        self.try_or_handle(|cache| cache.spec_type(&path.into()))
+        let path = path.into();
+        if !self.population_mask.includes(&path.prim_path()) {
+            return Ok(None);
+        }
+        self.try_or_handle(|cache| cache.spec_type(&path))
     }
 
     /// Resolves a field value by walking the prim index from strongest to weakest.
@@ -279,7 +390,11 @@ impl Stage {
         T: TryFrom<Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
-        let raw = self.try_or_handle(|cache| cache.resolve_field(&path.into(), field.as_ref()))?;
+        let path = path.into();
+        if !self.population_mask.includes(&path.prim_path()) {
+            return Ok(None);
+        }
+        let raw = self.try_or_handle(|cache| cache.resolve_field(&path, field.as_ref()))?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
@@ -348,12 +463,20 @@ impl Stage {
     }
 
     /// Returns `true` if the prim is loaded.
-    ///
-    /// The current stage implementation has no unload rules yet, so all active
-    /// prims are considered loaded. This will become load-rule aware when
-    /// payload loading control is added.
     pub fn is_loaded(&self, prim: impl Into<Path>) -> Result<bool> {
-        self.is_active(prim)
+        let prim = prim.into().prim_path();
+        if !self.is_active(&prim)? {
+            return Ok(false);
+        }
+        if self.initial_load_set.load_payloads() {
+            return Ok(true);
+        }
+        for path in Self::prim_ancestors_inclusive(prim) {
+            if self.has_payload(&path)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Returns `true` if the prim and all ancestors have defining specifiers.
@@ -393,6 +516,9 @@ impl Stage {
     /// Returns `true` if the prim index contains at least one composition arc.
     pub fn has_composition_arc(&self, prim: impl Into<Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
+        if !self.population_mask.includes(&prim) {
+            return Ok(false);
+        }
         self.try_or_handle(|cache| cache.has_composition_arc(&prim))
     }
 
@@ -442,10 +568,11 @@ impl Stage {
     /// for default traversal) are skipped.
     fn prim_status_masked(&self, prim: &Path, mask: PrimStatus) -> Result<PrimStatus> {
         let mut status = PrimStatus::empty();
-        if mask.intersects(PrimStatus::ACTIVE | PrimStatus::LOADED) {
-            let active = self.is_active(prim)?;
-            status.set(PrimStatus::ACTIVE, active);
-            status.set(PrimStatus::LOADED, active);
+        if mask.contains(PrimStatus::ACTIVE) {
+            status.set(PrimStatus::ACTIVE, self.is_active(prim)?);
+        }
+        if mask.contains(PrimStatus::LOADED) {
+            status.set(PrimStatus::LOADED, self.is_loaded(prim)?);
         }
         if mask.contains(PrimStatus::DEFINED) {
             status.set(PrimStatus::DEFINED, self.is_defined(prim)?);
@@ -484,6 +611,33 @@ impl Stage {
             }
         }
         Ok(Some(leaf))
+    }
+
+    fn has_payload(&self, prim: &Path) -> Result<bool> {
+        let payload = self.field::<Value>(prim, FieldKey::Payload)?;
+        Ok(match payload {
+            Some(Value::Payload(payload)) => Self::payload_has_target(&payload),
+            Some(Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(Self::payload_has_target),
+            _ => false,
+        })
+    }
+
+    fn payload_has_target(payload: &Payload) -> bool {
+        !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
+    }
+
+    fn filter_child_names(&self, parent: &Path, children: Vec<String>) -> Vec<String> {
+        if self.population_mask.is_all() {
+            return children;
+        }
+        children
+            .into_iter()
+            .filter(|name| {
+                parent
+                    .append_path(name.as_str())
+                    .is_ok_and(|child| self.population_mask.includes(&child))
+            })
+            .collect()
     }
 
     /// Iterates the prim path and its ancestors from leaf to root, stopping
@@ -541,7 +695,7 @@ impl Stage {
                 }
             }
 
-            let children = self.try_or_handle(|cache| cache.prim_children(&path))?;
+            let children = self.prim_children(&path)?;
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
@@ -571,6 +725,8 @@ pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -
     on_error: E,
     variant_fallbacks: pcp::VariantFallbackMap,
     session_layer: Option<String>,
+    initial_load_set: InitialLoadSet,
+    population_mask: StagePopulationMask,
 }
 
 impl StageBuilder {
@@ -580,6 +736,8 @@ impl StageBuilder {
             on_error: strict_composition_error,
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
+            initial_load_set: InitialLoadSet::LoadAll,
+            population_mask: StagePopulationMask::all(),
         }
     }
 }
@@ -592,6 +750,8 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             on_error: self.on_error,
             variant_fallbacks: self.variant_fallbacks,
             session_layer: self.session_layer,
+            initial_load_set: self.initial_load_set,
+            population_mask: self.population_mask,
         }
     }
 
@@ -607,6 +767,8 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             on_error: handler,
             variant_fallbacks: self.variant_fallbacks,
             session_layer: self.session_layer,
+            initial_load_set: self.initial_load_set,
+            population_mask: self.population_mask,
         }
     }
 
@@ -663,33 +825,65 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         self
     }
 
+    /// Sets the initial payload loading behavior.
+    pub fn initial_load_set(mut self, load_set: InitialLoadSet) -> Self {
+        self.initial_load_set = load_set;
+        self
+    }
+
+    /// Sets the stage population mask.
+    pub fn population_mask(mut self, mask: StagePopulationMask) -> Self {
+        self.population_mask = mask;
+        self
+    }
+
     /// Opens a stage from a root layer file.
+    ///
+    /// Session layers (if any) are prepended at the front of the layer stack
+    /// so they hold the strongest opinions.
     pub fn open(self, root_path: &str) -> Result<Stage>
     where
         R: 'static,
         E: 'static,
     {
         let on_error = self.on_error;
-        let variant_fallbacks = self.variant_fallbacks;
+        let initial_load_set = self.initial_load_set;
+        let load_payloads = initial_load_set.load_payloads();
 
-        // Collect session layers first (if any), then root layers.
         let session_layers = if let Some(ref session_path) = self.session_layer {
-            layer::collect_layers_with_handler(&self.resolver, session_path, |e| on_error(CompositionError::Layer(e)))?
+            layer::collect_layers_with_payloads(&self.resolver, session_path, load_payloads, |e| {
+                on_error(CompositionError::Layer(e))
+            })?
         } else {
             Vec::new()
         };
+        let root_layers = layer::collect_layers_with_payloads(&self.resolver, root_path, load_payloads, |e| {
+            on_error(CompositionError::Layer(e))
+        })?;
 
-        let root_layers =
-            layer::collect_layers_with_handler(&self.resolver, root_path, |e| on_error(CompositionError::Layer(e)))?;
+        let session_layer_count = session_layers.len();
+        let total = session_layer_count + root_layers.len();
+        let mut identifiers = Vec::with_capacity(total);
+        let mut layers = Vec::with_capacity(total);
+        for layer in session_layers.into_iter().chain(root_layers) {
+            identifiers.push(layer.identifier);
+            layers.push(layer.data);
+        }
 
-        let pcp_handler = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
-        Ok(Stage::from_layers(
-            self.resolver,
-            session_layers,
-            root_layers,
-            pcp_handler,
-            variant_fallbacks,
-        ))
+        let stack = pcp::LayerStack::new(
+            layers,
+            identifiers,
+            session_layer_count,
+            Box::new(self.resolver),
+            load_payloads,
+        );
+        let on_composition_error = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
+        Ok(Stage {
+            graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
+            initial_load_set,
+            population_mask: self.population_mask,
+            on_composition_error,
+        })
     }
 }
 
@@ -1305,6 +1499,53 @@ mod tests {
         assert!(!stage.is_loaded("/World/InactiveParent/Child")?);
 
         assert!(!stage.is_active("/World/Missing")?);
+        Ok(())
+    }
+
+    #[test]
+    fn load_none() -> Result<()> {
+        let path = composition_path("payload/payload_same_folder.usda");
+
+        let loaded = Stage::open(&path)?;
+        assert_eq!(loaded.layer_count(), 2);
+        assert!(loaded.is_loaded("/World")?);
+        assert_eq!(loaded.prim_children("/World")?, vec!["Cube"]);
+
+        let unloaded = Stage::builder()
+            .initial_load_set(InitialLoadSet::LoadNone)
+            .open(&path)?;
+        assert_eq!(unloaded.initial_load_set(), InitialLoadSet::LoadNone);
+        assert_eq!(unloaded.layer_count(), 1);
+        assert!(!unloaded.is_loaded("/World")?);
+        assert_eq!(unloaded.prim_children("/World")?, Vec::<String>::new());
+
+        let mut prims = Vec::new();
+        unloaded.traverse(|p| prims.push(p.as_str().to_string()))?;
+        assert!(prims.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn mask_traverse() -> Result<()> {
+        let stage = Stage::builder()
+            .population_mask(StagePopulationMask::new(["/World/ActiveParent/Child"]))
+            .open("fixtures/stage_queries.usda")?;
+
+        assert_eq!(stage.root_prims()?, vec!["World"]);
+        assert_eq!(stage.prim_children("/World")?, vec!["ActiveParent"]);
+        assert_eq!(stage.prim_children("/World/ActiveParent")?, vec!["Child"]);
+
+        assert!(stage.has_spec("/World")?);
+        assert!(stage.has_spec("/World/ActiveParent/Child")?);
+        assert!(!stage.has_spec("/World/Group")?);
+        assert_eq!(stage.kind("/World/Group")?, None);
+
+        let mut prims = Vec::new();
+        stage.traverse_all(|p| prims.push(p.as_str().to_string()))?;
+        assert_eq!(
+            prims,
+            vec!["/World", "/World/ActiveParent", "/World/ActiveParent/Child"]
+        );
         Ok(())
     }
 

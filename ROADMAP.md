@@ -70,7 +70,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
 | Reference time offsets | `10.3.2.1.2` | :white_check_mark: | `main` | Carried through reference arcs; composed with sublayer offsets on the target layer stack. Value-resolution application pending. |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
-| [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :construction: | | No mechanism to exclude payloads |
+| [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `main` | `StageBuilder::initial_load_set` supports loading all payloads or leaving them unloaded |
 | Payload time offsets | `10.3.2.2.2` | :white_check_mark: | `main` | Same composition as references; unloaded payloads' offsets are ignored. Value-resolution application pending. |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
@@ -93,14 +93,14 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 |---|---|---|---|---|
 | Composed stage | `11.2` | :white_check_mark: | `0.2.0` | `Stage::open` with depth-first traversal |
 | Populating the stage | `11.3` | :white_check_mark: | `0.2.0` | Lazy per-prim composition via `pcp::Cache` |
-| [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :construction: | | No subset-of-prims loading |
+| [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :white_check_mark: | `main` | `StageBuilder::population_mask` limits stage queries and traversal to a masked working set |
 | Ordered prim children | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment |
 | Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |
 | Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :construction: | | `instanceable` readable; shared representation not implemented |
 | Model hierarchy (kind) | `11.4` | :white_check_mark: | `main` | `Stage::is_model`/`is_group`/`is_component`/`is_subcomponent` validate the contiguous kind hierarchy |
-| [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :white_check_mark: | `main` | `Stage::is_active`/`is_loaded`/`is_defined`/`is_abstract`/`is_instance`, `prim_status`, and `PrimPredicate` traversal filtering; load rules pending |
+| [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :white_check_mark: | `main` | `Stage::is_active`/`is_loaded`/`is_defined`/`is_abstract`/`is_instance`, `prim_status`, and `PrimPredicate` traversal filtering |
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | `11.2` | :white_check_mark: | `0.3.0` | `StageBuilder::session_layer` |
 
 ## Value Resolution (Spec 12)

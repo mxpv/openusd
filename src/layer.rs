@@ -210,10 +210,32 @@ pub fn collect_layers_with_handler(
     root_path: &str,
     on_error: impl Fn(Error) -> Result<()>,
 ) -> Result<Vec<Layer>> {
+    collect_layers_with_payloads(resolver, root_path, true, on_error)
+}
+
+/// Like [`collect_layers_with_handler`] but controls whether payload
+/// dependencies are followed.
+///
+/// When `load_payloads` is `false`, payload arcs are left as authored
+/// metadata but their target layers are not loaded during collection.
+pub fn collect_layers_with_payloads(
+    resolver: &impl Resolver,
+    root_path: &str,
+    load_payloads: bool,
+    on_error: impl Fn(Error) -> Result<()>,
+) -> Result<Vec<Layer>> {
     let mut layers = Vec::new();
     let mut visited = HashSet::new();
 
-    collect_recursive(resolver, root_path, None, &mut layers, &mut visited, &on_error)?;
+    collect_recursive(
+        resolver,
+        root_path,
+        None,
+        load_payloads,
+        &mut layers,
+        &mut visited,
+        &on_error,
+    )?;
 
     // Layers are collected in post-order (leaves first), reverse so root is first.
     layers.reverse();
@@ -226,6 +248,7 @@ fn collect_recursive(
     resolver: &impl Resolver,
     asset_path: &str,
     anchor: Option<&ar::ResolvedPath>,
+    load_payloads: bool,
     layers: &mut Vec<Layer>,
     visited: &mut HashSet<String>,
     on_error: &dyn Fn(Error) -> Result<()>,
@@ -253,7 +276,7 @@ fn collect_recursive(
     let expr_vars = read_expression_variables(data.as_ref());
 
     // Collect typed dependencies from this layer.
-    let deps = collect_dependencies(data.as_ref());
+    let deps = collect_dependencies(data.as_ref(), load_payloads);
 
     let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
 
@@ -281,7 +304,15 @@ fn collect_recursive(
             continue;
         }
 
-        collect_recursive(resolver, &dep_asset, Some(&resolved), layers, visited, on_error)?;
+        collect_recursive(
+            resolver,
+            &dep_asset,
+            Some(&resolved),
+            load_payloads,
+            layers,
+            visited,
+            on_error,
+        )?;
     }
 
     layers.push(Layer::new(identifier, data));
@@ -289,8 +320,9 @@ fn collect_recursive(
     Ok(())
 }
 
-/// Collects typed dependencies from sublayers, references, and payloads in a layer.
-fn collect_dependencies(data: &dyn AbstractData) -> Vec<Dependency> {
+/// Collects typed dependencies from sublayers, references, and optionally
+/// payloads in a layer.
+fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Vec<Dependency> {
     let mut deps = Vec::new();
 
     let root = Path::abs_root();
@@ -324,26 +356,28 @@ fn collect_dependencies(data: &dyn AbstractData) -> Vec<Dependency> {
             }
         }
 
-        // Payloads.
-        if let Ok(value) = data.get(prim_path, FieldKey::Payload.as_str()) {
-            match value.as_ref() {
-                Value::Payload(p) if !p.asset_path.is_empty() => {
-                    deps.push(Dependency {
-                        asset_path: p.asset_path.clone(),
-                        kind: DependencyKind::Payload,
-                        prim_path: Some(prim_path.clone()),
-                    });
-                }
-                Value::PayloadListOp(list_op) => {
-                    for p in list_op.iter().filter(|p| !p.asset_path.is_empty()) {
+        if load_payloads {
+            // Payloads.
+            if let Ok(value) = data.get(prim_path, FieldKey::Payload.as_str()) {
+                match value.as_ref() {
+                    Value::Payload(p) if !p.asset_path.is_empty() => {
                         deps.push(Dependency {
                             asset_path: p.asset_path.clone(),
                             kind: DependencyKind::Payload,
                             prim_path: Some(prim_path.clone()),
                         });
                     }
+                    Value::PayloadListOp(list_op) => {
+                        for p in list_op.iter().filter(|p| !p.asset_path.is_empty()) {
+                            deps.push(Dependency {
+                                asset_path: p.asset_path.clone(),
+                                kind: DependencyKind::Payload,
+                                prim_path: Some(prim_path.clone()),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -620,6 +654,26 @@ mod tests {
 
         assert_eq!(layers.len(), 2, "root + 1 payload layer");
         assert!(layers[1].identifier.contains("_stage.usda"));
+        Ok(())
+    }
+
+    #[test]
+    fn skip_payloads() -> Result<()> {
+        let resolver = DefaultResolver::new();
+
+        let path = composition_path("payload/payload_same_folder.usda");
+        let layers = collect_layers_with_payloads(&resolver, &path, false, |_| Ok(()))?;
+        assert_eq!(layers.len(), 1);
+        assert!(layers[0].identifier.contains("payload_same_folder.usda"));
+
+        let errors = RefCell::new(0);
+        let path = composition_path("payload/payload_invalid.usda");
+        let layers = collect_layers_with_payloads(&resolver, &path, false, |_| {
+            *errors.borrow_mut() += 1;
+            Ok(())
+        })?;
+        assert_eq!(layers.len(), 1);
+        assert_eq!(*errors.borrow(), 0);
         Ok(())
     }
 

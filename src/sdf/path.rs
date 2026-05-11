@@ -189,6 +189,32 @@ impl Path {
         }
     }
 
+    /// Returns `true` if this path starts with `prefix` at a path boundary.
+    ///
+    /// A match requires either equality with `prefix` or that the suffix
+    /// following `prefix` begins with a path separator (`/`) or a variant
+    /// segment opener (`{`). This avoids false positives like
+    /// `/Foobar` starting with `/Foo`.
+    ///
+    /// ```text
+    /// "/A/B".has_prefix("/A")       -> true
+    /// "/A".has_prefix("/A")         -> true
+    /// "/A{set=sel}".has_prefix("/A")-> true
+    /// "/Ab".has_prefix("/A")        -> false
+    /// "/X".has_prefix("/")          -> true
+    /// ```
+    pub fn has_prefix(&self, prefix: &Path) -> bool {
+        let old = prefix.as_str();
+        let me = self.as_str();
+        if me == old {
+            return true;
+        }
+        let Some(suffix) = me.strip_prefix(old) else {
+            return false;
+        };
+        old == "/" || suffix.starts_with('/') || suffix.starts_with('{')
+    }
+
     /// Replaces a prefix path with a new prefix, used for namespace remapping
     /// during composition (e.g. references and inherits).
     ///
@@ -462,6 +488,26 @@ mod tests {
 
         for (path, expected) in cases {
             assert_eq!(Path::new(path).unwrap().is_property_path(), expected);
+        }
+    }
+
+    #[test]
+    fn test_has_prefix() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("/A/B/C", "/A", true),
+            ("/A/B/C", "/A/B", true),
+            ("/A/B/C", "/A/B/C", true),
+            ("/A/B/C", "/A/B/D", false),
+            ("/Foobar", "/Foo", false),
+            ("/A{set=sel}", "/A", true),
+            ("/A", "/", true),
+            ("/", "/", true),
+            ("/A/B", "/A/B/C", false),
+        ];
+        for (path, prefix, expected) in cases {
+            let p = Path::new(path).unwrap();
+            let pre = Path::new(prefix).unwrap();
+            assert_eq!(p.has_prefix(&pre), *expected, "{path}.has_prefix({prefix})");
         }
     }
 

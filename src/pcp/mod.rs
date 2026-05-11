@@ -180,6 +180,8 @@ pub(crate) struct LayerStack {
     pub sublayer_stacks: SublayerStacks,
     /// Number of session layers at the front of the layer stack.
     pub session_layer_count: usize,
+    /// Whether payload arcs should be expanded during prim index construction.
+    pub load_payloads: bool,
     /// O(1) lookup: effective sublayer offset of each layer in the first
     /// stack that contains it. Precomputed from `sublayer_stacks` to keep
     /// per-prim composition off the linear-scan hot path.
@@ -195,6 +197,7 @@ impl LayerStack {
         identifiers: Vec<String>,
         session_layer_count: usize,
         resolver: Box<dyn Resolver>,
+        load_payloads: bool,
     ) -> Self {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers, &*resolver)))
@@ -210,6 +213,7 @@ impl LayerStack {
             identifiers,
             sublayer_stacks,
             session_layer_count,
+            load_payloads,
             layer_offsets,
             resolver,
         }
