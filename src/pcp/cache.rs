@@ -155,10 +155,9 @@ impl Cache {
         let Some(root_layer) = self.stack.root_layer() else {
             return Ok(None);
         };
-        if !root_layer.has_field(&root, field) {
+        let Some(value) = root_layer.try_get(&root, field)? else {
             return Ok(None);
-        }
-        let value = root_layer.get(&root, field)?;
+        };
         if matches!(value.as_ref(), Value::ValueBlock) {
             return Ok(None);
         }

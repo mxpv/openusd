@@ -5,7 +5,7 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::sdf::{AbstractData, Path, Spec, SpecType, Value};
 
@@ -99,14 +99,8 @@ impl AbstractData for Data {
         self.specs.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>> {
-        let Some(spec) = self.specs.get(path) else {
-            bail!("No spec found for path: {path}")
-        };
-        let Some(value) = spec.get(field) else {
-            bail!("No field found for path '{path}' and field '{field}'")
-        };
-        Ok(Cow::Borrowed(value))
+    fn try_get(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>> {
+        Ok(self.specs.get(path).and_then(|spec| spec.get(field)).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &Path) -> Option<Vec<String>> {

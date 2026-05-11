@@ -5,7 +5,7 @@
 
 use std::{borrow::Cow, collections::HashMap, fmt::Debug};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
@@ -254,19 +254,25 @@ pub trait AbstractData {
     /// Returns the type of the spec at the given path.
     fn spec_type(&self, path: &Path) -> Option<SpecType>;
 
-    /// Returns the underlying value for the given path.
-    ///
-    /// # Return
-    /// Returns a [Value] enum that wraps possible field's values.
+    /// Returns the value for a field, or `None` if not authored.
     ///
     /// The value can be either owned or borrowed depending on internals.
     /// In the binary format, the data is typically compressed and/or encoded,
-    /// so memory allocation is required to store unpacked result, so
-    /// owned values are typically be expected.
+    /// so memory allocation is required to store unpacked result, so owned
+    /// values are typically expected. With text parsers, there is a data copy
+    /// already stored, so a borrowed value is returned to avoid unnecessary copies.
     ///
-    /// With test parsers, there is a data copy already stored, so
-    /// a borrowed value will be returned to avoid unnecessary copies.
-    fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>>;
+    /// Errors propagate I/O or decoding failures; a missing spec or field is
+    /// signalled by `Ok(None)`.
+    fn try_get(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>>;
+
+    /// Returns the value for a field, erroring if not authored.
+    ///
+    /// Use [`AbstractData::try_get`] when absence is an expected condition.
+    fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>> {
+        self.try_get(path, field)?
+            .ok_or_else(|| anyhow!("No field '{field}' at path '{path}'"))
+    }
 
     /// Returns the field names for a given path in authored order.
     fn list(&self, path: &Path) -> Option<Vec<String>>;

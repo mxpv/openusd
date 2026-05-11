@@ -317,10 +317,10 @@ fn collect_recursive(
     let data = open_layer(resolver, &resolved)?;
 
     // Read expression variables from this layer's pseudo-root.
-    let expr_vars = read_expression_variables(data.as_ref());
+    let expr_vars = read_expression_variables(data.as_ref())?;
 
     // Collect typed dependencies from this layer.
-    let deps = collect_dependencies(data.as_ref(), context.load_payloads);
+    let deps = collect_dependencies(data.as_ref(), context.load_payloads)?;
 
     let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
 
@@ -378,13 +378,13 @@ fn collect_recursive(
 
 /// Collects typed dependencies from sublayers, references, and optionally
 /// payloads in a layer.
-fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Vec<Dependency> {
+fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Result<Vec<Dependency>> {
     let mut deps = Vec::new();
 
     let root = Path::abs_root();
 
     // Sublayers (layer-level).
-    if let Ok(value) = data.get(&root, FieldKey::SubLayers.as_str()) {
+    if let Some(value) = data.try_get(&root, FieldKey::SubLayers.as_str())? {
         if let Value::StringVec(sub_paths) = value.into_owned() {
             for asset_path in sub_paths {
                 deps.push(Dependency {
@@ -397,10 +397,10 @@ fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Vec<Dep
     }
 
     // Walk the prim hierarchy to find references and payloads.
-    let prim_paths = collect_prim_paths(data);
+    let prim_paths = collect_prim_paths(data)?;
     for prim_path in &prim_paths {
         // References.
-        if let Ok(value) = data.get(prim_path, FieldKey::References.as_str()) {
+        if let Some(value) = data.try_get(prim_path, FieldKey::References.as_str())? {
             if let Value::ReferenceListOp(list_op) = value.as_ref() {
                 for r in list_op.iter().filter(|r| !r.asset_path.is_empty()) {
                     deps.push(Dependency {
@@ -414,7 +414,7 @@ fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Vec<Dep
 
         if load_payloads {
             // Payloads.
-            if let Ok(value) = data.get(prim_path, FieldKey::Payload.as_str()) {
+            if let Some(value) = data.try_get(prim_path, FieldKey::Payload.as_str())? {
                 match value.as_ref() {
                     Value::Payload(p) if !p.asset_path.is_empty() => {
                         deps.push(Dependency {
@@ -438,12 +438,12 @@ fn collect_dependencies(data: &dyn AbstractData, load_payloads: bool) -> Vec<Dep
         }
     }
 
-    deps
+    Ok(deps)
 }
 
 /// Collects all prim and variant spec paths by walking `primChildren`,
 /// `variantSetChildren`, and `variantChildren` hierarchies.
-fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
+fn collect_prim_paths(data: &dyn AbstractData) -> Result<Vec<Path>> {
     let mut result = Vec::new();
     let mut queue = vec![Path::abs_root()];
 
@@ -458,7 +458,7 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
         }
 
         // Regular prim children.
-        if let Ok(value) = data.get(&path, ChildrenKey::PrimChildren.as_str()) {
+        if let Some(value) = data.try_get(&path, ChildrenKey::PrimChildren.as_str())? {
             if let Value::TokenVec(children) = value.into_owned() {
                 for name in children.iter().rev() {
                     if let Ok(child) = path.append_path(name.as_str()) {
@@ -469,12 +469,12 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
         }
 
         // Variant set children (e.g. /Prim -> /Prim{setName=}).
-        if let Ok(value) = data.get(&path, ChildrenKey::VariantSetChildren.as_str()) {
+        if let Some(value) = data.try_get(&path, ChildrenKey::VariantSetChildren.as_str())? {
             if let Value::TokenVec(set_names) = value.into_owned() {
                 for set_name in &set_names {
                     // Variant children within each set (e.g. /Prim{setName=selA}).
                     let set_path = path.append_variant_selection(set_name, "");
-                    if let Ok(value) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) {
+                    if let Some(value) = data.try_get(&set_path, ChildrenKey::VariantChildren.as_str())? {
                         if let Value::TokenVec(variant_names) = value.into_owned() {
                             for variant_name in &variant_names {
                                 let variant_path = path.append_variant_selection(set_name, variant_name);
@@ -487,7 +487,7 @@ fn collect_prim_paths(data: &dyn AbstractData) -> Vec<Path> {
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Opens a single layer from a resolved path, auto-detecting the format.
@@ -523,14 +523,14 @@ pub fn open_layer(resolver: &impl Resolver, resolved: &ar::ResolvedPath) -> Resu
 }
 
 /// Reads `expressionVariables` from the layer's pseudo-root, if present.
-fn read_expression_variables(data: &dyn AbstractData) -> HashMap<String, Value> {
+fn read_expression_variables(data: &dyn AbstractData) -> Result<HashMap<String, Value>> {
     let root = Path::abs_root();
-    if let Ok(value) = data.get(&root, FieldKey::ExpressionVariables.as_str()) {
+    if let Some(value) = data.try_get(&root, FieldKey::ExpressionVariables.as_str())? {
         if let Value::Dictionary(dict) = value.into_owned() {
-            return dict;
+            return Ok(dict);
         }
     }
-    HashMap::new()
+    Ok(HashMap::new())
 }
 
 /// Evaluates an expression-valued asset path, or passes it through unchanged.

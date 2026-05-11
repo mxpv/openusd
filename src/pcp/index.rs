@@ -313,11 +313,10 @@ impl PrimIndex {
         for node in self.nodes() {
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
-            if !data.has_field(&query_path, field) {
+            let Some(value) = data.try_get(&query_path, field)? else {
                 continue;
-            }
-            let value = data.get(&query_path, field)?.into_owned();
-            match (merged.as_mut(), value) {
+            };
+            match (merged.as_mut(), value.into_owned()) {
                 (None, Value::ValueBlock) => return Ok(None),
                 (None, Value::Dictionary(dict)) => merged = Some(dict),
                 (None, other) => return Ok(Some(other)),
@@ -338,10 +337,9 @@ impl PrimIndex {
         for node in self.nodes() {
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
-            if !data.has_field(&query_path, field) {
+            let Some(value) = data.try_get(&query_path, field)? else {
                 continue;
-            }
-            let value = data.get(&query_path, field)?;
+            };
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
@@ -362,10 +360,9 @@ impl PrimIndex {
         for node in self.nodes() {
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
-            if !data.has_field(&query_path, field) {
+            let Some(value) = data.try_get(&query_path, field)? else {
                 continue;
-            }
-            let value = data.get(&query_path, field)?;
+            };
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
@@ -391,10 +388,9 @@ impl PrimIndex {
         for node in self.nodes() {
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
-            if !data.has_field(&query_path, field) {
+            let Some(value) = data.try_get(&query_path, field)? else {
                 continue;
-            }
-            let value = data.get(&query_path, field)?;
+            };
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
@@ -1121,7 +1117,11 @@ impl<'a> IndexBuilder<'a> {
             let layer_id = self.stack.identifier(layer_index).to_owned();
             let source = if prim_path.is_empty() {
                 let root = Path::abs_root();
-                let Ok(value) = self.stack.layer(layer_index).get(&root, FieldKey::DefaultPrim.as_str()) else {
+                let Some(value) = self
+                    .stack
+                    .layer(layer_index)
+                    .try_get(&root, FieldKey::DefaultPrim.as_str())?
+                else {
                     return Err(Error::MissingDefaultPrim {
                         layer_id,
                         arc,

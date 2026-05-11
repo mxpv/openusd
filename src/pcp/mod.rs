@@ -368,4 +368,9 @@ pub enum Error {
         /// The prim path where the arc was authored.
         site_path: Path,
     },
+
+    /// Unexpected internal failure surfaced during composition (typically I/O
+    /// or value-decoding errors from the underlying layer data).
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }

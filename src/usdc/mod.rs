@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, io, mem, path::Path};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use layout::ValueRep;
 
 mod coding;
@@ -110,18 +110,12 @@ where
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
-        let Some(spec) = self.data.get(path) else {
-            bail!("No spec found for path: {path}")
+    fn try_get(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
+        let Some(value_rep) = self.data.get(path).and_then(|spec| spec.get(field).copied()) else {
+            return Ok(None);
         };
-
-        let Some(value_rep) = spec.get(field).copied() else {
-            bail!("No field found for path '{path}' and field '{field}'")
-        };
-
         let value = self.file.borrow_mut().value(value_rep)?;
-
-        Ok(Cow::Owned(value))
+        Ok(Some(Cow::Owned(value)))
     }
 
     #[inline]

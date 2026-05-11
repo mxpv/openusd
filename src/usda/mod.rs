@@ -3,7 +3,7 @@
 use std::borrow::Cow;
 use std::{collections::HashMap, fs, path::Path};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 pub mod parser;
 pub mod token;
@@ -95,16 +95,8 @@ impl sdf::AbstractData for TextReader {
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn get(&self, path: &sdf::Path, field: &str) -> Result<Cow<'_, sdf::Value>> {
-        let Some(spec) = self.data.get(path) else {
-            bail!("No spec found for path: {path}")
-        };
-
-        let Some(field) = spec.get(field) else {
-            bail!("No field found for path '{path}' and field '{field}'")
-        };
-
-        Ok(Cow::Borrowed(field))
+    fn try_get(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
+        Ok(self.data.get(path).and_then(|spec| spec.get(field)).map(Cow::Borrowed))
     }
 
     fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
