@@ -118,6 +118,12 @@ impl Cache {
         Ok(None)
     }
 
+    /// Returns `true` if the composed prim index contains any non-local arc.
+    pub(crate) fn has_composition_arc(&mut self, path: &Path) -> Result<bool> {
+        self.ensure_index(path)?;
+        Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
+    }
+
     /// Resolves a field value from the strongest opinion across all composition nodes.
     pub fn resolve_field(&mut self, path: &Path, field: &str) -> Result<Option<Value>> {
         if path.is_property_path() {

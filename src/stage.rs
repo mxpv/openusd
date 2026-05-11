@@ -38,10 +38,30 @@
 use std::cell::RefCell;
 
 use anyhow::Result;
+use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
-use crate::sdf::{Path, SpecType, Value};
+use crate::sdf::{FieldKey, Path, SpecType, Specifier, Value};
 use crate::{layer, pcp, CompositionError};
+
+bitflags! {
+    /// Resolved stage-level status bits for a prim.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct PrimStatus: u32 {
+        /// The prim and all ancestors are active.
+        const ACTIVE = 1 << 0;
+        /// The prim is loaded according to the stage's current load behavior.
+        const LOADED = 1 << 1;
+        /// The prim and all ancestors have defining specifiers.
+        const DEFINED = 1 << 2;
+        /// The prim or an ancestor has a `class` specifier.
+        const ABSTRACT = 1 << 3;
+        /// The prim is instanceable and has at least one composition arc.
+        const INSTANCE = 1 << 4;
+        /// The prim is part of the contiguous model hierarchy.
+        const MODEL = 1 << 5;
+    }
+}
 
 /// A composed USD stage.
 ///
@@ -237,6 +257,168 @@ impl Stage {
     /// Returns the composed `typeName` for a prim, if set.
     pub fn type_name(&self, prim: &Path) -> Result<Option<String>> {
         self.field::<String>(prim, "typeName")
+    }
+
+    /// Returns the composed specifier for a prim, if one resolves.
+    pub fn specifier(&self, prim: impl Into<Path>) -> Result<Option<Specifier>> {
+        self.field::<Specifier>(prim.into().prim_path(), FieldKey::Specifier)
+    }
+
+    /// Returns the composed `kind` metadata for a prim, if authored.
+    pub fn kind(&self, prim: impl Into<Path>) -> Result<Option<String>> {
+        self.field::<String>(prim.into().prim_path(), FieldKey::Kind)
+    }
+
+    /// Returns `true` if the prim and all ancestors are active.
+    ///
+    /// Missing `active` opinions default to `true`; a non-existent prim returns
+    /// `false`.
+    pub fn is_active(&self, prim: impl Into<Path>) -> Result<bool> {
+        let prim = prim.into().prim_path();
+        if prim == Path::abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(&prim)? {
+            return Ok(false);
+        }
+        for path in Self::prim_ancestors_inclusive(prim) {
+            if self
+                .field::<bool>(&path, FieldKey::Active)?
+                .is_some_and(|active| !active)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Returns `true` if the prim is loaded.
+    ///
+    /// The current stage implementation has no unload rules yet, so all active
+    /// prims are considered loaded. This will become load-rule aware when
+    /// payload loading control is added.
+    pub fn is_loaded(&self, prim: impl Into<Path>) -> Result<bool> {
+        self.is_active(prim)
+    }
+
+    /// Returns `true` if the prim and all ancestors have defining specifiers.
+    ///
+    /// `def` and `class` are defining. `over`, missing specs, and missing
+    /// specifier opinions are not defining.
+    pub fn is_defined(&self, prim: impl Into<Path>) -> Result<bool> {
+        let prim = prim.into().prim_path();
+        if prim == Path::abs_root() {
+            return Ok(true);
+        }
+        if !self.has_spec(&prim)? {
+            return Ok(false);
+        }
+        for path in Self::prim_ancestors_inclusive(prim) {
+            if !matches!(self.specifier(path)?, Some(Specifier::Def | Specifier::Class)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Returns `true` if the prim or any ancestor resolves to `class`.
+    pub fn is_abstract(&self, prim: impl Into<Path>) -> Result<bool> {
+        let prim = prim.into().prim_path();
+        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+            return Ok(false);
+        }
+        for path in Self::prim_ancestors_inclusive(prim) {
+            if self.specifier(path)? == Some(Specifier::Class) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Returns `true` if the prim index contains at least one composition arc.
+    pub fn has_composition_arc(&self, prim: impl Into<Path>) -> Result<bool> {
+        let prim = prim.into().prim_path();
+        self.try_or_handle(|cache| cache.has_composition_arc(&prim))
+    }
+
+    /// Returns `true` if `instanceable` resolves to true and the prim has a composition arc.
+    pub fn is_instance(&self, prim: impl Into<Path>) -> Result<bool> {
+        let prim = prim.into().prim_path();
+        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+            return Ok(false);
+        }
+        if !self.field::<bool>(&prim, FieldKey::Instanceable)?.unwrap_or(false) {
+            return Ok(false);
+        }
+        self.has_composition_arc(&prim)
+    }
+
+    /// Returns `true` if the prim is in the contiguous model hierarchy.
+    ///
+    /// A model prim has `kind` equal to `group`, `assembly`, or `component`.
+    /// Any ancestor below the pseudo-root must have `kind` equal to `group` or
+    /// `assembly`; `subcomponent` is intentionally not part of the hierarchy.
+    pub fn is_model(&self, prim: impl Into<Path>) -> Result<bool> {
+        Ok(self.model_kind(prim.into())?.is_some())
+    }
+
+    /// Returns `true` if the prim is a group-like model (`group` or `assembly`).
+    pub fn is_group(&self, prim: impl Into<Path>) -> Result<bool> {
+        Ok(matches!(self.model_kind(prim.into())?, Some("group" | "assembly")))
+    }
+
+    /// Returns `true` if the prim is a component model in a valid model hierarchy.
+    pub fn is_component(&self, prim: impl Into<Path>) -> Result<bool> {
+        Ok(self.model_kind(prim.into())? == Some("component"))
+    }
+
+    /// Returns `true` if the prim has `kind = "subcomponent"`.
+    pub fn is_subcomponent(&self, prim: impl Into<Path>) -> Result<bool> {
+        Ok(self.kind(prim)?.as_deref() == Some("subcomponent"))
+    }
+
+    /// Returns the resolved stage status bits for a prim.
+    pub fn prim_status(&self, prim: impl Into<Path>) -> Result<PrimStatus> {
+        let prim = prim.into().prim_path();
+        let active = self.is_active(&prim)?;
+        let mut status = PrimStatus::empty();
+        status.set(PrimStatus::ACTIVE, active);
+        status.set(PrimStatus::LOADED, active);
+        status.set(PrimStatus::DEFINED, self.is_defined(&prim)?);
+        status.set(PrimStatus::ABSTRACT, self.is_abstract(&prim)?);
+        status.set(PrimStatus::INSTANCE, self.is_instance(&prim)?);
+        status.set(PrimStatus::MODEL, self.is_model(&prim)?);
+        Ok(status)
+    }
+
+    /// Returns the model-hierarchy `kind` for the prim — `Some("group" | "assembly" | "component")`
+    /// when the prim and all ancestors form a contiguous model hierarchy, else `None`.
+    fn model_kind(&self, prim: Path) -> Result<Option<&'static str>> {
+        let prim = prim.prim_path();
+        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+            return Ok(None);
+        }
+        let leaf = match self.kind(&prim)?.as_deref() {
+            Some("group") => "group",
+            Some("assembly") => "assembly",
+            Some("component") => "component",
+            _ => return Ok(None),
+        };
+        let Some(parent) = prim.parent() else {
+            return Ok(Some(leaf));
+        };
+        for ancestor in Self::prim_ancestors_inclusive(parent) {
+            if !matches!(self.kind(ancestor)?.as_deref(), Some("group" | "assembly")) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(leaf))
+    }
+
+    /// Iterates the prim path and its ancestors from leaf to root, stopping
+    /// before the pseudo-root. Assumes `start` is already a prim path.
+    fn prim_ancestors_inclusive(start: Path) -> impl Iterator<Item = Path> {
+        std::iter::successors(Some(start), Path::parent).take_while(|p| *p != Path::abs_root())
     }
 
     /// Calls `f` with a mutable reference to the composition cache. If `f`
@@ -997,6 +1179,94 @@ mod tests {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         assert_eq!(stage.type_name(&Path::new("/World/Geo")?)?, Some("Mesh".to_string()));
         assert_eq!(stage.type_name(&Path::new("/World")?)?, Some("Xform".to_string()));
+        Ok(())
+    }
+
+    fn open_stage_queries_fixture() -> Result<Stage> {
+        Stage::open("fixtures/stage_queries.usda")
+    }
+
+    #[test]
+    fn active_and_loaded_are_ancestor_aware() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        assert!(stage.is_active("/World/ActiveParent/Child")?);
+        assert!(stage.is_loaded("/World/ActiveParent/Child")?);
+
+        assert!(!stage.is_active("/World/InactiveParent")?);
+        assert!(!stage.is_active("/World/InactiveParent/Child")?);
+        assert!(!stage.is_loaded("/World/InactiveParent/Child")?);
+
+        assert!(!stage.is_active("/World/Missing")?);
+        Ok(())
+    }
+
+    #[test]
+    fn defined_and_abstract_are_ancestor_aware() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        assert_eq!(stage.specifier("/World/OverOnly")?, Some(Specifier::Over));
+        assert!(stage.is_defined("/World/ActiveParent/Child")?);
+        assert!(!stage.is_defined("/World/OverOnly")?);
+        assert!(!stage.is_defined("/World/OverParent/Child")?);
+
+        assert!(stage.is_defined("/World/ClassParent/Child")?);
+        assert!(stage.is_abstract("/World/ClassParent")?);
+        assert!(stage.is_abstract("/World/ClassParent/Child")?);
+        assert!(!stage.is_abstract("/World/ActiveParent/Child")?);
+        Ok(())
+    }
+
+    #[test]
+    fn instance_requires_instanceable_and_composition_arc() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        assert!(stage.has_composition_arc("/World/Instance")?);
+        assert!(stage.is_instance("/World/Instance")?);
+
+        assert!(!stage.has_composition_arc("/World/InstanceableNoArc")?);
+        assert!(!stage.is_instance("/World/InstanceableNoArc")?);
+        Ok(())
+    }
+
+    #[test]
+    fn model_queries_follow_contiguous_kind_hierarchy() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        assert_eq!(stage.kind("/World")?, Some("assembly".to_string()));
+        assert!(stage.is_model("/World")?);
+        assert!(stage.is_group("/World")?);
+
+        assert!(stage.is_model("/World/Group")?);
+        assert!(stage.is_group("/World/Group")?);
+        assert!(stage.is_model("/World/Group/Component")?);
+        assert!(stage.is_component("/World/Group/Component")?);
+
+        assert!(!stage.is_model("/World/Group/Subcomponent")?);
+        assert!(stage.is_subcomponent("/World/Group/Subcomponent")?);
+
+        assert_eq!(
+            stage.kind("/World/InvalidComponentParent/Component")?,
+            Some("component".to_string())
+        );
+        assert!(!stage.is_model("/World/InvalidComponentParent/Component")?);
+        assert!(!stage.is_component("/World/InvalidComponentParent/Component")?);
+        Ok(())
+    }
+
+    #[test]
+    fn prim_status_groups_query_bits() -> Result<()> {
+        let stage = open_stage_queries_fixture()?;
+
+        assert_eq!(
+            stage.prim_status("/World/ClassParent/Child")?,
+            PrimStatus::ACTIVE | PrimStatus::LOADED | PrimStatus::DEFINED | PrimStatus::ABSTRACT
+        );
+
+        assert_eq!(
+            stage.prim_status("/World/Instance")?,
+            PrimStatus::ACTIVE | PrimStatus::LOADED | PrimStatus::DEFINED | PrimStatus::INSTANCE
+        );
         Ok(())
     }
 }
