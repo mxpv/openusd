@@ -166,6 +166,11 @@ impl PrimIndex {
         self.graph.is_empty()
     }
 
+    /// Returns `true` if any node was introduced by a composition arc.
+    pub(crate) fn has_composition_arc(&self) -> bool {
+        self.nodes().iter().any(|node| node.arc != ArcType::Root)
+    }
+
     /// Returns the nodes in strength order (index 0 = strongest).
     pub fn nodes(&self) -> &[Node] {
         &self.graph

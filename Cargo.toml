@@ -15,6 +15,7 @@ serde = ["dep:serde", "half/serde"]
 
 [dependencies]
 anyhow = "1.0.79"
+bitflags = "2.11.1"
 bytemuck = { version = "1.14.0", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
 thiserror = "2"

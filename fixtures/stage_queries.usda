@@ -1,0 +1,91 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Scope "World" (
+    kind = "assembly"
+)
+{
+    def Scope "ActiveParent"
+    {
+        def Scope "Child"
+        {
+        }
+    }
+
+    def Scope "InactiveParent" (
+        active = false
+    )
+    {
+        def Scope "Child" (
+            active = true
+        )
+        {
+        }
+    }
+
+    over "OverOnly"
+    {
+    }
+
+    over "OverParent"
+    {
+        def Scope "Child"
+        {
+        }
+    }
+
+    class "ClassParent"
+    {
+        def Scope "Child"
+        {
+        }
+    }
+
+    def Scope "Group" (
+        kind = "group"
+    )
+    {
+        def Scope "Component" (
+            kind = "component"
+        )
+        {
+        }
+
+        def Scope "Subcomponent" (
+            kind = "subcomponent"
+        )
+        {
+        }
+    }
+
+    def Scope "InvalidComponentParent"
+    {
+        def Scope "Component" (
+            kind = "component"
+        )
+        {
+        }
+    }
+
+    def Scope "Instance" (
+        instanceable = true
+        references = </World/Prototype>
+    )
+    {
+    }
+
+    def Scope "InstanceableNoArc" (
+        instanceable = true
+    )
+    {
+    }
+
+    def Scope "Prototype"
+    {
+        def Scope "ReferencedChild"
+        {
+        }
+    }
+}
