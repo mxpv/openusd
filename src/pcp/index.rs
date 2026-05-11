@@ -1389,7 +1389,7 @@ pub(super) fn find_layer(asset_path: &str, identifiers: &[String], resolver: &dy
 mod tests {
     use super::*;
     use crate::ar::DefaultResolver;
-    use crate::layer::collect_layers;
+    use crate::layer::Collector;
     use crate::sdf::LayerData;
 
     use anyhow::Result;
@@ -1411,7 +1411,7 @@ mod tests {
     /// Loads layers and splits into parallel vecs for PrimIndex::build.
     fn load_layers(path: &str) -> Result<(Vec<LayerData>, Vec<String>)> {
         let resolver = DefaultResolver::new();
-        let collected = collect_layers(&resolver, path)?;
+        let collected = Collector::new(&resolver).collect(path)?;
         let mut layers = Vec::new();
         let mut identifiers = Vec::new();
         for layer in collected {

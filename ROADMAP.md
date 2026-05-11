@@ -93,7 +93,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 |---|---|---|---|---|
 | Composed stage | `11.2` | :white_check_mark: | `0.2.0` | `Stage::open` with depth-first traversal |
 | Populating the stage | `11.3` | :white_check_mark: | `0.2.0` | Lazy per-prim composition via `pcp::Cache` |
-| [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :white_check_mark: | `main` | `StageBuilder::population_mask` limits stage queries and traversal to a masked working set |
+| [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :white_check_mark: | `main` | `StageBuilder::population_mask` limits stage queries, traversal, and root layer-stack dependency collection to a masked working set |
 | Ordered prim children | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment |
 | Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |

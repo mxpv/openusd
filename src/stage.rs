@@ -207,11 +207,15 @@ impl StagePopulationMask {
     }
 
     /// Returns `true` if `path` is inside the population mask.
+    ///
+    /// Variant selection segments in `path` are stripped before matching so a
+    /// mask of `/Prim/Child` still includes opinions authored under
+    /// `/Prim{set=sel}/Child`.
     pub fn includes(&self, path: &Path) -> bool {
         if self.is_all() {
             return true;
         }
-        let path = path.prim_path();
+        let path = path.prim_path().strip_all_variant_selections();
         self.paths
             .iter()
             .any(|mask_path| path.has_prefix(mask_path) || mask_path.has_prefix(&path))
@@ -848,18 +852,27 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     {
         let on_error = self.on_error;
         let initial_load_set = self.initial_load_set;
+        let population_mask = self.population_mask;
         let load_payloads = initial_load_set.load_payloads();
 
+        let include_prim_dependency = |path: &Path| population_mask.includes(path);
+        let collect_stage_layers = |path: &str| {
+            let collector = layer::Collector::new(&self.resolver)
+                .load_payloads(load_payloads)
+                .on_error(|e| on_error(CompositionError::Layer(e)));
+            if population_mask.is_all() {
+                collector.collect(path)
+            } else {
+                collector.prim_dependency_filter(&include_prim_dependency).collect(path)
+            }
+        };
+
         let session_layers = if let Some(ref session_path) = self.session_layer {
-            layer::collect_layers_with_payloads(&self.resolver, session_path, load_payloads, |e| {
-                on_error(CompositionError::Layer(e))
-            })?
+            collect_stage_layers(session_path)?
         } else {
             Vec::new()
         };
-        let root_layers = layer::collect_layers_with_payloads(&self.resolver, root_path, load_payloads, |e| {
-            on_error(CompositionError::Layer(e))
-        })?;
+        let root_layers = collect_stage_layers(root_path)?;
 
         let session_layer_count = session_layers.len();
         let total = session_layer_count + root_layers.len();
@@ -881,7 +894,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         Ok(Stage {
             graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
             initial_load_set,
-            population_mask: self.population_mask,
+            population_mask,
             on_composition_error,
         })
     }
@@ -1546,6 +1559,19 @@ mod tests {
             prims,
             vec!["/World", "/World/ActiveParent", "/World/ActiveParent/Child"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn mask_skips_dependency() -> Result<()> {
+        let path = composition_path("references/reference_invalid.usda");
+        let stage = Stage::builder()
+            .population_mask(StagePopulationMask::new(["/World/cube"]))
+            .open(&path)?;
+
+        assert_eq!(stage.root_prims()?, vec!["World"]);
+        assert_eq!(stage.prim_children("/World")?, vec!["cube"]);
+        assert!(!stage.has_spec("/World/invalid_reference")?);
         Ok(())
     }
 

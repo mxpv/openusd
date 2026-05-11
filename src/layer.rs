@@ -1,10 +1,11 @@
 //! Layer stack collection.
 //!
-//! Given a root USD file, [`collect_layers`] uses an [`ar::Resolver`] to recursively
-//! resolve and load every layer the stage depends on — following sublayers, references,
-//! and payloads across files and formats (`.usda`, `.usdc`, `.usd`, `.usdz`). The result
-//! is a [`Vec`] of [`Layer`]s, each wrapping a parsed [`AbstractData`] with its resolved
-//! identity. Cycles are detected and skipped automatically.
+//! Given a root USD file, [`Collector`] uses an [`ar::Resolver`] to recursively
+//! resolve and load every layer the stage depends on — following sublayers,
+//! references, and payloads across files and formats (`.usda`, `.usdc`, `.usd`,
+//! `.usdz`). The result is a [`Vec`] of [`Layer`]s, each wrapping a parsed
+//! [`AbstractData`] with its resolved identity. Cycles are detected and
+//! skipped automatically.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -190,57 +191,101 @@ struct Dependency {
     prim_path: Option<Path>,
 }
 
-/// Opens a root layer and recursively collects all referenced layers.
-///
-/// Any unresolvable transitive dependency causes an immediate error.
-/// For more control over error handling, use [`collect_layers_with_handler`].
-///
-/// Returns a [`Vec<Layer>`] with the root (strongest) layer first.
-pub fn collect_layers(resolver: &impl Resolver, root_path: &str) -> Result<Vec<Layer>> {
-    collect_layers_with_handler(resolver, root_path, |e| bail!("{e}"))
-}
-
-/// Like [`collect_layers`] but with a custom error handler for recoverable
-/// composition failures.
-///
-/// The `on_error` callback decides whether to continue (`Ok(())`) or abort
-/// (`Err(...)`) for each composition error encountered.
-pub fn collect_layers_with_handler(
-    resolver: &impl Resolver,
-    root_path: &str,
-    on_error: impl Fn(Error) -> Result<()>,
-) -> Result<Vec<Layer>> {
-    collect_layers_with_payloads(resolver, root_path, true, on_error)
-}
-
-/// Like [`collect_layers_with_handler`] but controls whether payload
-/// dependencies are followed.
-///
-/// When `load_payloads` is `false`, payload arcs are left as authored
-/// metadata but their target layers are not loaded during collection.
-pub fn collect_layers_with_payloads(
-    resolver: &impl Resolver,
-    root_path: &str,
+struct CollectionContext<'a> {
     load_payloads: bool,
-    on_error: impl Fn(Error) -> Result<()>,
-) -> Result<Vec<Layer>> {
-    let mut layers = Vec::new();
-    let mut visited = HashSet::new();
+    include_prim_dependency: Option<&'a dyn Fn(&Path) -> bool>,
+    on_error: &'a dyn Fn(Error) -> Result<()>,
+}
 
-    collect_recursive(
-        resolver,
-        root_path,
-        None,
-        load_payloads,
-        &mut layers,
-        &mut visited,
-        &on_error,
-    )?;
+impl<'a> CollectionContext<'a> {
+    fn with_filter(&self, include_prim_dependency: Option<&'a dyn Fn(&Path) -> bool>) -> Self {
+        Self {
+            load_payloads: self.load_payloads,
+            include_prim_dependency,
+            on_error: self.on_error,
+        }
+    }
+}
 
-    // Layers are collected in post-order (leaves first), reverse so root is first.
-    layers.reverse();
+type StrictErrorHandler = fn(Error) -> Result<()>;
 
-    Ok(layers)
+fn strict_error(e: Error) -> Result<()> {
+    bail!("{e}")
+}
+
+/// Builder for collecting a root layer and all layers it depends on.
+pub struct Collector<'a, R: Resolver, E: Fn(Error) -> Result<()> = StrictErrorHandler> {
+    resolver: &'a R,
+    load_payloads: bool,
+    include_prim_dependency: Option<&'a dyn Fn(&Path) -> bool>,
+    on_error: E,
+}
+
+impl<'a, R: Resolver> Collector<'a, R, StrictErrorHandler> {
+    /// Creates a collector that errors on any unresolvable dependency and
+    /// follows payload arcs. Use [`Collector::on_error`] or
+    /// [`Collector::load_payloads`] to override.
+    pub fn new(resolver: &'a R) -> Self {
+        Self {
+            resolver,
+            load_payloads: true,
+            include_prim_dependency: None,
+            on_error: strict_error,
+        }
+    }
+}
+
+impl<'a, R: Resolver, E: Fn(Error) -> Result<()>> Collector<'a, R, E> {
+    /// Controls whether payload dependencies are followed.
+    ///
+    /// When `load_payloads` is `false`, payload arcs are left as authored
+    /// metadata but their target layers are not loaded during collection.
+    pub fn load_payloads(mut self, load_payloads: bool) -> Self {
+        self.load_payloads = load_payloads;
+        self
+    }
+
+    /// Sets a callback for recoverable layer collection errors.
+    ///
+    /// The callback decides whether to continue (`Ok(())`) or abort (`Err(...)`)
+    /// for each recoverable error encountered.
+    pub fn on_error<E2: Fn(Error) -> Result<()>>(self, on_error: E2) -> Collector<'a, R, E2> {
+        Collector {
+            resolver: self.resolver,
+            load_payloads: self.load_payloads,
+            include_prim_dependency: self.include_prim_dependency,
+            on_error,
+        }
+    }
+
+    /// Skips reference/payload dependencies whose authoring prim path fails
+    /// `include`. Used by `StageBuilder` to honor `StagePopulationMask` during
+    /// root-layer-stack collection so culled-subtree dependencies aren't
+    /// resolved or loaded. Crate-internal pending a public design.
+    pub(crate) fn prim_dependency_filter(mut self, include: &'a dyn Fn(&Path) -> bool) -> Self {
+        self.include_prim_dependency = Some(include);
+        self
+    }
+
+    /// Opens a root layer and recursively collects all referenced layers.
+    ///
+    /// Returns a [`Vec<Layer>`] with the root (strongest) layer first.
+    pub fn collect(&self, root_path: &str) -> Result<Vec<Layer>> {
+        let mut layers = Vec::new();
+        let mut visited = HashSet::new();
+        let context = CollectionContext {
+            load_payloads: self.load_payloads,
+            include_prim_dependency: self.include_prim_dependency,
+            on_error: &self.on_error,
+        };
+
+        collect_recursive(self.resolver, root_path, None, &context, &mut layers, &mut visited)?;
+
+        // Layers are collected in post-order (leaves first), reverse so root is first.
+        layers.reverse();
+
+        Ok(layers)
+    }
 }
 
 /// Recursive layer collector.
@@ -248,10 +293,9 @@ fn collect_recursive(
     resolver: &impl Resolver,
     asset_path: &str,
     anchor: Option<&ar::ResolvedPath>,
-    load_payloads: bool,
+    context: &CollectionContext<'_>,
     layers: &mut Vec<Layer>,
     visited: &mut HashSet<String>,
-    on_error: &dyn Fn(Error) -> Result<()>,
 ) -> Result<()> {
     // Create an anchored identifier so relative paths resolve correctly.
     let identifier = resolver.create_identifier(asset_path, anchor);
@@ -276,11 +320,17 @@ fn collect_recursive(
     let expr_vars = read_expression_variables(data.as_ref());
 
     // Collect typed dependencies from this layer.
-    let deps = collect_dependencies(data.as_ref(), load_payloads);
+    let deps = collect_dependencies(data.as_ref(), context.load_payloads);
 
     let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
 
     for dep in deps {
+        if let (Some(include), Some(prim_path)) = (context.include_prim_dependency, dep.prim_path.as_ref()) {
+            if !include(prim_path) {
+                continue;
+            }
+        }
+
         // Evaluate expression-valued asset paths.
         let dep_asset = resolve_expression(&dep.asset_path, &expr_vars)?;
 
@@ -294,7 +344,7 @@ fn collect_recursive(
         // Check if this dependency resolves before recursing.
         let dep_id = resolver.create_identifier(&dep_asset, Some(&resolved));
         if !visited.contains(&dep_id) && resolver.resolve(&dep_id).is_none() {
-            on_error(Error::UnresolvedAsset {
+            (context.on_error)(Error::UnresolvedAsset {
                 asset_path: dep_asset,
                 referencing_layer: identifier.clone(),
                 kind: dep.kind,
@@ -304,14 +354,20 @@ fn collect_recursive(
             continue;
         }
 
+        // References and payloads enter a new layer's namespace, so the
+        // caller's prim-path filter (rooted in the originating namespace) no
+        // longer applies. Sublayers share the parent's namespace and keep it.
+        let child_filter = match dep.kind {
+            DependencyKind::SubLayer => context.include_prim_dependency,
+            DependencyKind::Reference | DependencyKind::Payload => None,
+        };
         collect_recursive(
             resolver,
             &dep_asset,
             Some(&resolved),
-            load_payloads,
+            &context.with_filter(child_filter),
             layers,
             visited,
-            on_error,
         )?;
     }
 
@@ -522,7 +578,7 @@ mod tests {
     fn expression_sublayer() -> Result<()> {
         let path = fixture_path("expr_sublayer.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved sublayer");
         assert!(layers[0].identifier.contains("expr_sublayer.usda"));
@@ -534,7 +590,7 @@ mod tests {
     fn expression_reference() -> Result<()> {
         let path = fixture_path("expr_reference.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved reference");
         assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
@@ -545,7 +601,7 @@ mod tests {
     fn expression_asset_path() -> Result<()> {
         let path = fixture_path("expr_asset_path.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved reference");
         assert!(layers[0].identifier.contains("expr_asset_path.usda"));
@@ -560,7 +616,7 @@ mod tests {
     fn expression_payload() -> Result<()> {
         let path = fixture_path("expr_payload.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 expression-resolved payload");
         assert!(layers[1].identifier.contains("expr_sublayer_target.usda"));
@@ -575,7 +631,7 @@ mod tests {
     fn sublayer_same_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 sublayer");
         assert!(layers[0].identifier.contains("sublayer_same_folder.usda"));
@@ -587,7 +643,7 @@ mod tests {
     fn sublayer_child_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_child_stage.usda"));
@@ -598,7 +654,7 @@ mod tests {
     fn sublayer_parent_folder() -> Result<()> {
         let path = composition_path("subLayer/sublayer_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_parent_stage.usda"));
@@ -613,7 +669,7 @@ mod tests {
     fn reference_same_folder() -> Result<()> {
         let path = composition_path("references/reference_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 referenced layer");
         assert!(layers[1].identifier.contains("_stage.usda"));
@@ -624,7 +680,7 @@ mod tests {
     fn reference_child_folder() -> Result<()> {
         let path = composition_path("references/reference_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_child_stage.usda"));
@@ -635,7 +691,7 @@ mod tests {
     fn reference_parent_folder() -> Result<()> {
         let path = composition_path("references/reference_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_parent_stage.usda"));
@@ -650,7 +706,7 @@ mod tests {
     fn payload_same_folder() -> Result<()> {
         let path = composition_path("payload/payload_same_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2, "root + 1 payload layer");
         assert!(layers[1].identifier.contains("_stage.usda"));
@@ -662,16 +718,22 @@ mod tests {
         let resolver = DefaultResolver::new();
 
         let path = composition_path("payload/payload_same_folder.usda");
-        let layers = collect_layers_with_payloads(&resolver, &path, false, |_| Ok(()))?;
+        let layers = Collector::new(&resolver)
+            .load_payloads(false)
+            .on_error(|_| Ok(()))
+            .collect(&path)?;
         assert_eq!(layers.len(), 1);
         assert!(layers[0].identifier.contains("payload_same_folder.usda"));
 
         let errors = RefCell::new(0);
         let path = composition_path("payload/payload_invalid.usda");
-        let layers = collect_layers_with_payloads(&resolver, &path, false, |_| {
-            *errors.borrow_mut() += 1;
-            Ok(())
-        })?;
+        let layers = Collector::new(&resolver)
+            .load_payloads(false)
+            .on_error(|_| {
+                *errors.borrow_mut() += 1;
+                Ok(())
+            })
+            .collect(&path)?;
         assert_eq!(layers.len(), 1);
         assert_eq!(*errors.borrow(), 0);
         Ok(())
@@ -681,7 +743,7 @@ mod tests {
     fn payload_child_folder() -> Result<()> {
         let path = composition_path("payload/payload_child_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_child_stage.usda"));
@@ -692,7 +754,7 @@ mod tests {
     fn payload_parent_folder() -> Result<()> {
         let path = composition_path("payload/payload_parent_folder.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         assert_eq!(layers.len(), 2);
         assert!(layers[1].identifier.contains("_parent_stage.usda"));
@@ -707,7 +769,7 @@ mod tests {
     fn teapot_multi_level() -> Result<()> {
         let path = format!("{}/vendor/usd-wg-assets/full_assets/Teapot/Teapot.usd", manifest_dir());
         let resolver = DefaultResolver::new();
-        let layers = collect_layers(&resolver, &path)?;
+        let layers = Collector::new(&resolver).collect(&path)?;
 
         // Teapot.usd -> payload Teapot_Payload.usd -> sublayer Teapot_Materials.usd
         assert!(layers.len() >= 3, "expected at least 3 layers, got {}", layers.len());
@@ -727,10 +789,10 @@ mod tests {
 
     /// Default handler errors on unresolvable dependencies (backward compat).
     #[test]
-    fn collect_layers_errors_on_missing_reference() {
+    fn strict_errors_on_missing_reference() {
         let path = composition_path("references/reference_invalid.usda");
         let resolver = DefaultResolver::new();
-        assert!(collect_layers(&resolver, &path).is_err());
+        assert!(Collector::new(&resolver).collect(&path).is_err());
     }
 
     /// Custom handler receives correct error details for each dependency kind.
@@ -740,22 +802,28 @@ mod tests {
         let errors = RefCell::new(Vec::new());
 
         let path = composition_path("references/reference_invalid.usda");
-        collect_layers_with_handler(&resolver, &path, |e| {
-            errors.borrow_mut().push(e);
-            Ok(())
-        })?;
+        Collector::new(&resolver)
+            .on_error(|e| {
+                errors.borrow_mut().push(e);
+                Ok(())
+            })
+            .collect(&path)?;
 
         let path = composition_path("payload/payload_invalid.usda");
-        collect_layers_with_handler(&resolver, &path, |e| {
-            errors.borrow_mut().push(e);
-            Ok(())
-        })?;
+        Collector::new(&resolver)
+            .on_error(|e| {
+                errors.borrow_mut().push(e);
+                Ok(())
+            })
+            .collect(&path)?;
 
         let path = composition_path("subLayer/sublayer_invalid.usda");
-        collect_layers_with_handler(&resolver, &path, |e| {
-            errors.borrow_mut().push(e);
-            Ok(())
-        })?;
+        Collector::new(&resolver)
+            .on_error(|e| {
+                errors.borrow_mut().push(e);
+                Ok(())
+            })
+            .collect(&path)?;
 
         let errors = errors.into_inner();
         assert_eq!(errors.len(), 3);
@@ -786,10 +854,30 @@ mod tests {
     fn handler_can_ignore_errors() -> Result<()> {
         let path = composition_path("references/reference_invalid.usda");
         let resolver = DefaultResolver::new();
-        let layers = collect_layers_with_handler(&resolver, &path, |_| Ok(()))?;
+        let layers = Collector::new(&resolver).on_error(|_| Ok(())).collect(&path)?;
 
         // Root layer loads despite the missing reference.
         assert_eq!(layers.len(), 1);
+        assert!(layers[0].identifier.contains("reference_invalid.usda"));
+        Ok(())
+    }
+
+    #[test]
+    fn filter_skips_dependency() -> Result<()> {
+        let path = composition_path("references/reference_invalid.usda");
+        let resolver = DefaultResolver::new();
+        let errors = RefCell::new(0);
+        let include = |path: &Path| path.as_str() == "/World/cube";
+        let layers = Collector::new(&resolver)
+            .prim_dependency_filter(&include)
+            .on_error(|_| {
+                *errors.borrow_mut() += 1;
+                Ok(())
+            })
+            .collect(&path)?;
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(*errors.borrow(), 0);
         assert!(layers[0].identifier.contains("reference_invalid.usda"));
         Ok(())
     }

@@ -189,6 +189,32 @@ impl Path {
         }
     }
 
+    /// Returns this path with every `{set=sel}` variant segment removed.
+    ///
+    /// Equivalent to C++ `SdfPath::StripAllVariantSelections`. Both trailing
+    /// and interior variant segments are stripped, so
+    /// `/A{x=y}/B{p=q}/C` becomes `/A/B/C`.
+    pub fn strip_all_variant_selections(&self) -> Path {
+        if !self.path.contains('{') {
+            return self.clone();
+        }
+        let mut out = String::with_capacity(self.path.len());
+        let mut rest = self.path.as_str();
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            match rest[open..].find('}') {
+                Some(close) => rest = &rest[open + close + 1..],
+                None => {
+                    out.push_str(&rest[open..]);
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        out.push_str(rest);
+        Path::from_str_unchecked(&out)
+    }
+
     /// Returns `true` if this path starts with `prefix` at a path boundary.
     ///
     /// A match requires either equality with `prefix` or that the suffix
@@ -488,6 +514,22 @@ mod tests {
 
         for (path, expected) in cases {
             assert_eq!(Path::new(path).unwrap().is_property_path(), expected);
+        }
+    }
+
+    #[test]
+    fn test_strip_all_variant_selections() {
+        let cases: &[(&str, &str)] = &[
+            ("/A/B/C", "/A/B/C"),
+            ("/A{set=sel}", "/A"),
+            ("/A{set=sel}/B", "/A/B"),
+            ("/A{x=y}/B{p=q}/C", "/A/B/C"),
+            ("/A/B{p=q}/C.attr", "/A/B/C.attr"),
+            ("/", "/"),
+        ];
+        for (input, expected) in cases {
+            let p = Path::new(input).unwrap();
+            assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
         }
     }
 

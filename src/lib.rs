@@ -12,7 +12,7 @@
 //! | [`usdc`] | Binary format. [`CrateData`](usdc::CrateData) parses and [`CrateWriter`](usdc::CrateWriter) emits `.usdc` files. |
 //! | [`usdz`] | Archive format. [`Archive`](usdz::Archive) reads and [`ArchiveWriter`](usdz::ArchiveWriter) emits `.usdz` packages. |
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |
-//! | [`layer`] | Layer collection. [`collect_layers`](layer::collect_layers) recursively loads all layers from a root file. |
+//! | [`layer`] | Layer collection. [`Collector`](layer::Collector) recursively loads all layers from a root file. |
 //! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering, per-prim index caching, and namespace mapping via [`MapFunction`](pcp::MapFunction). |
 //! | [`stage`] | Composed stage. [`Stage`](stage::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`expr`] | Variable expression parser and evaluator for USD's `\`...\`` expression syntax. |
@@ -42,7 +42,7 @@ pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
-pub use layer::{DependencyKind, LayerFormat};
+pub use layer::{Collector, DependencyKind, LayerFormat};
 pub use stage::{InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageBuilder, StagePopulationMask};
 
 /// A recoverable error encountered during stage composition.
