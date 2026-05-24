@@ -238,22 +238,32 @@ fn read_inherited_rel(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Opti
 /// Saves callers from re-walking for each schema family.
 pub fn find_skel_prims(stage: &Stage) -> Result<SkelPrims> {
     let mut out = SkelPrims::default();
+    let mut first_err: Result<()> = Ok(());
     stage.traverse(|path| {
-        if let Ok(Some(type_name)) = stage.type_name(path) {
-            match type_name.as_str() {
-                T_SKEL_ROOT => out.skel_roots.push(path.as_str().to_string()),
-                T_SKELETON => out.skeletons.push(path.as_str().to_string()),
-                T_SKEL_ANIMATION => out.animations.push(path.as_str().to_string()),
-                T_BLEND_SHAPE => out.blend_shapes.push(path.as_str().to_string()),
-                _ => {}
-            }
+        if first_err.is_err() {
+            return;
         }
-        if let Ok(api) = stage.api_schemas(path) {
+        let mut visit = || -> Result<()> {
+            if let Some(type_name) = stage.type_name(path)? {
+                match type_name.as_str() {
+                    T_SKEL_ROOT => out.skel_roots.push(path.as_str().to_string()),
+                    T_SKELETON => out.skeletons.push(path.as_str().to_string()),
+                    T_SKEL_ANIMATION => out.animations.push(path.as_str().to_string()),
+                    T_BLEND_SHAPE => out.blend_shapes.push(path.as_str().to_string()),
+                    _ => {}
+                }
+            }
+            let api = stage.api_schemas(path)?;
             if api.iter().any(|s| s == API_SKEL_BINDING) {
                 out.bindings.push(path.as_str().to_string());
             }
+            Ok(())
+        };
+        if let Err(e) = visit() {
+            first_err = Err(e);
         }
     })?;
+    first_err?;
     Ok(out)
 }
 

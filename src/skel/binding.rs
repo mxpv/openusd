@@ -51,33 +51,37 @@ pub struct SkelBinding {
 /// that SkelRoot is the enclosing scope for skeletal processing).
 pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBinding>> {
     let mut out = Vec::new();
+    let mut first_err: Result<()> = Ok(());
     stage.traverse(|path| {
         // Restrict to the SkelRoot's subtree. `has_prefix` handles the
         // SkelRoot == "/" case correctly (every absolute path has "/"
         // as a prefix).
-        if !path.has_prefix(skel_root) {
+        if first_err.is_err() || !path.has_prefix(skel_root) {
             return;
         }
-        let api = match stage.api_schemas(path) {
-            Ok(api) => api,
-            Err(_) => return,
+        let mut visit = || -> Result<()> {
+            let api = stage.api_schemas(path)?;
+            if !api.iter().any(|s| s == API_SKEL_BINDING) {
+                return Ok(());
+            }
+            let Some(binding) = read_skel_binding(stage, path)? else {
+                return Ok(());
+            };
+            let skeleton = read_inherited_skeleton(stage, path)?;
+            let animation_source = read_inherited_animation_source(stage, path)?;
+            out.push(SkelBinding {
+                prim: path.as_str().to_string(),
+                skeleton,
+                animation_source,
+                binding,
+            });
+            Ok(())
         };
-        if !api.iter().any(|s| s == API_SKEL_BINDING) {
-            return;
+        if let Err(e) = visit() {
+            first_err = Err(e);
         }
-        let binding = match read_skel_binding(stage, path) {
-            Ok(Some(b)) => b,
-            _ => return,
-        };
-        let skeleton = read_inherited_skeleton(stage, path).ok().flatten();
-        let animation_source = read_inherited_animation_source(stage, path).ok().flatten();
-        out.push(SkelBinding {
-            prim: path.as_str().to_string(),
-            skeleton,
-            animation_source,
-            binding,
-        });
     })?;
+    first_err?;
     Ok(out)
 }
 
@@ -87,16 +91,18 @@ pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBind
 /// disambiguate which skeleton each animation drives).
 pub fn discover_skeletons(stage: &Stage, skel_root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let mut first_err: Result<()> = Ok(());
     stage.traverse(|path| {
-        if !path.has_prefix(skel_root) {
+        if first_err.is_err() || !path.has_prefix(skel_root) {
             return;
         }
-        if let Ok(Some(t)) = stage.type_name(path) {
-            if t == T_SKELETON {
-                out.push(path.as_str().to_string());
-            }
+        match stage.type_name(path) {
+            Ok(Some(t)) if t == T_SKELETON => out.push(path.as_str().to_string()),
+            Ok(_) => {}
+            Err(e) => first_err = Err(e),
         }
     })?;
+    first_err?;
     Ok(out)
 }
 
@@ -104,12 +110,17 @@ pub fn discover_skeletons(stage: &Stage, skel_root: &Path) -> Result<Vec<String>
 /// for tools that don't know upfront where the SkelRoots live.
 pub fn find_skel_roots(stage: &Stage) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let mut first_err: Result<()> = Ok(());
     stage.traverse(|path| {
-        if let Ok(Some(t)) = stage.type_name(path) {
-            if t == T_SKEL_ROOT {
-                out.push(path.as_str().to_string());
-            }
+        if first_err.is_err() {
+            return;
+        }
+        match stage.type_name(path) {
+            Ok(Some(t)) if t == T_SKEL_ROOT => out.push(path.as_str().to_string()),
+            Ok(_) => {}
+            Err(e) => first_err = Err(e),
         }
     })?;
+    first_err?;
     Ok(out)
 }
