@@ -36,6 +36,8 @@ pub mod pcp;
 #[cfg(feature = "physics")]
 pub mod physics;
 pub mod sdf;
+#[cfg(feature = "skel")]
+pub mod skel;
 pub mod stage;
 pub mod usda;
 pub mod usdc;

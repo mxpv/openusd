@@ -178,7 +178,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [UsdGeom](https://openusd.org/release/api/usd_geom_page_front.html) (geometry, transforms, cameras) | :construction: | | |
 | [UsdShade](https://openusd.org/release/api/usd_shade_page_front.html) (materials, shaders) | :construction: | | |
 | [UsdLux](https://openusd.org/release/api/usd_lux_page_front.html) (lighting) | :construction: | | |
-| [UsdSkel](https://openusd.org/release/api/usd_skel_page_front.html) (skeletons, skinning) | :construction: | | |
+| [UsdSkel](https://openusd.org/release/api/usd_skel_page_front.html) (skeletons, skinning) | :white_check_mark: | `main` | Schema reader behind `skel` feature. Covers `SkelRoot`, `Skeleton`, `SkelAnimation`, `BlendShape` (incl. inbetween shapes), and `SkelBindingAPI` with namespace-inherited `skel:skeleton` / `skel:animationSource`. No authoring helpers; stage-level interpolation of SkelAnimation time samples is left to the consumer. |
 | [UsdVol](https://openusd.org/release/api/usd_vol_page_front.html) (volumes) | :construction: | | |
 | [UsdPhysics](https://openusd.org/release/api/usd_physics_page_front.html) | :white_check_mark: | `main` | Schema reader behind `physics` feature. Covers all 8 prim types, 7 single-apply APIs, `LimitAPI` + `DriveAPI` multi-apply. No authoring helpers; `CollisionGroup` returns raw collection targets only. |
 | [UsdRender](https://openusd.org/release/api/usd_render_page_front.html) | :construction: | | |

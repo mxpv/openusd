@@ -11,6 +11,7 @@ keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
 [features]
 physics = []
+skel = []
 serde = ["dep:serde", "half/serde"]
 
 [dependencies]
@@ -51,3 +52,7 @@ required-features = ["serde"]
 [[test]]
 name = "physics_reader"
 required-features = ["physics"]
+
+[[test]]
+name = "skel_reader"
+required-features = ["skel"]
