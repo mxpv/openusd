@@ -63,8 +63,15 @@ pub fn mat4_transform_vec(m: &[f64; 16], v: [f32; 3]) -> [f32; 3] {
     [nx as f32, ny as f32, nz as f32]
 }
 
+/// Singularity threshold for [`mat4_inverse`]. `f64::EPSILON` (≈ 2.2e-16)
+/// is tight enough that ill-conditioned real-world bind matrices slip
+/// through and produce numerically-unstable inverses; `1e-12` matches
+/// the tolerance Pixar's reference inverter uses for skel data.
+const MAT4_SINGULAR_DETERMINANT: f64 = 1e-12;
+
 /// Invert a 4×4 row-major matrix using cofactor expansion.
-/// Returns [`None`] when the matrix is singular (determinant ≈ 0).
+/// Returns [`None`] when the matrix is singular or near-singular
+/// (`|det| < `[`MAT4_SINGULAR_DETERMINANT`]).
 pub fn mat4_inverse(m: &[f64; 16]) -> Option<[f64; 16]> {
     let mut inv = [0.0f64; 16];
 
@@ -115,7 +122,7 @@ pub fn mat4_inverse(m: &[f64; 16]) -> Option<[f64; 16]> {
         - m[8] * m[2] * m[5];
 
     let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-    if det.abs() < f64::EPSILON {
+    if det.abs() < MAT4_SINGULAR_DETERMINANT {
         return None;
     }
     let inv_det = 1.0 / det;
@@ -518,6 +525,23 @@ mod tests {
         for i in 0..16 {
             assert!((id[i] - IDENTITY_MAT4[i]).abs() < 1e-10, "row-col {i}: {id:?}");
         }
+    }
+
+    #[test]
+    fn inverse_rejects_near_singular() {
+        // A 4x4 with two identical rows is singular (det = 0); a
+        // matrix scaled by ~1e-7 across the board is well above
+        // f64::EPSILON but well below the 1e-12 skel threshold.
+        let mut near_singular = [0.0f64; 16];
+        // Diagonal scale of 1e-4 means det = 1e-16 — under 1e-12.
+        for i in 0..4 {
+            near_singular[i * 4 + i] = 1e-4;
+        }
+        assert!(mat4_inverse(&near_singular).is_none(), "should reject near-singular");
+
+        // Plain singular (row of zeros).
+        let singular = [0.0f64; 16];
+        assert!(mat4_inverse(&singular).is_none(), "should reject zero matrix");
     }
 
     #[test]

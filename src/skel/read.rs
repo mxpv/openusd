@@ -120,6 +120,10 @@ fn read_inbetweens(stage: &Stage, prim: &Path) -> Result<Vec<ReadInbetween>> {
         let offsets = match stage.field::<Value>(attr_path.clone(), "default")? {
             Some(Value::Vec3fVec(v)) => v,
             Some(Value::Vec3dVec(v)) => v.into_iter().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32]).collect(),
+            Some(Value::Vec3hVec(v)) => v
+                .into_iter()
+                .map(|a| [a[0].to_f32(), a[1].to_f32(), a[2].to_f32()])
+                .collect(),
             _ => Vec::new(),
         };
         let weight = match stage.field::<Value>(attr_path, META_WEIGHT)? {
