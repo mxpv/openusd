@@ -119,27 +119,21 @@ impl SkinningResolver {
     /// Remap skinning transforms from the bound skeleton's joint
     /// order into the mesh's effective order. No-op when no
     /// `skel:joints` subset was authored.
+    ///
+    /// Walks the pre-computed mapper indices once with no
+    /// intermediate buffers, so this is cheap to call per frame.
+    /// Missing joints (a target joint that isn't in the bound
+    /// skeleton — rare but legal) get [`IDENTITY_MAT4`].
     pub fn remap_skinning_xforms(&self, skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f64; 16]> {
         if self.mapper.is_identity() {
             return skel_skinning_xforms.to_vec();
         }
-        // Flatten through the strided helper. Missing joints land as
-        // identity (fill value = 1 on the diagonal).
-        let flat: Vec<f64> = skel_skinning_xforms.iter().flat_map(|m| m.iter().copied()).collect();
-        let strided = self.mapper.remap_with_stride(&flat, 16, 0.0);
-        let mut out = Vec::with_capacity(self.num_mesh_joints);
-        for chunk in strided.chunks_exact(16) {
-            let mut m = [0.0f64; 16];
-            m.copy_from_slice(chunk);
-            // Fill-with-zeros leaves missing joints as the all-zeros
-            // matrix; promote to identity so the downstream skin
-            // routine doesn't collapse points to the origin.
-            if m == [0.0f64; 16] {
-                m = IDENTITY_MAT4;
-            }
-            out.push(m);
-        }
-        out
+        (0..self.mapper.target_len())
+            .map(|t| match self.mapper.source_index(t) {
+                Some(i) => skel_skinning_xforms[i],
+                None => IDENTITY_MAT4,
+            })
+            .collect()
     }
 
     /// Skin `points` through this binding's per-vertex influences,

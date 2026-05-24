@@ -26,6 +26,11 @@ pub struct AnimMapper {
     /// `indices[t]` = the source index that should land at target `t`,
     /// or [`MISSING`] if the target joint isn't in the source.
     indices: Vec<i32>,
+    /// Number of joints the mapper was constructed for on the source
+    /// side. [`remap`] / [`remap_with_stride`] assert that incoming
+    /// arrays match this length so callers fail fast on a mismatch
+    /// rather than picking up garbage.
+    source_len: usize,
     /// `true` iff `indices == [0, 1, 2, …, n-1]` AND `source.len() ==
     /// target.len()`. When set, [`remap`] is a straight clone.
     identity: bool,
@@ -48,6 +53,7 @@ impl AnimMapper {
         let identity = source.len() == target.len() && indices.iter().enumerate().all(|(i, &j)| j == i as i32);
         Self {
             indices,
+            source_len: source.len(),
             identity,
             full,
         }
@@ -58,9 +64,25 @@ impl AnimMapper {
         &self.indices
     }
 
+    /// Number of joints the mapper expects on the source side.
+    pub fn source_len(&self) -> usize {
+        self.source_len
+    }
+
     /// Number of joints in the target ordering.
     pub fn target_len(&self) -> usize {
         self.indices.len()
+    }
+
+    /// Source index that lands at target slot `target`, or [`None`]
+    /// when the target joint isn't present in the source. Hides the
+    /// internal sentinel encoding from callers — prefer this over
+    /// inspecting [`indices`] directly.
+    pub fn source_index(&self, target: usize) -> Option<usize> {
+        match self.indices.get(target).copied()? {
+            MISSING => None,
+            i => Some(i as usize),
+        }
     }
 
     /// `true` when the mapper is a no-op (source order equals target
@@ -84,9 +106,16 @@ impl AnimMapper {
 
     /// Remap a per-joint array `source` (one element per source
     /// joint) into target order. Missing entries get `default`.
-    /// Panics if `source.len()` doesn't match the source length the
-    /// mapper was built with.
+    ///
+    /// Panics when `source.len() != self.source_len()`.
     pub fn remap<T: Clone>(&self, source: &[T], default: T) -> Vec<T> {
+        assert_eq!(
+            source.len(),
+            self.source_len,
+            "AnimMapper::remap: source length {} != mapper source length {}",
+            source.len(),
+            self.source_len
+        );
         if self.identity {
             return source.to_vec();
         }
@@ -106,7 +135,19 @@ impl AnimMapper {
     /// matrix data stored as a flat `Vec<f64>` (stride = 16) or any
     /// other strided per-joint buffer. `default` is the value to copy
     /// into each entry of a missing slot.
+    ///
+    /// Panics when `source.len() != self.source_len() * stride`.
     pub fn remap_with_stride<T: Copy>(&self, source: &[T], stride: usize, default: T) -> Vec<T> {
+        let expected = self.source_len * stride;
+        assert_eq!(
+            source.len(),
+            expected,
+            "AnimMapper::remap_with_stride: source length {} != source_len {} * stride {} = {}",
+            source.len(),
+            self.source_len,
+            stride,
+            expected
+        );
         let mut out = Vec::with_capacity(self.indices.len() * stride);
         for &i in &self.indices {
             if i == MISSING {
@@ -152,6 +193,20 @@ mod tests {
         assert!(m.is_sparse());
         assert_eq!(m.indices(), &[0, MISSING]);
         assert_eq!(m.remap(&[42], 0), vec![42, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "source length")]
+    fn remap_rejects_wrong_source_length() {
+        let m = AnimMapper::new(&s(&["A", "B"]), &s(&["A", "B"]));
+        let _ = m.remap(&[1], 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "source length")]
+    fn remap_with_stride_rejects_wrong_source_length() {
+        let m = AnimMapper::new(&s(&["A", "B"]), &s(&["A"]));
+        let _ = m.remap_with_stride(&[0.0_f32; 7], 4, 0.0);
     }
 
     #[test]
