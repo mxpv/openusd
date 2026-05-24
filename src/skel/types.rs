@@ -1,6 +1,7 @@
 //! Decoded structs and enums returned by [`super::read`] functions.
 
 use super::tokens::*;
+use super::topology::joint_index_map;
 
 /// `primvars:skel:skinningMethod` token values from `UsdSkelBindingAPI`.
 ///
@@ -106,8 +107,7 @@ impl ReadSkeleton {
     /// `joints[i] = "A/B"` ⇒ parent is the index of `"A"`; a joint with
     /// no `/` is a root and gets `None`.
     pub fn joint_parent_indices(&self) -> Vec<Option<usize>> {
-        let by_path: std::collections::HashMap<&str, usize> =
-            self.joints.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+        let by_path = joint_index_map(&self.joints);
         self.joints
             .iter()
             .map(|p| {
@@ -132,8 +132,7 @@ impl ReadSkeleton {
     /// onto skeleton joint indices — the animation's ordering need not
     /// match the skeleton's.
     pub fn map_anim_joints(&self, anim_joints: &[String]) -> Vec<Option<usize>> {
-        let by_path: std::collections::HashMap<&str, usize> =
-            self.joints.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect();
+        let by_path = joint_index_map(&self.joints);
         anim_joints.iter().map(|p| by_path.get(p.as_str()).copied()).collect()
     }
 }

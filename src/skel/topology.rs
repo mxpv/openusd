@@ -10,6 +10,14 @@
 /// [`Topology::parents`] / [`Topology::parent`].
 pub const NO_PARENT: i32 = -1;
 
+/// Build a `{joint_path → index}` lookup over a `joints` token array.
+/// Shared between [`Topology::from_joint_paths`] and the read-side
+/// helpers in [`super::types`] so the same hashmap construction isn't
+/// duplicated.
+pub(super) fn joint_index_map(joints: &[String]) -> std::collections::HashMap<&str, usize> {
+    joints.iter().enumerate().map(|(i, p)| (p.as_str(), i)).collect()
+}
+
 /// Joint topology — parent indices, validation, root tests.
 ///
 /// Indices line up 1:1 with the originating `joints` token array.
@@ -34,13 +42,12 @@ impl Topology {
     ///
     /// Order is preserved: `parents[i]` corresponds to `paths[i]`.
     pub fn from_joint_paths(paths: &[String]) -> Self {
-        use std::collections::HashMap;
-        let by_path: HashMap<&str, i32> = paths.iter().enumerate().map(|(i, p)| (p.as_str(), i as i32)).collect();
+        let by_path = joint_index_map(paths);
         let parents = paths
             .iter()
             .map(|p| {
                 p.rsplit_once('/')
-                    .and_then(|(parent, _)| by_path.get(parent).copied())
+                    .and_then(|(parent, _)| by_path.get(parent).copied().map(|i| i as i32))
                     .unwrap_or(NO_PARENT)
             })
             .collect();
