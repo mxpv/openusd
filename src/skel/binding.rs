@@ -50,14 +50,12 @@ pub struct SkelBinding {
 /// function does NOT walk outside its subtree (per the UsdSkel rule
 /// that SkelRoot is the enclosing scope for skeletal processing).
 pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBinding>> {
-    let prefix = skel_root.as_str().to_string();
     let mut out = Vec::new();
     stage.traverse(|path| {
-        let p = path.as_str();
-        // Restrict to the SkelRoot's subtree. Pixar's UsdSkel allows
-        // SkelRoot to be the root itself (path = "/"), in which case
-        // the prefix check trivially holds.
-        if !is_under(p, &prefix) {
+        // Restrict to the SkelRoot's subtree. `has_prefix` handles the
+        // SkelRoot == "/" case correctly (every absolute path has "/"
+        // as a prefix).
+        if !path.has_prefix(skel_root) {
             return;
         }
         let api = match stage.api_schemas(path) {
@@ -74,7 +72,7 @@ pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBind
         let skeleton = read_inherited_skeleton(stage, path).ok().flatten();
         let animation_source = read_inherited_animation_source(stage, path).ok().flatten();
         out.push(SkelBinding {
-            prim: p.to_string(),
+            prim: path.as_str().to_string(),
             skeleton,
             animation_source,
             binding,
@@ -88,16 +86,14 @@ pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBind
 /// AnimationSource binding then has to be authored carefully to
 /// disambiguate which skeleton each animation drives).
 pub fn discover_skeletons(stage: &Stage, skel_root: &Path) -> Result<Vec<String>> {
-    let prefix = skel_root.as_str().to_string();
     let mut out = Vec::new();
     stage.traverse(|path| {
-        let p = path.as_str();
-        if !is_under(p, &prefix) {
+        if !path.has_prefix(skel_root) {
             return;
         }
         if let Ok(Some(t)) = stage.type_name(path) {
             if t == T_SKELETON {
-                out.push(p.to_string());
+                out.push(path.as_str().to_string());
             }
         }
     })?;
@@ -118,12 +114,3 @@ pub fn find_skel_roots(stage: &Stage) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn is_under(path: &str, prefix: &str) -> bool {
-    if prefix == "/" {
-        return true;
-    }
-    if path == prefix {
-        return true;
-    }
-    path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
-}
