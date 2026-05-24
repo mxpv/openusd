@@ -1,0 +1,86 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    doc = "UsdSkel reader integration test fixture: covers SkelRoot, Skeleton, SkelAnimation, BlendShape (with inbetweens), and SkelBindingAPI on a skinned Mesh."
+)
+
+def Xform "World"
+{
+    def SkelRoot "Character" (
+        prepend apiSchemas = ["SkelBindingAPI"]
+    )
+    {
+        float3[] extent = [(-1, 0, -1), (1, 2, 1)]
+        rel skel:skeleton = </World/Character/Rig>
+        rel skel:animationSource = </World/Character/Anim>
+
+        def Skeleton "Rig"
+        {
+            uniform token[] joints = ["Root", "Root/Hip", "Root/Hip/Knee"]
+            uniform matrix4d[] bindTransforms = [
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ),
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) ),
+            ]
+            uniform matrix4d[] restTransforms = [
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ),
+                ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) ),
+            ]
+        }
+
+        def SkelAnimation "Anim"
+        {
+            uniform token[] joints = ["Root", "Root/Hip", "Root/Hip/Knee"]
+            uniform token[] blendShapes = ["smile"]
+            float3[] translations.timeSamples = {
+                0: [(0, 0, 0), (0, 1, 0), (0, 1, 0)],
+                10: [(0, 0, 0), (0, 1.5, 0), (0, 1, 0)],
+            }
+            quatf[] rotations.timeSamples = {
+                0: [(1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)],
+                10: [(1, 0, 0, 0), (0.707, 0, 0, 0.707), (1, 0, 0, 0)],
+            }
+            float[] blendShapeWeights.timeSamples = {
+                0: [0.0],
+                10: [1.0],
+            }
+        }
+
+        def Mesh "Body" (
+            prepend apiSchemas = ["SkelBindingAPI"]
+        )
+        {
+            point3f[] points = [(-0.5, 0, -0.5), (0.5, 0, -0.5), (0.5, 0, 0.5), (-0.5, 0, 0.5)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+
+            uniform token[] skel:joints = ["Root/Hip", "Root/Hip/Knee"]
+            uniform token[] skel:blendShapes = ["smile"]
+            rel skel:blendShapeTargets = </World/Character/Smile>
+
+            int[] primvars:skel:jointIndices = [0, 0, 1, 1] (
+                interpolation = "vertex"
+                elementSize = 1
+            )
+            float[] primvars:skel:jointWeights = [1.0, 1.0, 1.0, 1.0] (
+                interpolation = "vertex"
+                elementSize = 1
+            )
+            matrix4d primvars:skel:geomBindTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            uniform token primvars:skel:skinningMethod = "classicLinear"
+        }
+
+        def BlendShape "Smile"
+        {
+            uniform vector3f[] offsets = [(0, 0.1, 0), (0, 0.1, 0)]
+            uniform vector3f[] normalOffsets = [(0, 0, 0), (0, 0, 0)]
+            uniform int[] pointIndices = [0, 1]
+            uniform vector3f[] inbetweens:half (
+                weight = 0.5
+            ) = [(0, 0.04, 0), (0, 0.04, 0)]
+        }
+    }
+}
