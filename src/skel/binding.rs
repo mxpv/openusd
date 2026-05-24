@@ -113,4 +113,3 @@ pub fn find_skel_roots(stage: &Stage) -> Result<Vec<String>> {
     })?;
     Ok(out)
 }
-

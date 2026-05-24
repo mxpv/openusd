@@ -200,14 +200,20 @@ pub fn read_skel_binding(stage: &Stage, prim: &Path) -> Result<Option<ReadSkelBi
 
 /// Resolve the inherited `skel:skeleton` binding for `prim` by walking
 /// up its ancestors. Returns the rel target authored on the nearest
-/// ancestor (inclusive of `prim` itself) that has `SkelBindingAPI`
-/// applied and authors the rel, or `None` if no such ancestor exists.
+/// ancestor (inclusive of `prim` itself) that authors the rel, or
+/// `None` if no such ancestor exists.
+///
+/// The walk does not require `SkelBindingAPI` to be formally applied
+/// on the ancestor — `skel:skeleton` is inheritable down namespace by
+/// virtue of being a `skel:`-prefixed rel, regardless of where the
+/// API is declared.
 pub fn read_inherited_skeleton(stage: &Stage, prim: &Path) -> Result<Option<String>> {
     read_inherited_rel(stage, prim, REL_SKEL_SKELETON)
 }
 
 /// Resolve the inherited `skel:animationSource` binding for `prim` by
-/// walking up its ancestors.
+/// walking up its ancestors. Same inheritance rules as
+/// [`read_inherited_skeleton`].
 pub fn read_inherited_animation_source(stage: &Stage, prim: &Path) -> Result<Option<String>> {
     read_inherited_rel(stage, prim, REL_SKEL_ANIMATION_SOURCE)
 }

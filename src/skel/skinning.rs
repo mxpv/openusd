@@ -21,10 +21,11 @@ pub const IDENTITY_MAT4: [f64; 16] = [
 /// `out = a · b` for two 4×4 row-major matrices.
 ///
 /// USD authors transforms in row-major form and applies them by
-/// pre-multiplying row vectors: `v_out = v_in · M`. Composition is
-/// therefore `(M_parent · M_local)` to chain a child's local
-/// transform under its parent — the same convention every UsdSkel
-/// formula in the spec uses.
+/// pre-multiplying row vectors: `v_out = v_in · M`. Sequences of
+/// transforms therefore chain left-to-right: to place a child's local
+/// transform under its parent's, compose `(M_local · M_parent)` — the
+/// same form the UsdSkel spec writes as
+/// `jointLocalSpaceTransform * parentJointSkelSpaceTransform`.
 pub fn mat4_mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
     let mut out = [0.0f64; 16];
     for r in 0..4 {
