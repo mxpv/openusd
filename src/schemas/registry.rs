@@ -7,8 +7,8 @@
 //! aliases. Once openusd-rs gains enough domain schemas to make a
 //! shared lookup useful, this is where that registry will live.
 //!
-//! Today the per-schema readers in [`super::physics`] and
-//! [`super::skel`] keep their own token constants and validation
-//! logic in-module — the registry layer doesn't need to exist yet,
-//! and would just be empty plumbing. The module exists as a clear
-//! signpost so future contributions know where to grow.
+//! Today the per-schema readers in `super::physics` and `super::skel`
+//! keep their own token constants and validation logic in-module —
+//! the registry layer doesn't need to exist yet, and would just be
+//! empty plumbing. The module exists as a clear signpost so future
+//! contributions know where to grow.
