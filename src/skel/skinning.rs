@@ -529,6 +529,58 @@ mod tests {
     }
 
     #[test]
+    fn inverse_round_trips_with_rotation() {
+        // Build a non-trivial transform that exercises every off-diagonal
+        // term of the 3x3 sub-block plus the translation row. A translation-
+        // only round-trip is too easy — its inverse is just the negated row
+        // — and would not catch an `m[r*4 + c]` ↔ `m[c*4 + r]` typo in any
+        // of the 16 cofactor formulas in mat4_inverse.
+        let scale = {
+            let mut m = IDENTITY_MAT4;
+            m[0] = 2.0;
+            m[5] = 3.0;
+            m[10] = 0.5;
+            m
+        };
+        // 30° rotation around Z (row-vector form: v_new = v · R_z).
+        let rot_z = {
+            let c = 0.8660254037844387_f64;
+            let s = 0.5_f64;
+            let mut m = IDENTITY_MAT4;
+            m[0] = c;
+            m[1] = s;
+            m[4] = -s;
+            m[5] = c;
+            m
+        };
+        let trans = translation(7.0, -3.0, 11.0);
+
+        // M = scale · rot_z · trans. Order doesn't matter for the test;
+        // any invertible non-axis-aligned composition lights up the cofactors.
+        let m = mat4_mul(&mat4_mul(&scale, &rot_z), &trans);
+        let inv = mat4_inverse(&m).expect("non-singular");
+
+        // Both M · inv and inv · M must equal identity. Checking both
+        // catches any cofactor-expansion asymmetry that a one-sided check
+        // would miss.
+        let id1 = mat4_mul(&m, &inv);
+        let id2 = mat4_mul(&inv, &m);
+        for i in 0..16 {
+            assert!((id1[i] - IDENTITY_MAT4[i]).abs() < 1e-10, "M·inv off at {i}: {id1:?}");
+            assert!((id2[i] - IDENTITY_MAT4[i]).abs() < 1e-10, "inv·M off at {i}: {id2:?}");
+        }
+
+        // Round-trip a non-trivial point through M then inv — independent
+        // sanity check on top of the matrix identity.
+        let p = [4.0_f32, -2.5, 7.5];
+        let warped = mat4_transform_point(&m, p);
+        let back = mat4_transform_point(&inv, warped);
+        for k in 0..3 {
+            assert!((back[k] - p[k]).abs() < 1e-4, "point round-trip off: {back:?} vs {p:?}");
+        }
+    }
+
+    #[test]
     fn inverse_rejects_near_singular() {
         // A 4x4 with two identical rows is singular (det = 0); a
         // matrix scaled by ~1e-7 across the board is well above
