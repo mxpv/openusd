@@ -4,11 +4,11 @@
 //! SkeletonResolver, SkinningResolver, binding discovery).
 
 use anyhow::Result;
-use openusd::sdf;
-use openusd::skel::{
+use openusd::schemas::skel::{
     self, discover_bindings, find_skel_roots, AnimMapper, InfluenceInterpolation, SkeletonResolver, SkinningMethod,
     SkinningResolver, Topology, NO_PARENT,
 };
+use openusd::sdf;
 use openusd::Stage;
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
@@ -210,7 +210,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
     // Author identity skinning transforms for every skeleton joint.
     // After remapping, the mesh-side array should still be length 2
     // (since the subset selects 2 joints).
-    let identity = openusd::skel::skinning::IDENTITY_MAT4;
+    let identity = openusd::schemas::skel::skinning::IDENTITY_MAT4;
     let skel_xforms = vec![identity; 3];
     let mesh_xforms = resolver.remap_skinning_xforms(&skel_xforms);
     assert_eq!(mesh_xforms.len(), 2);
@@ -231,7 +231,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
         [0.5, 0.0, 0.5],
         [-0.5, 0.0, 0.5],
     ];
-    let identity = openusd::skel::skinning::IDENTITY_MAT4;
+    let identity = openusd::schemas::skel::skinning::IDENTITY_MAT4;
     let skel_xforms = vec![identity; 3];
     let out = resolver.compute_skinned_points(&pts, &skel_xforms);
     // Identity geom-bind + identity joints + weight 1.0 = no movement.

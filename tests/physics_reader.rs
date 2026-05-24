@@ -2,7 +2,7 @@
 //! that exercises every schema family the reader covers.
 
 use anyhow::Result;
-use openusd::physics::{self, CollisionApprox, Dof, DriveType, JointKind};
+use openusd::schemas::physics::{self, CollisionApprox, Dof, DriveType, JointKind};
 use openusd::sdf;
 use openusd::Stage;
 
