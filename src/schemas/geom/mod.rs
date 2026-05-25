@@ -29,19 +29,22 @@
 pub mod tokens;
 
 mod camera;
+mod mesh;
 mod read;
 mod shapes;
 mod types;
 mod xform;
 
 pub use camera::read_camera;
+pub use mesh::{read_mesh, read_primvar_float, read_primvar_vec2f, read_primvar_vec3f, read_subset};
 pub use read::{
     compute_purpose, compute_visibility, find_geom_prims, read_extent, read_kind, read_proxy_prim, read_purpose,
     read_visibility,
 };
 pub use shapes::{read_capsule, read_cone, read_cube, read_cylinder, read_plane, read_sphere};
 pub use types::{
-    Axis, GeomPrims, Orientation, Projection, Purpose, ReadCamera, ReadCapsule, ReadCone, ReadCube, ReadCylinder,
-    ReadPlane, ReadSphere, StereoRole, Visibility,
+    Axis, ElementType, GeomPrims, Interpolation, Orientation, Primvar, Projection, Purpose, ReadCamera, ReadCapsule,
+    ReadCone, ReadCube, ReadCylinder, ReadMesh, ReadPlane, ReadSphere, ReadSubset, StereoRole, SubdivisionScheme,
+    Visibility,
 };
 pub use xform::{compute_local_to_parent_transform, read_xform_op_order, resets_xform_stack};

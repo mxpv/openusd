@@ -88,6 +88,58 @@ pub const STEREO_ROLE_MONO: &str = "mono";
 pub const STEREO_ROLE_LEFT: &str = "left";
 pub const STEREO_ROLE_RIGHT: &str = "right";
 
+// ── PointBased attribute names (shared by Mesh, Points, Curves, …) ──────
+pub const A_POINTS: &str = "points";
+pub const A_NORMALS: &str = "normals";
+pub const A_VELOCITIES: &str = "velocities";
+pub const A_ACCELERATIONS: &str = "accelerations";
+
+// ── Mesh attribute names ────────────────────────────────────────────────
+pub const A_FACE_VERTEX_COUNTS: &str = "faceVertexCounts";
+pub const A_FACE_VERTEX_INDICES: &str = "faceVertexIndices";
+pub const A_SUBDIVISION_SCHEME: &str = "subdivisionScheme";
+pub const A_INTERPOLATE_BOUNDARY: &str = "interpolateBoundary";
+pub const A_FACE_VARYING_LINEAR_INTERPOLATION: &str = "faceVaryingLinearInterpolation";
+pub const A_TRIANGLE_SUBDIVISION_RULE: &str = "triangleSubdivisionRule";
+pub const A_HOLE_INDICES: &str = "holeIndices";
+pub const A_CORNER_INDICES: &str = "cornerIndices";
+pub const A_CORNER_SHARPNESSES: &str = "cornerSharpnesses";
+pub const A_CREASE_INDICES: &str = "creaseIndices";
+pub const A_CREASE_LENGTHS: &str = "creaseLengths";
+pub const A_CREASE_SHARPNESSES: &str = "creaseSharpnesses";
+
+// Mesh subdivision scheme token values.
+pub const SUBDIV_SCHEME_NONE: &str = "none";
+pub const SUBDIV_SCHEME_CATMULL_CLARK: &str = "catmullClark";
+pub const SUBDIV_SCHEME_LOOP: &str = "loop";
+pub const SUBDIV_SCHEME_BILINEAR: &str = "bilinear";
+
+// ── GeomSubset attribute names ──────────────────────────────────────────
+pub const A_FAMILY_NAME: &str = "familyName";
+pub const A_ELEMENT_TYPE: &str = "elementType";
+pub const A_INDICES: &str = "indices";
+
+// GeomSubset elementType token values.
+pub const ELEMENT_TYPE_FACE: &str = "face";
+pub const ELEMENT_TYPE_POINT: &str = "point";
+pub const ELEMENT_TYPE_EDGE: &str = "edge";
+pub const ELEMENT_TYPE_TETRAHEDRON: &str = "tetrahedron";
+
+// Pixar's canonical material-binding family name on GeomSubsets.
+pub const FAMILY_NAME_MATERIAL_BIND: &str = "materialBind";
+
+// ── Primvar metadata field names ────────────────────────────────────────
+pub const PRIMVARS_NAMESPACE: &str = "primvars:";
+pub const META_INTERPOLATION: &str = "interpolation";
+pub const META_ELEMENT_SIZE: &str = "elementSize";
+
+// Primvar interpolation token values.
+pub const INTERP_CONSTANT: &str = "constant";
+pub const INTERP_UNIFORM: &str = "uniform";
+pub const INTERP_VARYING: &str = "varying";
+pub const INTERP_VERTEX: &str = "vertex";
+pub const INTERP_FACE_VARYING: &str = "faceVarying";
+
 // Orientation token values.
 pub const ORIENTATION_RIGHT_HANDED: &str = "rightHanded";
 pub const ORIENTATION_LEFT_HANDED: &str = "leftHanded";
