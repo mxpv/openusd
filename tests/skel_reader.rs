@@ -210,7 +210,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
     // Author identity skinning transforms for every skeleton joint.
     // After remapping, the mesh-side array should still be length 2
     // (since the subset selects 2 joints).
-    let identity = openusd::schemas::skel::skinning::IDENTITY_MAT4;
+    let identity = openusd::math::IDENTITY_MAT4;
     let skel_xforms = vec![identity; 3];
     let mesh_xforms = resolver.remap_skinning_xforms(&skel_xforms);
     assert_eq!(mesh_xforms.len(), 2);
@@ -231,7 +231,7 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
         [0.5, 0.0, 0.5],
         [-0.5, 0.0, 0.5],
     ];
-    let identity = openusd::schemas::skel::skinning::IDENTITY_MAT4;
+    let identity = openusd::math::IDENTITY_MAT4;
     let skel_xforms = vec![identity; 3];
     let out = resolver.compute_skinned_points(&pts, &skel_xforms);
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
@@ -341,7 +341,7 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     // to end. With identity rotations everywhere, the resulting
     // skinning xforms should be well-formed (non-zero translation row
     // on the moved joints).
-    let identity_world = openusd::schemas::skel::skinning::IDENTITY_MAT4;
+    let identity_world = openusd::math::IDENTITY_MAT4;
     let skinning = resolver.compute_skinning_transforms_from_local(&locals, &identity_world);
     assert_eq!(skinning.len(), 3);
     Ok(())

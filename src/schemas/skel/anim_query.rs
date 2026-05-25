@@ -16,10 +16,10 @@ use anyhow::Result;
 use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
-use super::skinning::{mat4_mul, IDENTITY_MAT4};
 use super::tokens::{
     A_BLEND_SHAPES, A_BLEND_SHAPE_WEIGHTS, A_JOINTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS, T_SKEL_ANIMATION,
 };
+use crate::math::{mat4_mul, IDENTITY_MAT4};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
 /// joint, holding translation `[x, y, z]`, rotation `[w, x, y, z]`,
