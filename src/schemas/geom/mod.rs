@@ -30,9 +30,11 @@ pub mod tokens;
 
 mod read;
 mod types;
+mod xform;
 
 pub use read::{
     compute_purpose, compute_visibility, find_geom_prims, read_extent, read_kind, read_proxy_prim, read_purpose,
     read_visibility,
 };
 pub use types::{GeomPrims, Orientation, Purpose, Visibility};
+pub use xform::{compute_local_to_parent_transform, read_xform_op_order, resets_xform_stack};
