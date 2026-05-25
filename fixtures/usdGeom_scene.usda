@@ -161,4 +161,42 @@ def Xform "World" (
             uniform token axis = "Y"
         }
     }
+
+    def Mesh "FancyMesh"
+    {
+        # A quad with displayColor + UVs + a faceVertexCount-of-4 face.
+        # GeomSubset child partitions the (single) face into a
+        # material-bind family for downstream binding.
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        color3f[] primvars:displayColor = [(1, 0, 0)] (
+            interpolation = "constant"
+        )
+        bool doubleSided = 1
+        uniform token orientation = "leftHanded"
+        uniform token subdivisionScheme = "none"
+        uniform token interpolateBoundary = "edgeAndCorner"
+        int[] cornerIndices = [0, 2]
+        float[] cornerSharpnesses = [10, 5]
+        int[] creaseIndices = [0, 1, 1, 2]
+        int[] creaseLengths = [2, 2]
+        float[] creaseSharpnesses = [3, 4]
+        int[] holeIndices = []
+        float3[] extent = [(0, 0, 0), (1, 1, 0)]
+        vector3f[] velocities = [(0, 0, 0), (0.1, 0, 0), (0, 0.1, 0), (0, 0, 0)]
+
+        def GeomSubset "Front"
+        {
+            uniform token familyName = "materialBind"
+            uniform token elementType = "face"
+            int[] indices = [0]
+        }
+    }
 }

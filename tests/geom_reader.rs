@@ -7,9 +7,10 @@ use anyhow::Result;
 use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
     self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_camera,
-    read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_kind, read_plane, read_proxy_prim,
-    read_purpose, read_sphere, read_visibility, read_xform_op_order, resets_xform_stack, Axis, Projection, Purpose,
-    StereoRole, Visibility,
+    read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_kind, read_mesh, read_plane, read_proxy_prim,
+    read_purpose, read_sphere, read_subset, read_visibility, read_xform_op_order, resets_xform_stack, Axis,
+    ElementType, Interpolation, Orientation as GeomOrientation, Projection, Purpose, StereoRole, SubdivisionScheme,
+    Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -398,6 +399,134 @@ fn read_camera_returns_none_for_non_camera() -> Result<()> {
     let stage = open()?;
     assert!(read_camera(&stage, &sdf::path("/World/Shapes/Ball")?)?.is_none());
     Ok(())
+}
+
+// ── Mesh + GeomSubset + Primvars ──────────────────────────────────
+
+#[test]
+fn read_mesh_returns_topology() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(m.points.len(), 4);
+    assert_eq!(m.face_vertex_counts, vec![4]);
+    assert_eq!(m.face_vertex_indices, vec![0, 1, 2, 3]);
+    Ok(())
+}
+
+#[test]
+fn mesh_gprim_attrs_round_trip() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    assert!(m.double_sided);
+    assert_eq!(m.orientation, GeomOrientation::LeftHanded);
+    assert_eq!(m.extent, Some([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]));
+    Ok(())
+}
+
+#[test]
+fn mesh_subdivision_attrs() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    assert_eq!(m.subdivision_scheme, SubdivisionScheme::None);
+    assert!(!m.subdivision_scheme.is_subdivision());
+    assert_eq!(m.interpolate_boundary.as_deref(), Some("edgeAndCorner"));
+    assert_eq!(m.corner_indices, vec![0, 2]);
+    assert_eq!(m.corner_sharpnesses, vec![10.0, 5.0]);
+    assert_eq!(m.crease_indices, vec![0, 1, 1, 2]);
+    assert_eq!(m.crease_lengths, vec![2, 2]);
+    assert_eq!(m.crease_sharpnesses, vec![3.0, 4.0]);
+    Ok(())
+}
+
+#[test]
+fn mesh_normals_primvar_carries_interpolation() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    let n = m.normals.expect("normals authored");
+    assert_eq!(n.values.len(), 4);
+    assert_eq!(n.interpolation, Interpolation::Vertex);
+    assert!(n.indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mesh_uvs_default_to_face_varying() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    let uvs = m.uvs.expect("primvars:st authored");
+    assert_eq!(uvs.values, vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+    assert_eq!(uvs.interpolation, Interpolation::FaceVarying);
+    Ok(())
+}
+
+#[test]
+fn mesh_display_color_constant_interp() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    let dc = m.display_color.expect("displayColor authored");
+    assert_eq!(dc.values, vec![[1.0, 0.0, 0.0]]);
+    assert_eq!(dc.interpolation, Interpolation::Constant);
+    Ok(())
+}
+
+#[test]
+fn mesh_velocities_pass_through() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    assert_eq!(m.velocities.len(), 4);
+    assert!(m.accelerations.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mesh_collects_material_bind_subsets() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
+    assert_eq!(m.subsets.len(), 1);
+    let s = &m.subsets[0];
+    assert_eq!(s.path, "/World/FancyMesh/Front");
+    assert_eq!(s.family_name.as_deref(), Some("materialBind"));
+    assert_eq!(s.element_type, ElementType::Face);
+    assert_eq!(s.indices, vec![0]);
+    Ok(())
+}
+
+#[test]
+fn read_subset_directly() -> Result<()> {
+    let stage = open()?;
+    let s = read_subset(&stage, &sdf::path("/World/FancyMesh/Front")?)?.expect("GeomSubset");
+    assert_eq!(s.element_type, ElementType::Face);
+    Ok(())
+}
+
+#[test]
+fn mesh_subdivision_scheme_token_round_trip() {
+    assert_eq!(SubdivisionScheme::default(), SubdivisionScheme::CatmullClark);
+    assert!(SubdivisionScheme::CatmullClark.is_subdivision());
+    assert!(!SubdivisionScheme::None.is_subdivision());
+    assert_eq!(SubdivisionScheme::from_token("loop"), Some(SubdivisionScheme::Loop));
+    assert_eq!(SubdivisionScheme::from_token("bogus"), None);
+}
+
+#[test]
+fn primvar_interpolation_token_round_trip() {
+    for &(token, mode) in &[
+        ("constant", Interpolation::Constant),
+        ("uniform", Interpolation::Uniform),
+        ("varying", Interpolation::Varying),
+        ("vertex", Interpolation::Vertex),
+        ("faceVarying", Interpolation::FaceVarying),
+    ] {
+        assert_eq!(Interpolation::from_token(token), Some(mode));
+        assert_eq!(mode.as_token(), token);
+    }
+}
+
+#[test]
+fn element_type_token_round_trip() {
+    assert_eq!(ElementType::default(), ElementType::Face);
+    assert_eq!(ElementType::from_token("point"), Some(ElementType::Point));
+    assert_eq!(ElementType::Tetrahedron.as_token(), "tetrahedron");
 }
 
 #[test]

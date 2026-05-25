@@ -355,6 +355,188 @@ impl ReadCamera {
     }
 }
 
+/// `UsdGeomMesh.subdivisionScheme` token values. The Pixar default
+/// is [`SubdivisionScheme::CatmullClark`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubdivisionScheme {
+    None,
+    #[default]
+    CatmullClark,
+    Loop,
+    Bilinear,
+}
+
+impl SubdivisionScheme {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            SubdivisionScheme::None => SUBDIV_SCHEME_NONE,
+            SubdivisionScheme::CatmullClark => SUBDIV_SCHEME_CATMULL_CLARK,
+            SubdivisionScheme::Loop => SUBDIV_SCHEME_LOOP,
+            SubdivisionScheme::Bilinear => SUBDIV_SCHEME_BILINEAR,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            SUBDIV_SCHEME_NONE => SubdivisionScheme::None,
+            SUBDIV_SCHEME_CATMULL_CLARK => SubdivisionScheme::CatmullClark,
+            SUBDIV_SCHEME_LOOP => SubdivisionScheme::Loop,
+            SUBDIV_SCHEME_BILINEAR => SubdivisionScheme::Bilinear,
+            _ => return None,
+        })
+    }
+
+    /// `true` when the scheme actually requests subdivision (i.e. not
+    /// [`SubdivisionScheme::None`]).
+    pub fn is_subdivision(self) -> bool {
+        !matches!(self, SubdivisionScheme::None)
+    }
+}
+
+/// Primvar interpolation modes from UsdGeomPrimvar.
+///
+/// `Constant` is one value for the whole prim. `Uniform` is per-face.
+/// `Varying` / `Vertex` are both per-point (with subtle subdivision
+/// differences). `FaceVarying` is per face-vertex (the canonical
+/// case for texture coordinates with seams).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Interpolation {
+    Constant,
+    Uniform,
+    Varying,
+    #[default]
+    Vertex,
+    FaceVarying,
+}
+
+impl Interpolation {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Interpolation::Constant => INTERP_CONSTANT,
+            Interpolation::Uniform => INTERP_UNIFORM,
+            Interpolation::Varying => INTERP_VARYING,
+            Interpolation::Vertex => INTERP_VERTEX,
+            Interpolation::FaceVarying => INTERP_FACE_VARYING,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            INTERP_CONSTANT => Interpolation::Constant,
+            INTERP_UNIFORM => Interpolation::Uniform,
+            INTERP_VARYING => Interpolation::Varying,
+            INTERP_VERTEX => Interpolation::Vertex,
+            INTERP_FACE_VARYING => Interpolation::FaceVarying,
+            _ => return None,
+        })
+    }
+}
+
+/// `UsdGeomSubset.elementType` — what kind of mesh component the
+/// subset enumerates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ElementType {
+    #[default]
+    Face,
+    Point,
+    Edge,
+    Tetrahedron,
+}
+
+impl ElementType {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            ElementType::Face => ELEMENT_TYPE_FACE,
+            ElementType::Point => ELEMENT_TYPE_POINT,
+            ElementType::Edge => ELEMENT_TYPE_EDGE,
+            ElementType::Tetrahedron => ELEMENT_TYPE_TETRAHEDRON,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            ELEMENT_TYPE_FACE => ElementType::Face,
+            ELEMENT_TYPE_POINT => ElementType::Point,
+            ELEMENT_TYPE_EDGE => ElementType::Edge,
+            ELEMENT_TYPE_TETRAHEDRON => ElementType::Tetrahedron,
+            _ => return None,
+        })
+    }
+}
+
+/// Decoded `UsdGeomSubset`. A face-element subset (the most common
+/// kind) enumerates a set of face indices into a parent mesh; the
+/// `family_name` groups subsets that collectively partition the
+/// mesh (e.g. `"materialBind"`).
+#[derive(Debug, Clone, Default)]
+pub struct ReadSubset {
+    pub path: String,
+    pub family_name: Option<String>,
+    pub element_type: ElementType,
+    pub indices: Vec<i32>,
+}
+
+/// One authored primvar — the values plus the metadata that controls
+/// how to interpret them (interpolation mode, optional indices for
+/// indexed primvars, per-element stride).
+#[derive(Debug, Clone, Default)]
+pub struct Primvar<T> {
+    pub values: Vec<T>,
+    pub interpolation: Interpolation,
+    /// Optional `<name>:indices` companion — when non-empty,
+    /// `effective[i] = values[indices[i]]`.
+    pub indices: Vec<i32>,
+    /// `elementSize` metadata — how many `T`s per logical element.
+    /// Defaults to `1`.
+    pub element_size: i32,
+}
+
+/// Decoded `UsdGeomMesh`.
+///
+/// Required attributes: `points`, `faceVertexCounts`,
+/// `faceVertexIndices`. Everything else is optional and surfaced
+/// only when authored.
+///
+/// `subsets` lists every `GeomSubset` child whose `familyName ==
+/// "materialBind"` (the canonical material-partition family). Other
+/// families are accessible via [`super::find_geom_prims`] + the
+/// generic [`super::read_subset`] reader.
+#[derive(Debug, Clone, Default)]
+pub struct ReadMesh {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    pub face_vertex_counts: Vec<i32>,
+    pub face_vertex_indices: Vec<i32>,
+    pub normals: Option<Primvar<[f32; 3]>>,
+    /// `primvars:st` (texture coords). Read as Vec2f; `st0` is also
+    /// honoured as a fallback name.
+    pub uvs: Option<Primvar<[f32; 2]>>,
+    /// `velocities` from PointBased — per-point linear velocity in
+    /// scene units per `timeCodesPerSecond`. Used for motion blur.
+    pub velocities: Vec<[f32; 3]>,
+    /// `accelerations` — per-point second derivative for higher-order
+    /// motion integration.
+    pub accelerations: Vec<[f32; 3]>,
+    pub orientation: Orientation,
+    pub double_sided: bool,
+    pub extent: Option<[[f32; 3]; 2]>,
+    pub subdivision_scheme: SubdivisionScheme,
+    pub interpolate_boundary: Option<String>,
+    pub face_varying_linear_interpolation: Option<String>,
+    pub triangle_subdivision_rule: Option<String>,
+    pub hole_indices: Vec<i32>,
+    pub corner_indices: Vec<i32>,
+    pub corner_sharpnesses: Vec<f32>,
+    pub crease_indices: Vec<i32>,
+    pub crease_lengths: Vec<i32>,
+    pub crease_sharpnesses: Vec<f32>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+    pub display_opacity: Option<Primvar<f32>>,
+    /// Material-bind GeomSubsets. Empty when the mesh isn't
+    /// subdivided into per-material groups.
+    pub subsets: Vec<ReadSubset>,
+}
+
 /// Result of [`super::read::find_geom_prims`] — a single-pass stage
 /// walk that returns categorised path lists. Saves callers from
 /// re-walking the stage for each schema family.
