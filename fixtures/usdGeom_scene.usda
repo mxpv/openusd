@@ -96,4 +96,49 @@ def Xform "World" (
         double3 xformOp:translate = (4, 0, 0)
         uniform token[] xformOpOrder = ["!invert!xformOp:translate"]
     }
+
+    def Scope "Shapes"
+    {
+        def Cube "AuthoredCube"
+        {
+            double size = 3.0
+        }
+
+        def Cube "DefaultCube"
+        {
+        }
+
+        def Sphere "Ball"
+        {
+            double radius = 4.5
+        }
+
+        def Cylinder "Pipe"
+        {
+            double radius = 0.25
+            double height = 2.0
+            uniform token axis = "Y"
+        }
+
+        def Capsule "Pill"
+        {
+            double radius = 0.1
+            double height = 0.5
+            uniform token axis = "X"
+        }
+
+        def Cone "Pyramid"
+        {
+            double radius = 1.5
+            double height = 4.0
+            # axis unauthored → defaults to Z.
+        }
+
+        def Plane "Ground"
+        {
+            double width = 10.0
+            double length = 8.0
+            uniform token axis = "Y"
+        }
+    }
 }

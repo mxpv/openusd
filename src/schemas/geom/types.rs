@@ -87,6 +87,138 @@ impl Orientation {
     }
 }
 
+/// `axis` token authored on radial shapes (Cylinder / Capsule / Cone)
+/// and on Plane. Per Pixar's spec the default is `Z`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Axis {
+    X,
+    Y,
+    #[default]
+    Z,
+}
+
+impl Axis {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Axis::X => AXIS_X,
+            Axis::Y => AXIS_Y,
+            Axis::Z => AXIS_Z,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            AXIS_X => Axis::X,
+            AXIS_Y => Axis::Y,
+            AXIS_Z => Axis::Z,
+            _ => return None,
+        })
+    }
+}
+
+/// Decoded `UsdGeomCube`. The cube spans `[-size/2, size/2]` on every
+/// axis; defaults to `size = 2` per Pixar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadCube {
+    pub size: f64,
+}
+
+impl Default for ReadCube {
+    fn default() -> Self {
+        Self { size: 2.0 }
+    }
+}
+
+/// Decoded `UsdGeomSphere`. Centred at the origin; `radius` defaults
+/// to `1.0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadSphere {
+    pub radius: f64,
+}
+
+impl Default for ReadSphere {
+    fn default() -> Self {
+        Self { radius: 1.0 }
+    }
+}
+
+/// Decoded `UsdGeomCylinder`. `height` is along `axis`; the two
+/// end-caps are positioned at `±height/2` along that axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadCylinder {
+    pub radius: f64,
+    pub height: f64,
+    pub axis: Axis,
+}
+
+impl Default for ReadCylinder {
+    fn default() -> Self {
+        Self {
+            radius: 1.0,
+            height: 2.0,
+            axis: Axis::default(),
+        }
+    }
+}
+
+/// Decoded `UsdGeomCapsule`. Like a cylinder but with hemispherical
+/// end-caps of the same radius.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadCapsule {
+    pub radius: f64,
+    pub height: f64,
+    pub axis: Axis,
+}
+
+impl Default for ReadCapsule {
+    fn default() -> Self {
+        Self {
+            radius: 0.5,
+            height: 1.0,
+            axis: Axis::default(),
+        }
+    }
+}
+
+/// Decoded `UsdGeomCone`. `height` is the spine length along `axis`;
+/// the cone's apex points along `+axis`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadCone {
+    pub radius: f64,
+    pub height: f64,
+    pub axis: Axis,
+}
+
+impl Default for ReadCone {
+    fn default() -> Self {
+        Self {
+            radius: 1.0,
+            height: 2.0,
+            axis: Axis::default(),
+        }
+    }
+}
+
+/// Decoded `UsdGeomPlane`. `axis` selects which axis the plane's
+/// surface normal aligns to. `width` / `length` measure the plane's
+/// extent in the two axes orthogonal to `axis`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReadPlane {
+    pub width: f64,
+    pub length: f64,
+    pub axis: Axis,
+}
+
+impl Default for ReadPlane {
+    fn default() -> Self {
+        Self {
+            width: 2.0,
+            length: 2.0,
+            axis: Axis::default(),
+        }
+    }
+}
+
 /// Result of [`super::read::find_geom_prims`] — a single-pass stage
 /// walk that returns categorised path lists. Saves callers from
 /// re-walking the stage for each schema family.

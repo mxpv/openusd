@@ -6,9 +6,9 @@
 use anyhow::Result;
 use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
-    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_extent,
-    read_kind, read_proxy_prim, read_purpose, read_visibility, read_xform_op_order, resets_xform_stack, Purpose,
-    Visibility,
+    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_capsule,
+    read_cone, read_cube, read_cylinder, read_extent, read_kind, read_plane, read_proxy_prim, read_purpose,
+    read_sphere, read_visibility, read_xform_op_order, resets_xform_stack, Axis, Purpose, Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -138,13 +138,20 @@ fn find_geom_prims_buckets_by_type() -> Result<()> {
 
     assert!(prims.xforms.contains(&"/World".to_string()));
     assert!(prims.xforms.contains(&"/World/Hidden".to_string()));
-    assert_eq!(prims.scopes, vec!["/World/Geometry".to_string()]);
+    assert!(prims.scopes.contains(&"/World/Geometry".to_string()));
+    assert!(prims.scopes.contains(&"/World/Shapes".to_string()));
     assert_eq!(prims.cameras, vec!["/World/Cam".to_string()]);
     assert!(prims.meshes.contains(&"/World/Geometry/Hero".to_string()));
     assert!(prims.meshes.contains(&"/World/Geometry/HeroProxy".to_string()));
-    assert_eq!(prims.cubes, vec!["/World/Geometry/GuideCube".to_string()]);
+    assert!(prims.cubes.contains(&"/World/Geometry/GuideCube".to_string()));
+    assert!(prims.cubes.contains(&"/World/Shapes/AuthoredCube".to_string()));
     assert!(prims.spheres.contains(&"/World/Geometry/InvisibleBall".to_string()));
     assert!(prims.spheres.contains(&"/World/Hidden/HiddenChild".to_string()));
+    assert!(prims.spheres.contains(&"/World/Shapes/Ball".to_string()));
+    assert!(prims.cylinders.contains(&"/World/Shapes/Pipe".to_string()));
+    assert!(prims.capsules.contains(&"/World/Shapes/Pill".to_string()));
+    assert!(prims.cones.contains(&"/World/Shapes/Pyramid".to_string()));
+    assert!(prims.planes.contains(&"/World/Shapes/Ground".to_string()));
 
     // Imageables is the superset — every typed prim above lands there.
     for p in [
@@ -229,6 +236,90 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
     assert!((p[1] - 4.0).abs() < 1e-4, "y: {}", p[1]);
     assert!((p[2] + 2.0).abs() < 1e-4, "z: {}", p[2]);
     Ok(())
+}
+
+// ── Intrinsic shapes ──────────────────────────────────────────────
+
+#[test]
+fn read_cube_returns_authored_size() -> Result<()> {
+    let stage = open()?;
+    let cube = read_cube(&stage, &sdf::path("/World/Shapes/AuthoredCube")?)?.expect("Cube");
+    assert_eq!(cube.size, 3.0);
+    Ok(())
+}
+
+#[test]
+fn unauthored_cube_falls_back_to_spec_default() -> Result<()> {
+    let stage = open()?;
+    let cube = read_cube(&stage, &sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
+    assert_eq!(cube.size, 2.0);
+    Ok(())
+}
+
+#[test]
+fn read_cube_returns_none_for_non_cube() -> Result<()> {
+    let stage = open()?;
+    assert!(read_cube(&stage, &sdf::path("/World/Shapes/Ball")?)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn read_sphere_returns_authored_radius() -> Result<()> {
+    let stage = open()?;
+    let s = read_sphere(&stage, &sdf::path("/World/Shapes/Ball")?)?.expect("Sphere");
+    assert_eq!(s.radius, 4.5);
+    Ok(())
+}
+
+#[test]
+fn read_cylinder_with_y_axis() -> Result<()> {
+    let stage = open()?;
+    let c = read_cylinder(&stage, &sdf::path("/World/Shapes/Pipe")?)?.expect("Cylinder");
+    assert_eq!(c.radius, 0.25);
+    assert_eq!(c.height, 2.0);
+    assert_eq!(c.axis, Axis::Y);
+    Ok(())
+}
+
+#[test]
+fn read_capsule_with_x_axis() -> Result<()> {
+    let stage = open()?;
+    let c = read_capsule(&stage, &sdf::path("/World/Shapes/Pill")?)?.expect("Capsule");
+    assert_eq!(c.radius, 0.1);
+    assert_eq!(c.height, 0.5);
+    assert_eq!(c.axis, Axis::X);
+    Ok(())
+}
+
+#[test]
+fn read_cone_defaults_to_z_axis() -> Result<()> {
+    let stage = open()?;
+    let c = read_cone(&stage, &sdf::path("/World/Shapes/Pyramid")?)?.expect("Cone");
+    assert_eq!(c.radius, 1.5);
+    assert_eq!(c.height, 4.0);
+    assert_eq!(c.axis, Axis::Z); // unauthored → spec default
+    Ok(())
+}
+
+#[test]
+fn read_plane_picks_up_dimensions_and_axis() -> Result<()> {
+    let stage = open()?;
+    let p = read_plane(&stage, &sdf::path("/World/Shapes/Ground")?)?.expect("Plane");
+    assert_eq!(p.width, 10.0);
+    assert_eq!(p.length, 8.0);
+    assert_eq!(p.axis, Axis::Y);
+    Ok(())
+}
+
+#[test]
+fn axis_token_round_trip() {
+    assert_eq!(Axis::X.as_token(), "X");
+    assert_eq!(Axis::Y.as_token(), "Y");
+    assert_eq!(Axis::Z.as_token(), "Z");
+    assert_eq!(Axis::from_token("X"), Some(Axis::X));
+    assert_eq!(Axis::from_token("bogus"), None);
+    // The default is Z per Pixar spec.
+    assert_eq!(Axis::default(), Axis::Z);
 }
 
 #[test]
