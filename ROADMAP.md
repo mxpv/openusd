@@ -119,8 +119,8 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | timeSamples, default, ValueBlock |
 | Attribute resolution (with time) | `12.3` | :white_check_mark: | `0.1.2` | Time sample lookup |
 | Spline evaluation | `12.5.3` | :construction: | | Bezier/Hermite curve interpolation |
-| Interpolation (Held) | `12.5.1` | :construction: | | Not implemented at stage level |
-| Interpolation (Linear) | `12.5.2` | :construction: | | Not implemented at stage level |
+| Interpolation (Held) | `12.5.1` | :white_check_mark: | `main` | `Stage::value_at(attr, time)` with `InterpolationType::Held`. |
+| Interpolation (Linear) | `12.5.2` | :white_check_mark: | `main` | `Stage::value_at(attr, time)` with `InterpolationType::Linear` (default). All §12.5.2 types incl. `quath`/`f`/`d` via slerp; held-fallback for unsupported types and past-last-sample. |
 | [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | `12.3` | :construction: | | `clips`/`clipSets` for split time samples |
 | Relationship targets (raw + forwarded) | `12.4` | :construction: | | `targetPaths` readable; forwarding not implemented |
 | Attribute connections | `12.4` | :construction: | | `connectionPaths` readable; not resolved |
