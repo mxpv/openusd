@@ -140,6 +140,47 @@ pub const INTERP_VARYING: &str = "varying";
 pub const INTERP_VERTEX: &str = "vertex";
 pub const INTERP_FACE_VARYING: &str = "faceVarying";
 
+// ── Curves common attribute names ───────────────────────────────────────
+pub const A_CURVE_VERTEX_COUNTS: &str = "curveVertexCounts";
+pub const A_WIDTHS: &str = "widths";
+
+// BasisCurves attribute names + token values.
+pub const A_TYPE: &str = "type";
+pub const A_BASIS: &str = "basis";
+pub const A_WRAP: &str = "wrap";
+pub const CURVE_TYPE_LINEAR: &str = "linear";
+pub const CURVE_TYPE_CUBIC: &str = "cubic";
+pub const CURVE_BASIS_BEZIER: &str = "bezier";
+pub const CURVE_BASIS_BSPLINE: &str = "bspline";
+pub const CURVE_BASIS_CATMULL_ROM: &str = "catmullRom";
+pub const CURVE_BASIS_HERMITE: &str = "hermite";
+pub const CURVE_WRAP_NONPERIODIC: &str = "nonperiodic";
+pub const CURVE_WRAP_PERIODIC: &str = "periodic";
+pub const CURVE_WRAP_PINNED: &str = "pinned";
+
+// NurbsCurves + NurbsPatch attribute names.
+pub const A_ORDER: &str = "order";
+pub const A_KNOTS: &str = "knots";
+pub const A_RANGES: &str = "ranges";
+pub const A_U_VERTEX_COUNT: &str = "uVertexCount";
+pub const A_V_VERTEX_COUNT: &str = "vVertexCount";
+pub const A_U_ORDER: &str = "uOrder";
+pub const A_V_ORDER: &str = "vOrder";
+pub const A_U_KNOTS: &str = "uKnots";
+pub const A_V_KNOTS: &str = "vKnots";
+pub const A_U_RANGE: &str = "uRange";
+pub const A_V_RANGE: &str = "vRange";
+
+// HermiteCurves attribute names.
+pub const A_TANGENTS: &str = "tangents";
+
+// Points attribute names.
+pub const A_IDS: &str = "ids";
+
+// TetMesh attribute names.
+pub const A_TET_VERTEX_INDICES: &str = "tetVertexIndices";
+pub const A_SURFACE_FACE_VERTEX_INDICES: &str = "surfaceFaceVertexIndices";
+
 // Orientation token values.
 pub const ORIENTATION_RIGHT_HANDED: &str = "rightHanded";
 pub const ORIENTATION_LEFT_HANDED: &str = "leftHanded";

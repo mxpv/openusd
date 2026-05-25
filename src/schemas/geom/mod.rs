@@ -29,6 +29,7 @@
 pub mod tokens;
 
 mod camera;
+mod curves;
 mod mesh;
 mod read;
 mod shapes;
@@ -36,6 +37,9 @@ mod types;
 mod xform;
 
 pub use camera::read_camera;
+pub use curves::{
+    read_basis_curves, read_hermite_curves, read_nurbs_curves, read_nurbs_patch, read_points, read_tet_mesh,
+};
 pub use mesh::{read_mesh, read_primvar_float, read_primvar_vec2f, read_primvar_vec3f, read_subset};
 pub use read::{
     compute_purpose, compute_visibility, find_geom_prims, read_extent, read_kind, read_proxy_prim, read_purpose,
@@ -43,8 +47,9 @@ pub use read::{
 };
 pub use shapes::{read_capsule, read_cone, read_cube, read_cylinder, read_plane, read_sphere};
 pub use types::{
-    Axis, ElementType, GeomPrims, Interpolation, Orientation, Primvar, Projection, Purpose, ReadCamera, ReadCapsule,
-    ReadCone, ReadCube, ReadCylinder, ReadMesh, ReadPlane, ReadSphere, ReadSubset, StereoRole, SubdivisionScheme,
-    Visibility,
+    Axis, CurveBasis, CurveType, CurveWrap, ElementType, GeomPrims, Interpolation, Orientation, Primvar, Projection,
+    Purpose, ReadBasisCurves, ReadCamera, ReadCapsule, ReadCone, ReadCube, ReadCylinder, ReadHermiteCurves, ReadMesh,
+    ReadNurbsCurves, ReadNurbsPatch, ReadPlane, ReadPoints, ReadSphere, ReadSubset, ReadTetMesh, StereoRole,
+    SubdivisionScheme, Visibility,
 };
 pub use xform::{compute_local_to_parent_transform, read_xform_op_order, resets_xform_stack};

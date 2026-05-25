@@ -537,6 +537,184 @@ pub struct ReadMesh {
     pub subsets: Vec<ReadSubset>,
 }
 
+/// `UsdGeomBasisCurves.type` token values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveType {
+    #[default]
+    Cubic,
+    Linear,
+}
+
+impl CurveType {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            CurveType::Cubic => CURVE_TYPE_CUBIC,
+            CurveType::Linear => CURVE_TYPE_LINEAR,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            CURVE_TYPE_CUBIC => CurveType::Cubic,
+            CURVE_TYPE_LINEAR => CurveType::Linear,
+            _ => return None,
+        })
+    }
+}
+
+/// `UsdGeomBasisCurves.basis` — the basis matrix for cubic curves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveBasis {
+    #[default]
+    Bezier,
+    Bspline,
+    CatmullRom,
+    Hermite,
+}
+
+impl CurveBasis {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            CurveBasis::Bezier => CURVE_BASIS_BEZIER,
+            CurveBasis::Bspline => CURVE_BASIS_BSPLINE,
+            CurveBasis::CatmullRom => CURVE_BASIS_CATMULL_ROM,
+            CurveBasis::Hermite => CURVE_BASIS_HERMITE,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            CURVE_BASIS_BEZIER => CurveBasis::Bezier,
+            CURVE_BASIS_BSPLINE => CurveBasis::Bspline,
+            CURVE_BASIS_CATMULL_ROM => CurveBasis::CatmullRom,
+            CURVE_BASIS_HERMITE => CurveBasis::Hermite,
+            _ => return None,
+        })
+    }
+}
+
+/// `UsdGeomBasisCurves.wrap` — whether curves form closed loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CurveWrap {
+    #[default]
+    Nonperiodic,
+    Periodic,
+    Pinned,
+}
+
+impl CurveWrap {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            CurveWrap::Nonperiodic => CURVE_WRAP_NONPERIODIC,
+            CurveWrap::Periodic => CURVE_WRAP_PERIODIC,
+            CurveWrap::Pinned => CURVE_WRAP_PINNED,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            CURVE_WRAP_NONPERIODIC => CurveWrap::Nonperiodic,
+            CURVE_WRAP_PERIODIC => CurveWrap::Periodic,
+            CURVE_WRAP_PINNED => CurveWrap::Pinned,
+            _ => return None,
+        })
+    }
+}
+
+/// Decoded `UsdGeomBasisCurves`. Multiple curves share one prim —
+/// each entry in `curve_vertex_counts` is the CV count for one
+/// curve; the matching slice of `points` is its CVs.
+#[derive(Debug, Clone, Default)]
+pub struct ReadBasisCurves {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    pub curve_vertex_counts: Vec<i32>,
+    pub curve_type: CurveType,
+    pub basis: CurveBasis,
+    pub wrap: CurveWrap,
+    pub widths: Vec<f32>,
+    pub normals: Option<Primvar<[f32; 3]>>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+    pub extent: Option<[[f32; 3]; 2]>,
+}
+
+/// Decoded `UsdGeomNurbsCurves`. Knot vectors and parameter ranges
+/// are concatenated across curves; consumers slice them per-curve
+/// using `order` and `curve_vertex_counts`.
+#[derive(Debug, Clone, Default)]
+pub struct ReadNurbsCurves {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    pub curve_vertex_counts: Vec<i32>,
+    /// Per-curve order (= degree + 1). Defaults to 4 (cubic) per
+    /// Pixar when unauthored.
+    pub order: Vec<i32>,
+    /// Concatenated knot vectors. Length = `Σ(curve_vertex_counts + order)`.
+    pub knots: Vec<f64>,
+    /// Per-curve `(uMin, uMax)` parameter range.
+    pub ranges: Vec<[f64; 2]>,
+    pub widths: Vec<f32>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+}
+
+/// Decoded `UsdGeomNurbsPatch`. The control net is `points` laid
+/// out row-major: `P[i, j] = points[i * v_vertex_count + j]`.
+#[derive(Debug, Clone, Default)]
+pub struct ReadNurbsPatch {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    pub u_vertex_count: i32,
+    pub v_vertex_count: i32,
+    pub u_order: i32,
+    pub v_order: i32,
+    pub u_knots: Vec<f64>,
+    pub v_knots: Vec<f64>,
+    pub u_range: [f64; 2],
+    pub v_range: [f64; 2],
+    pub display_color: Option<Primvar<[f32; 3]>>,
+}
+
+/// Decoded `UsdGeomHermiteCurves`. Each CV carries both a position
+/// and a tangent; cubic-Hermite interpolation between adjacent CVs
+/// uses their tangents.
+#[derive(Debug, Clone, Default)]
+pub struct ReadHermiteCurves {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    pub tangents: Vec<[f32; 3]>,
+    pub curve_vertex_counts: Vec<i32>,
+    pub widths: Vec<f32>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+}
+
+/// Decoded `UsdGeomPoints` point cloud.
+#[derive(Debug, Clone, Default)]
+pub struct ReadPoints {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    /// Per-point radius. Empty = consumer default.
+    pub widths: Vec<f32>,
+    /// Stable simulation IDs across frames. Empty when unauthored.
+    pub ids: Vec<i64>,
+    pub normals: Option<Primvar<[f32; 3]>>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+}
+
+/// Decoded `UsdGeomTetMesh`. N tetrahedra sharing a flat point pool;
+/// `tet_vertex_indices.len() == 4 * N`.
+#[derive(Debug, Clone, Default)]
+pub struct ReadTetMesh {
+    pub path: String,
+    pub points: Vec<[f32; 3]>,
+    /// Flat — length `= 4 * num_tets`. Each consecutive 4-tuple is
+    /// one tetrahedron.
+    pub tet_vertex_indices: Vec<i32>,
+    /// Optional cached boundary triangulation — flat, length `= 3 *
+    /// num_boundary_faces`. Empty when not authored.
+    pub surface_face_vertex_indices: Vec<i32>,
+    pub display_color: Option<Primvar<[f32; 3]>>,
+}
+
 /// Result of [`super::read::find_geom_prims`] — a single-pass stage
 /// walk that returns categorised path lists. Saves callers from
 /// re-walking the stage for each schema family.

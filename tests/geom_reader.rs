@@ -6,11 +6,12 @@
 use anyhow::Result;
 use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
-    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_camera,
-    read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_kind, read_mesh, read_plane, read_proxy_prim,
-    read_purpose, read_sphere, read_subset, read_visibility, read_xform_op_order, resets_xform_stack, Axis,
-    ElementType, Interpolation, Orientation as GeomOrientation, Projection, Purpose, StereoRole, SubdivisionScheme,
-    Visibility,
+    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_basis_curves,
+    read_camera, read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_hermite_curves, read_kind,
+    read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_points, read_proxy_prim, read_purpose,
+    read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack, Axis,
+    CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, Projection, Purpose,
+    StereoRole, SubdivisionScheme, Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -527,6 +528,86 @@ fn element_type_token_round_trip() {
     assert_eq!(ElementType::default(), ElementType::Face);
     assert_eq!(ElementType::from_token("point"), Some(ElementType::Point));
     assert_eq!(ElementType::Tetrahedron.as_token(), "tetrahedron");
+}
+
+// ── Curves / Patch / Points / TetMesh ─────────────────────────────
+
+#[test]
+fn read_basis_curves_returns_topology_and_type() -> Result<()> {
+    let stage = open()?;
+    let c = read_basis_curves(&stage, &sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
+    assert_eq!(c.points.len(), 4);
+    assert_eq!(c.curve_vertex_counts, vec![4]);
+    assert_eq!(c.curve_type, CurveType::Linear);
+    assert_eq!(c.wrap, CurveWrap::Nonperiodic);
+    assert_eq!(c.widths.len(), 4);
+    // basis defaults to bezier even on linear curves (Pixar default).
+    assert_eq!(c.basis, CurveBasis::Bezier);
+    Ok(())
+}
+
+#[test]
+fn read_nurbs_curves_falls_back_to_cubic_order() -> Result<()> {
+    let stage = open()?;
+    let c = read_nurbs_curves(&stage, &sdf::path("/World/Curves/Smooth")?)?.expect("NurbsCurves");
+    assert_eq!(c.order, vec![4]);
+    assert_eq!(c.knots.len(), 8);
+    // Range synthesised from the inner knot span (knots[3..=4] = [0, 1]).
+    assert_eq!(c.ranges.first().copied(), Some([0.0, 1.0]));
+    Ok(())
+}
+
+#[test]
+fn read_nurbs_patch_row_major_grid() -> Result<()> {
+    let stage = open()?;
+    let p = read_nurbs_patch(&stage, &sdf::path("/World/Curves/Sheet")?)?.expect("NurbsPatch");
+    assert_eq!(p.u_vertex_count, 4);
+    assert_eq!(p.v_vertex_count, 4);
+    assert_eq!(p.points.len(), 16);
+    assert_eq!(p.u_order, 4);
+    assert_eq!(p.v_order, 4);
+    Ok(())
+}
+
+#[test]
+fn read_hermite_curves_carries_tangents() -> Result<()> {
+    let stage = open()?;
+    let c = read_hermite_curves(&stage, &sdf::path("/World/Curves/Hairs")?)?.expect("HermiteCurves");
+    assert_eq!(c.points.len(), 4);
+    assert_eq!(c.tangents.len(), 4);
+    assert_eq!(c.curve_vertex_counts, vec![2, 2]);
+    Ok(())
+}
+
+#[test]
+fn read_points_with_ids_and_widths() -> Result<()> {
+    let stage = open()?;
+    let p = read_points(&stage, &sdf::path("/World/Curves/Cloud")?)?.expect("Points");
+    assert_eq!(p.points.len(), 3);
+    assert_eq!(p.widths, vec![0.05, 0.05, 0.05]);
+    assert_eq!(p.ids, vec![10, 20, 30]);
+    Ok(())
+}
+
+#[test]
+fn read_tet_mesh_flat_indices() -> Result<()> {
+    let stage = open()?;
+    let t = read_tet_mesh(&stage, &sdf::path("/World/Curves/Soft")?)?.expect("TetMesh");
+    assert_eq!(t.points.len(), 5);
+    // Two tets, each 4 verts → 8 indices total.
+    assert_eq!(t.tet_vertex_indices.len(), 8);
+    assert!(t.surface_face_vertex_indices.is_empty());
+    Ok(())
+}
+
+#[test]
+fn curve_type_basis_wrap_token_round_trip() {
+    assert_eq!(CurveType::default(), CurveType::Cubic);
+    assert_eq!(CurveType::from_token("linear"), Some(CurveType::Linear));
+    assert_eq!(CurveBasis::default(), CurveBasis::Bezier);
+    assert_eq!(CurveBasis::from_token("catmullRom"), Some(CurveBasis::CatmullRom));
+    assert_eq!(CurveWrap::default(), CurveWrap::Nonperiodic);
+    assert_eq!(CurveWrap::from_token("pinned"), Some(CurveWrap::Pinned));
 }
 
 #[test]
