@@ -64,4 +64,36 @@ def Xform "World" (
             double radius = 1.0
         }
     }
+
+    def Xform "TRS"
+    {
+        # Standard translate / rotateY / scale stack — applied first
+        # to last per xformOpOrder.
+        double3 xformOp:translate = (1, 2, 3)
+        float xformOp:rotateY = 90
+        float3 xformOp:scale = (2, 2, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]
+    }
+
+    def Xform "Detached"
+    {
+        # `!resetXformStack!` opts the prim out of inheriting any
+        # ancestor transform.
+        double3 xformOp:translate = (10, 0, 0)
+        uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+    }
+
+    def Xform "MatrixOp"
+    {
+        # Single-op matrix transform.
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 6, 7, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def Xform "Inverted"
+    {
+        # `!invert!` applies the inverse of the named op.
+        double3 xformOp:translate = (4, 0, 0)
+        uniform token[] xformOpOrder = ["!invert!xformOp:translate"]
+    }
 }
