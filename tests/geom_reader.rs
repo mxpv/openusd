@@ -8,10 +8,10 @@ use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
     self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_basis_curves,
     read_camera, read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_hermite_curves, read_kind,
-    read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_points, read_proxy_prim, read_purpose,
-    read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack, Axis,
-    CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, Projection, Purpose,
-    StereoRole, SubdivisionScheme, Visibility,
+    read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_point_instancer, read_points, read_proxy_prim,
+    read_purpose, read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack,
+    Axis, CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, Projection,
+    Purpose, StereoRole, SubdivisionScheme, Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -608,6 +608,44 @@ fn curve_type_basis_wrap_token_round_trip() {
     assert_eq!(CurveBasis::from_token("catmullRom"), Some(CurveBasis::CatmullRom));
     assert_eq!(CurveWrap::default(), CurveWrap::Nonperiodic);
     assert_eq!(CurveWrap::from_token("pinned"), Some(CurveWrap::Pinned));
+}
+
+// ── PointInstancer ────────────────────────────────────────────────
+
+#[test]
+fn read_point_instancer_returns_prototypes_and_per_instance_arrays() -> Result<()> {
+    let stage = open()?;
+    let pi = read_point_instancer(&stage, &sdf::path("/World/InstancerScope/Stars")?)?.expect("PointInstancer");
+    assert_eq!(pi.prototypes, vec!["/World/InstancerScope/Proto".to_string()]);
+    assert_eq!(pi.proto_indices, vec![0, 0, 0, 0]);
+    assert_eq!(pi.positions.len(), 4);
+    assert_eq!(pi.scales.len(), 4);
+    assert_eq!(pi.scales[1], [2.0, 2.0, 2.0]);
+    assert_eq!(pi.ids, vec![100, 200, 300, 400]);
+    assert_eq!(pi.invisible_ids, vec![300]);
+    assert_eq!(pi.velocities.len(), 4);
+    // Unauthored attributes default to empty.
+    assert!(pi.orientations.is_empty());
+    assert!(pi.angular_velocities.is_empty());
+    assert!(pi.inactive_ids.is_empty());
+    Ok(())
+}
+
+#[test]
+fn read_point_instancer_returns_none_for_non_instancer() -> Result<()> {
+    let stage = open()?;
+    assert!(read_point_instancer(&stage, &sdf::path("/World/Cam")?)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn find_geom_prims_includes_point_instancer() -> Result<()> {
+    let stage = open()?;
+    let prims = find_geom_prims(&stage)?;
+    assert!(prims
+        .point_instancers
+        .contains(&"/World/InstancerScope/Stars".to_string()));
+    Ok(())
 }
 
 #[test]
