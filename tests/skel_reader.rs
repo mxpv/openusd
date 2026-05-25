@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use openusd::schemas::skel::{
-    self, discover_bindings, find_skel_roots, AnimMapper, InfluenceInterpolation, SkeletonResolver, SkinningMethod,
-    SkinningResolver, Topology, NO_PARENT,
+    self, discover_bindings, find_skel_roots, AnimMapper, InfluenceInterpolation, SkelAnimQuery, SkeletonResolver,
+    SkinningMethod, SkinningResolver, Topology, NO_PARENT,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -267,4 +267,91 @@ fn anim_mapper_remap_with_missing_joints() {
     assert_eq!(m.target_len(), 3);
     let out = m.remap(&[10, 20], -1);
     assert_eq!(out, vec![20, -1, 10]);
+}
+
+#[test]
+fn skel_anim_query_orderings() -> Result<()> {
+    let stage = open()?;
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.expect("SkelAnimation");
+    assert_eq!(q.prim_path(), "/World/Character/Anim");
+    assert_eq!(q.joint_order(), &["Root", "Root/Hip", "Root/Hip/Knee"]);
+    assert_eq!(q.blend_shape_order(), &["smile"]);
+    assert!(q.joint_transforms_might_be_time_varying());
+    assert!(q.blend_shape_weights_might_be_time_varying());
+    Ok(())
+}
+
+#[test]
+fn skel_anim_query_components_at_start_frame() -> Result<()> {
+    let stage = open()?;
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
+    let (t, r, s) = q.compute_joint_local_transform_components(&stage, 0.0)?;
+    // Authored at t=0: hip is at (0, 1, 0), all rotations are identity,
+    // scales aren't authored so they default to unit.
+    assert_eq!(t[1], [0.0, 1.0, 0.0]);
+    assert_eq!(r[1], [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(s[1], [1.0, 1.0, 1.0]);
+    Ok(())
+}
+
+#[test]
+fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
+    let stage = open()?;
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
+    let (t, r, _) = q.compute_joint_local_transform_components(&stage, 5.0)?;
+    // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
+    // At t=5 we expect (0, 1.25, 0).
+    assert!((t[1][1] - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1][1]);
+    // Hip rotation slerps from identity to ~45° about +Z. At t=5 it
+    // should be a ~22.5° rotation about +Z.
+    let w_expected = (std::f32::consts::PI / 8.0).cos();
+    let z_expected = (std::f32::consts::PI / 8.0).sin();
+    assert!((r[1][0] - w_expected).abs() < 1e-3, "w: {}", r[1][0]);
+    assert!((r[1][3] - z_expected).abs() < 1e-3, "z: {}", r[1][3]);
+    Ok(())
+}
+
+#[test]
+fn skel_anim_query_blend_shape_weights_lerp() -> Result<()> {
+    let stage = open()?;
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
+    let w0 = q.compute_blend_shape_weights(&stage, 0.0)?;
+    assert_eq!(w0, vec![0.0]);
+    let w_mid = q.compute_blend_shape_weights(&stage, 5.0)?;
+    assert!((w_mid[0] - 0.5).abs() < 1e-5, "midpoint weight: {}", w_mid[0]);
+    let w_end = q.compute_blend_shape_weights(&stage, 10.0)?;
+    assert_eq!(w_end, vec![1.0]);
+    Ok(())
+}
+
+#[test]
+fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> {
+    let stage = open()?;
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
+    let skl = skel::read_skeleton(&stage, &sdf::path("/World/Character/Rig")?)?.unwrap();
+    let resolver = SkeletonResolver::new(skl);
+
+    let locals = q.compute_joint_local_transforms(&stage, 0.0)?;
+    assert_eq!(locals.len(), 3);
+    // Hip's local at t=0 should carry the (0,1,0) translation in
+    // USD's row-major form (translation lives in elements [12..15]).
+    assert_eq!(&locals[1][12..15], &[0.0, 1.0, 0.0]);
+
+    // Feed into the SkeletonResolver to confirm the wiring works end
+    // to end. With identity rotations everywhere, the resulting
+    // skinning xforms should be well-formed (non-zero translation row
+    // on the moved joints).
+    let identity_world = openusd::schemas::skel::skinning::IDENTITY_MAT4;
+    let skinning = resolver.compute_skinning_transforms_from_local(&locals, &identity_world);
+    assert_eq!(skinning.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn skel_anim_query_returns_none_on_non_skel_animation() -> Result<()> {
+    let stage = open()?;
+    // /World is an Xform, not a SkelAnimation.
+    let q = SkelAnimQuery::new(&stage, sdf::path("/World")?)?;
+    assert!(q.is_none());
+    Ok(())
 }
