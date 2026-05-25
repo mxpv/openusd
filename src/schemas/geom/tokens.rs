@@ -46,6 +46,19 @@ pub const A_EXTENT: &str = "extent";
 pub const A_DOUBLE_SIDED: &str = "doubleSided";
 pub const A_ORIENTATION: &str = "orientation";
 
+// ── Intrinsic-shape attributes ──────────────────────────────────────────
+pub const A_SIZE: &str = "size";
+pub const A_RADIUS: &str = "radius";
+pub const A_HEIGHT: &str = "height";
+pub const A_AXIS: &str = "axis";
+pub const A_WIDTH: &str = "width";
+pub const A_LENGTH: &str = "length";
+
+// Axis token values (radial shapes + Plane).
+pub const AXIS_X: &str = "X";
+pub const AXIS_Y: &str = "Y";
+pub const AXIS_Z: &str = "Z";
+
 // Orientation token values.
 pub const ORIENTATION_RIGHT_HANDED: &str = "rightHanded";
 pub const ORIENTATION_LEFT_HANDED: &str = "leftHanded";
