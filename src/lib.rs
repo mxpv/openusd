@@ -16,6 +16,7 @@
 //! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering, per-prim index caching, and namespace mapping via [`MapFunction`](pcp::MapFunction). |
 //! | [`stage`] | Composed stage. [`Stage`](stage::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`expr`] | Variable expression parser and evaluator for USD's `\`...\`` expression syntax. |
+//! | [`interp`] | Stage-level time-sample interpolation (AOUSD §12.5) — held + linear over every supported type. |
 //! | [`schemas`] | Domain-schema readers (UsdPhysics, UsdSkel, …) — non-core extensions, feature-gated. |
 //!
 //! # Quick start
@@ -32,6 +33,7 @@
 
 pub mod ar;
 pub mod expr;
+pub mod interp;
 pub mod layer;
 pub mod pcp;
 pub mod schemas;
@@ -42,6 +44,7 @@ pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
+pub use interp::InterpolationType;
 pub use layer::{Collector, DependencyKind, LayerFormat};
 pub use stage::{InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageBuilder, StagePopulationMask};
 

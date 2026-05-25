@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    defaultPrim = "Prim"
+    doc = "Time-sample interpolation integration test fixture: covers scalar double, vec3f, quatf (slerp), matrix4d, the unsupported-type → held fallback, and a blocked sample."
+)
+
+def Xform "Prim"
+{
+    # Scalar — linear interp over a known span.
+    double scalar.timeSamples = {
+        0: 0.0,
+        10: 20.0,
+    }
+
+    # Vector — component-wise linear.
+    float3 vec.timeSamples = {
+        0: (0.0, 0.0, 0.0),
+        10: (10.0, 20.0, 30.0),
+    }
+
+    # Quaternion — 0 → 180° rotation about +X via slerp. At t=5 the
+    # result should be a 90° rotation: (cos(45°), sin(45°), 0, 0).
+    quatf rot.timeSamples = {
+        0: (1, 0, 0, 0),
+        10: (0, 1, 0, 0),
+    }
+
+    # Token is NOT in §12.5.2's linear-supported set — falls back to
+    # held.
+    token label.timeSamples = {
+        0: "alpha",
+        10: "omega",
+    }
+
+    # ValueBlock anywhere in the bracketing pair → value_at returns None.
+    double blocked.timeSamples = {
+        0: 1.0,
+        10: None,
+    }
+
+    # No timeSamples at all → fall back to the attribute's default.
+    double static = 42.0
+}

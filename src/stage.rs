@@ -39,12 +39,13 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use anyhow::Result;
 use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
+use crate::interp::{self, InterpolationType};
 use crate::sdf::{FieldKey, Path, Payload, SpecType, Specifier, Value};
 use crate::{layer, pcp, CompositionError};
 
@@ -242,6 +243,10 @@ pub struct Stage {
     population_mask: StagePopulationMask,
     /// PCP error handler wrapping the user's unified callback.
     on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
+    /// Stage-level interpolation mode for time-sampled attributes
+    /// (AOUSD §12.5). Defaults to [`InterpolationType::Linear`] per
+    /// spec.
+    interpolation_type: Cell<InterpolationType>,
 }
 
 impl Stage {
@@ -314,6 +319,49 @@ impl Stage {
     /// the root layer (not the session layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<String> {
         self.graph.borrow().default_prim()
+    }
+
+    /// Returns the stage-level interpolation mode used by
+    /// [`Stage::value_at`]. AOUSD §12.5 defaults this to
+    /// [`InterpolationType::Linear`].
+    pub fn interpolation_type(&self) -> InterpolationType {
+        self.interpolation_type.get()
+    }
+
+    /// Override the stage-level interpolation mode at runtime.
+    /// Cheap — no recomputation, the next [`Stage::value_at`] call
+    /// reads the new mode.
+    pub fn set_interpolation_type(&self, mode: InterpolationType) {
+        self.interpolation_type.set(mode);
+    }
+
+    /// Evaluate an attribute's value at `time` under the stage's
+    /// current [`InterpolationType`]. Mirrors C++ `UsdAttribute::Get`
+    /// — the universal entry point for any consumer that needs a
+    /// resolved value at a specific time code.
+    ///
+    /// Resolution order:
+    /// 1. If the attribute authors `timeSamples`, apply [§12.5
+    ///    interpolation](crate::interp) over them.
+    /// 2. Otherwise fall back to the attribute's `default` value.
+    ///
+    /// Returns `Ok(None)` when the attribute is unauthored, when the
+    /// authored value is a [`Value::ValueBlock`] / [`Value::None`]
+    /// (the spec sentinels for "no value"), or when the queried prim
+    /// is excluded by the stage's population mask.
+    pub fn value_at(&self, attr_path: impl Into<Path>, time: f64) -> Result<Option<Value>> {
+        let attr_path = attr_path.into();
+        if !self.population_mask.includes(&attr_path.prim_path()) {
+            return Ok(None);
+        }
+        if let Some(Value::TimeSamples(samples)) = self.field::<Value>(attr_path.clone(), "timeSamples")? {
+            return Ok(interp::evaluate(&samples, time, self.interpolation_type.get()));
+        }
+        let default = self.field::<Value>(attr_path, FieldKey::Default)?;
+        Ok(default.and_then(|v| match v {
+            Value::ValueBlock | Value::None => None,
+            other => Some(other),
+        }))
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
@@ -731,6 +779,7 @@ pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -
     session_layer: Option<String>,
     initial_load_set: InitialLoadSet,
     population_mask: StagePopulationMask,
+    interpolation_type: InterpolationType,
 }
 
 impl StageBuilder {
@@ -742,6 +791,7 @@ impl StageBuilder {
             session_layer: None,
             initial_load_set: InitialLoadSet::LoadAll,
             population_mask: StagePopulationMask::all(),
+            interpolation_type: InterpolationType::default(),
         }
     }
 }
@@ -756,6 +806,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             session_layer: self.session_layer,
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
+            interpolation_type: self.interpolation_type,
         }
     }
 
@@ -773,7 +824,16 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             session_layer: self.session_layer,
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
+            interpolation_type: self.interpolation_type,
         }
+    }
+
+    /// Sets the stage-level interpolation mode for time-sampled
+    /// attribute queries through [`Stage::value_at`]. Default per
+    /// AOUSD §12.5 is [`InterpolationType::Linear`].
+    pub fn interpolation_type(mut self, mode: InterpolationType) -> Self {
+        self.interpolation_type = mode;
+        self
     }
 
     /// Sets the session layer for the stage.
@@ -896,6 +956,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
             initial_load_set,
             population_mask,
             on_composition_error,
+            interpolation_type: Cell::new(self.interpolation_type),
         })
     }
 }
