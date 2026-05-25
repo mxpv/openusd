@@ -1,0 +1,67 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    doc = "UsdGeom reader integration test fixture: covers the cross-cutting Imageable / Boundable attributes (visibility, purpose, extent, proxyPrim, kind) plus the typeName recognition used by find_geom_prims."
+)
+
+def Xform "World" (
+    kind = "assembly"
+)
+{
+    def Scope "Geometry"
+    {
+        def Mesh "Hero" (
+            kind = "component"
+        )
+        {
+            uniform token purpose = "render"
+            float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+            point3f[] points = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            rel proxyPrim = </World/Geometry/HeroProxy>
+        }
+
+        def Mesh "HeroProxy"
+        {
+            uniform token purpose = "proxy"
+            float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+            point3f[] points = [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+        }
+
+        def Cube "GuideCube"
+        {
+            uniform token purpose = "guide"
+            double size = 1.0
+        }
+
+        def Sphere "InvisibleBall"
+        {
+            token visibility = "invisible"
+            double radius = 0.5
+        }
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 50
+    }
+
+    def Xform "Hidden" (
+        kind = "group"
+    )
+    {
+        token visibility = "invisible"
+
+        def Sphere "HiddenChild"
+        {
+            # No directly-authored visibility — should inherit `invisible`
+            # via compute_visibility's ancestor walk.
+            double radius = 1.0
+        }
+    }
+}
