@@ -715,6 +715,47 @@ pub struct ReadTetMesh {
     pub display_color: Option<Primvar<[f32; 3]>>,
 }
 
+/// Decoded `UsdGeomPointInstancer`. Per-instance arrays are all the
+/// same length as `proto_indices` when authored; empty arrays mean
+/// the attribute wasn't authored.
+///
+/// `orientations` is stored as `[f32; 4]` regardless of whether the
+/// authored attribute was `quath[]` (half) or `quatf[]` (float) —
+/// the reader widens half quaternions to `f32`.
+///
+/// `inactive_ids` lives on the prim's metadata (not as an attribute)
+/// because it's authored as a stage-time-invariant pruning list per
+/// Pixar's spec.
+#[derive(Debug, Clone, Default)]
+pub struct ReadPointInstancer {
+    pub path: String,
+    /// Targets of the `prototypes` relationship — root paths of the
+    /// prims to instance.
+    pub prototypes: Vec<String>,
+    /// Per-instance index into `prototypes`. Drives the length of
+    /// every other per-instance array.
+    pub proto_indices: Vec<i32>,
+    /// Per-instance position. In USD's `point3f[]` form.
+    pub positions: Vec<[f32; 3]>,
+    /// Per-instance rotation — quaternion `(w, x, y, z)` widened to
+    /// `f32` whether authored as `quath[]` or `quatf[]`. Empty when
+    /// unauthored.
+    pub orientations: Vec<[f32; 4]>,
+    pub scales: Vec<[f32; 3]>,
+    pub velocities: Vec<[f32; 3]>,
+    pub accelerations: Vec<[f32; 3]>,
+    pub angular_velocities: Vec<[f32; 3]>,
+    /// Stable per-instance identifiers across frames. Empty when
+    /// unauthored.
+    pub ids: Vec<i64>,
+    /// Per-frame visibility prune list — instances with an ID in
+    /// this list are skipped at this time code.
+    pub invisible_ids: Vec<i64>,
+    /// Permanent prune list, read from the prim's `inactiveIds`
+    /// metadata. Stage-time invariant per Pixar's spec.
+    pub inactive_ids: Vec<i64>,
+}
+
 /// Result of [`super::read::find_geom_prims`] — a single-pass stage
 /// walk that returns categorised path lists. Saves callers from
 /// re-walking the stage for each schema family.

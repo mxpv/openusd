@@ -181,6 +181,17 @@ pub const A_IDS: &str = "ids";
 pub const A_TET_VERTEX_INDICES: &str = "tetVertexIndices";
 pub const A_SURFACE_FACE_VERTEX_INDICES: &str = "surfaceFaceVertexIndices";
 
+// ── PointInstancer attribute / relationship names ───────────────────────
+pub const REL_PROTOTYPES: &str = "prototypes";
+pub const A_PROTO_INDICES: &str = "protoIndices";
+pub const A_POSITIONS: &str = "positions";
+pub const A_ORIENTATIONS: &str = "orientations";
+pub const A_ORIENTATIONS_F: &str = "orientationsf";
+pub const A_SCALES: &str = "scales";
+pub const A_ANGULAR_VELOCITIES: &str = "angularVelocities";
+pub const A_INVISIBLE_IDS: &str = "invisibleIds";
+pub const META_INACTIVE_IDS: &str = "inactiveIds";
+
 // Orientation token values.
 pub const ORIENTATION_RIGHT_HANDED: &str = "rightHanded";
 pub const ORIENTATION_LEFT_HANDED: &str = "leftHanded";
