@@ -13,11 +13,15 @@
 //!
 //! | Feature | Module | Status |
 //! |---------|--------|--------|
+//! | `geom`    | `geom`    | `UsdGeom` reader (cross-cutting Imageable / Boundable today; full surface incoming). |
 //! | `physics` | `physics` | `UsdPhysics` reader (8 prim types, 7 single-apply APIs, multi-apply `LimitAPI` / `DriveAPI`). |
 //! | `skel`    | `skel`    | `UsdSkel` reader + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
+
+#[cfg(feature = "geom")]
+pub mod geom;
 
 #[cfg(feature = "physics")]
 pub mod physics;

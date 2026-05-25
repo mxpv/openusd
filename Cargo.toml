@@ -10,6 +10,7 @@ categories = ["graphics", "rendering", "rendering::data-formats"]
 keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
 [features]
+geom = []
 physics = []
 skel = []
 serde = ["dep:serde", "half/serde"]
@@ -56,3 +57,7 @@ required-features = ["physics"]
 [[test]]
 name = "skel_reader"
 required-features = ["skel"]
+
+[[test]]
+name = "geom_reader"
+required-features = ["geom"]
