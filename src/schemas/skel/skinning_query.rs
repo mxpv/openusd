@@ -14,8 +14,10 @@
 //!   caller doesn't have to re-read them per frame.
 //! - Driving the [`super::skinning`] math against the right inputs.
 
+use crate::math::IDENTITY_MAT4;
+
 use super::anim_mapper::AnimMapper;
-use super::skinning::{rigid_skinning_transform, skin_normals_lbs, skin_points_lbs, IDENTITY_MAT4};
+use super::skinning::{rigid_skinning_transform, skin_normals_lbs, skin_points_lbs};
 use super::types::{InfluenceInterpolation, ReadSkelBinding, SkinningMethod};
 
 /// Resolver bundle for one skinnable prim.
