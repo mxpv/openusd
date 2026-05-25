@@ -6,9 +6,10 @@
 use anyhow::Result;
 use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
-    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_capsule,
-    read_cone, read_cube, read_cylinder, read_extent, read_kind, read_plane, read_proxy_prim, read_purpose,
-    read_sphere, read_visibility, read_xform_op_order, resets_xform_stack, Axis, Purpose, Visibility,
+    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_camera,
+    read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_kind, read_plane, read_proxy_prim,
+    read_purpose, read_sphere, read_visibility, read_xform_op_order, resets_xform_stack, Axis, Projection, Purpose,
+    StereoRole, Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -140,7 +141,9 @@ fn find_geom_prims_buckets_by_type() -> Result<()> {
     assert!(prims.xforms.contains(&"/World/Hidden".to_string()));
     assert!(prims.scopes.contains(&"/World/Geometry".to_string()));
     assert!(prims.scopes.contains(&"/World/Shapes".to_string()));
-    assert_eq!(prims.cameras, vec!["/World/Cam".to_string()]);
+    assert!(prims.cameras.contains(&"/World/Cam".to_string()));
+    assert!(prims.cameras.contains(&"/World/AuthoredCam".to_string()));
+    assert!(prims.cameras.contains(&"/World/OrthoCam".to_string()));
     assert!(prims.meshes.contains(&"/World/Geometry/Hero".to_string()));
     assert!(prims.meshes.contains(&"/World/Geometry/HeroProxy".to_string()));
     assert!(prims.cubes.contains(&"/World/Geometry/GuideCube".to_string()));
@@ -320,6 +323,81 @@ fn axis_token_round_trip() {
     assert_eq!(Axis::from_token("bogus"), None);
     // The default is Z per Pixar spec.
     assert_eq!(Axis::default(), Axis::Z);
+}
+
+// ── Camera ────────────────────────────────────────────────────────
+
+#[test]
+fn read_camera_returns_authored_attrs() -> Result<()> {
+    let stage = open()?;
+    let c = read_camera(&stage, &sdf::path("/World/AuthoredCam")?)?.expect("Camera");
+    assert_eq!(c.focal_length, 35.0);
+    assert_eq!(c.horizontal_aperture, 36.0);
+    assert_eq!(c.vertical_aperture, 24.0);
+    assert_eq!(c.f_stop, 2.8);
+    assert_eq!(c.focus_distance, 10.0);
+    assert_eq!(c.projection, Projection::Perspective);
+    assert_eq!(c.clipping_range, [0.1, 5000.0]);
+    assert_eq!(c.shutter_open, -0.25);
+    assert_eq!(c.shutter_close, 0.25);
+    assert_eq!(c.exposure, 1.5);
+    assert_eq!(c.stereo_role, StereoRole::Left);
+    Ok(())
+}
+
+#[test]
+fn unauthored_camera_falls_back_to_spec_defaults() -> Result<()> {
+    let stage = open()?;
+    // /World/Cam only authors focalLength.
+    let c = read_camera(&stage, &sdf::path("/World/Cam")?)?.expect("Camera");
+    assert_eq!(c.focal_length, 50.0);
+    // Unauthored aperture / projection / stereoRole get Pixar's defaults.
+    assert_eq!(c.horizontal_aperture, 20.955);
+    assert_eq!(c.vertical_aperture, 15.2908);
+    assert_eq!(c.projection, Projection::Perspective);
+    assert_eq!(c.clipping_range, [1.0, 1_000_000.0]);
+    assert_eq!(c.stereo_role, StereoRole::Mono);
+    Ok(())
+}
+
+#[test]
+fn orthographic_projection_token() -> Result<()> {
+    let stage = open()?;
+    let c = read_camera(&stage, &sdf::path("/World/OrthoCam")?)?.expect("Camera");
+    assert_eq!(c.projection, Projection::Orthographic);
+    Ok(())
+}
+
+#[test]
+fn camera_fov_derives_from_aperture_and_focal_length() {
+    // 35 mm focal length, 36 mm horizontal aperture → ~54.4° h-FOV.
+    let c = openusd::schemas::geom::ReadCamera {
+        focal_length: 35.0,
+        horizontal_aperture: 36.0,
+        vertical_aperture: 24.0,
+        ..Default::default()
+    };
+    let h = c.horizontal_fov_rad().to_degrees();
+    let v = c.vertical_fov_rad().to_degrees();
+    assert!((h - 54.43).abs() < 0.05, "horizontal fov: {h}");
+    assert!((v - 37.85).abs() < 0.05, "vertical fov: {v}");
+    assert!((c.aspect_ratio() - 1.5).abs() < 1e-5);
+}
+
+#[test]
+fn camera_projection_and_stereo_token_round_trip() {
+    assert_eq!(Projection::Perspective.as_token(), "perspective");
+    assert_eq!(Projection::from_token("orthographic"), Some(Projection::Orthographic));
+    assert_eq!(Projection::from_token("bogus"), None);
+    assert_eq!(StereoRole::Right.as_token(), "right");
+    assert_eq!(StereoRole::from_token("mono"), Some(StereoRole::Mono));
+}
+
+#[test]
+fn read_camera_returns_none_for_non_camera() -> Result<()> {
+    let stage = open()?;
+    assert!(read_camera(&stage, &sdf::path("/World/Shapes/Ball")?)?.is_none());
+    Ok(())
 }
 
 #[test]

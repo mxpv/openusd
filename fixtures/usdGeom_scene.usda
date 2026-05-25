@@ -51,6 +51,26 @@ def Xform "World" (
         float focalLength = 50
     }
 
+    def Camera "AuthoredCam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float fStop = 2.8
+        float focusDistance = 10
+        token projection = "perspective"
+        float2 clippingRange = (0.1, 5000)
+        float shutter:open = -0.25
+        float shutter:close = 0.25
+        float exposure = 1.5
+        token stereoRole = "left"
+    }
+
+    def Camera "OrthoCam"
+    {
+        token projection = "orthographic"
+    }
+
     def Xform "Hidden" (
         kind = "group"
     )
