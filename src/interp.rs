@@ -67,6 +67,28 @@ pub fn is_linear_supported(v: &Value) -> bool {
             | Value::Quath(_)
             | Value::Quatf(_)
             | Value::Quatd(_)
+            // Array (VtArray) variants follow C++ `USD_LINEAR_INTERPOLATION_TYPES`.
+            // Bracketing samples must agree on length; when they don't,
+            // the evaluator falls back to held.
+            | Value::HalfVec(_)
+            | Value::FloatVec(_)
+            | Value::DoubleVec(_)
+            | Value::TimeCodeVec(_)
+            | Value::Matrix2dVec(_)
+            | Value::Matrix3dVec(_)
+            | Value::Matrix4dVec(_)
+            | Value::Vec2hVec(_)
+            | Value::Vec2fVec(_)
+            | Value::Vec2dVec(_)
+            | Value::Vec3hVec(_)
+            | Value::Vec3fVec(_)
+            | Value::Vec3dVec(_)
+            | Value::Vec4hVec(_)
+            | Value::Vec4fVec(_)
+            | Value::Vec4dVec(_)
+            | Value::QuathVec(_)
+            | Value::QuatfVec(_)
+            | Value::QuatdVec(_)
     )
 }
 
@@ -158,6 +180,72 @@ fn lerp_value(a: &Value, b: &Value, t: f32) -> Option<Value> {
         (V::Quath(x), V::Quath(y)) => V::Quath(slerp_half(x, y, t)),
         (V::Quatf(x), V::Quatf(y)) => V::Quatf(slerp_quatf(x, y, t)),
         (V::Quatd(x), V::Quatd(y)) => V::Quatd(slerp_quatd(x, y, t64)),
+
+        // Array (VtArray) variants. Per C++: bracketing samples must
+        // agree on length, otherwise fall back to held.
+        (V::HalfVec(x), V::HalfVec(y)) if x.len() == y.len() => V::HalfVec(
+            x.iter()
+                .zip(y)
+                .map(|(a, b)| half::f16::from_f32(lerp_f32(a.to_f32(), b.to_f32(), t)))
+                .collect(),
+        ),
+        (V::FloatVec(x), V::FloatVec(y)) if x.len() == y.len() => {
+            V::FloatVec(x.iter().zip(y).map(|(a, b)| lerp_f32(*a, *b, t)).collect())
+        }
+        (V::DoubleVec(x), V::DoubleVec(y)) if x.len() == y.len() => {
+            V::DoubleVec(x.iter().zip(y).map(|(a, b)| lerp_f64(*a, *b, t64)).collect())
+        }
+        (V::TimeCodeVec(x), V::TimeCodeVec(y)) if x.len() == y.len() => {
+            V::TimeCodeVec(x.iter().zip(y).map(|(a, b)| lerp_f64(*a, *b, t64)).collect())
+        }
+
+        (V::Matrix2dVec(x), V::Matrix2dVec(y)) if x.len() == y.len() => {
+            V::Matrix2dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<4>(a, b, t64)).collect())
+        }
+        (V::Matrix3dVec(x), V::Matrix3dVec(y)) if x.len() == y.len() => {
+            V::Matrix3dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<9>(a, b, t64)).collect())
+        }
+        (V::Matrix4dVec(x), V::Matrix4dVec(y)) if x.len() == y.len() => {
+            V::Matrix4dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<16>(a, b, t64)).collect())
+        }
+
+        (V::Vec2hVec(x), V::Vec2hVec(y)) if x.len() == y.len() => {
+            V::Vec2hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<2>(a, b, t)).collect())
+        }
+        (V::Vec2fVec(x), V::Vec2fVec(y)) if x.len() == y.len() => {
+            V::Vec2fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<2>(a, b, t)).collect())
+        }
+        (V::Vec2dVec(x), V::Vec2dVec(y)) if x.len() == y.len() => {
+            V::Vec2dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<2>(a, b, t64)).collect())
+        }
+        (V::Vec3hVec(x), V::Vec3hVec(y)) if x.len() == y.len() => {
+            V::Vec3hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<3>(a, b, t)).collect())
+        }
+        (V::Vec3fVec(x), V::Vec3fVec(y)) if x.len() == y.len() => {
+            V::Vec3fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<3>(a, b, t)).collect())
+        }
+        (V::Vec3dVec(x), V::Vec3dVec(y)) if x.len() == y.len() => {
+            V::Vec3dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<3>(a, b, t64)).collect())
+        }
+        (V::Vec4hVec(x), V::Vec4hVec(y)) if x.len() == y.len() => {
+            V::Vec4hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<4>(a, b, t)).collect())
+        }
+        (V::Vec4fVec(x), V::Vec4fVec(y)) if x.len() == y.len() => {
+            V::Vec4fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<4>(a, b, t)).collect())
+        }
+        (V::Vec4dVec(x), V::Vec4dVec(y)) if x.len() == y.len() => {
+            V::Vec4dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<4>(a, b, t64)).collect())
+        }
+
+        (V::QuathVec(x), V::QuathVec(y)) if x.len() == y.len() => {
+            V::QuathVec(x.iter().zip(y).map(|(a, b)| slerp_half(a, b, t)).collect())
+        }
+        (V::QuatfVec(x), V::QuatfVec(y)) if x.len() == y.len() => {
+            V::QuatfVec(x.iter().zip(y).map(|(a, b)| slerp_quatf(a, b, t)).collect())
+        }
+        (V::QuatdVec(x), V::QuatdVec(y)) if x.len() == y.len() => {
+            V::QuatdVec(x.iter().zip(y).map(|(a, b)| slerp_quatd(a, b, t64)).collect())
+        }
 
         _ => return None,
     })
@@ -381,6 +469,45 @@ mod tests {
         );
         assert!(out[2].abs() < 1e-5);
         assert!(out[3].abs() < 1e-5);
+    }
+
+    #[test]
+    fn linear_vec3f_array_lerps_per_element() {
+        let s = vec![
+            (0.0, Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])),
+            (10.0, Value::Vec3fVec(vec![[10.0, 0.0, 0.0], [10.0, 20.0, 0.0]])),
+        ];
+        let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
+        assert_eq!(out, Value::Vec3fVec(vec![[5.0, 0.0, 0.0], [10.0, 10.0, 0.0]]));
+    }
+
+    #[test]
+    fn linear_quatf_array_slerps_per_element() {
+        let s = vec![
+            (0.0, Value::QuatfVec(vec![[1.0, 0.0, 0.0, 0.0]])),
+            (10.0, Value::QuatfVec(vec![[0.0, 1.0, 0.0, 0.0]])),
+        ];
+        let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
+        if let Value::QuatfVec(v) = out {
+            let expected_w = std::f32::consts::FRAC_PI_4.cos();
+            let expected_x = std::f32::consts::FRAC_PI_4.sin();
+            assert!((v[0][0] - expected_w).abs() < 1e-5);
+            assert!((v[0][1] - expected_x).abs() < 1e-5);
+        } else {
+            panic!("expected QuatfVec, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn linear_array_length_mismatch_falls_back_to_held() {
+        // Spec: when bracketing arrays differ in length, linear is
+        // undefined; behaviour matches Held (return the previous sample).
+        let s = vec![
+            (0.0, Value::FloatVec(vec![1.0, 2.0, 3.0])),
+            (10.0, Value::FloatVec(vec![4.0, 5.0])),
+        ];
+        let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
+        assert_eq!(out, Value::FloatVec(vec![1.0, 2.0, 3.0]));
     }
 
     #[test]

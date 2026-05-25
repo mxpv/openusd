@@ -6,11 +6,12 @@
 //! per-mesh skinning resolvers, and pure-math helpers for linear
 //! blend skinning and blend-shape application.
 //!
-//! Time-dependent evaluation (interpolating SkelAnimation samples at
-//! a stage time, computing per-frame skinning transforms) is the job
-//! of the upcoming `anim` layer. The resolvers here are designed to
-//! plug straight into that work — every API that would need a
-//! `UsdTimeCode` instead takes the already-evaluated joint poses.
+//! Time-sampled SkelAnimation evaluation is handled by
+//! [`SkelAnimQuery`], which delegates to [`crate::Stage::value_at`]
+//! and inherits the stage's interpolation mode (AOUSD §12.5 — linear
+//! by default, with per-joint slerp for `rotations`). The static
+//! resolvers below take pre-evaluated joint poses, so callers
+//! typically wire `SkelAnimQuery` into them at each frame.
 //!
 //! # Schemas
 //!
@@ -66,6 +67,7 @@
 pub mod tokens;
 
 mod anim_mapper;
+mod anim_query;
 mod binding;
 mod read;
 mod skeleton_query;
@@ -75,6 +77,7 @@ mod topology;
 mod types;
 
 pub use anim_mapper::{AnimMapper, MISSING};
+pub use anim_query::{JointTransformComponents, SkelAnimQuery};
 pub use binding::{discover_bindings, discover_skeletons, find_skel_roots, SkelBinding};
 pub use read::{
     find_skel_prims, read_blend_shape, read_inherited_animation_source, read_inherited_skeleton, read_skel_animation,
