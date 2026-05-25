@@ -59,6 +59,35 @@ pub const AXIS_X: &str = "X";
 pub const AXIS_Y: &str = "Y";
 pub const AXIS_Z: &str = "Z";
 
+// ── Camera attribute names ──────────────────────────────────────────────
+pub const A_FOCAL_LENGTH: &str = "focalLength";
+pub const A_HORIZONTAL_APERTURE: &str = "horizontalAperture";
+pub const A_VERTICAL_APERTURE: &str = "verticalAperture";
+pub const A_HORIZONTAL_APERTURE_OFFSET: &str = "horizontalApertureOffset";
+pub const A_VERTICAL_APERTURE_OFFSET: &str = "verticalApertureOffset";
+pub const A_F_STOP: &str = "fStop";
+pub const A_FOCUS_DISTANCE: &str = "focusDistance";
+pub const A_PROJECTION: &str = "projection";
+pub const A_CLIPPING_RANGE: &str = "clippingRange";
+pub const A_CLIPPING_PLANES: &str = "clippingPlanes";
+pub const A_SHUTTER_OPEN: &str = "shutter:open";
+pub const A_SHUTTER_CLOSE: &str = "shutter:close";
+pub const A_EXPOSURE: &str = "exposure";
+pub const A_EXPOSURE_ISO: &str = "exposure:iso";
+pub const A_EXPOSURE_TIME: &str = "exposure:time";
+pub const A_EXPOSURE_F_STOP: &str = "exposure:fStop";
+pub const A_EXPOSURE_RESPONSIVITY: &str = "exposure:responsivity";
+pub const A_STEREO_ROLE: &str = "stereoRole";
+
+// Projection token values.
+pub const PROJECTION_PERSPECTIVE: &str = "perspective";
+pub const PROJECTION_ORTHOGRAPHIC: &str = "orthographic";
+
+// Stereo-role token values.
+pub const STEREO_ROLE_MONO: &str = "mono";
+pub const STEREO_ROLE_LEFT: &str = "left";
+pub const STEREO_ROLE_RIGHT: &str = "right";
+
 // Orientation token values.
 pub const ORIENTATION_RIGHT_HANDED: &str = "rightHanded";
 pub const ORIENTATION_LEFT_HANDED: &str = "leftHanded";
