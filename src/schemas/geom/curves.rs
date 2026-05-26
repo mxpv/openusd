@@ -72,15 +72,16 @@ pub fn read_nurbs_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsC
         let mut out = Vec::with_capacity(curve_vertex_counts.len());
         let mut k_cursor = 0usize;
         for (i, count) in curve_vertex_counts.iter().enumerate() {
-            let n = (*count as usize).max(0);
-            let p = order.get(i).copied().unwrap_or(4) as usize;
-            let nk = n + p;
-            if k_cursor + nk <= knots.len() && p > 0 && n > 0 {
+            let n = (*count).max(0) as usize;
+            let p = order.get(i).copied().unwrap_or(4).max(0) as usize;
+            let nk = n.saturating_add(p);
+            let end = k_cursor.saturating_add(nk);
+            if end <= knots.len() && p > 0 && n > 0 {
                 out.push([knots[k_cursor + p - 1], knots[k_cursor + n]]);
             } else {
                 out.push([0.0, 1.0]);
             }
-            k_cursor += nk;
+            k_cursor = end;
         }
         out
     });
@@ -112,9 +113,9 @@ pub fn read_nurbs_patch(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsPa
     let u_knots = read_double_vec(stage, prim, A_U_KNOTS)?.unwrap_or_default();
     let v_knots = read_double_vec(stage, prim, A_V_KNOTS)?.unwrap_or_default();
     let u_range = read_vec2d_scalar(stage, prim, A_U_RANGE)?
-        .unwrap_or_else(|| clamped_inner_span(&u_knots, u_vertex_count as usize, u_order as usize));
+        .unwrap_or_else(|| clamped_inner_span(&u_knots, u_vertex_count.max(0) as usize, u_order.max(0) as usize));
     let v_range = read_vec2d_scalar(stage, prim, A_V_RANGE)?
-        .unwrap_or_else(|| clamped_inner_span(&v_knots, v_vertex_count as usize, v_order as usize));
+        .unwrap_or_else(|| clamped_inner_span(&v_knots, v_vertex_count.max(0) as usize, v_order.max(0) as usize));
     let u_form = read_token(stage, prim, A_U_FORM)?
         .as_deref()
         .and_then(PatchForm::from_token)
@@ -219,7 +220,7 @@ pub fn read_tet_mesh(stage: &Stage, prim: &Path) -> Result<Option<ReadTetMesh>> 
 // ────────────────────────────────────────────────────────────────────────
 
 fn clamped_inner_span(knots: &[f64], n: usize, p: usize) -> [f64; 2] {
-    if !knots.is_empty() && n > 0 && p > 0 && knots.len() >= n + p {
+    if !knots.is_empty() && n > 0 && p > 0 && n.checked_add(p).is_some_and(|sum| knots.len() >= sum) {
         [knots[p - 1], knots[n]]
     } else {
         [0.0, 1.0]

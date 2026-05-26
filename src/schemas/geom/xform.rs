@@ -89,10 +89,12 @@ pub fn compute_local_to_parent_transform(stage: &Stage, prim: &Path, time: f64) 
 /// Build the 4×4 contribution of a single xformOp.
 ///
 /// `op_name` is one entry from `xformOpOrder` — possibly with the
-/// `!invert!` prefix and optionally with an `xformOp:` namespace
-/// prefix. The op's kind (translate / scale / orient / rotateAXIS /
-/// rotateEULER / transform) is parsed from the segment between
-/// `xformOp:` and the first `:` suffix.
+/// `!invert!` prefix. The remainder must be a fully-namespaced
+/// `xformOp:…` attribute name as authored on the prim; that's how
+/// `xformOpOrder` entries are spelled per the USD spec. The op's
+/// kind (translate / scale / orient / rotateAXIS / rotateEULER /
+/// transform) is parsed from the segment between `xformOp:` and the
+/// first `:` suffix.
 fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Result<[f64; 16]> {
     let (inverted, base) = match op_name.strip_prefix(TOKEN_INVERT_PREFIX) {
         Some(stripped) => (true, stripped),
@@ -150,7 +152,7 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
     };
 
     if inverted {
-        Ok(mat4_inverse(&m).unwrap_or(IDENTITY_MAT4))
+        mat4_inverse(&m).ok_or_else(|| anyhow::anyhow!("xformOp `{op_name}` matrix is singular and cannot be inverted"))
     } else {
         Ok(m)
     }

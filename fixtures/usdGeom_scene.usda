@@ -85,6 +85,14 @@ def Xform "World" (
         }
     }
 
+    # Untyped prim that still authors an Imageable opinion. Exercises
+    # find_geom_prims' fallback path for unknown Imageable subclasses.
+    def "CustomImageable"
+    {
+        token visibility = "invisible"
+        uniform token purpose = "guide"
+    }
+
     def Xform "TRS"
     {
         # Standard translate / rotateY / scale stack — applied first

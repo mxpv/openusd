@@ -191,11 +191,10 @@ pub fn find_geom_prims(stage: &Stage) -> Result<GeomPrims> {
                 _ => {}
             }
         }
-        if counted {
-            out.imageables.push(p);
-        } else if let Ok(Some(_)) = stage.field::<Value>(path.clone(), A_VISIBILITY) {
-            out.imageables.push(p);
-        } else if let Ok(Some(_)) = stage.field::<Value>(path.clone(), A_PURPOSE) {
+        let has_imageable_opinion = counted
+            || matches!(read_attr_default(stage, path, A_VISIBILITY), Ok(Some(_)))
+            || matches!(read_attr_default(stage, path, A_PURPOSE), Ok(Some(_)));
+        if has_imageable_opinion {
             out.imageables.push(p);
         }
     })?;
