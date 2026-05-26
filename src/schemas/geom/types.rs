@@ -316,7 +316,10 @@ impl Default for ReadCamera {
             vertical_aperture: 15.2908,
             horizontal_aperture_offset: 0.0,
             vertical_aperture_offset: 0.0,
-            f_stop: 1.0,
+            // 0.0 disables DOF — matches Pixar's `float fStop = 0.0` in
+            // `pxr/usd/usdGeom/schema.usda`. Renderers treat `fStop > 0`
+            // as the cue to enable a finite aperture.
+            f_stop: 0.0,
             focus_distance: 0.0,
             projection: Projection::Perspective,
             clipping_range: [1.0, 1_000_000.0],

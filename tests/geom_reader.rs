@@ -226,6 +226,21 @@ fn invert_prefix_inverts_the_op() -> Result<()> {
 }
 
 #[test]
+fn rotate_xyz_matches_pixar_composition() -> Result<()> {
+    // Pixar's `rotateXYZ` in `pxr/usd/usdGeom/xformOp.cpp` composes
+    // as `xRot * yRot * zRot` (row-vector matrices, leftmost applies
+    // first to v). Test rotateXYZ(0, 90°, 0) on +X: Ry(90°) takes
+    // +X to -Z.
+    let stage = open()?;
+    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/EulerXYZ")?, 0.0)?;
+    let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
+    assert!(p[0].abs() < 1e-5, "x: {}", p[0]);
+    assert!(p[1].abs() < 1e-5, "y: {}", p[1]);
+    assert!((p[2] + 1.0).abs() < 1e-5, "z: {} (expected -1)", p[2]);
+    Ok(())
+}
+
+#[test]
 fn trs_stack_composes_in_authored_order() -> Result<()> {
     let stage = open()?;
     // Order is translate → rotateY(90°) → scale(2,2,2). In USD's row-
@@ -359,6 +374,14 @@ fn unauthored_camera_falls_back_to_spec_defaults() -> Result<()> {
     assert_eq!(c.projection, Projection::Perspective);
     assert_eq!(c.clipping_range, [1.0, 1_000_000.0]);
     assert_eq!(c.stereo_role, StereoRole::Mono);
+    // Pixar's fStop default is 0.0 (DOF off); focusDistance also 0.0.
+    assert_eq!(c.f_stop, 0.0);
+    assert_eq!(c.focus_distance, 0.0);
+    // Exposure model sub-attrs land at their photographic defaults.
+    assert_eq!(c.exposure_iso, 100.0);
+    assert_eq!(c.exposure_time, 1.0);
+    assert_eq!(c.exposure_f_stop, 1.0);
+    assert_eq!(c.exposure_responsivity, 1.0);
     Ok(())
 }
 
