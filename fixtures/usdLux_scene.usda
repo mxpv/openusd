@@ -1,0 +1,112 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+    metersPerUnit = 1.0
+    doc = "UsdLux reader integration test fixture: covers DistantLight, SphereLight, RectLight (with ShapingAPI + ShadowAPI), DiskLight, CylinderLight, DomeLight (with portals), GeometryLight, PortalLight, and a LightListAPI at the root."
+)
+
+def Xform "World" (
+    prepend apiSchemas = ["LightListAPI"]
+)
+{
+    rel lightList = [
+        </World/Sun>,
+        </World/Sphere>,
+        </World/Rect>,
+        </World/Disk>,
+        </World/Tube>,
+        </World/Dome>,
+        </World/MeshLight>,
+        </World/Dome/Portal>,
+    ]
+    uniform token lightList:cacheBehavior = "consumeAndContinue"
+
+    def DistantLight "Sun"
+    {
+        # Authored intensity overrides the DistantLight default (50000)
+        # so the test can assert the override travels round-trip.
+        float inputs:intensity = 12000
+        float inputs:exposure = 1.5
+        color3f inputs:color = (1, 0.95, 0.85)
+        bool inputs:enableColorTemperature = true
+        float inputs:colorTemperature = 5500
+        float inputs:angle = 0.53
+    }
+
+    def SphereLight "Sphere"
+    {
+        float inputs:intensity = 800
+        color3f inputs:color = (1, 1, 1)
+        float inputs:radius = 0.25
+        bool treatAsPoint = true
+    }
+
+    def RectLight "Rect" (
+        prepend apiSchemas = ["ShapingAPI", "ShadowAPI"]
+    )
+    {
+        float inputs:intensity = 1500
+        color3f inputs:color = (1, 0.9, 0.8)
+        float inputs:width = 2.0
+        float inputs:height = 1.0
+        asset inputs:texture:file = @./textures/softbox.exr@
+
+        float inputs:shaping:focus = 4.0
+        color3f inputs:shaping:focusTint = (0, 0, 0)
+        float inputs:shaping:cone:angle = 45.0
+        float inputs:shaping:cone:softness = 0.2
+        asset inputs:shaping:ies:file = @./ies/profile.ies@
+        float inputs:shaping:ies:angleScale = 1.0
+        bool inputs:shaping:ies:normalize = true
+
+        bool inputs:shadow:enable = true
+        color3f inputs:shadow:color = (0, 0, 0)
+        float inputs:shadow:distance = 10.0
+        float inputs:shadow:falloff = 2.0
+        float inputs:shadow:falloffGamma = 1.0
+    }
+
+    def DiskLight "Disk"
+    {
+        float inputs:intensity = 600
+        float inputs:radius = 0.75
+    }
+
+    def CylinderLight "Tube"
+    {
+        float inputs:intensity = 400
+        float inputs:length = 3.0
+        float inputs:radius = 0.05
+        bool treatAsLine = true
+    }
+
+    def DomeLight "Dome"
+    {
+        float inputs:intensity = 1.0
+        asset inputs:texture:file = @./hdri/studio.hdr@
+        uniform token inputs:texture:format = "latlong"
+        float guideRadius = 50.0
+        rel portals = [</World/Dome/Portal>]
+
+        def PortalLight "Portal"
+        {
+            float inputs:width = 1.2
+            float inputs:height = 2.4
+        }
+    }
+
+    def Mesh "Emitter"
+    {
+        # Geometry used as the emissive surface of MeshLight below.
+        float3[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+    }
+
+    def GeometryLight "MeshLight"
+    {
+        float inputs:intensity = 200
+        rel geometry = </World/Emitter>
+    }
+}
