@@ -10,7 +10,7 @@
 //! that variant-specific accessors won't be called on the wrong spec kind.
 //!
 //! The primary entry points for authoring and inspection are
-//! [`Layer::create_prim`](crate::layer::Layer::create_prim) and friends;
+//! [`Layer::create_prim`](crate::sdf::Layer::create_prim) and friends;
 //! the `Spec::as_*` downcasts here are the low-level building block
 //! equivalent to C++'s `TfDynamic_cast<SdfPrimSpec>(spec)`.
 
@@ -40,7 +40,7 @@ use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, Value, Variabi
 /// `as_pseudo_root` (and their `_mut` variants) are the Rust equivalent of
 /// `TfDynamic_cast<SdfPrimSpec>(spec)` — a low-level downcast. The intended
 /// primary entry points are the path-keyed methods on
-/// [`Layer`](crate::layer::Layer) (e.g. `Layer::create_prim`,
+/// [`Layer`](crate::sdf::Layer) (e.g. `Layer::create_prim`,
 /// `Layer::prim_mut`), which mirror `SdfLayer::CreatePrimSpec` /
 /// `SdfLayer::GetPrimAtPath` and handle the write-side bookkeeping.
 #[derive(Debug, Clone)]

@@ -10,6 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
 mod data;
+mod layer;
 mod ordering;
 mod path;
 pub mod schema;
@@ -17,6 +18,7 @@ mod spec;
 mod value;
 
 pub use data::Data;
+pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::apply_ordering;
 pub use path::{path, Path};
 pub use schema::{ChildrenKey, FieldKey};
