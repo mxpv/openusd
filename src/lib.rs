@@ -45,7 +45,7 @@ pub mod usdz;
 
 pub use half::f16;
 pub use interp::InterpolationType;
-pub use layer::{Collector, DependencyKind, LayerFormat};
+pub use layer::{Collector, DependencyKind};
 pub use stage::{InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageBuilder, StagePopulationMask};
 
 /// A recoverable error encountered during stage composition.
