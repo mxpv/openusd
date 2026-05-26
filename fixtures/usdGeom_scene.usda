@@ -117,6 +117,16 @@ def Xform "World" (
         uniform token[] xformOpOrder = ["!invert!xformOp:translate"]
     }
 
+    def Xform "EulerXYZ"
+    {
+        # Pixar's `rotateXYZ` composes as `Rx · Ry · Rz` (per pxr/usd/usdGeom/xformOp.cpp).
+        # In row-vector convention `v · M`, the leftmost matrix applies first to v.
+        # So rotateXYZ(0, 90, 0) applies Ry(90°) to v (since Rx(0) and Rz(0) are identity).
+        # Ry(90°) takes +X to -Z.
+        float3 xformOp:rotateXYZ = (0, 90, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
     def Scope "Shapes"
     {
         def Cube "AuthoredCube"
