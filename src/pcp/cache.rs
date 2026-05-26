@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{Path, SpecType, Value};
+use crate::sdf::{AbstractData, Path, SpecType, Value};
 
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -73,8 +73,14 @@ impl Cache {
     }
 
     /// Returns the layer identifiers in strength order (root first).
-    pub fn layer_identifiers(&self) -> &[String] {
-        &self.stack.identifiers
+    pub fn layer_identifiers(&self) -> Vec<String> {
+        self.stack.layers.iter().map(|l| l.identifier.clone()).collect()
+    }
+
+    /// Returns the identifier for the layer at `index` without cloning the
+    /// whole identifier list. Returns `None` if the index is out of range.
+    pub fn layer_identifier(&self, index: usize) -> Option<&str> {
+        self.stack.layers.get(index).map(|l| l.identifier.as_str())
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.

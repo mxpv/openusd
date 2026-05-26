@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{LayerData, Path, Value};
+use crate::sdf::{self, AbstractData, Path, Value};
 
 use super::index::{ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -33,7 +33,7 @@ const MAX_RELOCATE_CHAIN: usize = 128;
 impl Relocates {
     /// Creates a new `Relocates` by extracting `layerRelocates` from every
     /// layer's pseudoroot.
-    pub fn new(layers: &[LayerData]) -> Self {
+    pub fn new(layers: &[sdf::Layer]) -> Self {
         let root = Path::abs_root();
         let mut layer_relocates = HashMap::new();
         for (i, layer) in layers.iter().enumerate() {
