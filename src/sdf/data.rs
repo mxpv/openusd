@@ -104,6 +104,10 @@ impl AbstractData for Data {
         paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         paths
     }
+
+    fn as_data_mut(&mut self) -> Option<&mut Data> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]

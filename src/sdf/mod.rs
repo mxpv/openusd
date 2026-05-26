@@ -282,6 +282,17 @@ pub trait AbstractData {
     /// The order is deterministic and stable across repeated calls. Emitters
     /// rely on this for reproducible output.
     fn paths(&self) -> Vec<Path>;
+
+    /// Returns a mutable reference to the underlying [`Data`] backend, if this
+    /// impl is a writable in-memory store.
+    ///
+    /// Read-only backends (USDA text readers, USDC binary readers) return
+    /// `None`. The default implementation returns `None`, so adding a new
+    /// `AbstractData` impl does not require opting in. Authoring code that
+    /// needs to mutate a layer uses this hook to reach the writable store.
+    fn as_data_mut(&mut self) -> Option<&mut Data> {
+        None
+    }
 }
 
 /// A boxed layer data source, used throughout the layer stack.
