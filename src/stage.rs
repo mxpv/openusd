@@ -46,7 +46,7 @@ use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
 use crate::interp::{self, InterpolationType};
-use crate::sdf::{FieldKey, Path, Payload, SpecType, Specifier, TimeSampleMap, Value};
+use crate::sdf::{self, FieldKey, Path, Payload, SpecType, Specifier, TimeSampleMap, Value};
 use crate::{layer, pcp, CompositionError};
 
 bitflags! {
@@ -285,7 +285,7 @@ impl Stage {
     /// Returns the layer identifiers in strength order (session layers first,
     /// then root layer and its sublayers).
     pub fn layer_identifiers(&self) -> Vec<String> {
-        self.graph.borrow().layer_identifiers().to_vec()
+        self.graph.borrow().layer_identifiers()
     }
 
     /// Returns `true` if the stage has a session layer.
@@ -307,7 +307,7 @@ impl Stage {
     pub fn session_layer(&self) -> Option<String> {
         let cache = self.graph.borrow();
         if cache.session_layer_count() > 0 {
-            Some(cache.layer_identifiers()[0].clone())
+            cache.layer_identifier(0).map(str::to_owned)
         } else {
             None
         }
@@ -958,21 +958,9 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         let root_layers = collect_stage_layers(root_path)?;
 
         let session_layer_count = session_layers.len();
-        let total = session_layer_count + root_layers.len();
-        let mut identifiers = Vec::with_capacity(total);
-        let mut layers = Vec::with_capacity(total);
-        for layer in session_layers.into_iter().chain(root_layers) {
-            identifiers.push(layer.identifier);
-            layers.push(layer.data);
-        }
+        let layers: Vec<sdf::Layer> = session_layers.into_iter().chain(root_layers).collect();
 
-        let stack = pcp::LayerStack::new(
-            layers,
-            identifiers,
-            session_layer_count,
-            Box::new(self.resolver),
-            load_payloads,
-        );
+        let stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
         let on_composition_error = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
         Ok(Stage {
             graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),

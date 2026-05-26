@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use crate::ar::Resolver;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{LayerData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Specifier, Value};
+use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Specifier, Value};
 
 use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
@@ -919,14 +919,11 @@ impl<'a> IndexBuilder<'a> {
     }
 
     fn get_sublayer_stack(&self, root_layer: usize) -> Vec<(usize, LayerOffset)> {
-        self.stack.sublayer_stacks.get(&root_layer).cloned().unwrap_or_else(|| {
-            LayerStack::build_sublayer_stack(
-                root_layer,
-                &self.stack.layers,
-                &self.stack.identifiers,
-                &*self.stack.resolver,
-            )
-        })
+        self.stack
+            .sublayer_stacks
+            .get(&root_layer)
+            .cloned()
+            .unwrap_or_else(|| LayerStack::build_sublayer_stack(root_layer, &self.stack.layers, &*self.stack.resolver))
     }
 
     /// Build a full PrimIndex for a target path and merge its nodes into this
@@ -1107,7 +1104,7 @@ impl<'a> IndexBuilder<'a> {
             // External reference — evaluate in a fresh sub-builder so the
             // target's layer stack doesn't share our `seen` set. The sub-builder
             // uses its own ancestor context derived from the target path.
-            let Some(layer_index) = find_layer(asset_path, &self.stack.identifiers, &*self.stack.resolver) else {
+            let Some(layer_index) = find_layer(asset_path, &self.stack.layers, &*self.stack.resolver) else {
                 return Err(Error::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
@@ -1238,7 +1235,7 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 /// the first variant name in each variant set as the default.
 fn resolve_variant_selections_in(
     nodes: &[Node],
-    layers: &[LayerData],
+    layers: &[sdf::Layer],
     variant_fallbacks: &VariantFallbackMap,
 ) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
@@ -1315,7 +1312,7 @@ fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String
 }
 
 /// Composes a list-op field across nodes, returning the flattened list.
-fn compose_arc_list_in<T: Default + Clone + PartialEq>(nodes: &[Node], field: FieldKey, layers: &[LayerData]) -> Vec<T>
+fn compose_arc_list_in<T: Default + Clone + PartialEq>(nodes: &[Node], field: FieldKey, layers: &[sdf::Layer]) -> Vec<T>
 where
     Value: TryInto<ListOp<T>>,
 {
@@ -1340,7 +1337,7 @@ where
 }
 
 /// Collects payloads from nodes, handling both single `Payload` and `PayloadListOp`.
-fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
+fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Vec<Payload> {
     let mut combined: Option<PayloadListOp> = None;
 
     for node in nodes {
@@ -1376,15 +1373,16 @@ fn collect_payloads_in(nodes: &[Node], layers: &[LayerData]) -> Vec<Payload> {
 /// The resolver anchors the path against each candidate identifier so that
 /// custom asset resolution backends work correctly without any filesystem
 /// access in this function.
-pub(super) fn find_layer(asset_path: &str, identifiers: &[String], resolver: &dyn Resolver) -> Option<usize> {
+pub(super) fn find_layer(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
     use crate::ar::ResolvedPath;
 
     let sep = std::path::MAIN_SEPARATOR as u8;
     let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
 
     // Fast path: exact or suffix match against canonical identifiers.
-    for (i, id) in identifiers.iter().enumerate() {
-        if *id == needle {
+    for (i, layer) in layers.iter().enumerate() {
+        let id = layer.identifier.as_str();
+        if id == needle {
             return Some(i);
         }
 
@@ -1400,10 +1398,10 @@ pub(super) fn find_layer(asset_path: &str, identifiers: &[String], resolver: &dy
     // the resolver so custom AR backends override path handling without any
     // filesystem access here.
     if needle.starts_with("../") || needle.starts_with("..\\") {
-        for anchor_id in identifiers {
-            let anchor = ResolvedPath::new(PathBuf::from(anchor_id));
+        for anchor_layer in layers {
+            let anchor = ResolvedPath::new(PathBuf::from(&anchor_layer.identifier));
             let resolved = resolver.create_identifier(asset_path, Some(&anchor));
-            if let Some(pos) = identifiers.iter().position(|id| *id == resolved) {
+            if let Some(pos) = layers.iter().position(|layer| layer.identifier == resolved) {
                 return Some(pos);
             }
         }
@@ -1421,7 +1419,6 @@ mod tests {
     use super::*;
     use crate::ar::DefaultResolver;
     use crate::layer::Collector;
-    use crate::sdf::LayerData;
 
     use anyhow::Result;
 
@@ -1439,17 +1436,10 @@ mod tests {
         format!("{}/fixtures/{relative}", manifest_dir())
     }
 
-    /// Loads layers and splits into parallel vecs for PrimIndex::build.
-    fn load_layers(path: &str) -> Result<(Vec<LayerData>, Vec<String>)> {
+    /// Loads layers into a `Vec<sdf::Layer>` for PrimIndex::build.
+    fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
         let resolver = DefaultResolver::new();
-        let collected = Collector::new(&resolver).collect(path)?;
-        let mut layers = Vec::new();
-        let mut identifiers = Vec::new();
-        for layer in collected {
-            identifiers.push(layer.identifier);
-            layers.push(layer.data);
-        }
-        Ok((layers, identifiers))
+        Collector::new(&resolver).collect(path)
     }
 
     /// Builds a prim index for a given path string.
@@ -1477,14 +1467,8 @@ mod tests {
 
     /// Helper: loads layers and creates a [`LayerStack`].
     fn load_stack(path: &str) -> anyhow::Result<LayerStack> {
-        let (layers, identifiers) = load_layers(path)?;
-        Ok(LayerStack::new(
-            layers,
-            identifiers,
-            0,
-            Box::new(DefaultResolver::new()),
-            true,
-        ))
+        let layers = load_layers(path)?;
+        Ok(LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true))
     }
 
     #[test]
@@ -1585,32 +1569,32 @@ mod tests {
     #[test]
     fn find_layer_exact_match() -> Result<()> {
         let resolver = DefaultResolver::new();
-        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer(&ids[0], &ids, &resolver).is_some());
+        let layers = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer(&layers[0].identifier, &layers, &resolver).is_some());
         Ok(())
     }
 
     #[test]
     fn find_layer_suffix_match() -> Result<()> {
         let resolver = DefaultResolver::new();
-        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("ref_target.usda", &ids, &resolver).is_some());
+        let layers = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("ref_target.usda", &layers, &resolver).is_some());
         Ok(())
     }
 
     #[test]
     fn find_layer_no_partial_name_match() -> Result<()> {
         let resolver = DefaultResolver::new();
-        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("target.usda", &ids, &resolver).is_none());
+        let layers = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("target.usda", &layers, &resolver).is_none());
         Ok(())
     }
 
     #[test]
     fn find_layer_not_found() -> Result<()> {
         let resolver = DefaultResolver::new();
-        let (_, ids) = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("nonexistent.usda", &ids, &resolver).is_none());
+        let layers = load_layers(&fixture_path("ref_external.usda"))?;
+        assert!(find_layer("nonexistent.usda", &layers, &resolver).is_none());
         Ok(())
     }
 
@@ -1629,17 +1613,14 @@ mod tests {
         let b = b_dir.join("Materials.usd");
         std::fs::write(&a, b"placeholder")?;
         std::fs::write(&b, b"placeholder")?;
-        let identifiers = vec![
-            a.canonicalize()?.to_string_lossy().into_owned(),
-            b.canonicalize()?.to_string_lossy().into_owned(),
+        let layers = vec![
+            sdf::Layer::new(a.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
+            sdf::Layer::new(b.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
         ];
         let resolver = DefaultResolver::new();
         // `../Materials/Materials.usd` written inside `Props/link.usd`
         // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(
-            find_layer("../Materials/Materials.usd", &identifiers, &resolver),
-            Some(1)
-        );
+        assert_eq!(find_layer("../Materials/Materials.usd", &layers, &resolver), Some(1));
         Ok(())
     }
 
@@ -1676,7 +1657,7 @@ mod tests {
             "should have node from C.usd via nested reference"
         );
 
-        let a_idx = find_layer("A.usd", &stack.identifiers, &*stack.resolver).unwrap();
+        let a_idx = find_layer("A.usd", &stack.layers, &*stack.resolver).unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
             stack.layer(a_idx).has_spec(&a_attr_path),
@@ -1722,7 +1703,7 @@ mod tests {
         let stack = load_stack(&path)?;
 
         assert!(
-            find_layer("camera_perspective.usd", &stack.identifiers, &*stack.resolver).is_some(),
+            find_layer("camera_perspective.usd", &stack.layers, &*stack.resolver).is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
@@ -1758,7 +1739,7 @@ mod tests {
 
     // --- Error reporting ---
 
-    fn parse_usda(text: &str) -> LayerData {
+    fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         Box::new(crate::usda::TextReader::from_data(data))
     }
@@ -1792,9 +1773,8 @@ def "Root" (
 }
 "#,
         );
-        let layers = vec![a, b];
-        let ids = vec!["a.usd".to_string(), "b.usd".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
+        let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
         assert!(
@@ -1816,9 +1796,8 @@ def "Prim" (
 }
 "#,
         );
-        let layers = vec![layer];
-        let ids = vec!["test.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
+        let layers = vec![sdf::Layer::new("test.usda", layer)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(
@@ -1842,9 +1821,11 @@ def "Prim" (
 "#,
         );
         let target = parse_usda("#usda 1.0\ndef \"Foo\" {}\n");
-        let layers = vec![root, target];
-        let ids = vec!["root.usda".to_string(), "target.usda".to_string()];
-        let stack = LayerStack::new(layers, ids, 0, Box::new(DefaultResolver::new()), true);
+        let layers = vec![
+            sdf::Layer::new("root.usda", root),
+            sdf::Layer::new("target.usda", target),
+        ];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
         assert!(

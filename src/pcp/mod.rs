@@ -42,7 +42,7 @@
 //!
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
-//! | `LayerStack` | `PcpLayerStack` | Layers, identifiers, and precomputed sublayer stacks bundled into a single unit. |
+//! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
@@ -103,7 +103,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, LayerData, Path, Value};
+use crate::sdf::{self, AbstractData, Path, Value};
 
 pub(crate) use cache::Cache;
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
@@ -168,14 +168,13 @@ pub(crate) type SublayerStacks = HashMap<usize, Vec<(usize, sdf::LayerOffset)>>;
 
 /// Loaded layers with precomputed sublayer ordering.
 ///
-/// Bundles layers, their identifiers, and the precomputed sublayer stacks
-/// into a single unit passed through the composition engine. Corresponds
-/// to a simplified C++ `PcpLayerStack`.
+/// Bundles the layers (each carrying its own identifier and data) with the
+/// precomputed sublayer stacks into a single unit passed through the
+/// composition engine. Corresponds to a simplified C++ `PcpLayerStack`.
 pub(crate) struct LayerStack {
-    /// Layer data in strength order (session layers first, then root layer).
-    pub layers: Vec<LayerData>,
-    /// Layer identifiers (asset paths) matching the `layers` order.
-    pub identifiers: Vec<String>,
+    /// Layers in strength order (session layers first, then root layer).
+    /// Each [`sdf::Layer`] bundles its resolved identifier and backing data.
+    pub layers: Vec<sdf::Layer>,
     /// Precomputed sublayer stacks keyed by root layer index.
     pub sublayer_stacks: SublayerStacks,
     /// Number of session layers at the front of the layer stack.
@@ -193,14 +192,13 @@ pub(crate) struct LayerStack {
 impl LayerStack {
     /// Creates a new layer stack, precomputing sublayer ordering.
     pub fn new(
-        layers: Vec<LayerData>,
-        identifiers: Vec<String>,
+        layers: Vec<sdf::Layer>,
         session_layer_count: usize,
         resolver: Box<dyn Resolver>,
         load_payloads: bool,
     ) -> Self {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
-            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &identifiers, &*resolver)))
+            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &*resolver)))
             .collect();
         let mut layer_offsets: HashMap<usize, sdf::LayerOffset> = HashMap::new();
         for stack in sublayer_stacks.values() {
@@ -210,7 +208,6 @@ impl LayerStack {
         }
         Self {
             layers,
-            identifiers,
             sublayer_stacks,
             session_layer_count,
             load_payloads,
@@ -230,8 +227,8 @@ impl LayerStack {
         self.layers.is_empty()
     }
 
-    /// Returns the layer data at the given index.
-    pub fn layer(&self, index: usize) -> &LayerData {
+    /// Returns the layer at the given index.
+    pub fn layer(&self, index: usize) -> &sdf::Layer {
         &self.layers[index]
     }
 
@@ -239,13 +236,13 @@ impl LayerStack {
     ///
     /// Per spec 12.2.7, layer metadata authored on the pseudo-root resolves
     /// from this layer only and does not compose with sublayers or arcs.
-    pub fn root_layer(&self) -> Option<&LayerData> {
+    pub fn root_layer(&self) -> Option<&sdf::Layer> {
         self.layers.get(self.session_layer_count)
     }
 
     /// Returns the layer identifier at the given index.
     pub fn identifier(&self, index: usize) -> &str {
-        &self.identifiers[index]
+        &self.layers[index].identifier
     }
 
     /// Returns the effective sublayer offset for `layer_index` relative to
@@ -267,8 +264,7 @@ impl LayerStack {
     /// root through all nested sublayers per spec 10.3.1.1.
     pub(crate) fn build_sublayer_stack(
         root_layer: usize,
-        layers: &[LayerData],
-        identifiers: &[String],
+        layers: &[sdf::Layer],
         resolver: &dyn Resolver,
     ) -> Vec<(usize, sdf::LayerOffset)> {
         let mut stack: Vec<(usize, sdf::LayerOffset)> = vec![(root_layer, sdf::LayerOffset::IDENTITY)];
@@ -299,7 +295,7 @@ impl LayerStack {
                 .unwrap_or_default();
 
             for (i, sub_path) in sub_paths.into_iter().enumerate() {
-                let Some(sub_idx) = index::find_layer(&sub_path, identifiers, resolver) else {
+                let Some(sub_idx) = index::find_layer(&sub_path, layers, resolver) else {
                     continue;
                 };
                 if !seen.insert(sub_idx) {

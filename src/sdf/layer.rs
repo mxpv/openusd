@@ -419,6 +419,43 @@ impl std::fmt::Debug for Layer {
     }
 }
 
+/// `Layer` forwards every [`AbstractData`] method to its backing storage so
+/// `&Layer` can stand in wherever `&dyn AbstractData` was used. Mirrors C++
+/// `SdfLayer : SdfAbstractData`.
+impl AbstractData for Layer {
+    fn has_spec(&self, path: &Path) -> bool {
+        self.data.has_spec(path)
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        self.data.has_field(path, field)
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        self.data.spec_type(path)
+    }
+
+    fn try_get(&self, path: &Path, field: &str) -> Result<Option<std::borrow::Cow<'_, Value>>> {
+        self.data.try_get(path, field)
+    }
+
+    fn list(&self, path: &Path) -> Option<Vec<String>> {
+        self.data.list(path)
+    }
+
+    fn paths(&self) -> Vec<Path> {
+        self.data.paths()
+    }
+
+    fn as_data(&self) -> Option<&Data> {
+        self.data.as_data()
+    }
+
+    fn as_data_mut(&mut self) -> Option<&mut Data> {
+        None
+    }
+}
+
 // =========================================================================
 // Authoring helpers
 // =========================================================================
