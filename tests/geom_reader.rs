@@ -175,6 +175,17 @@ fn find_geom_prims_buckets_by_type() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn find_geom_prims_includes_untyped_prims_with_imageable_opinions() -> Result<()> {
+    let stage = open()?;
+    let prims = find_geom_prims(&stage)?;
+    assert!(
+        prims.imageables.iter().any(|p| p == "/World/CustomImageable"),
+        "untyped prim with authored visibility/purpose should land in imageables"
+    );
+    Ok(())
+}
+
 // ── Xformable / xformOpOrder ──────────────────────────────────────
 
 #[test]
