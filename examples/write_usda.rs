@@ -3,6 +3,7 @@
 //! Usage: `cargo run --example write_usda -- out.usda`
 
 use openusd::sdf::{self, ChildrenKey, FieldKey, SpecType, Specifier, Value};
+use openusd::usda::TextWriter;
 
 fn main() -> anyhow::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "out.usda".to_string());
@@ -35,7 +36,7 @@ fn main() -> anyhow::Result<()> {
     attr_spec.add(FieldKey::TypeName, Value::Token("double".into()));
     attr_spec.add(FieldKey::Default, Value::Double(2.5));
 
-    data.write_usda(&out)?;
+    TextWriter::write_to_file(&data, &out)?;
     println!("Wrote {} spec(s) to {out}", data.len());
     Ok(())
 }

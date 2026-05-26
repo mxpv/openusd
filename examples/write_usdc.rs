@@ -3,6 +3,7 @@
 //! Usage: `cargo run --example write_usdc -- out.usdc`
 
 use openusd::sdf::{self, ChildrenKey, FieldKey, SpecType, Specifier, Value};
+use openusd::usdc::CrateWriter;
 
 fn main() -> anyhow::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "out.usdc".to_string());
@@ -31,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     attr_spec.add(FieldKey::TypeName, Value::Token("double".into()));
     attr_spec.add(FieldKey::Default, Value::Double(1.0));
 
-    data.write_usdc(&out)?;
+    CrateWriter::write_to_file(&data, &out)?;
     println!("Wrote {} spec(s) to {out}", data.len());
     Ok(())
 }

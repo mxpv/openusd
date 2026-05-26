@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier, Value};
+use openusd::usda::TextWriter;
 
 fn main() -> anyhow::Result<()> {
     write_spheres("sphere.usda")?;
@@ -23,7 +24,7 @@ fn write_spheres(path: &str) -> anyhow::Result<()> {
     add_sphere(&mut data, "/GreenSphere", [0.0, 1.0, 0.0])?;
     add_sphere(&mut data, "/RedSphere", [1.0, 0.0, 0.0])?;
 
-    data.write_usda(path)?;
+    TextWriter::write_to_file(&data, path)?;
     println!("Wrote {} spec(s) to {path}", data.len());
     Ok(())
 }
@@ -92,7 +93,7 @@ fn write_scene(path: &str) -> anyhow::Result<()> {
     add_variant(&mut data, "/ColoredSphere", "color", "green", Some("/GreenSphere"))?;
     add_variant(&mut data, "/ColoredSphere", "color", "red", Some("/RedSphere"))?;
 
-    data.write_usda(path)?;
+    TextWriter::write_to_file(&data, path)?;
     println!("Wrote {} spec(s) to {path}", data.len());
     Ok(())
 }
