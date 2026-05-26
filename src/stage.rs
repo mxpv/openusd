@@ -46,7 +46,7 @@ use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
 use crate::interp::{self, InterpolationType};
-use crate::sdf::{FieldKey, Path, Payload, SpecType, Specifier, Value};
+use crate::sdf::{FieldKey, Path, Payload, SpecType, Specifier, TimeSampleMap, Value};
 use crate::{layer, pcp, CompositionError};
 
 bitflags! {
@@ -335,6 +335,29 @@ impl Stage {
         self.interpolation_type.set(mode);
     }
 
+    /// Returns the composed `timeSamples` for an attribute, or
+    /// `None` when the attribute has none authored.
+    ///
+    /// When querying the same attribute at many time codes, fetch
+    /// once with this method and call [`interp::evaluate`] in a
+    /// loop — that amortizes the field-resolution cost (the
+    /// composition graph is walked, and the strongest opinion is
+    /// cloned, on every call to [`Stage::value_at`]).
+    ///
+    /// ```ignore
+    /// let samples = stage.time_samples("/Prim.scalar")?.unwrap_or_default();
+    /// let mode = stage.interpolation_type();
+    /// for frame in 0..100 {
+    ///     let v = interp::evaluate(&samples, frame as f64, mode);
+    /// }
+    /// ```
+    pub fn time_samples(&self, attr_path: impl Into<Path>) -> Result<Option<TimeSampleMap>> {
+        Ok(match self.field::<Value>(attr_path, FieldKey::TimeSamples)? {
+            Some(Value::TimeSamples(samples)) => Some(samples),
+            _ => None,
+        })
+    }
+
     /// Evaluate an attribute's value at `time` under the stage's
     /// current [`InterpolationType`]. Mirrors C++ `UsdAttribute::Get`
     /// — the universal entry point for any consumer that needs a
@@ -349,12 +372,12 @@ impl Stage {
     /// authored value is a [`Value::ValueBlock`] / [`Value::None`]
     /// (the spec sentinels for "no value"), or when the queried prim
     /// is excluded by the stage's population mask.
+    ///
+    /// For multi-frame queries against the same attribute, see
+    /// [`Stage::time_samples`].
     pub fn value_at(&self, attr_path: impl Into<Path>, time: f64) -> Result<Option<Value>> {
         let attr_path = attr_path.into();
-        if !self.population_mask.includes(&attr_path.prim_path()) {
-            return Ok(None);
-        }
-        if let Some(Value::TimeSamples(samples)) = self.field::<Value>(attr_path.clone(), "timeSamples")? {
+        if let Some(samples) = self.time_samples(&attr_path)? {
             return Ok(interp::evaluate(&samples, time, self.interpolation_type.get()));
         }
         let default = self.field::<Value>(attr_path, FieldKey::Default)?;
