@@ -11,6 +11,7 @@ keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 
 [features]
 geom = []
+lux = []
 physics = []
 skel = []
 serde = ["dep:serde", "half/serde"]
