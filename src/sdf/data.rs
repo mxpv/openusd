@@ -105,6 +105,10 @@ impl AbstractData for Data {
         paths
     }
 
+    fn as_data(&self) -> Option<&Data> {
+        Some(self)
+    }
+
     fn as_data_mut(&mut self) -> Option<&mut Data> {
         Some(self)
     }
