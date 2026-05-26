@@ -170,6 +170,13 @@ pub const A_U_KNOTS: &str = "uKnots";
 pub const A_V_KNOTS: &str = "vKnots";
 pub const A_U_RANGE: &str = "uRange";
 pub const A_V_RANGE: &str = "vRange";
+pub const A_U_FORM: &str = "uForm";
+pub const A_V_FORM: &str = "vForm";
+
+// NurbsPatch form token values.
+pub const PATCH_FORM_OPEN: &str = "open";
+pub const PATCH_FORM_CLOSED: &str = "closed";
+pub const PATCH_FORM_PERIODIC: &str = "periodic";
 
 // HermiteCurves attribute names.
 pub const A_TANGENTS: &str = "tangents";

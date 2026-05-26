@@ -10,8 +10,8 @@ use openusd::schemas::geom::{
     read_camera, read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_hermite_curves, read_kind,
     read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_point_instancer, read_points, read_proxy_prim,
     read_purpose, read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack,
-    Axis, CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, Projection,
-    Purpose, StereoRole, SubdivisionScheme, Visibility,
+    Axis, CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, PatchForm,
+    Projection, Purpose, StereoRole, SubdivisionScheme, Visibility,
 };
 use openusd::sdf;
 use openusd::Stage;
@@ -589,7 +589,20 @@ fn read_nurbs_patch_row_major_grid() -> Result<()> {
     assert_eq!(p.points.len(), 16);
     assert_eq!(p.u_order, 4);
     assert_eq!(p.v_order, 4);
+    // uForm authored; vForm unauthored → defaults to Open per Pixar.
+    assert_eq!(p.u_form, PatchForm::Periodic);
+    assert_eq!(p.v_form, PatchForm::Open);
     Ok(())
+}
+
+#[test]
+fn patch_form_token_round_trip() {
+    assert_eq!(PatchForm::default(), PatchForm::Open);
+    assert_eq!(PatchForm::Open.as_token(), "open");
+    assert_eq!(PatchForm::Closed.as_token(), "closed");
+    assert_eq!(PatchForm::Periodic.as_token(), "periodic");
+    assert_eq!(PatchForm::from_token("closed"), Some(PatchForm::Closed));
+    assert_eq!(PatchForm::from_token("bogus"), None);
 }
 
 #[test]

@@ -115,6 +115,14 @@ pub fn read_nurbs_patch(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsPa
         .unwrap_or_else(|| clamped_inner_span(&u_knots, u_vertex_count as usize, u_order as usize));
     let v_range = read_vec2d_scalar(stage, prim, A_V_RANGE)?
         .unwrap_or_else(|| clamped_inner_span(&v_knots, v_vertex_count as usize, v_order as usize));
+    let u_form = read_token(stage, prim, A_U_FORM)?
+        .as_deref()
+        .and_then(PatchForm::from_token)
+        .unwrap_or_default();
+    let v_form = read_token(stage, prim, A_V_FORM)?
+        .as_deref()
+        .and_then(PatchForm::from_token)
+        .unwrap_or_default();
     Ok(Some(ReadNurbsPatch {
         path: prim.as_str().to_string(),
         points,
@@ -126,6 +134,8 @@ pub fn read_nurbs_patch(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsPa
         v_knots,
         u_range,
         v_range,
+        u_form,
+        v_form,
         display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
     }))
 }

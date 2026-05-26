@@ -243,6 +243,8 @@ def Xform "World" (
             int vOrder = 4
             double[] uKnots = [0, 0, 0, 0, 1, 1, 1, 1]
             double[] vKnots = [0, 0, 0, 0, 1, 1, 1, 1]
+            uniform token uForm = "periodic"
+            # vForm unauthored — defaults to "open" per Pixar.
         }
 
         def HermiteCurves "Hairs"

@@ -660,6 +660,37 @@ pub struct ReadNurbsCurves {
     pub display_color: Option<Primvar<[f32; 3]>>,
 }
 
+/// `UsdGeomNurbsPatch.uForm` / `vForm` token values. Each axis
+/// independently describes whether the surface is open (default),
+/// closed (control points wrap, knot vector does not), or periodic
+/// (both control points and knots wrap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PatchForm {
+    #[default]
+    Open,
+    Closed,
+    Periodic,
+}
+
+impl PatchForm {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            PatchForm::Open => PATCH_FORM_OPEN,
+            PatchForm::Closed => PATCH_FORM_CLOSED,
+            PatchForm::Periodic => PATCH_FORM_PERIODIC,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            PATCH_FORM_OPEN => PatchForm::Open,
+            PATCH_FORM_CLOSED => PatchForm::Closed,
+            PATCH_FORM_PERIODIC => PatchForm::Periodic,
+            _ => return None,
+        })
+    }
+}
+
 /// Decoded `UsdGeomNurbsPatch`. The control net is `points` laid
 /// out row-major: `P[i, j] = points[i * v_vertex_count + j]`.
 #[derive(Debug, Clone, Default)]
@@ -674,6 +705,11 @@ pub struct ReadNurbsPatch {
     pub v_knots: Vec<f64>,
     pub u_range: [f64; 2],
     pub v_range: [f64; 2],
+    /// `uForm` — how the patch is closed (or not) along U. Default
+    /// is [`PatchForm::Open`] per Pixar's schema.
+    pub u_form: PatchForm,
+    /// `vForm` — same as `u_form` but for the V axis.
+    pub v_form: PatchForm,
     pub display_color: Option<Primvar<[f32; 3]>>,
 }
 
