@@ -49,9 +49,9 @@ pub use read::{
 };
 pub use shapes::{read_capsule, read_cone, read_cube, read_cylinder, read_plane, read_sphere};
 pub use types::{
-    Axis, CurveBasis, CurveType, CurveWrap, ElementType, GeomPrims, Interpolation, Orientation, Primvar, Projection,
-    Purpose, ReadBasisCurves, ReadCamera, ReadCapsule, ReadCone, ReadCube, ReadCylinder, ReadHermiteCurves, ReadMesh,
-    ReadNurbsCurves, ReadNurbsPatch, ReadPlane, ReadPointInstancer, ReadPoints, ReadSphere, ReadSubset, ReadTetMesh,
-    StereoRole, SubdivisionScheme, Visibility,
+    Axis, CurveBasis, CurveType, CurveWrap, ElementType, GeomPrims, Interpolation, Orientation, PatchForm, Primvar,
+    Projection, Purpose, ReadBasisCurves, ReadCamera, ReadCapsule, ReadCone, ReadCube, ReadCylinder, ReadHermiteCurves,
+    ReadMesh, ReadNurbsCurves, ReadNurbsPatch, ReadPlane, ReadPointInstancer, ReadPoints, ReadSphere, ReadSubset,
+    ReadTetMesh, StereoRole, SubdivisionScheme, Visibility,
 };
 pub use xform::{compute_local_to_parent_transform, read_xform_op_order, resets_xform_stack};
