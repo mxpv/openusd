@@ -22,6 +22,73 @@ pub struct ListOp<T: Default + Clone + PartialEq> {
 }
 
 impl<T: Default + Clone + PartialEq> ListOp<T> {
+    /// Creates an explicit list op that replaces weaker list opinions.
+    pub fn explicit<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            explicit: true,
+            explicit_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a `prepend` list op.
+    pub fn prepended<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            prepended_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Creates an `append` list op.
+    pub fn appended<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            appended_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Creates an `add` list op.
+    pub fn added<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            added_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a `delete` list op.
+    pub fn deleted<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            deleted_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Creates an `order` list op.
+    pub fn ordered<I>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+    {
+        Self {
+            ordered_items: items.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
     /// Returns an iterator over all items that contribute opinions:
     /// explicit, prepended, appended, and added.
     ///
@@ -266,6 +333,34 @@ mod tests {
     // In short, a ListOp can either replace the entire list (explicit mode) or
     // apply incremental edits (prepend, append, add, delete) on top of a weaker
     // opinion. These tests verify each operation and their interaction.
+
+    #[test]
+    fn constructors_populate_one_bucket() {
+        let op = ListOp::explicit([10, 20]);
+        assert!(op.explicit);
+        assert_eq!(op.explicit_items, vec![10, 20]);
+        assert!(op.prepended_items.is_empty());
+        assert!(op.appended_items.is_empty());
+        assert!(op.added_items.is_empty());
+        assert!(op.deleted_items.is_empty());
+        assert!(op.ordered_items.is_empty());
+
+        let op = ListOp::prepended([1, 2]);
+        assert!(!op.explicit);
+        assert_eq!(op.prepended_items, vec![1, 2]);
+
+        let op = ListOp::appended([3, 4]);
+        assert_eq!(op.appended_items, vec![3, 4]);
+
+        let op = ListOp::added([5, 6]);
+        assert_eq!(op.added_items, vec![5, 6]);
+
+        let op = ListOp::deleted([7, 8]);
+        assert_eq!(op.deleted_items, vec![7, 8]);
+
+        let op = ListOp::ordered([9, 10]);
+        assert_eq!(op.ordered_items, vec![9, 10]);
+    }
 
     /// Explicit mode replaces the weaker list entirely, regardless of its contents.
     #[test]
