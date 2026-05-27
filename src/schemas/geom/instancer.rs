@@ -30,11 +30,12 @@ pub fn read_point_instancer(stage: &Stage, prim: &Path) -> Result<Option<ReadPoi
         prototypes: read_rel_targets(stage, prim, REL_PROTOTYPES)?,
         proto_indices,
         positions,
-        // Pixar's canonical attribute is `orientations` (`quath[]`),
-        // but the newer `orientationsf` (`quatf[]`) is also accepted.
-        // Try both — first wins.
-        orientations: read_quat_vec(stage, prim, A_ORIENTATIONS)?
-            .or(read_quat_vec(stage, prim, A_ORIENTATIONS_F)?)
+        // Per Pixar's PointInstancer spec, when both attributes are
+        // authored `orientationsf` (`quatf[]`) wins over the legacy
+        // `orientations` (`quath[]`) — the float-precision attribute
+        // exists specifically to override the half-precision one.
+        orientations: read_quat_vec(stage, prim, A_ORIENTATIONS_F)?
+            .or(read_quat_vec(stage, prim, A_ORIENTATIONS)?)
             .unwrap_or_default(),
         scales: read_vec3f_vec(stage, prim, A_SCALES)?,
         velocities: read_vec3f_vec(stage, prim, A_VELOCITIES)?,
