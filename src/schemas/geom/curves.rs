@@ -154,17 +154,10 @@ pub fn read_hermite_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadHerm
         return Ok(None);
     };
     // Tangents are spec-required but some authoring tools omit them;
-    // fall back to forward differences so the curve still renders.
-    let tangents = read_vec3f_vec_opt(stage, prim, A_TANGENTS)?.unwrap_or_else(|| {
-        let n = points.len();
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let a = points[i];
-            let b = if i + 1 < n { points[i + 1] } else { points[i] };
-            out.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
-        }
-        out
-    });
+    // fall back to per-curve forward differences so the curve still
+    // renders.
+    let tangents = read_vec3f_vec_opt(stage, prim, A_TANGENTS)?
+        .unwrap_or_else(|| synth_hermite_tangents(&points, &curve_vertex_counts));
     Ok(Some(ReadHermiteCurves {
         path: prim.as_str().to_string(),
         points,
@@ -310,4 +303,61 @@ fn read_vec2d_scalar(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f
 fn read_extent(stage: &Stage, prim: &Path) -> Result<Option<[[f32; 3]; 2]>> {
     let arr = read_vec3f_vec_opt(stage, prim, A_EXTENT)?.unwrap_or_default();
     Ok(if arr.len() >= 2 { Some([arr[0], arr[1]]) } else { None })
+}
+
+/// Synthesise per-curve tangents by forward differences inside each
+/// curve segment defined by `curve_vertex_counts`. Walking the flat
+/// points array directly would cross curve boundaries — the last
+/// vertex of curve N would otherwise point toward the first vertex
+/// of curve N+1. The last vertex of each multi-vertex curve reuses
+/// the direction of the previous segment.
+fn synth_hermite_tangents(points: &[[f32; 3]], curve_vertex_counts: &[i32]) -> Vec<[f32; 3]> {
+    let mut out = Vec::with_capacity(points.len());
+    let mut cursor = 0usize;
+    for &raw_count in curve_vertex_counts {
+        let count = raw_count.max(0) as usize;
+        let end = cursor.saturating_add(count).min(points.len());
+        for i in cursor..end {
+            let a = points[i];
+            let b = if i + 1 < end {
+                points[i + 1]
+            } else if i > cursor {
+                let prev = points[i - 1];
+                [
+                    a[0] + (a[0] - prev[0]),
+                    a[1] + (a[1] - prev[1]),
+                    a[2] + (a[2] - prev[2]),
+                ]
+            } else {
+                a
+            };
+            out.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+        }
+        cursor = end;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hermite_tangents_respect_curve_boundaries() {
+        let points = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [10.0, 5.0, 0.0], [11.0, 5.0, 0.0]];
+        let counts = vec![2, 2];
+        let t = synth_hermite_tangents(&points, &counts);
+        assert_eq!(t.len(), 4);
+        assert_eq!(t[0], [1.0, 0.0, 0.0]);
+        assert_eq!(t[1], [1.0, 0.0, 0.0]);
+        assert_eq!(t[2], [1.0, 0.0, 0.0]);
+        assert_eq!(t[3], [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn hermite_tangents_single_vertex_curve_is_zero() {
+        let points = vec![[2.0, 3.0, 4.0]];
+        let t = synth_hermite_tangents(&points, &[1]);
+        assert_eq!(t, vec![[0.0, 0.0, 0.0]]);
+    }
 }
