@@ -19,7 +19,7 @@ use crate::usd::Stage;
 use super::tokens::{
     A_BLEND_SHAPES, A_BLEND_SHAPE_WEIGHTS, A_JOINTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS, T_SKEL_ANIMATION,
 };
-use crate::math::{mat4_mul, IDENTITY_MAT4};
+use crate::math::{mat4_from_quat, mat4_mul, mat4_scale, mat4_translation};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
 /// joint, holding translation `[x, y, z]`, rotation `[w, x, y, z]`,
@@ -216,74 +216,15 @@ fn attr_authored(stage: &Stage, prim: &Path, name: &str) -> Result<bool> {
 /// `M = scale · rotation · translation`, matching every other matrix
 /// helper in this crate.
 fn compose_trs(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f64; 16] {
-    let scale = scale_matrix(s);
-    let rotation = quat_to_matrix(r);
-    let translation = translation_matrix(t);
+    let scale = mat4_scale(s);
+    let rotation = mat4_from_quat(r);
+    let translation = mat4_translation(t);
     mat4_mul(&mat4_mul(&scale, &rotation), &translation)
-}
-
-fn translation_matrix(t: [f32; 3]) -> [f64; 16] {
-    let mut m = IDENTITY_MAT4;
-    m[12] = t[0] as f64;
-    m[13] = t[1] as f64;
-    m[14] = t[2] as f64;
-    m
-}
-
-fn scale_matrix(s: [f32; 3]) -> [f64; 16] {
-    let mut m = IDENTITY_MAT4;
-    m[0] = s[0] as f64;
-    m[5] = s[1] as f64;
-    m[10] = s[2] as f64;
-    m
-}
-
-/// Convert a `(w, x, y, z)` quaternion to the row-major rotation
-/// matrix used elsewhere in this crate. The translation row is
-/// identity.
-fn quat_to_matrix(q: [f32; 4]) -> [f64; 16] {
-    let w = q[0] as f64;
-    let x = q[1] as f64;
-    let y = q[2] as f64;
-    let z = q[3] as f64;
-    let xx = x * x;
-    let yy = y * y;
-    let zz = z * z;
-    let xy = x * y;
-    let xz = x * z;
-    let yz = y * z;
-    let wx = w * x;
-    let wy = w * y;
-    let wz = w * z;
-    [
-        1.0 - 2.0 * (yy + zz),
-        2.0 * (xy + wz),
-        2.0 * (xz - wy),
-        0.0,
-        2.0 * (xy - wz),
-        1.0 - 2.0 * (xx + zz),
-        2.0 * (yz + wx),
-        0.0,
-        2.0 * (xz + wy),
-        2.0 * (yz - wx),
-        1.0 - 2.0 * (xx + yy),
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn identity_quat_to_matrix_is_identity() {
-        let m = quat_to_matrix([1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(m, IDENTITY_MAT4);
-    }
 
     #[test]
     fn compose_trs_with_identity_rotation_and_unit_scale() {
