@@ -1,6 +1,6 @@
 //! [`Spec`] — the flat per-path field container — and its typed views
 //! ([`PrimSpec`], [`AttributeSpec`], [`RelationshipSpec`], [`PseudoRootSpec`]
-//! and their `*Mut` pairs).
+//! and their `*Mut` aliases).
 //!
 //! `Spec` parallels C++ `SdfData`'s per-spec entry; the typed views parallel
 //! the C++ `Sdf*Spec` subclasses (`SdfPrimSpec`, `SdfAttributeSpec`, …).
@@ -14,6 +14,7 @@
 //! the `Spec::as_*` downcasts here are the low-level building block
 //! equivalent to C++'s `TfDynamic_cast<SdfPrimSpec>(spec)`.
 
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use crate::sdf::schema::ChildrenKey;
@@ -34,7 +35,7 @@ use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, Value, Variabi
 ///
 /// Per-spec-type APIs (typeName setters, time samples, target paths, …)
 /// live on the [`PrimSpec`] / [`AttributeSpec`] / [`RelationshipSpec`] /
-/// [`PseudoRootSpec`] newtype views and their `*Mut` pairs. C++ does this
+/// [`PseudoRootSpec`] typed views and their `*Mut` aliases. C++ does this
 /// through inheritance (`SdfPrimSpec : SdfSpec`); we use a tagged container
 /// plus typed views. `Spec::as_prim` / `as_attr` / `as_relationship` /
 /// `as_pseudo_root` (and their `_mut` variants) are the Rust equivalent of
@@ -101,49 +102,49 @@ impl Spec {
     /// Returns a read-only [`PrimSpec`] view if this spec is of type
     /// [`SpecType::Prim`].
     pub fn as_prim(&self) -> Option<PrimSpec<'_>> {
-        (self.ty == SpecType::Prim).then_some(PrimSpec(self))
+        (self.ty == SpecType::Prim).then_some(PrimSpec::new(self))
     }
 
     /// Returns a mutable [`PrimSpecMut`] view if this spec is of type
     /// [`SpecType::Prim`].
     pub fn as_prim_mut(&mut self) -> Option<PrimSpecMut<'_>> {
-        (self.ty == SpecType::Prim).then_some(PrimSpecMut(self))
+        (self.ty == SpecType::Prim).then_some(PrimSpec::new(self))
     }
 
     /// Returns a read-only [`AttributeSpec`] view if this spec is of type
     /// [`SpecType::Attribute`].
     pub fn as_attr(&self) -> Option<AttributeSpec<'_>> {
-        (self.ty == SpecType::Attribute).then_some(AttributeSpec(self))
+        (self.ty == SpecType::Attribute).then_some(AttributeSpec::new(self))
     }
 
     /// Returns a mutable [`AttributeSpecMut`] view if this spec is of type
     /// [`SpecType::Attribute`].
     pub fn as_attr_mut(&mut self) -> Option<AttributeSpecMut<'_>> {
-        (self.ty == SpecType::Attribute).then_some(AttributeSpecMut(self))
+        (self.ty == SpecType::Attribute).then_some(AttributeSpec::new(self))
     }
 
     /// Returns a read-only [`RelationshipSpec`] view if this spec is of type
     /// [`SpecType::Relationship`].
     pub fn as_relationship(&self) -> Option<RelationshipSpec<'_>> {
-        (self.ty == SpecType::Relationship).then_some(RelationshipSpec(self))
+        (self.ty == SpecType::Relationship).then_some(RelationshipSpec::new(self))
     }
 
     /// Returns a mutable [`RelationshipSpecMut`] view if this spec is of type
     /// [`SpecType::Relationship`].
     pub fn as_relationship_mut(&mut self) -> Option<RelationshipSpecMut<'_>> {
-        (self.ty == SpecType::Relationship).then_some(RelationshipSpecMut(self))
+        (self.ty == SpecType::Relationship).then_some(RelationshipSpec::new(self))
     }
 
     /// Returns a read-only [`PseudoRootSpec`] view if this spec is of type
     /// [`SpecType::PseudoRoot`].
     pub fn as_pseudo_root(&self) -> Option<PseudoRootSpec<'_>> {
-        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec(self))
+        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
     }
 
     /// Returns a mutable [`PseudoRootSpecMut`] view if this spec is of type
     /// [`SpecType::PseudoRoot`].
     pub fn as_pseudo_root_mut(&mut self) -> Option<PseudoRootSpecMut<'_>> {
-        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpecMut(self))
+        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
     }
 }
 
@@ -151,18 +152,51 @@ impl Spec {
 // PrimSpec
 // =========================================================================
 
-/// Read-only typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
+/// Typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
+///
+/// The default borrow mode is read-only. [`PrimSpecMut`] aliases this same
+/// wrapper with an exclusive borrow, so it has both read and write methods.
 #[derive(Debug)]
-pub struct PrimSpec<'a>(pub(crate) &'a Spec);
+pub struct PrimSpec<'a, B = &'a Spec> {
+    spec: B,
+    _marker: PhantomData<&'a Spec>,
+}
 
-impl<'a> Deref for PrimSpec<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
+/// Mutable typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
+pub type PrimSpecMut<'a> = PrimSpec<'a, &'a mut Spec>;
+
+impl<'a, B> PrimSpec<'a, B> {
+    fn new(spec: B) -> Self {
+        Self {
+            spec,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<'a> PrimSpec<'a> {
+impl<'a, B> Deref for PrimSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
+    type Target = Spec;
+    fn deref(&self) -> &Spec {
+        self.spec.deref()
+    }
+}
+
+impl<'a, B> DerefMut for PrimSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
+    fn deref_mut(&mut self) -> &mut Spec {
+        self.spec.deref_mut()
+    }
+}
+
+impl<'a, B> PrimSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
     /// Authored `typeName` (e.g. `"Xform"`, `"Mesh"`). `None` if unset.
     pub fn type_name(&self) -> Option<&str> {
         match self.get(FieldKey::TypeName.as_str())? {
@@ -228,29 +262,10 @@ impl<'a> PrimSpec<'a> {
     }
 }
 
-/// Mutable typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
-#[derive(Debug)]
-pub struct PrimSpecMut<'a>(pub(crate) &'a mut Spec);
-
-impl<'a> Deref for PrimSpecMut<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
-    }
-}
-
-impl<'a> DerefMut for PrimSpecMut<'a> {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.0
-    }
-}
-
-impl<'a> PrimSpecMut<'a> {
-    /// Borrow as a read-only [`PrimSpec`] view.
-    pub fn as_prim(&self) -> PrimSpec<'_> {
-        PrimSpec(self.0)
-    }
-
+impl<'a, B> PrimSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
     /// Set the `typeName` field.
     pub fn set_type_name(&mut self, name: impl Into<String>) {
         self.add(FieldKey::TypeName, Value::Token(name.into()));
@@ -286,18 +301,51 @@ impl<'a> PrimSpecMut<'a> {
 // AttributeSpec
 // =========================================================================
 
-/// Read-only typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
+/// Typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
+///
+/// The default borrow mode is read-only. [`AttributeSpecMut`] aliases this
+/// same wrapper with an exclusive borrow, so it has both read and write methods.
 #[derive(Debug)]
-pub struct AttributeSpec<'a>(pub(crate) &'a Spec);
+pub struct AttributeSpec<'a, B = &'a Spec> {
+    spec: B,
+    _marker: PhantomData<&'a Spec>,
+}
 
-impl<'a> Deref for AttributeSpec<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
+/// Mutable typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
+pub type AttributeSpecMut<'a> = AttributeSpec<'a, &'a mut Spec>;
+
+impl<'a, B> AttributeSpec<'a, B> {
+    fn new(spec: B) -> Self {
+        Self {
+            spec,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<'a> AttributeSpec<'a> {
+impl<'a, B> Deref for AttributeSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
+    type Target = Spec;
+    fn deref(&self) -> &Spec {
+        self.spec.deref()
+    }
+}
+
+impl<'a, B> DerefMut for AttributeSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
+    fn deref_mut(&mut self) -> &mut Spec {
+        self.spec.deref_mut()
+    }
+}
+
+impl<'a, B> AttributeSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
     /// Attribute value type name (e.g. `"double"`, `"float3[]"`).
     pub fn type_name(&self) -> Option<&str> {
         match self.get(FieldKey::TypeName.as_str())? {
@@ -362,29 +410,10 @@ impl<'a> AttributeSpec<'a> {
     }
 }
 
-/// Mutable typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
-#[derive(Debug)]
-pub struct AttributeSpecMut<'a>(pub(crate) &'a mut Spec);
-
-impl<'a> Deref for AttributeSpecMut<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
-    }
-}
-
-impl<'a> DerefMut for AttributeSpecMut<'a> {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.0
-    }
-}
-
-impl<'a> AttributeSpecMut<'a> {
-    /// Borrow as a read-only [`AttributeSpec`] view.
-    pub fn as_attr(&self) -> AttributeSpec<'_> {
-        AttributeSpec(self.0)
-    }
-
+impl<'a, B> AttributeSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
     /// Set the `default` value.
     pub fn set_default(&mut self, value: impl Into<Value>) {
         self.add(FieldKey::Default, value.into());
@@ -485,18 +514,51 @@ fn upsert_time_sample(map: &mut Vec<(f64, Value)>, time: f64, value: Value) {
 // RelationshipSpec
 // =========================================================================
 
-/// Read-only typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
+/// Typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
+///
+/// The default borrow mode is read-only. [`RelationshipSpecMut`] aliases this
+/// same wrapper with an exclusive borrow, so it has both read and write methods.
 #[derive(Debug)]
-pub struct RelationshipSpec<'a>(pub(crate) &'a Spec);
+pub struct RelationshipSpec<'a, B = &'a Spec> {
+    spec: B,
+    _marker: PhantomData<&'a Spec>,
+}
 
-impl<'a> Deref for RelationshipSpec<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
+/// Mutable typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
+pub type RelationshipSpecMut<'a> = RelationshipSpec<'a, &'a mut Spec>;
+
+impl<'a, B> RelationshipSpec<'a, B> {
+    fn new(spec: B) -> Self {
+        Self {
+            spec,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<'a> RelationshipSpec<'a> {
+impl<'a, B> Deref for RelationshipSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
+    type Target = Spec;
+    fn deref(&self) -> &Spec {
+        self.spec.deref()
+    }
+}
+
+impl<'a, B> DerefMut for RelationshipSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
+    fn deref_mut(&mut self) -> &mut Spec {
+        self.spec.deref_mut()
+    }
+}
+
+impl<'a, B> RelationshipSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
     /// Authored `targetPaths` list op, if present.
     pub fn target_path_list(&self) -> Option<&PathListOp> {
         match self.get(FieldKey::TargetPaths.as_str())? {
@@ -522,29 +584,10 @@ impl<'a> RelationshipSpec<'a> {
     }
 }
 
-/// Mutable typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
-#[derive(Debug)]
-pub struct RelationshipSpecMut<'a>(pub(crate) &'a mut Spec);
-
-impl<'a> Deref for RelationshipSpecMut<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
-    }
-}
-
-impl<'a> DerefMut for RelationshipSpecMut<'a> {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.0
-    }
-}
-
-impl<'a> RelationshipSpecMut<'a> {
-    /// Borrow as a read-only [`RelationshipSpec`] view.
-    pub fn as_relationship(&self) -> RelationshipSpec<'_> {
-        RelationshipSpec(self.0)
-    }
-
+impl<'a, B> RelationshipSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
     /// Replace `targetPaths` with the given list.
     pub fn set_target_paths<I>(&mut self, paths: I)
     where
@@ -606,20 +649,53 @@ fn remove_path(paths: &mut Vec<Path>, path: &Path) -> bool {
 // PseudoRootSpec
 // =========================================================================
 
-/// Read-only typed view of the layer's root pseudo-spec. Parallel to C++
+/// Typed view of the layer's root pseudo-spec. Parallel to C++
 /// `SdfPseudoRootSpec`; carries layer-wide metadata (`defaultPrim`,
 /// `subLayers`, time codes, etc.).
+///
+/// The default borrow mode is read-only. [`PseudoRootSpecMut`] aliases this
+/// same wrapper with an exclusive borrow, so it has both read and write methods.
 #[derive(Debug)]
-pub struct PseudoRootSpec<'a>(pub(crate) &'a Spec);
+pub struct PseudoRootSpec<'a, B = &'a Spec> {
+    spec: B,
+    _marker: PhantomData<&'a Spec>,
+}
 
-impl<'a> Deref for PseudoRootSpec<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
+/// Mutable typed view of the layer's root pseudo-spec. Parallel to C++ `SdfPseudoRootSpec`.
+pub type PseudoRootSpecMut<'a> = PseudoRootSpec<'a, &'a mut Spec>;
+
+impl<'a, B> PseudoRootSpec<'a, B> {
+    fn new(spec: B) -> Self {
+        Self {
+            spec,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<'a> PseudoRootSpec<'a> {
+impl<'a, B> Deref for PseudoRootSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
+    type Target = Spec;
+    fn deref(&self) -> &Spec {
+        self.spec.deref()
+    }
+}
+
+impl<'a, B> DerefMut for PseudoRootSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
+    fn deref_mut(&mut self) -> &mut Spec {
+        self.spec.deref_mut()
+    }
+}
+
+impl<'a, B> PseudoRootSpec<'a, B>
+where
+    B: Deref<Target = Spec>,
+{
     /// `defaultPrim` token, if authored.
     pub fn default_prim(&self) -> Option<&str> {
         match self.get(FieldKey::DefaultPrim.as_str())? {
@@ -685,29 +761,10 @@ impl<'a> PseudoRootSpec<'a> {
     }
 }
 
-/// Mutable typed view of the layer's root pseudo-spec. Parallel to C++ `SdfPseudoRootSpec`.
-#[derive(Debug)]
-pub struct PseudoRootSpecMut<'a>(pub(crate) &'a mut Spec);
-
-impl<'a> Deref for PseudoRootSpecMut<'a> {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.0
-    }
-}
-
-impl<'a> DerefMut for PseudoRootSpecMut<'a> {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.0
-    }
-}
-
-impl<'a> PseudoRootSpecMut<'a> {
-    /// Borrow as a read-only [`PseudoRootSpec`] view.
-    pub fn as_pseudo_root(&self) -> PseudoRootSpec<'_> {
-        PseudoRootSpec(self.0)
-    }
-
+impl<'a, B> PseudoRootSpec<'a, B>
+where
+    B: DerefMut<Target = Spec>,
+{
     /// Set the `defaultPrim` token without validation.
     ///
     /// This spec-tier setter writes whatever token it is given. The
@@ -766,5 +823,55 @@ impl<'a> PseudoRootSpecMut<'a> {
     /// Set the frames per second.
     pub fn set_frames_per_second(&mut self, rate: f64) {
         self.add(FieldKey::FramesPerSecond, Value::Double(rate));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prim_mut_reads() {
+        let mut spec = Spec::new(SpecType::Prim);
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        prim.set_type_name("Xform");
+        prim.set_specifier(Specifier::Def);
+
+        assert_eq!(prim.type_name(), Some("Xform"));
+        assert_eq!(prim.specifier(), Some(Specifier::Def));
+    }
+
+    #[test]
+    fn attribute_mut_reads() {
+        let mut spec = Spec::new(SpecType::Attribute);
+        let mut attr = spec.as_attr_mut().expect("attribute spec");
+
+        attr.set_default(Value::Int(42));
+        attr.set_custom(true);
+
+        assert_eq!(attr.default(), Some(&Value::Int(42)));
+        assert!(attr.is_custom());
+    }
+
+    #[test]
+    fn relationship_mut_reads() {
+        let mut spec = Spec::new(SpecType::Relationship);
+        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let target = Path::new("/Target").expect("valid path");
+
+        rel.add_target(target.clone());
+
+        assert_eq!(rel.target_path_list().and_then(|op| op.iter().next()), Some(&target));
+    }
+
+    #[test]
+    fn pseudo_root_mut_reads() {
+        let mut spec = Spec::new(SpecType::PseudoRoot);
+        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+
+        root.set_default_prim("World");
+
+        assert_eq!(root.default_prim(), Some("World"));
     }
 }
