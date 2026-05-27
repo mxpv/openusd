@@ -7,11 +7,11 @@
 use anyhow::Result;
 use openusd::schemas::lux::{
     self, find_lux_prims, is_light_type, read_cylinder_light, read_disk_light, read_distant_light, read_dome_light,
-    read_geometry_light, read_light, read_light_list, read_portal_light, read_rect_light, read_shadow, read_shaping,
-    read_sphere_light, LightListCacheBehavior, ReadAnyLight, TextureFormat,
+    read_geometry_light, read_light, read_light_api, read_light_list, read_portal_light, read_rect_light, read_shadow,
+    read_shaping, read_sphere_light, read_sphere_light_at, LightListCacheBehavior, ReadAnyLight, TextureFormat,
 };
 use openusd::sdf;
-use openusd::Stage;
+use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdLux_scene.usda";
 
@@ -292,5 +292,111 @@ fn portal_light_unauthored_dimensions_fall_back_to_one() -> Result<()> {
     assert!((defaults.height - 1.0).abs() < 1e-6);
     assert!((light.width - 1.0).abs() < 1e-6);
     assert!((light.height - 1.0).abs() < 1e-6);
+    Ok(())
+}
+
+#[test]
+fn light_api_skips_non_light() -> Result<()> {
+    // /World is an Xform with LightListAPI applied — neither a light
+    // type nor LightAPI. read_light_api must return None rather than
+    // fabricate a fully-defaulted ReadLight from an arbitrary prim.
+    let stage = open()?;
+    let outcome = read_light_api(&stage, &sdf::path("/World")?)?;
+    assert!(outcome.is_none(), "expected None for non-light prim, got {outcome:?}");
+    Ok(())
+}
+
+#[test]
+fn light_api_via_concrete_type() -> Result<()> {
+    // A bare SphereLight authors LightAPI implicitly via its typename.
+    // read_light_api must see it and return populated defaults.
+    let usda = r#"#usda 1.0
+        def SphereLight "Bare" {}
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("bare.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let light = read_light_api(&stage, &sdf::path("/Bare")?)?.expect("LightAPI on SphereLight");
+    assert_eq!(light.path, "/Bare");
+    assert!((light.intensity - 1.0).abs() < 1e-6);
+    Ok(())
+}
+
+#[test]
+fn animated_intensity() -> Result<()> {
+    // Light with only timeSamples authored (no default field).
+    // read_sphere_light (default-time) must fall back to the spec
+    // default — current Pixar Get(value) semantics. read_sphere_light_at
+    // must interpolate the samples.
+    let usda = r#"#usda 1.0
+        def SphereLight "Flicker"
+        {
+            float inputs:intensity.timeSamples = {
+                0: 100.0,
+                10: 1000.0,
+            }
+        }
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("flicker.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+
+    // Default-time read ignores timeSamples → LightAPI's 1.0 default.
+    let still = read_sphere_light(&stage, &sdf::path("/Flicker")?)?.expect("SphereLight");
+    assert!((still.common.intensity - 1.0).abs() < 1e-6);
+
+    // At-time read picks the authored samples.
+    let t0 = read_sphere_light_at(&stage, &sdf::path("/Flicker")?, 0.0)?.expect("SphereLight @ 0");
+    assert!((t0.common.intensity - 100.0).abs() < 1e-3);
+    let t10 = read_sphere_light_at(&stage, &sdf::path("/Flicker")?, 10.0)?.expect("SphereLight @ 10");
+    assert!((t10.common.intensity - 1000.0).abs() < 1e-3);
+    // Midpoint interpolates linearly (stage default).
+    let t5 = read_sphere_light_at(&stage, &sdf::path("/Flicker")?, 5.0)?.expect("SphereLight @ 5");
+    assert!((t5.common.intensity - 550.0).abs() < 1e-3);
+    Ok(())
+}
+
+#[test]
+fn emissive_mesh_bucket() -> Result<()> {
+    let usda = r#"#usda 1.0
+        def Mesh "Emissive" (
+            prepend apiSchemas = ["LightAPI"]
+        ) {}
+        def Mesh "Plain" {}
+        def SphereLight "Bulb" {}
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("emissive.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let prims = find_lux_prims(&stage)?;
+    // Emissive mesh lands in the light_api bucket, NOT in `sphere`.
+    assert_eq!(prims.light_api, vec!["/Emissive".to_string()]);
+    // Concrete SphereLight stays in its own bucket (and does NOT
+    // double-bucket into light_api).
+    assert_eq!(prims.sphere, vec!["/Bulb".to_string()]);
+    assert!(!prims.light_api.contains(&"/Bulb".to_string()));
+    Ok(())
+}
+
+#[test]
+fn light_api_via_applied_schema() -> Result<()> {
+    // A Mesh with LightAPI prepended into apiSchemas is a valid
+    // emissive surface — read_light_api must surface it as a light.
+    let usda = r#"#usda 1.0
+        def Mesh "EmissivePanel" (
+            prepend apiSchemas = ["LightAPI"]
+        ) {
+            float inputs:intensity = 750
+        }
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("emissive.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let light = read_light_api(&stage, &sdf::path("/EmissivePanel")?)?.expect("LightAPI applied to Mesh");
+    assert!((light.intensity - 750.0).abs() < 1e-3);
     Ok(())
 }

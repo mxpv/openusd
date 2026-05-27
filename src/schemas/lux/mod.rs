@@ -42,12 +42,14 @@ mod read;
 mod types;
 
 pub use read::{
-    find_lux_prims, is_light_type, read_cylinder_light, read_disk_light, read_distant_light, read_dome_light,
-    read_geometry_light, read_light, read_light_api, read_light_list, read_portal_light, read_rect_light, read_shadow,
-    read_shaping, read_sphere_light,
+    find_lux_prims, is_light_type, read_cylinder_light, read_cylinder_light_at, read_disk_light, read_disk_light_at,
+    read_distant_light, read_distant_light_at, read_dome_light, read_dome_light_at, read_geometry_light,
+    read_geometry_light_at, read_light, read_light_api, read_light_api_at, read_light_at, read_light_list,
+    read_portal_light, read_portal_light_at, read_rect_light, read_rect_light_at, read_shadow, read_shadow_at,
+    read_shaping, read_shaping_at, read_sphere_light, read_sphere_light_at,
 };
 pub use types::{
-    LightListCacheBehavior, LuxPrims, ReadAnyLight, ReadCylinderLight, ReadDiskLight, ReadDistantLight, ReadDomeLight,
-    ReadGeometryLight, ReadLight, ReadLightList, ReadPortalLight, ReadRectLight, ReadShadow, ReadShaping,
-    ReadSphereLight, TextureFormat,
+    LightListCacheBehavior, LuxPrims, PoleAxis, ReadAnyLight, ReadCylinderLight, ReadDiskLight, ReadDistantLight,
+    ReadDomeLight, ReadGeometryLight, ReadLight, ReadLightList, ReadPortalLight, ReadRectLight, ReadShadow,
+    ReadShaping, ReadSphereLight, TextureFormat,
 };
