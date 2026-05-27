@@ -41,8 +41,11 @@
 
 pub mod tokens;
 
+mod author;
 mod read;
 mod types;
+
+pub use author::{apply_light_api, LightApiSetters, LightAuthor};
 
 pub use read::{
     find_lux_prims, is_light_type, read_cylinder_light, read_cylinder_light_at, read_disk_light, read_disk_light_at,
