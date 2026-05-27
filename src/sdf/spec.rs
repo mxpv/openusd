@@ -17,11 +17,10 @@
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-use crate::sdf::schema::ChildrenKey;
-use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, TokenListOp, Value, Variability};
+use crate::sdf;
 
 /// A single spec in a scene description layer — a (type, fields) entry
-/// keyed by [`Path`] within a [`Data`](crate::sdf::Data) store.
+/// keyed by [`sdf::Path`] within a [`Data`](crate::sdf::Data) store.
 ///
 /// See [SdfSpec](https://openusd.org/dev/api/class_sdf_spec.html) in the
 /// USD documentation.
@@ -43,9 +42,9 @@ use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, TokenListOp, V
 #[derive(Debug, Clone)]
 pub struct Spec {
     /// The type of this spec (prim, attribute, relationship, etc.).
-    pub ty: SpecType,
+    pub ty: sdf::SpecType,
     /// The fields stored on this spec, in authored order.
-    pub fields: Vec<(String, Value)>,
+    pub fields: Vec<(String, sdf::Value)>,
 }
 
 /// Errors raised by typed spec-level authoring helpers.
@@ -64,13 +63,13 @@ pub enum SpecError {
 
 impl Spec {
     /// Creates a new empty spec of the given type.
-    pub fn new(ty: SpecType) -> Self {
+    pub fn new(ty: sdf::SpecType) -> Self {
         Self { ty, fields: Vec::new() }
     }
 
     /// Insert or replace a field. If the key already exists, its value is
     /// overwritten in place and its position is preserved.
-    pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<Value>) {
+    pub fn add(&mut self, key: impl AsRef<str>, value: impl Into<sdf::Value>) {
         let key = key.as_ref();
         let value = value.into();
         if let Some(slot) = self.fields.iter_mut().find(|(k, _)| k == key) {
@@ -81,13 +80,13 @@ impl Spec {
     }
 
     /// Look up a field by name.
-    pub fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &str) -> Option<&sdf::Value> {
         self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     /// Mutably look up a field by name. Useful for in-place edits to composite
     /// values (time-sample maps, list ops) without cloning.
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut sdf::Value> {
         self.fields.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
@@ -97,7 +96,7 @@ impl Spec {
     }
 
     /// Remove a field by name, returning its value if present.
-    pub fn remove(&mut self, key: &str) -> Option<Value> {
+    pub fn remove(&mut self, key: &str) -> Option<sdf::Value> {
         let idx = self.fields.iter().position(|(k, _)| k == key)?;
         Some(self.fields.remove(idx).1)
     }
@@ -110,51 +109,51 @@ impl Spec {
     }
 
     /// Returns a read-only [`PrimSpec`] view if this spec is of type
-    /// [`SpecType::Prim`].
+    /// [`sdf::SpecType::Prim`].
     pub fn as_prim(&self) -> Option<PrimSpec<'_>> {
-        (self.ty == SpecType::Prim).then_some(PrimSpec::new(self))
+        (self.ty == sdf::SpecType::Prim).then_some(PrimSpec::new(self))
     }
 
     /// Returns a mutable [`PrimSpecMut`] view if this spec is of type
-    /// [`SpecType::Prim`].
+    /// [`sdf::SpecType::Prim`].
     pub fn as_prim_mut(&mut self) -> Option<PrimSpecMut<'_>> {
-        (self.ty == SpecType::Prim).then_some(PrimSpec::new(self))
+        (self.ty == sdf::SpecType::Prim).then_some(PrimSpec::new(self))
     }
 
     /// Returns a read-only [`AttributeSpec`] view if this spec is of type
-    /// [`SpecType::Attribute`].
+    /// [`sdf::SpecType::Attribute`].
     pub fn as_attr(&self) -> Option<AttributeSpec<'_>> {
-        (self.ty == SpecType::Attribute).then_some(AttributeSpec::new(self))
+        (self.ty == sdf::SpecType::Attribute).then_some(AttributeSpec::new(self))
     }
 
     /// Returns a mutable [`AttributeSpecMut`] view if this spec is of type
-    /// [`SpecType::Attribute`].
+    /// [`sdf::SpecType::Attribute`].
     pub fn as_attr_mut(&mut self) -> Option<AttributeSpecMut<'_>> {
-        (self.ty == SpecType::Attribute).then_some(AttributeSpec::new(self))
+        (self.ty == sdf::SpecType::Attribute).then_some(AttributeSpec::new(self))
     }
 
     /// Returns a read-only [`RelationshipSpec`] view if this spec is of type
-    /// [`SpecType::Relationship`].
+    /// [`sdf::SpecType::Relationship`].
     pub fn as_relationship(&self) -> Option<RelationshipSpec<'_>> {
-        (self.ty == SpecType::Relationship).then_some(RelationshipSpec::new(self))
+        (self.ty == sdf::SpecType::Relationship).then_some(RelationshipSpec::new(self))
     }
 
     /// Returns a mutable [`RelationshipSpecMut`] view if this spec is of type
-    /// [`SpecType::Relationship`].
+    /// [`sdf::SpecType::Relationship`].
     pub fn as_relationship_mut(&mut self) -> Option<RelationshipSpecMut<'_>> {
-        (self.ty == SpecType::Relationship).then_some(RelationshipSpec::new(self))
+        (self.ty == sdf::SpecType::Relationship).then_some(RelationshipSpec::new(self))
     }
 
     /// Returns a read-only [`PseudoRootSpec`] view if this spec is of type
-    /// [`SpecType::PseudoRoot`].
+    /// [`sdf::SpecType::PseudoRoot`].
     pub fn as_pseudo_root(&self) -> Option<PseudoRootSpec<'_>> {
-        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
+        (self.ty == sdf::SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
     }
 
     /// Returns a mutable [`PseudoRootSpecMut`] view if this spec is of type
-    /// [`SpecType::PseudoRoot`].
+    /// [`sdf::SpecType::PseudoRoot`].
     pub fn as_pseudo_root_mut(&mut self) -> Option<PseudoRootSpecMut<'_>> {
-        (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
+        (self.ty == sdf::SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
     }
 }
 
@@ -205,72 +204,72 @@ where
 {
     /// Authored `typeName` (e.g. `"Xform"`, `"Mesh"`). `None` if unset.
     pub fn type_name(&self) -> Option<&str> {
-        match self.get(FieldKey::TypeName.as_str())? {
-            Value::Token(t) => Some(t.as_str()),
+        match self.get(sdf::FieldKey::TypeName.as_str())? {
+            sdf::Value::Token(t) => Some(t.as_str()),
             _ => None,
         }
     }
 
     /// Authored `specifier` (`def`, `over`, `class`). `None` if unset.
-    pub fn specifier(&self) -> Option<Specifier> {
-        match self.get(FieldKey::Specifier.as_str())? {
-            Value::Specifier(s) => Some(*s),
+    pub fn specifier(&self) -> Option<sdf::Specifier> {
+        match self.get(sdf::FieldKey::Specifier.as_str())? {
+            sdf::Value::Specifier(s) => Some(*s),
             _ => None,
         }
     }
 
     /// Authored `kind` metadata (e.g. `"component"`, `"group"`).
     pub fn kind(&self) -> Option<&str> {
-        match self.get(FieldKey::Kind.as_str())? {
-            Value::Token(t) => Some(t.as_str()),
+        match self.get(sdf::FieldKey::Kind.as_str())? {
+            sdf::Value::Token(t) => Some(t.as_str()),
             _ => None,
         }
     }
 
     /// Authored `active` flag. `None` if unset (USD defaults to active).
     pub fn is_active(&self) -> Option<bool> {
-        match self.get(FieldKey::Active.as_str())? {
-            Value::Bool(b) => Some(*b),
+        match self.get(sdf::FieldKey::Active.as_str())? {
+            sdf::Value::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
     /// Authored `hidden` flag.
     pub fn is_hidden(&self) -> Option<bool> {
-        match self.get(FieldKey::Hidden.as_str())? {
-            Value::Bool(b) => Some(*b),
+        match self.get(sdf::FieldKey::Hidden.as_str())? {
+            sdf::Value::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
     /// Authored `instanceable` flag.
     pub fn is_instanceable(&self) -> Option<bool> {
-        match self.get(FieldKey::Instanceable.as_str())? {
-            Value::Bool(b) => Some(*b),
+        match self.get(sdf::FieldKey::Instanceable.as_str())? {
+            sdf::Value::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
     /// Names of child prims, in declared order. `None` if unset.
     pub fn prim_children(&self) -> Option<&[String]> {
-        match self.get(ChildrenKey::PrimChildren.as_str())? {
-            Value::TokenVec(v) => Some(v.as_slice()),
+        match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
+            sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
 
     /// Names of child properties, in declared order. `None` if unset.
     pub fn property_children(&self) -> Option<&[String]> {
-        match self.get(ChildrenKey::PropertyChildren.as_str())? {
-            Value::TokenVec(v) => Some(v.as_slice()),
+        match self.get(sdf::ChildrenKey::PropertyChildren.as_str())? {
+            sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
 
     /// Authored `apiSchemas` list op, if present.
-    pub fn api_schemas(&self) -> Option<&TokenListOp> {
-        match self.get(FieldKey::ApiSchemas.as_str())? {
-            Value::TokenListOp(op) => Some(op),
+    pub fn api_schemas(&self) -> Option<&sdf::TokenListOp> {
+        match self.get(sdf::FieldKey::ApiSchemas.as_str())? {
+            sdf::Value::TokenListOp(op) => Some(op),
             _ => None,
         }
     }
@@ -281,41 +280,41 @@ where
     B: DerefMut<Target = Spec>,
 {
     /// Set the `typeName` field. An empty `name` clears the field instead
-    /// of authoring `Value::Token("")` — matching the empty-string skip in
+    /// of authoring `sdf::Value::Token("")` — matching the empty-string skip in
     /// [`crate::sdf::Layer::create_prim`] so the two write paths stay in
     /// lockstep.
     pub fn set_type_name(&mut self, name: impl Into<String>) {
         let name = name.into();
         if name.is_empty() {
-            self.remove(FieldKey::TypeName.as_str());
+            self.remove(sdf::FieldKey::TypeName.as_str());
         } else {
-            self.add(FieldKey::TypeName, Value::Token(name));
+            self.add(sdf::FieldKey::TypeName, sdf::Value::Token(name));
         }
     }
 
     /// Set the `specifier` field.
-    pub fn set_specifier(&mut self, specifier: Specifier) {
-        self.add(FieldKey::Specifier, Value::Specifier(specifier));
+    pub fn set_specifier(&mut self, specifier: sdf::Specifier) {
+        self.add(sdf::FieldKey::Specifier, sdf::Value::Specifier(specifier));
     }
 
     /// Set the `kind` metadata.
     pub fn set_kind(&mut self, kind: impl Into<String>) {
-        self.add(FieldKey::Kind, Value::Token(kind.into()));
+        self.add(sdf::FieldKey::Kind, sdf::Value::Token(kind.into()));
     }
 
     /// Set the `active` flag.
     pub fn set_active(&mut self, active: bool) {
-        self.add(FieldKey::Active, Value::Bool(active));
+        self.add(sdf::FieldKey::Active, sdf::Value::Bool(active));
     }
 
     /// Set the `hidden` flag.
     pub fn set_hidden(&mut self, hidden: bool) {
-        self.add(FieldKey::Hidden, Value::Bool(hidden));
+        self.add(sdf::FieldKey::Hidden, sdf::Value::Bool(hidden));
     }
 
     /// Set the `instanceable` flag.
     pub fn set_instanceable(&mut self, instanceable: bool) {
-        self.add(FieldKey::Instanceable, Value::Bool(instanceable));
+        self.add(sdf::FieldKey::Instanceable, sdf::Value::Bool(instanceable));
     }
 
     /// Add an applied API schema token to this prim's `apiSchemas` list op.
@@ -333,21 +332,24 @@ where
     /// when the call was a no-op.
     pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, SpecError> {
         let name = name.into();
-        match self.get_mut(FieldKey::ApiSchemas.as_str()) {
-            Some(Value::TokenListOp(op)) => Ok(add_applied_schema_to_list_op(op, name)),
+        match self.get_mut(sdf::FieldKey::ApiSchemas.as_str()) {
+            Some(sdf::Value::TokenListOp(op)) => Ok(add_applied_schema_to_list_op(op, name)),
             Some(_) => Err(SpecError::FieldType {
-                field: FieldKey::ApiSchemas.as_str(),
-                expected: "TokenListOp",
+                field: sdf::FieldKey::ApiSchemas.as_str(),
+                expected: "sdf::TokenListOp",
             }),
             None => {
-                self.add(FieldKey::ApiSchemas, Value::TokenListOp(TokenListOp::prepended([name])));
+                self.add(
+                    sdf::FieldKey::ApiSchemas,
+                    sdf::Value::TokenListOp(sdf::TokenListOp::prepended([name])),
+                );
                 Ok(true)
             }
         }
     }
 }
 
-fn add_applied_schema_to_list_op(op: &mut TokenListOp, name: String) -> bool {
+fn add_applied_schema_to_list_op(op: &mut sdf::TokenListOp, name: String) -> bool {
     let already_applied = op.explicit_items.iter().any(|n| n == &name)
         || op.prepended_items.iter().any(|n| n == &name)
         || op.appended_items.iter().any(|n| n == &name)
@@ -419,63 +421,63 @@ where
 {
     /// Attribute value type name (e.g. `"double"`, `"float3[]"`).
     pub fn type_name(&self) -> Option<&str> {
-        match self.get(FieldKey::TypeName.as_str())? {
-            Value::Token(t) => Some(t.as_str()),
+        match self.get(sdf::FieldKey::TypeName.as_str())? {
+            sdf::Value::Token(t) => Some(t.as_str()),
             _ => None,
         }
     }
 
-    /// Attribute variability. Defaults to [`Variability::Varying`] if unset.
-    pub fn variability(&self) -> Variability {
-        match self.get(FieldKey::Variability.as_str()) {
-            Some(Value::Variability(v)) => *v,
-            _ => Variability::Varying,
+    /// Attribute variability. Defaults to [`sdf::Variability::Varying`] if unset.
+    pub fn variability(&self) -> sdf::Variability {
+        match self.get(sdf::FieldKey::Variability.as_str()) {
+            Some(sdf::Value::Variability(v)) => *v,
+            _ => sdf::Variability::Varying,
         }
     }
 
     /// Whether the attribute is `custom`. Defaults to `false` if unset.
     pub fn is_custom(&self) -> bool {
-        match self.get(FieldKey::Custom.as_str()) {
-            Some(Value::Bool(b)) => *b,
+        match self.get(sdf::FieldKey::Custom.as_str()) {
+            Some(sdf::Value::Bool(b)) => *b,
             _ => false,
         }
     }
 
     /// Default value, if authored.
-    pub fn default(&self) -> Option<&Value> {
-        self.get(FieldKey::Default.as_str())
+    pub fn default(&self) -> Option<&sdf::Value> {
+        self.get(sdf::FieldKey::Default.as_str())
     }
 
     /// Time-sample map, if authored, in storage order. Samples authored
     /// through [`AttributeSpecMut::set_time_sample`] are kept sorted by time;
     /// samples loaded from a parsed layer reflect on-disk ordering.
-    pub fn time_samples(&self) -> Option<&[(f64, Value)]> {
-        match self.get(FieldKey::TimeSamples.as_str())? {
-            Value::TimeSamples(map) => Some(map.as_slice()),
+    pub fn time_samples(&self) -> Option<&[(f64, sdf::Value)]> {
+        match self.get(sdf::FieldKey::TimeSamples.as_str())? {
+            sdf::Value::TimeSamples(map) => Some(map.as_slice()),
             _ => None,
         }
     }
 
     /// Color-space token, if authored.
     pub fn color_space(&self) -> Option<&str> {
-        match self.get(FieldKey::ColorSpace.as_str())? {
-            Value::Token(t) => Some(t.as_str()),
+        match self.get(sdf::FieldKey::ColorSpace.as_str())? {
+            sdf::Value::Token(t) => Some(t.as_str()),
             _ => None,
         }
     }
 
     /// `allowedTokens` array, if authored.
     pub fn allowed_tokens(&self) -> Option<&[String]> {
-        match self.get(FieldKey::AllowedTokens.as_str())? {
-            Value::TokenVec(v) => Some(v.as_slice()),
+        match self.get(sdf::FieldKey::AllowedTokens.as_str())? {
+            sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
 
     /// Authored `connectionPaths` list op, if present.
-    pub fn connection_path_list(&self) -> Option<&PathListOp> {
-        match self.get(FieldKey::ConnectionPaths.as_str())? {
-            Value::PathListOp(op) => Some(op),
+    pub fn connection_path_list(&self) -> Option<&sdf::PathListOp> {
+        match self.get(sdf::FieldKey::ConnectionPaths.as_str())? {
+            sdf::Value::PathListOp(op) => Some(op),
             _ => None,
         }
     }
@@ -486,32 +488,32 @@ where
     B: DerefMut<Target = Spec>,
 {
     /// Set the `default` value.
-    pub fn set_default(&mut self, value: impl Into<Value>) {
-        self.add(FieldKey::Default, value.into());
+    pub fn set_default(&mut self, value: impl Into<sdf::Value>) {
+        self.add(sdf::FieldKey::Default, value.into());
     }
 
     /// Clear any authored `default`.
     pub fn clear_default(&mut self) {
-        self.remove(FieldKey::Default.as_str());
+        self.remove(sdf::FieldKey::Default.as_str());
     }
 
     /// Insert or replace a time sample at `time`. Samples are kept sorted
     /// by time so consumers can binary-search. A pre-existing value of a
     /// non-`TimeSamples` variant is overwritten — debug builds assert.
-    pub fn set_time_sample(&mut self, time: f64, value: impl Into<Value>) {
+    pub fn set_time_sample(&mut self, time: f64, value: impl Into<sdf::Value>) {
         let value = value.into();
-        match self.get_mut(FieldKey::TimeSamples.as_str()) {
-            Some(Value::TimeSamples(map)) => upsert_time_sample(map, time, value),
+        match self.get_mut(sdf::FieldKey::TimeSamples.as_str()) {
+            Some(sdf::Value::TimeSamples(map)) => upsert_time_sample(map, time, value),
             Some(other) => {
                 debug_assert!(false, "timeSamples field is not a TimeSamples (got {other:?})");
                 let mut map = Vec::new();
                 upsert_time_sample(&mut map, time, value);
-                self.add(FieldKey::TimeSamples, Value::TimeSamples(map));
+                self.add(sdf::FieldKey::TimeSamples, sdf::Value::TimeSamples(map));
             }
             None => {
                 let mut map = Vec::new();
                 upsert_time_sample(&mut map, time, value);
-                self.add(FieldKey::TimeSamples, Value::TimeSamples(map));
+                self.add(sdf::FieldKey::TimeSamples, sdf::Value::TimeSamples(map));
             }
         }
     }
@@ -520,8 +522,8 @@ where
     /// If this was the last sample, the `timeSamples` field is cleared entirely
     /// so the spec round-trips identically to one that never authored samples.
     pub fn erase_time_sample(&mut self, time: f64) -> bool {
-        let key = FieldKey::TimeSamples.as_str();
-        let Some(Value::TimeSamples(map)) = self.get_mut(key) else {
+        let key = sdf::FieldKey::TimeSamples.as_str();
+        let Some(sdf::Value::TimeSamples(map)) = self.get_mut(key) else {
             return false;
         };
         // `total_cmp` gives a deterministic total ordering for `f64` (including
@@ -539,12 +541,12 @@ where
 
     /// Set the `custom` flag.
     pub fn set_custom(&mut self, custom: bool) {
-        self.add(FieldKey::Custom, Value::Bool(custom));
+        self.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom));
     }
 
     /// Set the `colorSpace` token.
     pub fn set_color_space(&mut self, color_space: impl Into<String>) {
-        self.add(FieldKey::ColorSpace, Value::Token(color_space.into()));
+        self.add(sdf::FieldKey::ColorSpace, sdf::Value::Token(color_space.into()));
     }
 
     /// Set the `allowedTokens` array.
@@ -554,23 +556,23 @@ where
         S: Into<String>,
     {
         let tokens: Vec<String> = tokens.into_iter().map(Into::into).collect();
-        self.add(FieldKey::AllowedTokens, Value::TokenVec(tokens));
+        self.add(sdf::FieldKey::AllowedTokens, sdf::Value::TokenVec(tokens));
     }
 
     /// Set the `connectionPaths`.
     pub fn set_connection_paths<I>(&mut self, paths: I)
     where
-        I: IntoIterator<Item = Path>,
+        I: IntoIterator<Item = sdf::Path>,
     {
-        let paths: Vec<Path> = paths.into_iter().collect();
+        let paths: Vec<sdf::Path> = paths.into_iter().collect();
         self.add(
-            FieldKey::ConnectionPaths,
-            Value::PathListOp(PathListOp::explicit(paths)),
+            sdf::FieldKey::ConnectionPaths,
+            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
         );
     }
 }
 
-fn upsert_time_sample(map: &mut Vec<(f64, Value)>, time: f64, value: Value) {
+fn upsert_time_sample(map: &mut Vec<(f64, sdf::Value)>, time: f64, value: sdf::Value) {
     // `total_cmp` provides a deterministic total ordering over `f64`,
     // including NaN and signed zero. `partial_cmp` would return `None` for
     // NaN, which (with `unwrap_or(Equal)`) collapses NaN keys with every
@@ -627,26 +629,26 @@ where
     B: Deref<Target = Spec>,
 {
     /// Authored `targetPaths` list op, if present.
-    pub fn target_path_list(&self) -> Option<&PathListOp> {
-        match self.get(FieldKey::TargetPaths.as_str())? {
-            Value::PathListOp(op) => Some(op),
+    pub fn target_path_list(&self) -> Option<&sdf::PathListOp> {
+        match self.get(sdf::FieldKey::TargetPaths.as_str())? {
+            sdf::Value::PathListOp(op) => Some(op),
             _ => None,
         }
     }
 
     /// Whether the relationship is `custom`.
     pub fn is_custom(&self) -> bool {
-        match self.get(FieldKey::Custom.as_str()) {
-            Some(Value::Bool(b)) => *b,
+        match self.get(sdf::FieldKey::Custom.as_str()) {
+            Some(sdf::Value::Bool(b)) => *b,
             _ => false,
         }
     }
 
-    /// Relationship variability. Defaults to [`Variability::Varying`].
-    pub fn variability(&self) -> Variability {
-        match self.get(FieldKey::Variability.as_str()) {
-            Some(Value::Variability(v)) => *v,
-            _ => Variability::Varying,
+    /// Relationship variability. Defaults to [`sdf::Variability::Varying`].
+    pub fn variability(&self) -> sdf::Variability {
+        match self.get(sdf::FieldKey::Variability.as_str()) {
+            Some(sdf::Value::Variability(v)) => *v,
+            _ => sdf::Variability::Varying,
         }
     }
 }
@@ -658,17 +660,20 @@ where
     /// Replace `targetPaths` with the given list.
     pub fn set_target_paths<I>(&mut self, paths: I)
     where
-        I: IntoIterator<Item = Path>,
+        I: IntoIterator<Item = sdf::Path>,
     {
-        let paths: Vec<Path> = paths.into_iter().collect();
-        self.add(FieldKey::TargetPaths, Value::PathListOp(PathListOp::explicit(paths)));
+        let paths: Vec<sdf::Path> = paths.into_iter().collect();
+        self.add(
+            sdf::FieldKey::TargetPaths,
+            sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
+        );
     }
 
     /// Append a single target path. No-op if already present. A pre-existing
-    /// value of a non-`PathListOp` variant is overwritten — debug builds assert.
-    pub fn add_target(&mut self, path: Path) {
-        match self.get_mut(FieldKey::TargetPaths.as_str()) {
-            Some(Value::PathListOp(op)) => {
+    /// value of a non-`sdf::PathListOp` variant is overwritten — debug builds assert.
+    pub fn add_target(&mut self, path: sdf::Path) {
+        match self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
+            Some(sdf::Value::PathListOp(op)) => {
                 if !op.iter().any(|p| p == &path) {
                     if op.explicit {
                         op.explicit_items.push(path);
@@ -678,18 +683,24 @@ where
                 }
             }
             Some(other) => {
-                debug_assert!(false, "targetPaths field is not a PathListOp (got {other:?})");
-                self.add(FieldKey::TargetPaths, Value::PathListOp(PathListOp::explicit([path])));
+                debug_assert!(false, "targetPaths field is not a sdf::PathListOp (got {other:?})");
+                self.add(
+                    sdf::FieldKey::TargetPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
+                );
             }
             None => {
-                self.add(FieldKey::TargetPaths, Value::PathListOp(PathListOp::explicit([path])));
+                self.add(
+                    sdf::FieldKey::TargetPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
+                );
             }
         }
     }
 
     /// Remove a single target path. Returns `true` if the path was present.
-    pub fn remove_target(&mut self, path: &Path) -> bool {
-        if let Some(Value::PathListOp(op)) = self.get_mut(FieldKey::TargetPaths.as_str()) {
+    pub fn remove_target(&mut self, path: &sdf::Path) -> bool {
+        if let Some(sdf::Value::PathListOp(op)) = self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
             return remove_path(&mut op.explicit_items, path)
                 | remove_path(&mut op.added_items, path)
                 | remove_path(&mut op.prepended_items, path)
@@ -700,11 +711,11 @@ where
 
     /// Set the `custom` flag.
     pub fn set_custom(&mut self, custom: bool) {
-        self.add(FieldKey::Custom, Value::Bool(custom));
+        self.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom));
     }
 }
 
-fn remove_path(paths: &mut Vec<Path>, path: &Path) -> bool {
+fn remove_path(paths: &mut Vec<sdf::Path>, path: &sdf::Path) -> bool {
     let Some(idx) = paths.iter().position(|p| p == path) else {
         return false;
     };
@@ -761,64 +772,64 @@ where
 {
     /// `defaultPrim` token, if authored.
     pub fn default_prim(&self) -> Option<&str> {
-        match self.get(FieldKey::DefaultPrim.as_str())? {
-            Value::Token(t) => Some(t.as_str()),
+        match self.get(sdf::FieldKey::DefaultPrim.as_str())? {
+            sdf::Value::Token(t) => Some(t.as_str()),
             _ => None,
         }
     }
 
     /// Sublayer asset paths in strength order (strongest first).
     pub fn sublayers(&self) -> Option<&[String]> {
-        match self.get(FieldKey::SubLayers.as_str())? {
-            Value::StringVec(v) | Value::TokenVec(v) => Some(v.as_slice()),
+        match self.get(sdf::FieldKey::SubLayers.as_str())? {
+            sdf::Value::StringVec(v) | sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
 
     /// Layer documentation string.
     pub fn documentation(&self) -> Option<&str> {
-        match self.get(FieldKey::Documentation.as_str())? {
-            Value::String(s) => Some(s.as_str()),
+        match self.get(sdf::FieldKey::Documentation.as_str())? {
+            sdf::Value::String(s) => Some(s.as_str()),
             _ => None,
         }
     }
 
     /// Layer start time code.
     pub fn start_time_code(&self) -> Option<f64> {
-        match self.get(FieldKey::StartTimeCode.as_str())? {
-            Value::Double(v) => Some(*v),
+        match self.get(sdf::FieldKey::StartTimeCode.as_str())? {
+            sdf::Value::Double(v) => Some(*v),
             _ => None,
         }
     }
 
     /// Layer end time code.
     pub fn end_time_code(&self) -> Option<f64> {
-        match self.get(FieldKey::EndTimeCode.as_str())? {
-            Value::Double(v) => Some(*v),
+        match self.get(sdf::FieldKey::EndTimeCode.as_str())? {
+            sdf::Value::Double(v) => Some(*v),
             _ => None,
         }
     }
 
     /// Time codes per second.
     pub fn time_codes_per_second(&self) -> Option<f64> {
-        match self.get(FieldKey::TimeCodesPerSecond.as_str())? {
-            Value::Double(v) => Some(*v),
+        match self.get(sdf::FieldKey::TimeCodesPerSecond.as_str())? {
+            sdf::Value::Double(v) => Some(*v),
             _ => None,
         }
     }
 
     /// Frames per second.
     pub fn frames_per_second(&self) -> Option<f64> {
-        match self.get(FieldKey::FramesPerSecond.as_str())? {
-            Value::Double(v) => Some(*v),
+        match self.get(sdf::FieldKey::FramesPerSecond.as_str())? {
+            sdf::Value::Double(v) => Some(*v),
             _ => None,
         }
     }
 
     /// Names of root prims in declared order.
     pub fn prim_children(&self) -> Option<&[String]> {
-        match self.get(ChildrenKey::PrimChildren.as_str())? {
-            Value::TokenVec(v) => Some(v.as_slice()),
+        match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
+            sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
@@ -835,7 +846,7 @@ where
     /// which rejects malformed values; use this method when you need to
     /// bypass that check (e.g. round-tripping spec data verbatim).
     pub fn set_default_prim(&mut self, name: impl Into<String>) {
-        self.add(FieldKey::DefaultPrim, Value::Token(name.into()));
+        self.add(sdf::FieldKey::DefaultPrim, sdf::Value::Token(name.into()));
     }
 
     /// Replace the sublayer list with the given asset paths.
@@ -845,47 +856,47 @@ where
         S: Into<String>,
     {
         let paths: Vec<String> = paths.into_iter().map(Into::into).collect();
-        self.add(FieldKey::SubLayers, Value::StringVec(paths));
+        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
     }
 
     /// Append a sublayer asset path. Duplicate entries are preserved because
     /// USD layer offsets and strength ordering make repeated sublayer arcs
-    /// meaningful. Always writes the field as `Value::StringVec` so the
+    /// meaningful. Always writes the field as `sdf::Value::StringVec` so the
     /// USDA/USDC writers emit it (they match `StringVec` only); a
     /// pre-existing `TokenVec` is migrated in place.
     pub fn add_sublayer(&mut self, path: impl Into<String>) {
         let path = path.into();
-        let mut paths: Vec<String> = match self.remove(FieldKey::SubLayers.as_str()) {
-            Some(Value::StringVec(v)) | Some(Value::TokenVec(v)) => v,
+        let mut paths: Vec<String> = match self.remove(sdf::FieldKey::SubLayers.as_str()) {
+            Some(sdf::Value::StringVec(v)) | Some(sdf::Value::TokenVec(v)) => v,
             _ => Vec::new(),
         };
         paths.push(path);
-        self.add(FieldKey::SubLayers, Value::StringVec(paths));
+        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
     }
 
     /// Set the layer documentation string.
     pub fn set_documentation(&mut self, doc: impl Into<String>) {
-        self.add(FieldKey::Documentation, Value::String(doc.into()));
+        self.add(sdf::FieldKey::Documentation, sdf::Value::String(doc.into()));
     }
 
     /// Set the layer start time code.
     pub fn set_start_time_code(&mut self, time: f64) {
-        self.add(FieldKey::StartTimeCode, Value::Double(time));
+        self.add(sdf::FieldKey::StartTimeCode, sdf::Value::Double(time));
     }
 
     /// Set the layer end time code.
     pub fn set_end_time_code(&mut self, time: f64) {
-        self.add(FieldKey::EndTimeCode, Value::Double(time));
+        self.add(sdf::FieldKey::EndTimeCode, sdf::Value::Double(time));
     }
 
     /// Set the time codes per second.
     pub fn set_time_codes_per_second(&mut self, rate: f64) {
-        self.add(FieldKey::TimeCodesPerSecond, Value::Double(rate));
+        self.add(sdf::FieldKey::TimeCodesPerSecond, sdf::Value::Double(rate));
     }
 
     /// Set the frames per second.
     pub fn set_frames_per_second(&mut self, rate: f64) {
-        self.add(FieldKey::FramesPerSecond, Value::Double(rate));
+        self.add(sdf::FieldKey::FramesPerSecond, sdf::Value::Double(rate));
     }
 }
 
@@ -895,19 +906,19 @@ mod tests {
 
     #[test]
     fn prim_mut_reads() {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
         prim.set_type_name("Xform");
-        prim.set_specifier(Specifier::Def);
+        prim.set_specifier(sdf::Specifier::Def);
 
         assert_eq!(prim.type_name(), Some("Xform"));
-        assert_eq!(prim.specifier(), Some(Specifier::Def));
+        assert_eq!(prim.specifier(), Some(sdf::Specifier::Def));
     }
 
     #[test]
     fn add_api_schema_prepends() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
         assert!(prim.add_applied_schema("MaterialBindingAPI")?);
@@ -925,10 +936,10 @@ mod tests {
 
     #[test]
     fn add_api_schema_explicit() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
-            FieldKey::ApiSchemas,
-            Value::TokenListOp(TokenListOp::explicit(["ExistingAPI".to_string()])),
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenListOp(sdf::TokenListOp::explicit(["ExistingAPI".to_string()])),
         );
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
@@ -942,10 +953,10 @@ mod tests {
 
     #[test]
     fn add_api_schema_keeps_add() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
-            FieldKey::ApiSchemas,
-            Value::TokenListOp(TokenListOp {
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenListOp(sdf::TokenListOp {
                 added_items: vec!["ExistingAPI".to_string()],
                 ..Default::default()
             }),
@@ -962,10 +973,10 @@ mod tests {
 
     #[test]
     fn add_api_schema_clears_delete() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
-            FieldKey::ApiSchemas,
-            Value::TokenListOp(TokenListOp {
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenListOp(sdf::TokenListOp {
                 deleted_items: vec!["RemovedAPI".to_string()],
                 ..Default::default()
             }),
@@ -984,10 +995,10 @@ mod tests {
     /// already_applied stays false, so the schema lands in `explicit_items`.
     #[test]
     fn add_api_schema_stale_added() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
-            FieldKey::ApiSchemas,
-            Value::TokenListOp(TokenListOp {
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenListOp(sdf::TokenListOp {
                 explicit: true,
                 added_items: vec!["StaleAPI".to_string()],
                 ..Default::default()
@@ -1007,10 +1018,10 @@ mod tests {
     /// first occurrence).
     #[test]
     fn add_api_schema_dup_delete() -> Result<(), SpecError> {
-        let mut spec = Spec::new(SpecType::Prim);
+        let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
-            FieldKey::ApiSchemas,
-            Value::TokenListOp(TokenListOp {
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenListOp(sdf::TokenListOp {
                 deleted_items: vec!["RemovedAPI".to_string(), "RemovedAPI".to_string()],
                 ..Default::default()
             }),
@@ -1027,36 +1038,39 @@ mod tests {
 
     #[test]
     fn add_api_schema_rejects_wrong_type() {
-        let mut spec = Spec::new(SpecType::Prim);
-        spec.add(FieldKey::ApiSchemas, Value::TokenVec(vec!["ExistingAPI".to_string()]));
+        let mut spec = Spec::new(sdf::SpecType::Prim);
+        spec.add(
+            sdf::FieldKey::ApiSchemas,
+            sdf::Value::TokenVec(vec!["ExistingAPI".to_string()]),
+        );
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
         assert!(matches!(
             prim.add_applied_schema("NewAPI"),
             Err(SpecError::FieldType {
                 field: "apiSchemas",
-                expected: "TokenListOp"
+                expected: "sdf::TokenListOp"
             })
         ));
     }
 
     #[test]
     fn attribute_mut_reads() {
-        let mut spec = Spec::new(SpecType::Attribute);
+        let mut spec = Spec::new(sdf::SpecType::Attribute);
         let mut attr = spec.as_attr_mut().expect("attribute spec");
 
-        attr.set_default(Value::Int(42));
+        attr.set_default(sdf::Value::Int(42));
         attr.set_custom(true);
 
-        assert_eq!(attr.default(), Some(&Value::Int(42)));
+        assert_eq!(attr.default(), Some(&sdf::Value::Int(42)));
         assert!(attr.is_custom());
     }
 
     #[test]
     fn relationship_mut_reads() {
-        let mut spec = Spec::new(SpecType::Relationship);
+        let mut spec = Spec::new(sdf::SpecType::Relationship);
         let mut rel = spec.as_relationship_mut().expect("relationship spec");
-        let target = Path::new("/Target").expect("valid path");
+        let target = sdf::Path::new("/Target").expect("valid path");
 
         rel.add_target(target.clone());
 
@@ -1065,7 +1079,7 @@ mod tests {
 
     #[test]
     fn pseudo_root_mut_reads() {
-        let mut spec = Spec::new(SpecType::PseudoRoot);
+        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
         let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
 
         root.set_default_prim("World");
