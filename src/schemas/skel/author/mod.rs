@@ -18,6 +18,9 @@
 //! [`Stage::set_edit_target`](crate::usd::Stage::set_edit_target) between
 //! calls.
 
+mod common;
 mod skel_root;
+mod skeleton;
 
 pub use skel_root::define_skel_root;
+pub use skeleton::{define_skeleton, SkeletonAuthor};
