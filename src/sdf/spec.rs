@@ -266,9 +266,17 @@ impl<'a, B> PrimSpec<'a, B>
 where
     B: DerefMut<Target = Spec>,
 {
-    /// Set the `typeName` field.
+    /// Set the `typeName` field. An empty `name` clears the field instead
+    /// of authoring `Value::Token("")` — matching the empty-string skip in
+    /// [`crate::sdf::Layer::create_prim`] so the two write paths stay in
+    /// lockstep.
     pub fn set_type_name(&mut self, name: impl Into<String>) {
-        self.add(FieldKey::TypeName, Value::Token(name.into()));
+        let name = name.into();
+        if name.is_empty() {
+            self.remove(FieldKey::TypeName.as_str());
+        } else {
+            self.add(FieldKey::TypeName, Value::Token(name));
+        }
     }
 
     /// Set the `specifier` field.
