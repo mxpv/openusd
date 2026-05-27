@@ -21,7 +21,10 @@
 
 use anyhow::Result;
 
-use crate::math::{mat4_inverse, mat4_mul, IDENTITY_MAT4};
+use crate::math::{
+    mat4_from_quat, mat4_inverse, mat4_mul, mat4_rotation_x, mat4_rotation_y, mat4_rotation_z, mat4_scale,
+    mat4_translation, IDENTITY_MAT4,
+};
 use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
@@ -62,16 +65,13 @@ pub fn resets_xform_stack(stage: &Stage, prim: &Path) -> Result<bool> {
 /// transform is identity).
 ///
 /// `!invert!` ops contribute the inverse of the underlying value.
-/// `!resetXformStack!` is skipped here; callers honour it via
-/// [`resets_xform_stack`] when chaining to a parent's transform.
+/// `!resetXformStack!` is only meaningful at index 0; the leading
+/// sentinel is skipped here (callers honour it via
+/// [`resets_xform_stack`]), while a non-leading occurrence surfaces
+/// as an error rather than being silently dropped.
 ///
 /// Op values are read through [`Stage::value_at`] so per-op
 /// `timeSamples` interpolate per AOUSD §12.5.
-///
-/// `!resetXformStack!` is only meaningful as the first entry per the
-/// UsdGeomXformable spec. A non-leading occurrence is malformed
-/// authoring and surfaces as an error rather than being silently
-/// skipped.
 pub fn compute_local_to_parent_transform(stage: &Stage, prim: &Path, time: f64) -> Result<[f64; 16]> {
     let Some(order) = read_xform_op_order(stage, prim)? else {
         return Ok(IDENTITY_MAT4);
@@ -126,28 +126,28 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
     let kind = after_ns.split(':').next().unwrap_or(after_ns);
 
     let m = match kind {
-        "translate" => translate_matrix(value_to_vec3f(&raw).unwrap_or([0.0, 0.0, 0.0])),
-        "translateX" => translate_matrix([value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0, 0.0]),
-        "translateY" => translate_matrix([0.0, value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0]),
-        "translateZ" => translate_matrix([0.0, 0.0, value_to_scalar_f32(&raw).unwrap_or(0.0)]),
-        "scale" => scale_matrix(value_to_vec3f(&raw).unwrap_or([1.0, 1.0, 1.0])),
-        "scaleX" => scale_matrix([value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0, 1.0]),
-        "scaleY" => scale_matrix([1.0, value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0]),
-        "scaleZ" => scale_matrix([1.0, 1.0, value_to_scalar_f32(&raw).unwrap_or(1.0)]),
-        "orient" => quat_to_matrix(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
+        "translate" => mat4_translation(value_to_vec3f(&raw).unwrap_or([0.0, 0.0, 0.0])),
+        "translateX" => mat4_translation([value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0, 0.0]),
+        "translateY" => mat4_translation([0.0, value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0]),
+        "translateZ" => mat4_translation([0.0, 0.0, value_to_scalar_f32(&raw).unwrap_or(0.0)]),
+        "scale" => mat4_scale(value_to_vec3f(&raw).unwrap_or([1.0, 1.0, 1.0])),
+        "scaleX" => mat4_scale([value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0, 1.0]),
+        "scaleY" => mat4_scale([1.0, value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0]),
+        "scaleZ" => mat4_scale([1.0, 1.0, value_to_scalar_f32(&raw).unwrap_or(1.0)]),
+        "orient" => mat4_from_quat(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
         // Rotation ops are kept in f64 end-to-end. xformOp:rotateX etc.
         // can be authored as either `float` or `double` per the
         // UsdGeomXformOp precision system; reading via f32 would
         // silently truncate the double-authored case before the trig
         // math runs.
-        "rotateX" => rotate_x_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateY" => rotate_y_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateZ" => rotate_z_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateX" => mat4_rotation_x(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateY" => mat4_rotation_y(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateZ" => mat4_rotation_z(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
         "rotateXYZ" | "rotateYXZ" | "rotateZXY" | "rotateXZY" | "rotateYZX" | "rotateZYX" => {
             let v = value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0]);
-            let rx = rotate_x_matrix(v[0].to_radians());
-            let ry = rotate_y_matrix(v[1].to_radians());
-            let rz = rotate_z_matrix(v[2].to_radians());
+            let rx = mat4_rotation_x(v[0].to_radians());
+            let ry = mat4_rotation_y(v[1].to_radians());
+            let rz = mat4_rotation_z(v[2].to_radians());
             // Apply axes in the order spelled by `kind` — `rotateXYZ`
             // means apply X first, then Y, then Z (per the Pixar spec).
             // In row-vector composition that's `Rx · Ry · Rz`.
@@ -173,91 +173,6 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
     } else {
         Ok(m)
     }
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// Row-major rotation / translation / scale builders.
-// ────────────────────────────────────────────────────────────────────────
-
-fn translate_matrix(t: [f32; 3]) -> [f64; 16] {
-    let mut m = IDENTITY_MAT4;
-    m[12] = t[0] as f64;
-    m[13] = t[1] as f64;
-    m[14] = t[2] as f64;
-    m
-}
-
-fn scale_matrix(s: [f32; 3]) -> [f64; 16] {
-    let mut m = IDENTITY_MAT4;
-    m[0] = s[0] as f64;
-    m[5] = s[1] as f64;
-    m[10] = s[2] as f64;
-    m
-}
-
-fn rotate_x_matrix(rad: f64) -> [f64; 16] {
-    let (s, c) = rad.sin_cos();
-    let mut m = IDENTITY_MAT4;
-    m[5] = c;
-    m[6] = s;
-    m[9] = -s;
-    m[10] = c;
-    m
-}
-
-fn rotate_y_matrix(rad: f64) -> [f64; 16] {
-    let (s, c) = rad.sin_cos();
-    let mut m = IDENTITY_MAT4;
-    m[0] = c;
-    m[2] = -s;
-    m[8] = s;
-    m[10] = c;
-    m
-}
-
-fn rotate_z_matrix(rad: f64) -> [f64; 16] {
-    let (s, c) = rad.sin_cos();
-    let mut m = IDENTITY_MAT4;
-    m[0] = c;
-    m[1] = s;
-    m[4] = -s;
-    m[5] = c;
-    m
-}
-
-/// Convert a `(w, x, y, z)` quaternion to a row-major 4×4 rotation.
-fn quat_to_matrix(q: [f32; 4]) -> [f64; 16] {
-    let w = q[0] as f64;
-    let x = q[1] as f64;
-    let y = q[2] as f64;
-    let z = q[3] as f64;
-    let xx = x * x;
-    let yy = y * y;
-    let zz = z * z;
-    let xy = x * y;
-    let xz = x * z;
-    let yz = y * z;
-    let wx = w * x;
-    let wy = w * y;
-    let wz = w * z;
-    [
-        1.0 - 2.0 * (yy + zz),
-        2.0 * (xy + wz),
-        2.0 * (xz - wy),
-        0.0,
-        2.0 * (xy - wz),
-        1.0 - 2.0 * (xx + zz),
-        2.0 * (yz + wx),
-        0.0,
-        2.0 * (xz + wy),
-        2.0 * (yz - wx),
-        1.0 - 2.0 * (xx + yy),
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    ]
 }
 
 fn value_to_vec3f(v: &Value) -> Option<[f32; 3]> {
@@ -306,69 +221,5 @@ fn value_to_quat_wxyz(v: &Value) -> Option<[f32; 4]> {
         Value::Quatd(q) => Some([q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]),
         Value::Quath(q) => Some([q[0].to_f32(), q[1].to_f32(), q[2].to_f32(), q[3].to_f32()]),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::math::mat4_transform_point;
-
-    #[test]
-    fn translate_matrix_layout_matches_row_major() {
-        let m = translate_matrix([5.0, -2.0, 7.0]);
-        assert_eq!(&m[12..15], &[5.0, -2.0, 7.0]);
-        let p = mat4_transform_point(&m, [1.0, 1.0, 1.0]);
-        assert_eq!(p, [6.0, -1.0, 8.0]);
-    }
-
-    #[test]
-    fn rotate_z_takes_x_to_y() {
-        let m = rotate_z_matrix(std::f64::consts::FRAC_PI_2);
-        let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
-        assert!((p[0]).abs() < 1e-6, "x: {}", p[0]);
-        assert!((p[1] - 1.0).abs() < 1e-6, "y: {}", p[1]);
-        assert!((p[2]).abs() < 1e-6);
-    }
-
-    #[test]
-    fn rotate_y_takes_x_to_neg_z() {
-        let m = rotate_y_matrix(std::f64::consts::FRAC_PI_2);
-        let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
-        assert!((p[0]).abs() < 1e-6);
-        assert!((p[1]).abs() < 1e-6);
-        assert!((p[2] + 1.0).abs() < 1e-6, "z: {}", p[2]);
-    }
-
-    #[test]
-    fn rotate_x_takes_y_to_z() {
-        let m = rotate_x_matrix(std::f64::consts::FRAC_PI_2);
-        let p = mat4_transform_point(&m, [0.0, 1.0, 0.0]);
-        assert!((p[0]).abs() < 1e-6);
-        assert!((p[1]).abs() < 1e-6);
-        assert!((p[2] - 1.0).abs() < 1e-6, "z: {}", p[2]);
-    }
-
-    #[test]
-    fn identity_quat_to_matrix_is_identity() {
-        assert_eq!(quat_to_matrix([1.0, 0.0, 0.0, 0.0]), IDENTITY_MAT4);
-    }
-
-    #[test]
-    fn quat_90_about_z_takes_x_to_y() {
-        // q = (cos(45°), 0, 0, sin(45°)) = 90° about +Z.
-        let h = std::f32::consts::FRAC_PI_4;
-        let m = quat_to_matrix([h.cos(), 0.0, 0.0, h.sin()]);
-        let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
-        assert!((p[0]).abs() < 1e-5);
-        assert!((p[1] - 1.0).abs() < 1e-5);
-        assert!((p[2]).abs() < 1e-5);
-    }
-
-    #[test]
-    fn scale_matrix_layout_matches_row_major() {
-        let m = scale_matrix([2.0, 3.0, 4.0]);
-        let p = mat4_transform_point(&m, [1.0, 1.0, 1.0]);
-        assert_eq!(p, [2.0, 3.0, 4.0]);
     }
 }
