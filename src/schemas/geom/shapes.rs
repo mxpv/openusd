@@ -82,6 +82,7 @@ pub fn read_plane(stage: &Stage, prim: &Path) -> Result<Option<ReadPlane>> {
         width: read_double(stage, prim, A_WIDTH)?.unwrap_or(2.0),
         length: read_double(stage, prim, A_LENGTH)?.unwrap_or(2.0),
         axis: read_axis(stage, prim)?,
+        double_sided: read_bool(stage, prim, A_DOUBLE_SIDED)?.unwrap_or(true),
     }))
 }
 
@@ -102,6 +103,14 @@ fn read_double(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f64>> {
     Ok(match stage.field::<Value>(attr, "default")? {
         Some(Value::Double(d)) => Some(d),
         Some(Value::Float(f)) => Some(f as f64),
+        _ => None,
+    })
+}
+
+fn read_bool(stage: &Stage, prim: &Path, name: &str) -> Result<Option<bool>> {
+    let attr = prim.append_property(name)?;
+    Ok(match stage.field::<Value>(attr, "default")? {
+        Some(Value::Bool(b)) => Some(b),
         _ => None,
     })
 }

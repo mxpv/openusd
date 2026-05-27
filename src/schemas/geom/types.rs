@@ -207,6 +207,7 @@ pub struct ReadPlane {
     pub width: f64,
     pub length: f64,
     pub axis: Axis,
+    pub double_sided: bool,
 }
 
 impl Default for ReadPlane {
@@ -215,6 +216,9 @@ impl Default for ReadPlane {
             width: 2.0,
             length: 2.0,
             axis: Axis::default(),
+            // Plane is the one Gprim where the spec flips the inherited
+            // Gprim default — UsdGeomPlane authors `doubleSided = true`.
+            double_sided: true,
         }
     }
 }

@@ -339,6 +339,8 @@ fn read_plane_picks_up_dimensions_and_axis() -> Result<()> {
     assert_eq!(p.width, 10.0);
     assert_eq!(p.length, 8.0);
     assert_eq!(p.axis, Axis::Y);
+    // Plane flips the inherited Gprim default; unauthored = true.
+    assert!(p.double_sided);
     Ok(())
 }
 
