@@ -79,7 +79,7 @@ mod types;
 
 pub use anim_mapper::{AnimMapper, MISSING};
 pub use anim_query::{JointTransformComponents, SkelAnimQuery};
-pub use author::define_skel_root;
+pub use author::{define_skel_root, define_skeleton, SkeletonAuthor};
 pub use binding::{discover_bindings, discover_skeletons, find_skel_roots, SkelBinding};
 pub use read::{
     find_skel_prims, read_blend_shape, read_inherited_animation_source, read_inherited_skeleton, read_skel_animation,

@@ -19,6 +19,7 @@ pub const A_EXTENT: &str = "extent";
 
 // Skeleton attribute names.
 pub const A_JOINTS: &str = "joints";
+pub const A_JOINT_NAMES: &str = "jointNames";
 pub const A_BIND_TRANSFORMS: &str = "bindTransforms";
 pub const A_REST_TRANSFORMS: &str = "restTransforms";
 
