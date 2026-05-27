@@ -51,9 +51,18 @@ pub fn read_mesh(stage: &Stage, prim: &Path) -> Result<Option<ReadMesh>> {
         .as_deref()
         .and_then(SubdivisionScheme::from_token)
         .unwrap_or_default();
-    let interpolate_boundary = read_token(stage, prim, A_INTERPOLATE_BOUNDARY)?;
-    let face_varying_linear_interpolation = read_token(stage, prim, A_FACE_VARYING_LINEAR_INTERPOLATION)?;
-    let triangle_subdivision_rule = read_token(stage, prim, A_TRIANGLE_SUBDIVISION_RULE)?;
+    let interpolate_boundary = read_token(stage, prim, A_INTERPOLATE_BOUNDARY)?
+        .as_deref()
+        .and_then(InterpolateBoundary::from_token)
+        .unwrap_or_default();
+    let face_varying_linear_interpolation = read_token(stage, prim, A_FACE_VARYING_LINEAR_INTERPOLATION)?
+        .as_deref()
+        .and_then(FaceVaryingLinearInterpolation::from_token)
+        .unwrap_or_default();
+    let triangle_subdivision_rule = read_token(stage, prim, A_TRIANGLE_SUBDIVISION_RULE)?
+        .as_deref()
+        .and_then(TriangleSubdivisionRule::from_token)
+        .unwrap_or_default();
 
     let hole_indices = read_int_vec(stage, prim, A_HOLE_INDICES)?.unwrap_or_default();
     let corner_indices = read_int_vec(stage, prim, A_CORNER_INDICES)?.unwrap_or_default();
