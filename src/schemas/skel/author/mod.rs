@@ -19,8 +19,10 @@
 //! calls.
 
 mod common;
+mod skel_animation;
 mod skel_root;
 mod skeleton;
 
+pub use skel_animation::{define_skel_animation, SkelAnimationAuthor};
 pub use skel_root::define_skel_root;
 pub use skeleton::{define_skeleton, SkeletonAuthor};

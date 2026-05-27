@@ -41,3 +41,16 @@ pub(super) fn author_uniform_matrix4d_array(
         .set(Value::Matrix4dVec(matrices))?;
     Ok(())
 }
+
+/// Get-or-create a varying attribute on `prim` with the given typed
+/// `type_name`. Caller writes the value via the returned
+/// [`crate::usd::Attribute`].
+pub(super) fn varying_attribute<'s>(
+    stage: &'s Stage,
+    prim: &Path,
+    name: &str,
+    type_name: &str,
+) -> Result<crate::usd::Attribute<'s>> {
+    let attr_path = prim.append_property(name)?;
+    Ok(stage.create_attribute(attr_path, type_name)?.set_custom(false)?)
+}
