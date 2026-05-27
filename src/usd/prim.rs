@@ -82,6 +82,36 @@ impl<'s> Prim<'s> {
         self.edit(|spec| spec.set_instanceable(instanceable))
     }
 
+    /// Add an applied API schema name to this prim's `apiSchemas` metadata.
+    ///
+    /// This is the registry-free authoring operation behind C++
+    /// `UsdPrim::AddAppliedSchema`: it edits the current edit target's
+    /// `apiSchemas` list op in place rather than replacing existing list-op
+    /// opinions. It does not validate that `name` is a registered API schema;
+    /// schema-registry-backed `ApplyAPI` behavior is still future work.
+    ///
+    /// The prim spec must already exist on the active edit target — chain
+    /// after [`Stage::define_prim`] or [`Stage::override_prim`]; otherwise
+    /// the call returns [`sdf::AuthoringError::InvalidPath`].
+    ///
+    /// [`Stage::define_prim`]: crate::usd::Stage::define_prim
+    /// [`Stage::override_prim`]: crate::usd::Stage::override_prim
+    pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
+        let path = self.path.clone();
+        let name = name.into();
+        self.stage.with_target_layer(|layer| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
+                Some(mut spec) => spec.add_applied_schema(name).map_err(Into::into),
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no prim spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(self)
+    }
+
     /// Author an attribute spec named `name` under this prim. Mirrors C++
     /// `UsdPrim::CreateAttribute`. Defaults `variability = Varying`,
     /// `custom = true` — override via the returned [`Attribute`] handle's
@@ -482,6 +512,48 @@ mod tests {
             stage.field::<sdf::Value>(binding.path(), sdf::FieldKey::Custom)?,
             Some(sdf::Value::Bool(true)),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
+        assert_eq!(stage.api_schemas(prim.path())?, vec!["MaterialBindingAPI".to_string()]);
+        assert!(stage.has_api_schema(prim.path(), "MaterialBindingAPI")?);
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema_merges() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World")?;
+        stage.with_target_layer(|layer| {
+            let data = layer.writable_data_mut()?;
+            let spec = data
+                .spec_mut(&sdf::Path::new("/World").expect("valid path"))
+                .expect("prim spec");
+            spec.add(
+                sdf::FieldKey::ApiSchemas,
+                sdf::Value::TokenListOp(sdf::TokenListOp {
+                    appended_items: vec!["ExistingAPI".to_string()],
+                    ..Default::default()
+                }),
+            );
+            Ok(true)
+        })?;
+
+        stage
+            .override_prim("/World")?
+            .add_applied_schema("ExistingAPI")?
+            .add_applied_schema("NewAPI")?;
+
+        let local = stage.field::<sdf::Value>("/World", sdf::FieldKey::ApiSchemas)?;
+        let Some(sdf::Value::TokenListOp(op)) = local else {
+            panic!("expected apiSchemas TokenListOp");
+        };
+        assert_eq!(op.appended_items, vec!["ExistingAPI".to_string()]);
+        assert_eq!(op.prepended_items, vec!["NewAPI".to_string()]);
         Ok(())
     }
 }

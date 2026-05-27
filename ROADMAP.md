@@ -137,7 +137,7 @@ that broader spec behavior can be considered fully covered.
 |---|---|---|---|---|
 | [Schema registry](https://openusd.org/release/api/class_usd_schema_registry.html) | `13.3` | :construction: | | Type hierarchy, prim definitions |
 | [Typed schemas](https://openusd.org/release/api/class_usd_typed.html) (IsA) | `13.3.1` | :construction: | | `typeName` readable; registry not implemented |
-| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` list-ops compose across contributing layers. Left for full spec coverage: schema registry, single/multiple application validation, built-in/auto-apply inclusions, composed prim definitions, and fallback property values. |
+| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` list-ops compose across contributing layers; `Prim::add_applied_schema` authors registry-free applied schema tokens by merging into the local list op. Left for full spec coverage: schema registry, single/multiple application validation, built-in/auto-apply inclusions, composed prim definitions, and fallback property values. |
 | Schema inclusions (built-ins, auto-applies) | `13.3.2.1` | :construction: | | |
 | Prim definitions (property fallbacks) | `13.3` | :construction: | | |
 | Core schema types | `13.4` | :construction: | | |

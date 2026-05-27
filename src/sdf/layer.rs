@@ -12,7 +12,7 @@ use anyhow::Result;
 use super::schema::{ChildrenKey, FieldKey};
 use super::{
     AbstractData, AttributeSpec, AttributeSpecMut, Data, LayerData, Path, PrimSpec, PrimSpecMut, PseudoRootSpec,
-    PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, Spec, SpecType, Specifier, Value, Variability,
+    PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, Spec, SpecError, SpecType, Specifier, Value, Variability,
 };
 use crate::{usda, usdc};
 
@@ -144,6 +144,10 @@ impl Layer {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AuthoringError {
+    /// The target spec rejected an edit.
+    #[error(transparent)]
+    Spec(#[from] SpecError),
+
     /// The layer's backend is not an in-memory [`Data`] store. Layers loaded
     /// from files via [`crate::layer::Collector`] are read-only.
     #[error("layer {identifier} is read-only; authoring is not supported")]
@@ -222,6 +226,7 @@ impl Layer {
 
         let spec = data.spec_mut(&path).expect("just ensured");
         spec.add(FieldKey::Specifier, Value::Specifier(specifier));
+
         if !type_name.is_empty() {
             spec.add(FieldKey::TypeName, Value::Token(type_name));
         }
@@ -277,13 +282,16 @@ impl Layer {
         if !data.has_spec(&path) {
             data.create_spec(path.clone(), SpecType::Attribute);
         }
+
         let spec = data.spec_mut(&path).expect("just ensured");
         spec.add(FieldKey::TypeName, Value::Token(type_name));
+
         if variability != Variability::Varying {
             spec.add(FieldKey::Variability, Value::Variability(variability));
         } else {
             spec.remove(FieldKey::Variability.as_str());
         }
+
         if custom {
             spec.add(FieldKey::Custom, Value::Bool(true));
         } else {
@@ -324,12 +332,15 @@ impl Layer {
         if !data.has_spec(&path) {
             data.create_spec(path.clone(), SpecType::Relationship);
         }
+
         let spec = data.spec_mut(&path).expect("just ensured");
+
         if variability != Variability::Varying {
             spec.add(FieldKey::Variability, Value::Variability(variability));
         } else {
             spec.remove(FieldKey::Variability.as_str());
         }
+
         if custom {
             spec.add(FieldKey::Custom, Value::Bool(true));
         } else {

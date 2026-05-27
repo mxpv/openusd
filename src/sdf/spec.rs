@@ -18,7 +18,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use crate::sdf::schema::ChildrenKey;
-use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, Value, Variability};
+use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, TokenListOp, Value, Variability};
 
 // =========================================================================
 // Spec
@@ -50,6 +50,20 @@ pub struct Spec {
     pub ty: SpecType,
     /// The fields stored on this spec, in authored order.
     pub fields: Vec<(String, Value)>,
+}
+
+/// Errors raised by typed spec-level authoring helpers.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SpecError {
+    /// A field exists with a value type that cannot be edited by the requested helper.
+    #[error("field {field} exists with non-{expected} value")]
+    FieldType {
+        /// The authored field name.
+        field: &'static str,
+        /// The required value type.
+        expected: &'static str,
+    },
 }
 
 impl Spec {
@@ -260,6 +274,14 @@ where
             _ => None,
         }
     }
+
+    /// Authored `apiSchemas` list op, if present.
+    pub fn api_schemas(&self) -> Option<&TokenListOp> {
+        match self.get(FieldKey::ApiSchemas.as_str())? {
+            Value::TokenListOp(op) => Some(op),
+            _ => None,
+        }
+    }
 }
 
 impl<'a, B> PrimSpec<'a, B>
@@ -303,6 +325,59 @@ where
     pub fn set_instanceable(&mut self, instanceable: bool) {
         self.add(FieldKey::Instanceable, Value::Bool(instanceable));
     }
+
+    /// Add an applied API schema token to this prim's `apiSchemas` list op.
+    ///
+    /// Mirrors C++ `UsdPrim::AddAppliedSchema`. When the schema is not yet
+    /// authored locally in any opinion bucket, the name is pushed onto
+    /// `explicit_items` for explicit ops, otherwise onto `prepended_items`.
+    /// Existing explicit/prepended/appended opinions are left in place and
+    /// treated as already applied (no duplicate add). A local delete of the
+    /// same name is always removed so applying a schema in the same edit
+    /// target cancels an earlier removal.
+    ///
+    /// Returns `Ok(true)` whenever the local list op changed (whether by
+    /// adding the schema, by clearing a pending delete, or both); `Ok(false)`
+    /// when the call was a no-op.
+    pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, SpecError> {
+        let name = name.into();
+        match self.get_mut(FieldKey::ApiSchemas.as_str()) {
+            Some(Value::TokenListOp(op)) => Ok(add_applied_schema_to_list_op(op, name)),
+            Some(_) => Err(SpecError::FieldType {
+                field: FieldKey::ApiSchemas.as_str(),
+                expected: "TokenListOp",
+            }),
+            None => {
+                self.add(FieldKey::ApiSchemas, Value::TokenListOp(TokenListOp::prepended([name])));
+                Ok(true)
+            }
+        }
+    }
+}
+
+fn add_applied_schema_to_list_op(op: &mut TokenListOp, name: String) -> bool {
+    let already_applied = op.explicit_items.iter().any(|n| n == &name)
+        || op.prepended_items.iter().any(|n| n == &name)
+        || op.appended_items.iter().any(|n| n == &name)
+        // Non-explicit `add` opinions already contribute the schema without changing list position.
+        || (!op.explicit && op.added_items.iter().any(|n| n == &name));
+
+    let before = op.deleted_items.len();
+    op.deleted_items.retain(|n| n != &name);
+    let mut changed = op.deleted_items.len() != before;
+
+    if already_applied {
+        return changed;
+    }
+
+    if op.explicit {
+        op.explicit_items.push(name);
+    } else {
+        op.prepended_items.push(name);
+    }
+    changed = true;
+
+    changed
 }
 
 // =========================================================================
@@ -848,6 +923,141 @@ mod tests {
 
         assert_eq!(prim.type_name(), Some("Xform"));
         assert_eq!(prim.specifier(), Some(Specifier::Def));
+    }
+
+    #[test]
+    fn add_api_schema_prepends() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(prim.add_applied_schema("MaterialBindingAPI")?);
+        assert!(prim.add_applied_schema("SkelBindingAPI")?);
+        assert!(!prim.add_applied_schema("MaterialBindingAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert!(!op.explicit);
+        assert_eq!(
+            op.prepended_items,
+            vec!["MaterialBindingAPI".to_string(), "SkelBindingAPI".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema_explicit() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(TokenListOp::explicit(["ExistingAPI".to_string()])),
+        );
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(prim.add_applied_schema("NewAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert!(op.explicit);
+        assert_eq!(op.explicit_items, vec!["ExistingAPI".to_string(), "NewAPI".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema_keeps_add() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(TokenListOp {
+                added_items: vec!["ExistingAPI".to_string()],
+                ..Default::default()
+            }),
+        );
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(!prim.add_applied_schema("ExistingAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert_eq!(op.added_items, vec!["ExistingAPI".to_string()]);
+        assert!(op.prepended_items.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema_clears_delete() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(TokenListOp {
+                deleted_items: vec!["RemovedAPI".to_string()],
+                ..Default::default()
+            }),
+        );
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(prim.add_applied_schema("RemovedAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert_eq!(op.prepended_items, vec!["RemovedAPI".to_string()]);
+        assert!(op.deleted_items.is_empty());
+        Ok(())
+    }
+
+    /// Explicit op with the name lingering in (irrelevant) `added_items`:
+    /// already_applied stays false, so the schema lands in `explicit_items`.
+    #[test]
+    fn add_api_schema_stale_added() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(TokenListOp {
+                explicit: true,
+                added_items: vec!["StaleAPI".to_string()],
+                ..Default::default()
+            }),
+        );
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(prim.add_applied_schema("StaleAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert!(op.explicit);
+        assert_eq!(op.explicit_items, vec!["StaleAPI".to_string()]);
+        Ok(())
+    }
+
+    /// A delete listing the same name twice is fully cleared (not just the
+    /// first occurrence).
+    #[test]
+    fn add_api_schema_dup_delete() -> Result<(), SpecError> {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(
+            FieldKey::ApiSchemas,
+            Value::TokenListOp(TokenListOp {
+                deleted_items: vec!["RemovedAPI".to_string(), "RemovedAPI".to_string()],
+                ..Default::default()
+            }),
+        );
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(prim.add_applied_schema("RemovedAPI")?);
+
+        let op = prim.api_schemas().expect("apiSchemas");
+        assert!(op.deleted_items.is_empty());
+        assert_eq!(op.prepended_items, vec!["RemovedAPI".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn add_api_schema_rejects_wrong_type() {
+        let mut spec = Spec::new(SpecType::Prim);
+        spec.add(FieldKey::ApiSchemas, Value::TokenVec(vec!["ExistingAPI".to_string()]));
+        let mut prim = spec.as_prim_mut().expect("prim spec");
+
+        assert!(matches!(
+            prim.add_applied_schema("NewAPI"),
+            Err(SpecError::FieldType {
+                field: "apiSchemas",
+                expected: "TokenListOp"
+            })
+        ));
     }
 
     #[test]
