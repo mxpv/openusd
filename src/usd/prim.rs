@@ -274,6 +274,25 @@ impl<'s> Attribute<'s> {
         self.edit(&[sdf::FieldKey::ColorSpace], |spec| spec.set_color_space(color_space))
     }
 
+    /// Author a generic metadata field on the attribute spec. Mirrors C++
+    /// `UsdAttribute::SetMetadata(name, value)`.
+    ///
+    /// Used for fields the schema layers on top of the core attribute
+    /// metadata (e.g. UsdSkel's `weight` on `inbetweens:NAME`, UsdGeom's
+    /// `elementSize` / `interpolation` on primvars). The dedicated setters
+    /// above (`set_variability`, `set_custom`, `set_color_space`) cover the
+    /// common cases — reach for this one when the schema requires a custom
+    /// field key not represented by [`sdf::FieldKey`].
+    pub fn set_metadata(
+        self,
+        key: impl Into<String>,
+        value: impl Into<sdf::Value>,
+    ) -> Result<Self, StageAuthoringError> {
+        let key = key.into();
+        let value = value.into();
+        self.edit(|spec| spec.add(key, value))
+    }
+
     /// Composed default value, if any layer authored one.
     //
     // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
