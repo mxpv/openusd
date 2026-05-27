@@ -34,6 +34,11 @@ For a detailed comparison with the C++ reference implementation and current prog
   - Composed [prim, attribute, and relationship handles](src/usd/prim.rs) with chained fluent edits.
   - `EditTarget` routing of opinions to a specific layer; in-memory stages for anonymous-root authoring.
   - Applied API schema authoring.
+- Domain schema readers (feature-gated, layered on the composed stage)
+  - [`UsdGeom`](src/schemas/geom) — Imageable / Boundable / Xformable, intrinsic shapes, Camera, Mesh, Curves, PointInstancer.
+  - [`UsdLux`](src/schemas/lux) — concrete light prims plus LightAPI / ShapingAPI / ShadowAPI and friends.
+  - [`UsdPhysics`](src/schemas/physics) — scene, joints, collisions, and per-DOF limit / drive APIs.
+  - [`UsdSkel`](src/schemas/skel) — schema reader plus a pure-math skinning toolkit (topology, anim mapping, LBS, blend shapes).
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
