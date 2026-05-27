@@ -179,6 +179,7 @@ pub const CURVE_WRAP_PINNED: &str = "pinned";
 pub const A_ORDER: &str = "order";
 pub const A_KNOTS: &str = "knots";
 pub const A_RANGES: &str = "ranges";
+pub const A_POINT_WEIGHTS: &str = "pointWeights";
 pub const A_U_VERTEX_COUNT: &str = "uVertexCount";
 pub const A_V_VERTEX_COUNT: &str = "vVertexCount";
 pub const A_U_ORDER: &str = "uOrder";

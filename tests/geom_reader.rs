@@ -588,6 +588,9 @@ fn read_nurbs_curves_falls_back_to_cubic_order() -> Result<()> {
     assert_eq!(c.knots.len(), 8);
     // Range synthesised from the inner knot span (knots[3..=4] = [0, 1]).
     assert_eq!(c.ranges.first().copied(), Some([0.0, 1.0]));
+    // pointWeights round-trips and identifies the curve as rational.
+    assert_eq!(c.point_weights.len(), 4);
+    assert_eq!(c.point_weights[0], 1.0);
     Ok(())
 }
 

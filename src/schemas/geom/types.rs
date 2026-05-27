@@ -751,6 +751,9 @@ pub struct ReadNurbsCurves {
     pub knots: Vec<f64>,
     /// Per-curve `(uMin, uMax)` parameter range.
     pub ranges: Vec<[f64; 2]>,
+    /// Per-CV rational weights — non-empty turns the curve rational.
+    /// When empty (the common case) the curve is polynomial.
+    pub point_weights: Vec<f64>,
     pub widths: Vec<f32>,
     pub display_color: Option<Primvar<[f32; 3]>>,
 }
