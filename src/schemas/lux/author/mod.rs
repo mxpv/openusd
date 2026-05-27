@@ -16,6 +16,7 @@
 
 mod boundable;
 mod common;
+mod dome;
 mod light_api;
 mod nonboundable;
 
@@ -23,5 +24,6 @@ pub use boundable::{
     define_cylinder_light, define_disk_light, define_portal_light, define_rect_light, define_sphere_light,
     CylinderLightAuthor, DiskLightAuthor, PortalLightAuthor, RectLightAuthor, SphereLightAuthor,
 };
+pub use dome::{define_dome_light, define_dome_light_1, DomeLight1Author, DomeLightAuthor};
 pub use light_api::{apply_light_api, LightApiSetters, LightAuthor};
 pub use nonboundable::{define_distant_light, define_geometry_light, DistantLightAuthor, GeometryLightAuthor};
