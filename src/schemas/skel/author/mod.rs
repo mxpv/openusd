@@ -18,12 +18,14 @@
 //! [`Stage::set_edit_target`](crate::usd::Stage::set_edit_target) between
 //! calls.
 
+mod binding;
 mod blend_shape;
 mod common;
 mod skel_animation;
 mod skel_root;
 mod skeleton;
 
+pub use binding::{apply_skel_binding, SkelBindingAuthor};
 pub use blend_shape::{define_blend_shape, BlendShapeAuthor};
 pub use skel_animation::{define_skel_animation, SkelAnimationAuthor};
 pub use skel_root::define_skel_root;
