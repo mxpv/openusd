@@ -11,6 +11,8 @@ use anyhow::Result;
 use crate::sdf::{Path, Value};
 use crate::usd::{Attribute, Stage};
 
+use crate::schemas::lux::tokens::{A_TREAT_AS_LINE, A_TREAT_AS_POINT};
+
 /// Author a `varying float` input on `prim` with the given default value.
 pub(super) fn author_input_float(stage: &Stage, prim: &Path, name: &str, value: f32) -> Result<()> {
     varying_attribute(stage, prim, name, "float")?.set(Value::Float(value))?;
@@ -41,6 +43,34 @@ where
         .create_relationship(rel_path)?
         .set_custom(false)?
         .set_targets(paths)?;
+    Ok(())
+}
+
+/// Author a `varying asset` input on `prim` with the given default value.
+pub(super) fn author_input_asset(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
+    varying_attribute(stage, prim, name, "asset")?.set(Value::AssetPath(value.into()))?;
+    Ok(())
+}
+
+/// Author the `treatAsPoint` bool flag on a SphereLight prim. Sits at
+/// the bare attribute name (not `inputs:`-prefixed) per
+/// `usdLux/schema.usda`.
+pub(super) fn author_treat_as_point(stage: &Stage, prim: &Path, value: bool) -> Result<()> {
+    let attr_path = prim.append_property(A_TREAT_AS_POINT)?;
+    stage
+        .create_attribute(attr_path, "bool")?
+        .set_custom(false)?
+        .set(Value::Bool(value))?;
+    Ok(())
+}
+
+/// Author the `treatAsLine` bool flag on a CylinderLight prim.
+pub(super) fn author_treat_as_line(stage: &Stage, prim: &Path, value: bool) -> Result<()> {
+    let attr_path = prim.append_property(A_TREAT_AS_LINE)?;
+    stage
+        .create_attribute(attr_path, "bool")?
+        .set_custom(false)?
+        .set(Value::Bool(value))?;
     Ok(())
 }
 
