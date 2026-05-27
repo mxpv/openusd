@@ -45,7 +45,11 @@ mod author;
 mod read;
 mod types;
 
-pub use author::{apply_light_api, LightApiSetters, LightAuthor};
+pub use author::{
+    apply_light_api, define_cylinder_light, define_disk_light, define_portal_light, define_rect_light,
+    define_sphere_light, CylinderLightAuthor, DiskLightAuthor, LightApiSetters, LightAuthor, PortalLightAuthor,
+    RectLightAuthor, SphereLightAuthor,
+};
 
 pub use read::{
     find_lux_prims, is_light_type, read_cylinder_light, read_cylinder_light_at, read_disk_light, read_disk_light_at,

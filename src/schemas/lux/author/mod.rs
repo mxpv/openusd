@@ -14,7 +14,12 @@
 //! routing is the caller's job via
 //! [`Stage::set_edit_target`](crate::usd::Stage::set_edit_target).
 
+mod boundable;
 mod common;
 mod light_api;
 
+pub use boundable::{
+    define_cylinder_light, define_disk_light, define_portal_light, define_rect_light, define_sphere_light,
+    CylinderLightAuthor, DiskLightAuthor, PortalLightAuthor, RectLightAuthor, SphereLightAuthor,
+};
 pub use light_api::{apply_light_api, LightApiSetters, LightAuthor};
