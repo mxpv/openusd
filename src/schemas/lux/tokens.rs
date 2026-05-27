@@ -58,6 +58,11 @@ pub const A_TEXTURE_FORMAT: &str = "inputs:texture:format";
 // DomeLight extras
 pub const REL_PORTALS: &str = "portals";
 pub const A_GUIDE_RADIUS: &str = "guideRadius";
+// DomeLight_1 only.
+pub const A_POLE_AXIS: &str = "poleAxis";
+pub const POLE_AXIS_SCENE_UP: &str = "scene";
+pub const POLE_AXIS_Y: &str = "Y";
+pub const POLE_AXIS_Z: &str = "Z";
 
 // GeometryLight
 pub const REL_GEOMETRY: &str = "geometry";

@@ -43,6 +43,40 @@ impl TextureFormat {
     }
 }
 
+/// `UsdLuxDomeLight_1.poleAxis` token values.
+///
+/// Selects which axis points to the dome's "north pole" — i.e. which
+/// axis the texture wraps around. Pixar's spec default is
+/// [`PoleAxis::SceneUp`], which defers to the stage's `upAxis` metadata.
+/// Only meaningful on `DomeLight_1`; legacy `DomeLight` has no
+/// equivalent attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoleAxis {
+    #[default]
+    SceneUp,
+    Y,
+    Z,
+}
+
+impl PoleAxis {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            PoleAxis::SceneUp => POLE_AXIS_SCENE_UP,
+            PoleAxis::Y => POLE_AXIS_Y,
+            PoleAxis::Z => POLE_AXIS_Z,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            POLE_AXIS_SCENE_UP => PoleAxis::SceneUp,
+            POLE_AXIS_Y => PoleAxis::Y,
+            POLE_AXIS_Z => PoleAxis::Z,
+            _ => return None,
+        })
+    }
+}
+
 /// `UsdLuxLightListAPI.lightList:cacheBehavior` token values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LightListCacheBehavior {
@@ -247,6 +281,10 @@ pub struct ReadDomeLight {
     /// optical entry points for sampling this dome.
     pub portals: Vec<String>,
     pub guide_radius: f32,
+    /// `DomeLight_1.poleAxis` — `None` on legacy `DomeLight` prims
+    /// (the attribute doesn't exist there) and on `DomeLight_1` prims
+    /// that don't author it.
+    pub pole_axis: Option<PoleAxis>,
 }
 
 impl Default for ReadDomeLight {
@@ -257,6 +295,7 @@ impl Default for ReadDomeLight {
             texture_format: TextureFormat::Automatic,
             portals: Vec::new(),
             guide_radius: 1.0e5,
+            pole_axis: None,
         }
     }
 }
@@ -404,6 +443,12 @@ pub struct LuxPrims {
     pub geometry: Vec<String>,
     pub portal: Vec<String>,
     pub light_filters: Vec<String>,
+    /// Prims that carry `LightAPI`, `MeshLightAPI`, or
+    /// `VolumeLightAPI` as an applied schema *without* being one of
+    /// the concrete UsdLux light types already bucketed above. This is
+    /// how renderers turn arbitrary meshes / volumes into emissive
+    /// surfaces; consumers shouldn't have to repeat the apiSchemas walk.
+    pub light_api: Vec<String>,
     /// Prims with `ShapingAPI` applied (typically spot lights).
     pub shaping: Vec<String>,
     /// Prims with `ShadowAPI` applied.
