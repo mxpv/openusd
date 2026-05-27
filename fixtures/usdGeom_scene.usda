@@ -235,6 +235,7 @@ def Xform "World" (
             int[] curveVertexCounts = [4]
             int[] order = [4]
             double[] knots = [0, 0, 0, 0, 1, 1, 1, 1]
+            double[] pointWeights = [1.0, 0.7071068, 0.7071068, 1.0]
         }
 
         def NurbsPatch "Sheet"

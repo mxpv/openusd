@@ -92,6 +92,7 @@ pub fn read_nurbs_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsC
         order,
         knots,
         ranges,
+        point_weights: read_double_vec(stage, prim, A_POINT_WEIGHTS)?.unwrap_or_default(),
         widths: read_float_vec(stage, prim, A_WIDTHS)?.unwrap_or_default(),
         display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
     }))
