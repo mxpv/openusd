@@ -67,14 +67,26 @@ pub fn resets_xform_stack(stage: &Stage, prim: &Path) -> Result<bool> {
 ///
 /// Op values are read through [`Stage::value_at`] so per-op
 /// `timeSamples` interpolate per AOUSD §12.5.
+///
+/// `!resetXformStack!` is only meaningful as the first entry per the
+/// UsdGeomXformable spec. A non-leading occurrence is malformed
+/// authoring and surfaces as an error rather than being silently
+/// skipped.
 pub fn compute_local_to_parent_transform(stage: &Stage, prim: &Path, time: f64) -> Result<[f64; 16]> {
     let Some(order) = read_xform_op_order(stage, prim)? else {
         return Ok(IDENTITY_MAT4);
     };
     let mut m = IDENTITY_MAT4;
-    for op_name in &order {
+    for (i, op_name) in order.iter().enumerate() {
         if op_name == TOKEN_RESET_XFORM_STACK {
-            continue;
+            if i == 0 {
+                continue;
+            }
+            anyhow::bail!(
+                "xformOpOrder on `{}`: `!resetXformStack!` is only valid at index 0, found at index {}",
+                prim.as_str(),
+                i,
+            );
         }
         let op = build_op_matrix(stage, prim, op_name, time)?;
         // In USD's row-vector convention, the first listed op is the
@@ -123,11 +135,16 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
         "scaleY" => scale_matrix([1.0, value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0]),
         "scaleZ" => scale_matrix([1.0, 1.0, value_to_scalar_f32(&raw).unwrap_or(1.0)]),
         "orient" => quat_to_matrix(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
-        "rotateX" => rotate_x_matrix(value_to_scalar_f32(&raw).unwrap_or(0.0).to_radians()),
-        "rotateY" => rotate_y_matrix(value_to_scalar_f32(&raw).unwrap_or(0.0).to_radians()),
-        "rotateZ" => rotate_z_matrix(value_to_scalar_f32(&raw).unwrap_or(0.0).to_radians()),
+        // Rotation ops are kept in f64 end-to-end. xformOp:rotateX etc.
+        // can be authored as either `float` or `double` per the
+        // UsdGeomXformOp precision system; reading via f32 would
+        // silently truncate the double-authored case before the trig
+        // math runs.
+        "rotateX" => rotate_x_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateY" => rotate_y_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateZ" => rotate_z_matrix(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
         "rotateXYZ" | "rotateYXZ" | "rotateZXY" | "rotateXZY" | "rotateYZX" | "rotateZYX" => {
-            let v = value_to_vec3f(&raw).unwrap_or([0.0, 0.0, 0.0]);
+            let v = value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0]);
             let rx = rotate_x_matrix(v[0].to_radians());
             let ry = rotate_y_matrix(v[1].to_radians());
             let rz = rotate_z_matrix(v[2].to_radians());
@@ -178,8 +195,8 @@ fn scale_matrix(s: [f32; 3]) -> [f64; 16] {
     m
 }
 
-fn rotate_x_matrix(rad: f32) -> [f64; 16] {
-    let (s, c) = (rad as f64).sin_cos();
+fn rotate_x_matrix(rad: f64) -> [f64; 16] {
+    let (s, c) = rad.sin_cos();
     let mut m = IDENTITY_MAT4;
     m[5] = c;
     m[6] = s;
@@ -188,8 +205,8 @@ fn rotate_x_matrix(rad: f32) -> [f64; 16] {
     m
 }
 
-fn rotate_y_matrix(rad: f32) -> [f64; 16] {
-    let (s, c) = (rad as f64).sin_cos();
+fn rotate_y_matrix(rad: f64) -> [f64; 16] {
+    let (s, c) = rad.sin_cos();
     let mut m = IDENTITY_MAT4;
     m[0] = c;
     m[2] = -s;
@@ -198,8 +215,8 @@ fn rotate_y_matrix(rad: f32) -> [f64; 16] {
     m
 }
 
-fn rotate_z_matrix(rad: f32) -> [f64; 16] {
-    let (s, c) = (rad as f64).sin_cos();
+fn rotate_z_matrix(rad: f64) -> [f64; 16] {
+    let (s, c) = rad.sin_cos();
     let mut m = IDENTITY_MAT4;
     m[0] = c;
     m[1] = s;
@@ -263,6 +280,26 @@ fn value_to_scalar_f32(v: &Value) -> Option<f32> {
     }
 }
 
+fn value_to_scalar_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Double(d) => Some(*d),
+        Value::Float(f) => Some(*f as f64),
+        Value::Half(h) => Some(h.to_f32() as f64),
+        Value::Int(i) => Some(*i as f64),
+        Value::Int64(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+fn value_to_vec3_f64(v: &Value) -> Option<[f64; 3]> {
+    match v {
+        Value::Vec3d(a) => Some(*a),
+        Value::Vec3f(a) => Some([a[0] as f64, a[1] as f64, a[2] as f64]),
+        Value::Vec3h(a) => Some([a[0].to_f32() as f64, a[1].to_f32() as f64, a[2].to_f32() as f64]),
+        _ => None,
+    }
+}
+
 fn value_to_quat_wxyz(v: &Value) -> Option<[f32; 4]> {
     match v {
         Value::Quatf(q) => Some(*q),
@@ -287,7 +324,7 @@ mod tests {
 
     #[test]
     fn rotate_z_takes_x_to_y() {
-        let m = rotate_z_matrix(std::f32::consts::FRAC_PI_2);
+        let m = rotate_z_matrix(std::f64::consts::FRAC_PI_2);
         let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
         assert!((p[0]).abs() < 1e-6, "x: {}", p[0]);
         assert!((p[1] - 1.0).abs() < 1e-6, "y: {}", p[1]);
@@ -296,7 +333,7 @@ mod tests {
 
     #[test]
     fn rotate_y_takes_x_to_neg_z() {
-        let m = rotate_y_matrix(std::f32::consts::FRAC_PI_2);
+        let m = rotate_y_matrix(std::f64::consts::FRAC_PI_2);
         let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
         assert!((p[0]).abs() < 1e-6);
         assert!((p[1]).abs() < 1e-6);
@@ -305,7 +342,7 @@ mod tests {
 
     #[test]
     fn rotate_x_takes_y_to_z() {
-        let m = rotate_x_matrix(std::f32::consts::FRAC_PI_2);
+        let m = rotate_x_matrix(std::f64::consts::FRAC_PI_2);
         let p = mat4_transform_point(&m, [0.0, 1.0, 0.0]);
         assert!((p[0]).abs() < 1e-6);
         assert!((p[1]).abs() < 1e-6);

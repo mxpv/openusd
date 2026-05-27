@@ -298,8 +298,8 @@ pub struct ReadCamera {
     /// Each entry is a `float4` plane equation `(n.x, n.y, n.z, d)`
     /// in camera-local space.
     pub clipping_planes: Vec<[f32; 4]>,
-    pub shutter_open: f32,
-    pub shutter_close: f32,
+    pub shutter_open: f64,
+    pub shutter_close: f64,
     pub exposure: f32,
     pub exposure_iso: f32,
     pub exposure_time: f32,
