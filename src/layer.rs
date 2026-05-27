@@ -959,8 +959,8 @@ mod tests {
     fn property_children() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         layer.create_prim("/Mesh", sdf::Specifier::Def, "Mesh")?;
-        layer.create_attr("/Mesh.points", "point3f[]", sdf::Variability::Varying, false)?;
-        layer.create_attr("/Mesh.normals", "normal3f[]", sdf::Variability::Varying, false)?;
+        layer.create_attribute("/Mesh.points", "point3f[]", sdf::Variability::Varying, false)?;
+        layer.create_attribute("/Mesh.normals", "normal3f[]", sdf::Variability::Varying, false)?;
         layer.create_relationship("/Mesh.material:binding", sdf::Variability::Varying, false)?;
 
         let mesh = layer.prim("/Mesh").expect("prim");
@@ -1051,7 +1051,7 @@ mod tests {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         layer.create_prim("/Sphere", sdf::Specifier::Def, "Sphere")?;
 
-        let mut radius = layer.create_attr("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
+        let mut radius = layer.create_attribute("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
         radius.set_default(sdf::Value::Double(2.5));
         radius.set_time_sample(0.0, sdf::Value::Double(1.0));
         radius.set_time_sample(10.0, sdf::Value::Double(3.0));
@@ -1080,7 +1080,7 @@ mod tests {
         let err = layer.create_prim("/A/B", sdf::Specifier::Def, "Xform").unwrap_err();
         assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
         let err = layer
-            .create_attr("/A.x", "double", sdf::Variability::Varying, false)
+            .create_attribute("/A.x", "double", sdf::Variability::Varying, false)
             .unwrap_err();
         assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
     }
@@ -1108,7 +1108,7 @@ mod tests {
     fn nan_time_sample() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         layer.create_prim("/Sphere", sdf::Specifier::Def, "Sphere")?;
-        let mut r = layer.create_attr("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
+        let mut r = layer.create_attribute("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
 
         r.set_time_sample(1.0, sdf::Value::Double(1.0));
         r.set_time_sample(f64::NAN, sdf::Value::Double(99.0));
@@ -1230,14 +1230,14 @@ mod tests {
         ));
         assert!(matches!(
             layer
-                .create_attr("/A", "double", sdf::Variability::Varying, false)
+                .create_attribute("/A", "double", sdf::Variability::Varying, false)
                 .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
         // Relative property paths must error, not panic in ensure_prim_chain.
         assert!(matches!(
             layer
-                .create_attr("A.foo", "double", sdf::Variability::Varying, false)
+                .create_attribute("A.foo", "double", sdf::Variability::Varying, false)
                 .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
@@ -1250,7 +1250,7 @@ mod tests {
         // Root-level property paths (`/.foo`) must also error, not panic.
         assert!(matches!(
             layer
-                .create_attr("/.foo", "double", sdf::Variability::Varying, false)
+                .create_attribute("/.foo", "double", sdf::Variability::Varying, false)
                 .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
@@ -1258,7 +1258,7 @@ mod tests {
         // tail after the last `.` is alphanumeric — split_property_path must reject them.
         assert!(matches!(
             layer
-                .create_attr("/A.rel[/Target].attr", "double", sdf::Variability::Varying, false)
+                .create_attribute("/A.rel[/Target].attr", "double", sdf::Variability::Varying, false)
                 .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
@@ -1278,14 +1278,14 @@ mod tests {
         layer.create_prim("/World", sdf::Specifier::Def, "Xform")?;
         let mut sphere = layer.create_prim("/World/Sphere", sdf::Specifier::Def, "Sphere")?;
         sphere.set_kind("component");
-        let mut radius = layer.create_attr("/World/Sphere.radius", "double", sdf::Variability::Varying, false)?;
+        let mut radius = layer.create_attribute("/World/Sphere.radius", "double", sdf::Variability::Varying, false)?;
         radius.set_default(sdf::Value::Double(1.5));
         let material = sdf::path("/World/Material")?;
         layer.create_prim(&material, sdf::Specifier::Def, "Material")?;
         let mut binding =
             layer.create_relationship("/World/Sphere.material:binding", sdf::Variability::Varying, false)?;
         binding.add_target(material.clone());
-        let mut surface = layer.create_attr(
+        let mut surface = layer.create_attribute(
             "/World/Sphere.inputs:surface",
             "token",
             sdf::Variability::Varying,

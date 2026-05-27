@@ -232,6 +232,37 @@ impl LayerStack {
         &self.layers[index]
     }
 
+    /// Mutable access to a layer in the stack, for authoring writes routed
+    /// through [`Cache::layer_mut`]. Returns `None` for an out-of-range index.
+    /// After mutating, callers must call [`Cache::invalidate_all`] so cached
+    /// composition state reflects the new opinions.
+    fn layer_mut(&mut self, index: usize) -> Option<&mut sdf::Layer> {
+        self.layers.get_mut(index)
+    }
+
+    /// Recompute the precomputed `sublayer_stacks` and `layer_offsets` maps
+    /// from the current layers. Used by [`Cache::invalidate_all`] after
+    /// authoring may have changed `subLayers` / `subLayerOffsets`.
+    //
+    // TODO: when one layer appears in multiple sublayer stacks with
+    // different effective offsets, the `entry().or_insert(off)` below picks
+    // whichever offset is seen first by `HashMap::values()`, which is
+    // iteration-order non-deterministic. The same bug exists in
+    // [`LayerStack::new`]; making it observable across an authoring call is
+    // what's new here. Surgical (`PcpChanges`-style) invalidation would let
+    // us drop this rebuild entirely.
+    fn calc_precomputed(&mut self) {
+        self.sublayer_stacks = (0..self.layers.len())
+            .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
+            .collect();
+        self.layer_offsets.clear();
+        for stack in self.sublayer_stacks.values() {
+            for &(li, off) in stack {
+                self.layer_offsets.entry(li).or_insert(off);
+            }
+        }
+    }
+
     /// Returns the root layer (the first non-session layer), if any.
     ///
     /// Per spec 12.2.7, layer metadata authored on the pseudo-root resolves

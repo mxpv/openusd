@@ -169,7 +169,7 @@ pub enum AuthoringError {
 /// File-loaded layers return [`AuthoringError::ReadOnly`].
 ///
 /// Mirrors `SdfLayer`'s authoring surface: [`Layer::create_prim`],
-/// [`Layer::override_prim`], [`Layer::create_attr`], and
+/// [`Layer::override_prim`], [`Layer::create_attribute`], and
 /// [`Layer::create_relationship`] parallel `SdfCreatePrimInLayer` /
 /// `SdfAttributeSpec::New` / `SdfRelationshipSpec::New`. `primChildren`
 /// and `propertyChildren` ordering is maintained automatically: ancestor
@@ -247,7 +247,7 @@ impl Layer {
     ///
     /// `typeName` and `variability` are construction parameters (matching
     /// C++ `SdfAttributeSpec::New`); there is no post-hoc setter for either.
-    pub fn create_attr(
+    pub fn create_attribute(
         &mut self,
         path: impl Into<Path>,
         type_name: impl Into<String>,
@@ -378,6 +378,42 @@ impl Layer {
     /// (`defaultPrim`, `subLayers`, time codes, …).
     pub fn pseudo_root(&self) -> Option<PseudoRootSpec<'_>> {
         self.data.as_data()?.spec(&Path::abs_root())?.as_pseudo_root()
+    }
+
+    /// Set the layer's `defaultPrim` metadata to `name`.
+    ///
+    /// `name` must be a USD identifier or nested prim path (without leading
+    /// `/`). Modern OpenUSD (≥ 23.05) allows `defaultPrim` to address a
+    /// nested prim such as `"World/Char"`; both shapes are accepted here so
+    /// the write contract matches the read path in
+    /// [`crate::pcp::Cache::default_prim`].
+    ///
+    /// Mirrors C++ `SdfLayer::SetDefaultPrim`.
+    ///
+    /// Note: [`crate::sdf::PseudoRootSpecMut::set_default_prim`] writes the
+    /// raw token without validation — that is the spec-tier escape hatch.
+    /// This Layer-tier method is the validating front door.
+    pub fn set_default_prim(&mut self, name: impl Into<String>) -> Result<(), AuthoringError> {
+        let name = name.into();
+        if name.is_empty() || name.starts_with('/') || Path::new(&format!("/{name}")).is_err() {
+            return Err(AuthoringError::InvalidPath {
+                path: Path::abs_root(),
+                reason: "defaultPrim must be a relative prim identifier or nested prim path",
+            });
+        }
+        self.pseudo_root_mut()?.set_default_prim(name);
+        Ok(())
+    }
+
+    /// Remove the layer's `defaultPrim` metadata. Mirrors C++
+    /// `SdfLayer::ClearDefaultPrim`. No-op when no pseudo-root spec exists
+    /// (clearing what isn't there must not materialize state).
+    pub fn clear_default_prim(&mut self) -> Result<(), AuthoringError> {
+        let data = self.writable_data_mut()?;
+        if let Some(spec) = data.spec_mut(&Path::abs_root()) {
+            spec.remove(FieldKey::DefaultPrim.as_str());
+        }
+        Ok(())
     }
 
     /// Mutably view this layer's root pseudo-spec. The spec is created on

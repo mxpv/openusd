@@ -229,6 +229,77 @@ impl Default for StagePopulationMask {
     }
 }
 
+/// Identifies which layer in a [`Stage`] receives authored opinions.
+///
+/// Minimal subset of C++ `UsdEditTarget` — this is not yet a full
+/// implementation. C++ `UsdEditTarget` also carries a `PcpMapFunction` so
+/// authoring can be routed *through* a composition arc (writing into a
+/// specific variant, reference, or specialize). The Rust version currently
+/// stores only a `layer_index`; the path mapping is the identity, so every
+/// authoring call writes to the target layer using the composed path
+/// verbatim. The TODOs below track what still needs to land before this
+/// reaches parity.
+//
+// TODO: carry a `pcp::NodeIndex` so variant / specialize edit contexts can
+// route writes inside a variant through `inverse(map_to_root)` (the math
+// already exists in `pcp::MapFunction`). Required to mirror C++
+// `UsdEditTarget(UsdPrim, UsdEditTarget::Reference)` flows used by variant
+// authoring.
+//
+// TODO: provide an RAII guard (`UsdEditContext` analog) that scopes a target
+// switch and restores the previous target on `Drop`. Lets callers write
+// `let _ctx = stage.edit_at(variant)?;` and have authoring routed for the
+// scope of the block.
+//
+// TODO: validate target by `pcp::LayerStackIdentifier` instead of a bare
+// `usize` so an `EditTarget` constructed against one stage can't be applied
+// to another, and so layer reordering (when supported) doesn't silently
+// retarget writes.
+//
+// TODO: add convenience constructors like `EditTarget::root(&stage)` /
+// `EditTarget::session(&stage)` so callers don't have to do
+// `session_layer_count`-arithmetic to address common slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditTarget {
+    layer_index: usize,
+}
+
+impl EditTarget {
+    /// Edit target pointing at the layer with the given index in the stage's
+    /// layer stack. Session layers occupy the first `session_layer_count`
+    /// slots; the root layer sits at `session_layer_count`.
+    //
+    // TODO: replace the raw `usize` constructor once the
+    // `LayerStackIdentifier`-based validation above lands. The bare index
+    // is convenient but offers no guard against cross-stage misuse.
+    pub const fn for_layer_index(layer_index: usize) -> Self {
+        Self { layer_index }
+    }
+
+    /// Returns the layer index this target writes to.
+    pub const fn layer_index(self) -> usize {
+        self.layer_index
+    }
+}
+
+/// Errors raised by [`Stage`]'s authoring methods.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StageAuthoringError {
+    /// The layer at the current edit target rejected the authoring call.
+    #[error(transparent)]
+    Layer(#[from] sdf::AuthoringError),
+
+    /// The edit target's layer index is out of range for this stage.
+    #[error("edit target layer index {index} is out of range ({len} layers)")]
+    LayerOutOfRange {
+        /// The offending index.
+        index: usize,
+        /// The current number of layers.
+        len: usize,
+    },
+}
+
 /// A composed USD stage.
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
@@ -247,6 +318,8 @@ pub struct Stage {
     /// (AOUSD §12.5). Defaults to [`InterpolationType::Linear`] per
     /// spec.
     interpolation_type: Cell<InterpolationType>,
+    /// Where authored opinions land. Defaults to the root layer.
+    edit_target: Cell<EditTarget>,
 }
 
 impl Stage {
@@ -275,6 +348,166 @@ impl Stage {
     /// ```
     pub fn builder() -> StageBuilder<DefaultResolver> {
         StageBuilder::new()
+    }
+
+    /// Returns the current edit target — the layer that authoring methods
+    /// write into.
+    pub fn edit_target(&self) -> EditTarget {
+        self.edit_target.get()
+    }
+
+    /// Replace the current edit target. Subsequent authoring calls write to
+    /// the new target's layer.
+    ///
+    /// Validates that `target.layer_index()` is in range so a bad index
+    /// surfaces here, not on some later unrelated authoring call.
+    pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
+        let len = self.graph.borrow().layer_count();
+        if target.layer_index >= len {
+            return Err(StageAuthoringError::LayerOutOfRange {
+                index: target.layer_index,
+                len,
+            });
+        }
+        self.edit_target.set(target);
+        Ok(())
+    }
+
+    /// Author a `def` prim spec at `path` with the given `typeName` on the
+    /// edit target's layer. Mirrors C++ `UsdStage::DefinePrim`.
+    //
+    // TODO: return a `StagePrim<'_>` composed handle (the `UsdPrim` analog)
+    // once the handle types land. The current `()` return discards the
+    // Layer-tier `PrimSpecMut` via `.map(drop)` — chaining is only available
+    // through `sdf::Layer` directly for now.
+    pub fn define_prim(&self, path: impl Into<Path>, type_name: impl Into<String>) -> Result<(), StageAuthoringError> {
+        let path = path.into();
+        let type_name = type_name.into();
+        self.with_target_layer(|layer| layer.create_prim(path, Specifier::Def, type_name).map(drop))
+    }
+
+    /// Ensure a prim spec exists at `path` with specifier `over` on the edit
+    /// target's layer. Mirrors C++ `UsdStage::OverridePrim`.
+    //
+    // TODO: return a `StagePrim<'_>` composed handle (see `define_prim`).
+    pub fn override_prim(&self, path: impl Into<Path>) -> Result<(), StageAuthoringError> {
+        let path = path.into();
+        self.with_target_layer(|layer| layer.override_prim(path).map(drop))
+    }
+
+    /// Author an attribute spec at a property path (e.g. `/World/Mesh.points`)
+    /// on the edit target's layer. Mirrors C++ `UsdPrim::CreateAttribute`.
+    //
+    // TODO: return a `StageAttribute<'_>` composed handle (the `UsdAttribute`
+    // analog) once handles land. C++ `UsdPrim::CreateAttribute` returns
+    // `UsdAttribute`, which is how callers do `attr.Set(value)` next.
+    pub fn create_attribute(
+        &self,
+        path: impl Into<Path>,
+        type_name: impl Into<String>,
+        variability: sdf::Variability,
+        custom: bool,
+    ) -> Result<(), StageAuthoringError> {
+        let path = path.into();
+        let type_name = type_name.into();
+        self.with_target_layer(|layer| layer.create_attribute(path, type_name, variability, custom).map(drop))
+    }
+
+    /// Author a relationship spec at a property path on the edit target's
+    /// layer. Mirrors C++ `UsdPrim::CreateRelationship`.
+    //
+    // TODO: return a `StageRelationship<'_>` composed handle (the
+    // `UsdRelationship` analog) once handles land.
+    pub fn create_relationship(
+        &self,
+        path: impl Into<Path>,
+        variability: sdf::Variability,
+        custom: bool,
+    ) -> Result<(), StageAuthoringError> {
+        let path = path.into();
+        self.with_target_layer(|layer| layer.create_relationship(path, variability, custom).map(drop))
+    }
+
+    /// Author `defaultPrim` on the stage's root layer.
+    ///
+    /// `defaultPrim` is a layer-level field that resolves from the root
+    /// layer only (AOUSD §12.2.7), so this method always writes to the root
+    /// layer regardless of the current [`EditTarget`]. Mirrors C++
+    /// `UsdStage::SetDefaultPrim` which routes through `GetRootLayer()`.
+    ///
+    /// `name` must be a valid USD identifier or nested prim path — see
+    /// [`sdf::Layer::set_default_prim`].
+    pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
+        let name = name.into();
+        self.with_root_layer(|layer| layer.set_default_prim(name))
+    }
+
+    /// Borrow the edit target's layer, hand it to `f`, then invalidate the
+    /// composition cache so subsequent reads see the new opinions.
+    ///
+    /// Callers must drop any typed spec view inside the closure (e.g.
+    /// `.map(drop)`) — the closure can't return a borrow from `&mut layer`.
+    ///
+    /// Invalidation always runs on `Ok` and on any post-mutation error.
+    /// `Layer` authoring methods are not strictly atomic (e.g.
+    /// `create_attribute` mutates `primChildren` before stamping `typeName`),
+    /// so a half-completed write must still drop stale indices. The one
+    /// error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
+    /// which is detected before any layer state changes.
+    fn with_target_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+    {
+        let target = self.edit_target.get();
+        let mut cache = self.graph.borrow_mut();
+        let len = cache.layer_count();
+        let result = {
+            let layer = cache
+                .layer_mut(target.layer_index)
+                .ok_or(StageAuthoringError::LayerOutOfRange {
+                    index: target.layer_index,
+                    len,
+                })?;
+            f(layer)
+        };
+        Self::finalize_layer(&mut cache, result)
+    }
+
+    /// Borrow the stage's root layer, hand it to `f`, then invalidate the
+    /// composition cache. See [`Stage::with_target_layer`] for the
+    /// invalidation contract.
+    fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+    {
+        let mut cache = self.graph.borrow_mut();
+        let index = cache.session_layer_count();
+        let len = cache.layer_count();
+        let result = {
+            let layer = cache
+                .layer_mut(index)
+                .ok_or(StageAuthoringError::LayerOutOfRange { index, len })?;
+            f(layer)
+        };
+        Self::finalize_layer(&mut cache, result)
+    }
+
+    /// Translate a Layer-tier authoring result into the Stage error type and
+    /// invalidate the composition cache when the call mutated (or may have
+    /// mutated) layer state. `ReadOnly` is the only variant we can prove is
+    /// pre-mutation; every other outcome conservatively triggers
+    /// invalidation.
+    //
+    // TODO: replace once Layer authoring methods are strictly atomic (or
+    // report a "did mutate" signal). Then we can invalidate only on Ok.
+    fn finalize_layer(
+        cache: &mut pcp::Cache,
+        result: Result<(), sdf::AuthoringError>,
+    ) -> Result<(), StageAuthoringError> {
+        if !matches!(result, Err(sdf::AuthoringError::ReadOnly { .. })) {
+            cache.invalidate_all();
+        }
+        result.map_err(StageAuthoringError::Layer)
     }
 
     /// Returns the number of layers in the stage (including session layers).
@@ -933,42 +1166,88 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
         R: 'static,
         E: 'static,
     {
-        let on_error = self.on_error;
-        let initial_load_set = self.initial_load_set;
-        let population_mask = self.population_mask;
-        let load_payloads = initial_load_set.load_payloads();
-
-        let include_prim_dependency = |path: &Path| population_mask.includes(path);
-        let collect_stage_layers = |path: &str| {
-            let collector = layer::Collector::new(&self.resolver)
-                .load_payloads(load_payloads)
-                .on_error(|e| on_error(CompositionError::Layer(e)));
-            if population_mask.is_all() {
-                collector.collect(path)
-            } else {
-                collector.prim_dependency_filter(&include_prim_dependency).collect(path)
-            }
-        };
-
-        let session_layers = if let Some(ref session_path) = self.session_layer {
-            collect_stage_layers(session_path)?
-        } else {
-            Vec::new()
-        };
-        let root_layers = collect_stage_layers(root_path)?;
-
+        let session_layers = self.collect_optional_session_layers()?;
+        let root_layers = self.collect_layers(root_path)?;
         let session_layer_count = session_layers.len();
         let layers: Vec<sdf::Layer> = session_layers.into_iter().chain(root_layers).collect();
+        Ok(self.make_stage(layers, session_layer_count))
+    }
 
+    /// Create an in-memory stage backed by a single writable anonymous root
+    /// layer. Mirrors C++ `UsdStage::CreateInMemory`.
+    ///
+    /// If a session layer was configured on the builder, it is loaded from
+    /// disk and prepended just like in [`StageBuilder::open`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::Stage;
+    ///
+    /// let stage = Stage::builder()
+    ///     .in_memory("anon.usda")
+    ///     .unwrap();
+    /// stage.define_prim("/World", "Xform").unwrap();
+    /// ```
+    pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage>
+    where
+        R: 'static,
+        E: 'static,
+    {
+        let identifier = identifier.into();
+        let session_layers = self.collect_optional_session_layers()?;
+        let session_layer_count = session_layers.len();
+        let layers: Vec<sdf::Layer> = session_layers
+            .into_iter()
+            .chain(std::iter::once(sdf::Layer::new_anonymous(identifier)))
+            .collect();
+        Ok(self.make_stage(layers, session_layer_count))
+    }
+
+    /// Collect layers reachable from `path`, honoring the builder's
+    /// resolver, error handler, payload-loading flag, and population mask.
+    fn collect_layers(&self, path: &str) -> Result<Vec<sdf::Layer>> {
+        let include_prim_dependency = |p: &Path| self.population_mask.includes(p);
+        let collector = layer::Collector::new(&self.resolver)
+            .load_payloads(self.initial_load_set.load_payloads())
+            .on_error(|e| (self.on_error)(CompositionError::Layer(e)));
+        if self.population_mask.is_all() {
+            collector.collect(path)
+        } else {
+            collector.prim_dependency_filter(&include_prim_dependency).collect(path)
+        }
+    }
+
+    /// Collect the configured session layer (and its dependencies), if any.
+    fn collect_optional_session_layers(&self) -> Result<Vec<sdf::Layer>> {
+        match self.session_layer.as_deref() {
+            Some(p) => self.collect_layers(p),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Assemble a [`Stage`] from already-collected layers. Shared
+    /// construction tail for [`StageBuilder::open`] and
+    /// [`StageBuilder::in_memory`]; any new `Stage` field must be wired in
+    /// here once.
+    fn make_stage(self, layers: Vec<sdf::Layer>, session_layer_count: usize) -> Stage
+    where
+        R: 'static,
+        E: 'static,
+    {
+        let on_error = self.on_error;
+        let load_payloads = self.initial_load_set.load_payloads();
         let stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
         let on_composition_error = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
-        Ok(Stage {
+        let edit_target = EditTarget::for_layer_index(session_layer_count);
+        Stage {
             graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
-            initial_load_set,
-            population_mask,
+            initial_load_set: self.initial_load_set,
+            population_mask: self.population_mask,
             on_composition_error,
             interpolation_type: Cell::new(self.interpolation_type),
-        })
+            edit_target: Cell::new(edit_target),
+        }
     }
 }
 
@@ -1766,6 +2045,168 @@ mod tests {
         assert!(prims.contains(&"/World/ClassParent/Child".to_string()));
         assert!(!prims.contains(&"/World/InactiveParent".to_string()));
         assert!(!prims.contains(&"/World/OverOnly".to_string()));
+        Ok(())
+    }
+
+    // --- Stage-tier authoring ---
+
+    fn in_memory_stage() -> Result<Stage> {
+        Stage::builder().in_memory("anon.usda")
+    }
+
+    #[test]
+    fn define_prim() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/World", "Xform")?;
+        stage.define_prim("/World/Mesh", "Mesh")?;
+        assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
+        assert_eq!(stage.spec_type("/World/Mesh")?, Some(SpecType::Prim));
+        assert_eq!(
+            stage.field::<Value>("/World", FieldKey::TypeName)?,
+            Some(Value::Token("Xform".into())),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authoring_invalidates_cached_miss() -> Result<()> {
+        let stage = in_memory_stage()?;
+        assert!(!stage.has_spec("/World")?);
+
+        stage.define_prim("/World", "Xform")?;
+
+        assert!(stage.has_spec("/World")?);
+        assert_eq!(
+            stage.field::<Value>("/World", FieldKey::TypeName)?,
+            Some(Value::Token("Xform".into())),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn override_prim() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.override_prim("/A/B")?;
+        assert_eq!(
+            stage.field::<Value>("/A", FieldKey::Specifier)?,
+            Some(Value::Specifier(Specifier::Over)),
+        );
+        assert_eq!(
+            stage.field::<Value>("/A/B", FieldKey::Specifier)?,
+            Some(Value::Specifier(Specifier::Over)),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_attribute() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/Sphere", "Sphere")?;
+        stage.create_attribute("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
+        assert_eq!(stage.spec_type("/Sphere.radius")?, Some(SpecType::Attribute));
+        assert_eq!(
+            stage.field::<Value>("/Sphere.radius", FieldKey::TypeName)?,
+            Some(Value::Token("double".into())),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_relationship() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/Mesh", "Mesh")?;
+        stage.create_relationship("/Mesh.material:binding", sdf::Variability::Uniform, false)?;
+        assert_eq!(stage.spec_type("/Mesh.material:binding")?, Some(SpecType::Relationship));
+        Ok(())
+    }
+
+    #[test]
+    fn author_default_prim() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.set_default_prim("World")?;
+        stage.define_prim("/World", "Xform")?;
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
+        Ok(())
+    }
+
+    /// `defaultPrim` writes target the root layer regardless of `EditTarget`
+    /// (mirrors C++ `UsdStage::SetDefaultPrim` going through `GetRootLayer`).
+    /// In-memory root with a file-loaded session layer; setting the edit
+    /// target to the read-only session layer must not block the write.
+    #[test]
+    fn default_prim_targets_root() -> Result<()> {
+        let session = fixture_path("session_layer.usda");
+        let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
+        stage.set_edit_target(EditTarget::for_layer_index(0))?; // session layer
+        stage.set_default_prim("World")?;
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
+        Ok(())
+    }
+
+    #[test]
+    fn default_prim_rejects_path() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let err = stage.set_default_prim("/World").unwrap_err();
+        assert!(matches!(
+            err,
+            StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. })
+        ));
+        Ok(())
+    }
+
+    /// Modern OpenUSD allows nested `defaultPrim` values like `"World/Char"`.
+    /// The write contract must match what the read path will accept.
+    #[test]
+    fn default_prim_accepts_nested() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.set_default_prim("World/Mesh")?;
+        assert_eq!(stage.default_prim().as_deref(), Some("World/Mesh"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_rejects_authoring() -> Result<()> {
+        let stage = Stage::open(&composition_path("subLayer/sublayer_same_folder.usda"))?;
+        let err = stage.define_prim("/X", "Xform").unwrap_err();
+        assert!(matches!(
+            err,
+            StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_default_prim() -> Result<()> {
+        let stage = Stage::open(&composition_path("subLayer/sublayer_same_folder.usda"))?;
+        let err = stage.set_default_prim("World").unwrap_err();
+        assert!(matches!(
+            err,
+            StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn edit_target_out_of_range() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let err = stage.set_edit_target(EditTarget::for_layer_index(99)).unwrap_err();
+        assert!(matches!(err, StageAuthoringError::LayerOutOfRange { .. }));
+        Ok(())
+    }
+
+    /// Exercises `StageBuilder::in_memory`'s session-layer branch: the
+    /// anonymous root must end up at `session_layer_count`, the edit target
+    /// must point there, and authoring on the in-memory root must work
+    /// (with the session layer remaining read-only).
+    #[test]
+    fn in_memory_session_layer() -> Result<()> {
+        let session = fixture_path("session_layer.usda");
+        let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
+        assert!(stage.has_session_layer());
+        assert_eq!(stage.layer_count(), 2);
+        assert_eq!(stage.edit_target().layer_index(), 1);
+        stage.define_prim("/World", "Xform")?;
+        assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
         Ok(())
     }
 }

@@ -83,6 +83,44 @@ impl Cache {
         self.stack.layers.get(index).map(|l| l.identifier.as_str())
     }
 
+    /// Mutable access to the layer at `index` for routed authoring writes.
+    /// Returns `None` if out of range. Callers must invoke
+    /// [`Cache::invalidate_all`] after any mutation so cached composition
+    /// state reflects the new opinions.
+    //
+    // TODO: replace with a `mutate_layer(idx, |layer| ...)` shape that bakes
+    // invalidation into the type, so a future caller can't grab the layer,
+    // mutate it, and forget to invalidate. Today the pairing is by
+    // convention only.
+    pub(crate) fn layer_mut(&mut self, index: usize) -> Option<&mut sdf::Layer> {
+        self.stack.layer_mut(index)
+    }
+
+    /// Drop every cached prim index and composition context, then rebuild
+    /// the precomputed state ([`Relocates`], sublayer stacks, layer offsets)
+    /// that was materialized once from the layer data at construction.
+    ///
+    /// Called by [`Stage`](crate::Stage) after any authored mutation to a
+    /// backing layer so subsequent reads see the new opinions — including
+    /// `layerRelocates`, `subLayers`, and `subLayerOffsets` changes.
+    //
+    // TODO: replace with surgical, `PcpChanges`-style invalidation that only
+    // re-evaluates affected paths and their descendants. The current
+    // "nuke everything" strategy is correct but pays the full rebuild cost
+    // on every write and rebuilds state (Relocates, sublayer stacks) that a
+    // typical authoring call cannot affect.
+    //
+    // TODO: any new field added to `Cache` that caches state derived from
+    // layer data must be reset here too — this method only knows about
+    // the three named below. Adding a memoized field without updating this
+    // list will silently retain stale post-author state.
+    pub(crate) fn invalidate_all(&mut self) {
+        self.indices.clear();
+        self.contexts.clear();
+        self.stack.calc_precomputed();
+        self.relocates = Relocates::new(&self.stack.layers);
+    }
+
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
