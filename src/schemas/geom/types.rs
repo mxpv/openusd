@@ -404,10 +404,12 @@ impl SubdivisionScheme {
 /// case for texture coordinates with seams).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Interpolation {
+    // Pixar's UsdGeomPrimvar default for unauthored `interpolation`
+    // metadata is `constant`.
+    #[default]
     Constant,
     Uniform,
     Varying,
-    #[default]
     Vertex,
     FaceVarying,
 }
