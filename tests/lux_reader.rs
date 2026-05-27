@@ -324,6 +324,21 @@ fn light_api_via_concrete_type() -> Result<()> {
 }
 
 #[test]
+fn light_api_distant_default() -> Result<()> {
+    let usda = r#"#usda 1.0
+        def DistantLight "Bare" {}
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("bare_distant.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let light = read_light_api(&stage, &sdf::path("/Bare")?)?.expect("LightAPI on DistantLight");
+    assert_eq!(light.path, "/Bare");
+    assert!((light.intensity - 50000.0).abs() < 1e-3);
+    Ok(())
+}
+
+#[test]
 fn animated_intensity() -> Result<()> {
     // Light with only timeSamples authored (no default field).
     // read_sphere_light (default-time) must fall back to the spec
@@ -398,5 +413,37 @@ fn light_api_via_applied_schema() -> Result<()> {
     let stage = Stage::open(path.to_str().unwrap())?;
     let light = read_light_api(&stage, &sdf::path("/EmissivePanel")?)?.expect("LightAPI applied to Mesh");
     assert!((light.intensity - 750.0).abs() < 1e-3);
+    Ok(())
+}
+
+#[test]
+fn light_api_mesh_and_volume() -> Result<()> {
+    let usda = r#"#usda 1.0
+        def Mesh "Panel" (
+            prepend apiSchemas = ["MeshLightAPI"]
+        ) {
+            float inputs:intensity = 321
+        }
+
+        def Volume "Fog" (
+            prepend apiSchemas = ["VolumeLightAPI"]
+        ) {
+            float inputs:intensity = 123
+        }
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("mesh_volume_light_api.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+
+    let prims = find_lux_prims(&stage)?;
+    assert!(prims.light_api.contains(&"/Panel".to_string()));
+    assert!(prims.light_api.contains(&"/Fog".to_string()));
+
+    let panel = read_light_api(&stage, &sdf::path("/Panel")?)?.expect("MeshLightAPI");
+    assert!((panel.intensity - 321.0).abs() < 1e-3);
+
+    let fog = read_light_api(&stage, &sdf::path("/Fog")?)?.expect("VolumeLightAPI");
+    assert!((fog.intensity - 123.0).abs() < 1e-3);
     Ok(())
 }
