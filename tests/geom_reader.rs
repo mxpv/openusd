@@ -269,6 +269,26 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn xform_double_precision() -> Result<()> {
+    let stage = open()?;
+
+    let translate = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleTranslate")?, 0.0)?;
+    assert_eq!(translate[12], 16_777_217.0);
+
+    let scale = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleScale")?, 0.0)?;
+    assert_eq!(scale[0], 16_777_217.0);
+
+    let scalar = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleScalarOps")?, 0.0)?;
+    assert_eq!(scalar[12], 16_777_217.0);
+    assert_eq!(scalar[5], 16_777_217.0);
+
+    let orient = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleOrient")?, 0.0)?;
+    assert!(orient[0].abs() < 1e-12, "x axis scale term: {}", orient[0]);
+
+    Ok(())
+}
+
 // ── Intrinsic shapes ──────────────────────────────────────────────
 
 #[test]
@@ -487,12 +507,30 @@ fn mesh_normals_primvar_carries_interpolation() -> Result<()> {
 }
 
 #[test]
-fn mesh_uvs_default_to_face_varying() -> Result<()> {
+fn mesh_uvs_face_varying() -> Result<()> {
     let stage = open()?;
     let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
     let uvs = m.uvs.expect("primvars:st authored");
     assert_eq!(uvs.values, vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
     assert_eq!(uvs.interpolation, Interpolation::FaceVarying);
+    Ok(())
+}
+
+#[test]
+fn mesh_double_sided_fallback() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FallbackMesh")?)?.unwrap();
+    assert!(m.double_sided);
+    Ok(())
+}
+
+#[test]
+fn mesh_vec2_fallback() -> Result<()> {
+    let stage = open()?;
+    let m = read_mesh(&stage, &sdf::path("/World/FallbackMesh")?)?.unwrap();
+    let uvs = m.uvs.expect("primvars:st authored");
+    assert_eq!(uvs.values, vec![[0.5, 0.25]]);
+    assert_eq!(uvs.interpolation, Interpolation::Constant);
     Ok(())
 }
 

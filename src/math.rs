@@ -143,20 +143,20 @@ pub fn mat4_inverse(m: &[f64; 16]) -> Option<[f64; 16]> {
 
 /// Pure-translation row-major 4×4. Loads `t` into the translation
 /// row (`m[12..=14]`); rotation/scale block is identity.
-pub fn mat4_translation(t: [f32; 3]) -> [f64; 16] {
+pub fn mat4_translation<T: Into<f64> + Copy>(t: [T; 3]) -> [f64; 16] {
     let mut m = IDENTITY_MAT4;
-    m[12] = t[0] as f64;
-    m[13] = t[1] as f64;
-    m[14] = t[2] as f64;
+    m[12] = t[0].into();
+    m[13] = t[1].into();
+    m[14] = t[2].into();
     m
 }
 
 /// Pure-scale row-major 4×4 with per-axis factors on the diagonal.
-pub fn mat4_scale(s: [f32; 3]) -> [f64; 16] {
+pub fn mat4_scale<T: Into<f64> + Copy>(s: [T; 3]) -> [f64; 16] {
     let mut m = IDENTITY_MAT4;
-    m[0] = s[0] as f64;
-    m[5] = s[1] as f64;
-    m[10] = s[2] as f64;
+    m[0] = s[0].into();
+    m[5] = s[1].into();
+    m[10] = s[2].into();
     m
 }
 
@@ -195,11 +195,11 @@ pub fn mat4_rotation_z(rad: f64) -> [f64; 16] {
 
 /// Convert a `(w, x, y, z)` quaternion to a row-major 4×4 rotation
 /// matrix. The translation row is identity.
-pub fn mat4_from_quat(q: [f32; 4]) -> [f64; 16] {
-    let w = q[0] as f64;
-    let x = q[1] as f64;
-    let y = q[2] as f64;
-    let z = q[3] as f64;
+pub fn mat4_from_quat<T: Into<f64> + Copy>(q: [T; 4]) -> [f64; 16] {
+    let w = q[0].into();
+    let x = q[1].into();
+    let y = q[2].into();
+    let z = q[3].into();
     let xx = x * x;
     let yy = y * y;
     let zz = z * z;

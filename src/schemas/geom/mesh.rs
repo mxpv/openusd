@@ -44,7 +44,7 @@ pub fn read_mesh(stage: &Stage, prim: &Path) -> Result<Option<ReadMesh>> {
         .as_deref()
         .and_then(Orientation::from_token)
         .unwrap_or_default();
-    let double_sided = read_bool(stage, prim, A_DOUBLE_SIDED)?.unwrap_or(false);
+    let double_sided = read_bool(stage, prim, A_DOUBLE_SIDED)?.unwrap_or(true);
     let extent = read_extent(stage, prim)?;
 
     let subdivision_scheme = read_token(stage, prim, A_SUBDIVISION_SCHEME)?
@@ -144,11 +144,7 @@ pub fn read_primvar_vec2f(stage: &Stage, prim: &Path, name: &str) -> Result<Opti
     };
     Ok(Some(Primvar {
         values,
-        interpolation: read_primvar_interpolation(stage, prim, name)?
-            // For UV-like primvars Pixar's most common interpolation
-            // is `faceVarying` (one value per face-vertex, so seams
-            // work). Fall back to that when unauthored.
-            .unwrap_or(Interpolation::FaceVarying),
+        interpolation: read_primvar_interpolation(stage, prim, name)?.unwrap_or_default(),
         indices: read_int_vec(stage, prim, &format!("{name}:indices"))?.unwrap_or_default(),
         element_size: read_primvar_element_size(stage, prim, name)?.unwrap_or(1),
     }))
