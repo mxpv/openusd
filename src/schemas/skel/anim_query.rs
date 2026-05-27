@@ -2,7 +2,7 @@
 //!
 //! Mirrors Pixar's `UsdSkelAnimQuery`. Thin wrapper: each
 //! `compute_*` method pulls the underlying `timeSamples` through
-//! [`crate::Stage::value_at`], so the values it returns already
+//! [`crate::usd::Stage::value_at`], so the values it returns already
 //! honour the stage's interpolation mode (AOUSD §12.5 — linear by
 //! default, with per-joint slerp for the `rotations` array).
 //!
@@ -14,7 +14,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::Stage;
+use crate::usd::Stage;
 
 use super::skinning::{mat4_mul, IDENTITY_MAT4};
 use super::tokens::{

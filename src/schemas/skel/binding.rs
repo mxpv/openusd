@@ -10,7 +10,7 @@
 use anyhow::Result;
 
 use crate::sdf::Path;
-use crate::Stage;
+use crate::usd::Stage;
 
 use super::read::{read_inherited_animation_source, read_inherited_skeleton, read_skel_binding};
 use super::tokens::{API_SKEL_BINDING, T_SKELETON, T_SKEL_ROOT};

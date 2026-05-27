@@ -14,17 +14,16 @@
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |
 //! | [`layer`] | Layer collection. [`Collector`](layer::Collector) recursively loads all layers from a root file. |
 //! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering, per-prim index caching, and namespace mapping via [`MapFunction`](pcp::MapFunction). |
-//! | [`stage`] | Composed stage. [`Stage`](stage::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
+//! | [`usd`] | Composed stage API. [`Stage`](usd::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`expr`] | Variable expression parser and evaluator for USD's `\`...\`` expression syntax. |
-//! | [`interp`] | Stage-level time-sample interpolation (AOUSD §12.5) — held + linear over every supported type. |
 //! | [`schemas`] | Domain-schema readers (UsdPhysics, UsdSkel, …) — non-core extensions, feature-gated. |
 //!
 //! # Quick start
 //!
 //! ```no_run
-//! use openusd::Stage;
+//! use openusd::usd;
 //!
-//! let stage = Stage::open("scene.usda").unwrap();
+//! let stage = usd::Stage::open("scene.usda").unwrap();
 //!
 //! stage.traverse(|prim_path| {
 //!     println!("{prim_path}");
@@ -33,36 +32,14 @@
 
 pub mod ar;
 pub mod expr;
-pub mod interp;
 pub mod layer;
 pub mod pcp;
 pub mod schemas;
 pub mod sdf;
-pub mod stage;
+pub mod usd;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;
 
 pub use half::f16;
-pub use interp::InterpolationType;
 pub use layer::{Collector, DependencyKind};
-pub use stage::{
-    EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError, StageBuilder,
-    StagePopulationMask,
-};
-
-/// A recoverable error encountered during stage composition.
-///
-/// Wraps errors from both layer collection ([`layer::Error`]) and prim
-/// composition ([`pcp::Error`]). The error handler provided via
-/// [`StageBuilder::on_error`] decides whether to skip and continue or abort.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum CompositionError {
-    /// Error during layer collection (e.g. unresolved asset path).
-    #[error(transparent)]
-    Layer(#[from] layer::Error),
-    /// Error during prim composition (e.g. missing defaultPrim, arc cycle).
-    #[error(transparent)]
-    Pcp(#[from] pcp::Error),
-}

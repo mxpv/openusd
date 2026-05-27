@@ -4,12 +4,12 @@
 use anyhow::Result;
 use openusd::schemas::physics::{self, CollisionApprox, Dof, DriveType, JointKind};
 use openusd::sdf;
-use openusd::Stage;
+use openusd::usd;
 
 const FIXTURE: &str = "fixtures/usdPhysics_scene.usda";
 
-fn open() -> Result<Stage> {
-    Stage::open(FIXTURE)
+fn open() -> Result<usd::Stage> {
+    usd::Stage::open(FIXTURE)
 }
 
 #[test]

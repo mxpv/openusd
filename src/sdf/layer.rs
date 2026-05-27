@@ -182,7 +182,7 @@ pub enum AuthoringError {
 /// underlying [`Data`] directly. Layers loaded by `usda::TextReader` or
 /// `usdc::CrateData` keep their own internal spec storage and do not yet
 /// expose a `Data` view, so the lookup methods return `None` on file-loaded
-/// layers. Use [`crate::stage::Stage`]'s path-keyed query API for inspection
+/// layers. Use [`crate::usd::Stage`]'s path-keyed query API for inspection
 /// in the meantime.
 //
 // TODO: materialize `TextReader` / `CrateData` into `Data` (or expose one via

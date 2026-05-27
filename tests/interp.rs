@@ -3,18 +3,18 @@
 
 use anyhow::Result;
 use openusd::sdf::{path, Value};
-use openusd::{InterpolationType, Stage};
+use openusd::usd;
 
 const FIXTURE: &str = "fixtures/interp_scene.usda";
 
-fn open() -> Result<Stage> {
-    Stage::open(FIXTURE)
+fn open() -> Result<usd::Stage> {
+    usd::Stage::open(FIXTURE)
 }
 
 #[test]
 fn default_interpolation_is_linear() -> Result<()> {
     let stage = open()?;
-    assert_eq!(stage.interpolation_type(), InterpolationType::Linear);
+    assert_eq!(stage.interpolation_type(), usd::InterpolationType::Linear);
     Ok(())
 }
 
@@ -68,7 +68,7 @@ fn unsupported_type_falls_back_to_held() -> Result<()> {
 #[test]
 fn held_mode_returns_previous_sample() -> Result<()> {
     let stage = open()?;
-    stage.set_interpolation_type(InterpolationType::Held);
+    stage.set_interpolation_type(usd::InterpolationType::Held);
     let v = stage.value_at(path("/Prim.scalar")?, 5.0)?.unwrap();
     // Previous sample is at t=0 with value 0.0.
     assert_eq!(v, Value::Double(0.0));
@@ -111,10 +111,10 @@ fn falls_back_to_default_when_no_timesamples() -> Result<()> {
 
 #[test]
 fn set_interpolation_type_via_builder() -> Result<()> {
-    let stage = Stage::builder()
-        .interpolation_type(InterpolationType::Held)
+    let stage = usd::Stage::builder()
+        .interpolation_type(usd::InterpolationType::Held)
         .open(FIXTURE)?;
-    assert_eq!(stage.interpolation_type(), InterpolationType::Held);
+    assert_eq!(stage.interpolation_type(), usd::InterpolationType::Held);
     let v = stage.value_at(path("/Prim.scalar")?, 5.0)?.unwrap();
     assert_eq!(v, Value::Double(0.0));
     Ok(())

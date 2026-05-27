@@ -9,12 +9,12 @@ use openusd::schemas::skel::{
     SkinningMethod, SkinningResolver, Topology, NO_PARENT,
 };
 use openusd::sdf;
-use openusd::Stage;
+use openusd::usd;
 
 const FIXTURE: &str = "fixtures/usdSkel_scene.usda";
 
-fn open() -> Result<Stage> {
-    Stage::open(FIXTURE)
+fn open() -> Result<usd::Stage> {
+    usd::Stage::open(FIXTURE)
 }
 
 #[test]

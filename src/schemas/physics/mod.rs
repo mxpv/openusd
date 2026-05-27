@@ -1,7 +1,7 @@
 //! UsdPhysics schema reader.
 //!
 //! Decodes Pixar's `UsdPhysics` schema family from a composed
-//! [`crate::Stage`]. Mirrors the C++ surface in
+//! [`crate::usd::Stage`]. Mirrors the C++ surface in
 //! `pxr/usd/usdPhysics/`:
 //!
 //! Concrete prim types:
@@ -39,9 +39,9 @@
 //! ## Example
 //!
 //! ```ignore
-//! use openusd::{physics, Stage};
+//! use openusd::{physics, usd};
 //!
-//! let stage = Stage::open("scene.usd")?;
+//! let stage = usd::Stage::open("scene.usd")?;
 //! let physics = physics::find_physics_prims(&stage)?;
 //! for joint_path in &physics.joints {
 //!     let path = openusd::sdf::path(joint_path)?;

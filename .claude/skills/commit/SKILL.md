@@ -41,6 +41,7 @@ Follow these steps:
    - Keep commits focused and atomic — one logical change per commit.
    - Proofread for grammar, technical accuracy, and completeness.
    - Show the commit message to the user and wait for confirmation before committing.
+   - Do NOT enumerate the staged files in the confirmation message — the user already knows which files are staged from `git status`. Only show the commit title and body.
 
 7. **Commit**: Stage relevant files and create the commit.
 
@@ -48,3 +49,4 @@ Strictly forbidden — these restrictions are non-negotiable:
 - Do NOT add "Generated with Claude Code" or any AI generation notices.
 - Do NOT add "Co-Authored-By: Claude" or any AI co-author attribution.
 - Do NOT include any reference to AI assistance, generation, or automation.
+- Do NOT list staged files (paths, renames, file counts) in the confirmation message or commit body — `git status` is the source of truth and re-listing them is noise.
