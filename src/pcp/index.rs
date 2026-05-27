@@ -293,6 +293,50 @@ impl PrimIndex {
         self.resolve_strongest(field, stack, prop_suffix)
     }
 
+    /// Resolves a token-list-op field by composing list edits from strongest
+    /// to weakest across all contributing nodes.
+    ///
+    /// This is used for metadata like `apiSchemas`, where the field value is a
+    /// list operation rather than a strongest-opinion scalar. A value block
+    /// stops weaker opinions while preserving any stronger composed edits.
+    pub(crate) fn resolve_token_list_op(
+        &self,
+        field: FieldKey,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let field = field.as_str();
+        let mut ops = Vec::new();
+
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            let Some(value) = data.try_get(&query_path, field)? else {
+                continue;
+            };
+            // TODO: a non-conformant backend may store `apiSchemas` as a plain
+            // `Value::TokenVec` even though the field is declared as a
+            // list-op. We currently skip those opinions (falling through to
+            // `_ => continue`). Tightening this further requires a
+            // schema-aware decode step in the USDC reader (and any other
+            // backend) so list-op fields are always produced as
+            // `Value::TokenListOp`; until that lands, ill-typed opinions for
+            // list-op fields are simply ignored rather than coerced.
+            let list_op = match value.into_owned() {
+                Value::ValueBlock => break,
+                Value::TokenListOp(op) => op,
+                _ => continue,
+            };
+            ops.push(list_op);
+        }
+
+        let mut result = Vec::new();
+        for op in ops.iter().rev() {
+            result = op.compose_over(&result);
+        }
+        Ok(result)
+    }
+
     /// Builds the query path for a node, applying `prop_suffix` if given.
     /// Borrows the node's path when no suffix is needed (zero-copy).
     fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>> {
@@ -635,7 +679,7 @@ impl<'a> IndexBuilder<'a> {
                     if start < end {
                         let new_nodes: Vec<Node> = self.output[start..end].to_vec();
                         let refs =
-                            compose_arc_list_in::<Reference>(&new_nodes, FieldKey::References, &self.stack.layers);
+                            compose_arc_list_in::<Reference>(&new_nodes, FieldKey::References, &self.stack.layers)?;
                         for reference in &refs {
                             self.eval_arc_target(
                                 &reference.asset_path,
@@ -648,7 +692,7 @@ impl<'a> IndexBuilder<'a> {
                             )?;
                         }
                         if self.stack.load_payloads {
-                            let payloads = collect_payloads_in(&new_nodes, &self.stack.layers);
+                            let payloads = collect_payloads_in(&new_nodes, &self.stack.layers)?;
                             for payload in &payloads {
                                 self.eval_arc_target(
                                     &payload.asset_path,
@@ -762,7 +806,7 @@ impl<'a> IndexBuilder<'a> {
         // target (which includes ancestor context) and merge its nodes.
         // Implied arcs are propagated inline through ancestor arc mappings.
         let inherits =
-            compose_arc_list_in::<Path>(&self.output[site_start..], FieldKey::InheritPaths, &self.stack.layers);
+            compose_arc_list_in::<Path>(&self.output[site_start..], FieldKey::InheritPaths, &self.stack.layers)?;
         for inherit_path in &inherits {
             let resolved = path.make_absolute(inherit_path);
             let before = self.output.len();
@@ -786,7 +830,7 @@ impl<'a> IndexBuilder<'a> {
             &self.output[site_start..opinion_end],
             FieldKey::References,
             &self.stack.layers,
-        );
+        )?;
         for reference in &references {
             self.eval_arc_target(
                 &reference.asset_path,
@@ -801,7 +845,7 @@ impl<'a> IndexBuilder<'a> {
 
         // P — Payloads.
         if self.stack.load_payloads {
-            let payloads = collect_payloads_in(&self.output[site_start..opinion_end], &self.stack.layers);
+            let payloads = collect_payloads_in(&self.output[site_start..opinion_end], &self.stack.layers)?;
             for payload in &payloads {
                 self.eval_arc_target(
                     &payload.asset_path,
@@ -820,7 +864,7 @@ impl<'a> IndexBuilder<'a> {
             &self.output[site_start..opinion_end],
             FieldKey::Specializes,
             &self.stack.layers,
-        );
+        )?;
         for specialize_path in &specializes {
             let resolved = path.make_absolute(specialize_path);
             let before = self.output.len();
@@ -1312,7 +1356,14 @@ fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String
 }
 
 /// Composes a list-op field across nodes, returning the flattened list.
-fn compose_arc_list_in<T: Default + Clone + PartialEq>(nodes: &[Node], field: FieldKey, layers: &[sdf::Layer]) -> Vec<T>
+///
+/// Surface backend decode errors to the caller; treat absent fields and
+/// wrong-typed values as "no opinion at this node".
+fn compose_arc_list_in<T: Default + Clone + PartialEq>(
+    nodes: &[Node],
+    field: FieldKey,
+    layers: &[sdf::Layer],
+) -> Result<Vec<T>>
 where
     Value: TryInto<ListOp<T>>,
 {
@@ -1321,7 +1372,7 @@ where
 
     for node in nodes {
         let data = &layers[node.layer_index];
-        let Ok(value) = data.get(&node.path, field) else {
+        let Some(value) = data.try_get(&node.path, field)? else {
             continue;
         };
         let Ok(list_op) = value.into_owned().try_into() else {
@@ -1333,16 +1384,18 @@ where
         });
     }
 
-    combined.map(|op| op.reduced().flatten()).unwrap_or_default()
+    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
 }
 
-/// Collects payloads from nodes, handling both single `Payload` and `PayloadListOp`.
-fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Vec<Payload> {
+/// Collects payloads from nodes, handling both single `Payload` and
+/// `PayloadListOp`. Surfaces backend decode errors; skips absent or
+/// wrong-typed values.
+fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payload>> {
     let mut combined: Option<PayloadListOp> = None;
 
     for node in nodes {
         let data = &layers[node.layer_index];
-        let Ok(value) = data.get(&node.path, FieldKey::Payload.as_str()) else {
+        let Some(value) = data.try_get(&node.path, FieldKey::Payload.as_str())? else {
             continue;
         };
 
@@ -1362,7 +1415,7 @@ fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Vec<Payload> {
         });
     }
 
-    combined.map(|op| op.reduced().flatten()).unwrap_or_default()
+    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
 }
 
 /// Finds a layer index whose identifier matches `asset_path`.

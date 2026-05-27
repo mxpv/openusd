@@ -738,16 +738,19 @@ impl Stage {
     /// Returns the composed `apiSchemas` list for a prim, flattened across all
     /// contributing layer opinions.
     ///
+    /// Property paths are coerced to their owning prim — `api_schemas` is a
+    /// prim-level field. This matches how [`Stage::specifier`] and
+    /// [`Stage::kind`] handle their inputs.
+    ///
     /// Multi-apply schema instances (e.g. `PhysicsLimitAPI:rotZ`) are included
     /// as-is; callers that need to match only the base name should strip the
     /// instance suffix themselves.
     pub fn api_schemas(&self, prim: &sdf::Path) -> Result<Vec<String>> {
-        let raw = self.field::<sdf::Value>(prim, "apiSchemas")?;
-        Ok(match raw {
-            Some(sdf::Value::TokenListOp(op)) => op.flatten(),
-            Some(sdf::Value::TokenVec(v)) => v,
-            _ => Vec::new(),
-        })
+        let prim = prim.prim_path();
+        if !self.population_mask.includes(&prim) {
+            return Ok(Vec::new());
+        }
+        self.try_or_handle(|cache| cache.api_schemas(&prim))
     }
 
     /// Returns `true` when `name` appears in the prim's composed `apiSchemas` list.
@@ -1847,6 +1850,254 @@ mod tests {
         let schemas = stage.api_schemas(&geo)?;
         assert!(schemas.contains(&"MaterialBindingAPI".to_string()));
         assert!(schemas.contains(&"SkelBindingAPI".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn api_schemas_compose_list_ops() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("weak.usda"),
+            r#"#usda 1.0
+
+def Xform "World"
+{
+    def Mesh "Geo" (
+        append apiSchemas = ["WeakAPI", "RemovedAPI"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("middle.usda"),
+            r#"#usda 1.0
+(
+    subLayers = [
+        @weak.usda@
+    ]
+)
+
+over "World"
+{
+    over "Geo" (
+        prepend apiSchemas = ["StrongAPI"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+(
+    subLayers = [
+        @middle.usda@
+    ]
+)
+
+over "World"
+{
+    over "Geo" (
+        delete apiSchemas = ["RemovedAPI"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let schemas = stage.api_schemas(&sdf::Path::new("/World/Geo")?)?;
+        assert_eq!(schemas, vec!["StrongAPI".to_string(), "WeakAPI".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn api_schemas_compose_reorder_list_op() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("weak.usda"),
+            r#"#usda 1.0
+
+def Xform "World"
+{
+    def Mesh "Geo" (
+        apiSchemas = ["A", "B", "C"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+(
+    subLayers = [
+        @weak.usda@
+    ]
+)
+
+over "World"
+{
+    over "Geo" (
+        reorder apiSchemas = ["C", "A"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let schemas = stage.api_schemas(&sdf::Path::new("/World/Geo")?)?;
+        assert_eq!(schemas, vec!["C".to_string(), "B".to_string(), "A".to_string()]);
+        Ok(())
+    }
+
+    /// Inherit arc: a class authoring `apiSchemas` contributes to the
+    /// inheriting prim's composed list, with the local prim's edits applied
+    /// on top. `has_api_schema` (the surface physics / skel readers depend
+    /// on) sees both opinions.
+    #[test]
+    fn api_schemas_via_inherit() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+class "_Base" (
+    prepend apiSchemas = ["BaseAPI"]
+)
+{
+}
+
+def Xform "World"
+{
+    def Mesh "Geo" (
+        inherits = </_Base>
+        prepend apiSchemas = ["LocalAPI"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let geo = sdf::Path::new("/World/Geo")?;
+        assert_eq!(
+            stage.api_schemas(&geo)?,
+            vec!["LocalAPI".to_string(), "BaseAPI".to_string()],
+        );
+        assert!(stage.has_api_schema(&geo, "BaseAPI")?);
+        assert!(stage.has_api_schema(&geo, "LocalAPI")?);
+        Ok(())
+    }
+
+    /// Reference arc: a referenced asset's `apiSchemas` compose into the
+    /// referencing prim's list, with the local layer's edits applied on top.
+    #[test]
+    fn api_schemas_via_reference() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("asset.usda"),
+            r#"#usda 1.0
+(
+    defaultPrim = "Source"
+)
+
+def Mesh "Source" (
+    prepend apiSchemas = ["AssetAPI"]
+)
+{
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def Xform "World"
+{
+    def "Geo" (
+        references = @asset.usda@
+        prepend apiSchemas = ["LocalAPI"]
+    )
+    {
+    }
+}
+"#,
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let geo = sdf::Path::new("/World/Geo")?;
+        assert_eq!(
+            stage.api_schemas(&geo)?,
+            vec!["LocalAPI".to_string(), "AssetAPI".to_string()],
+        );
+        Ok(())
+    }
+
+    /// Variant arc: a selected variant authoring `apiSchemas` contributes to
+    /// the variant-set-owning prim's composed list.
+    #[test]
+    fn api_schemas_via_variant() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def Xform "World"
+{
+    def Mesh "Geo" (
+        variants = {
+            string mode = "full"
+        }
+        prepend variantSets = "mode"
+        prepend apiSchemas = ["LocalAPI"]
+    )
+    {
+        variantSet "mode" = {
+            "full" (
+                prepend apiSchemas = ["VariantAPI"]
+            ) {
+            }
+            "empty" {
+            }
+        }
+    }
+}
+"#,
+        )?;
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let geo = sdf::Path::new("/World/Geo")?;
+        let schemas = stage.api_schemas(&geo)?;
+        assert!(
+            schemas.contains(&"VariantAPI".to_string()),
+            "variant contribution missing: {schemas:?}",
+        );
+        assert!(
+            schemas.contains(&"LocalAPI".to_string()),
+            "local contribution missing: {schemas:?}",
+        );
+        Ok(())
+    }
+
+    /// Property paths resolve to the owning prim's schemas (matches the
+    /// `specifier` / `kind` convention).
+    #[test]
+    fn api_schemas_property_path() -> Result<()> {
+        let stage = Stage::open("fixtures/api_schemas.usda")?;
+        let prim = sdf::Path::new("/World/Geo")?;
+        let prop = sdf::Path::new("/World/Geo.points")?;
+        assert_eq!(stage.api_schemas(&prop)?, stage.api_schemas(&prim)?);
         Ok(())
     }
 
