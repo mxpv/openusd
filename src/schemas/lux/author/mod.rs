@@ -17,9 +17,11 @@
 mod boundable;
 mod common;
 mod light_api;
+mod nonboundable;
 
 pub use boundable::{
     define_cylinder_light, define_disk_light, define_portal_light, define_rect_light, define_sphere_light,
     CylinderLightAuthor, DiskLightAuthor, PortalLightAuthor, RectLightAuthor, SphereLightAuthor,
 };
 pub use light_api::{apply_light_api, LightApiSetters, LightAuthor};
+pub use nonboundable::{define_distant_light, define_geometry_light, DistantLightAuthor, GeometryLightAuthor};
