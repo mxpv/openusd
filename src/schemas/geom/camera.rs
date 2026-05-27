@@ -32,8 +32,8 @@ pub fn read_camera(stage: &Stage, prim: &Path) -> Result<Option<ReadCamera>> {
         projection: read_projection(stage, prim)?,
         clipping_range: read_clipping_range(stage, prim)?.unwrap_or(defaults.clipping_range),
         clipping_planes: read_clipping_planes(stage, prim)?,
-        shutter_open: read_f32(stage, prim, A_SHUTTER_OPEN)?.unwrap_or(defaults.shutter_open),
-        shutter_close: read_f32(stage, prim, A_SHUTTER_CLOSE)?.unwrap_or(defaults.shutter_close),
+        shutter_open: read_f64(stage, prim, A_SHUTTER_OPEN)?.unwrap_or(defaults.shutter_open),
+        shutter_close: read_f64(stage, prim, A_SHUTTER_CLOSE)?.unwrap_or(defaults.shutter_close),
         exposure: read_f32(stage, prim, A_EXPOSURE)?.unwrap_or(defaults.exposure),
         exposure_iso: read_f32(stage, prim, A_EXPOSURE_ISO)?.unwrap_or(defaults.exposure_iso),
         exposure_time: read_f32(stage, prim, A_EXPOSURE_TIME)?.unwrap_or(defaults.exposure_time),
@@ -59,6 +59,16 @@ fn read_f32(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f32>> {
         Some(Value::Double(d)) => Some(d as f32),
         Some(Value::Half(h)) => Some(h.to_f32()),
         Some(Value::Int(i)) => Some(i as f32),
+        _ => None,
+    })
+}
+
+fn read_f64(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f64>> {
+    Ok(match attr_default(stage, prim, name)? {
+        Some(Value::Double(d)) => Some(d),
+        Some(Value::Float(f)) => Some(f as f64),
+        Some(Value::Half(h)) => Some(h.to_f32() as f64),
+        Some(Value::Int(i)) => Some(i as f64),
         _ => None,
     })
 }
