@@ -10,7 +10,7 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 The codebase follows the same module structure as the C++ OpenUSD SDK:
 
-- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys.
+- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys. `Layer` (C++ `SdfLayer`) bundles a resolved identifier with a backing `AbstractData` and exposes a Layer-tier authoring surface (`create_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim` / `clear_default_prim`) plus typed spec views (`PrimSpec[Mut]`, `AttributeSpec[Mut]`, `RelationshipSpec[Mut]`, `PseudoRootSpec[Mut]`). Authoring errors flow through `AuthoringError`.
 
 - **`usda/`** - Text format (`.usda`) reader: Lexer (logos) + recursive descent parser. `TextReader` implements `AbstractData`.
 
@@ -29,7 +29,7 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
   - `pcp/mapping.rs` — `MapFunction`: namespace mapping between composition arcs (C++ `PcpMapFunction`). Stores (source, target) path pairs with longest-prefix matching alongside an `sdf::LayerOffset` time retiming. `compose` concatenates both path and time offsets. Effective offset for a node is `node.map_to_root.time_offset()`.
   - `pcp/rel.rs` — `Relocates`: isolated relocate object owning per-layer `layerRelocates`. Resolves pre-relocation source paths, builds relocated prim indices, and adjusts child name lists. Receives external data (`&LayerStack`, cached indices/contexts) through method parameters; does not reference `Cache` directly.
 
-- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), variant fallback selections (`variant_fallbacks`), an optional session layer (`session_layer`), payload loading behavior (`initial_load_set` / `InitialLoadSet`), and a working-set filter (`population_mask` / `StagePopulationMask`).
+- **`stage`** - Composed stage: `Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), variant fallback selections (`variant_fallbacks`), an optional session layer (`session_layer`), payload loading behavior (`initial_load_set` / `InitialLoadSet`), and a working-set filter (`population_mask` / `StagePopulationMask`). `StageBuilder::open` loads a root layer from disk; `StageBuilder::in_memory` creates an empty writable anonymous root (C++ `UsdStage::CreateInMemory`). Stage-tier authoring (`define_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim`) routes through the current `EditTarget` (a minimal subset of C++ `UsdEditTarget` — currently just a `layer_index`, no per-arc path mapping yet) and triggers `Cache::invalidate_all` after each write. Errors surface via `StageAuthoringError`.
 
 - **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
 

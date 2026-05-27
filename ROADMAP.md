@@ -102,6 +102,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Model hierarchy (kind) | `11.4` | :white_check_mark: | `main` | `Stage::is_model`/`is_group`/`is_component`/`is_subcomponent` validate the contiguous kind hierarchy |
 | [Stage queries](https://openusd.org/release/api/prim_flags_8h.html) (Active, Loaded, Defined, Abstract, Instance) | `11.5` | :white_check_mark: | `main` | `Stage::is_active`/`is_loaded`/`is_defined`/`is_abstract`/`is_instance`, `prim_status`, and `PrimPredicate` traversal filtering |
 | [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) | `11.2` | :white_check_mark: | `0.3.0` | `StageBuilder::session_layer` |
+| Stage authoring (`DefinePrim` / `OverridePrim` / `CreateAttribute` / `CreateRelationship` / `SetDefaultPrim`) | — | :construction: | | Layer-tier authoring on `sdf::Layer` is in; Stage-tier wrappers route through `EditTarget` and `Cache::invalidate_all`. `StageBuilder::in_memory` creates an anonymous-root stage (C++ `CreateInMemory`). `EditTarget` is a minimal subset of `UsdEditTarget` — `layer_index` only, no `PcpMapFunction` for variant/reference routing yet. Composed handles (`UsdPrim` / `UsdAttribute` / `UsdRelationship` analogs) and surgical (`PcpChanges`-style) cache invalidation are pending. |
 
 ## Value Resolution (Spec 12)
 
@@ -188,7 +189,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Native instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) (shared representation) | :construction: | | |
 | [Stage cache](https://openusd.org/release/api/class_usd_utils_stage_cache.html) | :thinking: | | Avoid redundant stage loading |
 | [Kind registry](https://openusd.org/release/api/class_kind_registry.html) | :thinking: | | Model/group/assembly/component taxonomy |
-| [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :thinking: | | Direct opinions to a specific layer |
+| [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :construction: | | Minimal subset landed: `EditTarget { layer_index }` + `Stage::edit_target` / `set_edit_target` routes Stage-tier authoring writes. Missing: `PcpMapFunction`-based path mapping for variant / reference / specialize edit contexts, RAII `UsdEditContext` analog, and `LayerStackIdentifier`-keyed targets (currently a bare `usize`). |
 | [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :thinking: | | Listeners for live scene updates |
 | [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :thinking: | | Inspect all contributing opinions across layers |
 
