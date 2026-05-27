@@ -10,8 +10,8 @@ use openusd::schemas::geom::{
     read_camera, read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_hermite_curves, read_kind,
     read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_point_instancer, read_points, read_proxy_prim,
     read_purpose, read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack,
-    Axis, CurveBasis, CurveType, CurveWrap, ElementType, Interpolation, Orientation as GeomOrientation, PatchForm,
-    Projection, Purpose, StereoRole, SubdivisionScheme, Visibility,
+    Axis, CurveBasis, CurveType, CurveWrap, ElementType, InterpolateBoundary, Interpolation,
+    Orientation as GeomOrientation, PatchForm, Projection, Purpose, StereoRole, SubdivisionScheme, Visibility,
 };
 use openusd::sdf;
 use openusd::usd::Stage;
@@ -464,7 +464,7 @@ fn mesh_subdivision_attrs() -> Result<()> {
     let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
     assert_eq!(m.subdivision_scheme, SubdivisionScheme::None);
     assert!(!m.subdivision_scheme.is_subdivision());
-    assert_eq!(m.interpolate_boundary.as_deref(), Some("edgeAndCorner"));
+    assert_eq!(m.interpolate_boundary, InterpolateBoundary::EdgeAndCorner);
     assert_eq!(m.corner_indices, vec![0, 2]);
     assert_eq!(m.corner_sharpnesses, vec![10.0, 5.0]);
     assert_eq!(m.crease_indices, vec![0, 1, 1, 2]);

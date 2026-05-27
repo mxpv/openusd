@@ -114,6 +114,23 @@ pub const SUBDIV_SCHEME_CATMULL_CLARK: &str = "catmullClark";
 pub const SUBDIV_SCHEME_LOOP: &str = "loop";
 pub const SUBDIV_SCHEME_BILINEAR: &str = "bilinear";
 
+// Mesh interpolateBoundary token values.
+pub const INTERPOLATE_BOUNDARY_NONE: &str = "none";
+pub const INTERPOLATE_BOUNDARY_EDGE_ONLY: &str = "edgeOnly";
+pub const INTERPOLATE_BOUNDARY_EDGE_AND_CORNER: &str = "edgeAndCorner";
+
+// Mesh faceVaryingLinearInterpolation token values.
+pub const FV_LINEAR_INTERP_NONE: &str = "none";
+pub const FV_LINEAR_INTERP_CORNERS_ONLY: &str = "cornersOnly";
+pub const FV_LINEAR_INTERP_CORNERS_PLUS_1: &str = "cornersPlus1";
+pub const FV_LINEAR_INTERP_CORNERS_PLUS_2: &str = "cornersPlus2";
+pub const FV_LINEAR_INTERP_BOUNDARIES: &str = "boundaries";
+pub const FV_LINEAR_INTERP_ALL: &str = "all";
+
+// Mesh triangleSubdivisionRule token values.
+pub const TRIANGLE_SUBDIV_RULE_CATMULL_CLARK: &str = "catmullClark";
+pub const TRIANGLE_SUBDIV_RULE_SMOOTH: &str = "smooth";
+
 // ── GeomSubset attribute names ──────────────────────────────────────────
 pub const A_FAMILY_NAME: &str = "familyName";
 pub const A_ELEMENT_TYPE: &str = "elementType";

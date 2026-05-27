@@ -396,6 +396,99 @@ impl SubdivisionScheme {
     }
 }
 
+/// `UsdGeomMesh.interpolateBoundary` token values. Pixar's spec
+/// default is [`InterpolateBoundary::EdgeAndCorner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InterpolateBoundary {
+    None,
+    EdgeOnly,
+    #[default]
+    EdgeAndCorner,
+}
+
+impl InterpolateBoundary {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            InterpolateBoundary::None => INTERPOLATE_BOUNDARY_NONE,
+            InterpolateBoundary::EdgeOnly => INTERPOLATE_BOUNDARY_EDGE_ONLY,
+            InterpolateBoundary::EdgeAndCorner => INTERPOLATE_BOUNDARY_EDGE_AND_CORNER,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            INTERPOLATE_BOUNDARY_NONE => InterpolateBoundary::None,
+            INTERPOLATE_BOUNDARY_EDGE_ONLY => InterpolateBoundary::EdgeOnly,
+            INTERPOLATE_BOUNDARY_EDGE_AND_CORNER => InterpolateBoundary::EdgeAndCorner,
+            _ => return None,
+        })
+    }
+}
+
+/// `UsdGeomMesh.faceVaryingLinearInterpolation` token values. Pixar's
+/// spec default is [`FaceVaryingLinearInterpolation::CornersPlus1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FaceVaryingLinearInterpolation {
+    None,
+    CornersOnly,
+    #[default]
+    CornersPlus1,
+    CornersPlus2,
+    Boundaries,
+    All,
+}
+
+impl FaceVaryingLinearInterpolation {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            FaceVaryingLinearInterpolation::None => FV_LINEAR_INTERP_NONE,
+            FaceVaryingLinearInterpolation::CornersOnly => FV_LINEAR_INTERP_CORNERS_ONLY,
+            FaceVaryingLinearInterpolation::CornersPlus1 => FV_LINEAR_INTERP_CORNERS_PLUS_1,
+            FaceVaryingLinearInterpolation::CornersPlus2 => FV_LINEAR_INTERP_CORNERS_PLUS_2,
+            FaceVaryingLinearInterpolation::Boundaries => FV_LINEAR_INTERP_BOUNDARIES,
+            FaceVaryingLinearInterpolation::All => FV_LINEAR_INTERP_ALL,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            FV_LINEAR_INTERP_NONE => FaceVaryingLinearInterpolation::None,
+            FV_LINEAR_INTERP_CORNERS_ONLY => FaceVaryingLinearInterpolation::CornersOnly,
+            FV_LINEAR_INTERP_CORNERS_PLUS_1 => FaceVaryingLinearInterpolation::CornersPlus1,
+            FV_LINEAR_INTERP_CORNERS_PLUS_2 => FaceVaryingLinearInterpolation::CornersPlus2,
+            FV_LINEAR_INTERP_BOUNDARIES => FaceVaryingLinearInterpolation::Boundaries,
+            FV_LINEAR_INTERP_ALL => FaceVaryingLinearInterpolation::All,
+            _ => return None,
+        })
+    }
+}
+
+/// `UsdGeomMesh.triangleSubdivisionRule` token values. Pixar's spec
+/// default is [`TriangleSubdivisionRule::CatmullClark`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TriangleSubdivisionRule {
+    #[default]
+    CatmullClark,
+    Smooth,
+}
+
+impl TriangleSubdivisionRule {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            TriangleSubdivisionRule::CatmullClark => TRIANGLE_SUBDIV_RULE_CATMULL_CLARK,
+            TriangleSubdivisionRule::Smooth => TRIANGLE_SUBDIV_RULE_SMOOTH,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            TRIANGLE_SUBDIV_RULE_CATMULL_CLARK => TriangleSubdivisionRule::CatmullClark,
+            TRIANGLE_SUBDIV_RULE_SMOOTH => TriangleSubdivisionRule::Smooth,
+            _ => return None,
+        })
+    }
+}
+
 /// Primvar interpolation modes from UsdGeomPrimvar.
 ///
 /// `Constant` is one value for the whole prim. `Uniform` is per-face.
@@ -526,9 +619,9 @@ pub struct ReadMesh {
     pub double_sided: bool,
     pub extent: Option<[[f32; 3]; 2]>,
     pub subdivision_scheme: SubdivisionScheme,
-    pub interpolate_boundary: Option<String>,
-    pub face_varying_linear_interpolation: Option<String>,
-    pub triangle_subdivision_rule: Option<String>,
+    pub interpolate_boundary: InterpolateBoundary,
+    pub face_varying_linear_interpolation: FaceVaryingLinearInterpolation,
+    pub triangle_subdivision_rule: TriangleSubdivisionRule,
     pub hole_indices: Vec<i32>,
     pub corner_indices: Vec<i32>,
     pub corner_sharpnesses: Vec<f32>,
