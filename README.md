@@ -28,6 +28,12 @@ For a detailed comparison with the C++ reference implementation and current prog
   - Working-set control via population masks and initial payload-loading rules.
   - [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) and [variant fallback](https://openusd.org/release/glossary.html#usdglossary-variantset) selections via `StageBuilder`.
   - Recoverable error handling via `StageBuilder::on_error` callback.
+- Authoring API
+  - Build USD scenes through [layer](src/sdf/layer.rs)- and [stage](src/usd/stage.rs)-tier APIs.
+  - Typed [spec views](src/sdf/spec.rs) for compile-time-checked per-kind editing.
+  - Composed [prim, attribute, and relationship handles](src/usd/prim.rs) with chained fluent edits.
+  - `EditTarget` routing of opinions to a specific layer; in-memory stages for anonymous-root authoring.
+  - Applied API schema authoring.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 

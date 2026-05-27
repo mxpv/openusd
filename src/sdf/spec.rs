@@ -20,10 +20,6 @@ use std::ops::{Deref, DerefMut};
 use crate::sdf::schema::ChildrenKey;
 use crate::sdf::{FieldKey, Path, PathListOp, SpecType, Specifier, TokenListOp, Value, Variability};
 
-// =========================================================================
-// Spec
-// =========================================================================
-
 /// A single spec in a scene description layer — a (type, fields) entry
 /// keyed by [`Path`] within a [`Data`](crate::sdf::Data) store.
 ///
@@ -161,10 +157,6 @@ impl Spec {
         (self.ty == SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
     }
 }
-
-// =========================================================================
-// PrimSpec
-// =========================================================================
 
 /// Typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
 ///
@@ -380,10 +372,6 @@ fn add_applied_schema_to_list_op(op: &mut TokenListOp, name: String) -> bool {
     changed
 }
 
-// =========================================================================
-// AttributeSpec
-// =========================================================================
-
 /// Typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
 ///
 /// The default borrow mode is read-only. [`AttributeSpecMut`] aliases this
@@ -593,10 +581,6 @@ fn upsert_time_sample(map: &mut Vec<(f64, Value)>, time: f64, value: Value) {
     }
 }
 
-// =========================================================================
-// RelationshipSpec
-// =========================================================================
-
 /// Typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
 ///
 /// The default borrow mode is read-only. [`RelationshipSpecMut`] aliases this
@@ -727,10 +711,6 @@ fn remove_path(paths: &mut Vec<Path>, path: &Path) -> bool {
     paths.remove(idx);
     true
 }
-
-// =========================================================================
-// PseudoRootSpec
-// =========================================================================
 
 /// Typed view of the layer's root pseudo-spec. Parallel to C++
 /// `SdfPseudoRootSpec`; carries layer-wide metadata (`defaultPrim`,
