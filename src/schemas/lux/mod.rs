@@ -46,10 +46,10 @@ mod read;
 mod types;
 
 pub use author::{
-    apply_light_api, define_cylinder_light, define_disk_light, define_distant_light, define_geometry_light,
-    define_portal_light, define_rect_light, define_sphere_light, CylinderLightAuthor, DiskLightAuthor,
-    DistantLightAuthor, GeometryLightAuthor, LightApiSetters, LightAuthor, PortalLightAuthor, RectLightAuthor,
-    SphereLightAuthor,
+    apply_light_api, define_cylinder_light, define_disk_light, define_distant_light, define_dome_light,
+    define_dome_light_1, define_geometry_light, define_portal_light, define_rect_light, define_sphere_light,
+    CylinderLightAuthor, DiskLightAuthor, DistantLightAuthor, DomeLight1Author, DomeLightAuthor, GeometryLightAuthor,
+    LightApiSetters, LightAuthor, PortalLightAuthor, RectLightAuthor, SphereLightAuthor,
 };
 
 pub use read::{
