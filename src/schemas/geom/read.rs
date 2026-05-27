@@ -37,9 +37,6 @@ pub fn compute_visibility(stage: &Stage, prim: &Path) -> Result<Visibility> {
         if read_visibility(stage, &cur)? == Visibility::Invisible {
             return Ok(Visibility::Invisible);
         }
-        if cur.as_str() == "/" {
-            return Ok(Visibility::Inherited);
-        }
         match cur.parent() {
             Some(p) => cur = p,
             None => return Ok(Visibility::Inherited),
@@ -60,16 +57,15 @@ pub fn read_purpose(stage: &Stage, prim: &Path) -> Result<Purpose> {
 /// Resolve the effective `purpose` for `prim`. Per the UsdGeom spec,
 /// purpose is inherited from the closest ancestor with an authored
 /// opinion; `default` is the fallback when no ancestor authors one.
+///
+/// An authored-but-unrecognised token stops the walk at that ancestor
+/// and resolves to [`Purpose::Default`] — the same behaviour as
+/// [`read_purpose`], so direct and composed reads agree.
 pub fn compute_purpose(stage: &Stage, prim: &Path) -> Result<Purpose> {
     let mut cur = prim.clone();
     loop {
         if let Some(token) = read_token(stage, &cur, A_PURPOSE)? {
-            if let Some(p) = Purpose::from_token(&token) {
-                return Ok(p);
-            }
-        }
-        if cur.as_str() == "/" {
-            return Ok(Purpose::Default);
+            return Ok(Purpose::from_token(&token).unwrap_or_default());
         }
         match cur.parent() {
             Some(p) => cur = p,
