@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::Stage;
+use crate::usd::Stage;
 
 use super::mesh::read_primvar_vec3f;
 use super::tokens::*;

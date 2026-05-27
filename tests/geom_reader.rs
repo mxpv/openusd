@@ -14,7 +14,7 @@ use openusd::schemas::geom::{
     Projection, Purpose, StereoRole, SubdivisionScheme, Visibility,
 };
 use openusd::sdf;
-use openusd::Stage;
+use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
 
