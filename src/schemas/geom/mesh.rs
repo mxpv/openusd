@@ -201,7 +201,10 @@ fn read_primvar_element_size(stage: &Stage, prim: &Path, attr_name: &str) -> Res
     let attr = prim.append_property(attr_name)?;
     Ok(match stage.field::<Value>(attr, META_ELEMENT_SIZE)? {
         Some(Value::Int(n)) => Some(n),
-        Some(Value::Int64(n)) => Some(n as i32),
+        // An out-of-range Int64 reflects malformed authoring; ignore
+        // it rather than silently wrapping into a negative or zero
+        // stride that downstream consumers would treat as valid.
+        Some(Value::Int64(n)) => i32::try_from(n).ok(),
         _ => None,
     })
 }
