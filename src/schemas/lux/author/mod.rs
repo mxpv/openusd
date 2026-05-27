@@ -18,6 +18,7 @@ mod boundable;
 mod common;
 mod dome;
 mod light_api;
+mod light_list;
 mod nonboundable;
 mod shaping;
 
@@ -27,5 +28,6 @@ pub use boundable::{
 };
 pub use dome::{define_dome_light, define_dome_light_1, DomeLight1Author, DomeLightAuthor};
 pub use light_api::{apply_light_api, LightApiSetters, LightAuthor};
+pub use light_list::{apply_light_list, LightListAuthor};
 pub use nonboundable::{define_distant_light, define_geometry_light, DistantLightAuthor, GeometryLightAuthor};
 pub use shaping::{apply_shadow, apply_shaping, ShadowAuthor, ShapingAuthor};
