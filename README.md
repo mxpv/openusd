@@ -92,12 +92,26 @@ let active = stage.is_active("/World/Hero")?;
 let is_model = stage.is_model("/World/Hero")?;
 let type_name = stage.type_name("/World/Hero")?;
 
-// Read a typed field value (generic over TryFrom<Value>).
+// Read a typed field value.
 let visible: Option<bool> = stage.field("/World/Hero", sdf::FieldKey::Active)?;
 
 // Access children composed across layers, references, and payloads.
 let children = stage.prim_children("/World/Hero")?;
 let properties = stage.prim_properties("/World/Hero")?;
+
+// Author into an in-memory stage.
+let stage = usd::Stage::builder().in_memory("anon.usda")?;
+let mesh = stage
+    .define_prim("/World/Mesh")?
+    .set_type_name("Mesh")?
+    .set_kind("component")?;
+let radius = mesh
+    .create_attribute("radius", "double")?
+    .set_variability(sdf::Variability::Uniform)?
+    .set(sdf::Value::Double(1.0))?;
+let binding = mesh
+    .create_relationship("material:binding")?
+    .add_target(sdf::Path::new("/World/Material")?)?;
 ```
 
 ## Minimum supported Rust version (MSRV)

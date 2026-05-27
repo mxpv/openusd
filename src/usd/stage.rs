@@ -390,59 +390,64 @@ impl Stage {
         Ok(())
     }
 
-    /// Author a `def` prim spec at `path` with the given `typeName` on the
-    /// edit target's layer. Mirrors C++ `UsdStage::DefinePrim`.
-    //
-    // TODO: return a `StagePrim<'_>` composed handle (the `UsdPrim` analog)
-    // once the handle types land. The current `()` return discards the
-    // Layer-tier `PrimSpecMut` via `.map(drop)` — chaining is only available
-    // through `sdf::Layer` directly for now.
-    pub fn define_prim(&self, path: impl Into<Path>, type_name: impl Into<String>) -> Result<(), StageAuthoringError> {
+    /// Author a `def` prim spec at `path` on the edit target's layer and
+    /// return a [`Prim`] handle. Mirrors C++ `UsdStage::DefinePrim`. The
+    /// returned handle lets callers chain field setters (`set_type_name`,
+    /// `set_active`, `set_kind`, …) and child-property authoring
+    /// (`create_attribute`, `create_relationship`).
+    pub fn define_prim(&self, path: impl Into<Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
-        let type_name = type_name.into();
-        self.with_target_layer(|layer| layer.create_prim(path, Specifier::Def, type_name).map(drop))
+        let layer_path = path.clone();
+        self.with_target_layer(|layer| layer.create_prim(layer_path, Specifier::Def, "").map(|_| true))?;
+        Ok(super::Prim::new(self, path))
     }
 
-    /// Ensure a prim spec exists at `path` with specifier `over` on the edit
-    /// target's layer. Mirrors C++ `UsdStage::OverridePrim`.
-    //
-    // TODO: return a `StagePrim<'_>` composed handle (see `define_prim`).
-    pub fn override_prim(&self, path: impl Into<Path>) -> Result<(), StageAuthoringError> {
+    /// Ensure a prim spec exists at `path` and return a [`Prim`] handle.
+    /// Mirrors C++ `UsdStage::OverridePrim`. If a spec already exists at
+    /// `path` its specifier is left untouched — `override_prim` does not
+    /// downgrade an existing `def` or `class` to `over`. Chain fluent
+    /// setters on the returned handle to author additional fields.
+    pub fn override_prim(&self, path: impl Into<Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
-        self.with_target_layer(|layer| layer.override_prim(path).map(drop))
+        let layer_path = path.clone();
+        self.with_target_layer(|layer| layer.override_prim(layer_path).map(|_| true))?;
+        Ok(super::Prim::new(self, path))
     }
 
     /// Author an attribute spec at a property path (e.g. `/World/Mesh.points`)
-    /// on the edit target's layer. Mirrors C++ `UsdPrim::CreateAttribute`.
-    //
-    // TODO: return a `StageAttribute<'_>` composed handle (the `UsdAttribute`
-    // analog) once handles land. C++ `UsdPrim::CreateAttribute` returns
-    // `UsdAttribute`, which is how callers do `attr.Set(value)` next.
+    /// on the edit target's layer with default variability `Varying` and
+    /// `custom = true`, matching C++ `UsdPrim::CreateAttribute`'s generic
+    /// overloads. Override the defaults via the returned [`Attribute`] handle's
+    /// fluent setters.
     pub fn create_attribute(
         &self,
         path: impl Into<Path>,
         type_name: impl Into<String>,
-        variability: sdf::Variability,
-        custom: bool,
-    ) -> Result<(), StageAuthoringError> {
+    ) -> Result<super::Attribute<'_>, StageAuthoringError> {
         let path = path.into();
         let type_name = type_name.into();
-        self.with_target_layer(|layer| layer.create_attribute(path, type_name, variability, custom).map(drop))
+        let layer_path = path.clone();
+        self.with_target_layer(|layer| {
+            layer
+                .create_attribute(layer_path, type_name, sdf::Variability::Varying, true)
+                .map(|_| true)
+        })?;
+        Ok(super::Attribute::new(self, path))
     }
 
     /// Author a relationship spec at a property path on the edit target's
-    /// layer. Mirrors C++ `UsdPrim::CreateRelationship`.
-    //
-    // TODO: return a `StageRelationship<'_>` composed handle (the
-    // `UsdRelationship` analog) once handles land.
-    pub fn create_relationship(
-        &self,
-        path: impl Into<Path>,
-        variability: sdf::Variability,
-        custom: bool,
-    ) -> Result<(), StageAuthoringError> {
+    /// layer with default variability `Varying` and `custom = true`, matching
+    /// C++ `UsdPrim::CreateRelationship`. Override the defaults and add targets
+    /// via the returned [`Relationship`] handle's fluent setters.
+    pub fn create_relationship(&self, path: impl Into<Path>) -> Result<super::Relationship<'_>, StageAuthoringError> {
         let path = path.into();
-        self.with_target_layer(|layer| layer.create_relationship(path, variability, custom).map(drop))
+        let layer_path = path.clone();
+        self.with_target_layer(|layer| {
+            layer
+                .create_relationship(layer_path, sdf::Variability::Varying, true)
+                .map(|_| true)
+        })?;
+        Ok(super::Relationship::new(self, path))
     }
 
     /// Author `defaultPrim` on the stage's root layer.
@@ -471,9 +476,9 @@ impl Stage {
     /// so a half-completed write must still drop stale indices. The one
     /// error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
     /// which is detected before any layer state changes.
-    fn with_target_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
+    pub(super) fn with_target_layer<F>(&self, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer) -> Result<bool, sdf::AuthoringError>,
     {
         let target = self.edit_target.get();
         let mut cache = self.graph.borrow_mut();
@@ -492,7 +497,9 @@ impl Stage {
 
     /// Borrow the stage's root layer, hand it to `f`, then invalidate the
     /// composition cache. See [`Stage::with_target_layer`] for the
-    /// invalidation contract.
+    /// invalidation contract. Closure returns `Result<(), _>` (always
+    /// considered a mutation on `Ok`) so callers stay on the simple
+    /// `layer.set_default_prim(name)` shape with no map dance.
     fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
         F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
@@ -504,9 +511,9 @@ impl Stage {
             let layer = cache
                 .layer_mut(index)
                 .ok_or(StageAuthoringError::LayerOutOfRange { index, len })?;
-            f(layer)
+            f(layer).map(|()| true)
         };
-        Self::finalize_layer(&mut cache, result)
+        Self::finalize_layer(&mut cache, result).map(|_| ())
     }
 
     /// Translate a Layer-tier authoring result into the Stage error type and
@@ -515,16 +522,31 @@ impl Stage {
     /// pre-mutation; every other outcome conservatively triggers
     /// invalidation.
     //
+    // TODO: invalidate_all also fires when a handle's `edit` returns
+    // `InvalidPath` (spec missing on the current edit target) — that path is
+    // also pre-mutation, but we can't tell from the error variant alone
+    // (Layer-tier methods can partial-mutate before reporting InvalidPath).
+    // Surgical, PcpChanges-style invalidation will dissolve this concern.
+    //
     // TODO: replace once Layer authoring methods are strictly atomic (or
     // report a "did mutate" signal). Then we can invalidate only on Ok.
     fn finalize_layer(
         cache: &mut pcp::Cache,
-        result: Result<(), sdf::AuthoringError>,
-    ) -> Result<(), StageAuthoringError> {
-        if !matches!(result, Err(sdf::AuthoringError::ReadOnly { .. })) {
-            cache.invalidate_all();
+        result: Result<bool, sdf::AuthoringError>,
+    ) -> Result<bool, StageAuthoringError> {
+        match result {
+            Ok(true) => {
+                cache.invalidate_all();
+                Ok(true)
+            }
+            Ok(false) => Ok(false),
+            Err(e) => {
+                if !matches!(e, sdf::AuthoringError::ReadOnly { .. }) {
+                    cache.invalidate_all();
+                }
+                Err(StageAuthoringError::Layer(e))
+            }
         }
-        result.map_err(StageAuthoringError::Layer)
     }
 
     /// Returns the number of layers in the stage (including session layers).
@@ -1193,7 +1215,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// let stage = usd::Stage::builder()
     ///     .in_memory("anon.usda")
     ///     .unwrap();
-    /// stage.define_prim("/World", "Xform").unwrap();
+    /// stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     /// ```
     pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage>
     where
@@ -2063,8 +2085,8 @@ mod tests {
     #[test]
     fn define_prim() -> Result<()> {
         let stage = in_memory_stage()?;
-        stage.define_prim("/World", "Xform")?;
-        stage.define_prim("/World/Mesh", "Mesh")?;
+        stage.define_prim("/World")?.set_type_name("Xform")?;
+        stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
         assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
         assert_eq!(stage.spec_type("/World/Mesh")?, Some(SpecType::Prim));
         assert_eq!(
@@ -2079,7 +2101,7 @@ mod tests {
         let stage = in_memory_stage()?;
         assert!(!stage.has_spec("/World")?);
 
-        stage.define_prim("/World", "Xform")?;
+        stage.define_prim("/World")?.set_type_name("Xform")?;
 
         assert!(stage.has_spec("/World")?);
         assert_eq!(
@@ -2107,12 +2129,16 @@ mod tests {
     #[test]
     fn create_attribute() -> Result<()> {
         let stage = in_memory_stage()?;
-        stage.define_prim("/Sphere", "Sphere")?;
-        stage.create_attribute("/Sphere.radius", "double", sdf::Variability::Varying, false)?;
+        stage.define_prim("/Sphere")?.set_type_name("Sphere")?;
+        stage.create_attribute("/Sphere.radius", "double")?;
         assert_eq!(stage.spec_type("/Sphere.radius")?, Some(SpecType::Attribute));
         assert_eq!(
             stage.field::<Value>("/Sphere.radius", FieldKey::TypeName)?,
             Some(Value::Token("double".into())),
+        );
+        assert_eq!(
+            stage.field::<Value>("/Sphere.radius", FieldKey::Custom)?,
+            Some(Value::Bool(true)),
         );
         Ok(())
     }
@@ -2120,9 +2146,15 @@ mod tests {
     #[test]
     fn create_relationship() -> Result<()> {
         let stage = in_memory_stage()?;
-        stage.define_prim("/Mesh", "Mesh")?;
-        stage.create_relationship("/Mesh.material:binding", sdf::Variability::Uniform, false)?;
+        stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
+        stage
+            .create_relationship("/Mesh.material:binding")?
+            .set_variability(sdf::Variability::Uniform)?;
         assert_eq!(stage.spec_type("/Mesh.material:binding")?, Some(SpecType::Relationship));
+        assert_eq!(
+            stage.field::<Value>("/Mesh.material:binding", FieldKey::Custom)?,
+            Some(Value::Bool(true)),
+        );
         Ok(())
     }
 
@@ -2130,7 +2162,7 @@ mod tests {
     fn author_default_prim() -> Result<()> {
         let stage = in_memory_stage()?;
         stage.set_default_prim("World")?;
-        stage.define_prim("/World", "Xform")?;
+        stage.define_prim("/World")?.set_type_name("Xform")?;
         assert_eq!(stage.default_prim().as_deref(), Some("World"));
         Ok(())
     }
@@ -2173,7 +2205,7 @@ mod tests {
     #[test]
     fn read_only_rejects_authoring() -> Result<()> {
         let stage = Stage::open(&composition_path("subLayer/sublayer_same_folder.usda"))?;
-        let err = stage.define_prim("/X", "Xform").unwrap_err();
+        let err = stage.define_prim("/X").err().expect("expected ReadOnly error");
         assert!(matches!(
             err,
             StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
@@ -2211,7 +2243,7 @@ mod tests {
         assert!(stage.has_session_layer());
         assert_eq!(stage.layer_count(), 2);
         assert_eq!(stage.edit_target().layer_index(), 1);
-        stage.define_prim("/World", "Xform")?;
+        stage.define_prim("/World")?.set_type_name("Xform")?;
         assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
         Ok(())
     }

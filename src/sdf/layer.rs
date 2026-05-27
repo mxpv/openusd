@@ -204,6 +204,8 @@ impl Layer {
     /// `typeName`. Any missing ancestor specs are created as `over` and the
     /// parent's `primChildren` is updated.
     ///
+    /// An empty `type_name` leaves `typeName` unauthored, matching C++
+    /// `SdfCreatePrimInLayer` followed by a no-op `SetTypeName(TfToken())`.
     /// Mirrors C++ `SdfCreatePrimInLayer` + `SetSpecifier` + `SetTypeName`.
     pub fn create_prim(
         &mut self,
@@ -220,7 +222,9 @@ impl Layer {
 
         let spec = data.spec_mut(&path).expect("just ensured");
         spec.add(FieldKey::Specifier, Value::Specifier(specifier));
-        spec.add(FieldKey::TypeName, Value::Token(type_name));
+        if !type_name.is_empty() {
+            spec.add(FieldKey::TypeName, Value::Token(type_name));
+        }
 
         Ok(spec.as_prim_mut().expect("type guaranteed by ensure_prim_chain"))
     }
@@ -441,7 +445,13 @@ impl Layer {
             .expect("type guaranteed above"))
     }
 
-    fn writable_data_mut(&mut self) -> Result<&mut Data, AuthoringError> {
+    /// Borrow the layer's writable in-memory store, or return
+    /// [`AuthoringError::ReadOnly`] when the backend is a file-loaded
+    /// reader. Useful for higher-level authoring helpers (e.g.
+    /// [`crate::usd::Prim`]) that need to surface `ReadOnly` precisely
+    /// rather than misreporting a generic `InvalidPath` from a failed
+    /// mutable lookup.
+    pub(crate) fn writable_data_mut(&mut self) -> Result<&mut Data, AuthoringError> {
         let identifier = self.identifier.clone();
         self.data.as_data_mut().ok_or(AuthoringError::ReadOnly { identifier })
     }

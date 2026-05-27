@@ -5,9 +5,11 @@
 //! `Usd*` surface under `openusd::usd`.
 
 mod interp;
+mod prim;
 mod stage;
 
 pub use interp::InterpolationType;
+pub use prim::{Attribute, Prim, Relationship};
 pub use stage::{
     CompositionError, EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError, StageBuilder,
     StagePopulationMask,
