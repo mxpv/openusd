@@ -126,6 +126,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             return Self {
                 explicit: true,
                 explicit_items: self.explicit_items.clone(),
+                ordered_items: self.ordered_items.clone(),
                 ..Default::default()
             };
         }
@@ -155,6 +156,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             return Self {
                 explicit: true,
                 explicit_items,
+                ordered_items: merge_ordered(&self.ordered_items, &weaker.ordered_items),
                 ..Default::default()
             };
         }
@@ -212,6 +214,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             appended_items,
             added_items,
             deleted_items,
+            ordered_items: merge_ordered(&self.ordered_items, &weaker.ordered_items),
             ..Default::default()
         }
     }
@@ -226,6 +229,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             return Self {
                 explicit: true,
                 explicit_items: self.explicit_items.clone(),
+                ordered_items: self.ordered_items.clone(),
                 ..Default::default()
             };
         }
@@ -256,68 +260,117 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
                 })
                 .cloned()
                 .collect(),
+            ordered_items: self.ordered_items.clone(),
             ..Default::default()
         }
     }
 
     /// Flatten this list op into its final item list.
-    ///
-    /// Equivalent to `self.reduced().compose_over(&[])` but avoids the
-    /// intermediate allocation.
     pub fn flatten(&self) -> Vec<T> {
-        if self.explicit {
-            return self.explicit_items.clone();
+        let mut result = if self.explicit {
+            self.explicit_items.clone()
+        } else {
+            self.prepended_items
+                .iter()
+                .filter(|e| !self.appended_items.contains(e) && !self.added_items.contains(e))
+                .chain(self.appended_items.iter())
+                .chain(
+                    self.added_items
+                        .iter()
+                        .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
+                )
+                .cloned()
+                .collect()
+        };
+
+        if !self.ordered_items.is_empty() {
+            apply_ordering(&mut result, &self.ordered_items);
         }
-        self.prepended_items
-            .iter()
-            .filter(|e| !self.appended_items.contains(e) && !self.added_items.contains(e))
-            .chain(self.appended_items.iter())
-            .chain(
-                self.added_items
-                    .iter()
-                    .filter(|e| !self.prepended_items.contains(e) && !self.appended_items.contains(e)),
-            )
-            .cloned()
-            .collect()
+
+        result
     }
 
     /// Applies this list operation on top of a weaker list, producing the composed result.
     ///
-    /// Follows USD's list-editing semantics:
+    /// Implements AOUSD Core Specification §12.2.6 list-op application:
     /// - If `self.explicit` is true, the result is `self.explicit_items` (replacing everything).
     /// - Otherwise, starts with `weaker` and applies prepend, append, add, and delete edits.
+    /// - Finally, applies order edits to the matching items in the result.
     pub fn compose_over(&self, weaker: &[T]) -> Vec<T> {
-        if self.explicit {
-            return self.explicit_items.clone();
-        }
+        let mut result = if self.explicit {
+            self.explicit_items.clone()
+        } else {
+            let mut result: Vec<T> = weaker.to_vec();
 
-        let mut result: Vec<T> = weaker.to_vec();
+            // Prepend: insert at front, removing duplicates from the existing list.
+            for item in self.prepended_items.iter().rev() {
+                result.retain(|x| x != item);
+                result.insert(0, item.clone());
+            }
 
-        // Prepend: insert at front, removing duplicates from the existing list.
-        for item in self.prepended_items.iter().rev() {
-            result.retain(|x| x != item);
-            result.insert(0, item.clone());
-        }
-
-        // Append: push to back, removing duplicates from the existing list.
-        for item in &self.appended_items {
-            result.retain(|x| x != item);
-            result.push(item.clone());
-        }
-
-        // Add: push to back only if not already present.
-        for item in &self.added_items {
-            if !result.contains(item) {
+            // Append: push to back, removing duplicates from the existing list.
+            for item in &self.appended_items {
+                result.retain(|x| x != item);
                 result.push(item.clone());
             }
-        }
 
-        // Delete: remove matching items.
-        for item in &self.deleted_items {
-            result.retain(|x| x != item);
+            // Add: push to back only if not already present.
+            for item in &self.added_items {
+                if !result.contains(item) {
+                    result.push(item.clone());
+                }
+            }
+
+            // Delete: remove matching items.
+            for item in &self.deleted_items {
+                result.retain(|x| x != item);
+            }
+
+            result
+        };
+
+        if !self.ordered_items.is_empty() {
+            apply_ordering(&mut result, &self.ordered_items);
         }
 
         result
+    }
+}
+
+/// Merge two `reorder` lists with the stronger taking precedence on
+/// duplicates. Mirrors how `prepended_items` are combined: stronger items keep
+/// their order, then weaker items not present in the stronger are appended.
+fn merge_ordered<T: Clone + PartialEq>(stronger: &[T], weaker: &[T]) -> Vec<T> {
+    if weaker.is_empty() {
+        return stronger.to_vec();
+    }
+    if stronger.is_empty() {
+        return weaker.to_vec();
+    }
+    stronger
+        .iter()
+        .chain(weaker.iter().filter(|e| !stronger.contains(e)))
+        .cloned()
+        .collect()
+}
+
+fn apply_ordering<T: Clone + PartialEq>(items: &mut [T], order: &[T]) {
+    if order.is_empty() || items.is_empty() {
+        return;
+    }
+
+    let slots: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| order.contains(item).then_some(i))
+        .collect();
+    if slots.is_empty() {
+        return;
+    }
+
+    let projected: Vec<&T> = order.iter().filter(|item| items.contains(*item)).collect();
+    for (slot, item) in slots.into_iter().zip(projected) {
+        items[slot].clone_from(item);
     }
 }
 
@@ -449,6 +502,16 @@ mod tests {
         assert_eq!(op.compose_over(&[1, 2, 3]), vec![0, 1, 3, 99]);
     }
 
+    /// Ordered items are reshuffled only within their existing result slots.
+    #[test]
+    fn list_op_compose_ordered_items() {
+        let op = ListOp {
+            ordered_items: vec![3, 1],
+            ..Default::default()
+        };
+        assert_eq!(op.compose_over(&[1, 2, 3, 4]), vec![3, 2, 1, 4]);
+    }
+
     /// Composing over an empty weaker list produces results purely from the
     /// stronger operation's items.
     #[test]
@@ -467,5 +530,93 @@ mod tests {
     fn list_op_compose_noop() {
         let op: ListOp<i32> = ListOp::default();
         assert_eq!(op.compose_over(&[1, 2, 3]), vec![1, 2, 3]);
+    }
+
+    /// `reorder` opinions on the stronger op survive composition with a
+    /// composable weaker op and still apply on `flatten()`.
+    #[test]
+    fn combined_keeps_stronger_reorder() {
+        let stronger = ListOp {
+            ordered_items: vec![2, 1],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            prepended_items: vec![1, 2],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        assert_eq!(composed.ordered_items, vec![2, 1]);
+        assert_eq!(composed.flatten(), vec![2, 1]);
+    }
+
+    /// `reorder` opinions on the weaker op survive when the stronger is
+    /// composable but authors no `reorder` of its own.
+    #[test]
+    fn combined_keeps_weaker_reorder() {
+        let stronger = ListOp {
+            prepended_items: vec![3],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            prepended_items: vec![1, 2],
+            ordered_items: vec![2, 1],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        assert_eq!(composed.ordered_items, vec![2, 1]);
+        assert_eq!(composed.flatten(), vec![3, 2, 1]);
+    }
+
+    /// When both sides author a `reorder`, the stronger order wins; weaker
+    /// entries not in the stronger are appended.
+    #[test]
+    fn combined_merges_reorder() {
+        let stronger = ListOp {
+            ordered_items: vec![1, 2],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            prepended_items: vec![1, 2, 3],
+            ordered_items: vec![2, 3],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        assert_eq!(composed.ordered_items, vec![1, 2, 3]);
+        assert_eq!(composed.flatten(), vec![1, 2, 3]);
+    }
+
+    /// An explicit stronger op replaces weaker items but still carries its own
+    /// `ordered_items` through to `flatten`.
+    #[test]
+    fn combined_explicit_keeps_reorder() {
+        let stronger = ListOp {
+            explicit: true,
+            explicit_items: vec![1, 2, 3],
+            ordered_items: vec![3, 1],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            prepended_items: vec![9],
+            ordered_items: vec![9],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        assert!(composed.explicit);
+        assert_eq!(composed.ordered_items, vec![3, 1]);
+        assert_eq!(composed.flatten(), vec![3, 2, 1]);
+    }
+
+    /// `reduced()` keeps `ordered_items` intact so a `reorder` opinion still
+    /// applies on the eventual `flatten()`.
+    #[test]
+    fn reduced_keeps_reorder() {
+        let op = ListOp {
+            prepended_items: vec![1, 2],
+            ordered_items: vec![2, 1],
+            ..Default::default()
+        };
+        let reduced = op.reduced();
+        assert_eq!(reduced.ordered_items, vec![2, 1]);
+        assert_eq!(reduced.flatten(), vec![2, 1]);
     }
 }

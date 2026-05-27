@@ -4,6 +4,10 @@ Feature parity with the [AOUSD Core Specification v1.0.1](docs/aousd_core_spec_1
 
 Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Considering
 
+Status is scoped to the feature text in each row. If the implementation covers
+only part of the referenced spec section, the notes call out what remains before
+that broader spec behavior can be considered fully covered.
+
 ## Foundational Data Types (Spec 6)
 
 | Feature | Spec | Status | Version | Notes |
@@ -32,7 +36,7 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Core metadata fields (relationship spec) | `7.6.4` | :white_check_mark: | `0.1.2` | targetPaths, variability, custom |
 | Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `0.2.0` | |
 | Spline specialized type | `7.4.2.4` | :construction: | | SplineKnot, interpolation modes, extrapolation, looping |
-| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; composed through arcs as of `main`. |
+| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; composed through arcs as of `main`. Runtime retiming during value resolution is tracked under Spec 12. |
 
 ## Paths (Spec 8)
 
@@ -65,13 +69,13 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | [Sublayers](https://openusd.org/release/glossary.html#usdglossary-sublayers) | `10.3.1` | :white_check_mark: | `0.1.2` | Layer stack construction |
-| Sublayer time offsets | `10.3.1.1` | :white_check_mark: | `main` | Composed through nested sublayers; carried on each `Node` via `MapFunction::time_offset`. Value-resolution application pending. |
+| Sublayer offset composition | `10.3.1.1` | :white_check_mark: | `main` | Effective sublayer offsets are composed through nested sublayers and carried on each `Node` via `MapFunction::time_offset`. Runtime retiming is tracked under Spec 12.3.2.1. |
 | [References](https://openusd.org/release/api/class_usd_references.html) (internal + external) | `10.3.2.1` | :white_check_mark: | `0.1.2` | Including `defaultPrim` fallback |
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
-| Reference time offsets | `10.3.2.1.2` | :white_check_mark: | `main` | Carried through reference arcs; composed with sublayer offsets on the target layer stack. Value-resolution application pending. |
+| Reference offset composition | `10.3.2.1.2` | :white_check_mark: | `main` | Reference offsets are carried through reference arcs and composed with target layer-stack offsets. Runtime retiming is tracked under Spec 12.3.2.1. |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `main` | `StageBuilder::initial_load_set` supports loading all payloads or leaving them unloaded |
-| Payload time offsets | `10.3.2.2.2` | :white_check_mark: | `main` | Same composition as references; unloaded payloads' offsets are ignored. Value-resolution application pending. |
+| Payload offset composition | `10.3.2.2.2` | :white_check_mark: | `main` | Loaded payload offsets compose like references; unloaded payload offsets are ignored. Runtime retiming is tracked under Spec 12.3.2.1. |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |
@@ -94,8 +98,8 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 | Composed stage | `11.2` | :white_check_mark: | `0.2.0` | `Stage::open` with depth-first traversal |
 | Populating the stage | `11.3` | :white_check_mark: | `0.2.0` | Lazy per-prim composition via `pcp::Cache` |
 | [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :white_check_mark: | `main` | `StageBuilder::population_mask` limits stage queries, traversal, and root layer-stack dependency collection to a masked working set |
-| Ordered prim children | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment |
-| Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
+| Prim child discovery | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment. Full normative ordering is tracked in the `primOrder` row below. |
+| Ordered prim children (`primOrder` reordering) | `11.3.1` | :construction: | `main` | Partial: strongest `primOrder` is applied after the final merge. Left for full spec coverage: merge weakest-to-strongest, apply relocates per layer stack, and reapply `primOrder` after every merge. |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |
 | Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `main` | Strongest opinion applied via `sdf::apply_ordering` |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :construction: | | `instanceable` readable; shared representation not implemented |
@@ -108,17 +112,18 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
-| Metadata resolution (strongest opinion wins) | `12.2` | :white_check_mark: | `0.2.0` | `PrimIndex::resolve_field` with `ValueBlock` support |
+| Metadata resolution (strongest opinion wins) | `12.2` | :white_check_mark: | `0.2.0` | `PrimIndex::resolve_field` with `ValueBlock` support for scalar fields. Special field classes are tracked separately below. |
 | Specifier resolution | `12.2.1` | :white_check_mark: | `main` | `def`/`class`/`over` precedence with direct-inherit awareness in `PrimIndex::resolve_specifier` |
 | typeName resolution (from prim definition) | `12.2.2` | :construction: | | Uses strongest opinion, not prim definition |
 | variability resolution (weakest opinion) | `12.2.3` | :white_check_mark: | `main` | Weakest authored opinion via `PrimIndex::resolve_variability` |
 | custom field resolution (any-true) | `12.2.4` | :white_check_mark: | `main` | Logical OR across opinions via `PrimIndex::resolve_custom` |
 | Dictionary combining | `12.2.5` | :white_check_mark: | `main` | Recursive merge across dictionary-valued opinions |
-| List op resolution | `12.2.6` | :white_check_mark: | `0.2.0` | Combined stack of opinions |
+| List op resolution | `12.2.6` | :construction: | `main` | Partial: composition-arc list ops and composed `apiSchemas` are resolved. Left for full metadata coverage: generic list-op field resolution for `targetPaths`, `connectionPaths`, `clipSets`, and any registered list-op metadata field. |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
 | Fallback values | `12.2.8` | :construction: | | Requires schema registry |
-| Attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | timeSamples, default, ValueBlock |
-| Attribute resolution (with time) | `12.3` | :white_check_mark: | `0.1.2` | Time sample lookup |
+| Basic attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | Resolves authored `default`, `timeSamples`, and `ValueBlock`. Layer-offset retiming, value clips, and splines are tracked separately. |
+| Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.1.2` | `Stage::value_at` performs held/linear interpolation over composed samples. Per-node retiming and value clips are tracked separately. |
+| Layer-offset retiming during value resolution | `12.3.2.1` | :construction: | | Offsets are composed and stored on PCP nodes. Left: sample each contributing node in its local time (`stage_time * scale + offset`), merge retimed samples/defaults correctly, and cover sublayer/reference/payload offset cases. |
 | Spline evaluation | `12.5.3` | :construction: | | Bezier/Hermite curve interpolation |
 | Interpolation (Held) | `12.5.1` | :white_check_mark: | `main` | `Stage::value_at(attr, time)` with `InterpolationType::Held`. |
 | Interpolation (Linear) | `12.5.2` | :white_check_mark: | `main` | `Stage::value_at(attr, time)` with `InterpolationType::Linear` (default). All §12.5.2 types incl. `quath`/`f`/`d` via slerp; held-fallback for unsupported types and past-last-sample. |
@@ -132,12 +137,12 @@ Legend: :white_check_mark: Supported | :construction: Planned | :thinking: Consi
 |---|---|---|---|---|
 | [Schema registry](https://openusd.org/release/api/class_usd_schema_registry.html) | `13.3` | :construction: | | Type hierarchy, prim definitions |
 | [Typed schemas](https://openusd.org/release/api/class_usd_typed.html) (IsA) | `13.3.1` | :construction: | | `typeName` readable; registry not implemented |
-| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` readable; definitions not loaded |
+| [Applied schemas](https://openusd.org/release/api/class_usd_a_p_i_schema_base.html) (HasA) | `13.3.2` | :construction: | | `apiSchemas` list-ops compose across contributing layers. Left for full spec coverage: schema registry, single/multiple application validation, built-in/auto-apply inclusions, composed prim definitions, and fallback property values. |
 | Schema inclusions (built-ins, auto-applies) | `13.3.2.1` | :construction: | | |
 | Prim definitions (property fallbacks) | `13.3` | :construction: | | |
 | Core schema types | `13.4` | :construction: | | |
 | [Value type names](https://openusd.org/release/api/class_sdf_value_type_name.html) | `13.3` | :construction: | | Attribute type validation |
-| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :construction: | | Fields readable; semantics not applied |
+| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :construction: | | Fields readable; `apiSchemas` list-op composition applied. Left: composed-prim `fallbackPrimTypes`, value clip semantics for `clips`/`clipSets`, and any schema-domain behavior layered on these fields. |
 | [Schema codegen](https://openusd.org/release/tut_generating_new_schema.html) | `13.3` | :construction: | | Generate typed APIs from schema definitions |
 
 ## Color (Spec 14)
@@ -181,7 +186,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [UsdLux](https://openusd.org/release/api/usd_lux_page_front.html) (lighting) | :construction: | | |
 | [UsdSkel](https://openusd.org/release/api/usd_skel_page_front.html) (skeletons, skinning) | :white_check_mark: | `main` | Schema reader behind `skel` feature. Covers `SkelRoot`, `Skeleton`, `SkelAnimation`, `BlendShape` (incl. inbetween shapes), and `SkelBindingAPI` with namespace-inherited `skel:skeleton` / `skel:animationSource`. No authoring helpers; stage-level interpolation of SkelAnimation time samples is left to the consumer. |
 | [UsdVol](https://openusd.org/release/api/usd_vol_page_front.html) (volumes) | :construction: | | |
-| [UsdPhysics](https://openusd.org/release/api/usd_physics_page_front.html) | :white_check_mark: | `main` | Schema reader behind `physics` feature. Covers all 8 prim types, 7 single-apply APIs, `LimitAPI` + `DriveAPI` multi-apply. No authoring helpers; `CollisionGroup` returns raw collection targets only. |
+| [UsdPhysics](https://openusd.org/release/api/usd_physics_page_front.html) schema reader | :white_check_mark: | `main` | Reader behind `physics` feature. Covers all 8 prim types, 7 single-apply APIs, `LimitAPI` + `DriveAPI` multi-apply. No authoring helpers; collection evaluation for `CollisionGroup` is tracked under Spec 15. |
 | [UsdRender](https://openusd.org/release/api/usd_render_page_front.html) | :construction: | | |
 | UsdMedia, UsdUI, UsdProc | :construction: | | |
 | [Flatten / export](https://openusd.org/release/api/flatten_utils_8h.html) | :construction: | | |

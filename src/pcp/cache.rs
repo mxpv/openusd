@@ -190,6 +190,13 @@ impl Cache {
         }
     }
 
+    /// Returns the composed `apiSchemas` list for a prim.
+    pub fn api_schemas(&mut self, path: &Path) -> Result<Vec<String>> {
+        let path = path.prim_path();
+        self.ensure_index(&path)?;
+        self.indices[&path].resolve_token_list_op(FieldKey::ApiSchemas, &self.stack, None)
+    }
+
     /// Returns pseudo-root layer metadata from the root layer only.
     ///
     /// Session-layer and sublayer opinions are intentionally ignored here,
