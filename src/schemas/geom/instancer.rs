@@ -117,9 +117,13 @@ fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<St
 }
 
 /// `inactiveIds` lives on the prim's metadata, not as an attribute.
-/// Try `Int64Vec` first (Pixar's authored shape) then `IntVec`.
+/// Pixar's schema declares it as `int64listop`, so authored opinions
+/// surface as a list-op (the `prepend`/`append`/`delete` syntax).
+/// Plain `Int64Vec` / `IntVec` are accepted as legacy fallbacks.
 fn read_inactive_ids_metadata(stage: &Stage, prim: &Path) -> Result<Vec<i64>> {
     Ok(match stage.field::<Value>(prim.clone(), META_INACTIVE_IDS)? {
+        Some(Value::Int64ListOp(op)) => op.flatten(),
+        Some(Value::IntListOp(op)) => op.flatten().into_iter().map(|i| i as i64).collect(),
         Some(Value::Int64Vec(v)) => v,
         Some(Value::IntVec(v)) => v.into_iter().map(|i| i as i64).collect(),
         _ => Vec::new(),
