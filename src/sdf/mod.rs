@@ -24,7 +24,7 @@ pub use path::{path, Path};
 pub use schema::{ChildrenKey, FieldKey};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, PrimSpec, PrimSpecMut, PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec,
-    RelationshipSpecMut, Spec,
+    RelationshipSpecMut, Spec, SpecError,
 };
 pub use value::{Value, ValueConversionError};
 

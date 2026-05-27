@@ -102,6 +102,8 @@ The test suite includes extensive binary format tests using fixture files in `fi
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to `fixtures/` when vendor assets don't cover the specific case needed.
 
+Test function names should be terse (2–4 underscore-separated words) and match the existing naming convention of the file. Prefer `add_api_schema_dup_delete` over `add_api_schema_clears_duplicate_delete_opinions`.
+
 ## Dependencies
 
 Key external dependencies:
