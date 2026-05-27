@@ -1,13 +1,13 @@
 //! UsdSkel schema reader and skinning toolkit.
 //!
 //! Decodes Pixar's `UsdSkel` schema family from a composed
-//! [`crate::Stage`], plus the time-independent half of Pixar's
+//! [`crate::usd::Stage`], plus the time-independent half of Pixar's
 //! UsdSkel object model: topology, animation-to-skeleton mappers,
 //! per-mesh skinning resolvers, and pure-math helpers for linear
 //! blend skinning and blend-shape application.
 //!
 //! Time-sampled SkelAnimation evaluation is handled by
-//! [`SkelAnimQuery`], which delegates to [`crate::Stage::value_at`]
+//! [`SkelAnimQuery`], which delegates to [`crate::usd::Stage::value_at`]
 //! and inherits the stage's interpolation mode (AOUSD §12.5 — linear
 //! by default, with per-joint slerp for `rotations`). The static
 //! resolvers below take pre-evaluated joint poses, so callers
@@ -52,9 +52,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use openusd::{skel, sdf, Stage};
+//! use openusd::{sdf, skel, usd};
 //!
-//! let stage = Stage::open("character.usda")?;
+//! let stage = usd::Stage::open("character.usda")?;
 //! for root in skel::find_skel_roots(&stage)? {
 //!     let root = sdf::path(&root)?;
 //!     for b in skel::discover_bindings(&stage, &root)? {

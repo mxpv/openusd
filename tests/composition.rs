@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use openusd::{sdf, Stage};
+use openusd::{sdf, usd};
 
 const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/composition/tests/assets";
 
@@ -64,7 +64,7 @@ fn run(name: &str, format: Format) {
         return;
     }
 
-    let stage = Stage::builder()
+    let stage = usd::Stage::builder()
         .on_error(|_| Ok(()))
         .open(entry.to_str().unwrap())
         .unwrap();
@@ -278,8 +278,8 @@ composition_tests! {
 mod reorder {
     use super::*;
 
-    fn open_fixture() -> Stage {
-        Stage::open("fixtures/reorder.usda").expect("open reorder fixture")
+    fn open_fixture() -> usd::Stage {
+        usd::Stage::open("fixtures/reorder.usda").expect("open reorder fixture")
     }
 
     #[test]
@@ -304,8 +304,8 @@ mod value_resolution {
     use super::*;
     use openusd::sdf::{FieldKey, Specifier, Value, Variability};
 
-    fn open_fixture() -> Stage {
-        Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")
+    fn open_fixture() -> usd::Stage {
+        usd::Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")
     }
 
     fn dictionary<'a>(dict: &'a HashMap<String, Value>, key: &str) -> &'a HashMap<String, Value> {

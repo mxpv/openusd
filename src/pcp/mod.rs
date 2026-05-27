@@ -43,7 +43,7 @@
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
-//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::Stage). Owns a `LayerStack`. |
+//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
@@ -74,7 +74,7 @@
 //! # Variant fallbacks
 //!
 //! A [`VariantFallbackMap`] can be provided when opening a stage via
-//! [`StageBuilder::variant_fallbacks`](crate::StageBuilder::variant_fallbacks).
+//! [`StageBuilder::variant_fallbacks`](crate::usd::StageBuilder::variant_fallbacks).
 //! When a prim has a variant set but no authored selection, the engine tries
 //! each fallback in order. The first fallback matching an existing variant in
 //! the set is used; if none match, the first variant in the set is the default.
@@ -88,7 +88,7 @@
 //! execution.
 //!
 //! Composition errors ([`Error`]) are returned from [`Cache`](cache::Cache)
-//! methods and handled by the [`Stage`](crate::Stage)'s error callback.
+//! methods and handled by the [`Stage`](crate::usd::Stage)'s error callback.
 //! The callback decides whether to skip the broken arc and continue or
 //! abort composition entirely.
 //!
@@ -347,7 +347,7 @@ impl LayerStack {
 ///
 /// These errors represent recoverable composition failures — a missing
 /// layer or invalid metadata does not have to be fatal. The error handler
-/// provided via [`StageBuilder::on_error`](crate::StageBuilder::on_error)
+/// provided via [`StageBuilder::on_error`](crate::usd::StageBuilder::on_error)
 /// decides whether to skip the broken arc and continue, or abort.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

@@ -43,7 +43,7 @@ impl std::fmt::Display for DependencyKind {
 ///
 /// When opening a stage, some errors (such as missing referenced files) can be
 /// tolerated so that the stage is partially constructed. A callback provided via
-/// [`StageBuilder::on_error`](crate::stage::StageBuilder::on_error) receives
+/// [`StageBuilder::on_error`](crate::usd::StageBuilder::on_error) receives
 /// these errors and decides whether to continue or abort.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

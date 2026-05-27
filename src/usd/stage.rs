@@ -45,9 +45,26 @@ use anyhow::Result;
 use bitflags::bitflags;
 
 use crate::ar::{DefaultResolver, Resolver};
-use crate::interp::{self, InterpolationType};
 use crate::sdf::{self, FieldKey, Path, Payload, SpecType, Specifier, TimeSampleMap, Value};
-use crate::{layer, pcp, CompositionError};
+use crate::{layer, pcp};
+
+use super::interp::{self, InterpolationType};
+
+/// A recoverable error encountered during stage composition.
+///
+/// Wraps errors from both layer collection ([`layer::Error`]) and prim
+/// composition ([`pcp::Error`]). The error handler provided via
+/// [`StageBuilder::on_error`] decides whether to skip and continue or abort.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompositionError {
+    /// Error during layer collection (e.g. unresolved asset path).
+    #[error(transparent)]
+    Layer(#[from] layer::Error),
+    /// Error during prim composition (e.g. missing defaultPrim, arc cycle).
+    #[error(transparent)]
+    Pcp(#[from] pcp::Error),
+}
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -304,7 +321,7 @@ pub enum StageAuthoringError {
 ///
 /// Owns the loaded layer stack and provides composed access to prims,
 /// properties, and metadata. Composition indices are built lazily and
-/// cached in the [`Cache`].
+/// cached in the [`Cache`](crate::pcp::Cache).
 pub struct Stage {
     /// Lazily-built composition graph caching per-prim indices and contexts.
     graph: RefCell<pcp::Cache>,
@@ -336,9 +353,9 @@ impl Stage {
     /// # Example
     ///
     /// ```no_run
-    /// use openusd::Stage;
+    /// use openusd::usd;
     ///
-    /// let stage = Stage::builder()
+    /// let stage = usd::Stage::builder()
     ///     .on_error(|err| {
     ///         eprintln!("warning: {err}");
     ///         Ok(())
@@ -571,19 +588,8 @@ impl Stage {
     /// Returns the composed `timeSamples` for an attribute, or
     /// `None` when the attribute has none authored.
     ///
-    /// When querying the same attribute at many time codes, fetch
-    /// once with this method and call [`interp::evaluate`] in a
-    /// loop — that amortizes the field-resolution cost (the
-    /// composition graph is walked, and the strongest opinion is
-    /// cloned, on every call to [`Stage::value_at`]).
-    ///
-    /// ```ignore
-    /// let samples = stage.time_samples("/Prim.scalar")?.unwrap_or_default();
-    /// let mode = stage.interpolation_type();
-    /// for frame in 0..100 {
-    ///     let v = interp::evaluate(&samples, frame as f64, mode);
-    /// }
-    /// ```
+    /// This returns raw composed samples. Use [`Stage::value_at`] when you
+    /// need the stage's [`InterpolationType`] applied to a specific time code.
     pub fn time_samples(&self, attr_path: impl Into<Path>) -> Result<Option<TimeSampleMap>> {
         Ok(match self.field::<Value>(attr_path, FieldKey::TimeSamples)? {
             Some(Value::TimeSamples(samples)) => Some(samples),
@@ -597,8 +603,8 @@ impl Stage {
     /// resolved value at a specific time code.
     ///
     /// Resolution order:
-    /// 1. If the attribute authors `timeSamples`, apply [§12.5
-    ///    interpolation](crate::interp) over them.
+    /// 1. If the attribute authors `timeSamples`, apply AOUSD §12.5
+    ///    interpolation over them.
     /// 2. Otherwise fall back to the attribute's `default` value.
     ///
     /// Returns `Ok(None)` when the attribute is unauthored, when the
@@ -1105,9 +1111,9 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// # Example
     ///
     /// ```no_run
-    /// use openusd::Stage;
+    /// use openusd::usd;
     ///
-    /// let stage = Stage::builder()
+    /// let stage = usd::Stage::builder()
     ///     .session_layer("session.usda")
     ///     .open("scene.usda")
     ///     .unwrap();
@@ -1129,13 +1135,13 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// # Example
     ///
     /// ```no_run
-    /// use openusd::Stage;
+    /// use openusd::usd;
     /// use openusd::pcp::VariantFallbackMap;
     ///
     /// let fallbacks = VariantFallbackMap::new()
     ///     .add("shadingComplexity", ["full", "simple"]);
     ///
-    /// let stage = Stage::builder()
+    /// let stage = usd::Stage::builder()
     ///     .variant_fallbacks(fallbacks)
     ///     .open("scene.usda")
     ///     .unwrap();
@@ -1182,9 +1188,9 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// # Example
     ///
     /// ```
-    /// use openusd::Stage;
+    /// use openusd::usd;
     ///
-    /// let stage = Stage::builder()
+    /// let stage = usd::Stage::builder()
     ///     .in_memory("anon.usda")
     ///     .unwrap();
     /// stage.define_prim("/World", "Xform").unwrap();

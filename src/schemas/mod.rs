@@ -1,5 +1,5 @@
 //! Domain-schema readers — the non-core extensions that ride on top
-//! of the spec-level `sdf` / `stage` machinery.
+//! of the spec-level `sdf` / `usd` machinery.
 //!
 //! The AOUSD core specification (see `docs/aousd_core_spec_1.0.1.pdf`)
 //! covers composition, value resolution, and the file formats; it

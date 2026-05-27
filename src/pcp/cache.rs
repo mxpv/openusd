@@ -1,6 +1,6 @@
 //! Composition graph: lazily-built cache of per-prim composition indices.
 //!
-//! The [`Cache`] is the primary interface between [`Stage`](crate::Stage)
+//! The [`Cache`] is the primary interface between [`Stage`](crate::usd::Stage)
 //! and the composition engine. It caches [`PrimIndex`] results alongside the
 //! [`CompositionContext`] that flows from parent prims to children, so ancestor
 //! composition is never recomputed.
@@ -35,7 +35,7 @@ use super::{LayerStack, VariantFallbackMap};
 /// fallbacks are tried in order before the default (first variant in the set).
 ///
 /// All public methods return `Result` — a [`pcp::Error`](super::Error) is
-/// returned when composition fails. The caller ([`Stage`](crate::Stage))
+/// returned when composition fails. The caller ([`Stage`](crate::usd::Stage))
 /// decides whether to skip or abort via its error handler.
 pub struct Cache {
     stack: LayerStack,
@@ -100,7 +100,7 @@ impl Cache {
     /// the precomputed state ([`Relocates`], sublayer stacks, layer offsets)
     /// that was materialized once from the layer data at construction.
     ///
-    /// Called by [`Stage`](crate::Stage) after any authored mutation to a
+    /// Called by [`Stage`](crate::usd::Stage) after any authored mutation to a
     /// backing layer so subsequent reads see the new opinions — including
     /// `layerRelocates`, `subLayers`, and `subLayerOffsets` changes.
     //
