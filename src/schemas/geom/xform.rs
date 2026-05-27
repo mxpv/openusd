@@ -23,7 +23,7 @@ use anyhow::Result;
 
 use crate::math::{mat4_inverse, mat4_mul, IDENTITY_MAT4};
 use crate::sdf::{Path, Value};
-use crate::Stage;
+use crate::usd::Stage;
 
 const XFORM_OP_ORDER: &str = "xformOpOrder";
 const TOKEN_INVERT_PREFIX: &str = "!invert!";

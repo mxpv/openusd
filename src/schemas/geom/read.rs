@@ -8,7 +8,7 @@
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path, Value};
-use crate::Stage;
+use crate::usd::Stage;
 
 use super::tokens::*;
 use super::types::*;
