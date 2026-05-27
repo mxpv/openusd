@@ -26,7 +26,7 @@
 //! Use [`StageBuilder`] to customize stage behavior before opening:
 //!
 //! - [`StageBuilder::resolver`] sets a custom
-//!   [`Resolver`](crate::ar::Resolver) for mapping asset paths to files.
+//!   [`ar::Resolver`](crate::ar::Resolver) for mapping asset paths to files.
 //! - [`StageBuilder::on_error`] sets a callback for recoverable composition
 //!   errors (missing layers, arc cycles, etc.).
 //! - [`StageBuilder::variant_fallbacks`] provides a
@@ -44,9 +44,7 @@ use std::cell::{Cell, RefCell};
 use anyhow::Result;
 use bitflags::bitflags;
 
-use crate::ar::{DefaultResolver, Resolver};
-use crate::sdf::{self, FieldKey, Path, Payload, SpecType, Specifier, TimeSampleMap, Value};
-use crate::{layer, pcp};
+use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
 
@@ -163,14 +161,14 @@ impl InitialLoadSet {
 /// also included so traversal can reach the requested working set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagePopulationMask {
-    paths: Vec<Path>,
+    paths: Vec<sdf::Path>,
 }
 
 impl StagePopulationMask {
     /// Creates a mask that includes the full stage.
     pub fn all() -> Self {
         Self {
-            paths: vec![Path::abs_root()],
+            paths: vec![sdf::Path::abs_root()],
         }
     }
 
@@ -180,7 +178,7 @@ impl StagePopulationMask {
     }
 
     /// Creates a mask from prim paths.
-    pub fn new(paths: impl IntoIterator<Item = impl Into<Path>>) -> Self {
+    pub fn new(paths: impl IntoIterator<Item = impl Into<sdf::Path>>) -> Self {
         let mut mask = Self::empty();
         for path in paths {
             mask.add_path(path);
@@ -189,15 +187,15 @@ impl StagePopulationMask {
     }
 
     /// Returns a copy of this mask with `path` added.
-    pub fn with_path(mut self, path: impl Into<Path>) -> Self {
+    pub fn with_path(mut self, path: impl Into<sdf::Path>) -> Self {
         self.add_path(path);
         self
     }
 
     /// Adds a prim path to the mask.
-    pub fn add_path(&mut self, path: impl Into<Path>) -> &mut Self {
-        let path = Path::abs_root().make_absolute(&path.into().prim_path());
-        if path == Path::abs_root() {
+    pub fn add_path(&mut self, path: impl Into<sdf::Path>) -> &mut Self {
+        let path = sdf::Path::abs_root().make_absolute(&path.into().prim_path());
+        if path == sdf::Path::abs_root() {
             self.paths.clear();
             self.paths.push(path);
         } else if !self.is_all() && !self.paths.contains(&path) {
@@ -207,7 +205,7 @@ impl StagePopulationMask {
     }
 
     /// Returns the authored mask paths.
-    pub fn paths(&self) -> &[Path] {
+    pub fn paths(&self) -> &[sdf::Path] {
         &self.paths
     }
 
@@ -221,7 +219,7 @@ impl StagePopulationMask {
     /// `add_path` clears `paths` to `[abs_root]` whenever the root is added,
     /// so a single front-position check captures the invariant.
     pub fn is_all(&self) -> bool {
-        self.paths.first() == Some(&Path::abs_root())
+        self.paths.first() == Some(&sdf::Path::abs_root())
     }
 
     /// Returns `true` if `path` is inside the population mask.
@@ -229,7 +227,7 @@ impl StagePopulationMask {
     /// Variant selection segments in `path` are stripped before matching so a
     /// mask of `/Prim/Child` still includes opinions authored under
     /// `/Prim{set=sel}/Child`.
-    pub fn includes(&self, path: &Path) -> bool {
+    pub fn includes(&self, path: &sdf::Path) -> bool {
         if self.is_all() {
             return true;
         }
@@ -308,12 +306,12 @@ pub enum StageAuthoringError {
     Layer(#[from] sdf::AuthoringError),
 
     /// The edit target's layer index is out of range for this stage.
-    #[error("edit target layer index {index} is out of range ({len} layers)")]
+    #[error("edit target layer index {index} is out of range ({count} layers)")]
     LayerOutOfRange {
         /// The offending index.
         index: usize,
         /// The current number of layers.
-        len: usize,
+        count: usize,
     },
 }
 
@@ -340,7 +338,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    /// Opens a stage from a root layer file using the [`DefaultResolver`].
+    /// Opens a stage from a root layer file using the [`ar::DefaultResolver`].
     ///
     /// Any unresolvable transitive dependency causes an immediate error.
     /// For custom resolver or error handling, use [`Stage::builder`].
@@ -363,7 +361,7 @@ impl Stage {
     ///     .open("scene.usda")
     ///     .unwrap();
     /// ```
-    pub fn builder() -> StageBuilder<DefaultResolver> {
+    pub fn builder() -> StageBuilder<ar::DefaultResolver> {
         StageBuilder::new()
     }
 
@@ -379,13 +377,12 @@ impl Stage {
     /// Validates that `target.layer_index()` is in range so a bad index
     /// surfaces here, not on some later unrelated authoring call.
     pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
-        let len = self.graph.borrow().layer_count();
-        if target.layer_index >= len {
-            return Err(StageAuthoringError::LayerOutOfRange {
-                index: target.layer_index,
-                len,
-            });
+        let count = self.graph.borrow().layer_count();
+        let index = target.layer_index;
+        if index >= count {
+            return Err(StageAuthoringError::LayerOutOfRange { index, count });
         }
+
         self.edit_target.set(target);
         Ok(())
     }
@@ -395,10 +392,10 @@ impl Stage {
     /// returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
     /// (`create_attribute`, `create_relationship`).
-    pub fn define_prim(&self, path: impl Into<Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
+    pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
         let layer_path = path.clone();
-        self.with_target_layer(|layer| layer.create_prim(layer_path, Specifier::Def, "").map(|_| true))?;
+        self.with_target_layer(|layer| layer.create_prim(layer_path, sdf::Specifier::Def, "").map(|_| true))?;
         Ok(super::Prim::new(self, path))
     }
 
@@ -407,7 +404,7 @@ impl Stage {
     /// `path` its specifier is left untouched — `override_prim` does not
     /// downgrade an existing `def` or `class` to `over`. Chain fluent
     /// setters on the returned handle to author additional fields.
-    pub fn override_prim(&self, path: impl Into<Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
+    pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
         let layer_path = path.clone();
         self.with_target_layer(|layer| layer.override_prim(layer_path).map(|_| true))?;
@@ -421,7 +418,7 @@ impl Stage {
     /// fluent setters.
     pub fn create_attribute(
         &self,
-        path: impl Into<Path>,
+        path: impl Into<sdf::Path>,
         type_name: impl Into<String>,
     ) -> Result<super::Attribute<'_>, StageAuthoringError> {
         let path = path.into();
@@ -439,7 +436,10 @@ impl Stage {
     /// layer with default variability `Varying` and `custom = true`, matching
     /// C++ `UsdPrim::CreateRelationship`. Override the defaults and add targets
     /// via the returned [`Relationship`] handle's fluent setters.
-    pub fn create_relationship(&self, path: impl Into<Path>) -> Result<super::Relationship<'_>, StageAuthoringError> {
+    pub fn create_relationship(
+        &self,
+        path: impl Into<sdf::Path>,
+    ) -> Result<super::Relationship<'_>, StageAuthoringError> {
         let path = path.into();
         let layer_path = path.clone();
         self.with_target_layer(|layer| {
@@ -482,14 +482,12 @@ impl Stage {
     {
         let target = self.edit_target.get();
         let mut cache = self.graph.borrow_mut();
-        let len = cache.layer_count();
+        let count = cache.layer_count();
+        let index = target.layer_index;
         let result = {
             let layer = cache
-                .layer_mut(target.layer_index)
-                .ok_or(StageAuthoringError::LayerOutOfRange {
-                    index: target.layer_index,
-                    len,
-                })?;
+                .layer_mut(index)
+                .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
             f(layer)
         };
         Self::finalize_layer(&mut cache, result)
@@ -506,11 +504,11 @@ impl Stage {
     {
         let mut cache = self.graph.borrow_mut();
         let index = cache.session_layer_count();
-        let len = cache.layer_count();
+        let count = cache.layer_count();
         let result = {
             let layer = cache
                 .layer_mut(index)
-                .ok_or(StageAuthoringError::LayerOutOfRange { index, len })?;
+                .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
             f(layer).map(|()| true)
         };
         Self::finalize_layer(&mut cache, result).map(|_| ())
@@ -612,9 +610,9 @@ impl Stage {
     ///
     /// This returns raw composed samples. Use [`Stage::value_at`] when you
     /// need the stage's [`InterpolationType`] applied to a specific time code.
-    pub fn time_samples(&self, attr_path: impl Into<Path>) -> Result<Option<TimeSampleMap>> {
-        Ok(match self.field::<Value>(attr_path, FieldKey::TimeSamples)? {
-            Some(Value::TimeSamples(samples)) => Some(samples),
+    pub fn time_samples(&self, attr_path: impl Into<sdf::Path>) -> Result<Option<sdf::TimeSampleMap>> {
+        Ok(match self.field::<sdf::Value>(attr_path, sdf::FieldKey::TimeSamples)? {
+            Some(sdf::Value::TimeSamples(samples)) => Some(samples),
             _ => None,
         })
     }
@@ -630,27 +628,27 @@ impl Stage {
     /// 2. Otherwise fall back to the attribute's `default` value.
     ///
     /// Returns `Ok(None)` when the attribute is unauthored, when the
-    /// authored value is a [`Value::ValueBlock`] / [`Value::None`]
+    /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
     /// (the spec sentinels for "no value"), or when the queried prim
     /// is excluded by the stage's population mask.
     ///
     /// For multi-frame queries against the same attribute, see
     /// [`Stage::time_samples`].
-    pub fn value_at(&self, attr_path: impl Into<Path>, time: f64) -> Result<Option<Value>> {
+    pub fn value_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
         let attr_path = attr_path.into();
         if let Some(samples) = self.time_samples(&attr_path)? {
             return Ok(interp::evaluate(&samples, time, self.interpolation_type.get()));
         }
-        let default = self.field::<Value>(attr_path, FieldKey::Default)?;
+        let default = self.field::<sdf::Value>(attr_path, sdf::FieldKey::Default)?;
         Ok(default.and_then(|v| match v {
-            Value::ValueBlock | Value::None => None,
+            sdf::Value::ValueBlock | sdf::Value::None => None,
             other => Some(other),
         }))
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
-        let root = Path::abs_root();
+        let root = sdf::Path::abs_root();
         let children = self.try_or_handle(|cache| cache.prim_children(&root))?;
         Ok(self.filter_child_names(&root, children))
     }
@@ -660,7 +658,7 @@ impl Stage {
     /// Merges `primChildren` across all layers that have a spec at the given
     /// path, collecting the union of child names while preserving the order
     /// from the strongest layer.
-    pub fn prim_children(&self, path: impl Into<Path>) -> Result<Vec<String>> {
+    pub fn prim_children(&self, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
         let path = path.into().prim_path();
         if !self.population_mask.includes(&path) {
             return Ok(Vec::new());
@@ -670,7 +668,7 @@ impl Stage {
     }
 
     /// Returns the composed list of property names for a given prim path.
-    pub fn prim_properties(&self, path: impl Into<Path>) -> Result<Vec<String>> {
+    pub fn prim_properties(&self, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
         let path = path.into().prim_path();
         if !self.population_mask.includes(&path) {
             return Ok(Vec::new());
@@ -682,7 +680,7 @@ impl Stage {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub fn has_spec(&self, path: impl Into<Path>) -> Result<bool> {
+    pub fn has_spec(&self, path: impl Into<sdf::Path>) -> Result<bool> {
         let path = path.into();
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(false);
@@ -691,7 +689,7 @@ impl Stage {
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub fn spec_type(&self, path: impl Into<Path>) -> Result<Option<SpecType>> {
+    pub fn spec_type(&self, path: impl Into<sdf::Path>) -> Result<Option<sdf::SpecType>> {
         let path = path.into();
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
@@ -706,24 +704,24 @@ impl Stage {
     /// the property spec directly in each layer.
     ///
     /// Returns the first (strongest) opinion found, or `None` if no layer
-    /// provides a value. A [`Value::ValueBlock`] explicitly blocks opinions
+    /// provides a value. A [`sdf::Value::ValueBlock`] explicitly blocks opinions
     /// from weaker layers and causes `None` to be returned.
     ///
-    /// The return type is generic: use `Value` to get the raw enum, or a
+    /// The return type is generic: use `sdf::Value` to get the raw enum, or a
     /// concrete type (e.g. `bool`, `f64`, `String`) to convert automatically
-    /// via [`TryFrom<Value>`].
+    /// via [`TryFrom<sdf::Value>`].
     ///
-    /// Accepts both [`FieldKey`] and `&str` as the field name.
+    /// Accepts both [`sdf::FieldKey`] and `&str` as the field name.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let active: Option<bool> = stage.field(&prim, FieldKey::Active)?;
-    /// let raw: Option<Value> = stage.field(&prim, FieldKey::Active)?;
+    /// let active: Option<bool> = stage.field(&prim, sdf::FieldKey::Active)?;
+    /// let raw: Option<sdf::Value> = stage.field(&prim, sdf::FieldKey::Active)?;
     /// ```
-    pub fn field<T>(&self, path: impl Into<Path>, field: impl AsRef<str>) -> Result<Option<T>>
+    pub fn field<T>(&self, path: impl Into<sdf::Path>, field: impl AsRef<str>) -> Result<Option<T>>
     where
-        T: TryFrom<Value>,
+        T: TryFrom<sdf::Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
         let path = path.into();
@@ -743,11 +741,11 @@ impl Stage {
     /// Multi-apply schema instances (e.g. `PhysicsLimitAPI:rotZ`) are included
     /// as-is; callers that need to match only the base name should strip the
     /// instance suffix themselves.
-    pub fn api_schemas(&self, prim: &Path) -> Result<Vec<String>> {
-        let raw = self.field::<Value>(prim, "apiSchemas")?;
+    pub fn api_schemas(&self, prim: &sdf::Path) -> Result<Vec<String>> {
+        let raw = self.field::<sdf::Value>(prim, "apiSchemas")?;
         Ok(match raw {
-            Some(Value::TokenListOp(op)) => op.flatten(),
-            Some(Value::TokenVec(v)) => v,
+            Some(sdf::Value::TokenListOp(op)) => op.flatten(),
+            Some(sdf::Value::TokenVec(v)) => v,
             _ => Vec::new(),
         })
     }
@@ -756,32 +754,32 @@ impl Stage {
     ///
     /// For multi-apply schemas pass the full instance name (e.g.
     /// `"PhysicsLimitAPI:rotZ"`), not just the base name.
-    pub fn has_api_schema(&self, prim: &Path, name: &str) -> Result<bool> {
+    pub fn has_api_schema(&self, prim: &sdf::Path, name: &str) -> Result<bool> {
         Ok(self.api_schemas(prim)?.iter().any(|s| s == name))
     }
 
     /// Returns the composed `typeName` for a prim, if set.
-    pub fn type_name(&self, prim: &Path) -> Result<Option<String>> {
+    pub fn type_name(&self, prim: &sdf::Path) -> Result<Option<String>> {
         self.field::<String>(prim, "typeName")
     }
 
     /// Returns the composed specifier for a prim, if one resolves.
-    pub fn specifier(&self, prim: impl Into<Path>) -> Result<Option<Specifier>> {
-        self.field::<Specifier>(prim.into().prim_path(), FieldKey::Specifier)
+    pub fn specifier(&self, prim: impl Into<sdf::Path>) -> Result<Option<sdf::Specifier>> {
+        self.field::<sdf::Specifier>(prim.into().prim_path(), sdf::FieldKey::Specifier)
     }
 
     /// Returns the composed `kind` metadata for a prim, if authored.
-    pub fn kind(&self, prim: impl Into<Path>) -> Result<Option<String>> {
-        self.field::<String>(prim.into().prim_path(), FieldKey::Kind)
+    pub fn kind(&self, prim: impl Into<sdf::Path>) -> Result<Option<String>> {
+        self.field::<String>(prim.into().prim_path(), sdf::FieldKey::Kind)
     }
 
     /// Returns `true` if the prim and all ancestors are active.
     ///
     /// Missing `active` opinions default to `true`; a non-existent prim returns
     /// `false`.
-    pub fn is_active(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_active(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
-        if prim == Path::abs_root() {
+        if prim == sdf::Path::abs_root() {
             return Ok(true);
         }
         if !self.has_spec(&prim)? {
@@ -789,7 +787,7 @@ impl Stage {
         }
         for path in Self::prim_ancestors_inclusive(prim) {
             if self
-                .field::<bool>(&path, FieldKey::Active)?
+                .field::<bool>(&path, sdf::FieldKey::Active)?
                 .is_some_and(|active| !active)
             {
                 return Ok(false);
@@ -799,7 +797,7 @@ impl Stage {
     }
 
     /// Returns `true` if the prim is loaded.
-    pub fn is_loaded(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_loaded(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
         if !self.is_active(&prim)? {
             return Ok(false);
@@ -819,16 +817,16 @@ impl Stage {
     ///
     /// `def` and `class` are defining. `over`, missing specs, and missing
     /// specifier opinions are not defining.
-    pub fn is_defined(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_defined(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
-        if prim == Path::abs_root() {
+        if prim == sdf::Path::abs_root() {
             return Ok(true);
         }
         if !self.has_spec(&prim)? {
             return Ok(false);
         }
         for path in Self::prim_ancestors_inclusive(prim) {
-            if !matches!(self.specifier(path)?, Some(Specifier::Def | Specifier::Class)) {
+            if !matches!(self.specifier(path)?, Some(sdf::Specifier::Def | sdf::Specifier::Class)) {
                 return Ok(false);
             }
         }
@@ -836,13 +834,13 @@ impl Stage {
     }
 
     /// Returns `true` if the prim or any ancestor resolves to `class`.
-    pub fn is_abstract(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_abstract(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
-        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
             return Ok(false);
         }
         for path in Self::prim_ancestors_inclusive(prim) {
-            if self.specifier(path)? == Some(Specifier::Class) {
+            if self.specifier(path)? == Some(sdf::Specifier::Class) {
                 return Ok(true);
             }
         }
@@ -850,7 +848,7 @@ impl Stage {
     }
 
     /// Returns `true` if the prim index contains at least one composition arc.
-    pub fn has_composition_arc(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn has_composition_arc(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
         if !self.population_mask.includes(&prim) {
             return Ok(false);
@@ -859,12 +857,12 @@ impl Stage {
     }
 
     /// Returns `true` if `instanceable` resolves to true and the prim has a composition arc.
-    pub fn is_instance(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_instance(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
-        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
             return Ok(false);
         }
-        if !self.field::<bool>(&prim, FieldKey::Instanceable)?.unwrap_or(false) {
+        if !self.field::<bool>(&prim, sdf::FieldKey::Instanceable)?.unwrap_or(false) {
             return Ok(false);
         }
         self.has_composition_arc(&prim)
@@ -875,34 +873,34 @@ impl Stage {
     /// A model prim has `kind` equal to `group`, `assembly`, or `component`.
     /// Any ancestor below the pseudo-root must have `kind` equal to `group` or
     /// `assembly`; `subcomponent` is intentionally not part of the hierarchy.
-    pub fn is_model(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_model(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         Ok(self.model_kind(prim.into())?.is_some())
     }
 
     /// Returns `true` if the prim is a group-like model (`group` or `assembly`).
-    pub fn is_group(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_group(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         Ok(matches!(self.model_kind(prim.into())?, Some("group" | "assembly")))
     }
 
     /// Returns `true` if the prim is a component model in a valid model hierarchy.
-    pub fn is_component(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_component(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         Ok(self.model_kind(prim.into())? == Some("component"))
     }
 
     /// Returns `true` if the prim has `kind = "subcomponent"`.
-    pub fn is_subcomponent(&self, prim: impl Into<Path>) -> Result<bool> {
+    pub fn is_subcomponent(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         Ok(self.kind(prim)?.as_deref() == Some("subcomponent"))
     }
 
     /// Returns the resolved stage status bits for a prim.
-    pub fn prim_status(&self, prim: impl Into<Path>) -> Result<PrimStatus> {
+    pub fn prim_status(&self, prim: impl Into<sdf::Path>) -> Result<PrimStatus> {
         self.prim_status_masked(&prim.into().prim_path(), PrimStatus::all())
     }
 
     /// Computes only the status bits set in `mask`. Bits outside `mask` are
     /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
     /// for default traversal) are skipped.
-    fn prim_status_masked(&self, prim: &Path, mask: PrimStatus) -> Result<PrimStatus> {
+    fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
         let mut status = PrimStatus::empty();
         if mask.contains(PrimStatus::ACTIVE) {
             status.set(PrimStatus::ACTIVE, self.is_active(prim)?);
@@ -927,9 +925,9 @@ impl Stage {
 
     /// Returns the model-hierarchy `kind` for the prim — `Some("group" | "assembly" | "component")`
     /// when the prim and all ancestors form a contiguous model hierarchy, else `None`.
-    fn model_kind(&self, prim: Path) -> Result<Option<&'static str>> {
+    fn model_kind(&self, prim: sdf::Path) -> Result<Option<&'static str>> {
         let prim = prim.prim_path();
-        if prim == Path::abs_root() || !self.has_spec(&prim)? {
+        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
             return Ok(None);
         }
         let leaf = match self.kind(&prim)?.as_deref() {
@@ -949,20 +947,20 @@ impl Stage {
         Ok(Some(leaf))
     }
 
-    fn has_payload(&self, prim: &Path) -> Result<bool> {
-        let payload = self.field::<Value>(prim, FieldKey::Payload)?;
+    fn has_payload(&self, prim: &sdf::Path) -> Result<bool> {
+        let payload = self.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
         Ok(match payload {
-            Some(Value::Payload(payload)) => Self::payload_has_target(&payload),
-            Some(Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(Self::payload_has_target),
+            Some(sdf::Value::Payload(payload)) => Self::payload_has_target(&payload),
+            Some(sdf::Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(Self::payload_has_target),
             _ => false,
         })
     }
 
-    fn payload_has_target(payload: &Payload) -> bool {
+    fn payload_has_target(payload: &sdf::Payload) -> bool {
         !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
     }
 
-    fn filter_child_names(&self, parent: &Path, children: Vec<String>) -> Vec<String> {
+    fn filter_child_names(&self, parent: &sdf::Path, children: Vec<String>) -> Vec<String> {
         if self.population_mask.is_all() {
             return children;
         }
@@ -978,8 +976,8 @@ impl Stage {
 
     /// Iterates the prim path and its ancestors from leaf to root, stopping
     /// before the pseudo-root. Assumes `start` is already a prim path.
-    fn prim_ancestors_inclusive(start: Path) -> impl Iterator<Item = Path> {
-        std::iter::successors(Some(start), Path::parent).take_while(|p| *p != Path::abs_root())
+    fn prim_ancestors_inclusive(start: sdf::Path) -> impl Iterator<Item = sdf::Path> {
+        std::iter::successors(Some(start), sdf::Path::parent).take_while(|p| *p != sdf::Path::abs_root())
     }
 
     /// Calls `f` with a mutable reference to the composition cache. If `f`
@@ -1002,12 +1000,12 @@ impl Stage {
     ///
     /// The default predicate matches OpenUSD's usual traversal region:
     /// active, loaded, defined, and not abstract.
-    pub fn traverse(&self, visitor: impl FnMut(&Path)) -> Result<()> {
+    pub fn traverse(&self, visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         self.traverse_with_predicate(PrimPredicate::DEFAULT, visitor)
     }
 
     /// Traverses all composed prims depth-first, calling `visitor` for each.
-    pub fn traverse_all(&self, visitor: impl FnMut(&Path)) -> Result<()> {
+    pub fn traverse_all(&self, visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         self.traverse_with_predicate(PrimPredicate::ALL, visitor)
     }
 
@@ -1016,12 +1014,12 @@ impl Stage {
     /// Descendants are pruned when inherited status bits make it impossible for
     /// them to match, such as below inactive, unloaded, undefined, or abstract
     /// prims when the predicate excludes those regions.
-    pub fn traverse_with_predicate(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&Path)) -> Result<()> {
+    pub fn traverse_with_predicate(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         let needed = predicate.consulted_bits();
-        let mut stack = vec![Path::abs_root()];
+        let mut stack = vec![sdf::Path::abs_root()];
 
         while let Some(path) = stack.pop() {
-            if path != Path::abs_root() {
+            if path != sdf::Path::abs_root() {
                 let status = self.prim_status_masked(&path, needed)?;
                 if predicate.matches(status) {
                     visitor(&path);
@@ -1056,7 +1054,10 @@ fn strict_composition_error(e: CompositionError) -> Result<()> {
 ///
 /// Created via [`Stage::builder`]. Allows setting a custom asset resolver
 /// and an error handler for recoverable composition failures.
-pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -> Result<()> = StrictErrorHandler> {
+pub struct StageBuilder<
+    R: ar::Resolver = ar::DefaultResolver,
+    E: Fn(CompositionError) -> Result<()> = StrictErrorHandler,
+> {
     resolver: R,
     on_error: E,
     variant_fallbacks: pcp::VariantFallbackMap,
@@ -1069,7 +1070,7 @@ pub struct StageBuilder<R: Resolver = DefaultResolver, E: Fn(CompositionError) -
 impl StageBuilder {
     fn new() -> Self {
         Self {
-            resolver: DefaultResolver::new(),
+            resolver: ar::DefaultResolver::new(),
             on_error: strict_composition_error,
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
@@ -1080,9 +1081,9 @@ impl StageBuilder {
     }
 }
 
-impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
+impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// Sets a custom asset resolver.
-    pub fn resolver<R2: Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
+    pub fn resolver<R2: ar::Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
         StageBuilder {
             resolver,
             on_error: self.on_error,
@@ -1235,7 +1236,7 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
     /// Collect layers reachable from `path`, honoring the builder's
     /// resolver, error handler, payload-loading flag, and population mask.
     fn collect_layers(&self, path: &str) -> Result<Vec<sdf::Layer>> {
-        let include_prim_dependency = |p: &Path| self.population_mask.includes(p);
+        let include_prim_dependency = |p: &sdf::Path| self.population_mask.includes(p);
         let collector = layer::Collector::new(&self.resolver)
             .load_payloads(self.initial_load_set.load_payloads())
             .on_error(|e| (self.on_error)(CompositionError::Layer(e)));
@@ -1282,7 +1283,6 @@ impl<R: Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdf::schema::FieldKey;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -1349,11 +1349,11 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // The "active" metadata on CubeInactive should be false.
-        let active = stage.field::<bool>("/World/CubeInactive", FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeInactive", sdf::FieldKey::Active)?;
         assert_eq!(active, Some(false));
 
         // CubeActive has active = true.
-        let active = stage.field::<bool>("/World/CubeActive", FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeActive", sdf::FieldKey::Active)?;
         assert_eq!(active, Some(true));
 
         Ok(())
@@ -1365,7 +1365,7 @@ mod tests {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
-        let active = stage.field::<Value>("/World", FieldKey::Active)?;
+        let active = stage.field::<sdf::Value>("/World", sdf::FieldKey::Active)?;
         assert_eq!(active, None);
 
         Ok(())
@@ -1385,14 +1385,14 @@ mod tests {
 
         // /World/Cube.primvars:displayColor is overridden to blue [(0,0,1)] in
         // the stronger layer, base has red [(1,0,0)].
-        let prop_path = Path::new("/World/Cube")?.append_property("primvars:displayColor")?;
-        let value: Option<Value> = stage.field(&prop_path, FieldKey::Default)?;
+        let prop_path = sdf::Path::new("/World/Cube")?.append_property("primvars:displayColor")?;
+        let value: Option<sdf::Value> = stage.field(&prop_path, sdf::FieldKey::Default)?;
         assert!(value.is_some(), "displayColor should have a composed value");
 
         // The composed value must come from the stronger layer (blue),
         // not the weaker layer (red). Verify by checking it's not the base red.
         let value = value.unwrap();
-        let base_red = Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]);
+        let base_red = sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]);
         assert_ne!(value, base_red, "stronger layer opinion should win over weaker");
 
         Ok(())
@@ -1438,10 +1438,10 @@ mod tests {
         let path = composition_path("active.usda");
         let stage = Stage::open(&path)?;
 
-        let inactive: Option<bool> = stage.field("/World/CubeInactive", FieldKey::Active)?;
+        let inactive: Option<bool> = stage.field("/World/CubeInactive", sdf::FieldKey::Active)?;
         assert_eq!(inactive, Some(false));
 
-        let active = stage.field::<bool>("/World/CubeActive", FieldKey::Active)?;
+        let active = stage.field::<bool>("/World/CubeActive", sdf::FieldKey::Active)?;
         assert_eq!(active, Some(true));
 
         Ok(())
@@ -1536,12 +1536,12 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // The local displayColor (red) should win over inherited (green).
-        let prop = Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
-        let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World/cubeWithSetColor")?.append_property("primvars:displayColor")?;
+        let value: Option<sdf::Value> = stage.field(&prop, sdf::FieldKey::Default)?;
         assert!(value.is_some());
 
         // Verify it's the local red, not the inherited green.
-        let green = Value::Vec3fVec(vec![[0.0, 0.8, 0.0]]);
+        let green = sdf::Value::Vec3fVec(vec![[0.0, 0.8, 0.0]]);
         assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
 
         Ok(())
@@ -1559,8 +1559,8 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // The local radius=1 should win over variant radius=2.
-        let prop = Path::new("/World/Sphere")?.append_property("radius")?;
-        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World/Sphere")?.append_property("radius")?;
+        let value = stage.field::<f64>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some(1.0), "local opinion (1) should win over variant (2)");
 
         Ok(())
@@ -1595,12 +1595,12 @@ mod tests {
         let path = composition_path("inherit_and_specialize.usda");
         let stage = Stage::open(&path)?;
 
-        let prop = Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
-        let value: Option<Value> = stage.field(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World/cubeScene/specializes")?.append_property("primvars:displayColor")?;
+        let value: Option<sdf::Value> = stage.field(&prop, sdf::FieldKey::Default)?;
         assert!(value.is_some());
 
         // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
-        let red = Value::Vec3fVec(vec![[0.8, 0.0, 0.0]]);
+        let red = sdf::Value::Vec3fVec(vec![[0.8, 0.0, 0.0]]);
         assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
 
         Ok(())
@@ -1613,7 +1613,7 @@ mod tests {
         let path = fixture_path("instanceable_metadata.usda");
         let stage = Stage::open(&path)?;
 
-        let value = stage.field::<bool>("/Root/InstancePrototype", FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root/InstancePrototype", sdf::FieldKey::Instanceable)?;
         assert_eq!(value, Some(true), "instanceable = true should be stored");
 
         Ok(())
@@ -1625,7 +1625,7 @@ mod tests {
         let path = fixture_path("instanceable_metadata.usda");
         let stage = Stage::open(&path)?;
 
-        let value = stage.field::<bool>("/Root/NotInstanceable", FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root/NotInstanceable", sdf::FieldKey::Instanceable)?;
         assert_eq!(value, Some(false), "instanceable = false should be stored");
 
         Ok(())
@@ -1637,7 +1637,7 @@ mod tests {
         let path = fixture_path("instanceable_metadata.usda");
         let stage = Stage::open(&path)?;
 
-        let value = stage.field::<bool>("/Root", FieldKey::Instanceable)?;
+        let value = stage.field::<bool>("/Root", sdf::FieldKey::Instanceable)?;
         assert_eq!(value, None, "instanceable should be None when not authored");
 
         Ok(())
@@ -1655,8 +1655,8 @@ mod tests {
 
         // /NoSelection has no authored selection. With fallback "simple",
         // the complexity field should be 0.5 (not 1.0 from "full").
-        let prop = Path::new("/NoSelection")?.append_property("complexity")?;
-        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/NoSelection")?.append_property("complexity")?;
+        let value = stage.field::<f64>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some(0.5), "fallback 'simple' should give complexity=0.5");
 
         Ok(())
@@ -1672,8 +1672,8 @@ mod tests {
 
         // /Root has authored selection "full". Even with fallback "none",
         // the authored selection should win.
-        let prop = Path::new("/Root")?.append_property("complexity")?;
-        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/Root")?.append_property("complexity")?;
+        let value = stage.field::<f64>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some(1.0), "authored 'full' should win over fallback 'none'");
 
         Ok(())
@@ -1698,7 +1698,7 @@ mod tests {
 
         // The inherited property should be accessible.
         assert!(
-            stage.has_spec(Path::new("/Instance/Child.name")?)?,
+            stage.has_spec(sdf::Path::new("/Instance/Child.name")?)?,
             "property from inherited child should be visible"
         );
 
@@ -1727,7 +1727,7 @@ mod tests {
         );
 
         assert!(
-            stage.has_spec(Path::new("/Prim/A/B.val")?)?,
+            stage.has_spec(sdf::Path::new("/Prim/A/B.val")?)?,
             "deeply nested inherited property should be visible"
         );
 
@@ -1749,7 +1749,7 @@ mod tests {
         );
 
         assert!(
-            stage.has_spec(Path::new("/Leaf/Deep.x")?)?,
+            stage.has_spec(sdf::Path::new("/Leaf/Deep.x")?)?,
             "property from chain-inherited child should be visible"
         );
 
@@ -1785,8 +1785,8 @@ mod tests {
         assert!(stage.has_session_layer());
         assert_eq!(stage.layer_count(), 2);
 
-        let prop = Path::new("/World")?.append_property("radius")?;
-        let value = stage.field::<f64>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World")?.append_property("radius")?;
+        let value = stage.field::<f64>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some(99.0), "session layer opinion should win");
 
         Ok(())
@@ -1797,8 +1797,8 @@ mod tests {
     fn session_layer_adds_properties() -> Result<()> {
         let stage = open_with_session()?;
 
-        let prop = Path::new("/World")?.append_property("visibility")?;
-        let value = stage.field::<String>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World")?.append_property("visibility")?;
+        let value = stage.field::<String>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some("hidden".to_string()));
 
         Ok(())
@@ -1810,8 +1810,8 @@ mod tests {
     fn session_layer_preserves_root_opinions() -> Result<()> {
         let stage = open_with_session()?;
 
-        let prop = Path::new("/World")?.append_property("name")?;
-        let value = stage.field::<String>(&prop, FieldKey::Default)?;
+        let prop = sdf::Path::new("/World")?.append_property("name")?;
+        let value = stage.field::<String>(&prop, sdf::FieldKey::Default)?;
         assert_eq!(value, Some("root".to_string()));
 
         Ok(())
@@ -1843,7 +1843,7 @@ mod tests {
     #[test]
     fn api_schemas_returns_applied_schemas() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
-        let geo = Path::new("/World/Geo")?;
+        let geo = sdf::Path::new("/World/Geo")?;
         let schemas = stage.api_schemas(&geo)?;
         assert!(schemas.contains(&"MaterialBindingAPI".to_string()));
         assert!(schemas.contains(&"SkelBindingAPI".to_string()));
@@ -1853,7 +1853,7 @@ mod tests {
     #[test]
     fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
-        let props = Path::new("/World/Props")?;
+        let props = sdf::Path::new("/World/Props")?;
         assert!(stage.api_schemas(&props)?.is_empty());
         Ok(())
     }
@@ -1861,7 +1861,7 @@ mod tests {
     #[test]
     fn has_api_schema_matches_applied() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
-        let geo = Path::new("/World/Geo")?;
+        let geo = sdf::Path::new("/World/Geo")?;
         assert!(stage.has_api_schema(&geo, "MaterialBindingAPI")?);
         assert!(!stage.has_api_schema(&geo, "SkelRootAPI")?);
         Ok(())
@@ -1870,8 +1870,11 @@ mod tests {
     #[test]
     fn type_name_returns_prim_type() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
-        assert_eq!(stage.type_name(&Path::new("/World/Geo")?)?, Some("Mesh".to_string()));
-        assert_eq!(stage.type_name(&Path::new("/World")?)?, Some("Xform".to_string()));
+        assert_eq!(
+            stage.type_name(&sdf::Path::new("/World/Geo")?)?,
+            Some("Mesh".to_string())
+        );
+        assert_eq!(stage.type_name(&sdf::Path::new("/World")?)?, Some("Xform".to_string()));
         Ok(())
     }
 
@@ -1958,7 +1961,7 @@ mod tests {
     fn defined_abstract() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert_eq!(stage.specifier("/World/OverOnly")?, Some(Specifier::Over));
+        assert_eq!(stage.specifier("/World/OverOnly")?, Some(sdf::Specifier::Over));
         assert!(stage.is_defined("/World/ActiveParent/Child")?);
         assert!(!stage.is_defined("/World/OverOnly")?);
         assert!(!stage.is_defined("/World/OverParent/Child")?);
@@ -2087,11 +2090,11 @@ mod tests {
         let stage = in_memory_stage()?;
         stage.define_prim("/World")?.set_type_name("Xform")?;
         stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
-        assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
-        assert_eq!(stage.spec_type("/World/Mesh")?, Some(SpecType::Prim));
+        assert_eq!(stage.spec_type("/World")?, Some(sdf::SpecType::Prim));
+        assert_eq!(stage.spec_type("/World/Mesh")?, Some(sdf::SpecType::Prim));
         assert_eq!(
-            stage.field::<Value>("/World", FieldKey::TypeName)?,
-            Some(Value::Token("Xform".into())),
+            stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
+            Some(sdf::Value::Token("Xform".into())),
         );
         Ok(())
     }
@@ -2105,8 +2108,8 @@ mod tests {
 
         assert!(stage.has_spec("/World")?);
         assert_eq!(
-            stage.field::<Value>("/World", FieldKey::TypeName)?,
-            Some(Value::Token("Xform".into())),
+            stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
+            Some(sdf::Value::Token("Xform".into())),
         );
         Ok(())
     }
@@ -2116,12 +2119,12 @@ mod tests {
         let stage = in_memory_stage()?;
         stage.override_prim("/A/B")?;
         assert_eq!(
-            stage.field::<Value>("/A", FieldKey::Specifier)?,
-            Some(Value::Specifier(Specifier::Over)),
+            stage.field::<sdf::Value>("/A", sdf::FieldKey::Specifier)?,
+            Some(sdf::Value::Specifier(sdf::Specifier::Over)),
         );
         assert_eq!(
-            stage.field::<Value>("/A/B", FieldKey::Specifier)?,
-            Some(Value::Specifier(Specifier::Over)),
+            stage.field::<sdf::Value>("/A/B", sdf::FieldKey::Specifier)?,
+            Some(sdf::Value::Specifier(sdf::Specifier::Over)),
         );
         Ok(())
     }
@@ -2131,14 +2134,14 @@ mod tests {
         let stage = in_memory_stage()?;
         stage.define_prim("/Sphere")?.set_type_name("Sphere")?;
         stage.create_attribute("/Sphere.radius", "double")?;
-        assert_eq!(stage.spec_type("/Sphere.radius")?, Some(SpecType::Attribute));
+        assert_eq!(stage.spec_type("/Sphere.radius")?, Some(sdf::SpecType::Attribute));
         assert_eq!(
-            stage.field::<Value>("/Sphere.radius", FieldKey::TypeName)?,
-            Some(Value::Token("double".into())),
+            stage.field::<sdf::Value>("/Sphere.radius", sdf::FieldKey::TypeName)?,
+            Some(sdf::Value::Token("double".into())),
         );
         assert_eq!(
-            stage.field::<Value>("/Sphere.radius", FieldKey::Custom)?,
-            Some(Value::Bool(true)),
+            stage.field::<sdf::Value>("/Sphere.radius", sdf::FieldKey::Custom)?,
+            Some(sdf::Value::Bool(true)),
         );
         Ok(())
     }
@@ -2150,10 +2153,13 @@ mod tests {
         stage
             .create_relationship("/Mesh.material:binding")?
             .set_variability(sdf::Variability::Uniform)?;
-        assert_eq!(stage.spec_type("/Mesh.material:binding")?, Some(SpecType::Relationship));
         assert_eq!(
-            stage.field::<Value>("/Mesh.material:binding", FieldKey::Custom)?,
-            Some(Value::Bool(true)),
+            stage.spec_type("/Mesh.material:binding")?,
+            Some(sdf::SpecType::Relationship)
+        );
+        assert_eq!(
+            stage.field::<sdf::Value>("/Mesh.material:binding", sdf::FieldKey::Custom)?,
+            Some(sdf::Value::Bool(true)),
         );
         Ok(())
     }
@@ -2244,7 +2250,7 @@ mod tests {
         assert_eq!(stage.layer_count(), 2);
         assert_eq!(stage.edit_target().layer_index(), 1);
         stage.define_prim("/World")?.set_type_name("Xform")?;
-        assert_eq!(stage.spec_type("/World")?, Some(SpecType::Prim));
+        assert_eq!(stage.spec_type("/World")?, Some(sdf::SpecType::Prim));
         Ok(())
     }
 }
