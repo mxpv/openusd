@@ -7,9 +7,9 @@
 //!
 //! `read_light_api` returns the common LightAPI inputs from a prim
 //! that's either typed as a concrete UsdLux light or carries
-//! `LightAPI` as an applied schema; per-light readers call the
-//! internal `read_light_inputs` helper directly since they've already
-//! verified the prim's typeName.
+//! `LightAPI`, `MeshLightAPI`, or `VolumeLightAPI` as an applied
+//! schema; per-light readers call the internal `read_light_inputs`
+//! helper directly since they've already verified the prim's typeName.
 
 use anyhow::Result;
 
@@ -28,9 +28,9 @@ use super::types::*;
 /// a specific stage time.
 ///
 /// Returns `None` when the prim isn't a concrete UsdLux light type and
-/// doesn't carry `LightAPI` as an applied schema — that way callers
-/// can't accidentally produce a fully-defaulted "light" out of an
-/// arbitrary prim.
+/// doesn't carry `LightAPI`, `MeshLightAPI`, or `VolumeLightAPI` as an
+/// applied schema — that way callers can't accidentally produce a
+/// fully-defaulted "light" out of an arbitrary prim.
 pub fn read_light_api(stage: &Stage, prim: &Path) -> Result<Option<ReadLight>> {
     read_light_api_inner(stage, prim, None)
 }
@@ -43,12 +43,28 @@ pub fn read_light_api_at(stage: &Stage, prim: &Path, time: f64) -> Result<Option
 }
 
 fn read_light_api_inner(stage: &Stage, prim: &Path, time: Option<f64>) -> Result<Option<ReadLight>> {
-    let has_api =
-        stage.has_api_schema(prim, API_LIGHT)? || stage.type_name(prim)?.as_deref().is_some_and(is_light_type);
-    if !has_api {
-        return Ok(None);
+    let type_name = stage.type_name(prim)?;
+    if type_name.as_deref() == Some(T_DISTANT_LIGHT) {
+        let intensity_fallback = ReadDistantLight::default().common.intensity;
+        return Ok(Some(read_light_inputs_with_intensity(
+            stage,
+            prim,
+            time,
+            intensity_fallback,
+        )?));
     }
-    Ok(Some(read_light_inputs(stage, prim, time)?))
+    if type_name.as_deref().is_some_and(is_light_type) || has_light_api_schema(stage, prim)? {
+        return Ok(Some(read_light_inputs(stage, prim, time)?));
+    }
+    Ok(None)
+}
+
+fn has_light_api_schema(stage: &Stage, prim: &Path) -> Result<bool> {
+    Ok(stage.api_schemas(prim)?.iter().any(|s| is_light_api_schema(s)))
+}
+
+fn is_light_api_schema(name: &str) -> bool {
+    matches!(name, API_LIGHT | API_MESH_LIGHT | API_VOLUME_LIGHT)
 }
 
 /// Inner helper used by both the gated [`read_light_api`] and the
@@ -470,11 +486,7 @@ fn bucket_lux_prim(stage: &Stage, path: &Path, out: &mut LuxPrims) -> Result<()>
     // VolumeLightAPI without being one of the concrete light
     // typeNames — the canonical way to make an arbitrary mesh or
     // volume emissive.
-    if !concrete_typed
-        && api
-            .iter()
-            .any(|s| s == API_LIGHT || s == API_MESH_LIGHT || s == API_VOLUME_LIGHT)
-    {
+    if !concrete_typed && api.iter().any(|s| is_light_api_schema(s)) {
         out.light_api.push(p);
     }
     Ok(())

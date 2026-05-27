@@ -2,8 +2,8 @@
 //!
 //! Decodes Pixar's `UsdLux` schema family from a composed
 //! [`crate::Stage`]. Covers the canonical light prims plus the
-//! `LightAPI` / `ShapingAPI` / `ShadowAPI` / `LightListAPI`
-//! applied schemas:
+//! `LightAPI` / `MeshLightAPI` / `VolumeLightAPI` / `ShapingAPI` /
+//! `ShadowAPI` / `LightListAPI` applied schemas:
 //!
 //! Concrete light prims:
 //! - [`tokens::T_DISTANT_LIGHT`] — sun-style parallel light.
@@ -21,6 +21,9 @@
 //! Applied APIs:
 //! - [`tokens::API_LIGHT`] — implicit on every concrete light prim.
 //!   Surfaces intensity / exposure / colour / temperature, etc.
+//! - [`tokens::API_MESH_LIGHT`] / [`tokens::API_VOLUME_LIGHT`] —
+//!   make arbitrary meshes or volumes emissive via the same common
+//!   LightAPI inputs.
 //! - [`tokens::API_SHAPING`] — focus + cone + IES profile.
 //! - [`tokens::API_SHADOW`] — shadow casting controls.
 //! - [`tokens::API_LIGHT_LIST`] — cached light-list on a parent prim.
