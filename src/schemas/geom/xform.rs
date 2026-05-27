@@ -126,14 +126,14 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
     let kind = after_ns.split(':').next().unwrap_or(after_ns);
 
     let m = match kind {
-        "translate" => mat4_translation(value_to_vec3f(&raw).unwrap_or([0.0, 0.0, 0.0])),
-        "translateX" => mat4_translation([value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0, 0.0]),
-        "translateY" => mat4_translation([0.0, value_to_scalar_f32(&raw).unwrap_or(0.0), 0.0]),
-        "translateZ" => mat4_translation([0.0, 0.0, value_to_scalar_f32(&raw).unwrap_or(0.0)]),
-        "scale" => mat4_scale(value_to_vec3f(&raw).unwrap_or([1.0, 1.0, 1.0])),
-        "scaleX" => mat4_scale([value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0, 1.0]),
-        "scaleY" => mat4_scale([1.0, value_to_scalar_f32(&raw).unwrap_or(1.0), 1.0]),
-        "scaleZ" => mat4_scale([1.0, 1.0, value_to_scalar_f32(&raw).unwrap_or(1.0)]),
+        "translate" => mat4_translation(value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0])),
+        "translateX" => mat4_translation([value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0, 0.0]),
+        "translateY" => mat4_translation([0.0, value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0]),
+        "translateZ" => mat4_translation([0.0, 0.0, value_to_scalar_f64(&raw).unwrap_or(0.0)]),
+        "scale" => mat4_scale(value_to_vec3_f64(&raw).unwrap_or([1.0, 1.0, 1.0])),
+        "scaleX" => mat4_scale([value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0, 1.0]),
+        "scaleY" => mat4_scale([1.0, value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0]),
+        "scaleZ" => mat4_scale([1.0, 1.0, value_to_scalar_f64(&raw).unwrap_or(1.0)]),
         "orient" => mat4_from_quat(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
         // Rotation ops are kept in f64 end-to-end. xformOp:rotateX etc.
         // can be authored as either `float` or `double` per the
@@ -175,26 +175,6 @@ fn build_op_matrix(stage: &Stage, prim: &Path, op_name: &str, time: f64) -> Resu
     }
 }
 
-fn value_to_vec3f(v: &Value) -> Option<[f32; 3]> {
-    match v {
-        Value::Vec3f(a) => Some(*a),
-        Value::Vec3d(a) => Some([a[0] as f32, a[1] as f32, a[2] as f32]),
-        Value::Vec3h(a) => Some([a[0].to_f32(), a[1].to_f32(), a[2].to_f32()]),
-        _ => None,
-    }
-}
-
-fn value_to_scalar_f32(v: &Value) -> Option<f32> {
-    match v {
-        Value::Float(f) => Some(*f),
-        Value::Double(d) => Some(*d as f32),
-        Value::Half(h) => Some(h.to_f32()),
-        Value::Int(i) => Some(*i as f32),
-        Value::Int64(i) => Some(*i as f32),
-        _ => None,
-    }
-}
-
 fn value_to_scalar_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Double(d) => Some(*d),
@@ -215,11 +195,16 @@ fn value_to_vec3_f64(v: &Value) -> Option<[f64; 3]> {
     }
 }
 
-fn value_to_quat_wxyz(v: &Value) -> Option<[f32; 4]> {
+fn value_to_quat_wxyz(v: &Value) -> Option<[f64; 4]> {
     match v {
-        Value::Quatf(q) => Some(*q),
-        Value::Quatd(q) => Some([q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]),
-        Value::Quath(q) => Some([q[0].to_f32(), q[1].to_f32(), q[2].to_f32(), q[3].to_f32()]),
+        Value::Quatd(q) => Some(*q),
+        Value::Quatf(q) => Some([q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64]),
+        Value::Quath(q) => Some([
+            q[0].to_f32() as f64,
+            q[1].to_f32() as f64,
+            q[2].to_f32() as f64,
+            q[3].to_f32() as f64,
+        ]),
         _ => None,
     }
 }
