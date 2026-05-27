@@ -254,3 +254,43 @@ fn shaping_defaults_match_pixar() -> Result<()> {
     assert!(!s.ies_normalize);
     Ok(())
 }
+
+#[test]
+fn rect_light_unauthored_dimensions_fall_back_to_one() -> Result<()> {
+    // Same contract as ReadRectLight::default().
+    let usda = r#"#usda 1.0
+        def RectLight "Plain" {}
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("plain_rect.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let light = lux::read_rect_light(&stage, &sdf::path("/Plain")?)?.expect("RectLight");
+
+    let defaults = lux::ReadRectLight::default();
+    assert!((defaults.width - 1.0).abs() < 1e-6);
+    assert!((defaults.height - 1.0).abs() < 1e-6);
+    assert!((light.width - 1.0).abs() < 1e-6);
+    assert!((light.height - 1.0).abs() < 1e-6);
+    assert!(light.texture_file.is_none());
+    Ok(())
+}
+
+#[test]
+fn portal_light_unauthored_dimensions_fall_back_to_one() -> Result<()> {
+    let usda = r#"#usda 1.0
+        def PortalLight "Plain" {}
+        "#;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("plain_portal.usda");
+    std::fs::write(&path, usda)?;
+    let stage = Stage::open(path.to_str().unwrap())?;
+    let light = lux::read_portal_light(&stage, &sdf::path("/Plain")?)?.expect("PortalLight");
+
+    let defaults = lux::ReadPortalLight::default();
+    assert!((defaults.width - 1.0).abs() < 1e-6);
+    assert!((defaults.height - 1.0).abs() < 1e-6);
+    assert!((light.width - 1.0).abs() < 1e-6);
+    assert!((light.height - 1.0).abs() < 1e-6);
+    Ok(())
+}

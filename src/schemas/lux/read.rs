@@ -23,10 +23,19 @@ use super::types::*;
 /// every unauthored attribute. The `path` field is filled in from the
 /// prim passed in.
 pub fn read_light_api(stage: &Stage, prim: &Path) -> Result<ReadLight> {
+    read_light_api_with_intensity_default(stage, prim, ReadLight::default().intensity)
+}
+
+/// Read `LightAPI` inputs, applying `intensity_fallback` when
+/// `inputs:intensity` is not authored. Lets concrete light prims that
+/// override LightAPI's documented intensity default (notably
+/// `DistantLight = 50000`) share the same reader without querying
+/// `inputs:intensity` twice.
+fn read_light_api_with_intensity_default(stage: &Stage, prim: &Path, intensity_fallback: f32) -> Result<ReadLight> {
     let defaults = ReadLight::default();
     Ok(ReadLight {
         path: prim.as_str().to_string(),
-        intensity: read_f32(stage, prim, A_INTENSITY)?.unwrap_or(defaults.intensity),
+        intensity: read_f32(stage, prim, A_INTENSITY)?.unwrap_or(intensity_fallback),
         exposure: read_f32(stage, prim, A_EXPOSURE)?.unwrap_or(defaults.exposure),
         diffuse: read_f32(stage, prim, A_DIFFUSE)?.unwrap_or(defaults.diffuse),
         specular: read_f32(stage, prim, A_SPECULAR)?.unwrap_or(defaults.specular),
@@ -46,15 +55,8 @@ pub fn read_distant_light(stage: &Stage, prim: &Path) -> Result<Option<ReadDista
         return Ok(None);
     }
     let defaults = ReadDistantLight::default();
-    // DistantLight overrides LightAPI's `intensity = 1.0` default to 50000;
-    // pull common attrs but re-apply the DistantLight-specific intensity
-    // default when unauthored.
-    let mut common = read_light_api(stage, prim)?;
-    if read_f32(stage, prim, A_INTENSITY)?.is_none() {
-        common.intensity = defaults.common.intensity;
-    }
     Ok(Some(ReadDistantLight {
-        common,
+        common: read_light_api_with_intensity_default(stage, prim, defaults.common.intensity)?,
         angle_deg: read_f32(stage, prim, A_ANGLE)?.unwrap_or(defaults.angle_deg),
     }))
 }
@@ -79,10 +81,11 @@ pub fn read_rect_light(stage: &Stage, prim: &Path) -> Result<Option<ReadRectLigh
     if stage.type_name(prim)?.as_deref() != Some(T_RECT_LIGHT) {
         return Ok(None);
     }
+    let defaults = ReadRectLight::default();
     Ok(Some(ReadRectLight {
         common: read_light_api(stage, prim)?,
-        width: read_f32(stage, prim, A_WIDTH)?.unwrap_or(1.0),
-        height: read_f32(stage, prim, A_HEIGHT)?.unwrap_or(1.0),
+        width: read_f32(stage, prim, A_WIDTH)?.unwrap_or(defaults.width),
+        height: read_f32(stage, prim, A_HEIGHT)?.unwrap_or(defaults.height),
         texture_file: read_asset_path(stage, prim, A_TEXTURE_FILE)?,
     }))
 }
@@ -155,10 +158,11 @@ pub fn read_portal_light(stage: &Stage, prim: &Path) -> Result<Option<ReadPortal
     if stage.type_name(prim)?.as_deref() != Some(T_PORTAL_LIGHT) {
         return Ok(None);
     }
+    let defaults = ReadPortalLight::default();
     Ok(Some(ReadPortalLight {
         common: read_light_api(stage, prim)?,
-        width: read_f32(stage, prim, A_WIDTH)?.unwrap_or(1.0),
-        height: read_f32(stage, prim, A_HEIGHT)?.unwrap_or(1.0),
+        width: read_f32(stage, prim, A_WIDTH)?.unwrap_or(defaults.width),
+        height: read_f32(stage, prim, A_HEIGHT)?.unwrap_or(defaults.height),
     }))
 }
 

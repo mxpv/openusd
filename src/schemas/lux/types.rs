@@ -175,12 +175,23 @@ impl Default for ReadSphereLight {
 /// `UsdLuxRectLight` — rectangular area light. `texture:file` lets
 /// the light be coloured from a texture (typical for softboxes /
 /// projector-style setups).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReadRectLight {
     pub common: ReadLight,
     pub width: f32,
     pub height: f32,
     pub texture_file: Option<String>,
+}
+
+impl Default for ReadRectLight {
+    fn default() -> Self {
+        Self {
+            common: ReadLight::default(),
+            width: 1.0,
+            height: 1.0,
+            texture_file: None,
+        }
+    }
 }
 
 /// `UsdLuxDiskLight` — circular area light.
@@ -261,11 +272,21 @@ pub struct ReadGeometryLight {
 
 /// `UsdLuxPortalLight` — an aperture for sampling a parent
 /// `UsdLuxDomeLight` more efficiently from indoor scenes.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReadPortalLight {
     pub common: ReadLight,
     pub width: f32,
     pub height: f32,
+}
+
+impl Default for ReadPortalLight {
+    fn default() -> Self {
+        Self {
+            common: ReadLight::default(),
+            width: 1.0,
+            height: 1.0,
+        }
+    }
 }
 
 /// Dispatch enum for [`super::read::read_light`].
