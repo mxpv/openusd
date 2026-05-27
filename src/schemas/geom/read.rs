@@ -191,9 +191,14 @@ pub fn find_geom_prims(stage: &Stage) -> Result<GeomPrims> {
                 _ => {}
             }
         }
+        // Only Token / String opinions count — visibility / purpose
+        // are uniform token attributes per the schema. Other Value
+        // types (e.g. accidentally authored `bool visibility = false`)
+        // are ignored by read_visibility / read_purpose, so the walker
+        // mustn't treat them as imageable opinions either.
         let has_imageable_opinion = counted
-            || matches!(read_attr_default(stage, path, A_VISIBILITY), Ok(Some(_)))
-            || matches!(read_attr_default(stage, path, A_PURPOSE), Ok(Some(_)));
+            || matches!(read_token(stage, path, A_VISIBILITY), Ok(Some(_)))
+            || matches!(read_token(stage, path, A_PURPOSE), Ok(Some(_)));
         if has_imageable_opinion {
             out.imageables.push(p);
         }
