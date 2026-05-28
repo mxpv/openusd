@@ -15,10 +15,12 @@
 
 mod common;
 mod imageable;
+mod mesh;
 mod shapes;
 mod xform;
 
 pub use imageable::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
+pub use mesh::{define_mesh, define_subset, MeshAuthor, SubsetAuthor};
 pub use shapes::{
     define_capsule, define_cone, define_cube, define_cylinder, define_plane, define_scope, define_sphere, define_xform,
     CapsuleAuthor, ConeAuthor, CubeAuthor, CylinderAuthor, PlaneAuthor, SphereAuthor,

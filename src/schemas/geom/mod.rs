@@ -39,10 +39,11 @@ mod types;
 mod xform;
 
 pub use author::{
-    apply_imageable_overrides, define_capsule, define_cone, define_cube, define_cylinder, define_plane, define_scope,
-    define_sphere, define_xform, set_extent, set_orient, set_purpose, set_rotate_x, set_rotate_xyz, set_rotate_y,
-    set_rotate_z, set_scale, set_transform, set_translate, set_visibility, set_xform_op_order, CapsuleAuthor,
-    ConeAuthor, CubeAuthor, CylinderAuthor, ImageableAuthor, PlaneAuthor, SphereAuthor,
+    apply_imageable_overrides, define_capsule, define_cone, define_cube, define_cylinder, define_mesh, define_plane,
+    define_scope, define_sphere, define_subset, define_xform, set_extent, set_orient, set_purpose, set_rotate_x,
+    set_rotate_xyz, set_rotate_y, set_rotate_z, set_scale, set_transform, set_translate, set_visibility,
+    set_xform_op_order, CapsuleAuthor, ConeAuthor, CubeAuthor, CylinderAuthor, ImageableAuthor, MeshAuthor,
+    PlaneAuthor, SphereAuthor, SubsetAuthor,
 };
 pub use camera::read_camera;
 pub use curves::{
