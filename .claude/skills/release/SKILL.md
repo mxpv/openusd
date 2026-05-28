@@ -1,7 +1,7 @@
 ---
 name: release
 description: Publish a new release of the openusd crate. Use when cutting a release, bumping the version, or publishing to crates.io.
-argument-hint: "[version]"
+argument-hint: "[version] [highlights or other instructions]"
 disable-model-invocation: true
 allowed-tools: Bash(cargo *) Bash(git *) Bash(gh *)
 ---
@@ -10,7 +10,10 @@ Publish a new release of the openusd crate. The version argument is: $ARGUMENTS
 
 Follow these steps:
 
-1. **Validate version**: Ensure the version argument is provided and follows semver (e.g. `0.3.0`). If missing, ask for it. The version must NOT include a `v` prefix.
+1. **Validate version**: The arguments may include a version, highlights for the changelog, and/or other instructions — parse them out.
+   - If a version is given, it must follow semver (e.g. `0.3.0`) and must NOT include a `v` prefix.
+   - If no version is given, default to the next minor version above the current `version` in Cargo.toml: bump the minor component and reset the patch to `0` (e.g. `0.3.0` → `0.4.0`, `0.9.1` → `0.10.0`, `1.2.3` → `1.3.0`).
+   - Treat any non-version text in the arguments as guidance for the changelog summary or extra instructions to follow during the release.
 
 2. **Pre-flight checks**: Run these in parallel and stop if any fail:
    - `cargo clippy --all-targets --all-features -- -D warnings`
