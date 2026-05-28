@@ -13,7 +13,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value, Variability};
-use crate::usd::Stage;
+use crate::usd::{Prim, Stage};
 
 const A_XFORM_OP_ORDER: &str = "xformOpOrder";
 const NS_XFORM_OP: &str = "xformOp:";
@@ -110,20 +110,12 @@ fn author_xform_op(stage: &Stage, prim: &Path, kind: &str, type_name: &str, valu
     Ok(())
 }
 
-/// Append `xformOp:<kind>` to `xformOpOrder`. Re-reads any existing
-/// authored order from the stage so successive `set_*` calls
-/// compose without clobbering each other.
+/// Append `xformOp:<kind>` to `xformOpOrder`. Successive `set_*` calls
+/// compose without clobbering each other; the generic ordered-token-stack
+/// logic lives on [`Prim::append_to_uniform_token_array`].
 fn append_op(stage: &Stage, prim: &Path, kind: &str) -> Result<()> {
-    let full_name = format!("{NS_XFORM_OP}{kind}");
-
-    let existing = super::super::xform::read_xform_op_order(stage, prim)?.unwrap_or_default();
-    if existing.iter().any(|t| t == &full_name) {
-        // Already in the order — keep insertion order, don't duplicate.
-        return Ok(());
-    }
-    let mut updated = existing;
-    updated.push(full_name);
-    set_xform_op_order(stage, prim, updated)
+    Prim::new(stage, prim.clone()).append_to_uniform_token_array(A_XFORM_OP_ORDER, format!("{NS_XFORM_OP}{kind}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
