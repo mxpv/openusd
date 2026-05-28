@@ -59,7 +59,7 @@ mod author;
 mod read;
 mod types;
 
-pub use author::{define_physics_scene, PhysicsSceneAuthor};
+pub use author::{apply_mass, apply_rigid_body, define_physics_scene, MassAuthor, PhysicsSceneAuthor, RigidBodyAuthor};
 pub use read::{
     find_physics_prims, read_collision_group, read_collision_shape, read_filtered_pairs, read_has_articulation_root,
     read_has_collision, read_has_rigid_body, read_is_physics_scene, read_joint, read_joint_drives, read_joint_limits,

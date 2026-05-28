@@ -16,6 +16,8 @@
 //! (`limit:<dof>:physics:*` / `drive:<dof>:physics:*`).
 
 mod common;
+mod rigid_body;
 mod scene;
 
+pub use rigid_body::{apply_mass, apply_rigid_body, MassAuthor, RigidBodyAuthor};
 pub use scene::{define_physics_scene, PhysicsSceneAuthor};
