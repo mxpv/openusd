@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
+mod change;
 mod data;
 mod layer;
 mod ordering;
@@ -17,6 +18,7 @@ pub mod schema;
 mod spec;
 mod value;
 
+pub use change::{ChangeEntry, ChangeFlags, ChangeList};
 pub use data::Data;
 pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::apply_ordering;

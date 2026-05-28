@@ -395,7 +395,38 @@ impl Stage {
     pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
         let layer_path = path.clone();
-        self.with_target_layer(|layer| layer.create_prim(layer_path, sdf::Specifier::Def, "").map(|_| true))?;
+        self.with_target_layer(|layer| {
+            // Snapshot pre-author state so an idempotent call (existing
+            // spec, matching specifier) emits an empty `ChangeList` instead
+            // of triggering a stale-index drop.
+            let data = layer.data();
+            let had_spec = data.has_spec(&layer_path);
+            let prior_specifier_matches = had_spec
+                && matches!(
+                    data.try_get(&layer_path, sdf::FieldKey::Specifier.as_str())
+                        .ok()
+                        .flatten()
+                        .as_deref(),
+                    Some(sdf::Value::Specifier(sdf::Specifier::Def))
+                );
+
+            let auto_ancestors = layer.missing_prim_ancestors(&layer_path);
+            layer.create_prim(layer_path.clone(), sdf::Specifier::Def, "")?;
+            let mut cl = sdf::ChangeList::new();
+            if !had_spec {
+                let entry = cl.entry_mut(&layer_path);
+                entry.flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
+                entry.info_changed.insert(sdf::FieldKey::Specifier.as_str());
+            } else if !prior_specifier_matches {
+                cl.entry_mut(&layer_path)
+                    .info_changed
+                    .insert(sdf::FieldKey::Specifier.as_str());
+            }
+            for anc in auto_ancestors {
+                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            Ok(cl)
+        })?;
         Ok(super::Prim::new(self, path))
     }
 
@@ -407,7 +438,23 @@ impl Stage {
     pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
         let layer_path = path.clone();
-        self.with_target_layer(|layer| layer.override_prim(layer_path).map(|_| true))?;
+        self.with_target_layer(|layer| {
+            // `Layer::override_prim` is idempotent at the leaf when a spec
+            // already exists. Record `ADD_INERT_PRIM` only for newly created
+            // specs; auto-created ancestors are emitted unconditionally
+            // because `missing_prim_ancestors` already filters them.
+            let had_spec = layer.data().has_spec(&layer_path);
+            let auto_ancestors = layer.missing_prim_ancestors(&layer_path);
+            layer.override_prim(layer_path.clone())?;
+            let mut cl = sdf::ChangeList::new();
+            if !had_spec {
+                cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            for anc in auto_ancestors {
+                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            Ok(cl)
+        })?;
         Ok(super::Prim::new(self, path))
     }
 
@@ -425,9 +472,17 @@ impl Stage {
         let type_name = type_name.into();
         let layer_path = path.clone();
         self.with_target_layer(|layer| {
-            layer
-                .create_attribute(layer_path, type_name, sdf::Variability::Varying, true)
-                .map(|_| true)
+            // The owning prim and all its missing ancestors get
+            // auto-created as `over` specs by `create_attribute`.
+            let owning_prim = layer_path.prim_path();
+            let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
+            layer.create_attribute(layer_path.clone(), type_name, sdf::Variability::Varying, true)?;
+            let mut cl = sdf::ChangeList::new();
+            cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
+            for anc in auto_ancestors {
+                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            Ok(cl)
         })?;
         Ok(super::Attribute::new(self, path))
     }
@@ -443,9 +498,15 @@ impl Stage {
         let path = path.into();
         let layer_path = path.clone();
         self.with_target_layer(|layer| {
-            layer
-                .create_relationship(layer_path, sdf::Variability::Varying, true)
-                .map(|_| true)
+            let owning_prim = layer_path.prim_path();
+            let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
+            layer.create_relationship(layer_path.clone(), sdf::Variability::Varying, true)?;
+            let mut cl = sdf::ChangeList::new();
+            cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
+            for anc in auto_ancestors {
+                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            Ok(cl)
         })?;
         Ok(super::Relationship::new(self, path))
     }
@@ -461,24 +522,46 @@ impl Stage {
     /// [`sdf::Layer::set_default_prim`].
     pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
         let name = name.into();
-        self.with_root_layer(|layer| layer.set_default_prim(name))
+        self.with_root_layer(|layer| {
+            // Skip cache invalidation when the value isn't changing.
+            // `defaultPrim` is stored as a `Token`; treat a matching
+            // `String` opinion as equivalent (the Sdf-tier setter writes
+            // `Token`, but a layer loaded from text might surface either).
+            let prior = layer
+                .data()
+                .try_get(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())
+                .ok()
+                .flatten();
+            let unchanged = matches!(
+                prior.as_deref(),
+                Some(sdf::Value::Token(s) | sdf::Value::String(s)) if s == &name
+            );
+
+            layer.set_default_prim(name)?;
+            let mut cl = sdf::ChangeList::new();
+            if !unchanged {
+                cl.entry_mut(&sdf::Path::abs_root())
+                    .info_changed
+                    .insert(sdf::FieldKey::DefaultPrim.as_str());
+            }
+            Ok(cl)
+        })
     }
 
-    /// Borrow the edit target's layer, hand it to `f`, then invalidate the
-    /// composition cache so subsequent reads see the new opinions.
+    /// Borrow the edit target's layer, hand it to `f`, then drive cache
+    /// invalidation from the [`sdf::ChangeList`] the closure returns.
     ///
-    /// Callers must drop any typed spec view inside the closure (e.g.
-    /// `.map(drop)`) — the closure can't return a borrow from `&mut layer`.
+    /// Callers must drop any typed spec view inside the closure — the closure
+    /// can't return a borrow from `&mut layer`. The returned [`sdf::ChangeList`]
+    /// describes what was authored; an empty list means "no mutation
+    /// happened" and skips invalidation.
     ///
-    /// Invalidation always runs on `Ok` and on any post-mutation error.
-    /// `Layer` authoring methods are not strictly atomic (e.g.
-    /// `create_attribute` mutates `primChildren` before stamping `typeName`),
-    /// so a half-completed write must still drop stale indices. The one
-    /// error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
+    /// On any post-mutation error the cache falls back to "blow the world".
+    /// The one error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
     /// which is detected before any layer state changes.
     pub(super) fn with_target_layer<F>(&self, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<bool, sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
         let target = self.edit_target.get();
         let mut cache = self.graph.borrow_mut();
@@ -490,17 +573,15 @@ impl Stage {
                 .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
             f(layer)
         };
-        Self::finalize_layer(&mut cache, result)
+        Self::finalize_layer(&mut cache, index, result)
     }
 
-    /// Borrow the stage's root layer, hand it to `f`, then invalidate the
-    /// composition cache. See [`Stage::with_target_layer`] for the
-    /// invalidation contract. Closure returns `Result<(), _>` (always
-    /// considered a mutation on `Ok`) so callers stay on the simple
-    /// `layer.set_default_prim(name)` shape with no map dance.
+    /// Borrow the stage's root layer, hand it to `f`, then drive cache
+    /// invalidation from the closure's [`sdf::ChangeList`]. See
+    /// [`Stage::with_target_layer`] for the contract.
     fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
         let mut cache = self.graph.borrow_mut();
         let index = cache.session_layer_count();
@@ -509,38 +590,47 @@ impl Stage {
             let layer = cache
                 .layer_mut(index)
                 .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
-            f(layer).map(|()| true)
+            f(layer)
         };
-        Self::finalize_layer(&mut cache, result).map(|_| ())
+        Self::finalize_layer(&mut cache, index, result).map(|_| ())
     }
 
     /// Translate a Layer-tier authoring result into the Stage error type and
-    /// invalidate the composition cache when the call mutated (or may have
-    /// mutated) layer state. `ReadOnly` is the only variant we can prove is
-    /// pre-mutation; every other outcome conservatively triggers
-    /// invalidation.
+    /// invalidate the composition cache via [`pcp::Changes`]. An empty
+    /// change list short-circuits with no invalidation; a non-empty list is
+    /// classified and applied. Post-mutation errors fall back to a
+    /// stage-wide blow-out because the layer may be in a partial state.
     //
-    // TODO: invalidate_all also fires when a handle's `edit` returns
-    // `InvalidPath` (spec missing on the current edit target) — that path is
-    // also pre-mutation, but we can't tell from the error variant alone
-    // (Layer-tier methods can partial-mutate before reporting InvalidPath).
-    // Surgical, PcpChanges-style invalidation will dissolve this concern.
-    //
-    // TODO: replace once Layer authoring methods are strictly atomic (or
-    // report a "did mutate" signal). Then we can invalidate only on Ok.
+    // TODO: the error-path fallback to layer-stack-wide reset is
+    // conservative. Once `Layer` authoring methods either complete
+    // atomically or return a "partial mutation up to here" marker, the
+    // fallback can be narrowed to just the paths the closure touched
+    // before failing.
     fn finalize_layer(
         cache: &mut pcp::Cache,
-        result: Result<bool, sdf::AuthoringError>,
+        layer_index: usize,
+        result: Result<sdf::ChangeList, sdf::AuthoringError>,
     ) -> Result<bool, StageAuthoringError> {
         match result {
-            Ok(true) => {
-                cache.invalidate_all();
+            Ok(cl) if cl.is_empty() => Ok(false),
+            Ok(cl) => {
+                let mut changes = pcp::Changes::new();
+                changes.did_change(cache, &[(layer_index, cl)]);
+                changes.apply(cache);
                 Ok(true)
             }
-            Ok(false) => Ok(false),
             Err(e) => {
                 if !matches!(e, sdf::AuthoringError::ReadOnly { .. }) {
-                    cache.invalidate_all();
+                    // Conservatively drop every cached index on
+                    // post-mutation failure (the layer may be in a
+                    // partial state). `SIGNIFICANT` alone is enough —
+                    // `apply` routes it through `clear_all_indices` and
+                    // the layer-stack precomputed maps (sublayer stacks,
+                    // relocates) cannot have been affected by a failing
+                    // prim/property edit.
+                    let mut changes = pcp::Changes::new();
+                    changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
+                    changes.apply(cache);
                 }
                 Err(StageAuthoringError::Layer(e))
             }
@@ -550,6 +640,18 @@ impl Stage {
     /// Returns the number of layers in the stage (including session layers).
     pub fn layer_count(&self) -> usize {
         self.graph.borrow().layer_count()
+    }
+
+    /// Returns `true` when the composition cache currently holds a prim
+    /// index at `path`. Useful for verifying surgical invalidation and
+    /// for callers that want to observe cache occupancy.
+    pub fn is_indexed(&self, path: &sdf::Path) -> bool {
+        self.graph.borrow().is_indexed(path)
+    }
+
+    /// Total number of cached prim indices.
+    pub fn indexed_count(&self) -> usize {
+        self.graph.borrow().indexed_count()
     }
 
     /// Returns the layer identifiers in strength order (session layers first,

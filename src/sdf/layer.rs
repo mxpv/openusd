@@ -420,6 +420,33 @@ impl Layer {
         Ok(())
     }
 
+    /// Paths along `target`'s namespace chain (strict ancestors, root → leaf,
+    /// excluding `/`) that lack a spec on this layer and will therefore be
+    /// auto-created as `over` specs when authoring at `target` via
+    /// [`Layer::create_prim`] / [`Layer::override_prim`].
+    ///
+    /// Surfaces the same set of paths [`ensure_prim_chain`] (private) would
+    /// touch, so authoring callers can record cache-invalidation entries
+    /// for each auto-created ancestor without re-deriving the walk.
+    pub fn missing_prim_ancestors(&self, target: &Path) -> Vec<Path> {
+        match target.parent() {
+            Some(p) => self.missing_prim_chain_inclusive(&p),
+            None => Vec::new(),
+        }
+    }
+
+    /// `target` itself plus all its ancestors (root → leaf, excluding `/`)
+    /// that lack a spec on this layer. Mirrors the set
+    /// [`Layer::create_attribute`] / [`Layer::create_relationship`] will
+    /// auto-create — the owning prim may itself be missing, in which case
+    /// both the leaf and its ancestors get over specs.
+    pub fn missing_prim_chain_inclusive(&self, target: &Path) -> Vec<Path> {
+        std::iter::successors(Some(target.clone()), Path::parent)
+            .take_while(|p| !p.is_abs_root())
+            .filter(|p| !self.data.has_spec(p))
+            .collect()
+    }
+
     /// Remove the layer's `defaultPrim` metadata. Mirrors C++
     /// `SdfLayer::ClearDefaultPrim`. No-op when no pseudo-root spec exists
     /// (clearing what isn't there must not materialize state).

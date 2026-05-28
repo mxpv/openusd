@@ -18,6 +18,7 @@ use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
 
+use super::deps::Dependencies;
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
 use super::rel::Relocates;
@@ -43,6 +44,8 @@ pub struct Cache {
     indices: HashMap<Path, PrimIndex>,
     /// Per-prim composition contexts for child propagation.
     contexts: HashMap<Path, CompositionContext>,
+    /// Reverse `(layer, site) → prim_index_paths` map for surgical invalidation.
+    deps: Dependencies,
     /// Relocate namespace remapping state.
     relocates: Relocates,
     /// Variant fallback selections tried when no authored selection exists.
@@ -51,15 +54,31 @@ pub struct Cache {
 
 impl Cache {
     /// Creates a new composition graph from a prebuilt layer stack.
-    pub fn new(stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
+    pub(crate) fn new(stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
         let relocates = Relocates::new(&stack.layers);
         Self {
             stack,
             indices: HashMap::new(),
             contexts: HashMap::new(),
+            deps: Dependencies::default(),
             relocates,
             variant_fallbacks,
         }
+    }
+
+    /// Read-only access to the dependency map for change-driven invalidation.
+    pub(super) fn dependencies(&self) -> &Dependencies {
+        &self.deps
+    }
+
+    /// Returns `true` if a composed prim index is currently cached at `path`.
+    pub fn is_indexed(&self, path: &Path) -> bool {
+        self.indices.contains_key(path)
+    }
+
+    /// Number of cached prim indices.
+    pub fn indexed_count(&self) -> usize {
+        self.indices.len()
     }
 
     /// Returns the number of session layers at the front of the layer stack.
@@ -84,40 +103,79 @@ impl Cache {
     }
 
     /// Mutable access to the layer at `index` for routed authoring writes.
-    /// Returns `None` if out of range. Callers must invoke
-    /// [`Cache::invalidate_all`] after any mutation so cached composition
-    /// state reflects the new opinions.
-    //
-    // TODO: replace with a `mutate_layer(idx, |layer| ...)` shape that bakes
-    // invalidation into the type, so a future caller can't grab the layer,
-    // mutate it, and forget to invalidate. Today the pairing is by
-    // convention only.
+    /// Returns `None` if out of range. Callers route invalidation through
+    /// [`change::Changes::apply`](super::change::Changes::apply) instead of
+    /// dropping the whole cache.
     pub(crate) fn layer_mut(&mut self, index: usize) -> Option<&mut sdf::Layer> {
         self.stack.layer_mut(index)
     }
 
-    /// Drop every cached prim index and composition context, then rebuild
-    /// the precomputed state ([`Relocates`], sublayer stacks, layer offsets)
-    /// that was materialized once from the layer data at construction.
+    /// Drop a single prim's cached index, context, and dependency entries.
+    pub(super) fn drop_index(&mut self, path: &Path) {
+        self.indices.remove(path);
+        self.contexts.remove(path);
+        self.deps.remove(path);
+    }
+
+    /// Drop a prim's cached index and every namespace descendant. Used by
+    /// [`change::Changes`](super::change::Changes) when a significant change
+    /// touches `prefix` — the topology may have changed for the entire
+    /// subtree, so every dependent index is invalidated.
     ///
-    /// Called by [`Stage`](crate::usd::Stage) after any authored mutation to a
-    /// backing layer so subsequent reads see the new opinions — including
-    /// `layerRelocates`, `subLayers`, and `subLayerOffsets` changes.
+    /// Uses `HashMap::retain` so the prefix scan and removal happen in a
+    /// single pass, capturing victims into a small `Vec` only to forward to
+    /// the dependency map (which has no `retain` of its own).
     //
-    // TODO: replace with surgical, `PcpChanges`-style invalidation that only
-    // re-evaluates affected paths and their descendants. The current
-    // "nuke everything" strategy is correct but pays the full rebuild cost
-    // on every write and rebuilds state (Relocates, sublayer stacks) that a
-    // typical authoring call cannot affect.
-    //
-    // TODO: any new field added to `Cache` that caches state derived from
-    // layer data must be reset here too — this method only knows about
-    // the three named below. Adding a memoized field without updating this
-    // list will silently retain stale post-author state.
-    pub(crate) fn invalidate_all(&mut self) {
+    // TODO: replace the `has_prefix` scan with an `SdfPathTable`-like trie
+    // (`FindSubtreeRange` in C++). The current shape is O(n) per
+    // invalidation, fine while index counts are modest but the wrong
+    // long-term primitive.
+    pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
+        // `Path::has_prefix("")` returns `true` for every absolute path, so
+        // a default-constructed `Path` would silently wipe the entire
+        // cache without any layer-stack rebuild — almost certainly a
+        // caller bug. Catch it loudly in debug builds; the absolute root
+        // (`/`) is the legitimate "blow everything" prefix.
+        debug_assert!(
+            !prefix.is_empty(),
+            "drop_index_subtree called with empty prefix — use Path::abs_root() to drop everything",
+        );
+        let mut victims: Vec<Path> = Vec::new();
+        self.indices.retain(|p, _| {
+            if p.has_prefix(prefix) {
+                victims.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+        for v in &victims {
+            self.contexts.remove(v);
+            self.deps.remove(v);
+        }
+    }
+
+    /// Drop every cached index, context, and dependency entry without
+    /// touching the layer stack's precomputed state. Use this when the
+    /// layer-stack tier has not been touched but every cached prim must
+    /// be re-evaluated.
+    pub(super) fn clear_all_indices(&mut self) {
         self.indices.clear();
         self.contexts.clear();
+        self.deps.clear();
+    }
+
+    /// Recompute `LayerStack::sublayer_stacks` and `layer_offsets` from the
+    /// current layer data. Called from
+    /// [`change::Changes::apply`](super::change::Changes::apply) when a
+    /// sublayer add/remove or sublayer-offset edit lands.
+    pub(super) fn recompute_layer_stack(&mut self) {
         self.stack.calc_precomputed();
+    }
+
+    /// Recompute the cached `Relocates` from the current layer data. Called
+    /// when `layerRelocates` opinions or the layer stack itself change.
+    pub(super) fn recompute_relocates(&mut self) {
         self.relocates = Relocates::new(&self.stack.layers);
     }
 
@@ -409,6 +467,7 @@ impl Cache {
         }
 
         let child_context = index.context_for_children(&self.stack, &parent_ctx);
+        self.deps.add(path, &index, self.stack.len());
         self.indices.insert(path.clone(), index);
         self.contexts.insert(path.clone(), child_context);
         Ok(())

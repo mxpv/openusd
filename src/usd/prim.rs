@@ -26,9 +26,8 @@
 //! ```
 //!
 //! Each setter does its own short `borrow_mut` on the composition cache and
-//! triggers [`crate::pcp::Cache::invalidate_all`] on completion. The
-//! per-call rebuild cost will drop once surgical, `PcpChanges`-style
-//! invalidation lands; the per-call pattern itself stays.
+//! routes invalidation through [`crate::pcp::Changes`], so only the prim
+//! indices observably affected by the write are dropped.
 
 use super::{Stage, StageAuthoringError};
 use crate::sdf;
@@ -58,28 +57,30 @@ impl<'s> Prim<'s> {
     /// Set the prim's `typeName` field on the edit target's layer.
     pub fn set_type_name(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
-        self.edit(|spec| spec.set_type_name(name))
+        self.edit(&[sdf::FieldKey::TypeName], |spec| spec.set_type_name(name))
     }
 
     /// Set the prim's `active` flag.
     pub fn set_active(self, active: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_active(active))
+        self.edit(&[sdf::FieldKey::Active], |spec| spec.set_active(active))
     }
 
     /// Set the prim's `kind` metadata.
     pub fn set_kind(self, kind: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let kind = kind.into();
-        self.edit(|spec| spec.set_kind(kind))
+        self.edit(&[sdf::FieldKey::Kind], |spec| spec.set_kind(kind))
     }
 
     /// Set the prim's `hidden` flag.
     pub fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_hidden(hidden))
+        self.edit(&[sdf::FieldKey::Hidden], |spec| spec.set_hidden(hidden))
     }
 
     /// Set the prim's `instanceable` flag.
     pub fn set_instanceable(self, instanceable: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.set_instanceable(instanceable))
+        self.edit(&[sdf::FieldKey::Instanceable], |spec| {
+            spec.set_instanceable(instanceable)
+        })
     }
 
     /// Add an applied API schema name to this prim's `apiSchemas` metadata.
@@ -102,7 +103,14 @@ impl<'s> Prim<'s> {
         self.stage.with_target_layer(|layer| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
-                Some(mut spec) => spec.add_applied_schema(name).map_err(Into::into),
+                Some(mut spec) => {
+                    spec.add_applied_schema(name)?;
+                    let mut cl = sdf::ChangeList::new();
+                    cl.entry_mut(&path)
+                        .info_changed
+                        .insert(sdf::FieldKey::ApiSchemas.as_str());
+                    Ok(cl)
+                }
                 None => Err(sdf::AuthoringError::InvalidPath {
                     path: path.clone(),
                     reason: "no prim spec at path on the edit target layer",
@@ -147,13 +155,16 @@ impl<'s> Prim<'s> {
     }
 
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
-    /// `f`, and return `self` for chaining. Surfaces `ReadOnly` if the layer
-    /// can't be mutated, or `InvalidPath` if no prim spec exists at the path.
-    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    /// `f`, and return `self` for chaining. `fields` names the metadata keys
+    /// the closure intends to author so the cache invalidator can classify
+    /// them. Surfaces `ReadOnly` if the layer can't be mutated, or
+    /// `InvalidPath` if no prim spec exists at the path.
+    fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),
     {
         let path = self.path.clone();
+        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer(|layer| {
             // Detect the read-only case explicitly — otherwise `prim_mut`
             // returns `None` for both "no spec" and "layer not writable"
@@ -162,7 +173,12 @@ impl<'s> Prim<'s> {
             match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
                 Some(mut spec) => {
                     f(&mut spec);
-                    Ok(true)
+                    let mut cl = sdf::ChangeList::new();
+                    let entry = cl.entry_mut(&path);
+                    for name in &info_changed {
+                        entry.info_changed.insert(name);
+                    }
+                    Ok(cl)
                 }
                 None => Err(sdf::AuthoringError::InvalidPath {
                     path: path.clone(),
@@ -210,33 +226,37 @@ impl<'s> Attribute<'s> {
     /// the Sdf-tier `Spec::remove` directly if you instead want to clear the
     /// local opinion entirely.
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v)))
+        self.edit(&[sdf::FieldKey::Variability], |spec| {
+            spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v))
+        })
     }
 
     /// Set the attribute's `custom` flag. Always authors an explicit
     /// opinion (see [`Attribute::set_variability`] for the rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom)))
+        self.edit(&[sdf::FieldKey::Custom], |spec| {
+            spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom))
+        })
     }
 
     /// Set the default value. Mirrors C++ `UsdAttribute::Set(value)`.
     pub fn set(self, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(|spec| spec.set_default(value))
+        self.edit(&[sdf::FieldKey::Default], |spec| spec.set_default(value))
     }
 
     /// Set a value at a specific time. Mirrors C++
     /// `UsdAttribute::Set(value, time)`.
     pub fn set_at(self, time: f64, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(|spec| spec.set_time_sample(time, value))
+        self.edit(&[sdf::FieldKey::TimeSamples], |spec| spec.set_time_sample(time, value))
     }
 
     /// Block opinions from weaker layers by authoring a value block on the
     /// default and every authored time sample. Mirrors C++
     /// `UsdAttribute::Block()`.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| {
+        self.edit(&[sdf::FieldKey::Default, sdf::FieldKey::TimeSamples], |spec| {
             spec.set_default(sdf::Value::ValueBlock);
             // Block every authored time sample too — otherwise `get_at` would
             // still resolve weaker opinions through the cached samples.
@@ -251,7 +271,7 @@ impl<'s> Attribute<'s> {
     /// Set the `colorSpace` token.
     pub fn set_color_space(self, color_space: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let color_space = color_space.into();
-        self.edit(|spec| spec.set_color_space(color_space))
+        self.edit(&[sdf::FieldKey::ColorSpace], |spec| spec.set_color_space(color_space))
     }
 
     /// Composed default value, if any layer authored one.
@@ -279,19 +299,27 @@ impl<'s> Attribute<'s> {
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
-    /// apply `f`, and return `self` for chaining. See [`Prim::edit`] for the
-    /// `ReadOnly` vs `InvalidPath` discrimination.
-    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    /// apply `f`, and return `self` for chaining. `fields` names the metadata
+    /// keys the closure intends to author so the cache invalidator can
+    /// classify them. See [`Prim::edit`] for the `ReadOnly` vs `InvalidPath`
+    /// discrimination.
+    fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
     {
         let path = self.path.clone();
+        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer(|layer| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
                     f(&mut spec);
-                    Ok(true)
+                    let mut cl = sdf::ChangeList::new();
+                    let entry = cl.entry_mut(&path);
+                    for name in &info_changed {
+                        entry.info_changed.insert(name);
+                    }
+                    Ok(cl)
                 }
                 None => Err(sdf::AuthoringError::InvalidPath {
                     path: path.clone(),
@@ -337,24 +365,30 @@ impl<'s> Relationship<'s> {
     /// Set the relationship's `variability` field. Always authors an
     /// explicit opinion (see [`Attribute::set_variability`] for rationale).
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v)))
+        self.edit(&[sdf::FieldKey::Variability], false, |spec| {
+            spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v))
+        })
     }
 
     /// Set the relationship's `custom` flag. Always authors an explicit
     /// opinion (see [`Attribute::set_variability`] for rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom)))
+        self.edit(&[sdf::FieldKey::Custom], false, |spec| {
+            spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom))
+        })
     }
 
     /// Append a target path. No-op if already present.
     pub fn add_target(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit(|spec| spec.add_target(target))
+        self.edit(&[sdf::FieldKey::TargetPaths], true, |spec| spec.add_target(target))
     }
 
     /// Replace the entire target list.
     pub fn set_targets<I: IntoIterator<Item = sdf::Path>>(self, targets: I) -> Result<Self, StageAuthoringError> {
         let targets: Vec<sdf::Path> = targets.into_iter().collect();
-        self.edit(|spec| spec.set_target_paths(targets))
+        self.edit(&[sdf::FieldKey::TargetPaths], true, |spec| {
+            spec.set_target_paths(targets)
+        })
     }
 
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
@@ -364,32 +398,84 @@ impl<'s> Relationship<'s> {
     pub fn remove_target(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
         let path = self.path.clone();
         let target = target.clone();
+        let mut removed = false;
         self.stage.with_target_layer(|layer| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
-                Some(mut spec) => Ok(spec.remove_target(&target)),
+                Some(mut spec) => {
+                    removed = spec.remove_target(&target);
+                    let mut cl = sdf::ChangeList::new();
+                    if removed {
+                        let entry = cl.entry_mut(&path);
+                        entry.flags |= sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
+                        entry.info_changed.insert(sdf::FieldKey::TargetPaths.as_str());
+                    }
+                    Ok(cl)
+                }
                 None => Err(sdf::AuthoringError::InvalidPath {
                     path: path.clone(),
                     reason: "no relationship spec at path on the edit target layer",
                 }),
             }
-        })
+        })?;
+        Ok(removed)
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's
-    /// layer, apply `f`, and return `self` for chaining. See [`Prim::edit`]
-    /// for the `ReadOnly` vs `InvalidPath` discrimination.
-    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    /// layer, apply `f`, and return `self` for chaining. `fields` names the
+    /// authored metadata keys; `targets_changed` sets the target-list flag
+    /// in the change list. See [`Prim::edit`] for the `ReadOnly` vs
+    /// `InvalidPath` discrimination.
+    //
+    // The change-list entry is recorded at the relationship's property
+    // path, which `pcp::Changes::did_change` currently skips (no consumer
+    // for relationship-target invalidation). Flag and `info_changed`
+    // opinions are still emitted here so the producer side is in place
+    // when a consumer lands.
+    //
+    // TODO: wire the consumer. When `Cache` starts memoizing per-attribute
+    // composed values or per-relationship resolved-target lists:
+    //   1. Add a `classify_property_entry` branch in `pcp/change.rs`
+    //      mirroring `classify_prim_entry`, gated on
+    //      `path.is_property_path()`. Inspect
+    //      `entry.flags & CHANGE_RELATIONSHIP_TARGETS` and the
+    //      `TargetPaths` / `ConnectionPaths` keys in `info_changed`.
+    //   2. Decide tier: relationship/connection target list changes
+    //      are conceptually tier-3 (spec-stack refresh) — they don't
+    //      reshape the prim graph but they do invalidate composed
+    //      target resolution. Insert the owning prim path into
+    //      `did_change_specs` (or a new `did_change_targets` set keyed
+    //      by property path).
+    //   3. Extend `Changes::apply` to consume the new set by either
+    //      dropping the owner's resolved-target cache or refreshing it
+    //      in place. The current `did_change_specs` field is already
+    //      reserved for this; right now the entry is dropped on the
+    //      floor (see CacheChanges docs).
+    //   4. Remove the `targets_changed` parameter from `edit` and the
+    //      flag emission here if the classifier ends up not needing
+    //      either signal (e.g. it can infer everything from
+    //      `info_changed[TargetPaths]`). Until then both stay for
+    //      forward-compat.
+    fn edit<F>(self, fields: &[sdf::FieldKey], targets_changed: bool, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
     {
         let path = self.path.clone();
+        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer(|layer| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
                 Some(mut spec) => {
                     f(&mut spec);
-                    Ok(true)
+                    let mut cl = sdf::ChangeList::new();
+                    let entry = cl.entry_mut(&path);
+                    if targets_changed {
+                        entry.flags |= sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
+                    }
+                    for name in &info_changed {
+                        entry.info_changed.insert(name);
+                    }
+                    Ok(cl)
                 }
                 None => Err(sdf::AuthoringError::InvalidPath {
                     path: path.clone(),
@@ -540,7 +626,11 @@ mod tests {
                     ..Default::default()
                 }),
             );
-            Ok(true)
+            let mut cl = sdf::ChangeList::new();
+            cl.entry_mut(&sdf::Path::new("/World").expect("valid path"))
+                .info_changed
+                .insert(sdf::FieldKey::ApiSchemas.as_str());
+            Ok(cl)
         })?;
 
         stage
