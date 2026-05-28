@@ -12,7 +12,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::usd::{Prim, Stage};
 
 use crate::schemas::geom::tokens::{
     A_ELEMENT_TYPE, A_FACE_VERTEX_COUNTS, A_FACE_VERTEX_INDICES, A_FAMILY_NAME, A_INDICES, A_NORMALS, A_ORIENTATION,
@@ -25,33 +25,33 @@ use super::common::{author_int_vec, author_point3f_array, author_primvar, author
 /// Author a `def Mesh` prim and return a chainable [`MeshAuthor`].
 pub fn define_mesh<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MeshAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_MESH)?;
-    Ok(MeshAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(MeshAuthor { prim })
 }
 
 pub struct MeshAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl MeshAuthor<'_> {
+impl<'s> MeshAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
+
     /// Set `points` — vertex positions.
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
 
     /// Set `faceVertexCounts` — vertices per face.
     pub fn set_face_vertex_counts(self, counts: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_FACE_VERTEX_COUNTS, counts)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_FACE_VERTEX_COUNTS, counts)?;
         Ok(self)
     }
 
     /// Set `faceVertexIndices` — index buffer.
     pub fn set_face_vertex_indices(self, indices: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_FACE_VERTEX_INDICES, indices)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_FACE_VERTEX_INDICES, indices)?;
         Ok(self)
     }
 
@@ -64,8 +64,8 @@ impl MeshAuthor<'_> {
     /// downstream renderer.
     pub fn set_normals(self, normals: Vec<[f32; 3]>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             A_NORMALS,
             "normal3f[]",
             Value::Vec3fVec(normals),
@@ -77,13 +77,13 @@ impl MeshAuthor<'_> {
     /// Set `subdivisionScheme` (uniform token, `catmullClark` / `loop`
     /// / `bilinear` / `none`).
     pub fn set_subdivision_scheme(self, scheme: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.stage, &self.path, A_SUBDIVISION_SCHEME, scheme)?;
+        author_uniform_token(self.prim.stage(), self.prim.path(), A_SUBDIVISION_SCHEME, scheme)?;
         Ok(self)
     }
 
     /// Set `orientation` (uniform token, `rightHanded` / `leftHanded`).
     pub fn set_orientation(self, orientation: Orientation) -> Result<Self> {
-        author_uniform_token(self.stage, &self.path, A_ORIENTATION, orientation.as_token())?;
+        author_uniform_token(self.prim.stage(), self.prim.path(), A_ORIENTATION, orientation.as_token())?;
         Ok(self)
     }
 
@@ -92,8 +92,8 @@ impl MeshAuthor<'_> {
     /// for the rationale).
     pub fn set_display_color(self, colors: Vec<[f32; 3]>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             "primvars:displayColor",
             "color3f[]",
             Value::Vec3fVec(colors),
@@ -107,8 +107,8 @@ impl MeshAuthor<'_> {
     /// UV seams, or `Vertex` for shared UV layouts).
     pub fn set_st(self, uvs: Vec<[f32; 2]>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             "primvars:st",
             "texCoord2f[]",
             Value::Vec2fVec(uvs),
@@ -121,8 +121,8 @@ impl MeshAuthor<'_> {
     /// curves but also valid on PointBased prims.
     pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             "primvars:widths",
             "float[]",
             Value::FloatVec(widths),
@@ -135,37 +135,41 @@ impl MeshAuthor<'_> {
 /// Author a `def GeomSubset` prim under a Mesh.
 pub fn define_subset<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SubsetAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_GEOM_SUBSET)?;
-    Ok(SubsetAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(SubsetAuthor { prim })
 }
 
 pub struct SubsetAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl SubsetAuthor<'_> {
+impl<'s> SubsetAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
+
     /// Set `elementType` (uniform token, `face` / `point` / `edge` /
     /// `tetrahedron`). Spec default `face`.
     pub fn set_element_type(self, element_type: ElementType) -> Result<Self> {
-        author_uniform_token(self.stage, &self.path, A_ELEMENT_TYPE, element_type.as_token())?;
+        author_uniform_token(
+            self.prim.stage(),
+            self.prim.path(),
+            A_ELEMENT_TYPE,
+            element_type.as_token(),
+        )?;
         Ok(self)
     }
 
     /// Set `familyName` (uniform token) — groups related subsets.
     pub fn set_family_name(self, family_name: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.stage, &self.path, A_FAMILY_NAME, family_name)?;
+        author_uniform_token(self.prim.stage(), self.prim.path(), A_FAMILY_NAME, family_name)?;
         Ok(self)
     }
 
     /// Set `indices` (int[]) — selected element indices into the
     /// owning Mesh.
     pub fn set_indices(self, indices: Vec<i32>) -> Result<Self> {
-        let attr = self.path.append_property(A_INDICES)?;
-        self.stage
-            .create_attribute(attr, "int[]")?
+        self.prim
+            .create_attribute(A_INDICES, "int[]")?
             .set_custom(false)?
             .set(Value::IntVec(indices))?;
         Ok(self)
