@@ -13,12 +13,14 @@
 //! routing, and save flow through the same APIs a hand-rolled
 //! authoring call would use.
 
+mod camera;
 mod common;
 mod imageable;
 mod mesh;
 mod shapes;
 mod xform;
 
+pub use camera::{define_camera, CameraAuthor};
 pub use imageable::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
 pub use mesh::{define_mesh, define_subset, MeshAuthor, SubsetAuthor};
 pub use shapes::{
