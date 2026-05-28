@@ -60,8 +60,10 @@ mod read;
 mod types;
 
 pub use author::{
-    apply_collision, apply_mass, apply_mesh_collision, apply_physics_material, apply_rigid_body, define_physics_scene,
-    CollisionAuthor, MassAuthor, MaterialAuthor, MeshCollisionAuthor, PhysicsSceneAuthor, RigidBodyAuthor,
+    apply_articulation_root, apply_collision, apply_filtered_pairs, apply_mass, apply_mesh_collision,
+    apply_physics_material, apply_rigid_body, define_collision_group, define_physics_scene, CollisionAuthor,
+    CollisionGroupAuthor, FilteredPairsAuthor, MassAuthor, MaterialAuthor, MeshCollisionAuthor, PhysicsSceneAuthor,
+    RigidBodyAuthor,
 };
 pub use read::{
     find_physics_prims, read_collision_group, read_collision_shape, read_filtered_pairs, read_has_articulation_root,

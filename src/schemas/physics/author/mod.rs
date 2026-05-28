@@ -17,11 +17,15 @@
 
 mod collision;
 mod common;
+mod groups;
 mod rigid_body;
 mod scene;
 
 pub use collision::{
     apply_collision, apply_mesh_collision, apply_physics_material, CollisionAuthor, MaterialAuthor, MeshCollisionAuthor,
+};
+pub use groups::{
+    apply_articulation_root, apply_filtered_pairs, define_collision_group, CollisionGroupAuthor, FilteredPairsAuthor,
 };
 pub use rigid_body::{apply_mass, apply_rigid_body, MassAuthor, RigidBodyAuthor};
 pub use scene::{define_physics_scene, PhysicsSceneAuthor};
