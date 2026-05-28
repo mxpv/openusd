@@ -15,12 +15,18 @@
 
 mod camera;
 mod common;
+mod curves;
 mod imageable;
 mod mesh;
 mod shapes;
 mod xform;
 
 pub use camera::{define_camera, CameraAuthor};
+pub use curves::{
+    define_basis_curves, define_hermite_curves, define_nurbs_curves, define_nurbs_patch, define_point_instancer,
+    define_points, define_tet_mesh, BasisCurvesAuthor, HermiteCurvesAuthor, NurbsCurvesAuthor, NurbsPatchAuthor,
+    PointInstancerAuthor, PointsAuthor, TetMeshAuthor,
+};
 pub use imageable::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
 pub use mesh::{define_mesh, define_subset, MeshAuthor, SubsetAuthor};
 pub use shapes::{
