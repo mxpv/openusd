@@ -18,11 +18,9 @@ use crate::schemas::geom::tokens::{
     A_ELEMENT_TYPE, A_FACE_VERTEX_COUNTS, A_FACE_VERTEX_INDICES, A_FAMILY_NAME, A_INDICES, A_NORMALS, A_ORIENTATION,
     A_POINTS, A_SUBDIVISION_SCHEME, T_GEOM_SUBSET, T_MESH,
 };
-use crate::schemas::geom::types::{ElementType, Orientation};
+use crate::schemas::geom::types::{ElementType, Interpolation, Orientation};
 
-use super::common::{
-    author_color3f_array, author_float_array, author_int_vec, author_point3f_array, author_uniform_token,
-};
+use super::common::{author_int_vec, author_point3f_array, author_primvar, author_uniform_token};
 
 /// Author a `def Mesh` prim and return a chainable [`MeshAuthor`].
 pub fn define_mesh<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MeshAuthor<'s>> {
@@ -57,15 +55,22 @@ impl MeshAuthor<'_> {
         Ok(self)
     }
 
-    /// Set `normals` (`normal3f[]` per `usdGeom/schema.usda`). The
-    /// `primvars:normals` form is reserved for per-face / face-varying
-    /// normals authored as a primvar.
-    pub fn set_normals(self, normals: Vec<[f32; 3]>) -> Result<Self> {
-        let attr = self.path.append_property(A_NORMALS)?;
-        self.stage
-            .create_attribute(attr, "normal3f[]")?
-            .set_custom(false)?
-            .set(Value::Vec3fVec(normals))?;
+    /// Set `normals` (`normal3f[]` per `usdGeom/schema.usda`) with the given
+    /// `interpolation`. The `primvars:normals` form is reserved for per-face
+    /// / face-varying normals authored as a primvar.
+    ///
+    /// `interpolation` is required: USD treats unauthored interpolation as
+    /// `constant`, which would silently consume only `normals[0]` for any
+    /// downstream renderer.
+    pub fn set_normals(self, normals: Vec<[f32; 3]>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            A_NORMALS,
+            "normal3f[]",
+            Value::Vec3fVec(normals),
+            interpolation,
+        )?;
         Ok(self)
     }
 
@@ -82,28 +87,47 @@ impl MeshAuthor<'_> {
         Ok(self)
     }
 
-    /// Set `primvars:displayColor` (color3f[]) — the most commonly
-    /// authored display primvar. The reader exposes this directly on
-    /// the curves / mesh `Read*` structs.
-    pub fn set_display_color(self, colors: Vec<[f32; 3]>) -> Result<Self> {
-        author_color3f_array(self.stage, &self.path, "primvars:displayColor", colors)?;
+    /// Set `primvars:displayColor` (color3f[]) — the most commonly authored
+    /// display primvar. `interpolation` is required (see [`Self::set_normals`]
+    /// for the rationale).
+    pub fn set_display_color(self, colors: Vec<[f32; 3]>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            "primvars:displayColor",
+            "color3f[]",
+            Value::Vec3fVec(colors),
+            interpolation,
+        )?;
         Ok(self)
     }
 
     /// Set `primvars:st` (texCoord2f[]) — texture coordinates.
-    pub fn set_st(self, uvs: Vec<[f32; 2]>) -> Result<Self> {
-        let attr = self.path.append_property("primvars:st")?;
-        self.stage
-            .create_attribute(attr, "texCoord2f[]")?
-            .set_custom(false)?
-            .set(Value::Vec2fVec(uvs))?;
+    /// `interpolation` is required (typically `FaceVarying` for meshes with
+    /// UV seams, or `Vertex` for shared UV layouts).
+    pub fn set_st(self, uvs: Vec<[f32; 2]>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            "primvars:st",
+            "texCoord2f[]",
+            Value::Vec2fVec(uvs),
+            interpolation,
+        )?;
         Ok(self)
     }
 
-    /// Set `primvars:widths` (float[]) — per-point widths, mainly
-    /// used by curves but also valid on PointBased prims.
-    pub fn set_widths(self, widths: Vec<f32>) -> Result<Self> {
-        author_float_array(self.stage, &self.path, "primvars:widths", widths)?;
+    /// Set `primvars:widths` (float[]) — per-point widths, mainly used by
+    /// curves but also valid on PointBased prims.
+    pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            "primvars:widths",
+            "float[]",
+            Value::FloatVec(widths),
+            interpolation,
+        )?;
         Ok(self)
     }
 }
@@ -163,14 +187,43 @@ mod tests {
             .set_face_vertex_indices(vec![0, 1, 2, 3])?
             .set_subdivision_scheme("none")?
             .set_orientation(Orientation::RightHanded)?
-            .set_display_color(vec![[1.0, 0.0, 0.0]])?
-            .set_st(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])?;
+            .set_display_color(vec![[1.0, 0.0, 0.0]], Interpolation::Constant)?
+            .set_st(
+                vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                Interpolation::FaceVarying,
+            )?;
 
         let mesh = crate::schemas::geom::read_mesh(&stage, &sdf::path("/M")?)?.expect("Mesh");
         assert_eq!(mesh.points.len(), 4);
         assert_eq!(mesh.face_vertex_counts, vec![4]);
         assert_eq!(mesh.face_vertex_indices, vec![0, 1, 2, 3]);
         assert_eq!(mesh.orientation, Orientation::RightHanded);
+
+        let uvs = mesh.uvs.expect("uvs");
+        assert_eq!(uvs.values.len(), 4);
+        assert_eq!(uvs.interpolation, Interpolation::FaceVarying);
+        let colors = mesh.display_color.expect("displayColor");
+        assert_eq!(colors.values.len(), 1);
+        assert_eq!(colors.interpolation, Interpolation::Constant);
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_normals_roundtrip_vertex_interpolation() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        define_mesh(&stage, sdf::path("/M")?)?
+            .set_points(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])?
+            .set_face_vertex_counts(vec![3])?
+            .set_face_vertex_indices(vec![0, 1, 2])?
+            .set_normals(
+                vec![[0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+                Interpolation::Vertex,
+            )?;
+
+        let mesh = crate::schemas::geom::read_mesh(&stage, &sdf::path("/M")?)?.expect("Mesh");
+        let normals = mesh.normals.expect("normals");
+        assert_eq!(normals.values.len(), 3);
+        assert_eq!(normals.interpolation, Interpolation::Vertex);
         Ok(())
     }
 
