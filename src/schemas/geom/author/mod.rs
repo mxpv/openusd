@@ -15,9 +15,14 @@
 
 mod common;
 mod imageable;
+mod shapes;
 mod xform;
 
 pub use imageable::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
+pub use shapes::{
+    define_capsule, define_cone, define_cube, define_cylinder, define_plane, define_scope, define_sphere, define_xform,
+    CapsuleAuthor, ConeAuthor, CubeAuthor, CylinderAuthor, PlaneAuthor, SphereAuthor,
+};
 pub use xform::{
     set_orient, set_rotate_x, set_rotate_xyz, set_rotate_y, set_rotate_z, set_scale, set_transform, set_translate,
     set_xform_op_order,
