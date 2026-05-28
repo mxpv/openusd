@@ -63,10 +63,11 @@ impl<'s> ImageableAuthor<'s> {
 }
 
 /// Open an existing prim at `path` as `over` for setting Imageable /
-/// Boundable opinions. The typed `*Author` returned by the per-shape
-/// helpers in sibling modules already expose these setters too —
-/// reach for `apply_imageable_overrides` when you need to override
-/// these fields on a prim defined elsewhere (under a reference, etc.).
+/// Boundable opinions. Useful when you need to override visibility /
+/// purpose / extent on a prim defined elsewhere (under a reference,
+/// etc.) without dragging in a typed `*Author` for the underlying
+/// schema. Otherwise prefer the free [`set_visibility`] / [`set_purpose`]
+/// / [`set_extent`] helpers, which take a `&Stage` + `&Path` directly.
 pub fn apply_imageable_overrides<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<ImageableAuthor<'s>> {
     let prim = stage.override_prim(path)?;
     Ok(ImageableAuthor { prim })

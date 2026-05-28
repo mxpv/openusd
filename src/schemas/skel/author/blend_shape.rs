@@ -19,8 +19,7 @@ use crate::schemas::skel::tokens::{
 ///   point indices on the bound mesh.
 ///
 /// Inbetween shapes (`inbetweens:NAME` with `weight` metadata) are
-/// authored separately via [`BlendShapeAuthor::add_inbetween`] in a
-/// follow-up commit.
+/// authored separately via [`BlendShapeAuthor::add_inbetween`].
 pub fn define_blend_shape<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<BlendShapeAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_BLEND_SHAPE)?;
     Ok(BlendShapeAuthor { prim })
