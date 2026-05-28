@@ -15,9 +15,13 @@
 //! correctly-namespaced `apiSchemas` token plus the namespaced attribute set
 //! (`limit:<dof>:physics:*` / `drive:<dof>:physics:*`).
 
+mod collision;
 mod common;
 mod rigid_body;
 mod scene;
 
+pub use collision::{
+    apply_collision, apply_mesh_collision, apply_physics_material, CollisionAuthor, MaterialAuthor, MeshCollisionAuthor,
+};
 pub use rigid_body::{apply_mass, apply_rigid_body, MassAuthor, RigidBodyAuthor};
 pub use scene::{define_physics_scene, PhysicsSceneAuthor};
