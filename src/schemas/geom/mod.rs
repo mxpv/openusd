@@ -39,11 +39,13 @@ mod types;
 mod xform;
 
 pub use author::{
-    apply_imageable_overrides, define_camera, define_capsule, define_cone, define_cube, define_cylinder, define_mesh,
-    define_plane, define_scope, define_sphere, define_subset, define_xform, set_extent, set_orient, set_purpose,
-    set_rotate_x, set_rotate_xyz, set_rotate_y, set_rotate_z, set_scale, set_transform, set_translate, set_visibility,
-    set_xform_op_order, CameraAuthor, CapsuleAuthor, ConeAuthor, CubeAuthor, CylinderAuthor, ImageableAuthor,
-    MeshAuthor, PlaneAuthor, SphereAuthor, SubsetAuthor,
+    apply_imageable_overrides, define_basis_curves, define_camera, define_capsule, define_cone, define_cube,
+    define_cylinder, define_hermite_curves, define_mesh, define_nurbs_curves, define_nurbs_patch, define_plane,
+    define_point_instancer, define_points, define_scope, define_sphere, define_subset, define_tet_mesh, define_xform,
+    set_extent, set_orient, set_purpose, set_rotate_x, set_rotate_xyz, set_rotate_y, set_rotate_z, set_scale,
+    set_transform, set_translate, set_visibility, set_xform_op_order, BasisCurvesAuthor, CameraAuthor, CapsuleAuthor,
+    ConeAuthor, CubeAuthor, CylinderAuthor, HermiteCurvesAuthor, ImageableAuthor, MeshAuthor, NurbsCurvesAuthor,
+    NurbsPatchAuthor, PlaneAuthor, PointInstancerAuthor, PointsAuthor, SphereAuthor, SubsetAuthor, TetMeshAuthor,
 };
 pub use camera::read_camera;
 pub use curves::{
