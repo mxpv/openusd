@@ -5,12 +5,6 @@
 //! match the per-attribute schema declarations in
 //! `usdPhysics/schema.usda` (variability, type name, custom flag).
 
-// Helpers below are consumed progressively across the per-prim
-// modules (`scene`, `rigid_body`, `collision`, `joint`, `limit_drive`,
-// …). Mark unused ones during the early commits so the build stays
-// warning-clean.
-#![allow(dead_code)]
-
 use anyhow::Result;
 
 use crate::sdf::{Path, Value, Variability};

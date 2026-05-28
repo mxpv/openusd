@@ -22,7 +22,6 @@ use crate::schemas::geom::types::{ElementType, Orientation};
 
 use super::common::{
     author_color3f_array, author_float_array, author_int_vec, author_point3f_array, author_uniform_token,
-    author_vec3f_array,
 };
 
 /// Author a `def Mesh` prim and return a chainable [`MeshAuthor`].
@@ -58,11 +57,15 @@ impl MeshAuthor<'_> {
         Ok(self)
     }
 
-    /// Set `normals` (varying vector3f[]). Per UsdGeomPointBased, the
-    /// builtin `normals` attribute is varying — `primvars:normals` is
-    /// the primvar form for per-face/face-varying normals.
+    /// Set `normals` (`normal3f[]` per `usdGeom/schema.usda`). The
+    /// `primvars:normals` form is reserved for per-face / face-varying
+    /// normals authored as a primvar.
     pub fn set_normals(self, normals: Vec<[f32; 3]>) -> Result<Self> {
-        author_vec3f_array(self.stage, &self.path, A_NORMALS, normals)?;
+        let attr = self.path.append_property(A_NORMALS)?;
+        self.stage
+            .create_attribute(attr, "normal3f[]")?
+            .set_custom(false)?
+            .set(Value::Vec3fVec(normals))?;
         Ok(self)
     }
 

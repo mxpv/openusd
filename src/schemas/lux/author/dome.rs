@@ -47,7 +47,7 @@ impl<'s> DomeLightAuthor<'s> {
     /// (`automatic` / `latlong` / `mirroredBall` / `angular` /
     /// `cubeMapVerticalCross`).
     pub fn set_texture_format(self, format: TextureFormat) -> Result<Self> {
-        author_uniform_token_input(
+        author_token_input(
             self.prim.stage(),
             self.prim.path(),
             A_TEXTURE_FORMAT,
@@ -108,7 +108,7 @@ impl<'s> DomeLight1Author<'s> {
 
     /// Set `inputs:texture:format`.
     pub fn set_texture_format(self, format: TextureFormat) -> Result<Self> {
-        author_uniform_token_input(
+        author_token_input(
             self.prim.stage(),
             self.prim.path(),
             A_TEXTURE_FORMAT,
@@ -157,7 +157,8 @@ impl<'s> LightApiSetters<'s> for DomeLight1Author<'s> {
 
 /// Author a `varying token` input — for `inputs:texture:format`
 /// which the schema declares without the `uniform` keyword.
-fn author_uniform_token_input(stage: &Stage, prim: &Path, name: &str, value: String) -> Result<()> {
+fn author_token_input(stage: &Stage, prim: &Path, name: &str, value: String) -> Result<()> {
+    // Body unchanged — name now matches the varying behaviour.
     let attr_path = prim.append_property(name)?;
     stage
         .create_attribute(attr_path, "token")?

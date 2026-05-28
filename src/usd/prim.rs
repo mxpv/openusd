@@ -283,14 +283,29 @@ impl<'s> Attribute<'s> {
     /// above (`set_variability`, `set_custom`, `set_color_space`) cover the
     /// common cases — reach for this one when the schema requires a custom
     /// field key not represented by [`sdf::FieldKey`].
-    pub fn set_metadata(
-        self,
-        key: impl Into<String>,
-        value: impl Into<sdf::Value>,
-    ) -> Result<Self, StageAuthoringError> {
-        let key = key.into();
+    ///
+    /// `key` is `&'static str` so the change-tracking layer can record it
+    /// without copying; pass a `pub const FOO: &str = "..."` token rather than
+    /// a runtime-built string.
+    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(|spec| spec.add(key, value))
+        let path = self.path.clone();
+        self.stage.with_target_layer(|layer| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+                Some(mut spec) => {
+                    spec.add(key, value);
+                    let mut cl = sdf::ChangeList::new();
+                    cl.entry_mut(&path).info_changed.insert(key);
+                    Ok(cl)
+                }
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no attribute spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(self)
     }
 
     /// Composed default value, if any layer authored one.
