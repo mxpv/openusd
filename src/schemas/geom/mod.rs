@@ -38,7 +38,10 @@ mod shapes;
 mod types;
 mod xform;
 
-pub use author::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
+pub use author::{
+    apply_imageable_overrides, set_extent, set_orient, set_purpose, set_rotate_x, set_rotate_xyz, set_rotate_y,
+    set_rotate_z, set_scale, set_transform, set_translate, set_visibility, set_xform_op_order, ImageableAuthor,
+};
 pub use camera::read_camera;
 pub use curves::{
     read_basis_curves, read_hermite_curves, read_nurbs_curves, read_nurbs_patch, read_points, read_tet_mesh,
