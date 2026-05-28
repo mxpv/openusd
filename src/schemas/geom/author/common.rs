@@ -132,7 +132,7 @@ pub(super) fn author_vec3f_pair_array(stage: &Stage, prim: &Path, name: &str, va
     stage
         .create_attribute(attr_path, "float3[]")?
         .set_custom(false)?
-        .set(Value::Vec3fVec(vec![value[0], value[1]]))?;
+        .set(Value::Vec3fVec(value.to_vec()))?;
     Ok(())
 }
 

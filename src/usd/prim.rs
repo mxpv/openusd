@@ -171,6 +171,38 @@ impl<'s> Prim<'s> {
             .set_targets(targets.into_iter().map(Into::into))
     }
 
+    /// Append `value` to the `uniform token[]` attribute named `name` on this
+    /// prim, preserving insertion order. Reads the composed default across
+    /// layers (so weaker-layer opinions get materialised into the edit target's
+    /// new value), de-duplicates, and writes back via `create_attribute`.
+    ///
+    /// Returns `true` when `value` was appended, `false` when it was already
+    /// present (or the attribute is bound to a non-token-array variant that
+    /// can't be flattened).
+    ///
+    /// Useful for ordered token stacks like `xformOpOrder` or `apiSchemas`.
+    pub fn append_to_uniform_token_array(&self, name: &str, value: impl Into<String>) -> anyhow::Result<bool> {
+        let value = value.into();
+        let attr_path = self.path.append_property(name)?;
+        let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
+            Some(sdf::Value::TokenVec(v) | sdf::Value::StringVec(v)) => v,
+            Some(sdf::Value::TokenListOp(op)) => op.flatten(),
+            Some(sdf::Value::StringListOp(op)) => op.flatten(),
+            _ => Vec::new(),
+        };
+        if existing.iter().any(|t| t == &value) {
+            return Ok(false);
+        }
+        let mut updated = existing;
+        updated.push(value);
+        self.stage
+            .create_attribute(attr_path, "token[]")?
+            .set_variability(sdf::Variability::Uniform)?
+            .set_custom(false)?
+            .set(sdf::Value::TokenVec(updated))?;
+        Ok(true)
+    }
+
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
     /// `f`, and return `self` for chaining. `fields` names the metadata keys
     /// the closure intends to author so the cache invalidator can classify
