@@ -19,6 +19,7 @@ mod collision;
 mod common;
 mod groups;
 mod joint;
+mod limit_drive;
 mod rigid_body;
 mod scene;
 
@@ -33,5 +34,6 @@ pub use joint::{
     define_spherical_joint, DistanceJointAuthor, FixedJointAuthor, JointAuthor, JointAxis, JointSetters,
     PrismaticJointAuthor, RevoluteJointAuthor, SphericalJointAuthor,
 };
+pub use limit_drive::{apply_drive, apply_limit, DriveAuthor, LimitAuthor};
 pub use rigid_body::{apply_mass, apply_rigid_body, MassAuthor, RigidBodyAuthor};
 pub use scene::{define_physics_scene, PhysicsSceneAuthor};
