@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value, Variability};
+use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
 use crate::schemas::geom::tokens::{
@@ -166,7 +166,6 @@ impl SubsetAuthor<'_> {
         let attr = self.path.append_property(A_INDICES)?;
         self.stage
             .create_attribute(attr, "int[]")?
-            .set_variability(Variability::Uniform)?
             .set_custom(false)?
             .set(Value::IntVec(indices))?;
         Ok(self)
