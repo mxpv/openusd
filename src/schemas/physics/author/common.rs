@@ -10,25 +10,7 @@ use anyhow::Result;
 use crate::sdf::{Path, Value, Variability};
 use crate::usd::Stage;
 
-/// Author a `varying float` attribute with the given default.
-pub(super) fn author_float(stage: &Stage, prim: &Path, name: &str, value: f32) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "float")?
-        .set_custom(false)?
-        .set(Value::Float(value))?;
-    Ok(())
-}
-
-/// Author a `varying bool` attribute with the given default.
-pub(super) fn author_bool(stage: &Stage, prim: &Path, name: &str, value: bool) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "bool")?
-        .set_custom(false)?
-        .set(Value::Bool(value))?;
-    Ok(())
-}
+pub(super) use crate::schemas::common::{author_bool, author_float, author_rel_targets, author_uniform_token};
 
 /// Author a `uniform bool` attribute with the given default. Used for
 /// `startsAsleep` and `excludeFromArticulation`.
@@ -84,18 +66,6 @@ pub(super) fn author_quatf(stage: &Stage, prim: &Path, name: &str, value: [f32; 
     Ok(())
 }
 
-/// Author a `uniform token` attribute with the given default. Used for
-/// MeshCollisionAPI's `approximation` and joint `axis`.
-pub(super) fn author_uniform_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "token")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Token(value.into()))?;
-    Ok(())
-}
-
 /// Author a `varying string` attribute with the given default. Used
 /// for `CollisionGroup.mergeGroup`.
 pub(super) fn author_string(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
@@ -104,20 +74,5 @@ pub(super) fn author_string(stage: &Stage, prim: &Path, name: &str, value: impl 
         .create_attribute(attr_path, "string")?
         .set_custom(false)?
         .set(Value::String(value.into()))?;
-    Ok(())
-}
-
-/// Author a relationship at `prim.name` with the given target paths.
-pub(super) fn author_rel_targets<I, P>(stage: &Stage, prim: &Path, name: &str, targets: I) -> Result<()>
-where
-    I: IntoIterator<Item = P>,
-    P: Into<Path>,
-{
-    let rel_path = prim.append_property(name)?;
-    let paths: Vec<Path> = targets.into_iter().map(Into::into).collect();
-    stage
-        .create_relationship(rel_path)?
-        .set_custom(false)?
-        .set_targets(paths)?;
     Ok(())
 }

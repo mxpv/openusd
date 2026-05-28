@@ -40,7 +40,7 @@ pub struct Prim<'s> {
 }
 
 impl<'s> Prim<'s> {
-    pub(super) fn new(stage: &'s Stage, path: sdf::Path) -> Self {
+    pub(crate) fn new(stage: &'s Stage, path: sdf::Path) -> Self {
         Self { stage, path }
     }
 
@@ -152,6 +152,23 @@ impl<'s> Prim<'s> {
             })
         })?;
         self.stage.create_relationship(rel_path)
+    }
+
+    /// Author a relationship `name` with the given target paths and the
+    /// schema-authoring convention `custom = false`. Shortcut for
+    /// `create_relationship(name) + set_custom(false) + set_targets`.
+    pub fn author_relationship_targets<I, P>(
+        &self,
+        name: &str,
+        targets: I,
+    ) -> Result<Relationship<'s>, StageAuthoringError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<sdf::Path>,
+    {
+        self.create_relationship(name)?
+            .set_custom(false)?
+            .set_targets(targets.into_iter().map(Into::into))
     }
 
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
