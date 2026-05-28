@@ -28,6 +28,7 @@
 
 pub mod tokens;
 
+mod author;
 mod camera;
 mod curves;
 mod instancer;
@@ -37,6 +38,7 @@ mod shapes;
 mod types;
 mod xform;
 
+pub use author::{apply_imageable_overrides, set_extent, set_purpose, set_visibility, ImageableAuthor};
 pub use camera::read_camera;
 pub use curves::{
     read_basis_curves, read_hermite_curves, read_nurbs_curves, read_nurbs_patch, read_points, read_tet_mesh,
