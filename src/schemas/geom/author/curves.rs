@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use crate::sdf::Path;
-use crate::usd::Stage;
+use crate::usd::{Prim, Stage};
 
 use crate::schemas::geom::tokens::{
     A_ACCELERATIONS, A_ANGULAR_VELOCITIES, A_BASIS, A_CURVE_VERTEX_COUNTS, A_IDS, A_INVISIBLE_IDS, A_KNOTS, A_ORDER,
@@ -30,39 +30,38 @@ use crate::sdf::{Value, Variability};
 
 pub fn define_basis_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<BasisCurvesAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_BASIS_CURVES)?;
-    Ok(BasisCurvesAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(BasisCurvesAuthor { prim })
 }
 
 pub struct BasisCurvesAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl BasisCurvesAuthor<'_> {
+impl<'s> BasisCurvesAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     pub fn set_curve_vertex_counts(self, counts: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_CURVE_VERTEX_COUNTS, counts)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_CURVE_VERTEX_COUNTS, counts)?;
         Ok(self)
     }
     /// Set `type` (`linear` / `cubic`).
     pub fn set_curve_type(self, type_name: impl Into<String>) -> Result<Self> {
-        author_token(self.stage, &self.path, A_TYPE, type_name)?;
+        author_token(self.prim.stage(), self.prim.path(), A_TYPE, type_name)?;
         Ok(self)
     }
     /// Set `basis` (`bezier` / `bspline` / `catmullRom`).
     pub fn set_basis(self, basis: impl Into<String>) -> Result<Self> {
-        author_token(self.stage, &self.path, A_BASIS, basis)?;
+        author_token(self.prim.stage(), self.prim.path(), A_BASIS, basis)?;
         Ok(self)
     }
     /// Set `wrap` (`nonperiodic` / `periodic` / `pinned`).
     pub fn set_wrap(self, wrap: impl Into<String>) -> Result<Self> {
-        author_token(self.stage, &self.path, A_WRAP, wrap)?;
+        author_token(self.prim.stage(), self.prim.path(), A_WRAP, wrap)?;
         Ok(self)
     }
     /// Set `widths` along the curve. `interpolation` is required: Pixar's
@@ -72,8 +71,8 @@ impl BasisCurvesAuthor<'_> {
     /// first sample.
     pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             A_WIDTHS,
             "float[]",
             Value::FloatVec(widths),
@@ -87,37 +86,36 @@ impl BasisCurvesAuthor<'_> {
 
 pub fn define_nurbs_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<NurbsCurvesAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_NURBS_CURVES)?;
-    Ok(NurbsCurvesAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(NurbsCurvesAuthor { prim })
 }
 
 pub struct NurbsCurvesAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl NurbsCurvesAuthor<'_> {
+impl<'s> NurbsCurvesAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     pub fn set_curve_vertex_counts(self, counts: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_CURVE_VERTEX_COUNTS, counts)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_CURVE_VERTEX_COUNTS, counts)?;
         Ok(self)
     }
     pub fn set_order(self, order: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_ORDER, order)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_ORDER, order)?;
         Ok(self)
     }
     pub fn set_knots(self, knots: Vec<f64>) -> Result<Self> {
-        author_double_array(self.stage, &self.path, A_KNOTS, knots)?;
+        author_double_array(self.prim.stage(), self.prim.path(), A_KNOTS, knots)?;
         Ok(self)
     }
     pub fn set_ranges(self, ranges: Vec<[f64; 2]>) -> Result<Self> {
-        let attr = self.path.append_property(A_RANGES)?;
-        self.stage
+        let attr = self.prim.path().append_property(A_RANGES)?;
+        self.prim.stage()
             .create_attribute(attr, "double2[]")?
             .set_custom(false)?
             .set(Value::Vec2dVec(ranges))?;
@@ -127,8 +125,8 @@ impl NurbsCurvesAuthor<'_> {
     /// [`BasisCurvesAuthor::set_widths`] for the rationale).
     pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             A_WIDTHS,
             "float[]",
             Value::FloatVec(widths),
@@ -142,61 +140,60 @@ impl NurbsCurvesAuthor<'_> {
 
 pub fn define_nurbs_patch<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<NurbsPatchAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_NURBS_PATCH)?;
-    Ok(NurbsPatchAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(NurbsPatchAuthor { prim })
 }
 
 pub struct NurbsPatchAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl NurbsPatchAuthor<'_> {
+impl<'s> NurbsPatchAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     pub fn set_uv_vertex_counts(self, u_count: i32, v_count: i32) -> Result<Self> {
-        let attr_u = self.path.append_property(A_U_VERTEX_COUNT)?;
-        self.stage
+        let attr_u = self.prim.path().append_property(A_U_VERTEX_COUNT)?;
+        self.prim.stage()
             .create_attribute(attr_u, "int")?
             .set_custom(false)?
             .set(Value::Int(u_count))?;
-        let attr_v = self.path.append_property(A_V_VERTEX_COUNT)?;
-        self.stage
+        let attr_v = self.prim.path().append_property(A_V_VERTEX_COUNT)?;
+        self.prim.stage()
             .create_attribute(attr_v, "int")?
             .set_custom(false)?
             .set(Value::Int(v_count))?;
         Ok(self)
     }
     pub fn set_uv_order(self, u_order: i32, v_order: i32) -> Result<Self> {
-        let attr_u = self.path.append_property(A_U_ORDER)?;
-        self.stage
+        let attr_u = self.prim.path().append_property(A_U_ORDER)?;
+        self.prim.stage()
             .create_attribute(attr_u, "int")?
             .set_custom(false)?
             .set(Value::Int(u_order))?;
-        let attr_v = self.path.append_property(A_V_ORDER)?;
-        self.stage
+        let attr_v = self.prim.path().append_property(A_V_ORDER)?;
+        self.prim.stage()
             .create_attribute(attr_v, "int")?
             .set_custom(false)?
             .set(Value::Int(v_order))?;
         Ok(self)
     }
     pub fn set_uv_knots(self, u_knots: Vec<f64>, v_knots: Vec<f64>) -> Result<Self> {
-        author_double_array(self.stage, &self.path, A_U_KNOTS, u_knots)?;
-        author_double_array(self.stage, &self.path, A_V_KNOTS, v_knots)?;
+        author_double_array(self.prim.stage(), self.prim.path(), A_U_KNOTS, u_knots)?;
+        author_double_array(self.prim.stage(), self.prim.path(), A_V_KNOTS, v_knots)?;
         Ok(self)
     }
     pub fn set_uv_range(self, u_range: [f64; 2], v_range: [f64; 2]) -> Result<Self> {
-        let attr_u = self.path.append_property(A_U_RANGE)?;
-        self.stage
+        let attr_u = self.prim.path().append_property(A_U_RANGE)?;
+        self.prim.stage()
             .create_attribute(attr_u, "double2")?
             .set_custom(false)?
             .set(Value::Vec2d(u_range))?;
-        let attr_v = self.path.append_property(A_V_RANGE)?;
-        self.stage
+        let attr_v = self.prim.path().append_property(A_V_RANGE)?;
+        self.prim.stage()
             .create_attribute(attr_v, "double2")?
             .set_custom(false)?
             .set(Value::Vec2d(v_range))?;
@@ -204,14 +201,14 @@ impl NurbsPatchAuthor<'_> {
     }
     /// Set `uForm` / `vForm` (uniform token, `open` / `closed` / `periodic`).
     pub fn set_forms(self, u_form: impl Into<String>, v_form: impl Into<String>) -> Result<Self> {
-        let attr_u = self.path.append_property(A_U_FORM)?;
-        self.stage
+        let attr_u = self.prim.path().append_property(A_U_FORM)?;
+        self.prim.stage()
             .create_attribute(attr_u, "token")?
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
             .set(Value::Token(u_form.into()))?;
-        let attr_v = self.path.append_property(A_V_FORM)?;
-        self.stage
+        let attr_v = self.prim.path().append_property(A_V_FORM)?;
+        self.prim.stage()
             .create_attribute(attr_v, "token")?
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
@@ -224,36 +221,35 @@ impl NurbsPatchAuthor<'_> {
 
 pub fn define_hermite_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<HermiteCurvesAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_HERMITE_CURVES)?;
-    Ok(HermiteCurvesAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(HermiteCurvesAuthor { prim })
 }
 
 pub struct HermiteCurvesAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl HermiteCurvesAuthor<'_> {
+impl<'s> HermiteCurvesAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     pub fn set_tangents(self, tangents: Vec<[f32; 3]>) -> Result<Self> {
-        author_vec3f_array(self.stage, &self.path, A_TANGENTS, tangents)?;
+        author_vec3f_array(self.prim.stage(), self.prim.path(), A_TANGENTS, tangents)?;
         Ok(self)
     }
     pub fn set_curve_vertex_counts(self, counts: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_CURVE_VERTEX_COUNTS, counts)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_CURVE_VERTEX_COUNTS, counts)?;
         Ok(self)
     }
     /// Set `widths` along the curve with explicit `interpolation` (see
     /// [`BasisCurvesAuthor::set_widths`] for the rationale).
     pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             A_WIDTHS,
             "float[]",
             Value::FloatVec(widths),
@@ -267,28 +263,27 @@ impl HermiteCurvesAuthor<'_> {
 
 pub fn define_points<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PointsAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_POINTS)?;
-    Ok(PointsAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(PointsAuthor { prim })
 }
 
 pub struct PointsAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl PointsAuthor<'_> {
+impl<'s> PointsAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     /// Set per-point `widths` with explicit `interpolation` (typically
     /// `Vertex` — one width per point — or `Constant`).
     pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
         author_primvar(
-            self.stage,
-            &self.path,
+            self.prim.stage(),
+            self.prim.path(),
             A_WIDTHS,
             "float[]",
             Value::FloatVec(widths),
@@ -297,7 +292,7 @@ impl PointsAuthor<'_> {
         Ok(self)
     }
     pub fn set_ids(self, ids: Vec<i64>) -> Result<Self> {
-        author_int64_array(self.stage, &self.path, A_IDS, ids)?;
+        author_int64_array(self.prim.stage(), self.prim.path(), A_IDS, ids)?;
         Ok(self)
     }
 }
@@ -306,27 +301,26 @@ impl PointsAuthor<'_> {
 
 pub fn define_tet_mesh<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<TetMeshAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_TET_MESH)?;
-    Ok(TetMeshAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(TetMeshAuthor { prim })
 }
 
 pub struct TetMeshAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl TetMeshAuthor<'_> {
+impl<'s> TetMeshAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POINTS, points)?;
         Ok(self)
     }
     /// Set `tetVertexIndices` — flat `int[]` of length
     /// `4 * num_tets`. Each consecutive 4-tuple is one tetrahedron
     /// in the order the reader expects.
     pub fn set_tet_vertex_indices(self, indices: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_TET_VERTEX_INDICES, indices)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_TET_VERTEX_INDICES, indices)?;
         Ok(self)
     }
 }
@@ -335,65 +329,64 @@ impl TetMeshAuthor<'_> {
 
 pub fn define_point_instancer<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PointInstancerAuthor<'s>> {
     let prim = stage.define_prim(path)?.set_type_name(T_POINT_INSTANCER)?;
-    Ok(PointInstancerAuthor {
-        stage,
-        path: prim.path().clone(),
-    })
+    Ok(PointInstancerAuthor { prim })
 }
 
 pub struct PointInstancerAuthor<'s> {
-    stage: &'s Stage,
-    path: Path,
+    prim: Prim<'s>,
 }
 
-impl PointInstancerAuthor<'_> {
+impl<'s> PointInstancerAuthor<'s> {
+    pub fn into_prim(self) -> Prim<'s> {
+        self.prim
+    }
     /// Set the `prototypes` rel targets — paths to the prototype prims.
     pub fn set_prototypes<I, P>(self, prototypes: I) -> Result<Self>
     where
         I: IntoIterator<Item = P>,
         P: Into<Path>,
     {
-        author_rel_targets(self.stage, &self.path, REL_PROTOTYPES, prototypes)?;
+        author_rel_targets(self.prim.stage(), self.prim.path(), REL_PROTOTYPES, prototypes)?;
         Ok(self)
     }
     pub fn set_proto_indices(self, indices: Vec<i32>) -> Result<Self> {
-        author_int_vec(self.stage, &self.path, A_PROTO_INDICES, indices)?;
+        author_int_vec(self.prim.stage(), self.prim.path(), A_PROTO_INDICES, indices)?;
         Ok(self)
     }
     pub fn set_positions(self, positions: Vec<[f32; 3]>) -> Result<Self> {
-        author_point3f_array(self.stage, &self.path, A_POSITIONS, positions)?;
+        author_point3f_array(self.prim.stage(), self.prim.path(), A_POSITIONS, positions)?;
         Ok(self)
     }
     pub fn set_scales(self, scales: Vec<[f32; 3]>) -> Result<Self> {
-        let attr = self.path.append_property(A_SCALES)?;
-        self.stage
+        let attr = self.prim.path().append_property(A_SCALES)?;
+        self.prim.stage()
             .create_attribute(attr, "float3[]")?
             .set_custom(false)?
             .set(Value::Vec3fVec(scales))?;
         Ok(self)
     }
     pub fn set_orientations(self, quats: Vec<[f32; 4]>) -> Result<Self> {
-        author_quatf_array(self.stage, &self.path, A_ORIENTATIONS, quats)?;
+        author_quatf_array(self.prim.stage(), self.prim.path(), A_ORIENTATIONS, quats)?;
         Ok(self)
     }
     pub fn set_velocities(self, velocities: Vec<[f32; 3]>) -> Result<Self> {
-        author_vec3f_array(self.stage, &self.path, A_VELOCITIES, velocities)?;
+        author_vec3f_array(self.prim.stage(), self.prim.path(), A_VELOCITIES, velocities)?;
         Ok(self)
     }
     pub fn set_accelerations(self, accelerations: Vec<[f32; 3]>) -> Result<Self> {
-        author_vec3f_array(self.stage, &self.path, A_ACCELERATIONS, accelerations)?;
+        author_vec3f_array(self.prim.stage(), self.prim.path(), A_ACCELERATIONS, accelerations)?;
         Ok(self)
     }
     pub fn set_angular_velocities(self, vels: Vec<[f32; 3]>) -> Result<Self> {
-        author_vec3f_array(self.stage, &self.path, A_ANGULAR_VELOCITIES, vels)?;
+        author_vec3f_array(self.prim.stage(), self.prim.path(), A_ANGULAR_VELOCITIES, vels)?;
         Ok(self)
     }
     pub fn set_ids(self, ids: Vec<i64>) -> Result<Self> {
-        author_int64_array(self.stage, &self.path, A_IDS, ids)?;
+        author_int64_array(self.prim.stage(), self.prim.path(), A_IDS, ids)?;
         Ok(self)
     }
     pub fn set_invisible_ids(self, ids: Vec<i64>) -> Result<Self> {
-        author_int64_array(self.stage, &self.path, A_INVISIBLE_IDS, ids)?;
+        author_int64_array(self.prim.stage(), self.prim.path(), A_INVISIBLE_IDS, ids)?;
         Ok(self)
     }
 }
