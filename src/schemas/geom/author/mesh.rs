@@ -83,7 +83,12 @@ impl<'s> MeshAuthor<'s> {
 
     /// Set `orientation` (uniform token, `rightHanded` / `leftHanded`).
     pub fn set_orientation(self, orientation: Orientation) -> Result<Self> {
-        author_uniform_token(self.prim.stage(), self.prim.path(), A_ORIENTATION, orientation.as_token())?;
+        author_uniform_token(
+            self.prim.stage(),
+            self.prim.path(),
+            A_ORIENTATION,
+            orientation.as_token(),
+        )?;
         Ok(self)
     }
 

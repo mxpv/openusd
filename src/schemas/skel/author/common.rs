@@ -31,4 +31,3 @@ pub(super) fn author_uniform_matrix4d_array(
         .set(Value::Matrix4dVec(matrices))?;
     Ok(())
 }
-
