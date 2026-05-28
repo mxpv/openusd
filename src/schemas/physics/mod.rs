@@ -60,12 +60,13 @@ mod read;
 mod types;
 
 pub use author::{
-    apply_articulation_root, apply_collision, apply_filtered_pairs, apply_mass, apply_mesh_collision,
-    apply_physics_material, apply_rigid_body, define_collision_group, define_distance_joint, define_fixed_joint,
-    define_joint, define_physics_scene, define_prismatic_joint, define_revolute_joint, define_spherical_joint,
-    CollisionAuthor, CollisionGroupAuthor, DistanceJointAuthor, FilteredPairsAuthor, FixedJointAuthor, JointAuthor,
-    JointAxis, JointSetters, MassAuthor, MaterialAuthor, MeshCollisionAuthor, PhysicsSceneAuthor, PrismaticJointAuthor,
-    RevoluteJointAuthor, RigidBodyAuthor, SphericalJointAuthor,
+    apply_articulation_root, apply_collision, apply_drive, apply_filtered_pairs, apply_limit, apply_mass,
+    apply_mesh_collision, apply_physics_material, apply_rigid_body, define_collision_group, define_distance_joint,
+    define_fixed_joint, define_joint, define_physics_scene, define_prismatic_joint, define_revolute_joint,
+    define_spherical_joint, CollisionAuthor, CollisionGroupAuthor, DistanceJointAuthor, DriveAuthor,
+    FilteredPairsAuthor, FixedJointAuthor, JointAuthor, JointAxis, JointSetters, LimitAuthor, MassAuthor,
+    MaterialAuthor, MeshCollisionAuthor, PhysicsSceneAuthor, PrismaticJointAuthor, RevoluteJointAuthor,
+    RigidBodyAuthor, SphericalJointAuthor,
 };
 pub use read::{
     find_physics_prims, read_collision_group, read_collision_shape, read_filtered_pairs, read_has_articulation_root,
