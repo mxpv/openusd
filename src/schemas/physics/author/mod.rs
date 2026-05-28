@@ -18,6 +18,7 @@
 mod collision;
 mod common;
 mod groups;
+mod joint;
 mod rigid_body;
 mod scene;
 
@@ -26,6 +27,11 @@ pub use collision::{
 };
 pub use groups::{
     apply_articulation_root, apply_filtered_pairs, define_collision_group, CollisionGroupAuthor, FilteredPairsAuthor,
+};
+pub use joint::{
+    define_distance_joint, define_fixed_joint, define_joint, define_prismatic_joint, define_revolute_joint,
+    define_spherical_joint, DistanceJointAuthor, FixedJointAuthor, JointAuthor, JointAxis, JointSetters,
+    PrismaticJointAuthor, RevoluteJointAuthor, SphericalJointAuthor,
 };
 pub use rigid_body::{apply_mass, apply_rigid_body, MassAuthor, RigidBodyAuthor};
 pub use scene::{define_physics_scene, PhysicsSceneAuthor};
