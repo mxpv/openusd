@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value, Variability};
+use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
 use crate::schemas::geom::tokens::META_INTERPOLATION;
@@ -22,50 +22,12 @@ pub(super) fn author_token(stage: &Stage, prim: &Path, name: &str, value: impl I
     Ok(())
 }
 
-pub(super) fn author_uniform_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "token")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Token(value.into()))?;
-    Ok(())
-}
-
-pub(super) fn author_uniform_token_vec(stage: &Stage, prim: &Path, name: &str, tokens: Vec<String>) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "token[]")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::TokenVec(tokens))?;
-    Ok(())
-}
-
-pub(super) fn author_float(stage: &Stage, prim: &Path, name: &str, value: f32) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "float")?
-        .set_custom(false)?
-        .set(Value::Float(value))?;
-    Ok(())
-}
-
 pub(super) fn author_double(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
     let attr_path = prim.append_property(name)?;
     stage
         .create_attribute(attr_path, "double")?
         .set_custom(false)?
         .set(Value::Double(value))?;
-    Ok(())
-}
-
-pub(super) fn author_bool(stage: &Stage, prim: &Path, name: &str, value: bool) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "bool")?
-        .set_custom(false)?
-        .set(Value::Bool(value))?;
     Ok(())
 }
 
@@ -234,16 +196,4 @@ pub(super) fn author_matrix4d(stage: &Stage, prim: &Path, name: &str, value: [f6
     Ok(())
 }
 
-pub(super) fn author_rel_targets<I, P>(stage: &Stage, prim: &Path, name: &str, targets: I) -> Result<()>
-where
-    I: IntoIterator<Item = P>,
-    P: Into<Path>,
-{
-    let rel_path = prim.append_property(name)?;
-    let paths: Vec<Path> = targets.into_iter().map(Into::into).collect();
-    stage
-        .create_relationship(rel_path)?
-        .set_custom(false)?
-        .set_targets(paths)?;
-    Ok(())
-}
+pub(super) use crate::schemas::common::{author_bool, author_float, author_rel_targets, author_uniform_token};

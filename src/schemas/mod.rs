@@ -21,6 +21,9 @@
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
 
+#[cfg(any(feature = "geom", feature = "lux", feature = "physics", feature = "skel"))]
+mod common;
+
 #[cfg(feature = "geom")]
 pub mod geom;
 #[cfg(feature = "lux")]
