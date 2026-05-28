@@ -92,9 +92,50 @@
 //! The callback decides whether to skip the broken arc and continue or
 //! abort composition entirely.
 //!
+//! # Cache invalidation
+//!
+//! When a layer is authored, only the prim indices observably affected by
+//! the write are dropped from the cache. The pipeline mirrors C++
+//! `PcpChanges`:
+//!
+//! 1. The authoring callsite returns an [`sdf::ChangeList`](crate::sdf::ChangeList)
+//!    describing what it just did (the path, flag bits for spec adds/removes,
+//!    field names in `info_changed`).
+//! 2. [`Changes::did_change`] reads the change list and classifies each
+//!    entry into one of three tiers:
+//!    - Significant — graph topology may be wrong. Drop the index and every
+//!      namespace descendant. Triggered by composition-arc fields
+//!      (`references`, `payload`, `inheritPaths`, `specializes`,
+//!      `variantSetNames`, `variantSelection`, `instanceable`, `specifier`,
+//!      `active`) and by non-inert prim adds/removes.
+//!    - Prim — local rebuild only, descendants survive. Currently collapsed
+//!      into significant; the field exists for a future finer-grained split.
+//!    - Spec — graph is fine, only the spec stack changed. No-op while the
+//!      cache doesn't memoize the stacks; reserved for the future split.
+//!
+//!    Layer-stack-tier flags (sublayers, sublayer offsets, `layerRelocates`,
+//!    `defaultPrim`) cause the whole stack to be marked significant — every
+//!    cached index is dropped because composition topology may have shifted.
+//!
+//! 3. [`Changes::apply`] surgically removes the affected entries from the
+//!    cache. Indices rebuild lazily on next access.
+//!
+//! A reverse `(layer_index, site_path) → prim_index_paths` map (the
+//! `Dependencies` table internal to the cache) makes step 2 cheap: every
+//! [`PrimIndex`](index::PrimIndex) registers its observed sites when it
+//! finishes building, and the classifier looks up dependents — including
+//! ancestors of the changed site, since an arc at `/Foo` makes `/Foo/Bar`'s
+//! composition transitively dependent on `/Foo`.
+//!
+//! Property-tier authoring (attribute values, time samples, relationship
+//! targets) never invalidates the prim graph: those queries read live
+//! layer data on every call.
+//!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
 pub(crate) mod cache;
+pub(crate) mod change;
+pub(crate) mod deps;
 pub(crate) mod index;
 mod mapping;
 mod rel;
@@ -106,6 +147,8 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
 pub(crate) use cache::Cache;
+pub(crate) use change::Changes;
+pub use change::{CacheChanges, LayerStackChanges};
 pub use index::{ArcType, Node, NodeIndex, PrimIndex};
 pub use mapping::MapFunction;
 
@@ -234,23 +277,25 @@ impl LayerStack {
 
     /// Mutable access to a layer in the stack, for authoring writes routed
     /// through [`Cache::layer_mut`]. Returns `None` for an out-of-range index.
-    /// After mutating, callers must call [`Cache::invalidate_all`] so cached
-    /// composition state reflects the new opinions.
+    /// Callers route invalidation through
+    /// [`change::Changes::apply`](super::change::Changes::apply) so only the
+    /// affected prim indices are dropped.
     fn layer_mut(&mut self, index: usize) -> Option<&mut sdf::Layer> {
         self.layers.get_mut(index)
     }
 
     /// Recompute the precomputed `sublayer_stacks` and `layer_offsets` maps
-    /// from the current layers. Used by [`Cache::invalidate_all`] after
-    /// authoring may have changed `subLayers` / `subLayerOffsets`.
+    /// from the current layers. Used by
+    /// [`Cache::recompute_layer_stack`](super::cache::Cache::recompute_layer_stack)
+    /// after authoring touched `subLayers` / `subLayerOffsets`.
     //
     // TODO: when one layer appears in multiple sublayer stacks with
     // different effective offsets, the `entry().or_insert(off)` below picks
     // whichever offset is seen first by `HashMap::values()`, which is
     // iteration-order non-deterministic. The same bug exists in
     // [`LayerStack::new`]; making it observable across an authoring call is
-    // what's new here. Surgical (`PcpChanges`-style) invalidation would let
-    // us drop this rebuild entirely.
+    // what's new here. A per-stack incremental relocate diff would let us
+    // drop this rebuild entirely on most authoring calls.
     fn calc_precomputed(&mut self) {
         self.sublayer_stacks = (0..self.layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
