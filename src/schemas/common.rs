@@ -83,5 +83,7 @@ pub(crate) fn varying_attribute<'s>(
     name: &str,
     type_name: &str,
 ) -> Result<Attribute<'s>> {
-    Ok(Prim::new(stage, prim.clone()).create_attribute(name, type_name)?.set_custom(false)?)
+    Ok(Prim::new(stage, prim.clone())
+        .create_attribute(name, type_name)?
+        .set_custom(false)?)
 }

@@ -115,7 +115,8 @@ impl<'s> NurbsCurvesAuthor<'s> {
     }
     pub fn set_ranges(self, ranges: Vec<[f64; 2]>) -> Result<Self> {
         let attr = self.prim.path().append_property(A_RANGES)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr, "double2[]")?
             .set_custom(false)?
             .set(Value::Vec2dVec(ranges))?;
@@ -157,12 +158,14 @@ impl<'s> NurbsPatchAuthor<'s> {
     }
     pub fn set_uv_vertex_counts(self, u_count: i32, v_count: i32) -> Result<Self> {
         let attr_u = self.prim.path().append_property(A_U_VERTEX_COUNT)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_u, "int")?
             .set_custom(false)?
             .set(Value::Int(u_count))?;
         let attr_v = self.prim.path().append_property(A_V_VERTEX_COUNT)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_v, "int")?
             .set_custom(false)?
             .set(Value::Int(v_count))?;
@@ -170,12 +173,14 @@ impl<'s> NurbsPatchAuthor<'s> {
     }
     pub fn set_uv_order(self, u_order: i32, v_order: i32) -> Result<Self> {
         let attr_u = self.prim.path().append_property(A_U_ORDER)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_u, "int")?
             .set_custom(false)?
             .set(Value::Int(u_order))?;
         let attr_v = self.prim.path().append_property(A_V_ORDER)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_v, "int")?
             .set_custom(false)?
             .set(Value::Int(v_order))?;
@@ -188,12 +193,14 @@ impl<'s> NurbsPatchAuthor<'s> {
     }
     pub fn set_uv_range(self, u_range: [f64; 2], v_range: [f64; 2]) -> Result<Self> {
         let attr_u = self.prim.path().append_property(A_U_RANGE)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_u, "double2")?
             .set_custom(false)?
             .set(Value::Vec2d(u_range))?;
         let attr_v = self.prim.path().append_property(A_V_RANGE)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_v, "double2")?
             .set_custom(false)?
             .set(Value::Vec2d(v_range))?;
@@ -202,13 +209,15 @@ impl<'s> NurbsPatchAuthor<'s> {
     /// Set `uForm` / `vForm` (uniform token, `open` / `closed` / `periodic`).
     pub fn set_forms(self, u_form: impl Into<String>, v_form: impl Into<String>) -> Result<Self> {
         let attr_u = self.prim.path().append_property(A_U_FORM)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_u, "token")?
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
             .set(Value::Token(u_form.into()))?;
         let attr_v = self.prim.path().append_property(A_V_FORM)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr_v, "token")?
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
@@ -359,7 +368,8 @@ impl<'s> PointInstancerAuthor<'s> {
     }
     pub fn set_scales(self, scales: Vec<[f32; 3]>) -> Result<Self> {
         let attr = self.prim.path().append_property(A_SCALES)?;
-        self.prim.stage()
+        self.prim
+            .stage()
             .create_attribute(attr, "float3[]")?
             .set_custom(false)?
             .set(Value::Vec3fVec(scales))?;

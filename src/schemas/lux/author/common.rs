@@ -60,4 +60,3 @@ pub(super) fn author_treat_as_line(stage: &Stage, prim: &Path, value: bool) -> R
         .set(Value::Bool(value))?;
     Ok(())
 }
-
