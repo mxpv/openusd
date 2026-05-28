@@ -20,9 +20,10 @@ use crate::schemas::geom::tokens::{
 };
 
 use super::common::{
-    author_double_array, author_float_array, author_int64_array, author_int_vec, author_point3f_array,
-    author_quatf_array, author_rel_targets, author_token, author_vec3f_array,
+    author_double_array, author_int64_array, author_int_vec, author_point3f_array, author_primvar, author_quatf_array,
+    author_rel_targets, author_token, author_vec3f_array,
 };
+use crate::schemas::geom::types::Interpolation;
 use crate::sdf::{Value, Variability};
 
 // ── BasisCurves ────────────────────────────────────────────────────
@@ -64,8 +65,20 @@ impl BasisCurvesAuthor<'_> {
         author_token(self.stage, &self.path, A_WRAP, wrap)?;
         Ok(self)
     }
-    pub fn set_widths(self, widths: Vec<f32>) -> Result<Self> {
-        author_float_array(self.stage, &self.path, A_WIDTHS, widths)?;
+    /// Set `widths` along the curve. `interpolation` is required: Pixar's
+    /// reference treats `widths` on a curve as primvar-like with its own
+    /// interpolation (typically `Vertex` or `Varying`); leaving it unauthored
+    /// makes external consumers fall back to `constant` and lose all but the
+    /// first sample.
+    pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            A_WIDTHS,
+            "float[]",
+            Value::FloatVec(widths),
+            interpolation,
+        )?;
         Ok(self)
     }
 }
@@ -110,8 +123,17 @@ impl NurbsCurvesAuthor<'_> {
             .set(Value::Vec2dVec(ranges))?;
         Ok(self)
     }
-    pub fn set_widths(self, widths: Vec<f32>) -> Result<Self> {
-        author_float_array(self.stage, &self.path, A_WIDTHS, widths)?;
+    /// Set `widths` along the curve with explicit `interpolation` (see
+    /// [`BasisCurvesAuthor::set_widths`] for the rationale).
+    pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            A_WIDTHS,
+            "float[]",
+            Value::FloatVec(widths),
+            interpolation,
+        )?;
         Ok(self)
     }
 }
@@ -226,8 +248,17 @@ impl HermiteCurvesAuthor<'_> {
         author_int_vec(self.stage, &self.path, A_CURVE_VERTEX_COUNTS, counts)?;
         Ok(self)
     }
-    pub fn set_widths(self, widths: Vec<f32>) -> Result<Self> {
-        author_float_array(self.stage, &self.path, A_WIDTHS, widths)?;
+    /// Set `widths` along the curve with explicit `interpolation` (see
+    /// [`BasisCurvesAuthor::set_widths`] for the rationale).
+    pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            A_WIDTHS,
+            "float[]",
+            Value::FloatVec(widths),
+            interpolation,
+        )?;
         Ok(self)
     }
 }
@@ -252,8 +283,17 @@ impl PointsAuthor<'_> {
         author_point3f_array(self.stage, &self.path, A_POINTS, points)?;
         Ok(self)
     }
-    pub fn set_widths(self, widths: Vec<f32>) -> Result<Self> {
-        author_float_array(self.stage, &self.path, A_WIDTHS, widths)?;
+    /// Set per-point `widths` with explicit `interpolation` (typically
+    /// `Vertex` — one width per point — or `Constant`).
+    pub fn set_widths(self, widths: Vec<f32>, interpolation: Interpolation) -> Result<Self> {
+        author_primvar(
+            self.stage,
+            &self.path,
+            A_WIDTHS,
+            "float[]",
+            Value::FloatVec(widths),
+            interpolation,
+        )?;
         Ok(self)
     }
     pub fn set_ids(self, ids: Vec<i64>) -> Result<Self> {
@@ -375,11 +415,14 @@ mod tests {
             .set_curve_type("linear")?
             .set_basis("bezier")?
             .set_wrap("nonperiodic")?
-            .set_widths(vec![0.1, 0.1])?;
+            .set_widths(vec![0.1, 0.1], Interpolation::Vertex)?;
 
         let c = crate::schemas::geom::read_basis_curves(&stage, &sdf::path("/C")?)?.expect("BasisCurves");
         assert_eq!(c.points.len(), 2);
         assert_eq!(c.curve_vertex_counts, vec![2]);
+        assert_eq!(c.widths.len(), 2);
+        let interp = stage.field::<sdf::Value>("/C.widths", "interpolation")?;
+        assert_eq!(interp, Some(sdf::Value::Token("vertex".into())));
         Ok(())
     }
 

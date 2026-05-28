@@ -10,6 +10,9 @@ use anyhow::Result;
 use crate::sdf::{Path, Value, Variability};
 use crate::usd::Stage;
 
+use crate::schemas::geom::tokens::META_INTERPOLATION;
+use crate::schemas::geom::types::Interpolation;
+
 pub(super) fn author_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
     let attr_path = prim.append_property(name)?;
     stage
@@ -108,6 +111,30 @@ pub(super) fn author_float_array(stage: &Stage, prim: &Path, name: &str, value: 
         .create_attribute(attr_path, "float[]")?
         .set_custom(false)?
         .set(Value::FloatVec(value))?;
+    Ok(())
+}
+
+/// Author a primvar-style attribute with its `interpolation` metadata.
+///
+/// UsdGeom primvars (and the primvar-like `normals` / `widths` attributes on
+/// PointBased) encode per-element vs. per-prim semantics via an
+/// `interpolation` metadata field. Authoring the value without the metadata
+/// silently inherits Pixar's `constant` default, which truncates multi-element
+/// arrays to `values[0]` for any consumer that respects the field.
+pub(super) fn author_primvar(
+    stage: &Stage,
+    prim: &Path,
+    name: &str,
+    type_name: &str,
+    value: Value,
+    interpolation: Interpolation,
+) -> Result<()> {
+    let attr_path = prim.append_property(name)?;
+    stage
+        .create_attribute(attr_path, type_name)?
+        .set_custom(false)?
+        .set_metadata(META_INTERPOLATION, Value::Token(interpolation.as_token().to_string()))?
+        .set(value)?;
     Ok(())
 }
 
