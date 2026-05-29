@@ -1101,6 +1101,25 @@ mod tests {
         Ok(())
     }
 
+    /// A target that does not resolve to a relationship is kept as-is, even
+    /// when it has no spec at all (dangling path), matching C++ which forwards
+    /// only through live relationships.
+    #[test]
+    fn forwarded_targets_keeps_dangling() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Geom")?;
+        let a = stage
+            .define_prim("/P")?
+            .create_relationship("a")?
+            .set_targets([sdf::path("/Geom")?, sdf::path("/Nowhere.rel")?])?;
+
+        assert_eq!(
+            a.get_forwarded_targets()?,
+            vec![sdf::path("/Geom")?, sdf::path("/Nowhere.rel")?]
+        );
+        Ok(())
+    }
+
     /// A pure relationship cycle forwards to no terminal targets without
     /// hanging.
     #[test]

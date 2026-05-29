@@ -851,10 +851,13 @@ impl Cache {
     }
 
     /// Returns the forwarded `targetPaths` for a relationship (spec 12.4):
-    /// raw targets that resolve to a relationship are replaced, recursively,
-    /// by that relationship's own forwarded targets, so only prim and
-    /// attribute paths remain. Cycles are broken (each relationship is
-    /// followed once) and duplicates collapse, keeping first occurrence.
+    /// a target that resolves to a relationship is replaced, recursively, by
+    /// that relationship's own forwarded targets. Every other target is kept
+    /// as-is — prim paths, attribute paths, and any target that does not
+    /// resolve to a relationship (a dangling or unloaded path). This matches
+    /// C++ `UsdRelationship::GetForwardedTargets`, which forwards only through
+    /// live relationships. Cycles are broken (each relationship is followed
+    /// once) and duplicates collapse, keeping first occurrence.
     ///
     /// The walk uses an explicit stack rather than recursion (mirroring
     /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship

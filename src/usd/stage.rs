@@ -933,10 +933,11 @@ impl Stage {
         self.try_or_handle(|cache| cache.relationship_targets(rel))
     }
 
-    /// Returns the forwarded `targetPaths` for a relationship. Targets that
-    /// resolve to another relationship are replaced, recursively, by that
-    /// relationship's forwarded targets, leaving only prim and attribute paths
-    /// (spec 12.4). Cycles are broken and duplicates collapse. Mirrors C++
+    /// Returns the forwarded `targetPaths` for a relationship. A target that
+    /// resolves to another relationship is replaced, recursively, by that
+    /// relationship's forwarded targets; every other target is kept as-is,
+    /// including prim paths, attribute paths, and dangling paths (spec 12.4).
+    /// Cycles are broken and duplicates collapse. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
     ///
     /// Forwarding honors the population mask: a target relationship on a prim
