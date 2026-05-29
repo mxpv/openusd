@@ -683,6 +683,35 @@ impl<'s> Relationship<'s> {
         })
     }
 
+    /// Author a generic metadata field on the relationship spec.
+    /// Sibling of [`Attribute::set_metadata`]; used for relationship
+    /// metadata the dedicated setters don't cover, e.g. UsdShade's
+    /// `bindMaterialAs` binding-strength token on a `material:binding`
+    /// relationship.
+    ///
+    /// `key` is `&'static str` so the change-tracking layer can record
+    /// it without copying — pass a `pub const` token, not a runtime
+    /// string.
+    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+        let value = value.into();
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
+                Some(mut spec) => {
+                    spec.add(key, value);
+                    let mut cl = sdf::ChangeList::new();
+                    cl.entry_mut(&path).info_changed.insert(key);
+                    Ok(cl)
+                }
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no relationship spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(self)
+    }
+
     /// Remove a target path. Returns `Ok(true)` if it was present. Takes
     /// `&self` rather than consuming — `remove_target` returns a `bool` (not
     /// `Self`), so it doesn't fit the chain pattern. Skips cache invalidation
