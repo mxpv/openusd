@@ -148,9 +148,10 @@ impl Changes {
         //      "does any layer still spec this path?" check, which means
         //      walking every layer for `path` after the mutation.
         //   2. An inert add that flips the prim's `instanceable`
-        //      composition — promote to significant. Blocked on
-        //      instancing landing in `pcp::index` (instancing has no
-        //      consumer here yet).
+        //      composition — promote to significant. A direct `instanceable`
+        //      info-change is already significant (and clears the prototype
+        //      registry); still missing is detecting an inert spec add that
+        //      changes whether the prim is instanceable.
         //   3. An inert add at a path whose node was previously culled
         //      from a dependent prim's graph — that dependent needs a
         //      tier-2 prim rebuild so the now-needed node re-enters.
@@ -224,6 +225,17 @@ impl Changes {
     // directly (today it collapses them into the significant set in
     // `classify_prim_entry`), this branch becomes load-bearing.
     pub fn apply(self, cache: &mut Cache) {
+        // Any index invalidation can change which prims are instances or how
+        // they compose, so the shared-prototype registry (spec 11.3.3) must be
+        // rebuilt rather than left stale. It is lazily repopulated on the next
+        // instancing query.
+        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT)
+            || !self.cache.did_change_significantly.is_empty()
+            || !self.cache.did_change_prims.is_empty()
+        {
+            cache.invalidate_prototypes();
+        }
+
         // Order matters: clear the index cache BEFORE rebuilding the
         // layer stack's precomputed state. Cached prim graphs were
         // composed against the old `sublayer_stacks`/`Relocates`; if a
