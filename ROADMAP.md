@@ -118,7 +118,7 @@ that broader spec behavior can be considered fully covered.
 | variability resolution (weakest opinion) | `12.2.3` | :white_check_mark: | `0.4.0` | Weakest authored opinion via `PrimIndex::resolve_variability` |
 | custom field resolution (any-true) | `12.2.4` | :white_check_mark: | `0.4.0` | Logical OR across opinions via `PrimIndex::resolve_custom` |
 | Dictionary combining | `12.2.5` | :white_check_mark: | `0.4.0` | Recursive merge across dictionary-valued opinions |
-| List op resolution | `12.2.6` | :construction: | `0.4.0` | Partial: composition-arc list ops and composed `apiSchemas` are resolved. Left for full metadata coverage: generic list-op field resolution for `targetPaths`, `connectionPaths`, `clipSets`, and any registered list-op metadata field. |
+| List op resolution | `12.2.6` | :construction: | `0.4.0` | Partial: composition-arc list ops, composed `apiSchemas`, and composed `connectionPaths` (via `PrimIndex::resolve_path_list_op`) are resolved. Left for full metadata coverage: generic list-op field resolution for `targetPaths`, `clipSets`, and any registered list-op metadata field. |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
 | Fallback values | `12.2.8` | :construction: | | Requires schema registry |
 | Basic attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | Resolves authored `default`, `timeSamples`, and `ValueBlock`. Layer-offset retiming, value clips, and splines are tracked separately. |
@@ -129,7 +129,7 @@ that broader spec behavior can be considered fully covered.
 | Interpolation (Linear) | `12.5.2` | :white_check_mark: | `0.4.0` | `Stage::value_at(attr, time)` with `InterpolationType::Linear` (default). All §12.5.2 types incl. `quath`/`f`/`d` via slerp; held-fallback for unsupported types and past-last-sample. |
 | [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | `12.3` | :construction: | | `clips`/`clipSets` for split time samples |
 | Relationship targets (raw + forwarded) | `12.4` | :construction: | | `targetPaths` readable; forwarding not implemented |
-| Attribute connections | `12.4` | :construction: | | `connectionPaths` readable; not resolved |
+| Attribute connections | `12.4` | :white_check_mark: | `0.4.0` | `Stage::connection_paths` folds list-op edits across every contributing layer via `PrimIndex::resolve_path_list_op`. Authoring on `Attribute` (`set_connections`, `add_connection`, `add_connection_prepended`, `remove_connection`, `clear_connections`, `has_authored_connections`). Stage-wide `usd::ConnectionGraph` indexes every edge and resolves chains to terminal sources. |
 
 ## Schemas (Spec 13)
 
