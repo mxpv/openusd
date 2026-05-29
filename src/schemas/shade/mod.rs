@@ -30,9 +30,11 @@
 pub mod tokens;
 
 mod connectable;
+mod material;
 mod shader;
 mod types;
 
 pub use connectable::{create_input, create_output, input_name, input_path, output_name, output_path};
+pub use material::{define_material, define_node_graph, MaterialAuthor, NodeGraphAuthor};
 pub use shader::{define_shader, ShaderAuthor};
 pub use types::{BindingStrength, Connectability, ImplementationSource};
