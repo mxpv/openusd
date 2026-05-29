@@ -15,6 +15,7 @@ use crate::ar::Resolver;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Specifier, Value};
 
+use super::clip;
 use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
 
@@ -511,24 +512,6 @@ impl PrimIndex {
         Ok(None)
     }
 
-    /// Returns the layer index of the strongest root-layer-stack node that
-    /// authors a `clips` opinion at this prim — the value-clip anchor point
-    /// (spec 12.3.4.5). Clip asset paths are resolved relative to this layer.
-    /// Only `local_layers` are considered, since the anchor is by definition a
-    /// local opinion.
-    pub(crate) fn clip_anchor_layer(&self, stack: &LayerStack, local_layers: &HashSet<usize>) -> Result<Option<usize>> {
-        let field = FieldKey::Clips.as_str();
-        for node in self.nodes() {
-            if !local_layers.contains(&node.layer_index) {
-                continue;
-            }
-            if stack.layer(node.layer_index).try_get(&node.path, field)?.is_some() {
-                return Ok(Some(node.layer_index));
-            }
-        }
-        Ok(None)
-    }
-
     /// Resolves the `clipSets` strength order, if authored. Returns the ordered
     /// clip set names (strongest first). When unauthored, clip sets fall back
     /// to name order (spec 12.3.4.1). Composition across layers is limited to
@@ -545,6 +528,75 @@ impl PrimIndex {
             Value::StringVec(names) | Value::TokenVec(names) => Some(names),
             _ => None,
         })
+    }
+
+    /// Resolves explicit value clip sets while preserving the layer that
+    /// authored path-bearing fields. The top-level `clips` dictionary composes
+    /// recursively, but relative clip assets must still be anchored to the
+    /// layer that supplied `assetPaths`/`manifestAssetPath`.
+    pub(crate) fn resolve_clip_sets(&self, stack: &LayerStack) -> Result<Vec<clip::ResolvedClipSet>> {
+        let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut blocked_sets: HashSet<String> = HashSet::new();
+        let mut asset_layers: HashMap<String, usize> = HashMap::new();
+        let mut manifest_layers: HashMap<String, usize> = HashMap::new();
+
+        for node in self.nodes() {
+            let Some(value) = stack
+                .layer(node.layer_index)
+                .try_get(&node.path, FieldKey::Clips.as_str())?
+            else {
+                continue;
+            };
+            match value.into_owned() {
+                Value::ValueBlock => break,
+                Value::Dictionary(dict) => {
+                    for (set_name, set_value) in dict {
+                        if blocked_sets.contains(&set_name) {
+                            continue;
+                        }
+                        let Value::Dictionary(fields) = set_value else {
+                            if !sets.contains_key(&set_name) {
+                                blocked_sets.insert(set_name);
+                            }
+                            continue;
+                        };
+                        let composed = sets.entry(set_name.clone()).or_default();
+                        for (field, value) in fields {
+                            if composed.contains_key(&field) {
+                                continue;
+                            }
+                            if field == clip::keys::ASSET_PATHS {
+                                asset_layers.insert(set_name.clone(), node.layer_index);
+                            } else if field == clip::keys::MANIFEST_ASSET_PATH {
+                                manifest_layers.insert(set_name.clone(), node.layer_index);
+                            }
+                            composed.insert(field, value);
+                        }
+                    }
+                }
+                _ => continue,
+            }
+        }
+
+        let clips = Value::Dictionary(
+            sets.into_iter()
+                .map(|(name, fields)| (name, Value::Dictionary(fields)))
+                .collect(),
+        );
+        let order = self.clip_sets_order(stack)?;
+
+        Ok(clip::ClipSet::parse_all(&clips, order.as_deref())
+            .into_iter()
+            .filter_map(|set| {
+                let asset_layer = asset_layers.get(&set.name).copied()?;
+                let manifest_layer = manifest_layers.get(&set.name).copied();
+                Some(clip::ResolvedClipSet {
+                    set,
+                    asset_layer,
+                    manifest_layer,
+                })
+            })
+            .collect())
     }
 
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.

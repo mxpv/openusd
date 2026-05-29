@@ -2813,8 +2813,21 @@ def Shader "Mat" (
         match stage.value_at(attr, time).expect("value_at") {
             Some(sdf::Value::Float(v)) => Some(v as f64),
             Some(sdf::Value::Double(v)) => Some(v),
+            Some(sdf::Value::Int64(v)) => Some(v as f64),
             _ => None,
         }
+    }
+
+    fn write_clip_scene(
+        dir: &std::path::Path,
+        root_body: &str,
+        manifest_body: &str,
+        clip_body: &str,
+    ) -> Result<String> {
+        std::fs::write(dir.join("root.usda"), root_body)?;
+        std::fs::write(dir.join("manifest.usda"), manifest_body)?;
+        std::fs::write(dir.join("clip.usda"), clip_body)?;
+        Ok(dir.join("root.usda").to_string_lossy().into_owned())
     }
 
     /// A clip overrides a referenced attribute that has no local opinion: the
@@ -2837,6 +2850,212 @@ def Shader "Mat" (
         assert_eq!(value_f64(&stage, "/Model.local", 10.0), Some(10.0));
         // `ref` has no local opinion → the clip wins (-10, not the reference's 10).
         assert_eq!(value_f64(&stage, "/Model.ref", 10.0), Some(-10.0));
+        Ok(())
+    }
+
+    #[test]
+    fn clip_local_default_wins() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = write_clip_scene(
+            dir.path(),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float localDefault = 3
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float localDefault
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float localDefault.timeSamples = {
+        0: 7
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(&root)?;
+        assert_eq!(value_f64(&stage, "/Model.localDefault", 0.0), Some(3.0));
+        Ok(())
+    }
+
+    #[test]
+    fn clip_skips_missing_attr() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = write_clip_scene(
+            dir.path(),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float ghost
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float ghost.timeSamples = {
+        0: 7
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(&root)?;
+        assert_eq!(stage.spec_type("/Model.ghost")?, None);
+        assert_eq!(stage.value_at("/Model.ghost", 0.0)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn clip_anchor_sublayer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join("sub"))?;
+        std::fs::write(
+            dir.path().join("root.usda"),
+            r#"#usda 1.0
+(
+    subLayers = [@./sub/weak.usda@]
+)
+
+over "Model" (
+    clips = {
+        dictionary default = {
+            double2[] times = [(0, 0)]
+        }
+    }
+)
+{
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("sub").join("weak.usda"),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("sub").join("manifest.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("sub").join("clip.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size.timeSamples = {
+        0: 7
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+        assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(7.0));
+        Ok(())
+    }
+
+    #[test]
+    fn clip_anchor_reference() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join("asset"))?;
+        std::fs::write(
+            dir.path().join("root.usda"),
+            r#"#usda 1.0
+def "ShotModel" (
+    references = @./asset/model.usda@</Model>
+)
+{
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("asset").join("model.usda"),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("asset").join("manifest.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("asset").join("clip.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size.timeSamples = {
+        0: 7
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+        assert_eq!(value_f64(&stage, "/ShotModel.size", 0.0), Some(7.0));
         Ok(())
     }
 
