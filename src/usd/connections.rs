@@ -129,9 +129,7 @@ impl ConnectionGraph {
             match self.forward.get(node) {
                 // Terminal: nothing further to chase.
                 None => {
-                    if !terminals.contains(node) {
-                        terminals.push(node.clone());
-                    }
+                    terminals.push(node.clone());
                 }
                 // Push reversed so the first source is explored first
                 // (matches the original recursive order).
