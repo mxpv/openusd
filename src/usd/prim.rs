@@ -377,22 +377,20 @@ impl<'s> Attribute<'s> {
     }
 
     /// Append a single connection target to `connectionPaths`. No-op if
-    /// already present. Joins the appended-items list op (weaker than
-    /// prepended opinions). Mirrors C++ `UsdAttribute::AddConnection`
-    /// with the default back-of-append position.
+    /// already present (skips cache invalidation in that case). Joins the
+    /// appended-items list op (weaker than prepended opinions). Mirrors
+    /// C++ `UsdAttribute::AddConnection` with the default back-of-append
+    /// position.
     pub fn add_connection(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
-            spec.add_connection_path(target, false)
-        })
+        self.edit_connection(|spec| spec.add_connection_path(target, false))
     }
 
     /// Append a single connection target to the *prepended* list op, so
-    /// it composes stronger than connections from weaker layers. Mirrors
-    /// C++ `UsdAttribute::AddConnection` with a front-of-prepend position.
+    /// it composes stronger than connections from weaker layers. No-op if
+    /// already present. Mirrors C++ `UsdAttribute::AddConnection` with a
+    /// front-of-prepend position.
     pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
-            spec.add_connection_path(target, true)
-        })
+        self.edit_connection(|spec| spec.add_connection_path(target, true))
     }
 
     /// Remove a single connection target. Returns `Ok(true)` if it was
@@ -424,10 +422,41 @@ impl<'s> Attribute<'s> {
         Ok(removed)
     }
 
-    /// Clear all authored `connectionPaths` on the edit target.
-    /// Mirrors C++ `UsdAttribute::ClearConnections`.
+    /// Clear all authored `connectionPaths` on the edit target. Skips
+    /// cache invalidation when no opinion was authored. Mirrors C++
+    /// `UsdAttribute::ClearConnections`.
     pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| spec.clear_connection_paths())
+        self.edit_connection(|spec| spec.clear_connection_paths())
+    }
+
+    /// Run `f` on the attribute spec at the edit target's layer, and only
+    /// record a `ChangeList` entry (driving cache invalidation) when `f`
+    /// reports an actual mutation. The shared helper for the connection
+    /// authoring methods above.
+    fn edit_connection<F>(self, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> bool,
+    {
+        let path = self.path.clone();
+        self.stage.with_target_layer(|layer| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+                Some(mut spec) => {
+                    let mut cl = sdf::ChangeList::new();
+                    if f(&mut spec) {
+                        cl.entry_mut(&path)
+                            .info_changed
+                            .insert(sdf::FieldKey::ConnectionPaths.as_str());
+                    }
+                    Ok(cl)
+                }
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no attribute spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(self)
     }
 
     /// `true` when any connection opinion is authored — including an

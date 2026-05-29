@@ -571,7 +571,8 @@ where
         );
     }
 
-    /// Append a single connection path. No-op if already present.
+    /// Append a single connection path. Returns `true` if the spec was
+    /// mutated, `false` when the path was already present.
     ///
     /// `prepend = true` joins the prepended-items list (the new path
     /// composes stronger than weaker layers); `prepend = false` joins
@@ -581,23 +582,25 @@ where
     /// selects without flipping the op out of explicit mode. A
     /// pre-existing non-`PathListOp` value is overwritten — debug
     /// builds assert.
-    pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) {
+    pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) -> bool {
         match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
-                if !op.iter().any(|p| p == &path) {
-                    if op.explicit {
-                        // Stay explicit; honour `prepend` to control position.
-                        if prepend {
-                            op.explicit_items.insert(0, path);
-                        } else {
-                            op.explicit_items.push(path);
-                        }
-                    } else if prepend {
-                        op.prepended_items.push(path);
-                    } else {
-                        op.appended_items.push(path);
-                    }
+                if op.iter().any(|p| p == &path) {
+                    return false;
                 }
+                if op.explicit {
+                    // Stay explicit; honour `prepend` to control position.
+                    if prepend {
+                        op.explicit_items.insert(0, path);
+                    } else {
+                        op.explicit_items.push(path);
+                    }
+                } else if prepend {
+                    op.prepended_items.push(path);
+                } else {
+                    op.appended_items.push(path);
+                }
+                true
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
@@ -607,6 +610,7 @@ where
                     sdf::PathListOp::appended([path])
                 };
                 self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+                true
             }
             None => {
                 // Default to a non-explicit list op so the new path composes
@@ -617,6 +621,7 @@ where
                     sdf::PathListOp::appended([path])
                 };
                 self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+                true
             }
         }
     }
@@ -632,9 +637,10 @@ where
         false
     }
 
-    /// Clear all authored `connectionPaths`.
-    pub fn clear_connection_paths(&mut self) {
-        self.remove(sdf::FieldKey::ConnectionPaths.as_str());
+    /// Clear all authored `connectionPaths`. Returns `true` if an
+    /// opinion was actually removed.
+    pub fn clear_connection_paths(&mut self) -> bool {
+        self.remove(sdf::FieldKey::ConnectionPaths.as_str()).is_some()
     }
 }
 
@@ -998,6 +1004,30 @@ mod tests {
             vec!["MaterialBindingAPI".to_string(), "SkelBindingAPI".to_string()]
         );
         Ok(())
+    }
+
+    #[test]
+    fn add_connection_path_dedups() {
+        let mut spec = Spec::new(sdf::SpecType::Attribute);
+        let mut attr = spec.as_attr_mut().expect("attr spec");
+        let path = sdf::Path::new("/A.out").expect("path");
+
+        assert!(attr.add_connection_path(path.clone(), false));
+        // Duplicate — must not mutate, must not trip the change tracker.
+        assert!(!attr.add_connection_path(path, false));
+    }
+
+    #[test]
+    fn clear_connection_paths_noop() {
+        let mut spec = Spec::new(sdf::SpecType::Attribute);
+        let mut attr = spec.as_attr_mut().expect("attr spec");
+
+        // Nothing authored — clear is a no-op.
+        assert!(!attr.clear_connection_paths());
+
+        attr.add_connection_path(sdf::Path::new("/A.out").expect("path"), false);
+        assert!(attr.clear_connection_paths());
+        assert!(!attr.clear_connection_paths());
     }
 
     #[test]
