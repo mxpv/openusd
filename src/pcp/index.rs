@@ -337,6 +337,44 @@ impl PrimIndex {
         Ok(result)
     }
 
+    /// Resolves a path-list-op field by composing list edits from strongest
+    /// to weakest across all contributing nodes. Used for property-level
+    /// fields like `connectionPaths` and `targetPaths`. A value block stops
+    /// weaker opinions while preserving any stronger composed edits.
+    pub(crate) fn resolve_path_list_op(
+        &self,
+        field: FieldKey,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+    ) -> Result<Vec<Path>> {
+        let field = field.as_str();
+        let mut ops = Vec::new();
+
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            let Some(value) = data.try_get(&query_path, field)? else {
+                continue;
+            };
+            // A bare `PathVec` (no list-op envelope) is treated as an explicit
+            // replacement of weaker opinions — the natural interpretation for
+            // a non-list-op-typed value when the field is declared list-op.
+            let list_op = match value.into_owned() {
+                Value::ValueBlock => break,
+                Value::PathListOp(op) => op,
+                Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
+                _ => continue,
+            };
+            ops.push(list_op);
+        }
+
+        let mut result = Vec::new();
+        for op in ops.iter().rev() {
+            result = op.compose_over(&result);
+        }
+        Ok(result)
+    }
+
     /// Builds the query path for a node, applying `prop_suffix` if given.
     /// Borrows the node's path when no suffix is needed (zero-copy).
     fn query_path<'a>(node: &'a Node, prop_suffix: Option<&str>) -> Result<Cow<'a, Path>> {
