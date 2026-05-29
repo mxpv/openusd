@@ -226,6 +226,28 @@ impl<'s> Prim<'s> {
         Ok(!self.clip_sets()?.is_empty())
     }
 
+    /// Returns `true` if this prim is an instance (spec 11.3.3): `instanceable`
+    /// resolves true and the prim has a composition arc.
+    pub fn is_instance(&self) -> anyhow::Result<bool> {
+        self.stage.is_instance(self.path.clone())
+    }
+
+    /// Returns the shared prototype path (`/__Prototype_N`) for this prim if it
+    /// is an instance, else `None` (spec 11.3.3).
+    pub fn prototype(&self) -> anyhow::Result<Option<sdf::Path>> {
+        self.stage.get_prototype(self.path.clone())
+    }
+
+    /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
+    pub fn is_prototype(&self) -> anyhow::Result<bool> {
+        self.stage.is_prototype(self.path.clone())
+    }
+
+    /// Returns `true` if this prim lies within a prototype's namespace.
+    pub fn is_in_prototype(&self) -> anyhow::Result<bool> {
+        self.stage.is_in_prototype(self.path.clone())
+    }
+
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
     /// `f`, and return `self` for chaining. `fields` names the metadata keys
     /// the closure intends to author so the cache invalidator can classify
@@ -793,6 +815,24 @@ mod tests {
         // A prim with no clips reports none.
         let other = super::Prim::new(&stage, sdf::path("/Model2")?);
         assert!(!other.has_clips()?);
+        Ok(())
+    }
+
+    /// `Prim::is_instance`/`prototype`/`is_in_prototype` mirror the stage-level
+    /// instancing queries (spec 11.3.3).
+    #[test]
+    fn prim_prototype_handle() -> anyhow::Result<()> {
+        let path = format!("{}/fixtures/instancing_shared.usda", env!("CARGO_MANIFEST_DIR"));
+        let stage = Stage::open(&path)?;
+
+        let a = super::Prim::new(&stage, sdf::path("/A")?);
+        assert!(a.is_instance()?);
+        assert!(a.prototype()?.is_some());
+        assert!(!a.is_in_prototype()?);
+
+        let proto = super::Prim::new(&stage, sdf::path("/Proto")?);
+        assert!(!proto.is_instance()?);
+        assert!(proto.prototype()?.is_none());
         Ok(())
     }
 

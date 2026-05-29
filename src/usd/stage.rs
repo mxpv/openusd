@@ -80,6 +80,8 @@ bitflags! {
         const INSTANCE = 1 << 4;
         /// The prim is part of the contiguous model hierarchy.
         const MODEL = 1 << 5;
+        /// The prim lies within a prototype's namespace (`/__Prototype_N`).
+        const IN_PROTOTYPE = 1 << 6;
     }
 }
 
@@ -88,6 +90,11 @@ bitflags! {
 pub struct PrimPredicate {
     required: PrimStatus,
     rejected: PrimStatus,
+    /// When `false` (the default), traversal does not descend into an instance
+    /// prim's subtree — its contents are reached through the prototype
+    /// (`Stage::get_prototype`). When `true`, instance subtrees are traversed
+    /// directly (the "instance proxy" view, spec 11.3.3).
+    traverse_instance_proxies: bool,
 }
 
 impl PrimPredicate {
@@ -99,17 +106,34 @@ impl PrimPredicate {
     /// Status bits that, once set on an ancestor, are inherited by every descendant.
     const INHERITED_REJECTED: PrimStatus = PrimStatus::ABSTRACT;
 
-    /// Match every composed prim.
-    pub const ALL: Self = Self::new(PrimStatus::empty(), PrimStatus::empty());
+    /// Match every composed prim, descending into instance subtrees so the
+    /// full composed namespace is visited regardless of instancing.
+    pub const ALL: Self = Self {
+        required: PrimStatus::empty(),
+        rejected: PrimStatus::empty(),
+        traverse_instance_proxies: true,
+    };
 
     /// OpenUSD-style default traversal predicate.
     ///
     /// Matches prims that are active, loaded, defined, and not abstract.
     pub const DEFAULT: Self = Self::new(Self::INHERITED_REQUIRED, Self::INHERITED_REJECTED);
 
-    /// Creates a predicate with required and rejected status bits.
+    /// Creates a predicate with required and rejected status bits. Instance
+    /// subtrees are not traversed; see [`Self::with_instance_proxies`].
     pub const fn new(required: PrimStatus, rejected: PrimStatus) -> Self {
-        Self { required, rejected }
+        Self {
+            required,
+            rejected,
+            traverse_instance_proxies: false,
+        }
+    }
+
+    /// Returns a copy that descends into instance subtrees (instance proxies)
+    /// when `enabled`, instead of stopping at instance prims (spec 11.3.3).
+    pub fn with_instance_proxies(mut self, enabled: bool) -> Self {
+        self.traverse_instance_proxies = enabled;
+        self
     }
 
     /// Returns `true` if `status` satisfies the predicate.
@@ -119,7 +143,12 @@ impl PrimPredicate {
 
     /// Returns the set of status bits this predicate actually consults.
     fn consulted_bits(self) -> PrimStatus {
-        self.required.union(self.rejected)
+        let mut bits = self.required.union(self.rejected);
+        // Stopping at instances requires knowing which prims are instances.
+        if !self.traverse_instance_proxies {
+            bits = bits.union(PrimStatus::INSTANCE);
+        }
+        bits
     }
 
     /// Returns `true` if no descendant can satisfy this predicate.
@@ -988,6 +1017,39 @@ impl Stage {
         self.has_composition_arc(&prim)
     }
 
+    /// Returns the shared prototype path (`/__Prototype_N`) for an instance
+    /// prim, or `None` if `prim` is not an instance (spec 11.3.3). Instances
+    /// with the same composition share one prototype.
+    pub fn get_prototype(&self, prim: impl Into<sdf::Path>) -> Result<Option<sdf::Path>> {
+        let prim = prim.into().prim_path();
+        self.try_or_handle(|cache| cache.prototype_of(&prim))
+    }
+
+    /// Returns the instance prims sharing the prototype at `prototype` (a
+    /// `/__Prototype_N` path), in registration order.
+    pub fn get_instances(&self, prototype: impl Into<sdf::Path>) -> Result<Vec<sdf::Path>> {
+        let prototype = prototype.into();
+        self.try_or_handle(|cache| Ok(cache.instances_of(&prototype)))
+    }
+
+    /// Returns every registered prototype root (`/__Prototype_N`).
+    pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
+        self.try_or_handle(|cache| Ok(cache.prototypes()))
+    }
+
+    /// Returns `true` if `path` is a prototype root (`/__Prototype_N`).
+    pub fn is_prototype(&self, path: impl Into<sdf::Path>) -> Result<bool> {
+        let path = path.into();
+        self.try_or_handle(|cache| Ok(cache.is_prototype(&path)))
+    }
+
+    /// Returns `true` if `path` lies within a prototype's namespace (spec
+    /// 11.3.3).
+    pub fn is_in_prototype(&self, path: impl Into<sdf::Path>) -> Result<bool> {
+        let path = path.into();
+        self.try_or_handle(|cache| Ok(cache.is_in_prototype(&path)))
+    }
+
     /// Returns `true` if the prim is in the contiguous model hierarchy.
     ///
     /// A model prim has `kind` equal to `group`, `assembly`, or `component`.
@@ -1039,6 +1101,9 @@ impl Stage {
         }
         if mask.contains(PrimStatus::MODEL) {
             status.set(PrimStatus::MODEL, self.is_model(prim)?);
+        }
+        if mask.contains(PrimStatus::IN_PROTOTYPE) {
+            status.set(PrimStatus::IN_PROTOTYPE, self.is_in_prototype(prim)?);
         }
         Ok(status)
     }
@@ -1145,6 +1210,11 @@ impl Stage {
                     visitor(&path);
                 }
                 if predicate.prunes_descendants(status) {
+                    continue;
+                }
+                // Stop at instance prims unless instance proxies are requested;
+                // the instance's subtree is the prototype's (spec 11.3.3).
+                if !predicate.traverse_instance_proxies && status.contains(PrimStatus::INSTANCE) {
                     continue;
                 }
             }
@@ -2561,6 +2631,54 @@ def Shader "Mat" (
 
         assert_eq!(stage.prim_children("/A")?, vec!["Child".to_string()]);
         assert_eq!(stage.prim_children("/B")?, vec!["Child".to_string()]);
+        Ok(())
+    }
+
+    /// `get_prototype` / `get_instances` group instances by shared composition,
+    /// and the prototype namespace is addressable (spec 11.3.3).
+    #[test]
+    fn prototype_queries() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+        let proto = stage.get_prototype("/A")?;
+        assert!(proto.is_some());
+        assert_eq!(stage.get_prototype("/B")?, proto); // same composition → shared
+        assert_ne!(stage.get_prototype("/C")?, proto); // different prototype
+        assert_eq!(stage.get_prototype("/Proto")?, None); // not an instance
+
+        let proto = proto.unwrap();
+        let mut instances: Vec<String> = stage.get_instances(&proto)?.iter().map(|p| p.to_string()).collect();
+        instances.sort();
+        assert_eq!(instances, vec!["/A".to_string(), "/B".to_string()]);
+
+        // The prototype namespace is addressable and resolves to the shared
+        // (arc-only) subtree.
+        assert!(stage.is_prototype(&proto)?);
+        let child = sdf::path(format!("{proto}/Child"))?;
+        assert!(stage.is_in_prototype(&child)?);
+        assert_eq!(
+            stage.value_at(child.append_property("size")?, 0.0)?,
+            Some(sdf::Value::Double(5.0))
+        );
+        Ok(())
+    }
+
+    /// Default traversal stops at instance prims; `with_instance_proxies`
+    /// descends into their subtrees (spec 11.3.3).
+    #[test]
+    fn traversal_instance_proxies() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+        let mut default = Vec::new();
+        stage.traverse(|p| default.push(p.to_string()))?;
+        assert!(default.contains(&"/A".to_string()));
+        assert!(!default.contains(&"/A/Child".to_string()));
+
+        let mut proxies = Vec::new();
+        stage.traverse_with_predicate(PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
+            proxies.push(p.to_string())
+        })?;
+        assert!(proxies.contains(&"/A/Child".to_string()));
         Ok(())
     }
 
