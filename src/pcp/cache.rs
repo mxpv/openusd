@@ -55,12 +55,14 @@ pub struct Cache {
     /// 12.3.4), so they are held here rather than in the [`LayerStack`].
     clip_layers: HashMap<String, sdf::Layer>,
     /// Shared prototypes for scene-graph instancing (spec 11.3.3), keyed by
-    /// instancing key. Instances with the same key reuse one prototype, so its
-    /// subtree is composed only once. Cleared by
-    /// [`Self::invalidate_prototypes`] on any composition change.
-    prototypes: HashMap<InstanceKey, Prototype>,
-    /// Reverse lookup from a `/__Prototype_N` path to its instancing key.
-    prototype_roots: HashMap<Path, InstanceKey>,
+    /// their `/__Prototype_N` root path. Instances with the same instancing key
+    /// reuse one prototype, so its subtree is composed only once. Cleared by
+    /// [`Self::invalidate_prototypes`] on any composition change. Path-keyed so
+    /// the common query direction (path to prototype) is a single lookup.
+    prototypes: HashMap<Path, Prototype>,
+    /// Maps an instancing key to its prototype root, the lookup direction used
+    /// only when registering an instance to dedup against an existing key.
+    prototype_keys: HashMap<InstanceKey, Path>,
     /// Counter for minting `/__Prototype_N` identities in registration order.
     prototype_count: usize,
 }
@@ -78,8 +80,6 @@ struct Prototype {
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
     index: usize,
-    /// Synthetic prototype identity (`/__Prototype_N`).
-    path: Path,
     /// Instance whose composed subtree backs this prototype.
     canonical: Path,
     /// Every instance sharing this prototype.
@@ -121,7 +121,7 @@ impl Cache {
             variant_fallbacks,
             clip_layers: HashMap::new(),
             prototypes: HashMap::new(),
-            prototype_roots: HashMap::new(),
+            prototype_keys: HashMap::new(),
             prototype_count: 0,
         }
     }
@@ -471,7 +471,7 @@ impl Cache {
     /// would avoid recomputing unaffected keys.
     pub(super) fn invalidate_prototypes(&mut self) {
         self.prototypes.clear();
-        self.prototype_roots.clear();
+        self.prototype_keys.clear();
         // `prototype_count` stays monotonic so a `/__Prototype_N` identity is
         // never reused for a different composition within a session.
     }
@@ -633,22 +633,23 @@ impl Cache {
         let local = self.local_layers();
         let key = self.instance_key(&self.indices[instance], &local);
 
-        if let Some(prototype) = self.prototypes.get_mut(&key) {
+        if let Some(root) = self.prototype_keys.get(&key) {
+            let root = root.clone();
+            let prototype = self.prototypes.get_mut(&root).expect("key index points to a prototype");
             if !prototype.instances.contains(instance) {
                 prototype.instances.push(instance.clone());
             }
-            return Ok((prototype.canonical.clone(), prototype.path.clone()));
+            return Ok((prototype.canonical.clone(), root));
         }
 
         let index = self.prototype_count;
         let path = Path::new(&format!("/__Prototype_{index}"))?;
         self.prototype_count += 1;
-        self.prototype_roots.insert(path.clone(), key.clone());
+        self.prototype_keys.insert(key, path.clone());
         self.prototypes.insert(
-            key,
+            path.clone(),
             Prototype {
                 index,
-                path: path.clone(),
                 canonical: instance.clone(),
                 instances: vec![instance.clone()],
             },
@@ -671,9 +672,8 @@ impl Cache {
     /// depend on the order instances were queried. Empty for unknown paths.
     pub(crate) fn instances_of(&self, prototype: &Path) -> Vec<Path> {
         let mut instances = self
-            .prototype_roots
+            .prototypes
             .get(prototype)
-            .and_then(|key| self.prototypes.get(key))
             .map(|prototype| prototype.instances.clone())
             .unwrap_or_default();
         instances.sort();
@@ -682,27 +682,34 @@ impl Cache {
 
     /// Returns the registered `/__Prototype_N` roots, in registration order.
     pub(crate) fn prototypes(&self) -> Vec<Path> {
-        let mut roots: Vec<&Prototype> = self.prototypes.values().collect();
-        roots.sort_by_key(|prototype| prototype.index);
-        roots.into_iter().map(|prototype| prototype.path.clone()).collect()
+        let mut roots: Vec<(&Path, &Prototype)> = self.prototypes.iter().collect();
+        roots.sort_by_key(|(_, prototype)| prototype.index);
+        roots.into_iter().map(|(root, _)| root.clone()).collect()
     }
 
     /// Returns `true` if `path` is a `/__Prototype_N` root.
     pub(crate) fn is_prototype(&self, path: &Path) -> bool {
-        self.prototype_roots.contains_key(path)
+        self.prototypes.contains_key(path)
     }
 
     /// Returns `true` if `path` lies within a prototype's namespace — i.e. it
     /// has a `/__Prototype_N` ancestor (spec 11.3.3).
     pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
-        let mut ancestor = path.parent();
-        while let Some(current) = ancestor {
-            if self.prototype_roots.contains_key(&current) {
-                return true;
+        self.enclosing_prototype_root(path.parent()).is_some()
+    }
+
+    /// Walks the chain from `start` toward the root and returns the nearest
+    /// `/__Prototype_N` root on it, or `None`. Passing the queried prim starts
+    /// the walk inclusively; passing its parent excludes the prim itself.
+    fn enclosing_prototype_root(&self, start: Option<Path>) -> Option<Path> {
+        let mut node = start;
+        while let Some(current) = node {
+            if self.prototypes.contains_key(&current) {
+                return Some(current);
             }
-            ancestor = current.parent();
+            node = current.parent();
         }
-        false
+        None
     }
 
     /// Maps a prim path to the path that actually composes it. A descendant of
@@ -728,12 +735,9 @@ impl Cache {
     fn redirect_anchor(&mut self, prim: &Path) -> Result<Option<(Path, Path)>> {
         // A `/__Prototype_N[/tail]` query maps into the canonical instance's
         // subtree, so the synthetic prototype namespace is addressable.
-        let mut node = Some(prim.clone());
-        while let Some(current) = node {
-            if let Some(key) = self.prototype_roots.get(&current) {
-                return Ok(Some((current.clone(), self.prototypes[key].canonical.clone())));
-            }
-            node = current.parent();
+        if let Some(root) = self.enclosing_prototype_root(Some(prim.clone())) {
+            let canonical = self.prototypes[&root].canonical.clone();
+            return Ok(Some((root, canonical)));
         }
 
         let mut ancestor = prim.parent();
