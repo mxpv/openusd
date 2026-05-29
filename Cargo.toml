@@ -67,3 +67,7 @@ required-features = ["geom"]
 [[test]]
 name = "lux_reader"
 required-features = ["lux"]
+
+[[test]]
+name = "shade_reader"
+required-features = ["shade"]
