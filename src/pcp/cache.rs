@@ -75,11 +75,14 @@ pub struct Cache {
 /// Materializing `/__Prototype_N` as an independently composed namespace is
 /// future work.
 struct Prototype {
+    /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
+    /// be returned in mint order without parsing the path.
+    index: usize,
     /// Synthetic prototype identity (`/__Prototype_N`).
     path: Path,
     /// Instance whose composed subtree backs this prototype.
     canonical: Path,
-    /// Every instance sharing this prototype, in registration order.
+    /// Every instance sharing this prototype.
     instances: Vec<Path>,
 }
 
@@ -630,12 +633,14 @@ impl Cache {
             return Ok((prototype.canonical.clone(), prototype.path.clone()));
         }
 
-        let path = Path::new(&format!("/__Prototype_{}", self.prototype_count))?;
+        let index = self.prototype_count;
+        let path = Path::new(&format!("/__Prototype_{index}"))?;
         self.prototype_count += 1;
         self.prototype_roots.insert(path.clone(), key.clone());
         self.prototypes.insert(
             key,
             Prototype {
+                index,
                 path: path.clone(),
                 canonical: instance.clone(),
                 instances: vec![instance.clone()],
@@ -655,19 +660,23 @@ impl Cache {
     }
 
     /// Returns the instances sharing the prototype at `prototype` (a
-    /// `/__Prototype_N` path), in registration order. Empty for unknown paths.
+    /// `/__Prototype_N` path), sorted by namespace path so the result does not
+    /// depend on the order instances were queried. Empty for unknown paths.
     pub(crate) fn instances_of(&self, prototype: &Path) -> Vec<Path> {
-        self.prototype_roots
+        let mut instances = self
+            .prototype_roots
             .get(prototype)
             .and_then(|key| self.prototypes.get(key))
             .map(|prototype| prototype.instances.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        instances.sort();
+        instances
     }
 
     /// Returns the registered `/__Prototype_N` roots, in registration order.
     pub(crate) fn prototypes(&self) -> Vec<Path> {
         let mut roots: Vec<&Prototype> = self.prototypes.values().collect();
-        roots.sort_by(|a, b| a.path.cmp(&b.path));
+        roots.sort_by_key(|prototype| prototype.index);
         roots.into_iter().map(|prototype| prototype.path.clone()).collect()
     }
 
@@ -1569,6 +1578,22 @@ mod tests {
         assert!(cache.is_indexed(&sdf::path("/A/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
         assert!(cache.is_indexed(&sdf::path("/C/Child")?));
+        Ok(())
+    }
+
+    /// `instances_of` is sorted by path, so the result is independent of the
+    /// order instances were registered (spec 11.3.3).
+    #[test]
+    fn instances_of_sorted() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+
+        // Register /B before /A so registration order is [/B, /A].
+        let proto = cache.prototype_of(&sdf::path("/B")?)?.unwrap();
+        assert_eq!(cache.prototype_of(&sdf::path("/A")?)?, Some(proto.clone()));
+
+        // The returned instances are still sorted by path.
+        assert_eq!(cache.instances_of(&proto), vec![sdf::path("/A")?, sdf::path("/B")?]);
         Ok(())
     }
 
