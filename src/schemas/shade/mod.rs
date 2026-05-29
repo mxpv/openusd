@@ -32,6 +32,7 @@ pub mod tokens;
 mod binding;
 mod connectable;
 mod material;
+mod preview;
 mod read;
 mod shader;
 mod types;
@@ -42,6 +43,7 @@ pub use binding::{
 };
 pub use connectable::{create_input, create_output, input_name, input_path, output_name, output_path};
 pub use material::{define_material, define_node_graph, MaterialAuthor, NodeGraphAuthor};
+pub use preview::{read_preview_surface, Channel, ReadPreviewSurface};
 pub use read::{
     find_shade_prims, input_names, output_names, read_connections, read_input_connections, read_input_value,
     read_output_connections, read_shader_id, resolve_surface_shader, ShadePrims,
