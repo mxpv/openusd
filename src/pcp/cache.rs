@@ -708,10 +708,7 @@ impl Cache {
     /// shared prototype.
     fn redirect_prim(&mut self, prim: &Path) -> Result<Path> {
         match self.redirect_anchor(prim)? {
-            Some((origin, canonical)) => {
-                let tail = &prim.as_str()[origin.as_str().len()..];
-                Path::new(&format!("{canonical}{tail}"))
-            }
+            Some((origin, canonical)) => Ok(prim.replace_prefix(&origin, &canonical).unwrap_or_else(|| prim.clone())),
             None => Ok(prim.clone()),
         }
     }
@@ -810,7 +807,7 @@ impl Cache {
 
         // Resolve against the canonical instance's subtree when shared.
         let resolved_prim = match &anchor {
-            Some((origin, canonical)) => Path::new(&format!("{canonical}{}", &prim.as_str()[origin.as_str().len()..]))?,
+            Some((origin, canonical)) => prim.replace_prefix(origin, canonical).unwrap_or_else(|| prim.clone()),
             None => prim,
         };
         self.ensure_index(&resolved_prim)?;
