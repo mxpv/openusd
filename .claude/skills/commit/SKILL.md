@@ -37,7 +37,7 @@ Follow these steps:
 
 6. **Generate commit message**:
    - Use a short, descriptive title (50 characters or less).
-   - Include a brief body (1-3 sentences) summarizing changes when needed (wrap at 120 characters).
+   - Include a brief body (1-3 sentences) summarizing changes when needed (wrap at 80 characters).
    - Keep commits focused and atomic — one logical change per commit.
    - Proofread for grammar, technical accuracy, and completeness.
    - Show the commit message to the user and wait for confirmation before committing.
