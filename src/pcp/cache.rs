@@ -18,7 +18,6 @@ use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
 
-use super::clip;
 use super::deps::Dependencies;
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -55,6 +54,11 @@ pub struct Cache {
     /// identifier. Clip layers do not participate in composition (spec
     /// 12.3.4), so they are held here rather than in the [`LayerStack`].
     clip_layers: HashMap<String, sdf::Layer>,
+}
+
+enum FieldValue {
+    NotAuthored,
+    Authored(Option<Value>),
 }
 
 impl Cache {
@@ -135,6 +139,10 @@ impl Cache {
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
+        if !self.has_spec(attr_path)? {
+            return Ok(None);
+        }
+
         let prim = attr_path.prim_path();
         let suffix = attr_path.as_str()[prim.as_str().len()..].to_owned();
         let local_layers = self.local_layers();
@@ -148,22 +156,57 @@ impl Cache {
             return Ok(interp(&samples, time));
         }
 
-        // 2) Value clips, anchored on this prim or an ancestor.
-        if let Some(value) = self.resolve_clip_value(&prim, &suffix, time, &local_layers, interp)? {
+        // 2) Local defaults also take precedence over clip data.
+        if let FieldValue::Authored(value) =
+            self.resolve_local_field_value(&prim, &suffix, FieldKey::Default.as_str(), &local_layers)?
+        {
+            return Ok(value);
+        }
+
+        // 3) Value clips, anchored on this prim or an ancestor.
+        if let Some(value) = self.resolve_clip_value(&prim, &suffix, time, interp)? {
             return Ok(Some(value));
         }
 
-        // 3) Remaining time samples (reference/payload arcs), retimed.
+        // 4) Remaining time samples (reference/payload arcs), retimed.
         if let Some(samples) = self.indices[&prim].resolve_time_samples(&self.stack, Some(&suffix))? {
             return Ok(interp(&samples, time));
         }
 
-        // 4) Fall back to the strongest authored default.
+        // 5) Fall back to the strongest authored default.
         let default = self.indices[&prim].resolve_field(FieldKey::Default.as_str(), &self.stack, Some(&suffix))?;
         Ok(default.and_then(|value| match value {
             Value::ValueBlock | Value::None => None,
             other => Some(other),
         }))
+    }
+
+    fn resolve_local_field_value(
+        &self,
+        prim: &Path,
+        suffix: &str,
+        field: &str,
+        local_layers: &HashSet<usize>,
+    ) -> Result<FieldValue> {
+        let Some(index) = self.indices.get(prim) else {
+            return Ok(FieldValue::NotAuthored);
+        };
+
+        for node in index.nodes() {
+            if !local_layers.contains(&node.layer_index) {
+                continue;
+            }
+            let query_path = Path::new(&format!("{}{suffix}", node.path))?;
+            let Some(value) = self.stack.layer(node.layer_index).try_get(&query_path, field)? else {
+                continue;
+            };
+            return Ok(match value.into_owned() {
+                Value::ValueBlock | Value::None => FieldValue::Authored(None),
+                other => FieldValue::Authored(Some(other)),
+            });
+        }
+
+        Ok(FieldValue::NotAuthored)
     }
 
     /// Resolves a clip value for `attr_path` at `time` by searching the
@@ -174,12 +217,11 @@ impl Cache {
         attr_prim: &Path,
         suffix: &str,
         time: f64,
-        local_layers: &HashSet<usize>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
         let mut anchor_prim = attr_prim.clone();
         loop {
-            if let Some(value) = self.clip_value_at(&anchor_prim, attr_prim, suffix, time, local_layers, interp)? {
+            if let Some(value) = self.clip_value_at(&anchor_prim, attr_prim, suffix, time, interp)? {
                 return Ok(Some(value));
             }
             match anchor_prim.parent() {
@@ -198,40 +240,34 @@ impl Cache {
         attr_prim: &Path,
         suffix: &str,
         time: f64,
-        local_layers: &HashSet<usize>,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
-        // Gather the clip sets and anchor layer, then drop the index borrow so
+        // Gather the clip sets, then drop the index borrow so
         // clip layers can be loaded through `&mut self`.
-        let (sets, anchor_layer) = {
+        let sets = {
             self.ensure_index(anchor_prim)?;
             let index = &self.indices[anchor_prim];
-            let Some(clips) = index.resolve_field(FieldKey::Clips.as_str(), &self.stack, None)? else {
-                return Ok(None);
-            };
-            let order = index.clip_sets_order(&self.stack)?;
-            let sets = clip::ClipSet::parse_all(&clips, order.as_deref());
+            let sets = index.resolve_clip_sets(&self.stack)?;
             if sets.is_empty() {
                 return Ok(None);
             }
-            let anchor_layer = index
-                .clip_anchor_layer(&self.stack, local_layers)?
-                .unwrap_or(self.session_layer_count());
-            (sets, anchor_layer)
+            sets
         };
 
         // Path of the attribute relative to the clip anchor prim (empty when
         // the clip set is authored on the attribute's own prim).
         let relative = &attr_prim.as_str()[anchor_prim.as_str().len()..];
 
-        for set in &sets {
+        for resolved in &sets {
+            let set = &resolved.set;
             let base = set.prim_path.clone().unwrap_or_else(|| anchor_prim.clone());
             let clip_path = Path::new(&format!("{base}{relative}{suffix}"))?;
 
             // A manifest, when authored, declares which attributes the clips
             // provide; skip clip sets that do not declare this attribute.
             if let Some(manifest) = &set.manifest_asset {
-                let declared = match self.clip_layer(manifest, anchor_layer)? {
+                let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
+                let declared = match self.clip_layer(manifest, manifest_layer)? {
                     Some(layer) => layer.data().has_spec(&clip_path),
                     None => false,
                 };
@@ -248,7 +284,7 @@ impl Cache {
             };
             let clip_time = set.map_stage_to_clip(time);
 
-            let samples = match self.clip_layer(asset, anchor_layer)? {
+            let samples = match self.clip_layer(asset, resolved.asset_layer)? {
                 Some(layer) => match layer.data().try_get(&clip_path, FieldKey::TimeSamples.as_str())? {
                     Some(value) => match value.into_owned() {
                         Value::TimeSamples(samples) => Some(samples),

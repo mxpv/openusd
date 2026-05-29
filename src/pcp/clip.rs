@@ -47,6 +47,14 @@ pub(crate) struct ClipSet {
     pub times: Vec<(f64, f64)>,
 }
 
+/// A parsed clip set plus the layer provenance needed for asset resolution.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ResolvedClipSet {
+    pub set: ClipSet,
+    pub asset_layer: usize,
+    pub manifest_layer: Option<usize>,
+}
+
 impl ClipSet {
     /// Parses every explicit clip set from a composed `clips` dictionary value.
     ///
