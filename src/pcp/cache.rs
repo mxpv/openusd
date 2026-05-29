@@ -526,8 +526,30 @@ impl Cache {
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
+    ///
+    /// For a property path the type is read live from the owning prim's
+    /// composition nodes (like [`Self::has_spec_at`]) rather than from a
+    /// property-keyed index. Authoring a property never reshapes the prim
+    /// graph, so the prim index stays valid; reading the layers live picks up
+    /// a property spec added after this path was first queried, avoiding a
+    /// stale cached `None`.
     pub fn spec_type(&mut self, path: &Path) -> Result<Option<SpecType>> {
         let path = &self.effective_path(path)?;
+        if path.is_property_path() {
+            let prim_path = path.prim_path();
+            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
+            self.ensure_index(&prim_path)?;
+            let Some(index) = self.indices.get(&prim_path) else {
+                return Ok(None);
+            };
+            for node in index.nodes() {
+                let prop_path = Path::new(&format!("{}{prop_suffix}", node.path))?;
+                if let Some(ty) = self.stack.layer(node.layer_index).spec_type(&prop_path) {
+                    return Ok(Some(ty));
+                }
+            }
+            return Ok(None);
+        }
         self.ensure_index(path)?;
         let Some(index) = self.indices.get(path) else {
             return Ok(None);

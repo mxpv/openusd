@@ -1082,6 +1082,25 @@ mod tests {
         Ok(())
     }
 
+    /// Forwarding picks up a relationship authored AFTER a target was first
+    /// queried: the earlier query must not cache a stale "not a relationship"
+    /// verdict for the target path.
+    #[test]
+    fn forwarded_targets_after_target_authored() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Geom")?;
+        let p = stage.define_prim("/P")?;
+        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
+
+        // /P.b is not a relationship yet -> a forwards to the raw path /P.b.
+        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/P.b")?]);
+
+        // Author /P.b as a relationship; forwarding must now follow it.
+        p.create_relationship("b")?.set_targets([sdf::path("/Geom")?])?;
+        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        Ok(())
+    }
+
     /// A pure relationship cycle forwards to no terminal targets without
     /// hanging.
     #[test]
