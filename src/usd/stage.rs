@@ -1019,7 +1019,7 @@ impl Stage {
     /// Returns `true` if `instanceable` resolves to true and the prim has a composition arc.
     pub fn is_instance(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
         let prim = prim.into().prim_path();
-        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
+        if prim == sdf::Path::abs_root() || !self.population_mask.includes(&prim) || !self.has_spec(&prim)? {
             return Ok(false);
         }
         if !self.field::<bool>(&prim, sdf::FieldKey::Instanceable)?.unwrap_or(false) {
@@ -1030,22 +1030,39 @@ impl Stage {
 
     /// Returns the shared prototype path (`/__Prototype_N`) for an instance
     /// prim, or `None` if `prim` is not an instance (spec 11.3.3). Instances
-    /// with the same composition share one prototype.
+    /// with the same composition share one prototype. Prims outside the
+    /// population mask are not instanced and return `None`.
     pub fn get_prototype(&self, prim: impl Into<sdf::Path>) -> Result<Option<sdf::Path>> {
         let prim = prim.into().prim_path();
+        if !self.population_mask.includes(&prim) {
+            return Ok(None);
+        }
         self.try_or_handle(|cache| cache.prototype_of(&prim))
     }
 
     /// Returns the instance prims sharing the prototype at `prototype` (a
-    /// `/__Prototype_N` path), sorted by namespace path.
+    /// `/__Prototype_N` path), sorted by namespace path. Instances outside the
+    /// population mask are excluded.
     pub fn get_instances(&self, prototype: impl Into<sdf::Path>) -> Result<Vec<sdf::Path>> {
         let prototype = prototype.into();
-        self.try_or_handle(|cache| Ok(cache.instances_of(&prototype)))
+        let instances = self.try_or_handle(|cache| Ok(cache.instances_of(&prototype)))?;
+        Ok(instances
+            .into_iter()
+            .filter(|instance| self.population_mask.includes(instance))
+            .collect())
     }
 
-    /// Returns every registered prototype root (`/__Prototype_N`).
+    /// Returns every registered prototype root (`/__Prototype_N`) with at least
+    /// one instance inside the population mask.
     pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
-        self.try_or_handle(|cache| Ok(cache.prototypes()))
+        let mask = &self.population_mask;
+        self.try_or_handle(|cache| {
+            Ok(cache
+                .prototypes()
+                .into_iter()
+                .filter(|root| cache.instances_of(root).iter().any(|instance| mask.includes(instance)))
+                .collect())
+        })
     }
 
     /// Returns `true` if `path` is a prototype root (`/__Prototype_N`).
@@ -2660,6 +2677,29 @@ def Shader "Mat" (
             stage.value_at(child.append_property("size")?, 0.0)?,
             Some(sdf::Value::Double(5.0))
         );
+        Ok(())
+    }
+
+    /// Prototype queries respect the population mask: a masked-out instance is
+    /// not instanced and never appears among a prototype's instances.
+    #[test]
+    fn prototype_queries_masked() -> Result<()> {
+        let stage = Stage::builder()
+            .population_mask(StagePopulationMask::new(["/A"]))
+            .open(&fixture_path("instancing_shared.usda"))?;
+
+        // /A is in the mask; /B (which shares /A's prototype) is not.
+        assert!(stage.is_instance("/A")?);
+        assert!(!stage.is_instance("/B")?);
+
+        let proto = stage.get_prototype("/A")?;
+        assert!(proto.is_some());
+        assert_eq!(stage.get_prototype("/B")?, None);
+
+        // The masked-out /B is excluded from the prototype's instance list.
+        let proto = proto.unwrap();
+        assert_eq!(stage.get_instances(&proto)?, vec![sdf::path("/A")?]);
+        assert_eq!(stage.prototypes()?, vec![proto]);
         Ok(())
     }
 
