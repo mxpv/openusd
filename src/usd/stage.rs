@@ -912,10 +912,7 @@ impl Stage {
     /// an empty list for non-property paths or attributes with no authored
     /// connections.
     pub fn connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        if !self.population_mask.includes(&attr.prim_path()) {
-            return Ok(Vec::new());
-        }
-        self.try_or_handle(|cache| cache.connection_paths(attr))
+        self.masked_property_targets(attr, |cache| cache.connection_paths(attr))
     }
 
     /// Returns the composed raw `targetPaths` list for a relationship, folding
@@ -927,10 +924,7 @@ impl Stage {
     /// These are the raw targets (spec 12.4); target forwarding — recursively
     /// chasing relationship-to-relationship chains — is not applied.
     pub fn relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        if !self.population_mask.includes(&rel.prim_path()) {
-            return Ok(Vec::new());
-        }
-        self.try_or_handle(|cache| cache.relationship_targets(rel))
+        self.masked_property_targets(rel, |cache| cache.relationship_targets(rel))
     }
 
     /// Returns the forwarded `targetPaths` for a relationship. A target that
@@ -946,11 +940,24 @@ impl Stage {
     /// mask but reached directly (prim/attribute terminals) are still returned,
     /// matching raw [`Self::relationship_targets`].
     pub fn forwarded_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        if !self.population_mask.includes(&rel.prim_path()) {
+        let mask = &self.population_mask;
+        self.masked_property_targets(rel, |cache| {
+            cache.forwarded_relationship_targets(rel, &|p| mask.includes(p))
+        })
+    }
+
+    /// Runs a property-target query (`connectionPaths` / `targetPaths`) under
+    /// the population mask: a property whose owning prim is outside the working
+    /// set resolves to an empty list without touching the cache.
+    fn masked_property_targets(
+        &self,
+        prop: &sdf::Path,
+        query: impl FnOnce(&mut pcp::Cache) -> Result<Vec<sdf::Path>>,
+    ) -> Result<Vec<sdf::Path>> {
+        if !self.population_mask.includes(&prop.prim_path()) {
             return Ok(Vec::new());
         }
-        let mask = &self.population_mask;
-        self.try_or_handle(|cache| cache.forwarded_relationship_targets(rel, &|p| mask.includes(p)))
+        self.try_or_handle(query)
     }
 
     /// Returns the composed `typeName` for a prim, if set.
