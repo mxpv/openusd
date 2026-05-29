@@ -128,17 +128,24 @@ impl Changes {
         if significant {
             self.fanout_significant(cache, layer, path);
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
-            // Drop the local index so a cached "no spec here" miss can't
-            // stay sticky after an inert add. Dependents that already
-            // touch `(layer, path)` see the new opinion live through their
-            // existing nodes — no rebuild needed for them.
-            //
-            // The classifier ideally lands this in the spec tier
-            // (`did_change_specs`), but apply() can't refresh per-node
-            // spec stacks until they're memoized, so dropping is the
-            // safe substitute. When the spec tier becomes real, this
-            // moves over and the local drop falls out.
-            self.cache.did_change_prims.insert(path.clone());
+            if cache.layer_authors_field(layer, path, FieldKey::Instanceable.as_str()) {
+                // An inert add whose spec carries `instanceable` flips the
+                // prim's instancing composition (spec 11.3.3) even though the
+                // add itself is inert; recompose the subtree.
+                self.fanout_significant(cache, layer, path);
+            } else {
+                // Drop the local index so a cached "no spec here" miss can't
+                // stay sticky after an inert add. Dependents that already
+                // touch `(layer, path)` see the new opinion live through their
+                // existing nodes — no rebuild needed for them.
+                //
+                // The classifier ideally lands this in the spec tier
+                // (`did_change_specs`), but apply() can't refresh per-node
+                // spec stacks until they're memoized, so dropping is the
+                // safe substitute. When the spec tier becomes real, this
+                // moves over and the local drop falls out.
+                self.cache.did_change_prims.insert(path.clone());
+            }
         }
 
         // TODO: silent promotions of inert spec adds, per C++
@@ -147,12 +154,7 @@ impl Changes {
         //      because the prim no longer composes anything. Needs a
         //      "does any layer still spec this path?" check, which means
         //      walking every layer for `path` after the mutation.
-        //   2. An inert add that flips the prim's `instanceable`
-        //      composition — promote to significant. A direct `instanceable`
-        //      info-change is already significant (and clears the prototype
-        //      registry); still missing is detecting an inert spec add that
-        //      changes whether the prim is instanceable.
-        //   3. An inert add at a path whose node was previously culled
+        //   2. An inert add at a path whose node was previously culled
         //      from a dependent prim's graph — that dependent needs a
         //      tier-2 prim rebuild so the now-needed node re-enters.
         //      Blocked on culled-node tracking; the current
@@ -314,6 +316,27 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(0, cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+    }
+
+    /// An inert prim add whose spec authors `instanceable` flips the prim's
+    /// instancing composition, so it must be promoted to significant even
+    /// though the add itself is inert (spec 11.3.3).
+    #[test]
+    fn inert_add_with_instanceable_is_significant() {
+        let mut layer = crate::sdf::Layer::new_anonymous("root.usda");
+        layer
+            .create_prim("/X", crate::sdf::Specifier::Over, "")
+            .unwrap()
+            .set_instanceable(true);
+        let stack = LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true);
+        let cache = Cache::new(stack, VariantFallbackMap::new());
+
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/X")).flags = ChangeFlags::ADD_INERT_PRIM;
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(0, cl)]);
+
+        assert!(changes.cache.did_change_significantly.contains(&p("/X")));
     }
 
     #[test]
