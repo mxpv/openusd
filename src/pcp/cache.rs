@@ -874,6 +874,7 @@ impl Cache {
         is_populated: &dyn Fn(&Path) -> bool,
     ) -> Result<Vec<Path>> {
         let mut out = Vec::new();
+        let mut emitted = HashSet::new();
         let mut followed = HashSet::new();
         followed.insert(path.clone());
 
@@ -896,7 +897,7 @@ impl Cache {
                     continue; // already followed — break the cycle
                 }
                 stack.extend(self.relationship_targets(&target)?.into_iter().rev());
-            } else if !out.contains(&target) {
+            } else if emitted.insert(target.clone()) {
                 out.push(target);
             }
         }
