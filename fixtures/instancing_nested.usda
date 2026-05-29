@@ -1,0 +1,40 @@
+#usda 1.0
+(
+    doc = """Nested instancing (spec 11.3.3): an instance inside a prototype.
+
+    /Group/Sub is an instanceable reference to /Leaf, and /A and /B are
+    instanceable references to /Group. Each /X/Sub is therefore a nested
+    instance whose subtree comes from /Leaf and must resolve within /X."""
+)
+
+def Scope "Leaf"
+{
+    def Scope "L"
+    {
+        double v = 7.0
+    }
+}
+
+def Scope "Group"
+{
+    def Scope "Sub" (
+        instanceable = true
+        references = </Leaf>
+    )
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Group>
+)
+{
+}
+
+def Scope "B" (
+    instanceable = true
+    references = </Group>
+)
+{
+}

@@ -2663,6 +2663,37 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// A nested instance (an instance inside a prototype's subtree) is
+    /// recognized, resolves values within the queried instance, and shares its
+    /// own prototype across the outer instances (spec 11.3.3).
+    #[test]
+    fn nested_instances() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_nested.usda"))?;
+
+        assert_eq!(stage.value_at("/A/Sub/L.v", 0.0)?, Some(sdf::Value::Double(7.0)));
+        assert_eq!(stage.value_at("/B/Sub/L.v", 0.0)?, Some(sdf::Value::Double(7.0)));
+
+        // The nested prims are instances and share one prototype.
+        assert!(stage.is_instance("/A/Sub")?);
+        assert!(stage.is_instance("/B/Sub")?);
+        let nested = stage.get_prototype("/A/Sub")?;
+        assert!(nested.is_some());
+        assert_eq!(stage.get_prototype("/B/Sub")?, nested);
+
+        // The outer instances share a distinct prototype.
+        let outer = stage.get_prototype("/A")?;
+        assert_eq!(stage.get_prototype("/B")?, outer);
+        assert_ne!(outer, nested);
+
+        // The nested subtree is also reachable through the outer prototype.
+        let outer = outer.unwrap();
+        assert_eq!(
+            stage.value_at(sdf::path(format!("{outer}/Sub/L.v"))?, 0.0)?,
+            Some(sdf::Value::Double(7.0))
+        );
+        Ok(())
+    }
+
     /// A connection inside an instance subtree resolves within the queried
     /// instance, not the shared canonical instance (spec 11.3.3 + 11.3.4).
     #[test]
