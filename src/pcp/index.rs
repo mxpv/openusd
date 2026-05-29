@@ -290,6 +290,9 @@ impl PrimIndex {
         if field == FieldKey::Custom.as_str() {
             return self.resolve_custom(stack, prop_suffix);
         }
+        if field == FieldKey::TimeSamples.as_str() {
+            return Ok(self.resolve_time_samples(stack, prop_suffix)?.map(Value::TimeSamples));
+        }
         self.resolve_strongest(field, stack, prop_suffix)
     }
 
@@ -441,6 +444,39 @@ impl PrimIndex {
             }
         }
         Ok(merged.map(Value::Dictionary))
+    }
+
+    /// Resolves `timeSamples` across the composition graph, applying each
+    /// node's effective layer offset (spec 12.3.2.1) so authored layer time is
+    /// mapped to stage time.
+    ///
+    /// Walks nodes strongest-to-weakest and returns the first node that authors
+    /// time samples, retimed by that node's `map_to_root` offset. A
+    /// [`Value::ValueBlock`] blocks weaker layers, matching [`Self::resolve_strongest`].
+    ///
+    /// Unlike generic fields, time samples never merge across nodes: the
+    /// strongest authored opinion wins as a whole.
+    pub(crate) fn resolve_time_samples(
+        &self,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+    ) -> Result<Option<sdf::TimeSampleMap>> {
+        let field = FieldKey::TimeSamples.as_str();
+        for node in self.nodes() {
+            let query_path = Self::query_path(node, prop_suffix)?;
+            let data = stack.layer(node.layer_index);
+            let Some(value) = data.try_get(&query_path, field)? else {
+                continue;
+            };
+            match value.into_owned() {
+                Value::ValueBlock => return Ok(None),
+                Value::TimeSamples(samples) => {
+                    return Ok(Some(retime_samples(samples, node.map_to_root.time_offset())));
+                }
+                _ => continue,
+            }
+        }
+        Ok(None)
     }
 
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
@@ -1403,6 +1439,19 @@ fn resolve_variant_selections_in(
     }
 
     selections
+}
+
+/// Maps time sample keys from layer time to stage time through `offset`
+/// (spec 12.3.2.1): `stage_t = offset + scale * layer_t`. Returns the samples
+/// untouched when `offset` is the identity.
+fn retime_samples(samples: sdf::TimeSampleMap, offset: LayerOffset) -> sdf::TimeSampleMap {
+    if offset.is_identity() {
+        return samples;
+    }
+    samples
+        .into_iter()
+        .map(|(t, value)| (offset.offset + offset.scale * t, value))
+        .collect()
 }
 
 /// Applies `strong over weak` dictionary composition in place.
@@ -2390,6 +2439,59 @@ def "Prim" (
             got.contains(&("B.usd".into(), "/Model/Anim".into(), ArcType::Reference, 30.0, 1.0)),
             "missing /Model/Anim at effective (30, 1): got {got:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn retime_samples_offset_scale() {
+        let samples: sdf::TimeSampleMap = vec![(1.0, Value::Double(0.0)), (5.0, Value::Double(1.0))];
+        let retimed = retime_samples(samples, LayerOffset::new(10.0, 2.0));
+        let times: Vec<f64> = retimed.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, vec![12.0, 20.0]);
+    }
+
+    #[test]
+    fn retime_samples_identity_passthrough() {
+        let samples: sdf::TimeSampleMap = vec![(1.0, Value::Double(0.0))];
+        let retimed = retime_samples(samples.clone(), LayerOffset::IDENTITY);
+        assert_eq!(retimed, samples);
+    }
+
+    /// `resolve_time_samples` must map authored layer times to stage times
+    /// through the node's effective offset (spec 12.3.2.1): /Root references
+    /// model.usd</Model> with offset=10, scale=2, so samples authored at layer
+    /// times 1 and 5 resolve to stage times 12 and 20.
+    #[test]
+    fn time_samples_retimed_across_reference() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "Root" (
+    references = @model.usd@</Model> (offset = 10; scale = 2)
+)
+{
+}
+"#,
+        );
+        let model = parse_usda(
+            r#"#usda 1.0
+def "Model"
+{
+    double radius.timeSamples = {
+        1: 0.0,
+        5: 1.0,
+    }
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
+
+        let samples = index
+            .resolve_time_samples(&stack, Some(".radius"))?
+            .expect("retimed samples");
+        let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, vec![12.0, 20.0]);
         Ok(())
     }
 }
