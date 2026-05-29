@@ -1120,6 +1120,23 @@ mod tests {
         Ok(())
     }
 
+    /// Terminals reachable through multiple relationship paths collapse to a
+    /// single first-occurrence entry.
+    #[test]
+    fn forwarded_targets_dedup() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Geom")?;
+        let p = stage.define_prim("/P")?;
+        p.create_relationship("b")?.set_targets([sdf::path("/Geom")?])?;
+        let a = p
+            .create_relationship("a")?
+            .set_targets([sdf::path("/Geom")?, sdf::path("/P.b")?])?;
+
+        // /Geom is reached directly and again via /P.b; it appears once.
+        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        Ok(())
+    }
+
     /// A pure relationship cycle forwards to no terminal targets without
     /// hanging.
     #[test]
