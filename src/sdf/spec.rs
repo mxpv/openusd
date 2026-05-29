@@ -585,8 +585,12 @@ where
     pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) -> bool {
         match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
+                // Re-adding a previously deleted target must first clear the
+                // delete bucket; otherwise the newly authored connection can
+                // still be removed during list-op application.
+                let mut changed = remove_path(&mut op.deleted_items, &path);
                 if op.iter().any(|p| p == &path) {
-                    return false;
+                    return changed;
                 }
                 if op.explicit {
                     // Stay explicit; honour `prepend` to control position.
@@ -600,7 +604,8 @@ where
                 } else {
                     op.appended_items.push(path);
                 }
-                true
+                changed = true;
+                changed
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");

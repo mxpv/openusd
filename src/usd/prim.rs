@@ -382,7 +382,7 @@ impl<'s> Attribute<'s> {
     /// C++ `UsdAttribute::AddConnection` with the default back-of-append
     /// position.
     pub fn add_connection(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit_connection(|spec| spec.add_connection_path(target, false))
+        self.add_connection_at(target, false)
     }
 
     /// Append a single connection target to the *prepended* list op, so
@@ -390,7 +390,18 @@ impl<'s> Attribute<'s> {
     /// already present. Mirrors C++ `UsdAttribute::AddConnection` with a
     /// front-of-prepend position.
     pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit_connection(|spec| spec.add_connection_path(target, true))
+        self.add_connection_at(target, true)
+    }
+
+    fn add_connection_at(self, target: sdf::Path, prepend: bool) -> Result<Self, StageAuthoringError> {
+        let path = self.path.clone();
+        // Dedup against the composed result, not just the local edit-target
+        // op. Otherwise adding a weaker-layer target would author a stronger
+        // duplicate and could accidentally reorder it.
+        if self.stage.connection_paths(&path)?.iter().any(|p| p == &target) {
+            return Ok(self);
+        }
+        self.edit_connection(move |spec| spec.add_connection_path(target, prepend))
     }
 
     /// Remove a single connection target. Returns `Ok(true)` if it was
