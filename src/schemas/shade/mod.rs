@@ -31,10 +31,15 @@ pub mod tokens;
 
 mod connectable;
 mod material;
+mod read;
 mod shader;
 mod types;
 
 pub use connectable::{create_input, create_output, input_name, input_path, output_name, output_path};
 pub use material::{define_material, define_node_graph, MaterialAuthor, NodeGraphAuthor};
+pub use read::{
+    find_shade_prims, input_names, output_names, read_connections, read_input_connections, read_input_value,
+    read_output_connections, read_shader_id, resolve_surface_shader, ShadePrims,
+};
 pub use shader::{define_shader, ShaderAuthor};
 pub use types::{BindingStrength, Connectability, ImplementationSource};
