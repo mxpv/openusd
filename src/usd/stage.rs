@@ -2663,6 +2663,25 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// A connection inside an instance subtree resolves within the queried
+    /// instance, not the shared canonical instance (spec 11.3.3 + 11.3.4).
+    #[test]
+    fn instance_connection_remaps_to_instance() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_connections.usda"))?;
+
+        // Query /I1 first so it becomes canonical.
+        assert_eq!(
+            stage.connection_paths(&sdf::path("/I1/Dst.inputs:in")?)?,
+            vec![sdf::path("/I1/Src.outputs:out")?]
+        );
+        // /I2 shares the prototype; its connection must point into /I2.
+        assert_eq!(
+            stage.connection_paths(&sdf::path("/I2/Dst.inputs:in")?)?,
+            vec![sdf::path("/I2/Src.outputs:out")?]
+        );
+        Ok(())
+    }
+
     /// Default traversal stops at instance prims; `with_instance_proxies`
     /// descends into their subtrees (spec 11.3.3).
     #[test]

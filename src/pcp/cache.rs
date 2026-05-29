@@ -683,21 +683,31 @@ impl Cache {
     /// subtree, so identical instances share one composition (spec 11.3.3).
     /// Other paths pass through unchanged.
     ///
-    /// TODO: relationship targets and attribute connections authored inside an
-    /// instance subtree resolve into the canonical instance's namespace; map
-    /// them back to the queried instance.
     /// TODO: a nested instance (an instance inside another instance's subtree)
     /// is redirected to the canonical's nested instance but is not itself
     /// registered as a distinct prototype.
     fn redirect_prim(&mut self, prim: &Path) -> Result<Path> {
+        match self.redirect_anchor(prim)? {
+            Some((origin, canonical)) => {
+                let tail = &prim.as_str()[origin.as_str().len()..];
+                Path::new(&format!("{canonical}{tail}"))
+            }
+            None => Ok(prim.clone()),
+        }
+    }
+
+    /// If `prim` lies within a shared prototype's namespace, returns the
+    /// `(origin, canonical)` prefixes that map between the queried namespace
+    /// and the composed one: a `/__Prototype_N` root or a non-canonical
+    /// instance prim (`origin`) and the canonical instance backing it
+    /// (`canonical`). Returns `None` when `prim` composes in place.
+    fn redirect_anchor(&mut self, prim: &Path) -> Result<Option<(Path, Path)>> {
         // A `/__Prototype_N[/tail]` query maps into the canonical instance's
         // subtree, so the synthetic prototype namespace is addressable.
         let mut node = Some(prim.clone());
         while let Some(current) = node {
             if let Some(key) = self.prototype_roots.get(&current) {
-                let canonical = self.prototypes[key].canonical.clone();
-                let tail = &prim.as_str()[current.as_str().len()..];
-                return Path::new(&format!("{canonical}{tail}"));
+                return Ok(Some((current.clone(), self.prototypes[key].canonical.clone())));
             }
             node = current.parent();
         }
@@ -710,15 +720,14 @@ impl Cache {
             if self.is_instance(&current)? {
                 let canonical = self.canonical_instance(&current)?;
                 if canonical != current {
-                    let tail = &prim.as_str()[current.as_str().len()..];
-                    return Path::new(&format!("{canonical}{tail}"));
+                    return Ok(Some((current, canonical)));
                 }
                 // Nearest instance is canonical: compose this subtree in place.
                 break;
             }
             ancestor = current.parent();
         }
-        Ok(prim.clone())
+        Ok(None)
     }
 
     /// Redirects `path` (prim or property) through [`Self::redirect_prim`],
@@ -775,11 +784,37 @@ impl Cache {
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
-        let path = &self.effective_path(path)?;
-        let prim_path = path.prim_path();
-        let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-        self.ensure_index(&prim_path)?;
-        self.indices[&prim_path].resolve_path_list_op(FieldKey::ConnectionPaths, &self.stack, Some(prop_suffix))
+        let prim = path.prim_path();
+        let prop_suffix = path.as_str()[prim.as_str().len()..].to_owned();
+        let anchor = self.redirect_anchor(&prim)?;
+
+        // Resolve against the canonical instance's subtree when shared.
+        let resolved_prim = match &anchor {
+            Some((origin, canonical)) => Path::new(&format!("{canonical}{}", &prim.as_str()[origin.as_str().len()..]))?,
+            None => prim,
+        };
+        self.ensure_index(&resolved_prim)?;
+        let mut targets = self.indices[&resolved_prim].resolve_path_list_op(
+            FieldKey::ConnectionPaths,
+            &self.stack,
+            Some(&prop_suffix),
+        )?;
+
+        // Connection targets that land inside the prototype resolve into the
+        // canonical instance's namespace; map them back to the queried
+        // instance (spec 11.3.4 connections under spec 11.3.3 instancing).
+        //
+        // TODO: relationship `targetPaths` need the same instance remap, but
+        // they are not yet namespace-resolved through arcs (relationship target
+        // forwarding is unimplemented), so there is nothing composed to remap.
+        if let Some((origin, canonical)) = &anchor {
+            for target in &mut targets {
+                if let Some(remapped) = target.replace_prefix(canonical, origin) {
+                    *target = remapped;
+                }
+            }
+        }
+        Ok(targets)
     }
 
     /// Returns pseudo-root layer metadata from the root layer only.

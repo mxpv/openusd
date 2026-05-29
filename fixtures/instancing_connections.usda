@@ -1,0 +1,35 @@
+#usda 1.0
+(
+    doc = """Connection remapping across instances (spec 11.3.3 + 11.3.4).
+
+    /Proto/Dst connects to its sibling /Proto/Src. Both /I1 and /I2 are
+    instances of /Proto, so each instance's connection must resolve within
+    that instance, not leak into the shared canonical instance's namespace."""
+)
+
+def Scope "Proto"
+{
+    def Shader "Src"
+    {
+        color3f outputs:out
+    }
+
+    def Shader "Dst"
+    {
+        color3f inputs:in.connect = [</Proto/Src.outputs:out>]
+    }
+}
+
+def Scope "I1" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}
+
+def Scope "I2" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}
