@@ -683,9 +683,9 @@ impl Cache {
     /// subtree, so identical instances share one composition (spec 11.3.3).
     /// Other paths pass through unchanged.
     ///
-    /// TODO: a nested instance (an instance inside another instance's subtree)
-    /// is redirected to the canonical's nested instance but is not itself
-    /// registered as a distinct prototype.
+    /// Nested instances work without special handling: the walk redirects to
+    /// the nearest enclosing instance, so a nested instance resolves to its own
+    /// shared prototype.
     fn redirect_prim(&mut self, prim: &Path) -> Result<Path> {
         match self.redirect_anchor(prim)? {
             Some((origin, canonical)) => {
@@ -1058,10 +1058,9 @@ impl Cache {
 
         // This prim is an instance when its (unpruned) composition declares
         // `instanceable = true` and carries an arc; its descendants then
-        // inherit `within_instance`. Computed from the freshly built index to
+        // inherit `within_instance`. A nested instance therefore re-arms the
+        // flag for its own subtree. Computed from the freshly built index to
         // avoid re-entering `ensure_index` for `path`.
-        // TODO: a nested instance (one inside another instance's subtree) is
-        // not yet special-cased.
         let is_instance = index.has_composition_arc()
             && matches!(
                 index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
