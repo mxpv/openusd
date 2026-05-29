@@ -837,7 +837,17 @@ impl Cache {
     /// The walk uses an explicit stack rather than recursion (mirroring
     /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship
     /// chain cannot overflow the call stack.
-    pub fn forwarded_relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
+    ///
+    /// `is_populated` reports whether a prim is inside the stage's working set.
+    /// A target relationship on a prim outside the set is not followed — its
+    /// raw targets would be empty under the population mask anyway — so the
+    /// forwarded result never leaks scene the mask excludes (it stays
+    /// consistent with [`Self::relationship_targets`] on that path).
+    pub fn forwarded_relationship_targets(
+        &mut self,
+        path: &Path,
+        is_populated: &dyn Fn(&Path) -> bool,
+    ) -> Result<Vec<Path>> {
         let mut out = Vec::new();
         let mut followed = HashSet::new();
         followed.insert(path.clone());
@@ -852,6 +862,11 @@ impl Cache {
             let is_relationship =
                 target.is_property_path() && matches!(self.spec_type(&target)?, Some(SpecType::Relationship));
             if is_relationship {
+                // Don't follow a relationship the mask excludes; a masked-out
+                // prim contributes no composed targets.
+                if !is_populated(&target.prim_path()) {
+                    continue;
+                }
                 if !followed.insert(target.clone()) {
                     continue; // already followed — break the cycle
                 }

@@ -939,13 +939,17 @@ impl Stage {
     /// (spec 12.4). Cycles are broken and duplicates collapse. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
     ///
-    /// The population mask guards the queried relationship; forwarding then
-    /// follows the composed target chain regardless of the mask.
+    /// Forwarding honors the population mask: a target relationship on a prim
+    /// outside the working set is not followed, so the result never includes
+    /// scene the mask excludes. Target paths that are themselves outside the
+    /// mask but reached directly (prim/attribute terminals) are still returned,
+    /// matching raw [`Self::relationship_targets`].
     pub fn forwarded_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
         if !self.population_mask.includes(&rel.prim_path()) {
             return Ok(Vec::new());
         }
-        self.try_or_handle(|cache| cache.forwarded_relationship_targets(rel))
+        let mask = &self.population_mask;
+        self.try_or_handle(|cache| cache.forwarded_relationship_targets(rel, &|p| mask.includes(p)))
     }
 
     /// Returns the composed `typeName` for a prim, if set.
@@ -2456,6 +2460,47 @@ def "Inst" (
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let targets = stage.relationship_targets(&sdf::Path::new("/Inst.members")?)?;
         assert_eq!(targets, vec![sdf::Path::new("/Inst/Child")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn forwarded_targets_honor_mask() -> Result<()> {
+        // Forwarding must not read a relationship on a masked-out prim, so the
+        // chain through /Hidden.rel contributes nothing; a direct prim target
+        // to the masked prim is still returned (raw target value, not a query).
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def "Vis"
+{
+    rel chain = [</Hidden.rel>]
+    rel direct = [</Hidden>]
+}
+
+def "Hidden"
+{
+    rel rel = [</Hidden/Geom>]
+    def "Geom" {}
+}
+"#,
+        )?;
+
+        let stage = Stage::builder()
+            .population_mask(StagePopulationMask::new(["/Vis"]))
+            .open(root.to_str().expect("utf-8 temp path"))?;
+
+        // /Hidden is masked out: its relationship is not followed.
+        assert!(stage
+            .forwarded_relationship_targets(&sdf::Path::new("/Vis.chain")?)?
+            .is_empty());
+        // A direct prim target is still returned, matching raw targets.
+        assert_eq!(
+            stage.forwarded_relationship_targets(&sdf::Path::new("/Vis.direct")?)?,
+            vec![sdf::Path::new("/Hidden")?]
+        );
         Ok(())
     }
 
