@@ -828,6 +828,40 @@ impl Cache {
         self.property_targets(path, FieldKey::TargetPaths)
     }
 
+    /// Returns the forwarded `targetPaths` for a relationship (spec 12.4):
+    /// raw targets that resolve to a relationship are replaced, recursively,
+    /// by that relationship's own forwarded targets, so only prim and
+    /// attribute paths remain. Cycles are broken (each relationship is
+    /// followed once) and duplicates collapse, keeping first occurrence.
+    pub fn forwarded_relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
+        let mut targets = Vec::new();
+        let mut visited = HashSet::new();
+        self.forward_targets_into(path, &mut targets, &mut visited)?;
+        Ok(targets)
+    }
+
+    /// Recursive worker for [`Self::forwarded_relationship_targets`]. Appends
+    /// terminal (prim/attribute) targets of `rel` into `out`, descending into
+    /// any target that is itself a relationship. `visited` records the
+    /// relationships already followed to break target cycles.
+    fn forward_targets_into(&mut self, rel: &Path, out: &mut Vec<Path>, visited: &mut HashSet<Path>) -> Result<()> {
+        if !visited.insert(rel.clone()) {
+            return Ok(());
+        }
+        for target in self.relationship_targets(rel)? {
+            // Only property targets can be relationships; a prim-path target is
+            // always terminal. Classify property targets by composed spec type.
+            let is_relationship =
+                target.is_property_path() && matches!(self.spec_type(&target)?, Some(SpecType::Relationship));
+            if is_relationship {
+                self.forward_targets_into(&target, out, visited)?;
+            } else if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+        Ok(())
+    }
+
     /// Composes a path-list-op property field (`connectionPaths` or
     /// `targetPaths`) by folding list-op edits across every contributing layer
     /// and mapping targets through composition arcs into the stage namespace.
