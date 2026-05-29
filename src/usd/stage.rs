@@ -1037,7 +1037,7 @@ impl Stage {
     }
 
     /// Returns the instance prims sharing the prototype at `prototype` (a
-    /// `/__Prototype_N` path), in registration order.
+    /// `/__Prototype_N` path), sorted by namespace path.
     pub fn get_instances(&self, prototype: impl Into<sdf::Path>) -> Result<Vec<sdf::Path>> {
         let prototype = prototype.into();
         self.try_or_handle(|cache| Ok(cache.instances_of(&prototype)))
@@ -2647,8 +2647,8 @@ def Shader "Mat" (
         assert_eq!(stage.get_prototype("/Proto")?, None); // not an instance
 
         let proto = proto.unwrap();
-        let mut instances: Vec<String> = stage.get_instances(&proto)?.iter().map(|p| p.to_string()).collect();
-        instances.sort();
+        // Returned sorted by path, so callers need not sort themselves.
+        let instances: Vec<String> = stage.get_instances(&proto)?.iter().map(|p| p.to_string()).collect();
         assert_eq!(instances, vec!["/A".to_string(), "/B".to_string()]);
 
         // The prototype namespace is addressable and resolves to the shared
