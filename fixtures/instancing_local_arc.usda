@@ -1,0 +1,39 @@
+#usda 1.0
+(
+    doc = """Local composition arc on an instance descendant (spec 11.3.3).
+
+    /A is instanceable and references /Proto, so /A/Child must come only from
+    the prototype (v = 1.0). The local `over Child` carries its own reference
+    arc to /Other/Child (v = 999.0); that arc and the node it spawns are
+    discarded along with every other local opinion. A post-build prune that
+    only drops the local root node would leave the spawned reference node and
+    let 999.0 leak through — this fixture guards against that regression."""
+)
+
+def Scope "Proto"
+{
+    def Scope "Child"
+    {
+        double v = 1.0
+    }
+}
+
+def Scope "Other"
+{
+    def Scope "Child"
+    {
+        double v = 999.0
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+)
+{
+    over "Child" (
+        references = </Other/Child>
+    )
+    {
+    }
+}
