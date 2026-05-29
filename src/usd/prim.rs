@@ -203,6 +203,29 @@ impl<'s> Prim<'s> {
         Ok(true)
     }
 
+    /// Names of the value-clip sets composed onto this prim, sorted by name
+    /// (spec 12.3.4). Reads the composed `clips` dictionary across layers;
+    /// returns an empty vector when none are authored.
+    ///
+    /// This is read-only introspection — clip values are resolved through
+    /// [`Attribute::get_at`]. The `clipSets` strength order is not applied to
+    /// the returned names.
+    pub fn clip_sets(&self) -> anyhow::Result<Vec<String>> {
+        let Some(sdf::Value::Dictionary(sets)) = self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Clips)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut names: Vec<String> = sets.into_keys().collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Returns `true` when one or more value-clip sets are composed onto this
+    /// prim (spec 12.3.4).
+    pub fn has_clips(&self) -> anyhow::Result<bool> {
+        Ok(!self.clip_sets()?.is_empty())
+    }
+
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
     /// `f`, and return `self` for chaining. `fields` names the metadata keys
     /// the closure intends to author so the cache invalidator can classify
@@ -747,6 +770,30 @@ mod tests {
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// `Prim::has_clips`/`clip_sets` report composed clip sets, and
+    /// `Attribute::get_at` resolves clip values (spec 12.3.4).
+    #[test]
+    fn clip_introspection() -> anyhow::Result<()> {
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/entry.usd",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let stage = Stage::open(&path)?;
+
+        let model = super::Prim::new(&stage, sdf::path("/Model")?);
+        assert!(model.has_clips()?);
+        assert_eq!(model.clip_sets()?, vec!["default".to_string()]);
+
+        // get_at flows through clip resolution: the clip overrides the reference.
+        let size = super::Attribute::new(&stage, sdf::path("/Model.size")?);
+        assert_eq!(size.get_at(10.0)?, Some(sdf::Value::Float(10.0)));
+
+        // A prim with no clips reports none.
+        let other = super::Prim::new(&stage, sdf::path("/Model2")?);
+        assert!(!other.has_clips()?);
+        Ok(())
     }
 
     #[test]
