@@ -117,29 +117,28 @@ impl ConnectionGraph {
     /// cycles are broken (each property visited once). Returns `attr`
     /// itself when it has no outgoing connection.
     pub fn resolve_chain(&self, attr: &Path) -> Vec<Path> {
+        // Iterative depth-first walk over the `forward` graph. An explicit
+        // stack keeps deep chains from blowing the call stack.
         let mut terminals = Vec::new();
         let mut visited = HashSet::new();
-        self.walk_terminals(attr, &mut visited, &mut terminals);
+        let mut stack: Vec<&Path> = vec![attr];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node.clone()) {
+                continue;
+            }
+            match self.forward.get(node) {
+                // Terminal: nothing further to chase.
+                None => {
+                    if !terminals.contains(node) {
+                        terminals.push(node.clone());
+                    }
+                }
+                // Push reversed so the first source is explored first
+                // (matches the original recursive order).
+                Some(sources) => stack.extend(sources.iter().rev()),
+            }
+        }
         terminals
-    }
-
-    fn walk_terminals(&self, attr: &Path, visited: &mut HashSet<Path>, out: &mut Vec<Path>) {
-        if !visited.insert(attr.clone()) {
-            return;
-        }
-        match self.forward.get(attr) {
-            // Terminal: nothing further to chase.
-            None => {
-                if !out.contains(attr) {
-                    out.push(attr.clone());
-                }
-            }
-            Some(sources) => {
-                for source in sources {
-                    self.walk_terminals(source, visited, out);
-                }
-            }
-        }
     }
 }
 
@@ -191,11 +190,28 @@ mod tests {
         let stage = chain_stage()?;
         let graph = ConnectionGraph::from_stage(&stage)?;
 
-        // A.inputs:in -> B.outputs:out -> B.inputs:in -> C.outputs:out.
-        // Wait: B.outputs:out is NOT connected to B.inputs:in (shaders
-        // don't auto-wire), so the terminal of A is B.outputs:out.
+        // A.inputs:in -> B.outputs:out. Shader outputs don't auto-wire
+        // to inputs on the same prim, so B.outputs:out is the terminal.
         let terminals = graph.resolve_chain(&sdf::path("/G/A.inputs:in")?);
         assert_eq!(terminals, vec![sdf::path("/G/B.outputs:out")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_chain_deep() -> Result<()> {
+        // Deep chain — the iterative walk must finish without overflowing
+        // the call stack the recursive form would on a long chain.
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let host = stage.define_prim("/Host")?.set_type_name("Shader")?;
+        const N: usize = 2_000;
+        for i in 0..N - 1 {
+            host.create_attribute(&format!("inputs:n{i}"), "float")?
+                .set_connections([sdf::path(format!("/Host.inputs:n{}", i + 1))?])?;
+        }
+        host.create_attribute(&format!("inputs:n{}", N - 1), "float")?;
+        let graph = ConnectionGraph::from_stage(&stage)?;
+        let terminals = graph.resolve_chain(&sdf::path("/Host.inputs:n0")?);
+        assert_eq!(terminals, vec![sdf::path(format!("/Host.inputs:n{}", N - 1))?]);
         Ok(())
     }
 
