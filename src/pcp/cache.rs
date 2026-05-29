@@ -530,6 +530,17 @@ impl Cache {
         Ok(None)
     }
 
+    /// Returns `true` if the layer at `layer` authors `field` at `path`. Used
+    /// by change classification to detect, for an inert spec add, whether the
+    /// new spec carries a field (e.g. `instanceable`) that reshapes
+    /// composition.
+    pub(super) fn layer_authors_field(&self, layer: usize, path: &Path, field: &str) -> bool {
+        self.stack
+            .layers
+            .get(layer)
+            .is_some_and(|l| l.data().has_field(path, field))
+    }
+
     /// Returns `true` if the composed prim index contains any non-local arc.
     pub(crate) fn has_composition_arc(&mut self, path: &Path) -> Result<bool> {
         self.ensure_index(path)?;
