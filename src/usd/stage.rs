@@ -2393,7 +2393,7 @@ def Shader "Mat" (
             .try_as_path_list_op()
             .unwrap();
         assert!(op.deleted_items.is_empty());
-        assert_eq!(op.appended_items, vec![target]);
+        assert_eq!(op.prepended_items, vec![target]);
         Ok(())
     }
 

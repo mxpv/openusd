@@ -376,21 +376,26 @@ impl<'s> Attribute<'s> {
         })
     }
 
-    /// Append a single connection target to `connectionPaths`. No-op if
-    /// already present (skips cache invalidation in that case). Joins the
-    /// appended-items list op (weaker than prepended opinions). Mirrors
-    /// C++ `UsdAttribute::AddConnection` with the default back-of-append
-    /// position.
+    /// Add a single connection target at the default USD list position.
+    /// No-op if already present (skips cache invalidation in that case).
+    /// Joins the prepended-items list op, matching C++
+    /// `UsdAttribute::AddConnection`'s default back-of-prepend position.
     pub fn add_connection(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.add_connection_at(target, false)
+        self.add_connection_at(target, true)
     }
 
-    /// Append a single connection target to the *prepended* list op, so
-    /// it composes stronger than connections from weaker layers. No-op if
-    /// already present. Mirrors C++ `UsdAttribute::AddConnection` with a
-    /// front-of-prepend position.
+    /// Add a single connection target to the prepended list op. No-op if
+    /// already present. This is the explicit spelling of the default USD
+    /// AddConnection position.
     pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
         self.add_connection_at(target, true)
+    }
+
+    /// Add a single connection target to the appended list op. No-op if
+    /// already present. Use this when the new target should compose behind
+    /// prepended opinions from this layer.
+    pub fn add_connection_appended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
+        self.add_connection_at(target, false)
     }
 
     fn add_connection_at(self, target: sdf::Path, prepend: bool) -> Result<Self, StageAuthoringError> {
@@ -874,9 +879,9 @@ mod tests {
         let input = input.set_connections([iface.clone()])?;
         assert_eq!(input.get_connections()?, vec![iface.clone()]);
 
-        // add_connection appends; dedups.
+        // add_connection prepends by default; dedups.
         let input = input.add_connection(tex_out.path().clone())?;
-        assert_eq!(input.get_connections()?, vec![iface.clone(), tex_out.path().clone()]);
+        assert_eq!(input.get_connections()?, vec![tex_out.path().clone(), iface.clone()]);
         let input = input.add_connection(tex_out.path().clone())?;
         assert_eq!(input.get_connections()?.len(), 2);
 
@@ -910,11 +915,11 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_appended() -> anyhow::Result<()> {
+    fn add_connection_prepends() -> anyhow::Result<()> {
         // First-time `add_connection` on a no-prior-opinion attribute must
-        // author a non-explicit (appended) list op, so weaker-layer
+        // author a non-explicit (prepended) list op, so weaker-layer
         // connection opinions still compose. Authoring `explicit` here
-        // would silently block weaker layers — see `UsdAttribute::AddConnection`.
+        // would silently block weaker layers.
         let stage = stage()?;
         let target = sdf::Path::new("/Tex.outputs:rgb")?;
         let attr = stage
@@ -930,6 +935,27 @@ mod tests {
             .unwrap();
         assert!(!op.explicit, "first add_connection must not flip the op to explicit");
         assert!(op.explicit_items.is_empty());
+        assert_eq!(op.prepended_items, vec![target]);
+        assert!(op.appended_items.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_appended() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let target = sdf::Path::new("/Tex.outputs:rgb")?;
+        let attr = stage
+            .define_prim("/Surface")?
+            .set_type_name("Shader")?
+            .create_attribute("inputs:diffuseColor", "color3f")?
+            .add_connection_appended(target.clone())?;
+
+        let op = stage
+            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
+        assert!(!op.explicit);
         assert_eq!(op.appended_items, vec![target]);
         assert!(op.prepended_items.is_empty());
         Ok(())
