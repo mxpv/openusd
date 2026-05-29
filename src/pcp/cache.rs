@@ -54,17 +54,36 @@ pub struct Cache {
     /// identifier. Clip layers do not participate in composition (spec
     /// 12.3.4), so they are held here rather than in the [`LayerStack`].
     clip_layers: HashMap<String, sdf::Layer>,
-    /// Canonical instance per instancing key, for scene-graph instancing
-    /// sharing (spec 11.3.3). Instances with the same key reuse the first
-    /// (canonical) one's composed subtree, so it is composed only once.
+    /// Shared prototypes for scene-graph instancing (spec 11.3.3), keyed by
+    /// instancing key. Instances with the same key reuse one prototype, so its
+    /// subtree is composed only once.
     //
     // TODO: the registry is not invalidated when authoring changes an
     // instance's arcs or its `instanceable` flag. Tie it into change
     // processing (see the `instanceable` note in `pcp::change`).
-    // TODO: expose the shared prototype as a queryable identity
-    // (`/__Prototype_N`, GetPrototype / GetInstances / IsInPrototype) and as a
-    // traversable namespace — a separate piece of work building on this map.
-    instance_canonical: HashMap<InstanceKey, Path>,
+    prototypes: HashMap<InstanceKey, Prototype>,
+    /// Reverse lookup from a `/__Prototype_N` path to its instancing key.
+    prototype_roots: HashMap<Path, InstanceKey>,
+    /// Counter for minting `/__Prototype_N` identities in registration order.
+    prototype_count: usize,
+}
+
+/// A shared prototype for a set of instances with the same [`InstanceKey`]
+/// (spec 11.3.3). Its composition is backed by the canonical instance's
+/// already arc-only subtree, exposed under a synthetic `/__Prototype_N` path.
+///
+/// TODO: the prototype is alias-backed by the canonical instance rather than
+/// composed as its own root, so prototype-root attribute queries reflect the
+/// canonical instance's composition (which keeps its own local opinions).
+/// Materializing `/__Prototype_N` as an independently composed namespace is
+/// future work.
+struct Prototype {
+    /// Synthetic prototype identity (`/__Prototype_N`).
+    path: Path,
+    /// Instance whose composed subtree backs this prototype.
+    canonical: Path,
+    /// Every instance sharing this prototype, in registration order.
+    instances: Vec<Path>,
 }
 
 /// Identity of an instance prim's shared composition (spec 11.3.3): the
@@ -101,7 +120,9 @@ impl Cache {
             relocates,
             variant_fallbacks,
             clip_layers: HashMap::new(),
-            instance_canonical: HashMap::new(),
+            prototypes: HashMap::new(),
+            prototype_roots: HashMap::new(),
+            prototype_count: 0,
         }
     }
 
@@ -569,14 +590,81 @@ impl Cache {
     // into per-prototype results, then insert), and the shared `LayerStack`
     // handed to workers as `&`/`Arc`.
     fn canonical_instance(&mut self, instance: &Path) -> Result<Path> {
+        Ok(self.register_prototype(instance)?.0)
+    }
+
+    /// Registers `instance` against its prototype, minting `/__Prototype_N` and
+    /// recording the instance the first time a key is seen. Returns the
+    /// `(canonical instance, prototype path)` pair.
+    fn register_prototype(&mut self, instance: &Path) -> Result<(Path, Path)> {
         self.ensure_index(instance)?;
         let local = self.local_layers();
         let key = self.instance_key(&self.indices[instance], &local);
-        Ok(self
-            .instance_canonical
-            .entry(key)
-            .or_insert_with(|| instance.clone())
-            .clone())
+
+        if let Some(prototype) = self.prototypes.get_mut(&key) {
+            if !prototype.instances.contains(instance) {
+                prototype.instances.push(instance.clone());
+            }
+            return Ok((prototype.canonical.clone(), prototype.path.clone()));
+        }
+
+        let path = Path::new(&format!("/__Prototype_{}", self.prototype_count))?;
+        self.prototype_count += 1;
+        self.prototype_roots.insert(path.clone(), key.clone());
+        self.prototypes.insert(
+            key,
+            Prototype {
+                path: path.clone(),
+                canonical: instance.clone(),
+                instances: vec![instance.clone()],
+            },
+        );
+        Ok((instance.clone(), path))
+    }
+
+    /// Returns the synthetic prototype path (`/__Prototype_N`) shared by
+    /// `instance`, registering it on first use. `None` when `instance` is not
+    /// an instance prim (spec 11.3.3).
+    pub(crate) fn prototype_of(&mut self, instance: &Path) -> Result<Option<Path>> {
+        if !self.is_instance(instance)? {
+            return Ok(None);
+        }
+        Ok(Some(self.register_prototype(instance)?.1))
+    }
+
+    /// Returns the instances sharing the prototype at `prototype` (a
+    /// `/__Prototype_N` path), in registration order. Empty for unknown paths.
+    pub(crate) fn instances_of(&self, prototype: &Path) -> Vec<Path> {
+        self.prototype_roots
+            .get(prototype)
+            .and_then(|key| self.prototypes.get(key))
+            .map(|prototype| prototype.instances.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns the registered `/__Prototype_N` roots, in registration order.
+    pub(crate) fn prototypes(&self) -> Vec<Path> {
+        let mut roots: Vec<&Prototype> = self.prototypes.values().collect();
+        roots.sort_by(|a, b| a.path.cmp(&b.path));
+        roots.into_iter().map(|prototype| prototype.path.clone()).collect()
+    }
+
+    /// Returns `true` if `path` is a `/__Prototype_N` root.
+    pub(crate) fn is_prototype(&self, path: &Path) -> bool {
+        self.prototype_roots.contains_key(path)
+    }
+
+    /// Returns `true` if `path` lies within a prototype's namespace — i.e. it
+    /// has a `/__Prototype_N` ancestor (spec 11.3.3).
+    pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
+        let mut ancestor = path.parent();
+        while let Some(current) = ancestor {
+            if self.prototype_roots.contains_key(&current) {
+                return true;
+            }
+            ancestor = current.parent();
+        }
+        false
     }
 
     /// Maps a prim path to the path that actually composes it. A descendant of
@@ -591,6 +679,18 @@ impl Cache {
     /// is redirected to the canonical's nested instance but is not itself
     /// registered as a distinct prototype.
     fn redirect_prim(&mut self, prim: &Path) -> Result<Path> {
+        // A `/__Prototype_N[/tail]` query maps into the canonical instance's
+        // subtree, so the synthetic prototype namespace is addressable.
+        let mut node = Some(prim.clone());
+        while let Some(current) = node {
+            if let Some(key) = self.prototype_roots.get(&current) {
+                let canonical = self.prototypes[key].canonical.clone();
+                let tail = &prim.as_str()[current.as_str().len()..];
+                return Path::new(&format!("{canonical}{tail}"));
+            }
+            node = current.parent();
+        }
+
         let mut ancestor = prim.parent();
         while let Some(current) = ancestor {
             if current.is_abs_root() {
