@@ -2906,6 +2906,63 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// Forwarding through a relationship that lives inside an instance
+    /// prototype resolves within the queried instance: the prototype rel is
+    /// classified correctly (not mistaken for a terminal) and its targets
+    /// remap into the instance namespace (spec 11.3.3 + 12.4).
+    #[test]
+    fn forwarded_targets_through_instance() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("asset.usda"),
+            r#"#usda 1.0
+(
+    defaultPrim = "Proto"
+)
+
+def "Proto"
+{
+    def "Target" {}
+    rel direct = [</Proto/Target>]
+    rel chain = [</Proto.direct>]
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def "I1" (
+    instanceable = true
+    references = @asset.usda@
+)
+{
+}
+
+def "I2" (
+    instanceable = true
+    references = @asset.usda@
+)
+{
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        // chain -> direct (a prototype relationship) -> Target. Each hop stays
+        // in the queried instance's namespace.
+        assert_eq!(
+            stage.forwarded_relationship_targets(&sdf::path("/I1.chain")?)?,
+            vec![sdf::path("/I1/Target")?]
+        );
+        assert_eq!(
+            stage.forwarded_relationship_targets(&sdf::path("/I2.chain")?)?,
+            vec![sdf::path("/I2/Target")?]
+        );
+        Ok(())
+    }
+
     /// Connection and schema readers descend into instance subtrees, so
     /// content inside an instance is not silently skipped. Public traversal
     /// stops at instances, but these readers need the full composed namespace.
