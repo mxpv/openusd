@@ -27,7 +27,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::sdf::Path;
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 /// A directed index of every authored attribute connection on a stage.
 ///
@@ -45,11 +45,12 @@ pub struct ConnectionGraph {
 impl ConnectionGraph {
     /// Walk `stage` once and index every attribute carrying authored
     /// `connectionPaths`. Visits the default traversal region (active,
-    /// loaded, defined, non-abstract prims).
+    /// loaded, defined, non-abstract prims), descending into instance
+    /// proxies so connections inside instances are indexed too.
     pub fn from_stage(stage: &Stage) -> Result<Self> {
         let mut graph = ConnectionGraph::default();
         let mut first_err: Result<()> = Ok(());
-        stage.traverse(|prim| {
+        stage.traverse(PrimPredicate::DEFAULT_PROXIES, |prim| {
             if first_err.is_err() {
                 return;
             }

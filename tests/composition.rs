@@ -72,7 +72,9 @@ fn run(name: &str, format: Format) {
     // Collect every prim, including inactive/class/over prims, so the PCP
     // baselines can validate composition independent of stage traversal policy.
     let mut prims = Vec::new();
-    stage.traverse_all(|path| prims.push(path.to_string())).unwrap();
+    stage
+        .traverse(usd::PrimPredicate::ALL, |path| prims.push(path.to_string()))
+        .unwrap();
 
     let mut failures = Vec::new();
 

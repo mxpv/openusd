@@ -13,7 +13,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
@@ -314,7 +314,7 @@ pub fn read_filtered_pairs(stage: &Stage, prim: &Path) -> Result<Option<ReadFilt
 /// Saves callers from re-walking for every schema family.
 pub fn find_physics_prims(stage: &Stage) -> Result<PhysicsPrims> {
     let mut out = PhysicsPrims::default();
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         if let Ok(Some(type_name)) = stage.type_name(path) {
             match type_name.as_str() {
                 T_PHYSICS_SCENE => out.scenes.push(path.as_str().to_string()),
