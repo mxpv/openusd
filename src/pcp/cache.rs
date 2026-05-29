@@ -786,136 +786,165 @@ impl Cache {
             return;
         };
 
-        // Phase 1: Check non-Root nodes from the parent's index.
+        self.propagate_from_parent_nodes(child_path, child_name, parent_index, index);
+
+        // Each fallback only runs when the stronger phases found nothing.
+        if index.is_empty() {
+            self.propagate_from_ancestor_arcs(child_path, &parent_path, index);
+        }
+        if index.is_empty() {
+            self.propagate_from_layer_targets(child_path, child_name, &parent_path, parent_index, index);
+        }
+    }
+
+    /// Adds an implied node for every layer that has a spec at `source`,
+    /// mapping `source → composed` with the given arc, retiming, and global
+    /// weakness. Shared by the three [`Self::propagate_parent_specs`] phases.
+    fn push_implied_nodes(
+        &self,
+        index: &mut PrimIndex,
+        source: &Path,
+        composed: &Path,
+        arc: ArcType,
+        time_offset: sdf::LayerOffset,
+        introduced_by_specialize: bool,
+    ) {
+        for li in 0..self.stack.len() {
+            if self.stack.layer(li).has_spec(source) {
+                let map =
+                    MapFunction::from_pair_identity(source.clone(), composed.clone()).with_time_offset(time_offset);
+                index.push_node(Node {
+                    layer_index: li,
+                    path: source.clone(),
+                    arc,
+                    map_to_parent: map.clone(),
+                    map_to_root: map,
+                    introduced_by_specialize,
+                });
+            }
+        }
+    }
+
+    /// Collects the ancestor arcs reachable by walking namespace ancestors from
+    /// `start` upward, de-duplicated by their map function (strongest first).
+    fn collect_ancestor_arcs_from(&self, start: Option<Path>) -> Vec<&AncestorArc> {
+        let mut arcs: Vec<&AncestorArc> = Vec::new();
+        let mut current = start;
+        while let Some(path) = current {
+            if let Some(ctx) = self.contexts.get(&path) {
+                for arc in &ctx.ancestor_arcs {
+                    if !arcs.iter().any(|existing| existing.map == arc.map) {
+                        arcs.push(arc);
+                    }
+                }
+            }
+            current = path.parent();
+        }
+        arcs
+    }
+
+    /// Phase 1: child specs reachable through the parent's own non-`Root`
+    /// nodes (e.g. a child of an inherited class with no local override).
+    fn propagate_from_parent_nodes(
+        &self,
+        child_path: &Path,
+        child_name: &str,
+        parent_index: &PrimIndex,
+        index: &mut PrimIndex,
+    ) {
         for parent_node in parent_index.nodes() {
             if parent_node.arc == ArcType::Root {
                 continue;
             }
-
             let Ok(node_child_path) = parent_node.path.append_path(child_name) else {
                 continue;
             };
-
-            for li in 0..self.stack.len() {
-                if self.stack.layer(li).has_spec(&node_child_path) {
-                    let map = MapFunction::from_pair_identity(node_child_path.clone(), child_path.clone())
-                        .with_time_offset(parent_node.map_to_root.time_offset());
-                    index.push_node(Node {
-                        layer_index: li,
-                        path: node_child_path.clone(),
-                        arc: parent_node.arc,
-                        map_to_parent: map.clone(),
-                        map_to_root: map,
-                        introduced_by_specialize: parent_node.introduced_by_specialize,
-                    });
-                }
-            }
+            self.push_implied_nodes(
+                index,
+                &node_child_path,
+                child_path,
+                parent_node.arc,
+                parent_node.map_to_root.time_offset(),
+                parent_node.introduced_by_specialize,
+            );
         }
+    }
 
-        // Phase 2: Use ancestor arcs from all cached ancestors to find
-        // specs at alternative namespace paths. This covers cases where
-        // merge_full_index produced empty indices for inherit targets
-        // (due to building with default context that misses ancestor arcs).
-        if index.is_empty() {
-            let mut all_ancestor_arcs: Vec<&AncestorArc> = Vec::new();
-            let mut ap = Some(parent_path.clone());
-            while let Some(pp) = ap {
-                if let Some(ctx) = self.contexts.get(&pp) {
-                    for a in &ctx.ancestor_arcs {
-                        if !all_ancestor_arcs.iter().any(|x| x.map == a.map) {
-                            all_ancestor_arcs.push(a);
-                        }
-                    }
-                }
-                ap = pp.parent();
+    /// Phase 2 (fallback): child specs at alternative namespace paths reached
+    /// via cached ancestor arcs — covers inherit targets whose index was built
+    /// with default context and so missed those arcs.
+    fn propagate_from_ancestor_arcs(&self, child_path: &Path, parent_path: &Path, index: &mut PrimIndex) {
+        for ancestor in self.collect_ancestor_arcs_from(Some(parent_path.clone())) {
+            let Some(alt_path) = ancestor.map.map_target_to_source(child_path) else {
+                continue;
+            };
+            if alt_path == *child_path {
+                continue;
             }
-            for ancestor in &all_ancestor_arcs {
-                let Some(alt_path) = ancestor.map.map_target_to_source(child_path) else {
+            self.push_implied_nodes(
+                index,
+                &alt_path,
+                child_path,
+                ancestor.arc,
+                ancestor.map.time_offset(),
+                ancestor.arc == ArcType::Specialize,
+            );
+        }
+    }
+
+    /// Phase 3 (fallback): inherit/specialize targets read directly from the
+    /// parent's layer data, checked at the composed path and every grandparent
+    /// ancestor remapping — for targets neither merged into the index nor
+    /// reachable through cached ancestor arcs.
+    fn propagate_from_layer_targets(
+        &self,
+        child_path: &Path,
+        child_name: &str,
+        parent_path: &Path,
+        parent_index: &PrimIndex,
+        index: &mut PrimIndex,
+    ) {
+        let grandparent_arcs = self.collect_ancestor_arcs_from(parent_path.parent());
+
+        for parent_node in parent_index.nodes() {
+            for (field, arc) in [
+                (FieldKey::InheritPaths, ArcType::Inherit),
+                (FieldKey::Specializes, ArcType::Specialize),
+            ] {
+                let Ok(val) = self
+                    .stack
+                    .layer(parent_node.layer_index)
+                    .get(&parent_node.path, field.as_str())
+                else {
                     continue;
                 };
-                if alt_path == *child_path {
+                let Value::PathListOp(list_op) = val.into_owned() else {
                     continue;
-                }
-                for li in 0..self.stack.len() {
-                    if self.stack.layer(li).has_spec(&alt_path) {
-                        let map = MapFunction::from_pair_identity(alt_path.clone(), child_path.clone())
-                            .with_time_offset(ancestor.map.time_offset());
-                        index.push_node(Node {
-                            layer_index: li,
-                            path: alt_path.clone(),
-                            arc: ancestor.arc,
-                            map_to_parent: map.clone(),
-                            map_to_root: map,
-                            introduced_by_specialize: ancestor.arc == ArcType::Specialize,
-                        });
+                };
+                for target in &list_op.flatten() {
+                    let resolved = parent_path.make_absolute(target);
+                    let Ok(target_child) = resolved.append_path(child_name) else {
+                        continue;
+                    };
+                    // Composed path plus every grandparent ancestor remapping.
+                    let mut paths_to_check = vec![target_child.clone()];
+                    for ga in &grandparent_arcs {
+                        if let Some(alt) = ga.map.map_target_to_source(&target_child) {
+                            if alt != target_child && !paths_to_check.contains(&alt) {
+                                paths_to_check.push(alt);
+                            }
+                        }
                     }
-                }
-            }
-        }
-
-        // Phase 3: Read inherit/specialize targets from the parent's layer
-        // data and check their child paths in all namespace variants. This
-        // handles the case where the inherit target's index was empty
-        // (merge_full_index with default context) and ancestor_arcs don't
-        // have the mapping.
-        if index.is_empty() {
-            let mut grandparent_arcs: Vec<&AncestorArc> = Vec::new();
-            let mut p = parent_path.parent();
-            while let Some(pp) = p {
-                if let Some(ctx) = self.contexts.get(&pp) {
-                    grandparent_arcs.extend(&ctx.ancestor_arcs);
-                }
-                p = pp.parent();
-            }
-
-            for parent_node in parent_index.nodes() {
-                for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                    let arc = if field.as_str() == FieldKey::InheritPaths.as_str() {
-                        ArcType::Inherit
-                    } else {
-                        ArcType::Specialize
-                    };
-                    let Ok(val) = self
-                        .stack
-                        .layer(parent_node.layer_index)
-                        .get(&parent_node.path, field.as_str())
-                    else {
-                        continue;
-                    };
-                    let Value::PathListOp(list_op) = val.into_owned() else {
-                        continue;
-                    };
-                    for target in &list_op.flatten() {
-                        let resolved = parent_path.make_absolute(target);
-                        let Ok(target_child) = resolved.append_path(child_name) else {
-                            continue;
-                        };
-                        // Check composed path + all grandparent ancestor remappings.
-                        let mut paths_to_check = vec![target_child.clone()];
-                        for ga in &grandparent_arcs {
-                            if let Some(alt) = ga.map.map_target_to_source(&target_child) {
-                                if alt != target_child && !paths_to_check.contains(&alt) {
-                                    paths_to_check.push(alt);
-                                }
-                            }
-                        }
-                        for check in &paths_to_check {
-                            for li in 0..self.stack.len() {
-                                if self.stack.layer(li).has_spec(check) {
-                                    let map = MapFunction::from_pair_identity(check.clone(), child_path.clone())
-                                        .with_time_offset(parent_node.map_to_root.time_offset());
-                                    index.push_node(Node {
-                                        layer_index: li,
-                                        path: check.clone(),
-                                        arc,
-                                        map_to_parent: map.clone(),
-                                        map_to_root: map,
-                                        introduced_by_specialize: arc == ArcType::Specialize
-                                            || parent_node.introduced_by_specialize,
-                                    });
-                                }
-                            }
-                        }
+                    let specialize = arc == ArcType::Specialize || parent_node.introduced_by_specialize;
+                    for check in &paths_to_check {
+                        self.push_implied_nodes(
+                            index,
+                            check,
+                            child_path,
+                            arc,
+                            parent_node.map_to_root.time_offset(),
+                            specialize,
+                        );
                     }
                 }
             }
