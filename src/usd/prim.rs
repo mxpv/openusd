@@ -430,12 +430,17 @@ impl<'s> Attribute<'s> {
         self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| spec.clear_connection_paths())
     }
 
-    /// `true` when any connection is authored on the edit target's layer.
-    /// Mirrors C++ `UsdAttribute::HasAuthoredConnections`.
+    /// `true` when any connection opinion is authored — including an
+    /// explicit-empty list op (`.connect = []`), the canonical way to
+    /// block weaker-layer connections. Mirrors C++
+    /// `UsdAttribute::HasAuthoredConnections`.
     //
     // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
     pub fn has_authored_connections(&self) -> anyhow::Result<bool> {
-        Ok(!self.get_connections()?.is_empty())
+        Ok(self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
+            .is_some())
     }
 
     /// Composed `connectionPaths`, flattened across layers. Returns an
@@ -825,7 +830,24 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_defaults_to_appended() -> anyhow::Result<()> {
+    fn authored_connections_explicit_empty() -> anyhow::Result<()> {
+        // `set_connections([])` authors an explicit-empty list op, the
+        // canonical way to block weaker-layer connection opinions.
+        // `has_authored_connections` must see this as authored even though
+        // the flattened list is empty.
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/Surface")?
+            .set_type_name("Shader")?
+            .create_attribute("inputs:diffuseColor", "color3f")?
+            .set_connections::<[sdf::Path; 0]>([])?;
+        assert!(attr.has_authored_connections()?);
+        assert!(attr.get_connections()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_appended() -> anyhow::Result<()> {
         // First-time `add_connection` on a no-prior-opinion attribute must
         // author a non-explicit (appended) list op, so weaker-layer
         // connection opinions still compose. Authoring `explicit` here
@@ -851,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn add_connection_prepended_on_explicit_op() -> anyhow::Result<()> {
+    fn add_connection_prepend_on_explicit() -> anyhow::Result<()> {
         // When the existing op is `explicit` (e.g. authored via
         // `set_connections`), `add_connection_prepended` must honour the
         // prepend position by inserting at the front of `explicit_items`
