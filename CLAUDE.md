@@ -91,6 +91,7 @@ When implementing a new feature from the spec:
 - Never remove comments during refactoring if they are still applicable
 - Don't reference planning phases or steps (e.g. "Phase 1", "Step 2") in code, comments, names, fixtures, or commit messages; describe what the code does or, for deferred work, name the missing feature in a `TODO`
 - Wrap prose at 80 characters — Markdown, plans, design write-ups, and doc-comment text; Rust code still follows rustfmt (120)
+- Mark performance/parallelism opportunities with a `TODO(rayon)` (or `TODO(perf)`) comment in new code and when refactoring existing code, instead of optimizing prematurely; say what is independent or parallelizable so the seam is actionable later
 - Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
 - Avoid raw path string manipulations; use `Path` methods instead of building or parsing path strings manually
 - Don't add "Generated with Claude Code" or "Co-Authored-By: Claude" to commits, PRs, or release notes
