@@ -3059,6 +3059,109 @@ def "Model"
         Ok(())
     }
 
+    #[test]
+    fn clip_metadata_retimed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("root.usda"),
+            r#"#usda 1.0
+(
+    subLayers = [@./weak.usda@ (offset = 10)]
+)
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("weak.usda"),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+            double2[] times = [(0, 0), (5, 5)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("manifest.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size
+}
+"#,
+        )?;
+        std::fs::write(
+            dir.path().join("clip.usda"),
+            r#"#usda 1.0
+def "Model"
+{
+    float size.timeSamples = {
+        0: 0,
+        5: 5
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(dir.path().join("root.usda").to_string_lossy().as_ref())?;
+        assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(0.0));
+        assert_eq!(value_f64(&stage, "/Model.size", 15.0), Some(5.0));
+        Ok(())
+    }
+
+    #[test]
+    fn clip_initial_jump() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = write_clip_scene(
+            dir.path(),
+            r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+            double2[] times = [(0, 0), (0, 25), (10, 35)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float size
+}
+"#,
+            r#"#usda 1.0
+def "Model"
+{
+    float size.timeSamples = {
+        0: 0.0,
+        25: 25.0,
+        35: 35.0
+    }
+}
+"#,
+        )?;
+
+        let stage = Stage::open(&root)?;
+        assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(25.0));
+        assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(30.0));
+        Ok(())
+    }
+
     /// Active-clip selection switches clips by stage time and maps stage time
     /// to clip time through the timing curve (spec 12.3.4.3, 12.3.4.4).
     #[test]

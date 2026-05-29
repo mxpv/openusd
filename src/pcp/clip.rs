@@ -155,7 +155,7 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
     let (Some(&(first_stage, first_clip)), Some(&(last_stage, last_clip))) = (times.first(), times.last()) else {
         return stage_time;
     };
-    if stage_time <= first_stage {
+    if stage_time < first_stage {
         return first_clip;
     }
     if stage_time >= last_stage {
@@ -268,6 +268,16 @@ mod tests {
         assert_eq!(cs.map_stage_to_clip(10.0), 25.0); // at jump → "at and after"
         assert_eq!(cs.map_stage_to_clip(15.0), 30.0); // second segment
         assert_eq!(cs.map_stage_to_clip(20.0), 35.0);
+    }
+
+    #[test]
+    fn map_times_initial_jump() {
+        // At a duplicated first stage time, the right-hand entry applies
+        // exactly at the jump.
+        let cs = clip_set(vec![], vec![(0.0, 0.0), (0.0, 25.0), (10.0, 35.0)]);
+        assert_eq!(cs.map_stage_to_clip(-1.0), 0.0);
+        assert_eq!(cs.map_stage_to_clip(0.0), 25.0);
+        assert_eq!(cs.map_stage_to_clip(5.0), 30.0);
     }
 
     #[test]

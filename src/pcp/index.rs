@@ -565,6 +565,11 @@ impl PrimIndex {
                             if composed.contains_key(&field) {
                                 continue;
                             }
+                            let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
+                                retime_clip_stage_times(value, node.map_to_root.time_offset())
+                            } else {
+                                value
+                            };
                             if field == clip::keys::ASSET_PATHS {
                                 asset_layers.insert(set_name.clone(), node.layer_index);
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
@@ -799,9 +804,25 @@ impl<'a> IndexBuilder<'a> {
         // opinions from referenced layer stacks without a separate
         // propagation pass). Each layer still carries its own effective
         // sublayer offset so that retiming flows through correctly.
-        let root_stack: Vec<(usize, LayerOffset)> = (0..self.stack.len())
-            .map(|i| (i, self.stack.effective_offset_for_layer(i)))
-            .collect();
+        let mut seen_layers = HashSet::new();
+        let mut root_stack = Vec::new();
+        for i in 0..self.stack.session_layer_count {
+            root_stack.push((i, LayerOffset::IDENTITY));
+            seen_layers.insert(i);
+        }
+        let root = self.stack.session_layer_count;
+        if let Some(stack) = self.stack.sublayer_stacks.get(&root) {
+            for &(i, offset) in stack {
+                if seen_layers.insert(i) {
+                    root_stack.push((i, offset));
+                }
+            }
+        }
+        for i in 0..self.stack.len() {
+            if seen_layers.insert(i) {
+                root_stack.push((i, self.stack.effective_offset_for_layer(i)));
+            }
+        }
 
         // Evaluate root composition site (no parent — this is the graph root).
         self.eval_site(
@@ -1572,6 +1593,23 @@ fn retime_samples(samples: sdf::TimeSampleMap, offset: LayerOffset) -> sdf::Time
         .into_iter()
         .map(|(t, value)| (offset.offset + offset.scale * t, value))
         .collect()
+}
+
+/// Maps the stage-time component of clip `active`/`times` pairs through the
+/// layer offset of the node that authored the field.
+fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
+    if offset.is_identity() {
+        return value;
+    }
+    match value {
+        Value::Vec2dVec(pairs) => Value::Vec2dVec(
+            pairs
+                .into_iter()
+                .map(|[stage, data]| [offset.offset + offset.scale * stage, data])
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 /// Applies `strong over weak` dictionary composition in place.
