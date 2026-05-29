@@ -264,6 +264,13 @@ impl Cache {
                     return Ok(Some(value));
                 }
             }
+
+            // TODO: handle missing values in a declared clip (spec 12.3.4.6-7).
+            // When the manifest declares this attribute but the active clip has
+            // no samples at `clip_time`, the result should be the manifest's
+            // default, an empty sentinel, or — with `interpolateMissingClipValues`
+            // — a value interpolated from the nearest surrounding clips. We
+            // currently fall through to weaker value sources instead.
         }
 
         Ok(None)

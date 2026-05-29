@@ -80,6 +80,10 @@ impl ClipSet {
     /// Parses a single clip set from its metadata dictionary. Returns `None`
     /// when the set has no explicit `assetPaths` (template form is deferred).
     fn parse_one(name: &str, set: &HashMap<String, Value>) -> Option<ClipSet> {
+        // TODO: handle template clips (spec 12.3.4.1.3). When a set authors
+        // `templateAssetPath` instead of `assetPaths`, derive the explicit
+        // `assetPaths`/`active`/`times` from the template metadata here rather
+        // than skipping the set.
         let asset_paths = set.get(keys::ASSET_PATHS).and_then(as_string_vec)?;
 
         let prim_path = set
