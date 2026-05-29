@@ -161,6 +161,17 @@ pub struct PrimIndex {
     graph: PrimIndexGraph,
 }
 
+/// A single authored opinion surfaced by [`PrimIndex::opinions`].
+struct Opinion<'a> {
+    /// The contributing node, strongest-to-weakest in the walk.
+    node: &'a Node,
+    /// The path queried in the node's layer (the node path with the property
+    /// suffix applied).
+    query_path: Cow<'a, Path>,
+    /// The authored value at `query_path`.
+    value: Cow<'a, Value>,
+}
+
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     pub fn is_empty(&self) -> bool {
@@ -312,12 +323,8 @@ impl PrimIndex {
         let field = field.as_str();
         let mut ops = Vec::new();
 
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let value = opinion?.value;
             // TODO: a non-conformant backend may store `apiSchemas` as a plain
             // `Value::TokenVec` even though the field is declared as a
             // list-op. We currently skip those opinions (falling through to
@@ -354,12 +361,12 @@ impl PrimIndex {
         let field = field.as_str();
         let mut ops = Vec::new();
 
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let Opinion {
+                node,
+                query_path,
+                value,
+            } = opinion?;
             // A bare `PathVec` (no list-op envelope) is treated as an explicit
             // replacement of weaker opinions — the natural interpretation for
             // a non-list-op-typed value when the field is declared list-op.
@@ -421,6 +428,33 @@ impl PrimIndex {
         }
     }
 
+    /// Iterates the authored opinions for `field` across the composition graph,
+    /// strongest to weakest, skipping nodes with no opinion. Centralizes the
+    /// query-path / layer / `try_get` walk shared by every `resolve_*` field
+    /// resolver.
+    fn opinions<'a>(
+        &'a self,
+        field: &'a str,
+        stack: &'a LayerStack,
+        prop_suffix: Option<&'a str>,
+    ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
+        self.nodes().iter().filter_map(move |node| {
+            let query_path = match Self::query_path(node, prop_suffix) {
+                Ok(path) => path,
+                Err(err) => return Some(Err(err)),
+            };
+            match stack.layer(node.layer_index).try_get(&query_path, field) {
+                Ok(Some(value)) => Some(Ok(Opinion {
+                    node,
+                    query_path,
+                    value,
+                })),
+                Ok(None) => None,
+                Err(err) => Some(Err(err)),
+            }
+        })
+    }
+
     /// Walks nodes from strongest to weakest, returning the first opinion.
     /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. When
     /// the strongest opinion is a dictionary, weaker dictionary opinions are
@@ -429,12 +463,8 @@ impl PrimIndex {
     /// are ignored.
     fn resolve_strongest(&self, field: &str, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let mut merged: Option<HashMap<String, Value>> = None;
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let value = opinion?.value;
             match (merged.as_mut(), value.into_owned()) {
                 (None, Value::ValueBlock) => return Ok(None),
                 (None, Value::Dictionary(dict)) => merged = Some(dict),
@@ -492,15 +522,11 @@ impl PrimIndex {
         local_layers: Option<&HashSet<usize>>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
         let field = FieldKey::TimeSamples.as_str();
-        for node in self.nodes() {
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let Opinion { node, value, .. } = opinion?;
             if local_layers.is_some_and(|local| !local.contains(&node.layer_index)) {
                 continue;
             }
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
             match value.into_owned() {
                 Value::ValueBlock => return Ok(None),
                 Value::TimeSamples(samples) => {
@@ -610,12 +636,8 @@ impl PrimIndex {
     fn resolve_variability(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Variability.as_str();
         let mut weakest = None;
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let value = opinion?.value;
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
@@ -633,12 +655,8 @@ impl PrimIndex {
     fn resolve_custom(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Custom.as_str();
         let mut saw_opinion = false;
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let value = opinion?.value;
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
@@ -661,12 +679,8 @@ impl PrimIndex {
     fn resolve_specifier(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Specifier.as_str();
         let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
-        for node in self.nodes() {
-            let query_path = Self::query_path(node, prop_suffix)?;
-            let data = stack.layer(node.layer_index);
-            let Some(value) = data.try_get(&query_path, field)? else {
-                continue;
-            };
+        for opinion in self.opinions(field, stack, prop_suffix) {
+            let Opinion { node, value, .. } = opinion?;
             if matches!(value.as_ref(), Value::ValueBlock) {
                 break;
             }
