@@ -17,11 +17,18 @@
 //! | `physics` | `physics` | `UsdPhysics` reader (8 prim types, 7 single-apply APIs, multi-apply `LimitAPI` / `DriveAPI`). |
 //! | `skel`    | `skel`    | `UsdSkel` reader + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS). |
 //! | `lux`     | `lux`     | `UsdLux` reader (8 concrete light prims + LightAPI / ShapingAPI / ShadowAPI / LightListAPI). |
+//! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
 
-#[cfg(any(feature = "geom", feature = "lux", feature = "physics", feature = "skel"))]
+#[cfg(any(
+    feature = "geom",
+    feature = "lux",
+    feature = "physics",
+    feature = "shade",
+    feature = "skel"
+))]
 mod common;
 
 #[cfg(feature = "geom")]
@@ -30,6 +37,8 @@ pub mod geom;
 pub mod lux;
 #[cfg(feature = "physics")]
 pub mod physics;
+#[cfg(feature = "shade")]
+pub mod shade;
 #[cfg(feature = "skel")]
 pub mod skel;
 
