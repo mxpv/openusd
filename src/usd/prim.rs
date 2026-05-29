@@ -443,20 +443,14 @@ impl<'s> Attribute<'s> {
             .is_some())
     }
 
-    /// Composed `connectionPaths`, flattened across layers. Returns an
-    /// empty vec when no connection is authored. Mirrors C++
-    /// `UsdAttribute::GetConnections`.
+    /// Composed `connectionPaths`, with list-op edits folded across every
+    /// contributing layer. Returns an empty vec when no connection is
+    /// authored. Mirrors C++ `UsdAttribute::GetConnections`.
     //
-    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
+    // TODO: drop `anyhow::Result` once `Stage::connection_paths` returns
+    // a typed error.
     pub fn get_connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        match self
-            .stage
-            .field::<sdf::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
-        {
-            Some(sdf::Value::PathListOp(op)) => Ok(op.flatten()),
-            Some(sdf::Value::PathVec(v)) => Ok(v),
-            _ => Ok(Vec::new()),
-        }
+        self.stage.connection_paths(&self.path)
     }
 
     /// Composed default value, if any layer authored one.

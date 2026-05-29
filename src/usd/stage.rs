@@ -863,6 +863,18 @@ impl Stage {
         Ok(self.api_schemas(prim)?.iter().any(|s| s == name))
     }
 
+    /// Returns the composed `connectionPaths` list for an attribute path,
+    /// folding list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Mirrors C++ `UsdAttribute::GetConnections`. Returns
+    /// an empty list for non-property paths or attributes with no authored
+    /// connections.
+    pub fn connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        if !self.population_mask.includes(&attr.prim_path()) {
+            return Ok(Vec::new());
+        }
+        self.try_or_handle(|cache| cache.connection_paths(attr))
+    }
+
     /// Returns the composed `typeName` for a prim, if set.
     pub fn type_name(&self, prim: &sdf::Path) -> Result<Option<String>> {
         self.field::<String>(prim, "typeName")
@@ -2200,6 +2212,52 @@ def Xform "World"
         let prim = sdf::Path::new("/World/Geo")?;
         let prop = sdf::Path::new("/World/Geo.points")?;
         assert_eq!(stage.api_schemas(&prop)?, stage.api_schemas(&prim)?);
+        Ok(())
+    }
+
+    #[test]
+    fn connection_paths_compose_list_ops() -> Result<()> {
+        // Stack: weak sublayer authors `append`; root layer authors
+        // `prepend`. `connection_paths` must fold edits across both
+        // layers, not return only the strongest layer's list op.
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("weak.usda"),
+            r#"#usda 1.0
+
+def Shader "Mat"
+{
+    color3f outputs:out
+    append color3f inputs:in.connect = [</Mat.outputs:out>]
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+(
+    subLayers = [
+        @weak.usda@
+    ]
+)
+
+over "Mat"
+{
+    prepend color3f inputs:in.connect = [</Mat.outputs:strong>]
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let conns = stage.connection_paths(&sdf::Path::new("/Mat.inputs:in")?)?;
+        assert_eq!(
+            conns,
+            vec![
+                sdf::Path::new("/Mat.outputs:strong")?,
+                sdf::Path::new("/Mat.outputs:out")?
+            ]
+        );
         Ok(())
     }
 

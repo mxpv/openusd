@@ -255,6 +255,19 @@ impl Cache {
         self.indices[&path].resolve_token_list_op(FieldKey::ApiSchemas, &self.stack, None)
     }
 
+    /// Returns the composed `connectionPaths` list for an attribute path,
+    /// folding list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Non-property paths trivially return an empty list.
+    pub fn connection_paths(&mut self, path: &Path) -> Result<Vec<Path>> {
+        if !path.is_property_path() {
+            return Ok(Vec::new());
+        }
+        let prim_path = path.prim_path();
+        let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
+        self.ensure_index(&prim_path)?;
+        self.indices[&prim_path].resolve_path_list_op(FieldKey::ConnectionPaths, &self.stack, Some(prop_suffix))
+    }
+
     /// Returns pseudo-root layer metadata from the root layer only.
     ///
     /// Session-layer and sublayer opinions are intentionally ignored here,

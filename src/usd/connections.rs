@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::Path;
 use crate::usd::Stage;
 
 /// A directed index of every authored attribute connection on a stage.
@@ -64,7 +64,7 @@ impl ConnectionGraph {
     fn index_prim(&mut self, stage: &Stage, prim: &Path) -> Result<()> {
         for prop in stage.prim_properties(prim.clone())? {
             let attr = prim.append_property(&prop)?;
-            let sources = connections_of(stage, &attr)?;
+            let sources = stage.connection_paths(&attr)?;
             if sources.is_empty() {
                 continue;
             }
@@ -141,15 +141,6 @@ impl ConnectionGraph {
             }
         }
     }
-}
-
-/// Read the composed, flattened `connectionPaths` of a single property.
-fn connections_of(stage: &Stage, attr: &Path) -> Result<Vec<Path>> {
-    Ok(match stage.field::<Value>(attr.clone(), "connectionPaths")? {
-        Some(Value::PathListOp(op)) => op.flatten(),
-        Some(Value::PathVec(v)) => v,
-        _ => Vec::new(),
-    })
 }
 
 #[cfg(test)]
