@@ -45,11 +45,11 @@ pub fn create_output<'s>(prim: &Prim<'s>, base: &str, type_name: &str) -> Result
 /// `/Mat/Surface.inputs:diffuseColor`. Useful as a connection source /
 /// target without materialising the attribute first.
 pub fn input_path(prim: &Path, base: &str) -> Result<Path> {
-    Ok(prim.append_property(&input_name(base))?)
+    prim.append_property(&input_name(base))
 }
 
 /// Full property path of an output on `prim`, e.g.
 /// `/Mat/Tex.outputs:rgb`.
 pub fn output_path(prim: &Path, base: &str) -> Result<Path> {
-    Ok(prim.append_property(&output_name(base))?)
+    prim.append_property(&output_name(base))
 }

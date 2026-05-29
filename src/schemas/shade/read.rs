@@ -17,7 +17,7 @@ use super::tokens::{A_INFO_ID, NS_INPUTS, NS_OUTPUTS, TERMINAL_SURFACE, T_MATERI
 /// Composed default value of `inputs:<base>` on `prim`, if authored.
 pub fn read_input_value(stage: &Stage, prim: &Path, base: &str) -> Result<Option<Value>> {
     let attr = prim.append_property(&format!("{NS_INPUTS}{base}"))?;
-    Ok(stage.field::<Value>(attr, "default")?)
+    stage.field::<Value>(attr, "default")
 }
 
 /// Composed `connectionPaths` of `inputs:<base>` on `prim`. Empty when
