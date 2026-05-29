@@ -2262,6 +2262,47 @@ over "Mat"
     }
 
     #[test]
+    fn connection_paths_remap_reference() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("asset.usda"),
+            r#"#usda 1.0
+(
+    defaultPrim = "Source"
+)
+
+def Shader "Source"
+{
+    color3f outputs:out
+    color3f inputs:in.connect = [</Source.outputs:out>]
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def Shader "Mat" (
+    references = @asset.usda@
+)
+{
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let input = sdf::Path::new("/Mat.inputs:in")?;
+        let output = sdf::Path::new("/Mat.outputs:out")?;
+        assert_eq!(stage.connection_paths(&input)?, vec![output.clone()]);
+
+        let graph = crate::usd::ConnectionGraph::from_stage(&stage)?;
+        assert_eq!(graph.sources(&input), &[output.clone()]);
+        assert_eq!(graph.sinks(&output), &[input]);
+        Ok(())
+    }
+
+    #[test]
     fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let props = sdf::Path::new("/World/Props")?;
