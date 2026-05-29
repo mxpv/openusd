@@ -135,6 +135,7 @@
 
 pub(crate) mod cache;
 pub(crate) mod change;
+pub(crate) mod clip;
 pub(crate) mod deps;
 pub(crate) mod index;
 mod mapping;

@@ -1015,6 +1015,20 @@ impl<'a> Parser<'a> {
                 let value = self.fetch_str().context("Unable to parse prefix")?;
                 spec.add(FieldKey::Prefix, sdf::Value::String(value.to_owned()));
             }
+            n if n == FieldKey::Clips.as_str() => {
+                ensure!(list_op.is_none(), "clips metadata does not support list ops");
+                let value = self.parse_dictionary().context("Unable to parse clips dictionary")?;
+                spec.add(FieldKey::Clips, value);
+            }
+            n if n == FieldKey::ClipSets.as_str() => {
+                let values = self
+                    .one_or_list(|this| Ok(this.fetch_str()?.to_owned()))
+                    .context("Unable to parse clipSets list")?;
+                let list_op = self
+                    .apply_list_op(list_op, values)
+                    .context("Unable to build clipSets listOp")?;
+                spec.add(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
+            }
             other => bail!("Unsupported prim metadata: {other}"),
         }
 
