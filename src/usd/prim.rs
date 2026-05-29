@@ -1061,6 +1061,27 @@ mod tests {
         Ok(())
     }
 
+    /// A deep relationship chain forwards without overflowing the call stack
+    /// (the iterative walk must finish where recursion would abort).
+    #[test]
+    fn forwarded_targets_deep_chain() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Geom")?;
+        let host = stage.define_prim("/Host")?;
+        const N: usize = 4_000;
+        // r0 -> r1 -> ... -> r{N-1} -> /Geom, all relationships on one prim.
+        let r0 = host.create_relationship("r0")?.set_targets([sdf::path("/Host.r1")?])?;
+        for i in 1..N - 1 {
+            host.create_relationship(&format!("r{i}"))?
+                .set_targets([sdf::path(format!("/Host.r{}", i + 1))?])?;
+        }
+        host.create_relationship(&format!("r{}", N - 1))?
+            .set_targets([sdf::path("/Geom")?])?;
+
+        assert_eq!(r0.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        Ok(())
+    }
+
     /// A pure relationship cycle forwards to no terminal targets without
     /// hanging.
     #[test]
