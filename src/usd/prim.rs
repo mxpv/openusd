@@ -825,6 +825,58 @@ mod tests {
     }
 
     #[test]
+    fn add_connection_defaults_to_appended() -> anyhow::Result<()> {
+        // First-time `add_connection` on a no-prior-opinion attribute must
+        // author a non-explicit (appended) list op, so weaker-layer
+        // connection opinions still compose. Authoring `explicit` here
+        // would silently block weaker layers — see `UsdAttribute::AddConnection`.
+        let stage = stage()?;
+        let target = sdf::Path::new("/Tex.outputs:rgb")?;
+        let attr = stage
+            .define_prim("/Surface")?
+            .set_type_name("Shader")?
+            .create_attribute("inputs:diffuseColor", "color3f")?
+            .add_connection(target.clone())?;
+
+        let op = stage
+            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
+        assert!(!op.explicit, "first add_connection must not flip the op to explicit");
+        assert!(op.explicit_items.is_empty());
+        assert_eq!(op.appended_items, vec![target]);
+        assert!(op.prepended_items.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_prepended_on_explicit_op() -> anyhow::Result<()> {
+        // When the existing op is `explicit` (e.g. authored via
+        // `set_connections`), `add_connection_prepended` must honour the
+        // prepend position by inserting at the front of `explicit_items`
+        // rather than silently routing to the back.
+        let stage = stage()?;
+        let a = sdf::Path::new("/A.outputs:out")?;
+        let b = sdf::Path::new("/B.outputs:out")?;
+        let attr = stage
+            .define_prim("/Surface")?
+            .set_type_name("Shader")?
+            .create_attribute("inputs:diffuseColor", "color3f")?
+            .set_connections([a.clone()])?
+            .add_connection_prepended(b.clone())?;
+
+        let op = stage
+            .field::<sdf::Value>(attr.path(), sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
+        assert!(op.explicit);
+        assert_eq!(op.explicit_items, vec![b, a]);
+        Ok(())
+    }
+
+    #[test]
     fn add_api_schema() -> anyhow::Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;

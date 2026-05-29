@@ -571,17 +571,27 @@ where
         );
     }
 
-    /// Append a single connection path. No-op if already present. When
-    /// `prepend` is true the path joins the prepended-items list (it wins
-    /// over weaker layers); otherwise it joins the explicit / appended
-    /// list. A pre-existing non-`PathListOp` value is overwritten — debug
+    /// Append a single connection path. No-op if already present.
+    ///
+    /// `prepend = true` joins the prepended-items list (the new path
+    /// composes stronger than weaker layers); `prepend = false` joins
+    /// the appended-items list (weaker than prepends, but still
+    /// composes with weaker-layer opinions). When the existing op is
+    /// `explicit`, the path is added to whichever side `prepend`
+    /// selects without flipping the op out of explicit mode. A
+    /// pre-existing non-`PathListOp` value is overwritten — debug
     /// builds assert.
     pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) {
         match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
             Some(sdf::Value::PathListOp(op)) => {
                 if !op.iter().any(|p| p == &path) {
                     if op.explicit {
-                        op.explicit_items.push(path);
+                        // Stay explicit; honour `prepend` to control position.
+                        if prepend {
+                            op.explicit_items.insert(0, path);
+                        } else {
+                            op.explicit_items.push(path);
+                        }
                     } else if prepend {
                         op.prepended_items.push(path);
                     } else {
@@ -591,16 +601,20 @@ where
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
-                self.add(
-                    sdf::FieldKey::ConnectionPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
-                );
-            }
-            None => {
                 let op = if prepend {
                     sdf::PathListOp::prepended([path])
                 } else {
-                    sdf::PathListOp::explicit([path])
+                    sdf::PathListOp::appended([path])
+                };
+                self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+            }
+            None => {
+                // Default to a non-explicit list op so the new path composes
+                // with weaker-layer opinions, matching C++ `UsdAttribute::AddConnection`.
+                let op = if prepend {
+                    sdf::PathListOp::prepended([path])
+                } else {
+                    sdf::PathListOp::appended([path])
                 };
                 self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
             }
