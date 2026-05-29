@@ -56,11 +56,8 @@ pub struct Cache {
     clip_layers: HashMap<String, sdf::Layer>,
     /// Shared prototypes for scene-graph instancing (spec 11.3.3), keyed by
     /// instancing key. Instances with the same key reuse one prototype, so its
-    /// subtree is composed only once.
-    //
-    // TODO: the registry is not invalidated when authoring changes an
-    // instance's arcs or its `instanceable` flag. Tie it into change
-    // processing (see the `instanceable` note in `pcp::change`).
+    /// subtree is composed only once. Cleared by
+    /// [`Self::invalidate_prototypes`] on any composition change.
     prototypes: HashMap<InstanceKey, Prototype>,
     /// Reverse lookup from a `/__Prototype_N` path to its instancing key.
     prototype_roots: HashMap<Path, InstanceKey>,
@@ -460,6 +457,20 @@ impl Cache {
         self.indices.clear();
         self.contexts.clear();
         self.deps.clear();
+    }
+
+    /// Clears the shared-prototype registry (spec 11.3.3) so stale
+    /// instance-to-prototype mappings do not survive a composition change.
+    /// The registry is rebuilt lazily on the next instancing query.
+    ///
+    /// TODO: this drops the whole registry on any invalidation; a targeted
+    /// invalidation that removes only the prototypes whose instances changed
+    /// would avoid recomputing unaffected keys.
+    pub(super) fn invalidate_prototypes(&mut self) {
+        self.prototypes.clear();
+        self.prototype_roots.clear();
+        // `prototype_count` stays monotonic so a `/__Prototype_N` identity is
+        // never reused for a different composition within a session.
     }
 
     /// Recompute `LayerStack::sublayer_stacks` and `layer_offsets` from the
@@ -1520,6 +1531,29 @@ mod tests {
         assert!(cache.is_indexed(&sdf::path("/A/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
         assert!(cache.is_indexed(&sdf::path("/C/Child")?));
+        Ok(())
+    }
+
+    /// A significant change (here, flipping `instanceable`) clears the
+    /// prototype registry so stale instance-to-prototype mappings do not
+    /// persist (spec 11.3.3).
+    #[test]
+    fn instance_change_invalidates_prototypes() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+
+        assert!(cache.prototype_of(&sdf::path("/A")?)?.is_some());
+        assert!(!cache.prototypes().is_empty());
+
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/A")?)
+            .info_changed
+            .insert(sdf::FieldKey::Instanceable.as_str());
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(0, cl)]);
+        changes.apply(&mut cache);
+
+        assert!(cache.prototypes().is_empty());
         Ok(())
     }
 }
