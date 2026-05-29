@@ -193,6 +193,14 @@ impl PrimIndex {
         self.graph.nodes.push(node);
     }
 
+    /// Retains only the nodes matching `keep`, preserving strength order.
+    /// Used to drop local opinions from an instance descendant's index
+    /// (spec 11.3.3). Safe only after the index is fully built, since it
+    /// renumbers the node arena.
+    pub(crate) fn retain_nodes(&mut self, keep: impl FnMut(&Node) -> bool) {
+        self.graph.nodes.retain(keep);
+    }
+
     /// Inserts a relocate node at the correct LIVERPS strength position.
     ///
     /// Finds the first node whose arc type is weaker than `Relocate`
@@ -271,6 +279,9 @@ impl PrimIndex {
             selections: merged_selections,
             ancestor_arcs,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
+            // Inherited from the parent; the cache additionally sets this when
+            // the current prim itself resolves as an instance.
+            within_instance: parent_ctx.within_instance,
         }
     }
 
@@ -739,6 +750,11 @@ pub(crate) struct CompositionContext {
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
+    /// `true` when this prim is a descendant of an instance prim (spec
+    /// 11.3.3). Set by the cache once an ancestor resolves as an instance and
+    /// inherited by every deeper prim, so local opinions on the instance
+    /// subtree can be discarded during composition.
+    pub within_instance: bool,
 }
 
 /// Records an ancestor composition arc for descendant namespace remapping.
