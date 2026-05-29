@@ -8,10 +8,6 @@
 //! (spec 12.3.4.1.3) are resolved to explicit metadata elsewhere and are not
 //! parsed by [`ClipSet::parse_all`].
 
-// This model is consumed by clip-aware value resolution (a later step). Until
-// that lands, the items below are exercised only by unit tests.
-#![allow(dead_code)]
-
 use crate::sdf::{Path, Value};
 use std::collections::HashMap;
 
@@ -27,8 +23,6 @@ pub(crate) mod keys {
     pub const ACTIVE: &str = "active";
     /// `(stageTime, clipTime)` pairs forming the stage-to-clip timing curve.
     pub const TIMES: &str = "times";
-    /// Regex-style template asset path (template form; parsing deferred).
-    pub const TEMPLATE_ASSET_PATH: &str = "templateAssetPath";
 }
 
 /// A single explicit clip set: a named group of value clips with sequencing

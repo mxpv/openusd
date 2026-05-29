@@ -10,7 +10,7 @@
 //! are merged as `ArcType::Relocate` nodes. The child name lists are
 //! adjusted to hide relocated sources and expose targets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -18,6 +18,7 @@ use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
 
+use super::clip;
 use super::deps::Dependencies;
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -53,9 +54,6 @@ pub struct Cache {
     /// Lazily-loaded value-clip and manifest layers, keyed by resolved
     /// identifier. Clip layers do not participate in composition (spec
     /// 12.3.4), so they are held here rather than in the [`LayerStack`].
-    // Consumed by clip-aware value resolution (a later step); until then this
-    // field and `clip_layer` are exercised only by the loader's own test.
-    #[allow(dead_code)]
     clip_layers: HashMap<String, sdf::Layer>,
 }
 
@@ -81,7 +79,6 @@ impl Cache {
     /// composition [`LayerStack`] (spec 12.3.4).
     ///
     /// Returns `Ok(None)` when the asset path cannot be resolved.
-    #[allow(dead_code)]
     pub(crate) fn clip_layer(&mut self, asset_path: &str, anchor_layer: usize) -> Result<Option<&sdf::Layer>> {
         // Anchor the clip asset path to the authoring layer's location so
         // relative paths resolve like any other dependency.
@@ -105,6 +102,171 @@ impl Cache {
         }
 
         Ok(self.clip_layers.get(&clip_id))
+    }
+
+    /// Layer indices that make up the stage's root layer stack: the session
+    /// layers plus the root layer and its sublayers. These carry "local"
+    /// opinions, which outrank value-clip data (spec 12.3.4.5). Referenced and
+    /// payload layer stacks contribute their own `Root`-arc nodes, so local
+    /// membership is decided by layer index, not arc type.
+    fn local_layers(&self) -> HashSet<usize> {
+        let mut local: HashSet<usize> = (0..self.stack.session_layer_count).collect();
+        let root = self.stack.session_layer_count;
+        if let Some(sublayers) = self.stack.sublayer_stacks.get(&root) {
+            local.extend(sublayers.iter().map(|&(index, _)| index));
+        }
+        local
+    }
+
+    /// Resolves an attribute's value at `time`, honoring value clips
+    /// (spec 12.3.4). Strength ordering:
+    ///
+    /// 1. Local (`Root` arc) `timeSamples` win over clips.
+    /// 2. Value clips anchored on the attribute's prim or an ancestor.
+    /// 3. The strongest remaining `timeSamples` (across reference/payload arcs).
+    /// 4. The strongest authored `default`.
+    ///
+    /// `interp` applies the stage's interpolation policy to a sample map at a
+    /// given time; it is supplied by the caller so this layer stays free of any
+    /// interpolation policy.
+    pub(crate) fn value_at(
+        &mut self,
+        attr_path: &Path,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let prim = attr_path.prim_path();
+        let suffix = attr_path.as_str()[prim.as_str().len()..].to_owned();
+        let local_layers = self.local_layers();
+
+        self.ensure_index(&prim)?;
+
+        // 1) Local time samples take precedence over clip data.
+        if let Some(samples) =
+            self.indices[&prim].resolve_local_time_samples(&self.stack, Some(&suffix), &local_layers)?
+        {
+            return Ok(interp(&samples, time));
+        }
+
+        // 2) Value clips, anchored on this prim or an ancestor.
+        if let Some(value) = self.resolve_clip_value(&prim, &suffix, time, &local_layers, interp)? {
+            return Ok(Some(value));
+        }
+
+        // 3) Remaining time samples (reference/payload arcs), retimed.
+        if let Some(samples) = self.indices[&prim].resolve_time_samples(&self.stack, Some(&suffix))? {
+            return Ok(interp(&samples, time));
+        }
+
+        // 4) Fall back to the strongest authored default.
+        let default = self.indices[&prim].resolve_field(FieldKey::Default.as_str(), &self.stack, Some(&suffix))?;
+        Ok(default.and_then(|value| match value {
+            Value::ValueBlock | Value::None => None,
+            other => Some(other),
+        }))
+    }
+
+    /// Resolves a clip value for `attr_path` at `time` by searching the
+    /// attribute's prim and then its ancestors, nearest first — a nearer clip
+    /// set overrides one on an ancestor (spec 12.3.4.5).
+    fn resolve_clip_value(
+        &mut self,
+        attr_prim: &Path,
+        suffix: &str,
+        time: f64,
+        local_layers: &HashSet<usize>,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let mut anchor_prim = attr_prim.clone();
+        loop {
+            if let Some(value) = self.clip_value_at(&anchor_prim, attr_prim, suffix, time, local_layers, interp)? {
+                return Ok(Some(value));
+            }
+            match anchor_prim.parent() {
+                Some(parent) if !parent.is_abs_root() => anchor_prim = parent,
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Looks for a clip set anchored on `anchor_prim` that provides a value for
+    /// the attribute `attr_prim + suffix` at `time`. Returns the interpolated
+    /// clip value, or `None` when no applicable clip set is found.
+    fn clip_value_at(
+        &mut self,
+        anchor_prim: &Path,
+        attr_prim: &Path,
+        suffix: &str,
+        time: f64,
+        local_layers: &HashSet<usize>,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        // Gather the clip sets and anchor layer, then drop the index borrow so
+        // clip layers can be loaded through `&mut self`.
+        let (sets, anchor_layer) = {
+            self.ensure_index(anchor_prim)?;
+            let index = &self.indices[anchor_prim];
+            let Some(clips) = index.resolve_field(FieldKey::Clips.as_str(), &self.stack, None)? else {
+                return Ok(None);
+            };
+            let order = index.clip_sets_order(&self.stack)?;
+            let sets = clip::ClipSet::parse_all(&clips, order.as_deref());
+            if sets.is_empty() {
+                return Ok(None);
+            }
+            let anchor_layer = index
+                .clip_anchor_layer(&self.stack, local_layers)?
+                .unwrap_or(self.session_layer_count());
+            (sets, anchor_layer)
+        };
+
+        // Path of the attribute relative to the clip anchor prim (empty when
+        // the clip set is authored on the attribute's own prim).
+        let relative = &attr_prim.as_str()[anchor_prim.as_str().len()..];
+
+        for set in &sets {
+            let base = set.prim_path.clone().unwrap_or_else(|| anchor_prim.clone());
+            let clip_path = Path::new(&format!("{base}{relative}{suffix}"))?;
+
+            // A manifest, when authored, declares which attributes the clips
+            // provide; skip clip sets that do not declare this attribute.
+            if let Some(manifest) = &set.manifest_asset {
+                let declared = match self.clip_layer(manifest, anchor_layer)? {
+                    Some(layer) => layer.data().has_spec(&clip_path),
+                    None => false,
+                };
+                if !declared {
+                    continue;
+                }
+            }
+
+            let Some(active) = set.active_clip(time) else {
+                continue;
+            };
+            let Some(asset) = set.asset_paths.get(active) else {
+                continue;
+            };
+            let clip_time = set.map_stage_to_clip(time);
+
+            let samples = match self.clip_layer(asset, anchor_layer)? {
+                Some(layer) => match layer.data().try_get(&clip_path, FieldKey::TimeSamples.as_str())? {
+                    Some(value) => match value.into_owned() {
+                        Value::TimeSamples(samples) => Some(samples),
+                        _ => None,
+                    },
+                    None => None,
+                },
+                None => None,
+            };
+
+            if let Some(samples) = samples {
+                if let Some(value) = interp(&samples, clip_time) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// Read-only access to the dependency map for change-driven invalidation.

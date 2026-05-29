@@ -461,8 +461,40 @@ impl PrimIndex {
         stack: &LayerStack,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
+        self.time_samples_in(stack, prop_suffix, None)
+    }
+
+    /// Resolves `timeSamples` considering only opinions from the root layer
+    /// stack (`local_layers`). Used by value-clip resolution, where clip data
+    /// is weaker than the anchoring layer's local opinions but stronger than
+    /// data introduced across reference/payload arcs (spec 12.3.4.5).
+    ///
+    /// Membership is by layer index, not arc type: a referenced layer stack
+    /// also contributes `Root`-arc nodes, so only the stage's own root layer
+    /// stack counts as local.
+    pub(crate) fn resolve_local_time_samples(
+        &self,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+        local_layers: &HashSet<usize>,
+    ) -> Result<Option<sdf::TimeSampleMap>> {
+        self.time_samples_in(stack, prop_suffix, Some(local_layers))
+    }
+
+    /// Shared `timeSamples` walk. When `local_layers` is `Some`, nodes whose
+    /// layer is outside that set are skipped so only root-layer-stack opinions
+    /// contribute.
+    fn time_samples_in(
+        &self,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+        local_layers: Option<&HashSet<usize>>,
+    ) -> Result<Option<sdf::TimeSampleMap>> {
         let field = FieldKey::TimeSamples.as_str();
         for node in self.nodes() {
+            if local_layers.is_some_and(|local| !local.contains(&node.layer_index)) {
+                continue;
+            }
             let query_path = Self::query_path(node, prop_suffix)?;
             let data = stack.layer(node.layer_index);
             let Some(value) = data.try_get(&query_path, field)? else {
@@ -477,6 +509,39 @@ impl PrimIndex {
             }
         }
         Ok(None)
+    }
+
+    /// Returns the layer index of the strongest root-layer-stack node that
+    /// authors a `clips` opinion at this prim — the value-clip anchor point
+    /// (spec 12.3.4.5). Clip asset paths are resolved relative to this layer.
+    /// Only `local_layers` are considered, since the anchor is by definition a
+    /// local opinion.
+    pub(crate) fn clip_anchor_layer(&self, stack: &LayerStack, local_layers: &HashSet<usize>) -> Result<Option<usize>> {
+        let field = FieldKey::Clips.as_str();
+        for node in self.nodes() {
+            if !local_layers.contains(&node.layer_index) {
+                continue;
+            }
+            if stack.layer(node.layer_index).try_get(&node.path, field)?.is_some() {
+                return Ok(Some(node.layer_index));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Resolves the `clipSets` strength order, if authored. Returns the ordered
+    /// clip set names (strongest first). When unauthored, clip sets fall back
+    /// to name order (spec 12.3.4.1). Composition across layers is limited to
+    /// the strongest opinion's list op.
+    pub(crate) fn clip_sets_order(&self, stack: &LayerStack) -> Result<Option<Vec<String>>> {
+        let Some(value) = self.resolve_field(FieldKey::ClipSets.as_str(), stack, None)? else {
+            return Ok(None);
+        };
+        Ok(match value {
+            Value::StringListOp(op) => Some(op.compose_over(&Vec::new())),
+            Value::StringVec(names) | Value::TokenVec(names) => Some(names),
+            _ => None,
+        })
     }
 
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.

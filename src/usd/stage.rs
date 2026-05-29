@@ -728,10 +728,11 @@ impl Stage {
     /// — the universal entry point for any consumer that needs a
     /// resolved value at a specific time code.
     ///
-    /// Resolution order:
-    /// 1. If the attribute authors `timeSamples`, apply AOUSD §12.5
-    ///    interpolation over them.
-    /// 2. Otherwise fall back to the attribute's `default` value.
+    /// Resolution order (AOUSD §12.3):
+    /// 1. Local `timeSamples` (root layer stack), §12.5 interpolated.
+    /// 2. Value clips anchored on the prim or an ancestor (§12.3.4).
+    /// 3. Remaining `timeSamples` (reference/payload arcs), interpolated.
+    /// 4. The attribute's `default` value.
     ///
     /// Returns `Ok(None)` when the attribute is unauthored, when the
     /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
@@ -742,14 +743,12 @@ impl Stage {
     /// [`Stage::time_samples`].
     pub fn value_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
         let attr_path = attr_path.into();
-        if let Some(samples) = self.time_samples(&attr_path)? {
-            return Ok(interp::evaluate(&samples, time, self.interpolation_type.get()));
+        if !self.population_mask.includes(&attr_path.prim_path()) {
+            return Ok(None);
         }
-        let default = self.field::<sdf::Value>(attr_path, sdf::FieldKey::Default)?;
-        Ok(default.and_then(|v| match v {
-            sdf::Value::ValueBlock | sdf::Value::None => None,
-            other => Some(other),
-        }))
+        let interp_type = self.interpolation_type.get();
+        let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
+        self.try_or_handle(|cache| cache.value_at(&attr_path, time, &interp))
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
@@ -2798,6 +2797,81 @@ def Shader "Mat" (
         assert_eq!(stage.edit_target().layer_index(), 1);
         stage.define_prim("/World")?.set_type_name("Xform")?;
         assert_eq!(stage.spec_type("/World")?, Some(sdf::SpecType::Prim));
+        Ok(())
+    }
+
+    // --- Value clips (spec 12.3.4) ---
+
+    fn clip_asset(name: &str) -> String {
+        format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/{name}/entry.usd",
+            manifest_dir()
+        )
+    }
+
+    fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
+        match stage.value_at(attr, time).expect("value_at") {
+            Some(sdf::Value::Float(v)) => Some(v as f64),
+            Some(sdf::Value::Double(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A clip overrides a referenced attribute that has no local opinion: the
+    /// clip's samples win over the reference's (spec 12.3.4.5).
+    #[test]
+    fn clip_basic_overrides_reference() -> Result<()> {
+        let stage = Stage::open(&clip_asset("clip_basic"))?;
+        // clip.usd authors size = stage time; the reference authors negatives.
+        assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(10.0));
+        assert_eq!(value_f64(&stage, "/Model.size", 7.0), Some(7.0)); // interpolated
+        Ok(())
+    }
+
+    /// Local time samples beat clips; a clip beats a referenced attribute that
+    /// has no local opinion (spec 12.3.4.5).
+    #[test]
+    fn clip_strength_local_vs_reference() -> Result<()> {
+        let stage = Stage::open(&clip_asset("clip_advanced"))?;
+        // `local` has a local opinion → local wins (10, not the clip's -10).
+        assert_eq!(value_f64(&stage, "/Model.local", 10.0), Some(10.0));
+        // `ref` has no local opinion → the clip wins (-10, not the reference's 10).
+        assert_eq!(value_f64(&stage, "/Model.ref", 10.0), Some(-10.0));
+        Ok(())
+    }
+
+    /// Active-clip selection switches clips by stage time and maps stage time
+    /// to clip time through the timing curve (spec 12.3.4.3, 12.3.4.4).
+    #[test]
+    fn clip_multi_active_switch() -> Result<()> {
+        let stage = Stage::open(&clip_asset("clip_multi"))?;
+        // Stage 10 → clip1 at clip time 10 → -10.
+        assert_eq!(value_f64(&stage, "/Model_1.size", 10.0), Some(-10.0));
+        // Stage 22 → clip2 active, clip time 6 → -26.
+        assert_eq!(value_f64(&stage, "/Model_1.size", 22.0), Some(-26.0));
+        Ok(())
+    }
+
+    /// Clip set strength falls back to name order when `clipSets` is unauthored
+    /// (spec 12.3.4.1): `clip_a` outranks `clip_b` regardless of text order.
+    #[test]
+    fn clip_sets_default_order() -> Result<()> {
+        let stage = Stage::open(&clip_asset("clip_sets"))?;
+        // clip_a (primPath /ClipA) wins: attr at stage 0 → 10, not 100.
+        assert_eq!(value_f64(&stage, "/DefaultOrderTest.attr", 0.0), Some(10.0));
+        assert_eq!(value_f64(&stage, "/DefaultOrderTest.attr", 1.0), Some(20.0));
+        Ok(())
+    }
+
+    /// The timing curve maps stage time to clip time, including a jump
+    /// discontinuity at stage 20 (spec 12.3.4.4, 12.3.4.8).
+    #[test]
+    fn clip_timings_curve() -> Result<()> {
+        let stage = Stage::open(&clip_asset("clip_timings"))?;
+        assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(10.0));
+        assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(15.0));
+        assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(10.0)); // jump → "at and after"
+        assert_eq!(value_f64(&stage, "/Model.size", 30.0), Some(15.0));
         Ok(())
     }
 }
