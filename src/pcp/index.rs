@@ -344,11 +344,7 @@ impl PrimIndex {
             ops.push(list_op);
         }
 
-        let mut result = Vec::new();
-        for op in ops.iter().rev() {
-            result = op.compose_over(&result);
-        }
-        Ok(result)
+        Ok(compose_list_ops(&ops))
     }
 
     /// Resolves a path-list-op field by composing list edits from strongest
@@ -382,11 +378,7 @@ impl PrimIndex {
             ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
         }
 
-        let mut result = Vec::new();
-        for op in ops.iter().rev() {
-            result = op.compose_over(&result);
-        }
-        Ok(result)
+        Ok(compose_list_ops(&ops))
     }
 
     /// Translate a path-list-op opinion from one contributing node into the
@@ -574,11 +566,7 @@ impl PrimIndex {
         if ops.is_empty() {
             return Ok(None);
         }
-        let mut result = Vec::new();
-        for op in ops.iter().rev() {
-            result = op.compose_over(&result);
-        }
-        Ok(Some(result))
+        Ok(Some(compose_list_ops(&ops)))
     }
 
     /// Resolves explicit value clip sets while preserving the layer that
@@ -1534,6 +1522,18 @@ impl<'a> IndexBuilder<'a> {
 // ---------------------------------------------------------------------------
 // Shared helpers (used by IndexBuilder and Stage)
 // ---------------------------------------------------------------------------
+
+/// Folds list-op opinions, collected strongest-to-weakest, into a single
+/// resolved list (spec 12.2.6): each weaker op is composed under the stronger
+/// ones. `compose_over` short-circuits on an explicit op, so a stronger
+/// explicit opinion replaces all weaker contributions.
+fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> Vec<T> {
+    let mut result = Vec::new();
+    for op in ops.iter().rev() {
+        result = op.compose_over(&result);
+    }
+    result
+}
 
 /// Expands an internal reference target by inserting variant segments from
 /// the context path.
