@@ -36,8 +36,8 @@ Follow these steps:
    - Stage ROADMAP.md alongside the other changes.
 
 6. **Generate commit message**:
-   - Use a short, descriptive title (50 characters or less).
-   - Include a brief body (1-3 sentences) summarizing changes when needed (wrap at 80 characters).
+   - Follow the 50/72 rule: subject line 50 characters or less, body wrapped at 72 characters.
+   - Include a brief body (1-3 sentences) summarizing changes when needed.
    - Keep commits focused and atomic — one logical change per commit.
    - Proofread for grammar, technical accuracy, and completeness.
    - Show the commit message to the user and wait for confirmation before committing.
