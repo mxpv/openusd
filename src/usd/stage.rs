@@ -2327,11 +2327,73 @@ def Shader "Mat" (
         assert!(attr.remove_connection(&target)?);
         assert!(attr.get_connections()?.is_empty());
 
-        let Some(sdf::Value::PathListOp(op)) = stage.field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
-        else {
-            panic!("expected local connectionPaths delete op");
-        };
+        let op = stage
+            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
         assert_eq!(op.deleted_items, vec![target]);
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_dedups_inherited() -> Result<()> {
+        let target = sdf::Path::new("/Mat.outputs:out")?;
+        let input = sdf::Path::new("/Mat.inputs:in")?;
+
+        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+
+        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
+        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
+        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
+            .set_connection_paths([target.clone()]);
+
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let attr = crate::usd::Attribute::new(&stage, input.clone());
+        let attr = attr.add_connection(target.clone())?;
+
+        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        let op = stage
+            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
+        assert!(op.explicit, "add_connection should not author a duplicate local op");
+        assert_eq!(op.explicit_items, vec![target]);
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_clears_delete() -> Result<()> {
+        let target = sdf::Path::new("/Mat.outputs:out")?;
+        let input = sdf::Path::new("/Mat.inputs:in")?;
+
+        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+
+        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
+        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
+        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
+            .set_connection_paths([target.clone()]);
+
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let attr = crate::usd::Attribute::new(&stage, input.clone());
+
+        assert!(attr.remove_connection(&target)?);
+        assert!(attr.get_connections()?.is_empty());
+        let attr = attr.add_connection(target.clone())?;
+
+        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        let op = stage
+            .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
+            .unwrap()
+            .try_as_path_list_op()
+            .unwrap();
+        assert!(op.deleted_items.is_empty());
+        assert_eq!(op.appended_items, vec![target]);
         Ok(())
     }
 
