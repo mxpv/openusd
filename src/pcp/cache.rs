@@ -50,6 +50,13 @@ pub struct Cache {
     relocates: Relocates,
     /// Variant fallback selections tried when no authored selection exists.
     variant_fallbacks: VariantFallbackMap,
+    /// Lazily-loaded value-clip and manifest layers, keyed by resolved
+    /// identifier. Clip layers do not participate in composition (spec
+    /// 12.3.4), so they are held here rather than in the [`LayerStack`].
+    // Consumed by clip-aware value resolution (a later step); until then this
+    // field and `clip_layer` are exercised only by the loader's own test.
+    #[allow(dead_code)]
+    clip_layers: HashMap<String, sdf::Layer>,
 }
 
 impl Cache {
@@ -63,7 +70,41 @@ impl Cache {
             deps: Dependencies::default(),
             relocates,
             variant_fallbacks,
+            clip_layers: HashMap::new(),
         }
+    }
+
+    /// Loads a value-clip or manifest layer referenced by `asset_path`,
+    /// anchored to the layer at `anchor_layer` (the layer that authored the
+    /// clip metadata). Layers are loaded on demand through the stack's
+    /// resolver and cached by resolved identifier; clip layers never enter the
+    /// composition [`LayerStack`] (spec 12.3.4).
+    ///
+    /// Returns `Ok(None)` when the asset path cannot be resolved.
+    #[allow(dead_code)]
+    pub(crate) fn clip_layer(&mut self, asset_path: &str, anchor_layer: usize) -> Result<Option<&sdf::Layer>> {
+        // Anchor the clip asset path to the authoring layer's location so
+        // relative paths resolve like any other dependency.
+        let clip_id = {
+            let resolver = self.stack.resolver.as_ref();
+            let anchor_id = self.stack.identifier(anchor_layer).to_owned();
+            match resolver.resolve(&anchor_id) {
+                Some(anchor) => resolver.create_identifier(asset_path, Some(&anchor)),
+                None => resolver.create_identifier(asset_path, None),
+            }
+        };
+
+        if !self.clip_layers.contains_key(&clip_id) {
+            let resolver = self.stack.resolver.as_ref();
+            let Some(resolved) = resolver.resolve(&clip_id) else {
+                return Ok(None);
+            };
+            let data = crate::layer::open_layer(resolver, &resolved)?;
+            self.clip_layers
+                .insert(clip_id.clone(), sdf::Layer::new(clip_id.clone(), data));
+        }
+
+        Ok(self.clip_layers.get(&clip_id))
     }
 
     /// Read-only access to the dependency map for change-driven invalidation.
@@ -861,5 +902,53 @@ impl Cache {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ar::{DefaultResolver, Resolver};
+
+    fn manifest_dir() -> String {
+        std::env::var("CARGO_MANIFEST_DIR").unwrap()
+    }
+
+    /// Builds a one-layer stack whose root is loaded from a real path, so the
+    /// resolver can anchor clip asset paths relative to it.
+    fn single_layer_stack(path: &str) -> LayerStack {
+        let resolver = DefaultResolver::new();
+        let resolved = resolver.resolve(path).expect("root resolves");
+        let id = resolver.create_identifier(path, None);
+        let data = crate::layer::open_layer(&resolver, &resolved).expect("open root");
+        LayerStack::new(
+            vec![sdf::Layer::new(id, data)],
+            0,
+            Box::new(DefaultResolver::new()),
+            true,
+        )
+    }
+
+    /// `clip_layer` loads a clip layer relative to the authoring layer, caches
+    /// it (clip layers never enter the composition stack), and reports an
+    /// unresolvable path as `None`.
+    #[test]
+    fn loads_and_caches_clip_layer() -> Result<()> {
+        let root = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/usda/root.usda",
+            manifest_dir()
+        );
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+
+        {
+            let clip = cache.clip_layer("./clip.usda", 0)?.expect("clip resolves");
+            assert!(clip.identifier.contains("clip.usda"));
+            assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
+        }
+
+        // Second lookup is a cache hit; a bogus path resolves to None.
+        assert!(cache.clip_layer("./clip.usda", 0)?.is_some());
+        assert!(cache.clip_layer("./does_not_exist.usda", 0)?.is_none());
+        Ok(())
     }
 }
