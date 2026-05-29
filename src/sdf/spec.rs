@@ -559,7 +559,7 @@ where
         self.add(sdf::FieldKey::AllowedTokens, sdf::Value::TokenVec(tokens));
     }
 
-    /// Set the `connectionPaths`.
+    /// Set the `connectionPaths` (explicit list op, replacing any prior).
     pub fn set_connection_paths<I>(&mut self, paths: I)
     where
         I: IntoIterator<Item = sdf::Path>,
@@ -569,6 +569,58 @@ where
             sdf::FieldKey::ConnectionPaths,
             sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
         );
+    }
+
+    /// Append a single connection path. No-op if already present. When
+    /// `prepend` is true the path joins the prepended-items list (it wins
+    /// over weaker layers); otherwise it joins the explicit / appended
+    /// list. A pre-existing non-`PathListOp` value is overwritten — debug
+    /// builds assert.
+    pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) {
+        match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
+            Some(sdf::Value::PathListOp(op)) => {
+                if !op.iter().any(|p| p == &path) {
+                    if op.explicit {
+                        op.explicit_items.push(path);
+                    } else if prepend {
+                        op.prepended_items.push(path);
+                    } else {
+                        op.appended_items.push(path);
+                    }
+                }
+            }
+            Some(other) => {
+                debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
+                self.add(
+                    sdf::FieldKey::ConnectionPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
+                );
+            }
+            None => {
+                let op = if prepend {
+                    sdf::PathListOp::prepended([path])
+                } else {
+                    sdf::PathListOp::explicit([path])
+                };
+                self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+            }
+        }
+    }
+
+    /// Remove a single connection path. Returns `true` if it was present.
+    pub fn remove_connection_path(&mut self, path: &sdf::Path) -> bool {
+        if let Some(sdf::Value::PathListOp(op)) = self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
+            return remove_path(&mut op.explicit_items, path)
+                | remove_path(&mut op.added_items, path)
+                | remove_path(&mut op.prepended_items, path)
+                | remove_path(&mut op.appended_items, path);
+        }
+        false
+    }
+
+    /// Clear all authored `connectionPaths`.
+    pub fn clear_connection_paths(&mut self) {
+        self.remove(sdf::FieldKey::ConnectionPaths.as_str());
     }
 }
 
