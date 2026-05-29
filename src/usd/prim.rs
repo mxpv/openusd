@@ -489,9 +489,9 @@ impl<'s> Attribute<'s> {
                 Some(mut spec) => {
                     let mut cl = sdf::ChangeList::new();
                     if f(&mut spec) {
-                        cl.entry_mut(&path)
-                            .info_changed
-                            .insert(sdf::FieldKey::ConnectionPaths.as_str());
+                        let entry = cl.entry_mut(&path);
+                        entry.flags |= sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION;
+                        entry.info_changed.insert(sdf::FieldKey::ConnectionPaths.as_str());
                     }
                     Ok(cl)
                 }
