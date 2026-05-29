@@ -833,33 +833,34 @@ impl Cache {
     /// by that relationship's own forwarded targets, so only prim and
     /// attribute paths remain. Cycles are broken (each relationship is
     /// followed once) and duplicates collapse, keeping first occurrence.
+    ///
+    /// The walk uses an explicit stack rather than recursion (mirroring
+    /// [`crate::usd::ConnectionGraph::resolve_chain`]) so a deep relationship
+    /// chain cannot overflow the call stack.
     pub fn forwarded_relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
-        let mut targets = Vec::new();
-        let mut visited = HashSet::new();
-        self.forward_targets_into(path, &mut targets, &mut visited)?;
-        Ok(targets)
-    }
+        let mut out = Vec::new();
+        let mut followed = HashSet::new();
+        followed.insert(path.clone());
 
-    /// Recursive worker for [`Self::forwarded_relationship_targets`]. Appends
-    /// terminal (prim/attribute) targets of `rel` into `out`, descending into
-    /// any target that is itself a relationship. `visited` records the
-    /// relationships already followed to break target cycles.
-    fn forward_targets_into(&mut self, rel: &Path, out: &mut Vec<Path>, visited: &mut HashSet<Path>) -> Result<()> {
-        if !visited.insert(rel.clone()) {
-            return Ok(());
-        }
-        for target in self.relationship_targets(rel)? {
+        // Seed with the queried relationship's raw targets. Targets are pushed
+        // reversed so the strongest (first) target is popped and resolved
+        // first, preserving authored order in `out`.
+        let mut stack: Vec<Path> = self.relationship_targets(path)?.into_iter().rev().collect();
+        while let Some(target) = stack.pop() {
             // Only property targets can be relationships; a prim-path target is
             // always terminal. Classify property targets by composed spec type.
             let is_relationship =
                 target.is_property_path() && matches!(self.spec_type(&target)?, Some(SpecType::Relationship));
             if is_relationship {
-                self.forward_targets_into(&target, out, visited)?;
+                if !followed.insert(target.clone()) {
+                    continue; // already followed — break the cycle
+                }
+                stack.extend(self.relationship_targets(&target)?.into_iter().rev());
             } else if !out.contains(&target) {
                 out.push(target);
             }
         }
-        Ok(())
+        Ok(out)
     }
 
     /// Composes a path-list-op property field (`connectionPaths` or
