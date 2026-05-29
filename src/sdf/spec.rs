@@ -637,6 +637,40 @@ where
         false
     }
 
+    /// Author a removal for a connection path. Local contributions are
+    /// stripped first; non-explicit list ops also get a delete opinion so
+    /// weaker-layer contributions stay removed in the composed result.
+    pub fn delete_connection_path(&mut self, path: &sdf::Path) -> bool {
+        match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
+            Some(sdf::Value::PathListOp(op)) => {
+                let removed = remove_path(&mut op.explicit_items, path)
+                    | remove_path(&mut op.added_items, path)
+                    | remove_path(&mut op.prepended_items, path)
+                    | remove_path(&mut op.appended_items, path);
+                if op.explicit || op.deleted_items.iter().any(|p| p == path) {
+                    return removed;
+                }
+                op.deleted_items.push(path.clone());
+                true
+            }
+            Some(other) => {
+                debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
+                self.add(
+                    sdf::FieldKey::ConnectionPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
+                );
+                true
+            }
+            None => {
+                self.add(
+                    sdf::FieldKey::ConnectionPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
+                );
+                true
+            }
+        }
+    }
+
     /// Clear all authored `connectionPaths`. Returns `true` if an
     /// opinion was actually removed.
     pub fn clear_connection_paths(&mut self) -> bool {

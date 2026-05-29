@@ -399,17 +399,46 @@ impl<'s> Attribute<'s> {
     pub fn remove_connection(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
         let path = self.path.clone();
         let target = target.clone();
+        // The target may exist only through weaker layers. Check the composed
+        // list first so this call can author a delete opinion even when the
+        // edit-target layer has no local connection item to remove.
+        if !self.stage.connection_paths(&path)?.iter().any(|p| p == &target) {
+            return Ok(false);
+        }
+        let type_name = self.stage.field::<String>(&path, sdf::FieldKey::TypeName)?;
         let mut removed = false;
         self.stage.with_target_layer(|layer| {
+            let created_attr = !layer.data().has_spec(&path);
+            let auto_ancestors = if !created_attr {
+                Vec::new()
+            } else {
+                // A delete list-op still needs a property spec to carry it.
+                // Use the composed type name and leave `custom` unauthored so
+                // the spec is only as strong as needed for the connection edit.
+                let type_name = type_name.clone().ok_or_else(|| sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "cannot author connection delete for typeless composed attribute",
+                })?;
+                let owning_prim = path.prim_path();
+                let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
+                layer.create_attribute(path.clone(), type_name, sdf::Variability::Varying, false)?;
+                auto_ancestors
+            };
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
-                    removed = spec.remove_connection_path(&target);
+                    removed = spec.delete_connection_path(&target);
                     let mut cl = sdf::ChangeList::new();
                     if removed {
-                        cl.entry_mut(&path)
-                            .info_changed
-                            .insert(sdf::FieldKey::ConnectionPaths.as_str());
+                        let entry = cl.entry_mut(&path);
+                        if created_attr {
+                            entry.flags |= sdf::ChangeFlags::ADD_PROPERTY;
+                        }
+                        entry.flags |= sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION;
+                        entry.info_changed.insert(sdf::FieldKey::ConnectionPaths.as_str());
+                    }
+                    for anc in auto_ancestors {
+                        cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
                     }
                     Ok(cl)
                 }

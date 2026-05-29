@@ -305,6 +305,10 @@ pub enum StageAuthoringError {
     #[error(transparent)]
     Layer(#[from] sdf::AuthoringError),
 
+    /// A composed-stage query needed to route or validate the authoring call failed.
+    #[error(transparent)]
+    Composition(#[from] anyhow::Error),
+
     /// The edit target's layer index is out of range for this stage.
     #[error("edit target layer index {index} is out of range ({count} layers)")]
     LayerOutOfRange {
@@ -2297,8 +2301,37 @@ def Shader "Mat" (
         assert_eq!(stage.connection_paths(&input)?, vec![output.clone()]);
 
         let graph = crate::usd::ConnectionGraph::from_stage(&stage)?;
-        assert_eq!(graph.sources(&input), &[output.clone()]);
+        assert_eq!(graph.sources(&input), std::slice::from_ref(&output));
         assert_eq!(graph.sinks(&output), &[input]);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_connection_deletes_inherited() -> Result<()> {
+        let target = sdf::Path::new("/Mat.outputs:out")?;
+        let input = sdf::Path::new("/Mat.inputs:in")?;
+
+        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+
+        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
+        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
+        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
+            .set_connection_paths([target.clone()]);
+
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let attr = crate::usd::Attribute::new(&stage, input.clone());
+
+        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        assert!(attr.remove_connection(&target)?);
+        assert!(attr.get_connections()?.is_empty());
+
+        let Some(sdf::Value::PathListOp(op)) = stage.field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
+        else {
+            panic!("expected local connectionPaths delete op");
+        };
+        assert_eq!(op.deleted_items, vec![target]);
         Ok(())
     }
 
