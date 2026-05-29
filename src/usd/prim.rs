@@ -731,12 +731,8 @@ impl<'s> Relationship<'s> {
             .is_some())
     }
 
-    /// Composed raw `targetPaths`, with list-op edits folded across every
-    /// contributing layer. Returns an empty vec when no target is authored.
-    /// Mirrors C++ `UsdRelationship::GetTargets`.
-    ///
-    /// These are the raw targets (spec 12.4); target forwarding — recursively
-    /// chasing relationship-to-relationship chains — is not applied.
+    /// Composed raw `targetPaths`. See [`Stage::relationship_targets`] for the
+    /// resolution contract. Mirrors C++ `UsdRelationship::GetTargets`.
     //
     // TODO: drop `anyhow::Result` once `Stage::relationship_targets` returns
     // a typed error.
@@ -744,10 +740,8 @@ impl<'s> Relationship<'s> {
         self.stage.relationship_targets(&self.path)
     }
 
-    /// Composed forwarded targets: any target that resolves to another
-    /// relationship is replaced, recursively, by that relationship's forwarded
-    /// targets, leaving only prim and attribute paths (spec 12.4). Cycles are
-    /// broken and duplicates collapse. Mirrors C++
+    /// Composed forwarded targets. See [`Stage::forwarded_relationship_targets`]
+    /// for the forwarding, cycle, and mask contract. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
     //
     // TODO: drop `anyhow::Result` once `Stage::forwarded_relationship_targets`
