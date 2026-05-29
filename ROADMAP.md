@@ -69,13 +69,13 @@ that broader spec behavior can be considered fully covered.
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | [Sublayers](https://openusd.org/release/glossary.html#usdglossary-sublayers) | `10.3.1` | :white_check_mark: | `0.1.2` | Layer stack construction |
-| Sublayer offset composition | `10.3.1.1` | :construction: | | `0.4.0` — effective sublayer offsets composed through nested sublayers; carried on each `Node` via `MapFunction::time_offset`; applied during value resolution (Spec 12.3.2.1)<br>Remaining — `scale <= 0` composition-error guard with fallback to default offsets |
+| Sublayer offset composition | `10.3.1.1` | :white_check_mark: | `0.4.0` | Effective sublayer offsets composed through nested sublayers<br>Carried on each `Node` via `MapFunction::time_offset`<br>Applied during value resolution (§12.3.2.1)<br>`scale <= 0` falls back to identity via `LayerOffset::sanitized()` |
 | [References](https://openusd.org/release/api/class_usd_references.html) (internal + external) | `10.3.2.1` | :white_check_mark: | `0.1.2` | Including `defaultPrim` fallback |
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
-| Reference offset composition | `10.3.2.1.2` | :construction: | | `0.4.0` — reference offsets carried through reference arcs and composed with target layer-stack offsets; applied during value resolution (Spec 12.3.2.1)<br>Remaining — `scale <= 0` composition-error guard with fallback to default offsets |
+| Reference offset composition | `10.3.2.1.2` | :white_check_mark: | `0.4.0` | Reference offsets carried through reference arcs and composed with target layer-stack offsets<br>Applied during value resolution (§12.3.2.1)<br>`scale <= 0` falls back to identity via `LayerOffset::sanitized()` |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `0.4.0` | `StageBuilder::initial_load_set` supports loading all payloads or leaving them unloaded |
-| Payload offset composition | `10.3.2.2.2` | :construction: | | `0.4.0` — loaded payload offsets compose like references; unloaded payload offsets ignored; applied during value resolution (Spec 12.3.2.1)<br>Remaining — `scale <= 0` composition-error guard with fallback to default offsets |
+| Payload offset composition | `10.3.2.2.2` | :white_check_mark: | `0.4.0` | Loaded payload offsets compose like references; unloaded payload offsets ignored<br>Applied during value resolution (§12.3.2.1)<br>`scale <= 0` falls back to identity via `LayerOffset::sanitized()` |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |

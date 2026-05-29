@@ -2676,4 +2676,93 @@ def "Model"
         assert_eq!(times, vec![12.0, 20.0]);
         Ok(())
     }
+
+    // Spec §10.3.2.1.2 / §10.3.2.2.2 / §10.3.1.1: a layer offset with
+    // `scale <= 0` is a composition error; the offset falls back to the
+    // default `(0.0, 1.0)`.
+
+    #[test]
+    fn reference_offset_zero_scale_falls_back_to_identity() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "Root" (
+    references = @model.usd@</Model> (offset = 10; scale = 0)
+)
+{
+}
+"#,
+        );
+        let model = parse_usda(
+            r#"#usda 1.0
+def "Model" {}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/Root");
+        let got = offset_stack(&index, &stack);
+        assert!(
+            got.contains(&("model.usd".into(), "/Model".into(), ArcType::Reference, 0.0, 1.0)),
+            "expected reference offset to fall back to identity for scale=0: got {got:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn payload_offset_negative_scale_falls_back_to_identity() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "Root" (
+    payload = @model.usd@</Model> (offset = 5; scale = -2)
+)
+{
+}
+"#,
+        );
+        let model = parse_usda(
+            r#"#usda 1.0
+def "Model" {}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/Root");
+        let got = offset_stack(&index, &stack);
+        assert!(
+            got.contains(&("model.usd".into(), "/Model".into(), ArcType::Payload, 0.0, 1.0)),
+            "expected payload offset to fall back to identity for scale=-2: got {got:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sublayer_offset_zero_scale_falls_back_to_identity() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+(
+    subLayers = [
+        @sub.usda@ (offset = 10; scale = 0)
+    ]
+)
+def "Root" {}
+"#,
+        );
+        let sub = parse_usda(
+            r#"#usda 1.0
+def "Root" {}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/Root");
+        let got = offset_stack(&index, &stack);
+        assert!(
+            got.iter().any(|(name, path, _, off, scale)| name == "sub.usda"
+                && path == "/Root"
+                && *off == 0.0
+                && *scale == 1.0),
+            "expected sublayer offset to fall back to identity for scale=0: got {got:?}"
+        );
+        Ok(())
+    }
 }
