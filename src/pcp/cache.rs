@@ -814,6 +814,25 @@ impl Cache {
     /// folding list-op edits (prepend / append / add / delete) across every
     /// contributing layer. Non-property paths trivially return an empty list.
     pub fn connection_paths(&mut self, path: &Path) -> Result<Vec<Path>> {
+        self.property_targets(path, FieldKey::ConnectionPaths)
+    }
+
+    /// Returns the composed raw `targetPaths` list for a relationship path,
+    /// folding list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Non-property paths trivially return an empty list.
+    ///
+    /// These are the raw targets (the resolved `targetPaths` list op, spec
+    /// 12.4); target forwarding — recursively chasing relationship-to-
+    /// relationship chains — is not applied here.
+    pub fn relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
+        self.property_targets(path, FieldKey::TargetPaths)
+    }
+
+    /// Composes a path-list-op property field (`connectionPaths` or
+    /// `targetPaths`) by folding list-op edits across every contributing layer
+    /// and mapping targets through composition arcs into the stage namespace.
+    /// Both fields follow generic list-op value resolution (spec 12.2.6).
+    fn property_targets(&mut self, path: &Path, field: FieldKey) -> Result<Vec<Path>> {
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
@@ -827,19 +846,12 @@ impl Cache {
             None => prim,
         };
         self.ensure_index(&resolved_prim)?;
-        let mut targets = self.indices[&resolved_prim].resolve_path_list_op(
-            FieldKey::ConnectionPaths,
-            &self.stack,
-            Some(&prop_suffix),
-        )?;
+        let mut targets = self.indices[&resolved_prim].resolve_path_list_op(field, &self.stack, Some(&prop_suffix))?;
 
-        // Connection targets that land inside the prototype resolve into the
-        // canonical instance's namespace; map them back to the queried
-        // instance (spec 11.3.4 connections under spec 11.3.3 instancing).
-        //
-        // TODO: relationship `targetPaths` need the same instance remap, but
-        // they are not yet namespace-resolved through arcs (relationship target
-        // forwarding is unimplemented), so there is nothing composed to remap.
+        // Targets that land inside the prototype resolve into the canonical
+        // instance's namespace; map them back to the queried instance (spec
+        // 11.3.4 connections / relationship targets under spec 11.3.3
+        // instancing).
         if let Some((origin, canonical)) = &anchor {
             for target in &mut targets {
                 if let Some(remapped) = target.replace_prefix(canonical, origin) {

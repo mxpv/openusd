@@ -918,6 +918,21 @@ impl Stage {
         self.try_or_handle(|cache| cache.connection_paths(attr))
     }
 
+    /// Returns the composed raw `targetPaths` list for a relationship, folding
+    /// list-op edits (prepend / append / add / delete) across every
+    /// contributing layer. Mirrors C++ `UsdRelationship::GetTargets`. Returns
+    /// an empty list for non-property paths or relationships with no authored
+    /// targets.
+    ///
+    /// These are the raw targets (spec 12.4); target forwarding — recursively
+    /// chasing relationship-to-relationship chains — is not applied.
+    pub fn relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        if !self.population_mask.includes(&rel.prim_path()) {
+            return Ok(Vec::new());
+        }
+        self.try_or_handle(|cache| cache.relationship_targets(rel))
+    }
+
     /// Returns the composed `typeName` for a prim, if set.
     pub fn type_name(&self, prim: &sdf::Path) -> Result<Option<String>> {
         self.field::<String>(prim, "typeName")
@@ -2348,6 +2363,84 @@ over "Mat"
                 sdf::Path::new("/Mat.outputs:out")?
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_targets_compose_list_ops() -> Result<()> {
+        // Weak sublayer appends a target; root prepends one. Raw targets must
+        // fold list-op edits across both layers (spec 12.2.6, 12.4).
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("weak.usda"),
+            r#"#usda 1.0
+
+def "Set"
+{
+    def "A" {}
+    def "B" {}
+    append rel members = [</Set/B>]
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+(
+    subLayers = [
+        @weak.usda@
+    ]
+)
+
+over "Set"
+{
+    prepend rel members = [</Set/A>]
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let targets = stage.relationship_targets(&sdf::Path::new("/Set.members")?)?;
+        assert_eq!(targets, vec![sdf::Path::new("/Set/A")?, sdf::Path::new("/Set/B")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_targets_remap_reference() -> Result<()> {
+        // Targets authored in a referenced asset's namespace resolve into the
+        // referencing prim's namespace (spec 12.4 raw targets across arcs).
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("asset.usda"),
+            r#"#usda 1.0
+(
+    defaultPrim = "Source"
+)
+
+def "Source"
+{
+    def "Child" {}
+    rel members = [</Source/Child>]
+}
+"#,
+        )?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            r#"#usda 1.0
+
+def "Inst" (
+    references = @asset.usda@
+)
+{
+}
+"#,
+        )?;
+
+        let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
+        let targets = stage.relationship_targets(&sdf::Path::new("/Inst.members")?)?;
+        assert_eq!(targets, vec![sdf::Path::new("/Inst/Child")?]);
         Ok(())
     }
 
