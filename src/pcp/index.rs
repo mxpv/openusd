@@ -533,12 +533,15 @@ impl PrimIndex {
     /// clip set names (strongest first). When unauthored, clip sets fall back
     /// to name order (spec 12.3.4.1). Composition across layers is limited to
     /// the strongest opinion's list op.
+    ///
+    /// `clipSets` is a string list op; both the `String` and `Token` list-op
+    /// encodings are accepted, since USDC backends may decode it either way.
     pub(crate) fn clip_sets_order(&self, stack: &LayerStack) -> Result<Option<Vec<String>>> {
         let Some(value) = self.resolve_field(FieldKey::ClipSets.as_str(), stack, None)? else {
             return Ok(None);
         };
         Ok(match value {
-            Value::StringListOp(op) => Some(op.compose_over(&Vec::new())),
+            Value::StringListOp(op) | Value::TokenListOp(op) => Some(op.compose_over(&Vec::new())),
             Value::StringVec(names) | Value::TokenVec(names) => Some(names),
             _ => None,
         })
