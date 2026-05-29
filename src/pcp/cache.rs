@@ -190,7 +190,7 @@ impl Cache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
         let attr_path = &self.effective_path(attr_path)?;
-        if !self.has_spec(attr_path)? {
+        if !self.has_spec_at(attr_path)? {
             return Ok(None);
         }
 
@@ -496,6 +496,13 @@ impl Cache {
     /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&mut self, path: &Path) -> Result<bool> {
         let path = &self.effective_path(path)?;
+        self.has_spec_at(path)
+    }
+
+    /// Like [`Self::has_spec`], but assumes `path` has already been redirected
+    /// through [`Self::effective_path`]. Callers that redirected the path
+    /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
+    fn has_spec_at(&mut self, path: &Path) -> Result<bool> {
         if path.is_property_path() {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
@@ -750,6 +757,11 @@ impl Cache {
     /// Redirects `path` (prim or property) through [`Self::redirect_prim`],
     /// preserving any property suffix. Applied at every descendant-serving
     /// query entry point so non-canonical instance subtrees are never built.
+    //
+    // TODO(perf): every call walks the path's ancestors to find an enclosing
+    // instance. The result is stable until the prototype registry is
+    // invalidated, so it could be memoized per prim path and cleared alongside
+    // `invalidate_prototypes`.
     fn effective_path(&mut self, path: &Path) -> Result<Path> {
         let prim = path.prim_path();
         let redirected = self.redirect_prim(&prim)?;
