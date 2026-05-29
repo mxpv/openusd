@@ -224,14 +224,15 @@ impl Path {
     /// Returns `true` if this path starts with `prefix` at a path boundary.
     ///
     /// A match requires either equality with `prefix` or that the suffix
-    /// following `prefix` begins with a path separator (`/`) or a variant
-    /// segment opener (`{`). This avoids false positives like
+    /// following `prefix` begins with a path separator (`/`), property
+    /// separator (`.`), or variant segment opener (`{`). This avoids false positives like
     /// `/Foobar` starting with `/Foo`.
     ///
     /// ```text
     /// "/A/B".has_prefix("/A")       -> true
     /// "/A".has_prefix("/A")         -> true
     /// "/A{set=sel}".has_prefix("/A")-> true
+    /// "/A.attr".has_prefix("/A")    -> true
     /// "/Ab".has_prefix("/A")        -> false
     /// "/X".has_prefix("/")          -> true
     /// ```
@@ -244,7 +245,7 @@ impl Path {
         let Some(suffix) = me.strip_prefix(old) else {
             return false;
         };
-        old == "/" || suffix.starts_with('/') || suffix.starts_with('{')
+        old == "/" || suffix.starts_with('/') || suffix.starts_with('.') || suffix.starts_with('{')
     }
 
     /// Replaces a prefix path with a new prefix, used for namespace remapping
@@ -265,11 +266,14 @@ impl Path {
             return Some(new_prefix.clone());
         }
 
-        // Must start with old_prefix followed by '/' or '{' (variant segment).
+        // Must start with old_prefix followed by '/', '.', or '{'. Property
+        // targets in connection/relationship list ops rely on prim-prefix
+        // mappings crossing the property separator, e.g.
+        // `/Asset.outputs:out` -> `/Instance.outputs:out`.
         let suffix = me.strip_prefix(old)?;
         // The absolute root "/" is a prefix of all absolute paths; after
         // stripping it the remainder won't start with '/' (e.g. "Foo/Bar").
-        if old != "/" && !suffix.starts_with('/') && !suffix.starts_with('{') {
+        if old != "/" && !suffix.starts_with('/') && !suffix.starts_with('.') && !suffix.starts_with('{') {
             return None;
         }
         // Ensure a separator between new prefix and suffix for non-root.
@@ -282,7 +286,9 @@ impl Path {
         }
 
         let new = new_prefix.as_str();
-        if new == "/" {
+        if new == "/" && suffix.starts_with('.') {
+            Some(Path::from_str_unchecked(&format!("/{suffix}")))
+        } else if new == "/" {
             Some(Path::from_str_unchecked(suffix))
         } else {
             Some(Path::from_str_unchecked(&format!("{new}{suffix}")))
@@ -548,6 +554,7 @@ mod tests {
             ("/A/B/C", "/A/B/D", false),
             ("/Foobar", "/Foo", false),
             ("/A{set=sel}", "/A", true),
+            ("/A.attr", "/A", true),
             ("/A", "/", true),
             ("/", "/", true),
             ("/A/B", "/A/B/C", false),
@@ -643,6 +650,16 @@ mod tests {
         assert_eq!(
             p("/Ref/Child").replace_prefix(&p("/Ref"), &p("/")).unwrap().as_str(),
             "/Child"
+        );
+
+        // Property paths still live under the owning prim namespace for
+        // composition maps; the `.` separator must count as a prefix boundary.
+        assert_eq!(
+            p("/Ref.outputs:out")
+                .replace_prefix(&p("/Ref"), &p("/MyPrim"))
+                .unwrap()
+                .as_str(),
+            "/MyPrim.outputs:out"
         );
 
         // No match.

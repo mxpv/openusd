@@ -365,7 +365,7 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            ops.push(list_op);
+            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
         }
 
         let mut result = Vec::new();
@@ -373,6 +373,39 @@ impl PrimIndex {
             result = op.compose_over(&result);
         }
         Ok(result)
+    }
+
+    /// Translate a path-list-op opinion from one contributing node into the
+    /// composed stage namespace before list-op composition.
+    ///
+    /// Every bucket must be translated, not just contributed values: delete
+    /// and reorder opinions only work when they compare against weaker items
+    /// in the same namespace. Unmappable paths are dropped, matching a
+    /// namespace map whose source domain does not include the authored target.
+    fn map_path_list_op_to_root(op: sdf::PathListOp, anchor: &Path, map: &MapFunction) -> sdf::PathListOp {
+        fn map_paths(paths: Vec<Path>, anchor: &Path, map: &MapFunction) -> Vec<Path> {
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    // List-op targets are authored in the contributing node's
+                    // namespace; compose them only after translating to the
+                    // stage root namespace so deletes and reorders compare
+                    // like-for-like across layers and arcs.
+                    let absolute = anchor.make_absolute(&path);
+                    map.map_source_to_target(&absolute)
+                })
+                .collect()
+        }
+
+        sdf::PathListOp {
+            explicit: op.explicit,
+            explicit_items: map_paths(op.explicit_items, anchor, map),
+            added_items: map_paths(op.added_items, anchor, map),
+            prepended_items: map_paths(op.prepended_items, anchor, map),
+            appended_items: map_paths(op.appended_items, anchor, map),
+            deleted_items: map_paths(op.deleted_items, anchor, map),
+            ordered_items: map_paths(op.ordered_items, anchor, map),
+        }
     }
 
     /// Builds the query path for a node, applying `prop_suffix` if given.
