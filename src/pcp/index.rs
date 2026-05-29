@@ -1707,28 +1707,21 @@ fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payl
 pub(super) fn find_layer(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
     use crate::ar::ResolvedPath;
 
-    let sep = std::path::MAIN_SEPARATOR as u8;
-    let needle = asset_path.strip_prefix("./").unwrap_or(asset_path);
+    let asset_path_ref = std::path::Path::new(asset_path);
+    let needle = asset_path_ref.strip_prefix(".").unwrap_or(asset_path_ref);
 
     // Fast path: exact or suffix match against canonical identifiers.
     for (i, layer) in layers.iter().enumerate() {
-        let id = layer.identifier.as_str();
-        if id == needle {
+        let identifier = std::path::Path::new(layer.identifier.as_str());
+        if identifier == needle || identifier.ends_with(needle) {
             return Some(i);
-        }
-
-        if id.ends_with(needle) {
-            let prefix_len = id.len() - needle.len();
-            if prefix_len > 0 && id.as_bytes()[prefix_len - 1] == sep {
-                return Some(i);
-            }
         }
     }
 
     // Relative paths traversing parent directories need anchoring. Delegate to
     // the resolver so custom AR backends override path handling without any
     // filesystem access here.
-    if needle.starts_with("../") || needle.starts_with("..\\") {
+    if needle.starts_with("..") {
         for anchor_layer in layers {
             let anchor = ResolvedPath::new(PathBuf::from(&anchor_layer.identifier));
             let resolved = resolver.create_identifier(asset_path, Some(&anchor));
@@ -1910,6 +1903,23 @@ mod tests {
         let resolver = DefaultResolver::new();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
         assert!(find_layer("ref_target.usda", &layers, &resolver).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn find_layer_relative_child() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let asset_dir = tmp.path().join("asset");
+        std::fs::create_dir_all(&asset_dir)?;
+        let model = asset_dir.join("model.usda");
+        std::fs::write(&model, b"placeholder")?;
+
+        let resolver = DefaultResolver::new();
+        let layers = vec![sdf::Layer::new(
+            model.canonicalize()?.to_string_lossy(),
+            Box::new(sdf::Data::new()),
+        )];
+        assert_eq!(find_layer("./asset/model.usda", &layers, &resolver), Some(0));
         Ok(())
     }
 
