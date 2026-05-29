@@ -1,0 +1,45 @@
+#usda 1.0
+(
+    doc = """Shared prototypes for scene-graph instancing (spec 11.3.3).
+
+    /A and /B are instanceable and reference the same prototype, so they share
+    one composed subtree. /C references a different prototype and must not be
+    shared with them."""
+)
+
+def Scope "Proto"
+{
+    def Scope "Child"
+    {
+        double size = 5.0
+    }
+}
+
+def Scope "OtherProto"
+{
+    def Scope "Child"
+    {
+        double size = 9.0
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}
+
+def Scope "B" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}
+
+def Scope "C" (
+    instanceable = true
+    references = </OtherProto>
+)
+{
+}

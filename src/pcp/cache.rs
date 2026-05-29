@@ -54,6 +54,34 @@ pub struct Cache {
     /// identifier. Clip layers do not participate in composition (spec
     /// 12.3.4), so they are held here rather than in the [`LayerStack`].
     clip_layers: HashMap<String, sdf::Layer>,
+    /// Canonical instance per instancing key, for scene-graph instancing
+    /// sharing (spec 11.3.3). Instances with the same key reuse the first
+    /// (canonical) one's composed subtree, so it is composed only once.
+    //
+    // TODO: the registry is not invalidated when authoring changes an
+    // instance's arcs or its `instanceable` flag. Tie it into change
+    // processing (see the `instanceable` note in `pcp::change`).
+    // TODO: expose the shared prototype as a queryable identity
+    // (`/__Prototype_N`, GetPrototype / GetInstances / IsInPrototype) and as a
+    // traversable namespace — a separate piece of work building on this map.
+    instance_canonical: HashMap<InstanceKey, Path>,
+}
+
+/// Identity of an instance prim's shared composition (spec 11.3.3): the
+/// arc-introduced opinions that determine its subtree, independent of the
+/// instance's own stage path. Instances with equal keys share a prototype.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct InstanceKey(Vec<InstanceArc>);
+
+/// One arc contribution in an [`InstanceKey`]. Floats are stored as bit
+/// patterns so the key is `Hash`/`Eq`.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct InstanceArc {
+    arc: u8,
+    layer: String,
+    path: String,
+    offset_bits: u64,
+    scale_bits: u64,
 }
 
 enum FieldValue {
@@ -73,6 +101,7 @@ impl Cache {
             relocates,
             variant_fallbacks,
             clip_layers: HashMap::new(),
+            instance_canonical: HashMap::new(),
         }
     }
 
@@ -139,6 +168,7 @@ impl Cache {
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
+        let attr_path = &self.effective_path(attr_path)?;
         if !self.has_spec(attr_path)? {
             return Ok(None);
         }
@@ -430,6 +460,7 @@ impl Cache {
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
     pub fn has_spec(&mut self, path: &Path) -> Result<bool> {
+        let path = &self.effective_path(path)?;
         if path.is_property_path() {
             let prim_path = path.prim_path();
             let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
@@ -454,6 +485,7 @@ impl Cache {
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub fn spec_type(&mut self, path: &Path) -> Result<Option<SpecType>> {
+        let path = &self.effective_path(path)?;
         self.ensure_index(path)?;
         let Some(index) = self.indices.get(path) else {
             return Ok(None);
@@ -474,16 +506,21 @@ impl Cache {
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
     /// the strongest `instanceable` opinion is `true` and the prim has at
-    /// least one composition arc.
+    /// least one composition arc. Reads the index directly (not through
+    /// [`Self::resolve_field`]) so it is safe to call from path redirection.
     pub(crate) fn is_instance(&mut self, path: &Path) -> Result<bool> {
         if path.is_abs_root() {
             return Ok(false);
         }
-        let instanceable = matches!(
-            self.resolve_field(path, FieldKey::Instanceable.as_str())?,
+        self.ensure_index(path)?;
+        let index = &self.indices[path];
+        if !index.has_composition_arc() {
+            return Ok(false);
+        }
+        Ok(matches!(
+            index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
             Some(Value::Bool(true))
-        );
-        Ok(instanceable && self.has_composition_arc(path)?)
+        ))
     }
 
     /// `true` for a node that is a local opinion — authored directly in the
@@ -494,6 +531,102 @@ impl Cache {
         node.arc == ArcType::Root && local.contains(&node.layer_index)
     }
 
+    /// Computes the instancing key for an already-built instance index: the
+    /// arc-introduced (non-local) opinions that define the shared subtree,
+    /// independent of the instance's own stage path (spec 11.3.3).
+    ///
+    /// TODO: variant selections are captured only implicitly via variant
+    /// nodes' paths; fold the resolved selection set in explicitly if a case
+    /// surfaces where that is insufficient.
+    fn instance_key(&self, index: &PrimIndex, local: &HashSet<usize>) -> InstanceKey {
+        let arcs = index
+            .nodes()
+            .iter()
+            .filter(|node| !Self::is_local_opinion(node, local))
+            .map(|node| {
+                let offset = node.map_to_root.time_offset();
+                InstanceArc {
+                    arc: node.arc as u8,
+                    layer: self.stack.identifier(node.layer_index).to_string(),
+                    path: node.path.to_string(),
+                    offset_bits: offset.offset.to_bits(),
+                    scale_bits: offset.scale.to_bits(),
+                }
+            })
+            .collect();
+        InstanceKey(arcs)
+    }
+
+    /// Returns the canonical instance whose composed subtree is shared by
+    /// every instance with `instance`'s instancing key. The first instance
+    /// registered for a key becomes canonical; later instances with the same
+    /// key reuse its subtree, so it is composed only once (spec 11.3.3).
+    //
+    // TODO(rayon): distinct prototypes (distinct instancing keys) compose
+    // independent subtrees, so the canonical instances can be composed in
+    // parallel. `IndexBuilder` already takes only `&` references; this needs
+    // the cache to build indices off the `&mut self` path first (e.g. compose
+    // into per-prototype results, then insert), and the shared `LayerStack`
+    // handed to workers as `&`/`Arc`.
+    fn canonical_instance(&mut self, instance: &Path) -> Result<Path> {
+        self.ensure_index(instance)?;
+        let local = self.local_layers();
+        let key = self.instance_key(&self.indices[instance], &local);
+        Ok(self
+            .instance_canonical
+            .entry(key)
+            .or_insert_with(|| instance.clone())
+            .clone())
+    }
+
+    /// Maps a prim path to the path that actually composes it. A descendant of
+    /// a non-canonical instance is redirected into the canonical instance's
+    /// subtree, so identical instances share one composition (spec 11.3.3).
+    /// Other paths pass through unchanged.
+    ///
+    /// TODO: relationship targets and attribute connections authored inside an
+    /// instance subtree resolve into the canonical instance's namespace; map
+    /// them back to the queried instance.
+    /// TODO: a nested instance (an instance inside another instance's subtree)
+    /// is redirected to the canonical's nested instance but is not itself
+    /// registered as a distinct prototype.
+    fn redirect_prim(&mut self, prim: &Path) -> Result<Path> {
+        let mut ancestor = prim.parent();
+        while let Some(current) = ancestor {
+            if current.is_abs_root() {
+                break;
+            }
+            if self.is_instance(&current)? {
+                let canonical = self.canonical_instance(&current)?;
+                if canonical != current {
+                    let tail = &prim.as_str()[current.as_str().len()..];
+                    return Path::new(&format!("{canonical}{tail}"));
+                }
+                // Nearest instance is canonical: compose this subtree in place.
+                break;
+            }
+            ancestor = current.parent();
+        }
+        Ok(prim.clone())
+    }
+
+    /// Redirects `path` (prim or property) through [`Self::redirect_prim`],
+    /// preserving any property suffix. Applied at every descendant-serving
+    /// query entry point so non-canonical instance subtrees are never built.
+    fn effective_path(&mut self, path: &Path) -> Result<Path> {
+        let prim = path.prim_path();
+        let redirected = self.redirect_prim(&prim)?;
+        if redirected == prim {
+            return Ok(path.clone());
+        }
+        if path.is_property_path() {
+            let suffix = &path.as_str()[prim.as_str().len()..];
+            Ok(Path::new(&format!("{redirected}{suffix}"))?)
+        } else {
+            Ok(redirected)
+        }
+    }
+
     /// Resolves a field value from the strongest opinion across all composition nodes.
     ///
     /// Layer metadata authored on the pseudo-root is resolved directly from
@@ -501,6 +634,7 @@ impl Cache {
     /// pseudo-root's `primChildren` field remains a child-list query and is
     /// handled by normal composition.
     pub fn resolve_field(&mut self, path: &Path, field: &str) -> Result<Option<Value>> {
+        let path = &self.effective_path(path)?;
         if path.is_abs_root() && field != ChildrenKey::PrimChildren.as_str() {
             return self.root_layer_field(field);
         }
@@ -518,7 +652,7 @@ impl Cache {
 
     /// Returns the composed `apiSchemas` list for a prim.
     pub fn api_schemas(&mut self, path: &Path) -> Result<Vec<String>> {
-        let path = path.prim_path();
+        let path = self.effective_path(&path.prim_path())?;
         self.ensure_index(&path)?;
         self.indices[&path].resolve_token_list_op(FieldKey::ApiSchemas, &self.stack, None)
     }
@@ -530,6 +664,7 @@ impl Cache {
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
+        let path = &self.effective_path(path)?;
         let prim_path = path.prim_path();
         let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
         self.ensure_index(&prim_path)?;
@@ -568,6 +703,7 @@ impl Cache {
     /// nodes merge weakest-to-strongest, which can yield different results
     /// when multiple sublayers contribute partial orderings.
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
+        let path = &self.effective_path(path)?;
         let mut children = self.composed_children(path, ChildrenKey::PrimChildren)?;
 
         if !self.relocates.is_empty() {
@@ -583,6 +719,7 @@ impl Cache {
     /// Applies the strongest `propertyOrder` opinion to the unioned property
     /// list. See [`Cache::prim_children`] for the composition-rule caveat.
     pub fn prim_properties(&mut self, path: &Path) -> Result<Vec<String>> {
+        let path = &self.effective_path(path)?;
         let mut properties = self.composed_children(path, ChildrenKey::PropertyChildren)?;
         self.apply_order_field(path, FieldKey::PropertyOrder, &mut properties)?;
         Ok(properties)
@@ -1259,6 +1396,30 @@ mod tests {
         // Second lookup is a cache hit; a bogus path resolves to None.
         assert!(cache.clip_layer("./clip.usda", 0)?.is_some());
         assert!(cache.clip_layer("./does_not_exist.usda", 0)?.is_none());
+        Ok(())
+    }
+
+    /// Instances sharing a prototype compose their subtree once: a
+    /// non-canonical instance's descendant is served by the canonical one and
+    /// is never indexed (spec 11.3.3).
+    #[test]
+    fn instances_share_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+
+        // Query /A first so it becomes the canonical instance for its key.
+        let size = |cache: &mut Cache, p: &str| cache.value_at(&sdf::path(p).unwrap(), 0.0, &interp);
+        assert_eq!(size(&mut cache, "/A/Child.size")?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(size(&mut cache, "/B/Child.size")?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(size(&mut cache, "/C/Child.size")?, Some(sdf::Value::Double(9.0)));
+
+        // /A and /B share a prototype, so /B's subtree is served by /A and
+        // /B/Child is never composed. /C uses a different prototype, so its
+        // own subtree is composed.
+        assert!(cache.is_indexed(&sdf::path("/A/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/C/Child")?));
         Ok(())
     }
 }

@@ -2549,6 +2549,21 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// Instances sharing a prototype resolve descendant values identically and
+    /// expose the prototype's children (spec 11.3.3).
+    #[test]
+    fn shared_instances_resolve_identically() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+        assert_eq!(stage.value_at("/A/Child.size", 0.0)?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(stage.value_at("/B/Child.size", 0.0)?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(stage.value_at("/C/Child.size", 0.0)?, Some(sdf::Value::Double(9.0)));
+
+        assert_eq!(stage.prim_children("/A")?, vec!["Child".to_string()]);
+        assert_eq!(stage.prim_children("/B")?, vec!["Child".to_string()]);
+        Ok(())
+    }
+
     /// Local opinions on an instance's descendants are discarded; values come
     /// from the arc (spec 11.3.3).
     #[test]
