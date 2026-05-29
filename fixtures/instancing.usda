@@ -1,0 +1,49 @@
+#usda 1.0
+(
+    doc = """Scene-graph instancing behavioral conformance (spec 11.3.3).
+
+    /Instance is instanceable and references /Prototype, so its subtree must
+    come only from the arc: the local-only child is hidden and the local
+    override on the referenced child is ignored. /NonInstance references the
+    same prototype without instanceable, so local and referenced opinions
+    both contribute (regression guard)."""
+)
+
+def Scope "Prototype"
+{
+    def Scope "Child"
+    {
+        double size = 1.0
+    }
+}
+
+def Scope "Instance" (
+    instanceable = true
+    references = </Prototype>
+)
+{
+    # Local-only child: discarded — instance children come only from the arc.
+    def Scope "LocalOnly"
+    {
+    }
+
+    # Local override on the referenced descendant: ignored on an instance.
+    over "Child"
+    {
+        double size = 999.0
+    }
+}
+
+def Scope "NonInstance" (
+    references = </Prototype>
+)
+{
+    def Scope "LocalOnly"
+    {
+    }
+
+    over "Child"
+    {
+        double size = 999.0
+    }
+}

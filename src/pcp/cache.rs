@@ -472,6 +472,28 @@ impl Cache {
         Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
     }
 
+    /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
+    /// the strongest `instanceable` opinion is `true` and the prim has at
+    /// least one composition arc.
+    pub(crate) fn is_instance(&mut self, path: &Path) -> Result<bool> {
+        if path.is_abs_root() {
+            return Ok(false);
+        }
+        let instanceable = matches!(
+            self.resolve_field(path, FieldKey::Instanceable.as_str())?,
+            Some(Value::Bool(true))
+        );
+        Ok(instanceable && self.has_composition_arc(path)?)
+    }
+
+    /// `true` for a node that is a local opinion — authored directly in the
+    /// root layer stack (`Root` arc), as opposed to brought in by a
+    /// composition arc. These are discarded on instance subtrees (spec
+    /// 11.3.3). The `local` set is [`Self::local_layers`].
+    fn is_local_opinion(node: &Node, local: &HashSet<usize>) -> bool {
+        node.arc == ArcType::Root && local.contains(&node.layer_index)
+    }
+
     /// Resolves a field value from the strongest opinion across all composition nodes.
     ///
     /// Layer metadata authored on the pseudo-root is resolved directly from
@@ -690,6 +712,17 @@ impl Cache {
             return Ok(());
         }
 
+        // Compose ancestors first so the parent's `CompositionContext` (and
+        // its `within_instance` flag, spec 11.3.3) is available. Composition
+        // is a pure function of the layer stack, path, and parent context, so
+        // building ancestors eagerly only fixes the parent context — it does
+        // not change any prim's resolved opinions.
+        if let Some(parent) = path.parent() {
+            if !parent.is_abs_root() && !self.indices.contains_key(&parent) {
+                self.precache_path(&parent);
+            }
+        }
+
         // Pre-cache inherit/specialize targets so the index builder can
         // find them. This handles the timing issue where a target prim is
         // in a sibling subtree that hasn't been traversed yet.
@@ -725,7 +758,35 @@ impl Cache {
                 .add_relocate_nodes(path, &mut index, &self.stack, &self.indices, &self.contexts)?;
         }
 
-        let child_context = index.context_for_children(&self.stack, &parent_ctx);
+        // Inside an instance, local opinions on descendants are discarded
+        // (spec 11.3.3): the subtree is composed purely from the arcs. Pruning
+        // the local-opinion nodes here is the single chokepoint that makes
+        // every downstream query (values, fields, children, spec type) use the
+        // arc-only composition.
+        //
+        // TODO: instances are composed independently per occurrence. Composing
+        // identical instances once through a shared prototype representation
+        // (an instancing key plus synthesized `/__Prototype_N` prims) is not
+        // yet implemented.
+        if parent_ctx.within_instance {
+            let local = self.local_layers();
+            index.retain_nodes(|node| !Self::is_local_opinion(node, &local));
+        }
+
+        // This prim is an instance when its (unpruned) composition declares
+        // `instanceable = true` and carries an arc; its descendants then
+        // inherit `within_instance`. Computed from the freshly built index to
+        // avoid re-entering `ensure_index` for `path`.
+        // TODO: a nested instance (one inside another instance's subtree) is
+        // not yet special-cased.
+        let is_instance = index.has_composition_arc()
+            && matches!(
+                index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
+                Some(Value::Bool(true))
+            );
+
+        let mut child_context = index.context_for_children(&self.stack, &parent_ctx);
+        child_context.within_instance = parent_ctx.within_instance || is_instance;
         self.deps.add(path, &index, self.stack.len());
         self.indices.insert(path.clone(), index);
         self.contexts.insert(path.clone(), child_context);
@@ -788,7 +849,7 @@ impl Cache {
 
         self.propagate_from_parent_nodes(child_path, child_name, parent_index, index);
 
-        // Each fallback only runs when the stronger phases found nothing.
+        // Each fallback runs only when the earlier passes found nothing.
         if index.is_empty() {
             self.propagate_from_ancestor_arcs(child_path, &parent_path, index);
         }
@@ -799,7 +860,7 @@ impl Cache {
 
     /// Adds an implied node for every layer that has a spec at `source`,
     /// mapping `source → composed` with the given arc, retiming, and global
-    /// weakness. Shared by the three [`Self::propagate_parent_specs`] phases.
+    /// weakness. Shared by the [`Self::propagate_parent_specs`] passes.
     fn push_implied_nodes(
         &self,
         index: &mut PrimIndex,
@@ -843,7 +904,7 @@ impl Cache {
         arcs
     }
 
-    /// Phase 1: child specs reachable through the parent's own non-`Root`
+    /// First pass: child specs reachable through the parent's own non-`Root`
     /// nodes (e.g. a child of an inherited class with no local override).
     fn propagate_from_parent_nodes(
         &self,
@@ -870,8 +931,8 @@ impl Cache {
         }
     }
 
-    /// Phase 2 (fallback): child specs at alternative namespace paths reached
-    /// via cached ancestor arcs — covers inherit targets whose index was built
+    /// Fallback pass: child specs at alternative namespace paths reached via
+    /// cached ancestor arcs — covers inherit targets whose index was built
     /// with default context and so missed those arcs.
     fn propagate_from_ancestor_arcs(&self, child_path: &Path, parent_path: &Path, index: &mut PrimIndex) {
         for ancestor in self.collect_ancestor_arcs_from(Some(parent_path.clone())) {
@@ -892,7 +953,7 @@ impl Cache {
         }
     }
 
-    /// Phase 3 (fallback): inherit/specialize targets read directly from the
+    /// Last-resort pass: inherit/specialize targets read directly from the
     /// parent's layer data, checked at the composed path and every grandparent
     /// ancestor remapping — for targets neither merged into the index nor
     /// reachable through cached ancestor arcs.
@@ -960,10 +1021,25 @@ impl Cache {
     /// composition needed to discover class children.
     fn composed_children(&mut self, path: &Path, children_field: ChildrenKey) -> Result<Vec<String>> {
         self.ensure_index(path)?;
+
+        // An instance prim's children come only from its composition arcs;
+        // local opinions contributing to `primChildren` are discarded (spec
+        // 11.3.3). The instance prim's own index is otherwise left intact, so
+        // its own properties still see local opinions.
+        let drop_local = matches!(children_field, ChildrenKey::PrimChildren) && self.is_instance(path)?;
+        let local = if drop_local {
+            self.local_layers()
+        } else {
+            HashSet::new()
+        };
+
         let index = &self.indices[path];
         let mut result: Vec<String> = Vec::new();
 
         for node in index.nodes() {
+            if drop_local && Self::is_local_opinion(node, &local) {
+                continue;
+            }
             if let Ok(value) = self
                 .stack
                 .layer(node.layer_index)

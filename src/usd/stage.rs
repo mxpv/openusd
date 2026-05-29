@@ -2531,6 +2531,44 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// An instance prim's children come only from its composition arcs; a
+    /// local-only child is discarded (spec 11.3.3).
+    #[test]
+    fn instance_children_from_arcs_only() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing.usda"))?;
+
+        let mut children = stage.prim_children("/Instance")?;
+        children.sort();
+        assert_eq!(children, vec!["Child".to_string()]);
+
+        // A plain (non-instance) reference still merges local and referenced
+        // children.
+        let mut non_instance = stage.prim_children("/NonInstance")?;
+        non_instance.sort();
+        assert_eq!(non_instance, vec!["Child".to_string(), "LocalOnly".to_string()]);
+        Ok(())
+    }
+
+    /// Local opinions on an instance's descendants are discarded; values come
+    /// from the arc (spec 11.3.3).
+    #[test]
+    fn instance_descendant_ignores_local_override() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing.usda"))?;
+
+        // Instance: the local `over Child { size = 999 }` is ignored.
+        assert_eq!(
+            stage.value_at("/Instance/Child.size", 0.0)?,
+            Some(sdf::Value::Double(1.0))
+        );
+
+        // Non-instance: the local override wins as usual.
+        assert_eq!(
+            stage.value_at("/NonInstance/Child.size", 0.0)?,
+            Some(sdf::Value::Double(999.0))
+        );
+        Ok(())
+    }
+
     #[test]
     fn model_hierarchy() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
