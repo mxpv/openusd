@@ -744,6 +744,18 @@ impl<'s> Relationship<'s> {
         self.stage.relationship_targets(&self.path)
     }
 
+    /// Composed forwarded targets: any target that resolves to another
+    /// relationship is replaced, recursively, by that relationship's forwarded
+    /// targets, leaving only prim and attribute paths (spec 12.4). Cycles are
+    /// broken and duplicates collapse. Mirrors C++
+    /// `UsdRelationship::GetForwardedTargets`.
+    //
+    // TODO: drop `anyhow::Result` once `Stage::forwarded_relationship_targets`
+    // returns a typed error.
+    pub fn get_forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage.forwarded_relationship_targets(&self.path)
+    }
+
     /// Borrow the relationship spec at `self.path` on the edit target's
     /// layer, apply `f`, and return `self` for chaining. `fields` names the
     /// authored metadata keys; `targets_changed` sets the target-list flag
@@ -998,6 +1010,67 @@ mod tests {
             .create_relationship("material:binding")?;
         assert!(!rel.has_authored_targets()?);
         assert!(rel.get_targets()?.is_empty());
+        Ok(())
+    }
+
+    /// Spec 12.4 example: `/foo.myRel` targets a prim and a relationship; the
+    /// relationship forwards to two prims. Forwarding flattens the chain to
+    /// only prim/attribute paths, while the raw targets keep the relationship.
+    #[test]
+    fn forwarded_targets_spec_example() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/foo")?;
+        stage.define_prim("/foo/bar")?;
+        stage.define_prim("/foo/foobar")?;
+        stage.define_prim("/foo/foobar/barbaz")?;
+        stage
+            .define_prim("/baz")?
+            .create_relationship("bazrel")?
+            .set_targets([sdf::path("/foo/foobar")?, sdf::path("/foo/foobar/barbaz")?])?;
+        let my_rel = stage
+            .define_prim("/foo")?
+            .create_relationship("myRel")?
+            .set_targets([sdf::path("/foo/bar")?, sdf::path("/baz.bazrel")?])?;
+
+        assert_eq!(
+            my_rel.get_forwarded_targets()?,
+            vec![
+                sdf::path("/foo/bar")?,
+                sdf::path("/foo/foobar")?,
+                sdf::path("/foo/foobar/barbaz")?,
+            ]
+        );
+        assert_eq!(
+            my_rel.get_targets()?,
+            vec![sdf::path("/foo/bar")?, sdf::path("/baz.bazrel")?]
+        );
+        Ok(())
+    }
+
+    /// Forwarding follows a multi-hop relationship chain to its terminal prim.
+    #[test]
+    fn forwarded_targets_multi_hop() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Geom")?;
+        let p = stage.define_prim("/P")?;
+        p.create_relationship("c")?.set_targets([sdf::path("/Geom")?])?;
+        p.create_relationship("b")?.set_targets([sdf::path("/P.c")?])?;
+        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
+
+        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        Ok(())
+    }
+
+    /// A pure relationship cycle forwards to no terminal targets without
+    /// hanging.
+    #[test]
+    fn forwarded_targets_cycle() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let p = stage.define_prim("/P")?;
+        let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
+        p.create_relationship("b")?.set_targets([sdf::path("/P.a")?])?;
+
+        assert!(a.get_forwarded_targets()?.is_empty());
         Ok(())
     }
 

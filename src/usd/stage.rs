@@ -933,6 +933,21 @@ impl Stage {
         self.try_or_handle(|cache| cache.relationship_targets(rel))
     }
 
+    /// Returns the forwarded `targetPaths` for a relationship. Targets that
+    /// resolve to another relationship are replaced, recursively, by that
+    /// relationship's forwarded targets, leaving only prim and attribute paths
+    /// (spec 12.4). Cycles are broken and duplicates collapse. Mirrors C++
+    /// `UsdRelationship::GetForwardedTargets`.
+    ///
+    /// The population mask guards the queried relationship; forwarding then
+    /// follows the composed target chain regardless of the mask.
+    pub fn forwarded_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        if !self.population_mask.includes(&rel.prim_path()) {
+            return Ok(Vec::new());
+        }
+        self.try_or_handle(|cache| cache.forwarded_relationship_targets(rel))
+    }
+
     /// Returns the composed `typeName` for a prim, if set.
     pub fn type_name(&self, prim: &sdf::Path) -> Result<Option<String>> {
         self.field::<String>(prim, "typeName")
