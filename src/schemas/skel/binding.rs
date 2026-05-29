@@ -10,7 +10,7 @@
 use anyhow::Result;
 
 use crate::sdf::Path;
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 use super::read::{read_inherited_animation_source, read_inherited_skeleton, read_skel_binding};
 use super::tokens::{API_SKEL_BINDING, T_SKELETON, T_SKEL_ROOT};
@@ -52,7 +52,7 @@ pub struct SkelBinding {
 pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBinding>> {
     let mut out = Vec::new();
     let mut first_err: Result<()> = Ok(());
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         // Restrict to the SkelRoot's subtree. `has_prefix` handles the
         // SkelRoot == "/" case correctly (every absolute path has "/"
         // as a prefix).
@@ -92,7 +92,7 @@ pub fn discover_bindings(stage: &Stage, skel_root: &Path) -> Result<Vec<SkelBind
 pub fn discover_skeletons(stage: &Stage, skel_root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut first_err: Result<()> = Ok(());
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         if first_err.is_err() || !path.has_prefix(skel_root) {
             return;
         }
@@ -111,7 +111,7 @@ pub fn discover_skeletons(stage: &Stage, skel_root: &Path) -> Result<Vec<String>
 pub fn find_skel_roots(stage: &Stage) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut first_err: Result<()> = Ok(());
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         if first_err.is_err() {
             return;
         }

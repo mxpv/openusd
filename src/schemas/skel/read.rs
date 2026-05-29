@@ -14,7 +14,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
@@ -239,7 +239,7 @@ fn read_inherited_rel(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Opti
 pub fn find_skel_prims(stage: &Stage) -> Result<SkelPrims> {
     let mut out = SkelPrims::default();
     let mut first_err: Result<()> = Ok(());
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         if first_err.is_err() {
             return;
         }

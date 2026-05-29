@@ -8,7 +8,7 @@
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path, Value};
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
@@ -107,7 +107,7 @@ pub fn read_kind(stage: &Stage, prim: &Path) -> Result<Option<String>> {
 /// Imageable but live in UsdLux).
 pub fn find_geom_prims(stage: &Stage) -> Result<GeomPrims> {
     let mut out = GeomPrims::default();
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         let p = path.as_str().to_string();
         let mut counted = false;
         if let Ok(Some(type_name)) = stage.type_name(path) {

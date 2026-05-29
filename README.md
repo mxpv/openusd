@@ -94,9 +94,10 @@ let stage = usd::Stage::builder()
     .population_mask(usd::StagePopulationMask::new(["/World/Hero"]))
     .open("scene.usda")?;
 
-// Traverse all prims, or filter with a predicate (skips inactive/unloaded/abstract subtrees).
-stage.traverse(|path| println!("{path}"))?;
-stage.traverse_with_predicate(usd::PrimPredicate::DEFAULT, |path| println!("{path}"))?;
+// Traverse prims filtered by a predicate. DEFAULT skips inactive/unloaded/abstract
+// subtrees and stops at instances; ALL visits every composed prim.
+stage.traverse(usd::PrimPredicate::DEFAULT, |path| println!("{path}"))?;
+stage.traverse(usd::PrimPredicate::ALL, |path| println!("{path}"))?;
 
 // Composed prim queries.
 let active = stage.is_active("/World/Hero")?;

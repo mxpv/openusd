@@ -22,11 +22,11 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use openusd::usd;
+//! use openusd::usd::{self, PrimPredicate};
 //!
 //! let stage = usd::Stage::open("scene.usda").unwrap();
 //!
-//! stage.traverse(|prim_path| {
+//! stage.traverse(PrimPredicate::DEFAULT, |prim_path| {
 //!     println!("{prim_path}");
 //! }).unwrap();
 //! ```

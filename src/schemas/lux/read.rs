@@ -14,7 +14,7 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
@@ -428,7 +428,7 @@ pub fn read_light_list(stage: &Stage, prim: &Path) -> Result<Option<ReadLightLis
 /// Uses the default traversal predicate (active + defined + loaded +
 /// non-abstract), matching the convention shared with `find_geom_prims`
 /// and `find_physics_prims`. Consumers that need to see inactive or
-/// class prims should iterate over `stage.traverse_all` themselves and
+/// class prims should iterate with [`PrimPredicate::ALL`] themselves and
 /// dispatch via [`read_light`] / [`read_shaping`] / etc.
 pub fn find_lux_prims(stage: &Stage) -> Result<LuxPrims> {
     let mut out = LuxPrims::default();
@@ -437,7 +437,7 @@ pub fn find_lux_prims(stage: &Stage) -> Result<LuxPrims> {
     // Without this, type_name / api_schemas failures would be
     // silently dropped via `if let Ok(...)`.
     let mut err: Result<()> = Ok(());
-    stage.traverse(|path| {
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |path| {
         if err.is_err() {
             return;
         }

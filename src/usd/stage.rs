@@ -119,6 +119,17 @@ impl PrimPredicate {
     /// Matches prims that are active, loaded, defined, and not abstract.
     pub const DEFAULT: Self = Self::new(Self::INHERITED_REQUIRED, Self::INHERITED_REJECTED);
 
+    /// The default region, but descending into instance subtrees (instance
+    /// proxies). Schema and connection readers gather every prim of interest
+    /// across the stage and so must reach instanced content; public traversal
+    /// stops at instances and reaches their contents through the prototype, but
+    /// prototypes are not yet materialized as separately traversable roots.
+    pub const DEFAULT_PROXIES: Self = Self {
+        required: Self::INHERITED_REQUIRED,
+        rejected: Self::INHERITED_REJECTED,
+        traverse_instance_proxies: true,
+    };
+
     /// Creates a predicate with required and rejected status bits. Instance
     /// subtrees are not traversed; see [`Self::with_instance_proxies`].
     pub const fn new(required: PrimStatus, rejected: PrimStatus) -> Self {
@@ -1181,25 +1192,14 @@ impl Stage {
         }
     }
 
-    /// Traverses composed prims matching the default predicate.
-    ///
-    /// The default predicate matches OpenUSD's usual traversal region:
-    /// active, loaded, defined, and not abstract.
-    pub fn traverse(&self, visitor: impl FnMut(&sdf::Path)) -> Result<()> {
-        self.traverse_with_predicate(PrimPredicate::DEFAULT, visitor)
-    }
-
-    /// Traverses all composed prims depth-first, calling `visitor` for each.
-    pub fn traverse_all(&self, visitor: impl FnMut(&sdf::Path)) -> Result<()> {
-        self.traverse_with_predicate(PrimPredicate::ALL, visitor)
-    }
-
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
     ///
-    /// Descendants are pruned when inherited status bits make it impossible for
-    /// them to match, such as below inactive, unloaded, undefined, or abstract
-    /// prims when the predicate excludes those regions.
-    pub fn traverse_with_predicate(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
+    /// Pass [`PrimPredicate::DEFAULT`] for OpenUSD's usual traversal region
+    /// (active, loaded, defined, non-abstract). Descendants are pruned when
+    /// inherited status bits make it impossible for them to match, such as below
+    /// inactive, unloaded, undefined, or abstract prims when the predicate
+    /// excludes those regions.
+    pub fn traverse(&self, predicate: PrimPredicate, mut visitor: impl FnMut(&sdf::Path)) -> Result<()> {
         let needed = predicate.consulted_bits();
         let mut stack = vec![sdf::Path::abs_root()];
 
@@ -1511,7 +1511,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         let mut prims = Vec::new();
-        stage.traverse(|p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
 
         assert_eq!(prims, vec!["/World", "/World/CubeActive"]);
 
@@ -1525,7 +1525,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         let mut prims = Vec::new();
-        stage.traverse_all(|p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
 
         assert_eq!(prims, vec!["/World", "/World/CubeInactive", "/World/CubeActive"]);
 
@@ -1615,7 +1615,7 @@ mod tests {
 
         // The weaker sublayer (_stage.usda) defines /World/Cube.
         let mut prims = Vec::new();
-        stage.traverse(|p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
         assert!(prims.contains(&"/World/Cube".to_string()));
 
         Ok(())
@@ -2531,7 +2531,7 @@ def Shader "Mat" (
         assert_eq!(unloaded.prim_children("/World")?, Vec::<String>::new());
 
         let mut prims = Vec::new();
-        unloaded.traverse(|p| prims.push(p.as_str().to_string()))?;
+        unloaded.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
         assert!(prims.is_empty());
         Ok(())
     }
@@ -2552,7 +2552,7 @@ def Shader "Mat" (
         assert_eq!(stage.kind("/World/Group")?, None);
 
         let mut prims = Vec::new();
-        stage.traverse_all(|p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
         assert_eq!(
             prims,
             vec!["/World", "/World/ActiveParent", "/World/ActiveParent/Child"]
@@ -2713,6 +2713,23 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// Connection and schema readers descend into instance subtrees, so
+    /// content inside an instance is not silently skipped. Public traversal
+    /// stops at instances, but these readers need the full composed namespace.
+    #[test]
+    fn readers_index_instanced_content() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_connections.usda"))?;
+
+        let graph = crate::usd::ConnectionGraph::from_stage(&stage)?;
+        // The connection lives inside the instance /I1; the reader must descend
+        // into the instance proxy to index it.
+        assert_eq!(
+            graph.sources(&sdf::path("/I1/Dst.inputs:in")?),
+            &[sdf::path("/I1/Src.outputs:out")?]
+        );
+        Ok(())
+    }
+
     /// Default traversal stops at instance prims; `with_instance_proxies`
     /// descends into their subtrees (spec 11.3.3).
     #[test]
@@ -2720,12 +2737,12 @@ def Shader "Mat" (
         let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
         let mut default = Vec::new();
-        stage.traverse(|p| default.push(p.to_string()))?;
+        stage.traverse(PrimPredicate::DEFAULT, |p| default.push(p.to_string()))?;
         assert!(default.contains(&"/A".to_string()));
         assert!(!default.contains(&"/A/Child".to_string()));
 
         let mut proxies = Vec::new();
-        stage.traverse_with_predicate(PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
+        stage.traverse(PrimPredicate::DEFAULT.with_instance_proxies(true), |p| {
             proxies.push(p.to_string())
         })?;
         assert!(proxies.contains(&"/A/Child".to_string()));
@@ -2809,7 +2826,7 @@ def Shader "Mat" (
         let stage = open_stage_queries_fixture()?;
 
         let mut prims = Vec::new();
-        stage.traverse(|p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
 
         assert!(prims.contains(&"/World".to_string()));
         assert!(prims.contains(&"/World/ActiveParent".to_string()));
@@ -2831,7 +2848,7 @@ def Shader "Mat" (
         let stage = open_stage_queries_fixture()?;
 
         let mut prims = Vec::new();
-        stage.traverse_with_predicate(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
 
         assert!(prims.contains(&"/World/InactiveParent".to_string()));
         assert!(prims.contains(&"/World/InactiveParent/Child".to_string()));
@@ -2848,7 +2865,7 @@ def Shader "Mat" (
         let predicate = PrimPredicate::new(PrimStatus::ACTIVE | PrimStatus::DEFINED, PrimStatus::empty());
 
         let mut prims = Vec::new();
-        stage.traverse_with_predicate(predicate, |p| prims.push(p.as_str().to_string()))?;
+        stage.traverse(predicate, |p| prims.push(p.as_str().to_string()))?;
 
         assert!(prims.contains(&"/World/ClassParent".to_string()));
         assert!(prims.contains(&"/World/ClassParent/Child".to_string()));
