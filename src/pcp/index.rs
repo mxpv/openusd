@@ -193,14 +193,6 @@ impl PrimIndex {
         self.graph.nodes.push(node);
     }
 
-    /// Retains only the nodes matching `keep`, preserving strength order.
-    /// Used to drop local opinions from an instance descendant's index
-    /// (spec 11.3.3). Safe only after the index is fully built, since it
-    /// renumbers the node arena.
-    pub(crate) fn retain_nodes(&mut self, keep: impl FnMut(&Node) -> bool) {
-        self.graph.nodes.retain(keep);
-    }
-
     /// Inserts a relocate node at the correct LIVERPS strength position.
     ///
     /// Finds the first node whose arc type is weaker than `Relocate`
@@ -828,41 +820,49 @@ impl<'a> IndexBuilder<'a> {
     /// arcs introduced variant sets that V hadn't seen), their arcs are
     /// followed and variants re-resolved.
     fn build(&mut self, path: &Path) -> Result<(), Error> {
-        // The root L stage conceptually scans the stage's root layer stack,
-        // but the existing engine approximates implied-arc propagation by
-        // scanning every loaded layer flat (so inherits/specializes pick up
-        // opinions from referenced layer stacks without a separate
-        // propagation pass). Each layer still carries its own effective
-        // sublayer offset so that retiming flows through correctly.
-        let mut seen_layers = HashSet::new();
-        let mut root_stack = Vec::new();
-        for i in 0..self.stack.session_layer_count {
-            root_stack.push((i, LayerOffset::IDENTITY));
-            seen_layers.insert(i);
-        }
-        let root = self.stack.session_layer_count;
-        if let Some(stack) = self.stack.sublayer_stacks.get(&root) {
-            for &(i, offset) in stack {
-                if seen_layers.insert(i) {
-                    root_stack.push((i, offset));
+        // A prim inside an instance discards every local opinion (spec 11.3.3):
+        // its subtree is composed purely from the arcs the instance brings in,
+        // which arrive through ancestor-arc propagation below. Skipping the
+        // local root site here means local arcs are never followed in the first
+        // place — a post-build node prune would drop the local `Root` node but
+        // leave the Reference/Inherit/Variant nodes that local opinion spawned.
+        if !self.ctx.within_instance {
+            // The root L stage conceptually scans the stage's root layer stack,
+            // but the existing engine approximates implied-arc propagation by
+            // scanning every loaded layer flat (so inherits/specializes pick up
+            // opinions from referenced layer stacks without a separate
+            // propagation pass). Each layer still carries its own effective
+            // sublayer offset so that retiming flows through correctly.
+            let mut seen_layers = HashSet::new();
+            let mut root_stack = Vec::new();
+            for i in 0..self.stack.session_layer_count {
+                root_stack.push((i, LayerOffset::IDENTITY));
+                seen_layers.insert(i);
+            }
+            let root = self.stack.session_layer_count;
+            if let Some(stack) = self.stack.sublayer_stacks.get(&root) {
+                for &(i, offset) in stack {
+                    if seen_layers.insert(i) {
+                        root_stack.push((i, offset));
+                    }
                 }
             }
-        }
-        for i in 0..self.stack.len() {
-            if seen_layers.insert(i) {
-                root_stack.push((i, self.stack.effective_offset_for_layer(i)));
+            for i in 0..self.stack.len() {
+                if seen_layers.insert(i) {
+                    root_stack.push((i, self.stack.effective_offset_for_layer(i)));
+                }
             }
-        }
 
-        // Evaluate root composition site (no parent — this is the graph root).
-        self.eval_site(
-            path,
-            &root_stack,
-            ArcType::Root,
-            0,
-            NodeIndex::INVALID,
-            MapFunction::identity(),
-        )?;
+            // Evaluate root composition site (no parent — this is the graph root).
+            self.eval_site(
+                path,
+                &root_stack,
+                ArcType::Root,
+                0,
+                NodeIndex::INVALID,
+                MapFunction::identity(),
+            )?;
+        }
 
         // Propagate ancestor arcs: only match arcs whose target (composed)
         // prefix equals the parent path, then remap by appending the child name.

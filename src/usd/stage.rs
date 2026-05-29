@@ -2753,6 +2753,17 @@ def Shader "Mat" (
     }
 
     #[test]
+    fn instance_descendant_ignores_local_arc() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_local_arc.usda"))?;
+
+        // The local `over Child (references = </Other/Child>)` carries its own
+        // arc; both the local opinion and the node that arc spawns are
+        // discarded, so the value comes from the prototype, not /Other/Child.
+        assert_eq!(stage.value_at("/A/Child.v", 0.0)?, Some(sdf::Value::Double(1.0)));
+        Ok(())
+    }
+
+    #[test]
     fn model_hierarchy() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 

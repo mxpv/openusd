@@ -1053,21 +1053,14 @@ impl Cache {
         }
 
         // Inside an instance, local opinions on descendants are discarded
-        // (spec 11.3.3): the subtree is composed purely from the arcs. Pruning
-        // the local-opinion nodes here is the single chokepoint that makes
-        // every downstream query (values, fields, children, spec type) use the
-        // arc-only composition.
-        //
-        // TODO: instances are composed independently per occurrence. Composing
-        // identical instances once through a shared prototype representation
-        // (an instancing key plus synthesized `/__Prototype_N` prims) is not
-        // yet implemented.
-        if parent_ctx.within_instance {
-            let local = self.local_layers();
-            index.retain_nodes(|node| !Self::is_local_opinion(node, &local));
-        }
+        // (spec 11.3.3): the subtree is composed purely from the arcs the
+        // instance brings in. This is enforced at composition time — the index
+        // builder skips the local root site for any prim whose parent context
+        // is `within_instance`, so the local arcs are never followed — rather
+        // than pruned afterwards, which would leave the nodes those local arcs
+        // spawned.
 
-        // This prim is an instance when its (unpruned) composition declares
+        // This prim is an instance when its composition declares
         // `instanceable = true` and carries an arc; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
         // flag for its own subtree. Computed from the freshly built index to
