@@ -36,7 +36,7 @@ that broader spec behavior can be considered fully covered.
 | Core metadata fields (relationship spec) | `7.6.4` | :white_check_mark: | `0.1.2` | targetPaths, variability, custom |
 | Core metadata fields (variant set/variant spec) | `7.6.5-7` | :white_check_mark: | `0.2.0` | |
 | Spline specialized type | `7.4.2.4` | :construction: | | SplineKnot, interpolation modes, extrapolation, looping |
-| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; composed through arcs as of `main`. Runtime retiming during value resolution is tracked under Spec 12. |
+| Retiming specialized type ([layer offsets](https://openusd.org/release/glossary.html#usdglossary-layeroffset)) | `7.6.1.2.2` | :white_check_mark: | `0.1.2` | Parsed from subLayerOffsets; composed through arcs and applied during value resolution (Spec 12.3.2.1). |
 
 ## Paths (Spec 8)
 
@@ -69,13 +69,13 @@ that broader spec behavior can be considered fully covered.
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
 | [Sublayers](https://openusd.org/release/glossary.html#usdglossary-sublayers) | `10.3.1` | :white_check_mark: | `0.1.2` | Layer stack construction |
-| Sublayer offset composition | `10.3.1.1` | :white_check_mark: | `0.4.0` | Effective sublayer offsets are composed through nested sublayers and carried on each `Node` via `MapFunction::time_offset`. Runtime retiming is tracked under Spec 12.3.2.1. |
+| Sublayer offset composition | `10.3.1.1` | :white_check_mark: | `0.4.0` | Effective sublayer offsets are composed through nested sublayers and carried on each `Node` via `MapFunction::time_offset`, and applied during value resolution (Spec 12.3.2.1). |
 | [References](https://openusd.org/release/api/class_usd_references.html) (internal + external) | `10.3.2.1` | :white_check_mark: | `0.1.2` | Including `defaultPrim` fallback |
 | Reference [namespace mapping](https://openusd.org/release/api/class_pcp_map_function.html) | `10.3.2.1.1` | :white_check_mark: | `0.3.0` | `MapFunction` with source/target pairs |
-| Reference offset composition | `10.3.2.1.2` | :white_check_mark: | `0.4.0` | Reference offsets are carried through reference arcs and composed with target layer-stack offsets. Runtime retiming is tracked under Spec 12.3.2.1. |
+| Reference offset composition | `10.3.2.1.2` | :white_check_mark: | `0.4.0` | Reference offsets are carried through reference arcs and composed with target layer-stack offsets, and applied during value resolution (Spec 12.3.2.1). |
 | [Payloads](https://openusd.org/release/api/class_usd_payloads.html) | `10.3.2.2` | :white_check_mark: | `0.1.2` | Treated identically to references |
 | [Payload loading control](https://openusd.org/release/api/class_usd_stage_load_rules.html) | `10.3.2.2` | :white_check_mark: | `0.4.0` | `StageBuilder::initial_load_set` supports loading all payloads or leaving them unloaded |
-| Payload offset composition | `10.3.2.2.2` | :white_check_mark: | `0.4.0` | Loaded payload offsets compose like references; unloaded payload offsets are ignored. Runtime retiming is tracked under Spec 12.3.2.1. |
+| Payload offset composition | `10.3.2.2.2` | :white_check_mark: | `0.4.0` | Loaded payload offsets compose like references; unloaded payload offsets are ignored. Applied during value resolution (Spec 12.3.2.1). |
 | [Inherits](https://openusd.org/release/api/class_usd_inherits.html) | `10.3.2.3` | :white_check_mark: | `0.2.0` | Including implied inherit propagation |
 | Inherit namespace mapping (with identity) | `10.3.2.3.1` | :white_check_mark: | `0.3.0` | `from_pair_identity` adds `(/, /)` catch-all |
 | [Specializes](https://openusd.org/release/api/class_usd_specializes.html) | `10.3.2.4` | :white_check_mark: | `0.2.0` | |
@@ -121,13 +121,13 @@ that broader spec behavior can be considered fully covered.
 | List op resolution | `12.2.6` | :construction: | `0.4.0` | Partial: composition-arc list ops, composed `apiSchemas`, and composed `connectionPaths` (via `PrimIndex::resolve_path_list_op`) are resolved. Left for full metadata coverage: generic list-op field resolution for `targetPaths`, `clipSets`, and any registered list-op metadata field. |
 | Layer metadata (root layer only) | `12.2.7` | :white_check_mark: | `0.2.0` | `defaultPrim`, timing fields, etc. |
 | Fallback values | `12.2.8` | :construction: | | Requires schema registry |
-| Basic attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | Resolves authored `default`, `timeSamples`, and `ValueBlock`. Layer-offset retiming, value clips, and splines are tracked separately. |
-| Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.1.2` | `Stage::value_at` performs held/linear interpolation over composed samples. Per-node retiming and value clips are tracked separately. |
-| Layer-offset retiming during value resolution | `12.3.2.1` | :construction: | | Offsets are composed and stored on PCP nodes. Left: sample each contributing node in its local time (`stage_time * scale + offset`), merge retimed samples/defaults correctly, and cover sublayer/reference/payload offset cases. |
+| Basic attribute resolution | `12.3` | :white_check_mark: | `0.2.0` | Resolves authored `default`, `timeSamples`, and `ValueBlock`, with layer-offset retiming applied. Value clips and splines are tracked separately. |
+| Time-sample lookup and interpolation | `12.3, 12.5.1-2` | :white_check_mark: | `0.1.2` | `Stage::value_at` performs held/linear interpolation over composed samples, including per-node retiming and value clips. |
+| Layer-offset retiming during value resolution | `12.3.2.1` | :white_check_mark: | `main` | `PrimIndex::resolve_time_samples` maps each contributing node's authored sample times to stage time through the node's composed `map_to_root` offset (`stage_t = scale * layer_t + offset`), covering sublayer/reference/payload offsets. Strongest opinion wins among `timeSamples` nodes; `ValueBlock` blocks weaker layers. Cross-layer `default` vs `timeSamples` strength ordering is tracked under basic attribute resolution. |
 | Spline evaluation | `12.5.3` | :construction: | | Bezier/Hermite curve interpolation |
 | Interpolation (Held) | `12.5.1` | :white_check_mark: | `0.4.0` | `Stage::value_at(attr, time)` with `InterpolationType::Held`. |
 | Interpolation (Linear) | `12.5.2` | :white_check_mark: | `0.4.0` | `Stage::value_at(attr, time)` with `InterpolationType::Linear` (default). All §12.5.2 types incl. `quath`/`f`/`d` via slerp; held-fallback for unsupported types and past-last-sample. |
-| [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | `12.3` | :construction: | | `clips`/`clipSets` for split time samples |
+| [Value clips](https://openusd.org/release/api/_usd__page__value_clips.html) | `12.3.4` | :construction: | `main` | Explicit clips resolved during `Stage::value_at`: `clips`/`clipSets` parsing, manifest gating, active-clip selection, stage-to-clip time mapping (incl. jump discontinuities), and clip strength below local L (`Cache::value_at`). `Prim::has_clips`/`clip_sets` introspection. Left: template clips, `interpolateMissingClipValues` / missing-value sentinels, and `UsdClipsAPI` authoring. |
 | Relationship targets (raw + forwarded) | `12.4` | :construction: | | `targetPaths` readable; forwarding not implemented |
 | Attribute connections | `12.4` | :white_check_mark: | `0.4.0` | `Stage::connection_paths` folds list-op edits across every contributing layer via `PrimIndex::resolve_path_list_op`. Authoring on `Attribute` (`set_connections`, `add_connection`, `add_connection_prepended`, `remove_connection`, `clear_connections`, `has_authored_connections`). Stage-wide `usd::ConnectionGraph` indexes every edge and resolves chains to terminal sources. |
 
@@ -142,7 +142,7 @@ that broader spec behavior can be considered fully covered.
 | Prim definitions (property fallbacks) | `13.3` | :construction: | | |
 | Core schema types | `13.4` | :construction: | | |
 | [Value type names](https://openusd.org/release/api/class_sdf_value_type_name.html) | `13.3` | :construction: | | Attribute type validation |
-| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :construction: | | Fields readable; `apiSchemas` list-op composition applied. Left: composed-prim `fallbackPrimTypes`, value clip semantics for `clips`/`clipSets`, and any schema-domain behavior layered on these fields. |
+| Extension metadata fields (fallbackPrimTypes, apiSchemas, clips, clipSets) | `13.2` | :construction: | | Fields readable; `apiSchemas` list-op composition applied; explicit value-clip semantics for `clips`/`clipSets` resolved during value resolution (Spec 12.3.4). Left: composed-prim `fallbackPrimTypes`, template/missing-value clip behavior, and any schema-domain behavior layered on these fields. |
 | [Schema codegen](https://openusd.org/release/tut_generating_new_schema.html) | `13.3` | :construction: | | Generate typed APIs from schema definitions |
 
 ## Color (Spec 14)
