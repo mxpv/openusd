@@ -357,6 +357,103 @@ impl<'s> Attribute<'s> {
         Ok(self)
     }
 
+    /// Author the attribute's `connectionPaths` — the `.connect` targets
+    /// that wire this attribute to other properties. Mirrors C++
+    /// `UsdAttribute::SetConnections` / `UsdShadeInput::ConnectToSource`.
+    ///
+    /// Each path is a full property path including its namespace, e.g.
+    /// `</Mat/Tex.outputs:rgb>` or `</Mat.inputs:diffuseColor>`. Replaces
+    /// any previously authored connections (the list op is written
+    /// `explicit`). This is the primitive every UsdShade input/output
+    /// connection is built on.
+    pub fn set_connections<I>(self, targets: I) -> Result<Self, StageAuthoringError>
+    where
+        I: IntoIterator<Item = sdf::Path>,
+    {
+        let targets: Vec<sdf::Path> = targets.into_iter().collect();
+        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
+            spec.set_connection_paths(targets)
+        })
+    }
+
+    /// Append a single connection target to `connectionPaths`. No-op if
+    /// already present. Joins the appended-items list op (weaker than
+    /// prepended opinions). Mirrors C++ `UsdAttribute::AddConnection`
+    /// with the default back-of-append position.
+    pub fn add_connection(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
+        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
+            spec.add_connection_path(target, false)
+        })
+    }
+
+    /// Append a single connection target to the *prepended* list op, so
+    /// it composes stronger than connections from weaker layers. Mirrors
+    /// C++ `UsdAttribute::AddConnection` with a front-of-prepend position.
+    pub fn add_connection_prepended(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
+        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
+            spec.add_connection_path(target, true)
+        })
+    }
+
+    /// Remove a single connection target. Returns `Ok(true)` if it was
+    /// present. Takes `&self` (returns `bool`, not `Self`, so it doesn't
+    /// chain). Mirrors C++ `UsdAttribute::RemoveConnection`.
+    pub fn remove_connection(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
+        let path = self.path.clone();
+        let target = target.clone();
+        let mut removed = false;
+        self.stage.with_target_layer(|layer| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+                Some(mut spec) => {
+                    removed = spec.remove_connection_path(&target);
+                    let mut cl = sdf::ChangeList::new();
+                    if removed {
+                        cl.entry_mut(&path)
+                            .info_changed
+                            .insert(sdf::FieldKey::ConnectionPaths.as_str());
+                    }
+                    Ok(cl)
+                }
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no attribute spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(removed)
+    }
+
+    /// Clear all authored `connectionPaths` on the edit target.
+    /// Mirrors C++ `UsdAttribute::ClearConnections`.
+    pub fn clear_connections(self) -> Result<Self, StageAuthoringError> {
+        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| spec.clear_connection_paths())
+    }
+
+    /// `true` when any connection is authored on the edit target's layer.
+    /// Mirrors C++ `UsdAttribute::HasAuthoredConnections`.
+    //
+    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
+    pub fn has_authored_connections(&self) -> anyhow::Result<bool> {
+        Ok(!self.get_connections()?.is_empty())
+    }
+
+    /// Composed `connectionPaths`, flattened across layers. Returns an
+    /// empty vec when no connection is authored. Mirrors C++
+    /// `UsdAttribute::GetConnections`.
+    //
+    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
+    pub fn get_connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        match self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::ConnectionPaths)?
+        {
+            Some(sdf::Value::PathListOp(op)) => Ok(op.flatten()),
+            Some(sdf::Value::PathVec(v)) => Ok(v),
+            _ => Ok(Vec::new()),
+        }
+    }
+
     /// Composed default value, if any layer authored one.
     //
     // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
@@ -681,6 +778,49 @@ mod tests {
             stage.field::<sdf::Value>(binding.path(), sdf::FieldKey::Custom)?,
             Some(sdf::Value::Bool(true)),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn attribute_connections() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let mat = stage.define_prim("/Mat")?.set_type_name("Material")?;
+        mat.create_attribute("inputs:diffuseColor", "color3f")?;
+        let tex_out = stage
+            .define_prim("/Mat/Tex")?
+            .set_type_name("Shader")?
+            .create_attribute("outputs:rgb", "color3f")?;
+
+        let input = stage
+            .define_prim("/Mat/Surface")?
+            .set_type_name("Shader")?
+            .create_attribute("inputs:diffuseColor", "color3f")?
+            .set_connections([tex_out.path().clone()])?;
+
+        let conns = input.get_connections()?;
+        assert_eq!(conns, vec![tex_out.path().clone()]);
+        assert!(input.has_authored_connections()?);
+
+        // Re-authoring replaces, doesn't append.
+        let iface = sdf::Path::new("/Mat.inputs:diffuseColor")?;
+        let input = input.set_connections([iface.clone()])?;
+        assert_eq!(input.get_connections()?, vec![iface.clone()]);
+
+        // add_connection appends; dedups.
+        let input = input.add_connection(tex_out.path().clone())?;
+        assert_eq!(input.get_connections()?, vec![iface.clone(), tex_out.path().clone()]);
+        let input = input.add_connection(tex_out.path().clone())?;
+        assert_eq!(input.get_connections()?.len(), 2);
+
+        // remove_connection.
+        assert!(input.remove_connection(&iface)?);
+        assert_eq!(input.get_connections()?, vec![tex_out.path().clone()]);
+        assert!(!input.remove_connection(&iface)?);
+
+        // clear_connections.
+        let input = input.clear_connections()?;
+        assert!(!input.has_authored_connections()?);
+        assert!(input.get_connections()?.is_empty());
         Ok(())
     }
 
