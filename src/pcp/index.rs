@@ -543,14 +543,23 @@ impl PrimIndex {
 
     /// Resolves the `clipSets` strength order, if authored. Returns the ordered
     /// clip set names (strongest first), folding the list-op edits across every
-    /// contributing layer per generic list-op resolution (spec 12.2.6). When
-    /// unauthored, returns `None` so clip sets fall back to name order (spec
-    /// 12.3.4.1).
+    /// contributing layer per generic list-op resolution (spec 12.2.6).
+    ///
+    /// The list op is composed over an empty base, matching C++
+    /// `Usd_ClipSetDefinition`: an authored `clipSets` is the authoritative
+    /// ordered list, so a set absent from it is excluded. This makes the
+    /// return value three-way:
+    ///
+    /// - `None` — no opinion authored anywhere; clip sets fall back to name
+    ///   order (spec 12.3.4.1).
+    /// - `Some([])` — authored but composing to empty (explicit `[]` or a
+    ///   delete that cancels every name); no clip sets are active.
+    /// - `Some(names)` — the composed strength order.
     ///
     /// `clipSets` is a string list op; both the `String` and `Token` list-op
     /// encodings (and bare vecs, treated as explicit) are accepted, since USDC
     /// backends may decode it either way. A `ValueBlock` with no stronger
-    /// opinion blocks the field entirely, falling back to name order.
+    /// opinion leaves the field unauthored (`None`), falling back to name order.
     pub(crate) fn clip_sets_order(&self, stack: &LayerStack) -> Result<Option<Vec<String>>> {
         let mut ops = Vec::new();
         for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
@@ -2849,6 +2858,29 @@ def "P" {}
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, None);
+        Ok(())
+    }
+
+    /// An authored-but-empty `clipSets` (explicit `[]`) is distinct from an
+    /// unauthored field: it composes to `Some([])`, meaning no clip sets are
+    /// active, rather than `None` (name-order fallback). Matches C++
+    /// `Usd_ClipSetDefinition`, which applies the list op over an empty base.
+    #[test]
+    fn clip_sets_order_authored_empty() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "P" (
+    clipSets = []
+)
+{
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/P");
+
+        assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));
         Ok(())
     }
 }
