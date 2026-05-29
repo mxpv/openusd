@@ -379,7 +379,7 @@ fn collect_prim_paths(data: &dyn sdf::AbstractData) -> Result<Vec<sdf::Path>> {
 /// Supports `.usda` (text), `.usdc` (binary), `.usd` (auto-detected via magic
 /// bytes), and `.usdz` (archive — reads the first layer). Returns the parsed
 /// data as a boxed [`sdf::AbstractData`].
-pub fn open_layer(resolver: &impl ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+pub fn open_layer(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or_default();
 
     let mut asset = resolver.open_asset(resolved)?;
