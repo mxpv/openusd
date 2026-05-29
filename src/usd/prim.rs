@@ -719,6 +719,31 @@ impl<'s> Relationship<'s> {
         Ok(removed)
     }
 
+    /// `true` when any target opinion is authored — including an
+    /// explicit-empty list op (`rel r = []`), the canonical way to block
+    /// weaker-layer targets. Mirrors C++ `UsdRelationship::HasAuthoredTargets`.
+    //
+    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
+    pub fn has_authored_targets(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::TargetPaths)?
+            .is_some())
+    }
+
+    /// Composed raw `targetPaths`, with list-op edits folded across every
+    /// contributing layer. Returns an empty vec when no target is authored.
+    /// Mirrors C++ `UsdRelationship::GetTargets`.
+    ///
+    /// These are the raw targets (spec 12.4); target forwarding — recursively
+    /// chasing relationship-to-relationship chains — is not applied.
+    //
+    // TODO: drop `anyhow::Result` once `Stage::relationship_targets` returns
+    // a typed error.
+    pub fn get_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage.relationship_targets(&self.path)
+    }
+
     /// Borrow the relationship spec at `self.path` on the edit target's
     /// layer, apply `f`, and return `self` for chaining. `fields` names the
     /// authored metadata keys; `targets_changed` sets the target-list flag
@@ -938,6 +963,41 @@ mod tests {
             stage.field::<sdf::Value>(binding.path(), sdf::FieldKey::Custom)?,
             Some(sdf::Value::Bool(true)),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_targets() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/World/Material")?.set_type_name("Material")?;
+        stage.define_prim("/World/Material2")?.set_type_name("Material")?;
+        let mesh = stage.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
+
+        let binding = mesh
+            .create_relationship("material:binding")?
+            .add_target(sdf::Path::new("/World/Material")?)?
+            .add_target(sdf::Path::new("/World/Material2")?)?;
+        assert!(binding.has_authored_targets()?);
+        assert_eq!(
+            binding.get_targets()?,
+            vec![sdf::Path::new("/World/Material")?, sdf::Path::new("/World/Material2")?]
+        );
+
+        // Removing a target updates the composed list.
+        assert!(binding.remove_target(&sdf::Path::new("/World/Material2")?)?);
+        assert_eq!(binding.get_targets()?, vec![sdf::Path::new("/World/Material")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_targets_unauthored() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let rel = stage
+            .define_prim("/World/Mesh")?
+            .set_type_name("Mesh")?
+            .create_relationship("material:binding")?;
+        assert!(!rel.has_authored_targets()?);
+        assert!(rel.get_targets()?.is_empty());
         Ok(())
     }
 

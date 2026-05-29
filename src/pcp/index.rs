@@ -542,21 +542,34 @@ impl PrimIndex {
     }
 
     /// Resolves the `clipSets` strength order, if authored. Returns the ordered
-    /// clip set names (strongest first). When unauthored, clip sets fall back
-    /// to name order (spec 12.3.4.1). Composition across layers is limited to
-    /// the strongest opinion's list op.
+    /// clip set names (strongest first), folding the list-op edits across every
+    /// contributing layer per generic list-op resolution (spec 12.2.6). When
+    /// unauthored, returns `None` so clip sets fall back to name order (spec
+    /// 12.3.4.1).
     ///
     /// `clipSets` is a string list op; both the `String` and `Token` list-op
-    /// encodings are accepted, since USDC backends may decode it either way.
+    /// encodings (and bare vecs, treated as explicit) are accepted, since USDC
+    /// backends may decode it either way. A `ValueBlock` with no stronger
+    /// opinion blocks the field entirely, falling back to name order.
     pub(crate) fn clip_sets_order(&self, stack: &LayerStack) -> Result<Option<Vec<String>>> {
-        let Some(value) = self.resolve_field(FieldKey::ClipSets.as_str(), stack, None)? else {
+        let mut ops = Vec::new();
+        for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
+            match opinion?.value.into_owned() {
+                // Stop weaker opinions while keeping any stronger composed edits.
+                Value::ValueBlock => break,
+                Value::StringListOp(op) | Value::TokenListOp(op) => ops.push(op),
+                Value::StringVec(names) | Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(names)),
+                _ => continue,
+            }
+        }
+        if ops.is_empty() {
             return Ok(None);
-        };
-        Ok(match value {
-            Value::StringListOp(op) | Value::TokenListOp(op) => Some(op.compose_over(&Vec::new())),
-            Value::StringVec(names) | Value::TokenVec(names) => Some(names),
-            _ => None,
-        })
+        }
+        let mut result = Vec::new();
+        for op in ops.iter().rev() {
+            result = op.compose_over(&result);
+        }
+        Ok(Some(result))
     }
 
     /// Resolves explicit value clip sets while preserving the layer that
@@ -2779,6 +2792,63 @@ def "Root" {}
                 && *scale == 1.0),
             "expected sublayer offset to fall back to identity for scale=0: got {got:?}"
         );
+        Ok(())
+    }
+
+    /// `clipSets` order folds list-op edits across layers (spec 12.2.6): the
+    /// root's `prepend` and the sublayer's `append` both contribute, rather
+    /// than the strongest opinion alone winning.
+    #[test]
+    fn clip_sets_order_folds_layers() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+(
+    subLayers = [
+        @sub.usda@
+    ]
+)
+def "P" (
+    prepend clipSets = ["a"]
+)
+{
+}
+"#,
+        );
+        let sub = parse_usda(
+            r#"#usda 1.0
+over "P" (
+    append clipSets = ["b"]
+)
+{
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/P");
+
+        // Strongest-only resolution would drop the weaker "b"; folding keeps it.
+        assert_eq!(
+            index.clip_sets_order(&stack)?,
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        Ok(())
+    }
+
+    /// `clipSets` is unauthored across the stack: order resolves to `None` so
+    /// clip sets fall back to name order (spec 12.3.4.1).
+    #[test]
+    fn clip_sets_order_unauthored() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "P" {}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/P");
+
+        assert_eq!(index.clip_sets_order(&stack)?, None);
         Ok(())
     }
 }
