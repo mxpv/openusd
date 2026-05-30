@@ -455,17 +455,16 @@ impl<'s> Attribute<'s> {
     /// present. Takes `&self` (returns `bool`, not `Self`, so it doesn't
     /// chain). Mirrors C++ `UsdAttribute::RemoveConnection`.
     pub fn remove_connection(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
-        let path = self.path.clone();
         let target = target.clone();
         // The target may exist only through weaker layers. Check the composed
         // list first so this call can author a delete opinion even when the
         // edit-target layer has no local connection item to remove.
-        if !self.stage.connection_paths(&path)?.iter().any(|p| p == &target) {
+        if !self.stage.connection_paths(&self.path)?.iter().any(|p| p == &target) {
             return Ok(false);
         }
-        let type_name = self.stage.field::<String>(&path, sdf::FieldKey::TypeName)?;
+        let type_name = self.stage.field::<String>(&self.path, sdf::FieldKey::TypeName)?;
         let mut removed = false;
-        self.stage.with_target_layer_at(&path, |layer, spec_path| {
+        self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
             let created_attr = !layer.data().has_spec(&spec_path);
             let auto_ancestors = if !created_attr {
                 Vec::new()
