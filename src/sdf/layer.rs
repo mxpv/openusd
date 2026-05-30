@@ -441,10 +441,19 @@ impl Layer {
     /// auto-create — the owning prim may itself be missing, in which case
     /// both the leaf and its ancestors get over specs.
     pub fn missing_prim_chain_inclusive(&self, target: &Path) -> Vec<Path> {
-        std::iter::successors(Some(target.clone()), Path::parent)
-            .take_while(|p| !p.is_abs_root())
-            .filter(|p| !self.data.has_spec(p))
-            .collect()
+        // `namespace_chain` mirrors exactly what `ensure_prim_chain` will
+        // create, including variant set / variant scaffolding for variant
+        // paths. An unparseable target yields no entries — the subsequent
+        // authoring call surfaces the error.
+        namespace_chain(target)
+            .map(|chain| {
+                chain
+                    .into_iter()
+                    .map(|elem| elem.path)
+                    .filter(|p| !self.data.has_spec(p))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Remove the layer's `defaultPrim` metadata. Mirrors C++
@@ -554,64 +563,149 @@ impl AbstractData for Layer {
 /// path already holds a spec of a non-prim type — stamping `primChildren`
 /// onto an Attribute or Relationship spec would corrupt the layer.
 fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringError> {
-    let mut chain: Vec<Path> = Vec::new();
-    let mut cursor: Path = target.clone();
-    while !cursor.is_abs_root() {
-        chain.push(cursor.clone());
-        cursor = cursor.parent().expect("non-root has a parent (validated upstream)");
-    }
-    chain.reverse(); // root → leaf
+    let chain = namespace_chain(target)?;
 
-    for (i, child) in chain.iter().enumerate() {
-        let parent_path = if i == 0 { Path::abs_root() } else { chain[i - 1].clone() };
-        let parent_ty = if parent_path.is_abs_root() {
-            SpecType::PseudoRoot
-        } else {
-            SpecType::Prim
-        };
-
-        if let Some(existing) = data.spec_type(&parent_path) {
-            if existing != parent_ty {
+    // First pass: every existing spec along the chain must already hold the
+    // SpecType the chain expects, and every child-list field must be a
+    // `TokenVec` (or absent). Stamping `primChildren` onto an Attribute, or a
+    // variant set onto a non-prim, would corrupt the layer.
+    for elem in &chain {
+        if let Some(existing) = data.spec_type(&elem.path) {
+            if existing != elem.spec_type {
                 return Err(AuthoringError::InvalidPath {
-                    path: parent_path,
-                    reason: "ancestor spec exists with non-prim SpecType",
+                    path: elem.path.clone(),
+                    reason: "spec exists with an incompatible SpecType",
                 });
             }
         }
-        validate_token_vec(data, &parent_path, ChildrenKey::PrimChildren)?;
-
-        if let Some(existing) = data.spec_type(child) {
-            if existing != SpecType::Prim {
-                return Err(AuthoringError::InvalidPath {
-                    path: child.clone(),
-                    reason: "spec exists with non-prim SpecType",
-                });
-            }
-        }
+        validate_token_vec(data, &elem.parent, elem.child_key)?;
     }
 
-    for (i, child) in chain.iter().enumerate() {
-        let parent_path = if i == 0 { Path::abs_root() } else { chain[i - 1].clone() };
-        let child_name = child.name().expect("non-root has a name").to_owned();
+    // Materialize the pseudo-root so the first element's parent is present;
+    // every other element's parent is itself an earlier element in the chain.
+    if data.spec_type(&Path::abs_root()).is_none() {
+        data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
+    }
 
-        let parent_ty = if parent_path.is_abs_root() {
-            SpecType::PseudoRoot
-        } else {
-            SpecType::Prim
-        };
-        if data.spec_type(&parent_path).is_none() {
-            data.create_spec(parent_path.clone(), parent_ty);
-        }
+    // Second pass: register each child name on its parent and create the spec.
+    for elem in &chain {
+        let parent_spec = data
+            .spec_mut(&elem.parent)
+            .expect("parent created by an earlier element");
+        add_to_token_vec(parent_spec, &elem.parent, elem.child_key, &elem.child_name)?;
 
-        let parent_spec = data.spec_mut(&parent_path).expect("just ensured");
-        add_to_token_vec(parent_spec, &parent_path, ChildrenKey::PrimChildren, &child_name)?;
-
-        if data.spec_type(child).is_none() {
-            let spec = data.create_spec(child.clone(), SpecType::Prim);
-            spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Over));
+        if data.spec_type(&elem.path).is_none() {
+            let spec = data.create_spec(elem.path.clone(), elem.spec_type);
+            // Only prim specs carry a specifier; variant set / variant specs
+            // are pure scaffolding.
+            if elem.spec_type == SpecType::Prim {
+                spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Over));
+            }
         }
     }
     Ok(())
+}
+
+/// One spec on the namespace chain from the pseudo-root down to an authoring
+/// target, in root → leaf order. A variant selection `{set=sel}` expands into
+/// two elements: the variant set spec (`/Prim{set=}`) registered under the
+/// owning prim's `variantSetChildren`, then the variant spec (`/Prim{set=sel}`)
+/// registered under the variant set's `variantChildren`.
+struct ChainElement {
+    /// Path of the spec to ensure.
+    path: Path,
+    /// Spec type to create at `path` if absent.
+    spec_type: SpecType,
+    /// Path of the parent spec that lists `path` as a child.
+    parent: Path,
+    /// Child-list field on `parent` that records `child_name`.
+    child_key: ChildrenKey,
+    /// Name to register in the parent's child list.
+    child_name: String,
+}
+
+/// Decompose `target` — a prim path that may contain `{set=sel}` variant
+/// selections — into the ordered chain of specs that must exist for it to be
+/// authorable. Validates that `target` is an absolute, non-root, non-property
+/// path whose every component (prim name, variant set name, and variant
+/// selection) is a USD identifier.
+fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
+    let invalid = |reason: &'static str| AuthoringError::InvalidPath {
+        path: target.clone(),
+        reason,
+    };
+    if !target.is_abs() || target.is_abs_root() {
+        return Err(invalid("expected absolute non-root prim path"));
+    }
+    if target.is_property_path() {
+        return Err(invalid("expected prim path, got property path"));
+    }
+
+    let mut elems = Vec::new();
+    let mut cursor = Path::abs_root();
+    let mut rest = &target.as_str()[1..];
+
+    while !rest.is_empty() {
+        // A prim name runs up to the next path separator or variant opener.
+        let end = rest.find(['/', '{']).unwrap_or(rest.len());
+        let name = &rest[..end];
+        if !Path::is_valid_identifier(name) {
+            return Err(invalid("prim path component is not a USD identifier"));
+        }
+        let prim_path = cursor.append_path(name).map_err(|_| invalid("malformed prim path"))?;
+        elems.push(ChainElement {
+            path: prim_path.clone(),
+            spec_type: SpecType::Prim,
+            parent: cursor,
+            child_key: ChildrenKey::PrimChildren,
+            child_name: name.to_owned(),
+        });
+        cursor = prim_path;
+        rest = &rest[end..];
+
+        // Zero or more variant selections may follow the prim name.
+        while let Some(after_open) = rest.strip_prefix('{') {
+            let close = after_open
+                .find('}')
+                .ok_or_else(|| invalid("unterminated variant selection"))?;
+            let (set, selection) = after_open[..close]
+                .split_once('=')
+                .ok_or_else(|| invalid("variant selection is missing '='"))?;
+            if !Path::is_valid_identifier(set) {
+                return Err(invalid("variant set name is not a USD identifier"));
+            }
+            if selection.is_empty() || !Path::is_valid_identifier(selection) {
+                return Err(invalid("variant selection is not a USD identifier"));
+            }
+
+            let vset_path = cursor.append_variant_selection(set, "");
+            let variant_path = cursor.append_variant_selection(set, selection);
+            elems.push(ChainElement {
+                path: vset_path.clone(),
+                spec_type: SpecType::VariantSet,
+                parent: cursor,
+                child_key: ChildrenKey::VariantSetChildren,
+                child_name: set.to_owned(),
+            });
+            elems.push(ChainElement {
+                path: variant_path.clone(),
+                spec_type: SpecType::Variant,
+                parent: vset_path,
+                child_key: ChildrenKey::VariantChildren,
+                child_name: selection.to_owned(),
+            });
+            cursor = variant_path;
+            rest = &after_open[close + 1..];
+        }
+
+        match rest.strip_prefix('/') {
+            Some(next) if !next.is_empty() => rest = next,
+            Some(_) => return Err(invalid("malformed prim path")),
+            None if rest.is_empty() => {}
+            None => return Err(invalid("malformed prim path")),
+        }
+    }
+    Ok(elems)
 }
 
 /// Insert `name` into the `TokenVec` field at `key` on `spec`, creating the
@@ -659,30 +753,12 @@ fn require_spec_type_or_absent(data: &Data, path: &Path, expected: SpecType) -> 
 }
 
 /// Validate that `path` is an absolute, non-root, non-property path suitable
-/// for prim authoring — every `/`-separated component must be a USD identifier
-/// (no brackets, variant-selection segments, or stray dots).
+/// for prim authoring. Each prim component must be a USD identifier, optionally
+/// carrying `{set=sel}` variant selections whose set and selection names are
+/// themselves identifiers. Delegates to [`namespace_chain`] so the accepted
+/// grammar stays in lock-step with what [`ensure_prim_chain`] can build.
 fn require_prim_path(path: &Path) -> Result<(), AuthoringError> {
-    if !path.is_abs() || path.is_abs_root() {
-        return Err(AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "expected absolute non-root prim path",
-        });
-    }
-    if path.is_property_path() {
-        return Err(AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "expected prim path, got property path",
-        });
-    }
-    for segment in path.as_str()[1..].split('/') {
-        if !Path::is_valid_identifier(segment) {
-            return Err(AuthoringError::InvalidPath {
-                path: path.clone(),
-                reason: "prim path component is not a USD identifier",
-            });
-        }
-    }
-    Ok(())
+    namespace_chain(path).map(|_| ())
 }
 
 /// Split a property path like `/World/Mesh.points` into `(/World/Mesh,

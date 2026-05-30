@@ -1262,13 +1262,53 @@ mod tests {
                 .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
-        // Variant-selection segments aren't USD identifiers — reject them in prim paths.
+        // Well-formed variant selections are authorable (they build the variant
+        // set / variant scaffolding), but malformed ones — here an empty
+        // selection — must still be rejected.
         assert!(matches!(
-            layer
-                .create_prim("/A{x=y}/B", sdf::Specifier::Def, "Xform")
-                .unwrap_err(),
+            layer.create_prim("/A{x=}/B", sdf::Specifier::Def, "Xform").unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
+    }
+
+    /// Authoring a prim inside a variant builds the full variant set / variant
+    /// scaffolding with correct spec types and child registration.
+    #[test]
+    fn variant_authoring() -> Result<()> {
+        let mut layer = sdf::Layer::new_anonymous("variants.usda");
+        layer.create_prim("/Prim", sdf::Specifier::Def, "Xform")?;
+        layer.create_prim("/Prim{set=sel}/child", sdf::Specifier::Def, "Scope")?;
+
+        assert_eq!(layer.spec_type(&sdf::path("/Prim")?), Some(sdf::SpecType::Prim));
+        assert_eq!(
+            layer.spec_type(&sdf::path("/Prim{set=}")?),
+            Some(sdf::SpecType::VariantSet)
+        );
+        assert_eq!(
+            layer.spec_type(&sdf::path("/Prim{set=sel}")?),
+            Some(sdf::SpecType::Variant)
+        );
+        assert_eq!(
+            layer.spec_type(&sdf::path("/Prim{set=sel}/child")?),
+            Some(sdf::SpecType::Prim)
+        );
+
+        let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
+            match layer.get(&sdf::path(path)?, key.as_str())?.into_owned() {
+                sdf::Value::TokenVec(v) => Ok(v),
+                other => panic!("expected TokenVec at {path}, got {other:?}"),
+            }
+        };
+        assert_eq!(token_vec("/Prim", sdf::ChildrenKey::VariantSetChildren)?, vec!["set"]);
+        assert_eq!(
+            token_vec("/Prim{set=}", sdf::ChildrenKey::VariantChildren)?,
+            vec!["sel"]
+        );
+        assert_eq!(
+            token_vec("/Prim{set=sel}", sdf::ChildrenKey::PrimChildren)?,
+            vec!["child"]
+        );
+        Ok(())
     }
 
     #[test]
