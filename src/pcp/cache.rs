@@ -499,56 +499,60 @@ impl Cache {
         self.has_spec_at(path)
     }
 
+    /// Resolves a value over the composition nodes of a property's owning prim,
+    /// strongest first, reading each contributing layer live. `path` must be a
+    /// property path: it is re-anchored onto each node's prim (crossing the
+    /// `.` separator) and `probe` is called with that node's layer and the
+    /// re-anchored property path; the first `Some` wins.
+    ///
+    /// Reading live — rather than from a property-keyed index — keeps results
+    /// correct after a property spec is authored, since authoring a property
+    /// never reshapes the owning prim's composition graph (the prim index
+    /// stays valid).
+    fn find_property_node<T>(
+        &mut self,
+        path: &Path,
+        mut probe: impl FnMut(&sdf::Layer, &Path) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let prim_path = path.prim_path();
+        self.ensure_index(&prim_path)?;
+        let Some(index) = self.indices.get(&prim_path) else {
+            return Ok(None);
+        };
+        for node in index.nodes() {
+            let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
+                continue;
+            };
+            if let Some(found) = probe(self.stack.layer(node.layer_index), &prop_path) {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
+    }
+
     /// Like [`Self::has_spec`], but assumes `path` has already been redirected
     /// through [`Self::effective_path`]. Callers that redirected the path
     /// themselves (e.g. [`Self::value_at`]) use this to avoid redirecting twice.
     fn has_spec_at(&mut self, path: &Path) -> Result<bool> {
         if path.is_property_path() {
-            let prim_path = path.prim_path();
-            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-            self.ensure_index(&prim_path)?;
-            let Some(index) = self.indices.get(&prim_path) else {
-                return Ok(false);
-            };
-            for node in index.nodes() {
-                let prop_path = format!("{}{prop_suffix}", node.path);
-                if let Ok(p) = Path::new(&prop_path) {
-                    if self.stack.layer(node.layer_index).has_spec(&p) {
-                        return Ok(true);
-                    }
-                }
-            }
-            Ok(false)
-        } else {
-            self.ensure_index(path)?;
-            Ok(self.indices.get(path).is_some_and(|idx| !idx.is_empty()))
+            return Ok(self
+                .find_property_node(path, |layer, p| layer.has_spec(p).then_some(()))?
+                .is_some());
         }
+        self.ensure_index(path)?;
+        Ok(self.indices.get(path).is_some_and(|idx| !idx.is_empty()))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
     ///
     /// For a property path the type is read live from the owning prim's
-    /// composition nodes (like [`Self::has_spec_at`]) rather than from a
-    /// property-keyed index. Authoring a property never reshapes the prim
-    /// graph, so the prim index stays valid; reading the layers live picks up
-    /// a property spec added after this path was first queried, avoiding a
-    /// stale cached `None`.
+    /// composition nodes (see [`Self::find_property_node`]) rather than from a
+    /// property-keyed index, so a property spec added after this path was first
+    /// queried is picked up instead of a stale cached `None`.
     pub fn spec_type(&mut self, path: &Path) -> Result<Option<SpecType>> {
         let path = &self.effective_path(path)?;
         if path.is_property_path() {
-            let prim_path = path.prim_path();
-            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
-            self.ensure_index(&prim_path)?;
-            let Some(index) = self.indices.get(&prim_path) else {
-                return Ok(None);
-            };
-            for node in index.nodes() {
-                let prop_path = Path::new(&format!("{}{prop_suffix}", node.path))?;
-                if let Some(ty) = self.stack.layer(node.layer_index).spec_type(&prop_path) {
-                    return Ok(Some(ty));
-                }
-            }
-            return Ok(None);
+            return self.find_property_node(path, |layer, p| layer.spec_type(p));
         }
         self.ensure_index(path)?;
         let Some(index) = self.indices.get(path) else {
