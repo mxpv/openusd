@@ -459,7 +459,7 @@ impl<'a> Parser<'a> {
         self.ensure_pun('=')?;
 
         // Create the variant set spec.
-        let vset_path = sdf::Path::new(&format!("{}{{{name}=}}", prim_path))?;
+        let vset_path = prim_path.append_variant_selection(&name, "");
         let mut vset_spec = sdf::Spec::new(sdf::SpecType::VariantSet);
         let mut variant_children = Vec::new();
 
@@ -469,7 +469,7 @@ impl<'a> Parser<'a> {
 
             variant_children.push(variant_name.clone());
 
-            let variant_path = sdf::Path::new(&format!("{}{{{name}={variant_name}}}", prim_path))?;
+            let variant_path = prim_path.append_variant_selection(&name, &variant_name);
             let mut variant_spec = sdf::Spec::new(sdf::SpecType::Variant);
 
             // Optional metadata block.
@@ -626,9 +626,7 @@ impl<'a> Parser<'a> {
         // Check if there's an assignment
         if !self.is_next(Token::Punctuation('=')) {
             let path = current_path.append_property(name)?;
-            if !properties.contains(&name.to_string()) {
-                properties.push(name.to_string());
-            }
+            push_unique(properties, name);
 
             let mut base = Self::make_attribute_spec(&type_info, custom, variability);
             base.extend_from(spec);
@@ -1371,22 +1369,15 @@ impl<'a> Parser<'a> {
         op: Option<Token<'a>>,
         items: Vec<T>,
     ) -> Result<sdf::ListOp<T>> {
-        let mut list = sdf::ListOp::default();
-
         match op {
-            None => {
-                list.explicit = true;
-                list.explicit_items = items;
-            }
-            Some(Token::Prepend) => list.prepended_items = items,
-            Some(Token::Append) => list.appended_items = items,
-            Some(Token::Add) => list.added_items = items,
-            Some(Token::Delete) => list.deleted_items = items,
-            Some(Token::Reorder) => list.ordered_items = items,
+            None => Ok(sdf::ListOp::explicit(items)),
+            Some(Token::Prepend) => Ok(sdf::ListOp::prepended(items)),
+            Some(Token::Append) => Ok(sdf::ListOp::appended(items)),
+            Some(Token::Add) => Ok(sdf::ListOp::added(items)),
+            Some(Token::Delete) => Ok(sdf::ListOp::deleted(items)),
+            Some(Token::Reorder) => Ok(sdf::ListOp::ordered(items)),
             other => bail!("Unsupported list op: {other:?}"),
         }
-
-        Ok(list)
     }
 
     /// Decode a typed value based on USD's scalar/array/role type tables.
@@ -1669,7 +1660,7 @@ impl<'a> Parser<'a> {
                     layer_offset.offset = offset.try_as_double().context("Unexpected offset type, want double")?;
                 }
                 if let Some(scale) = scale {
-                    layer_offset.scale = scale.try_as_double().context("")?;
+                    layer_offset.scale = scale.try_as_double().context("Unexpected scale type, want double")?;
                 }
             }
             sublayer_offsets.push(layer_offset);

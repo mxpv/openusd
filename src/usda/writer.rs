@@ -364,17 +364,11 @@ impl<W: Write> Emitter<'_, W> {
     }
 
     fn write_loop(&mut self, d: &HashMap<String, Value>) -> Result<()> {
-        let f = |k: &str| -> f64 {
-            match d.get(k) {
-                Some(Value::Double(v)) => *v,
-                _ => 0.0,
-            }
-        };
-        let a = f("protoStart");
-        let b = f("protoEnd");
-        let c = f("numPreLoops");
-        let e = f("numPostLoops");
-        let g = f("valueOffset");
+        let a = get_double(d, "protoStart");
+        let b = get_double(d, "protoEnd");
+        let c = get_double(d, "numPreLoops");
+        let e = get_double(d, "numPostLoops");
+        let g = get_double(d, "valueOffset");
         self.write_indent()?;
         let mut buf = String::new();
         buf.push_str("loop: (");
@@ -397,19 +391,13 @@ impl<W: Write> Emitter<'_, W> {
         knot: &HashMap<String, Value>,
         knot_custom: Option<&HashMap<String, Value>>,
     ) -> Result<()> {
-        let d = |k: &str| -> f64 {
-            match knot.get(k) {
-                Some(Value::Double(v)) => *v,
-                _ => 0.0,
-            }
-        };
-        let time = d("time");
-        let value = d("value");
-        let pre_value = d("preValue");
-        let pre_slope = d("preTangentSlope");
-        let pre_width = d("preTangentWidth");
-        let post_slope = d("postTangentSlope");
-        let post_width = d("postTangentWidth");
+        let time = get_double(knot, "time");
+        let value = get_double(knot, "value");
+        let pre_value = get_double(knot, "preValue");
+        let pre_slope = get_double(knot, "preTangentSlope");
+        let pre_width = get_double(knot, "preTangentWidth");
+        let post_slope = get_double(knot, "postTangentSlope");
+        let post_width = get_double(knot, "postTangentWidth");
         let interp = match knot.get("nextInterpolationMode") {
             Some(Value::Token(t)) => t.as_str(),
             _ => "held",
@@ -1109,6 +1097,15 @@ fn format_matrix(s: &mut String, m: &[f64], dim: usize) -> Result<()> {
     }
     s.push(')');
     Ok(())
+}
+
+/// Looks up `key` in `dict` and returns its `Double` value, defaulting to `0.0`
+/// when the key is missing or holds a non-double.
+fn get_double(dict: &HashMap<String, Value>, key: &str) -> f64 {
+    match dict.get(key) {
+        Some(Value::Double(v)) => *v,
+        _ => 0.0,
+    }
 }
 
 fn format_double(s: &mut String, v: f64) {
