@@ -18,6 +18,7 @@ use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
 
+use super::clip::ResolvedClipSet;
 use super::deps::Dependencies;
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
 use super::mapping::MapFunction;
@@ -315,17 +316,25 @@ impl Cache {
             let clip_path = Path::new(&format!("{base}{relative}{suffix}"))?;
 
             // A manifest, when authored, declares which attributes the clips
-            // provide; skip clip sets that do not declare this attribute.
-            if let Some(manifest) = &set.manifest_asset {
-                let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
-                let declared = match self.clip_layer(manifest, manifest_layer)? {
-                    Some(layer) => layer.data().has_spec(&clip_path),
-                    None => false,
-                };
-                if !declared {
-                    continue;
+            // provide. A set whose manifest does not declare this attribute is
+            // skipped. A set that *does* declare it owns the attribute's
+            // time-varying value (spec 12.3.4.6): a gap in the active clip
+            // resolves to a manifest default or a value block, never to a
+            // weaker value source.
+            let manifest_declared = match &set.manifest_asset {
+                Some(manifest) => {
+                    let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
+                    let declared = match self.clip_layer(manifest, manifest_layer)? {
+                        Some(layer) => layer.data().has_spec(&clip_path),
+                        None => false,
+                    };
+                    if !declared {
+                        continue;
+                    }
+                    true
                 }
-            }
+                None => false,
+            };
 
             let Some(active) = set.active_clip(time) else {
                 continue;
@@ -335,32 +344,137 @@ impl Cache {
             };
             let clip_time = set.map_stage_to_clip(time);
 
-            let samples = match self.clip_layer(asset, resolved.asset_layer)? {
-                Some(layer) => match layer.data().try_get(&clip_path, FieldKey::TimeSamples.as_str())? {
-                    Some(value) => match value.into_owned() {
-                        Value::TimeSamples(samples) => Some(samples),
-                        _ => None,
-                    },
-                    None => None,
-                },
-                None => None,
-            };
+            if let Some(value) = self.clip_sample_at(asset, resolved.asset_layer, &clip_path, clip_time, interp)? {
+                return Ok(Some(value));
+            }
 
-            if let Some(samples) = samples {
-                if let Some(value) = interp(&samples, clip_time) {
+            // The active clip has no sample at `clip_time`. Only a
+            // manifest-declared attribute gets the gap-filling treatment;
+            // without a manifest there is no assurance this set owns the
+            // attribute, so fall through to weaker value sources.
+            if !manifest_declared {
+                continue;
+            }
+
+            // (a) Manifest default: synthesize a sample at the clip's active
+            //     time (spec 12.3.4.6).
+            if let Some(value) = self.manifest_default(resolved, &clip_path)? {
+                return Ok(Some(value));
+            }
+
+            // (b) interpolateMissingClipValues: interpolate the gap across the
+            //     nearest surrounding clips (spec 12.3.4.7).
+            if set.interpolate_missing {
+                if let Some(value) = self.interpolate_missing_value(resolved, &clip_path, time, interp)? {
                     return Ok(Some(value));
                 }
             }
 
-            // TODO: handle missing values in a declared clip (spec 12.3.4.6-7).
-            // When the manifest declares this attribute but the active clip has
-            // no samples at `clip_time`, the result should be the manifest's
-            // default, an empty sentinel, or — with `interpolateMissingClipValues`
-            // — a value interpolated from the nearest surrounding clips. We
-            // currently fall through to weaker value sources instead.
+            // (c) No default and nothing to interpolate: the manifest-declared
+            //     attribute is authoritatively absent — a value block — which
+            //     must not fall through to weaker sources (spec 12.3.4.6).
+            return Ok(Some(Value::ValueBlock));
         }
 
         Ok(None)
+    }
+
+    /// Reads the time samples for `clip_path` from a single clip layer and
+    /// interpolates at `clip_time`. Returns `None` when the layer is
+    /// unresolved or the attribute has no time samples there.
+    fn clip_sample_at(
+        &mut self,
+        asset: &str,
+        anchor_layer: usize,
+        clip_path: &Path,
+        clip_time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let samples = match self.clip_layer(asset, anchor_layer)? {
+            Some(layer) => match layer.data().try_get(clip_path, FieldKey::TimeSamples.as_str())? {
+                Some(value) => match value.into_owned() {
+                    Value::TimeSamples(samples) => Some(samples),
+                    _ => None,
+                },
+                None => None,
+            },
+            None => None,
+        };
+        Ok(samples.and_then(|samples| interp(&samples, clip_time)))
+    }
+
+    /// Reads the manifest's authored `default` for `clip_path` (spec 12.3.4.6):
+    /// when the active clip has a gap, the manifest default stands in as the
+    /// sample value. Returns `None` when no manifest is authored, the manifest
+    /// is unresolved, or it holds no usable default for the attribute.
+    fn manifest_default(&mut self, resolved: &ResolvedClipSet, clip_path: &Path) -> Result<Option<Value>> {
+        let Some(manifest) = resolved.set.manifest_asset.clone() else {
+            return Ok(None);
+        };
+        let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
+        let value = match self.clip_layer(&manifest, manifest_layer)? {
+            Some(layer) => layer
+                .data()
+                .try_get(clip_path, FieldKey::Default.as_str())?
+                .map(|value| value.into_owned()),
+            None => None,
+        };
+        Ok(value.and_then(|value| match value {
+            Value::ValueBlock | Value::None => None,
+            other => Some(other),
+        }))
+    }
+
+    /// Fills a gap in the active clip by interpolating across the nearest
+    /// surrounding clips that contribute a value (spec 12.3.4.7). Each
+    /// contributing clip is anchored on the stage timeline at the active stage
+    /// time it owns and valued by its sample there; `interp` then brackets
+    /// `time` between the nearest such anchors, exactly as if the clips' samples
+    /// formed one virtual sample map. The forward bracket is the next
+    /// contributing clip's start time and the backward bracket the previous
+    /// one's, matching the C++ resolver. When only one side contributes, its
+    /// value is held across the gap.
+    fn interpolate_missing_value(
+        &mut self,
+        resolved: &ResolvedClipSet,
+        clip_path: &Path,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let set = &resolved.set;
+        let anchor = resolved.asset_layer;
+        // Position of the active clip among the `active` entries at `time`.
+        let active_pos = set.active.iter().rposition(|&(stage, _)| stage <= time).unwrap_or(0);
+
+        // Forward: nearest later clip that contributes, anchored at its start.
+        let mut upper = None;
+        for &(stage, idx) in set.active.iter().skip(active_pos + 1) {
+            if let Some(asset) = set.asset_paths.get(idx) {
+                let clip_time = set.map_stage_to_clip(stage);
+                if let Some(value) = self.clip_sample_at(asset, anchor, clip_path, clip_time, interp)? {
+                    upper = Some((stage, value));
+                    break;
+                }
+            }
+        }
+
+        // Backward: nearest earlier clip that contributes, anchored at its start.
+        let mut lower = None;
+        for &(stage, idx) in set.active[..active_pos].iter().rev() {
+            if let Some(asset) = set.asset_paths.get(idx) {
+                let clip_time = set.map_stage_to_clip(stage);
+                if let Some(value) = self.clip_sample_at(asset, anchor, clip_path, clip_time, interp)? {
+                    lower = Some((stage, value));
+                    break;
+                }
+            }
+        }
+
+        Ok(match (lower, upper) {
+            (Some((lt, lv)), Some((ut, uv))) => interp(&vec![(lt, lv), (ut, uv)], time),
+            (Some((_, value)), None) | (None, Some((_, value))) => Some(value),
+            (None, None) => None,
+        })
     }
 
     /// Read-only access to the dependency map for change-driven invalidation.
@@ -1621,6 +1735,17 @@ mod tests {
         std::env::var("CARGO_MANIFEST_DIR").unwrap()
     }
 
+    /// Builds a stack with the root and every layer reachable through
+    /// references/sublayers collected in, so composition can resolve them
+    /// (clip layers are still opened lazily by the cache).
+    fn collected_stack(path: &str) -> LayerStack {
+        let resolver = DefaultResolver::new();
+        let layers = crate::layer::Collector::new(&resolver)
+            .collect(path)
+            .expect("collect layers");
+        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+    }
+
     /// Builds a one-layer stack whose root is loaded from a real path, so the
     /// resolver can anchor clip asset paths relative to it.
     fn single_layer_stack(path: &str) -> LayerStack {
@@ -1674,6 +1799,72 @@ mod tests {
         let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &interp);
         assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Double(10.0)));
         assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Double(20.0)));
+        Ok(())
+    }
+
+    /// Exact-match sampler: a clip resolves only at a frame it authors.
+    fn exact(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
+        samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone())
+    }
+
+    /// Linear sampler over `float` samples, held outside the sample range.
+    fn lerp(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
+        let as_f = |v: &Value| match v {
+            Value::Float(f) => *f as f64,
+            Value::Double(d) => *d,
+            _ => 0.0,
+        };
+        let first = samples.first()?;
+        if t <= first.0 {
+            return Some(first.1.clone());
+        }
+        let last = samples.last()?;
+        if t >= last.0 {
+            return Some(last.1.clone());
+        }
+        let w = samples.windows(2).find(|w| t >= w[0].0 && t <= w[1].0)?;
+        let f = (t - w[0].0) / (w[1].0 - w[0].0);
+        Some(Value::Double(as_f(&w[0].1) + (as_f(&w[1].1) - as_f(&w[0].1)) * f))
+    }
+
+    /// A gap in the active clip falls to the manifest's authored default
+    /// (spec 12.3.4.6): `t=0` is sampled from the clip, `t=10` (no sample)
+    /// resolves to the manifest default `99.0`.
+    #[test]
+    fn missing_clip_value_uses_manifest_default() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_default/root.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, Some(Value::Float(99.0)));
+        Ok(())
+    }
+
+    /// A manifest-declared attribute with no default and a gap resolves to a
+    /// value block (spec 12.3.4.6): the clip owns the attribute, so the gap
+    /// must not fall through to the referenced time samples (`777.0`).
+    #[test]
+    fn missing_clip_value_without_default_is_value_block() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(5.0)));
+        assert_eq!(size(&mut cache, 10.0)?, Some(Value::ValueBlock));
+        Ok(())
+    }
+
+    /// With `interpolateMissingClipValues`, a gap is filled by interpolating
+    /// across the surrounding contributing clips (spec 12.3.4.7): the empty
+    /// middle clip at `t=15` interpolates `0.0` (t=0 clip) and `100.0`
+    /// (t=20 clip) to `75.0`.
+    #[test]
+    fn interpolate_missing_clip_values_across_clips() -> Result<()> {
+        let root = format!("{}/fixtures/clip_missing_interp/root.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &lerp);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(0.0)));
+        assert_eq!(size(&mut cache, 15.0)?, Some(Value::Double(75.0)));
+        assert_eq!(size(&mut cache, 20.0)?, Some(Value::Double(100.0)));
         Ok(())
     }
 

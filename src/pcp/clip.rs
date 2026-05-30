@@ -23,6 +23,10 @@ pub(crate) mod keys {
     pub const ACTIVE: &str = "active";
     /// `(stageTime, clipTime)` pairs forming the stage-to-clip timing curve.
     pub const TIMES: &str = "times";
+    /// `bool` — interpolate across surrounding clips for an attribute whose
+    /// active clip has a gap, instead of falling to the manifest default
+    /// (spec 12.3.4.6-7).
+    pub const INTERPOLATE_MISSING: &str = "interpolateMissingClipValues";
 
     // ── Template clip keys (spec 12.3.4.1.3) ──────────────────────────────
     /// `#`-pattern asset path expanded into explicit `assetPaths`.
@@ -57,6 +61,10 @@ pub(crate) struct ClipSet {
     /// timing curve (spec 12.3.4.4). Duplicate stage times encode jump
     /// discontinuities (spec 12.3.4.8).
     pub times: Vec<(f64, f64)>,
+    /// When `true`, a gap in the active clip is filled by interpolating across
+    /// the nearest surrounding clips rather than by the manifest default
+    /// (spec 12.3.4.6-7).
+    pub interpolate_missing: bool,
 }
 
 /// A parsed clip set plus the layer provenance needed for asset resolution.
@@ -133,6 +141,8 @@ impl ClipSet {
             None => expand_template(set)?,
         };
 
+        let interpolate_missing = set.get(keys::INTERPOLATE_MISSING).and_then(as_bool).unwrap_or(false);
+
         Some(ClipSet {
             name: name.to_string(),
             prim_path,
@@ -140,6 +150,7 @@ impl ClipSet {
             asset_paths,
             active,
             times,
+            interpolate_missing,
         })
     }
 
@@ -364,6 +375,13 @@ fn as_f64(value: &Value) -> Option<f64> {
     }
 }
 
+fn as_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
 fn as_asset(value: &Value) -> Option<String> {
     match value {
         Value::AssetPath(s) | Value::String(s) | Value::Token(s) => Some(s.clone()),
@@ -514,6 +532,7 @@ mod tests {
             asset_paths: Vec::new(),
             active,
             times,
+            interpolate_missing: false,
         }
     }
 
