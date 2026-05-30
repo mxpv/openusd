@@ -394,10 +394,10 @@ pub struct EditContext<'a> {
 
 impl Drop for EditContext<'_> {
     fn drop(&mut self) {
-        // The saved target was valid when this guard was created and layer
-        // membership can't shrink underneath it, so the restore can't fail;
-        // ignore the result rather than panic in `drop`.
-        let _ = self.stage.set_edit_target(self.saved.clone());
+        // A `drop` must be infallible and must not re-enter the composition
+        // cache. The saved target was valid when the guard was created, so
+        // restoring it needs no validation — assign the field directly.
+        *self.stage.edit_target.borrow_mut() = self.saved.clone();
     }
 }
 
@@ -424,7 +424,10 @@ pub enum StageAuthoringError {
 
     /// The path being authored falls outside the current edit target's
     /// mapping co-domain, so it cannot be translated to a layer-local spec
-    /// path (e.g. authoring outside the prim a variant edit target scopes).
+    /// path. The local and variant edit targets map every path (their mapping
+    /// carries an identity catch-all), so this only arises for arc-based
+    /// targets with a restricted domain — e.g. an external reference or
+    /// payload edit context, which are not yet implemented.
     #[error("path {path} is outside the current edit target")]
     OutsideEditTarget {
         /// The scene-namespace path that could not be mapped.
@@ -697,9 +700,9 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
-        // Resolve the target layer and mapped path from a short-lived borrow
-        // so authoring doesn't deep-clone the `EditTarget` (its `MapFunction`
-        // owns heap path pairs) on every call.
+        // Read the layer index and mapped spec path under a short borrow of
+        // `edit_target` (which owns a heap `MapFunction`), releasing it before
+        // the `graph` borrow below.
         let (index, spec_path) = {
             let target = self.edit_target.borrow();
             let spec_path =
