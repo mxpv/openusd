@@ -226,9 +226,12 @@ impl Path {
         if self.path.is_empty() || self.path == "/" {
             return None;
         }
-        if self.is_property_path() {
-            let dot = self.path.rfind('.')?;
-            return Some(PathElement::Property(&self.path[dot + 1..]));
+        // A property's element is the whole property name (everything after
+        // the owning prim's `.`), matching `parent()`/`split_property()` so an
+        // element appended to `parent()` reconstructs the path — including
+        // names that themselves contain dots, e.g. `append_property("foo.bar")`.
+        if let Some((_, name)) = self.split_property() {
+            return Some(PathElement::Property(name));
         }
         // For a prim or variant path the last element is the last component;
         // reuse the single variant-grammar definition in `components`. A
@@ -794,6 +797,9 @@ mod tests {
         assert_eq!(last("/A").as_deref(), Some("A"));
         assert_eq!(last("/A.points").as_deref(), Some(".points"));
         assert_eq!(last("/A.inputs:diffuse").as_deref(), Some(".inputs:diffuse"));
+        // The whole property name, even one containing dots (so parent() plus
+        // this element reconstruct the path) — `append_property("foo.bar")`.
+        assert_eq!(last("/A.foo.bar").as_deref(), Some(".foo.bar"));
         assert_eq!(last("/A{set=sel}").as_deref(), Some("{set=sel}"));
         assert_eq!(last("/A{x=y}{p=q}").as_deref(), Some("{p=q}"));
         assert_eq!(last("/"), None);
