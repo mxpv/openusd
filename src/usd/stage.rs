@@ -284,27 +284,27 @@ impl Default for StagePopulationMask {
     }
 }
 
-/// Identifies which layer in a [`Stage`] receives authored opinions.
+/// Identifies which layer in a [`Stage`] receives authored opinions, and how
+/// stage-namespace paths map into that layer's namespace.
 ///
-/// Minimal subset of C++ `UsdEditTarget` — this is not yet a full
-/// implementation. C++ `UsdEditTarget` also carries a `PcpMapFunction` so
-/// authoring can be routed *through* a composition arc (writing into a
-/// specific variant, reference, or specialize). The Rust version currently
-/// stores only a `layer_index`; the path mapping is the identity, so every
-/// authoring call writes to the target layer using the composed path
-/// verbatim. The TODOs below track what still needs to land before this
-/// reaches parity.
+/// Subset of C++ `UsdEditTarget`. Like C++, it pairs a target layer with a
+/// `PcpMapFunction` (`mapping`) that translates a scene (stage-namespace) path
+/// into the spec (layer-namespace) path actually authored. For a plain local
+/// target the mapping is the identity, so authoring writes to the target layer
+/// using the composed path verbatim. A variant target (see
+/// [`for_local_direct_variant`](Self::for_local_direct_variant)) carries a
+/// mapping that inserts the `{set=sel}` segment so child opinions land inside
+/// the variant.
 //
-// TODO: carry a `pcp::NodeIndex` so variant / specialize edit contexts can
-// route writes inside a variant through `inverse(map_to_root)` (the math
-// already exists in `pcp::MapFunction`). Required to mirror C++
-// `UsdEditTarget(UsdPrim, UsdEditTarget::Reference)` flows used by variant
-// authoring.
+// TODO: arc-based constructor (`for_node`) routing writes into a specific
+// reference / specialize arc, mirroring C++
+// `UsdEditTarget(UsdPrim, UsdEditTarget::Reference)`. Needs a narrow
+// `pcp::Cache` accessor exposing the strongest matching node's `map_to_root`
+// plus the per-layer sublayer offset.
 //
-// TODO: provide an RAII guard (`UsdEditContext` analog) that scopes a target
-// switch and restores the previous target on `Drop`. Lets callers write
-// `let _ctx = stage.edit_at(variant)?;` and have authoring routed for the
-// scope of the block.
+// TODO: re-map embedded relationship / connection target paths in
+// `map_to_spec_path` (C++ `MapToSpecPath` step 2), rejecting paths whose
+// embedded targets fall outside the mapping's co-domain.
 //
 // TODO: validate target by `pcp::LayerStackIdentifier` instead of a bare
 // `usize` so an `EditTarget` constructed against one stage can't be applied
@@ -314,26 +314,90 @@ impl Default for StagePopulationMask {
 // TODO: add convenience constructors like `EditTarget::root(&stage)` /
 // `EditTarget::session(&stage)` so callers don't have to do
 // `session_layer_count`-arithmetic to address common slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EditTarget {
     layer_index: usize,
+    /// Maps the layer (spec) namespace to the stage (scene) namespace — the
+    /// same orientation as [`pcp::Node`](crate::pcp::Node)'s `map_to_root`.
+    /// Authoring queries it in reverse via
+    /// [`map_to_spec_path`](Self::map_to_spec_path). Identity for a local
+    /// target, so the default authoring path is unchanged.
+    mapping: pcp::MapFunction,
 }
 
 impl EditTarget {
     /// Edit target pointing at the layer with the given index in the stage's
-    /// layer stack. Session layers occupy the first `session_layer_count`
-    /// slots; the root layer sits at `session_layer_count`.
-    //
-    // TODO: replace the raw `usize` constructor once the
-    // `LayerStackIdentifier`-based validation above lands. The bare index
-    // is convenient but offers no guard against cross-stage misuse.
-    pub const fn for_layer_index(layer_index: usize) -> Self {
-        Self { layer_index }
+    /// layer stack, with an identity path mapping (scene path == spec path).
+    /// Session layers occupy the first `session_layer_count` slots; the root
+    /// layer sits at `session_layer_count`.
+    pub fn for_layer_index(layer_index: usize) -> Self {
+        Self {
+            layer_index,
+            mapping: pcp::MapFunction::identity(),
+        }
+    }
+
+    /// Edit target that routes authoring into a local variant. `var_sel_path`
+    /// is the variant-selection prim path (e.g. `/Prim{set=sel}`) on the
+    /// target layer; child prim and property opinions authored at the stripped
+    /// scene path (`/Prim/child`) land at `/Prim{set=sel}/child` in the layer.
+    ///
+    /// Mirrors C++ `UsdEditTarget::ForLocalDirectVariant`. Paths outside the
+    /// variant prim map to themselves, so authoring elsewhere is unaffected.
+    pub fn for_local_direct_variant(layer_index: usize, var_sel_path: sdf::Path) -> Self {
+        let stripped = var_sel_path.strip_all_variant_selections();
+        Self {
+            layer_index,
+            mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
+        }
     }
 
     /// Returns the layer index this target writes to.
-    pub const fn layer_index(self) -> usize {
+    pub fn layer_index(&self) -> usize {
         self.layer_index
+    }
+
+    /// Maps a scene (stage-namespace) path to the spec (layer-namespace) path
+    /// authoring should write at. Returns `None` when `scene_path` falls
+    /// outside the mapping's co-domain (C++ returns an empty `SdfPath`).
+    ///
+    /// Mirrors C++ `UsdEditTarget::MapToSpecPath`, which queries the mapping in
+    /// the target-to-source direction.
+    pub fn map_to_spec_path(&self, scene_path: &sdf::Path) -> Option<sdf::Path> {
+        self.mapping.map_target_to_source(scene_path)
+    }
+}
+
+/// RAII guard that scopes a [`Stage`] edit-target switch, restoring the
+/// previous target when dropped. Created by
+/// [`Stage::edit_context`](Stage::edit_context); mirrors C++ `UsdEditContext`.
+///
+/// ```no_run
+/// # use openusd::usd::{Stage, EditTarget};
+/// # fn f(stage: &Stage) -> anyhow::Result<()> {
+/// {
+///     let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
+///     stage.define_prim("/World")?; // authored into layer 0
+/// } // previous edit target restored here
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The guard is neither `Clone` nor `Copy`, mirroring C++'s deleted copy and
+/// assignment. Note that [`Stage::set_default_prim`](Stage::set_default_prim)
+/// always targets the root layer, so wrapping it in an `EditContext` has no
+/// effect.
+pub struct EditContext<'a> {
+    stage: &'a Stage,
+    saved: EditTarget,
+}
+
+impl Drop for EditContext<'_> {
+    fn drop(&mut self) {
+        // The saved target was valid when this guard was created and layer
+        // membership can't shrink underneath it, so the restore can't fail;
+        // ignore the result rather than panic in `drop`.
+        let _ = self.stage.set_edit_target(self.saved.clone());
     }
 }
 
@@ -357,6 +421,15 @@ pub enum StageAuthoringError {
         /// The current number of layers.
         count: usize,
     },
+
+    /// The path being authored falls outside the current edit target's
+    /// mapping co-domain, so it cannot be translated to a layer-local spec
+    /// path (e.g. authoring outside the prim a variant edit target scopes).
+    #[error("path {path} is outside the current edit target")]
+    OutsideEditTarget {
+        /// The scene-namespace path that could not be mapped.
+        path: sdf::Path,
+    },
 }
 
 /// A composed USD stage.
@@ -378,7 +451,7 @@ pub struct Stage {
     /// spec.
     interpolation_type: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
-    edit_target: Cell<EditTarget>,
+    edit_target: RefCell<EditTarget>,
 }
 
 impl Stage {
@@ -412,7 +485,7 @@ impl Stage {
     /// Returns the current edit target — the layer that authoring methods
     /// write into.
     pub fn edit_target(&self) -> EditTarget {
-        self.edit_target.get()
+        self.edit_target.borrow().clone()
     }
 
     /// Replace the current edit target. Subsequent authoring calls write to
@@ -427,8 +500,21 @@ impl Stage {
             return Err(StageAuthoringError::LayerOutOfRange { index, count });
         }
 
-        self.edit_target.set(target);
+        *self.edit_target.borrow_mut() = target;
         Ok(())
+    }
+
+    /// Scope a temporary edit-target switch. Sets `target` as the current edit
+    /// target and returns an [`EditContext`] guard that restores the previous
+    /// target when dropped — including on early return via `?`. Mirrors C++
+    /// `UsdEditContext`.
+    ///
+    /// Returns an error (leaving the current target unchanged) when `target`
+    /// fails the same validation as [`set_edit_target`](Self::set_edit_target).
+    pub fn edit_context(&self, target: EditTarget) -> Result<EditContext<'_>, StageAuthoringError> {
+        let saved = self.edit_target.borrow().clone();
+        self.set_edit_target(target)?;
+        Ok(EditContext { stage: self, saved })
     }
 
     /// Author a `def` prim spec at `path` on the edit target's layer and
@@ -438,8 +524,7 @@ impl Stage {
     /// (`create_attribute`, `create_relationship`).
     pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
-        let layer_path = path.clone();
-        self.with_target_layer(|layer| {
+        self.with_target_layer_at(&path, |layer, layer_path| {
             // Snapshot pre-author state so an idempotent call (existing
             // spec, matching specifier) emits an empty `ChangeList` instead
             // of triggering a stale-index drop.
@@ -481,8 +566,7 @@ impl Stage {
     /// setters on the returned handle to author additional fields.
     pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
         let path = path.into();
-        let layer_path = path.clone();
-        self.with_target_layer(|layer| {
+        self.with_target_layer_at(&path, |layer, layer_path| {
             // `Layer::override_prim` is idempotent at the leaf when a spec
             // already exists. Record `ADD_INERT_PRIM` only for newly created
             // specs; auto-created ancestors are emitted unconditionally
@@ -514,8 +598,7 @@ impl Stage {
     ) -> Result<super::Attribute<'_>, StageAuthoringError> {
         let path = path.into();
         let type_name = type_name.into();
-        let layer_path = path.clone();
-        self.with_target_layer(|layer| {
+        self.with_target_layer_at(&path, |layer, layer_path| {
             // The owning prim and all its missing ancestors get
             // auto-created as `over` specs by `create_attribute`.
             let owning_prim = layer_path.prim_path();
@@ -540,8 +623,7 @@ impl Stage {
         path: impl Into<sdf::Path>,
     ) -> Result<super::Relationship<'_>, StageAuthoringError> {
         let path = path.into();
-        let layer_path = path.clone();
-        self.with_target_layer(|layer| {
+        self.with_target_layer_at(&path, |layer, layer_path| {
             let owning_prim = layer_path.prim_path();
             let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
             layer.create_relationship(layer_path.clone(), sdf::Variability::Varying, true)?;
@@ -592,8 +674,16 @@ impl Stage {
         })
     }
 
-    /// Borrow the edit target's layer, hand it to `f`, then drive cache
-    /// invalidation from the [`sdf::ChangeList`] the closure returns.
+    /// Map `scene_path` through the current edit target, borrow the target's
+    /// layer, and hand both the layer and the mapped spec path to `f`, then
+    /// drive cache invalidation from the [`sdf::ChangeList`] the closure
+    /// returns.
+    ///
+    /// The closure receives the spec (layer-namespace) path; under a local
+    /// target this equals `scene_path`, under a variant target it carries the
+    /// `{set=sel}` segment. The closure must author at, and record its
+    /// `ChangeList` against, that spec path — `did_change` consumes paths in
+    /// layer namespace.
     ///
     /// Callers must drop any typed spec view inside the closure — the closure
     /// can't return a borrow from `&mut layer`. The returned [`sdf::ChangeList`]
@@ -603,11 +693,16 @@ impl Stage {
     /// On any post-mutation error the cache falls back to "blow the world".
     /// The one error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
     /// which is detected before any layer state changes.
-    pub(super) fn with_target_layer<F>(&self, f: F) -> Result<bool, StageAuthoringError>
+    pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
-        let target = self.edit_target.get();
+        let target = self.edit_target.borrow().clone();
+        let spec_path = target
+            .map_to_spec_path(scene_path)
+            .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
+                path: scene_path.clone(),
+            })?;
         let mut cache = self.graph.borrow_mut();
         let count = cache.layer_count();
         let index = target.layer_index;
@@ -615,14 +710,16 @@ impl Stage {
             let layer = cache
                 .layer_mut(index)
                 .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
-            f(layer)
+            f(layer, spec_path)
         };
         Self::finalize_layer(&mut cache, index, result)
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
     /// invalidation from the closure's [`sdf::ChangeList`]. See
-    /// [`Stage::with_target_layer`] for the contract.
+    /// [`Stage::with_target_layer_at`] for the contract. Unlike that method,
+    /// this ignores the edit target and its mapping — `defaultPrim` is a
+    /// root-layer field authored at `abs_root` verbatim.
     fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
         F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
@@ -1524,7 +1621,7 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
             population_mask: self.population_mask,
             on_composition_error,
             interpolation_type: Cell::new(self.interpolation_type),
-            edit_target: Cell::new(edit_target),
+            edit_target: RefCell::new(edit_target),
         }
     }
 }
@@ -3304,6 +3401,120 @@ def "I2" (
         assert_eq!(stage.edit_target().layer_index(), 1);
         stage.define_prim("/World")?.set_type_name("Xform")?;
         assert_eq!(stage.spec_type("/World")?, Some(sdf::SpecType::Prim));
+        Ok(())
+    }
+
+    /// A local edit target maps scene paths to themselves, so authoring is
+    /// unchanged from the bare-`layer_index` behavior.
+    #[test]
+    fn edit_target_local_is_identity() -> Result<()> {
+        let target = EditTarget::for_layer_index(0);
+        let path = sdf::path("/A/B")?;
+        assert_eq!(target.map_to_spec_path(&path), Some(path));
+        Ok(())
+    }
+
+    /// A variant edit target rewrites scene paths into the `{set=sel}`
+    /// namespace; paths outside the variant prim map to themselves.
+    #[test]
+    fn variant_target_maps_selection() -> Result<()> {
+        let target = EditTarget::for_local_direct_variant(0, sdf::path("/Prim{set=sel}")?);
+        assert_eq!(
+            target.map_to_spec_path(&sdf::path("/Prim/child")?),
+            Some(sdf::path("/Prim{set=sel}/child")?)
+        );
+        assert_eq!(
+            target.map_to_spec_path(&sdf::path("/Prim.attr")?),
+            Some(sdf::path("/Prim{set=sel}.attr")?)
+        );
+        assert_eq!(
+            target.map_to_spec_path(&sdf::path("/Other")?),
+            Some(sdf::path("/Other")?)
+        );
+        Ok(())
+    }
+
+    /// Authoring a child prim under a variant edit target lands the spec at
+    /// the `{set=sel}` path in the target layer.
+    #[test]
+    fn variant_target_routes_child() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.edit_target().layer_index();
+        stage.define_prim("/Prim")?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        stage.define_prim("/Prim/child")?;
+
+        let landed = {
+            use sdf::AbstractData;
+            let mut cache = stage.graph.borrow_mut();
+            let layer = cache.layer_mut(root).expect("root layer");
+            layer.spec_type(&sdf::path("/Prim{set=sel}/child")?)
+        };
+        assert_eq!(landed, Some(sdf::SpecType::Prim));
+        Ok(())
+    }
+
+    /// A property authored under a variant edit target carries its `.attr`
+    /// suffix into the `{set=sel}` namespace.
+    #[test]
+    fn variant_target_routes_property() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.edit_target().layer_index();
+        stage.define_prim("/Prim")?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        stage.create_attribute("/Prim.size", "double")?;
+
+        let landed = {
+            use sdf::AbstractData;
+            let mut cache = stage.graph.borrow_mut();
+            let layer = cache.layer_mut(root).expect("root layer");
+            layer.spec_type(&sdf::path("/Prim{set=sel}.size")?)
+        };
+        assert_eq!(landed, Some(sdf::SpecType::Attribute));
+        Ok(())
+    }
+
+    /// `edit_context` restores the previous edit target when the guard drops.
+    #[test]
+    fn edit_context_restores_on_drop() -> Result<()> {
+        let session = fixture_path("session_layer.usda");
+        let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
+        assert_eq!(stage.edit_target().layer_index(), 1);
+        {
+            let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
+            assert_eq!(stage.edit_target().layer_index(), 0);
+        }
+        assert_eq!(stage.edit_target().layer_index(), 1);
+        Ok(())
+    }
+
+    /// The guard restores the target even when the scope exits early via `?`.
+    #[test]
+    fn edit_context_restores_on_error() -> Result<()> {
+        let session = fixture_path("session_layer.usda");
+        let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
+        assert_eq!(stage.edit_target().layer_index(), 1);
+        let authored: std::result::Result<(), StageAuthoringError> = (|| {
+            let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
+            // Layer 0 is the read-only session layer; the write fails and `?`
+            // returns from this closure with the guard still in scope.
+            stage.define_prim("/X")?;
+            Ok(())
+        })();
+        assert!(authored.is_err());
+        assert_eq!(stage.edit_target().layer_index(), 1);
+        Ok(())
+    }
+
+    /// A bad target is rejected at `edit_context`, leaving the current target
+    /// unchanged.
+    #[test]
+    fn edit_context_rejects_bad_target() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let before = stage.edit_target().layer_index();
+        let result = stage.edit_context(EditTarget::for_layer_index(99));
+        assert!(matches!(result, Err(StageAuthoringError::LayerOutOfRange { .. })));
+        assert_eq!(stage.edit_target().layer_index(), before);
         Ok(())
     }
 

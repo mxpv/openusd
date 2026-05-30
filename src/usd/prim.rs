@@ -98,9 +98,8 @@ impl<'s> Prim<'s> {
     /// [`Stage::define_prim`]: crate::usd::Stage::define_prim
     /// [`Stage::override_prim`]: crate::usd::Stage::override_prim
     pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
-        let path = self.path.clone();
         let name = name.into();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
                 Some(mut spec) => {
@@ -257,9 +256,8 @@ impl<'s> Prim<'s> {
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),
     {
-        let path = self.path.clone();
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             // Detect the read-only case explicitly — otherwise `prim_mut`
             // returns `None` for both "no spec" and "layer not writable"
             // and we'd mask `ReadOnly` as `InvalidPath`.
@@ -383,8 +381,7 @@ impl<'s> Attribute<'s> {
     /// a runtime-built string.
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        let path = self.path.clone();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
@@ -468,8 +465,8 @@ impl<'s> Attribute<'s> {
         }
         let type_name = self.stage.field::<String>(&path, sdf::FieldKey::TypeName)?;
         let mut removed = false;
-        self.stage.with_target_layer(|layer| {
-            let created_attr = !layer.data().has_spec(&path);
+        self.stage.with_target_layer_at(&path, |layer, spec_path| {
+            let created_attr = !layer.data().has_spec(&spec_path);
             let auto_ancestors = if !created_attr {
                 Vec::new()
             } else {
@@ -477,21 +474,21 @@ impl<'s> Attribute<'s> {
                 // Use the composed type name and leave `custom` unauthored so
                 // the spec is only as strong as needed for the connection edit.
                 let type_name = type_name.clone().ok_or_else(|| sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
+                    path: spec_path.clone(),
                     reason: "cannot author connection delete for typeless composed attribute",
                 })?;
-                let owning_prim = path.prim_path();
+                let owning_prim = spec_path.prim_path();
                 let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
-                layer.create_attribute(path.clone(), type_name, sdf::Variability::Varying, false)?;
+                layer.create_attribute(spec_path.clone(), type_name, sdf::Variability::Varying, false)?;
                 auto_ancestors
             };
             let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+            match data.spec_mut(&spec_path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
                     removed = spec.delete_connection_path(&target);
                     let mut cl = sdf::ChangeList::new();
                     if removed {
-                        let entry = cl.entry_mut(&path);
+                        let entry = cl.entry_mut(&spec_path);
                         if created_attr {
                             entry.flags |= sdf::ChangeFlags::ADD_PROPERTY;
                         }
@@ -504,7 +501,7 @@ impl<'s> Attribute<'s> {
                     Ok(cl)
                 }
                 None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
+                    path: spec_path.clone(),
                     reason: "no attribute spec at path on the edit target layer",
                 }),
             }
@@ -527,8 +524,7 @@ impl<'s> Attribute<'s> {
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> bool,
     {
-        let path = self.path.clone();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
@@ -605,9 +601,8 @@ impl<'s> Attribute<'s> {
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
     {
-        let path = self.path.clone();
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
                 Some(mut spec) => {
@@ -694,10 +689,9 @@ impl<'s> Relationship<'s> {
     /// `Self`), so it doesn't fit the chain pattern. Skips cache invalidation
     /// when the target wasn't authored (no mutation occurred).
     pub fn remove_target(&self, target: &sdf::Path) -> Result<bool, StageAuthoringError> {
-        let path = self.path.clone();
         let target = target.clone();
         let mut removed = false;
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
                 Some(mut spec) => {
@@ -789,9 +783,8 @@ impl<'s> Relationship<'s> {
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
     {
-        let path = self.path.clone();
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
-        self.stage.with_target_layer(|layer| {
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
                 Some(mut spec) => {
@@ -1290,7 +1283,7 @@ mod tests {
     fn add_api_schema_merges() -> anyhow::Result<()> {
         let stage = stage()?;
         stage.define_prim("/World")?;
-        stage.with_target_layer(|layer| {
+        stage.with_target_layer_at(&sdf::Path::new("/World").expect("valid path"), |layer, _path| {
             let data = layer.writable_data_mut()?;
             let spec = data
                 .spec_mut(&sdf::Path::new("/World").expect("valid path"))
