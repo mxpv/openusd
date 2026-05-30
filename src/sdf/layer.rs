@@ -564,12 +564,29 @@ impl AbstractData for Layer {
 /// onto an Attribute or Relationship spec would corrupt the layer.
 fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringError> {
     let chain = namespace_chain(target)?;
+    let abs_root = Path::abs_root();
+
+    // The first element's parent is the pseudo-root; if a spec already sits
+    // there it must be a `PseudoRoot`, or `primChildren` would be stamped onto
+    // the wrong spec type below.
+    if let Some(existing) = data.spec_type(&abs_root) {
+        if existing != SpecType::PseudoRoot {
+            return Err(AuthoringError::InvalidPath {
+                path: abs_root,
+                reason: "root spec exists with a non-PseudoRoot SpecType",
+            });
+        }
+    }
+
+    // The parent of each element is positional: the preceding element, or the
+    // pseudo-root for the first.
+    let parent_of = |i: usize| if i == 0 { &abs_root } else { &chain[i - 1].path };
 
     // First pass: every existing spec along the chain must already hold the
     // SpecType the chain expects, and every child-list field must be a
     // `TokenVec` (or absent). Stamping `primChildren` onto an Attribute, or a
     // variant set onto a non-prim, would corrupt the layer.
-    for elem in &chain {
+    for (i, elem) in chain.iter().enumerate() {
         if let Some(existing) = data.spec_type(&elem.path) {
             if existing != elem.spec_type {
                 return Err(AuthoringError::InvalidPath {
@@ -578,21 +595,20 @@ fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringErro
                 });
             }
         }
-        validate_token_vec(data, &elem.parent, elem.child_key)?;
+        validate_token_vec(data, parent_of(i), elem.child_key)?;
     }
 
     // Materialize the pseudo-root so the first element's parent is present;
     // every other element's parent is itself an earlier element in the chain.
-    if data.spec_type(&Path::abs_root()).is_none() {
-        data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
+    if data.spec_type(&abs_root).is_none() {
+        data.create_spec(abs_root.clone(), SpecType::PseudoRoot);
     }
 
     // Second pass: register each child name on its parent and create the spec.
-    for elem in &chain {
-        let parent_spec = data
-            .spec_mut(&elem.parent)
-            .expect("parent created by an earlier element");
-        add_to_token_vec(parent_spec, &elem.parent, elem.child_key, &elem.child_name)?;
+    for (i, elem) in chain.iter().enumerate() {
+        let parent = parent_of(i);
+        let parent_spec = data.spec_mut(parent).expect("parent created by an earlier element");
+        add_to_token_vec(parent_spec, parent, elem.child_key, &elem.child_name)?;
 
         if data.spec_type(&elem.path).is_none() {
             let spec = data.create_spec(elem.path.clone(), elem.spec_type);
@@ -611,25 +627,40 @@ fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringErro
 /// two elements: the variant set spec (`/Prim{set=}`) registered under the
 /// owning prim's `variantSetChildren`, then the variant spec (`/Prim{set=sel}`)
 /// registered under the variant set's `variantChildren`.
+///
+/// The parent is positional — every element's parent is the preceding element
+/// (or the pseudo-root for the first), so it isn't stored. `child_name` is kept
+/// because it is not recoverable from `path` for variant elements
+/// (`/Prim{set=}.name()` is `Prim{set=}`, not the set name `set`).
 struct ChainElement {
     /// Path of the spec to ensure.
     path: Path,
     /// Spec type to create at `path` if absent.
     spec_type: SpecType,
-    /// Path of the parent spec that lists `path` as a child.
-    parent: Path,
-    /// Child-list field on `parent` that records `child_name`.
+    /// Child-list field on the parent that records `child_name`.
     child_key: ChildrenKey,
     /// Name to register in the parent's child list.
     child_name: String,
 }
 
-/// Decompose `target` — a prim path that may contain `{set=sel}` variant
-/// selections — into the ordered chain of specs that must exist for it to be
-/// authorable. Validates that `target` is an absolute, non-root, non-property
-/// path whose every component (prim name, variant set name, and variant
-/// selection) is a USD identifier.
-fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
+/// A component of a prim path, yielded in root → leaf order by
+/// [`parse_prim_path`].
+enum PathToken<'a> {
+    /// A prim name registered under its parent's `primChildren`.
+    Prim(&'a str),
+    /// A `{set=sel}` variant selection on the current prim.
+    Variant { set: &'a str, selection: &'a str },
+}
+
+/// Parse and validate a prim path that may carry `{set=sel}` variant
+/// selections, invoking `emit` for each [`PathToken`] in root → leaf order.
+///
+/// Validates that `target` is absolute, non-root, non-property and that every
+/// prim name, variant set name, and variant selection is a USD identifier.
+/// This is the single definition of the authorable prim-path grammar; both
+/// [`require_prim_path`] (validate only, no allocation) and [`namespace_chain`]
+/// (build the spec chain) drive it, so they cannot drift apart.
+fn parse_prim_path(target: &Path, mut emit: impl FnMut(PathToken<'_>)) -> Result<(), AuthoringError> {
     let invalid = |reason: &'static str| AuthoringError::InvalidPath {
         path: target.clone(),
         reason,
@@ -641,10 +672,7 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
         return Err(invalid("expected prim path, got property path"));
     }
 
-    let mut elems = Vec::new();
-    let mut cursor = Path::abs_root();
     let mut rest = &target.as_str()[1..];
-
     while !rest.is_empty() {
         // A prim name runs up to the next path separator or variant opener.
         let end = rest.find(['/', '{']).unwrap_or(rest.len());
@@ -652,15 +680,7 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
         if !Path::is_valid_identifier(name) {
             return Err(invalid("prim path component is not a USD identifier"));
         }
-        let prim_path = cursor.append_path(name).map_err(|_| invalid("malformed prim path"))?;
-        elems.push(ChainElement {
-            path: prim_path.clone(),
-            spec_type: SpecType::Prim,
-            parent: cursor,
-            child_key: ChildrenKey::PrimChildren,
-            child_name: name.to_owned(),
-        });
-        cursor = prim_path;
+        emit(PathToken::Prim(name));
         rest = &rest[end..];
 
         // Zero or more variant selections may follow the prim name.
@@ -677,24 +697,7 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
             if selection.is_empty() || !Path::is_valid_identifier(selection) {
                 return Err(invalid("variant selection is not a USD identifier"));
             }
-
-            let vset_path = cursor.append_variant_selection(set, "");
-            let variant_path = cursor.append_variant_selection(set, selection);
-            elems.push(ChainElement {
-                path: vset_path.clone(),
-                spec_type: SpecType::VariantSet,
-                parent: cursor,
-                child_key: ChildrenKey::VariantSetChildren,
-                child_name: set.to_owned(),
-            });
-            elems.push(ChainElement {
-                path: variant_path.clone(),
-                spec_type: SpecType::Variant,
-                parent: vset_path,
-                child_key: ChildrenKey::VariantChildren,
-                child_name: selection.to_owned(),
-            });
-            cursor = variant_path;
+            emit(PathToken::Variant { set, selection });
             rest = &after_open[close + 1..];
         }
 
@@ -705,6 +708,44 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
             None => return Err(invalid("malformed prim path")),
         }
     }
+    Ok(())
+}
+
+/// Decompose `target` — a prim path that may contain `{set=sel}` variant
+/// selections — into the ordered chain of specs that must exist for it to be
+/// authorable. Validation and grammar live in [`parse_prim_path`].
+fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
+    let mut elems = Vec::new();
+    let mut cursor = Path::abs_root();
+
+    parse_prim_path(target, |token| match token {
+        PathToken::Prim(name) => {
+            let path = cursor.append_path(name).expect("name validated as an identifier");
+            elems.push(ChainElement {
+                path: path.clone(),
+                spec_type: SpecType::Prim,
+                child_key: ChildrenKey::PrimChildren,
+                child_name: name.to_owned(),
+            });
+            cursor = path;
+        }
+        PathToken::Variant { set, selection } => {
+            elems.push(ChainElement {
+                path: cursor.append_variant_selection(set, ""),
+                spec_type: SpecType::VariantSet,
+                child_key: ChildrenKey::VariantSetChildren,
+                child_name: set.to_owned(),
+            });
+            let variant_path = cursor.append_variant_selection(set, selection);
+            elems.push(ChainElement {
+                path: variant_path.clone(),
+                spec_type: SpecType::Variant,
+                child_key: ChildrenKey::VariantChildren,
+                child_name: selection.to_owned(),
+            });
+            cursor = variant_path;
+        }
+    })?;
     Ok(elems)
 }
 
@@ -755,10 +796,11 @@ fn require_spec_type_or_absent(data: &Data, path: &Path, expected: SpecType) -> 
 /// Validate that `path` is an absolute, non-root, non-property path suitable
 /// for prim authoring. Each prim component must be a USD identifier, optionally
 /// carrying `{set=sel}` variant selections whose set and selection names are
-/// themselves identifiers. Delegates to [`namespace_chain`] so the accepted
-/// grammar stays in lock-step with what [`ensure_prim_chain`] can build.
+/// themselves identifiers. Shares [`parse_prim_path`] with [`namespace_chain`]
+/// so the accepted grammar stays in lock-step, but allocates nothing — it
+/// drives the parser with a no-op rather than building the spec chain.
 fn require_prim_path(path: &Path) -> Result<(), AuthoringError> {
-    namespace_chain(path).map(|_| ())
+    parse_prim_path(path, |_| {})
 }
 
 /// Split a property path like `/World/Mesh.points` into `(/World/Mesh,
