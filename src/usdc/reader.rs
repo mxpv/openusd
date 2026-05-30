@@ -510,6 +510,21 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(value)
     }
 
+    /// Read a scalar asset path or path expression.
+    ///
+    /// Both encode an index that points into the token table when the value is
+    /// inlined but into the string table when it is stored on the heap, so the
+    /// table is chosen by the inlined flag (mirrors `SdfAssetPath` /
+    /// `SdfPathExpression` handling in Pixar's crate reader).
+    fn read_asset_path(&mut self, value: ValueRep) -> Result<String> {
+        let index = self.unpack_value::<u32>(value)?;
+        if value.is_inlined() {
+            Ok(self.tokens[index as usize].clone())
+        } else {
+            Ok(self.resolve_string(index))
+        }
+    }
+
     /// Reads a lz4 compressed data and returns decompressed raw bytes.
     ///
     /// Format expected:
@@ -954,7 +969,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.set_position(value.payload())?;
                 sdf::Value::StringVec(self.read_string_vec()?)
             }
-            Type::AssetPath => sdf::Value::AssetPath(self.read_token(value)?),
+            Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
@@ -1286,8 +1301,8 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?),
 
             Type::PathExpression => {
-                let token = self.read_token(value)?;
-                sdf::Value::PathExpression(token)
+                let expr = self.read_asset_path(value)?;
+                sdf::Value::PathExpression(expr)
             }
 
             Type::UnregisteredValue => {
