@@ -217,18 +217,12 @@ impl Path {
             let dot = self.path.rfind('.')?;
             return Some(PathElement::Property(&self.path[dot + 1..]));
         }
-        if self.path.ends_with('}') {
-            if let Some(open) = self.path.rfind('{') {
-                let inner = &self.path[open + 1..self.path.len() - 1];
-                if let Some((set, selection)) = inner.split_once('=') {
-                    return Some(PathElement::Variant { set, selection });
-                }
-            }
-        }
-        match self.path.rsplit_once('/') {
-            Some((_, name)) => Some(PathElement::Prim(name)),
-            None => Some(PathElement::Prim(&self.path)),
-        }
+        // For a prim or variant path the last element is the last component;
+        // reuse the single variant-grammar definition in `components`.
+        self.components().last().map(|c| match c {
+            PathComponent::Prim(name) => PathElement::Prim(name),
+            PathComponent::Variant { set, selection } => PathElement::Variant { set, selection },
+        })
     }
 
     /// Returns the parent path, or `None` for the pseudo-root `/` and empty
@@ -249,14 +243,14 @@ impl Path {
         if self.path.is_empty() || self.path == "/" {
             return None;
         }
-        if self.is_property_path() {
-            return Some(self.prim_path());
-        }
         // Drop a trailing `{set=sel}` variant selection.
-        if self.path.ends_with('}') {
+        if self.is_prim_variant_selection_path() {
             if let Some(open) = self.path.rfind('{') {
                 return Some(Path::from_str_unchecked(&self.path[..open]));
             }
+        }
+        if self.is_property_path() {
+            return Some(self.prim_path());
         }
         match self.path.rsplit_once('/') {
             Some(("", _)) => Some(Path::abs_root()),
