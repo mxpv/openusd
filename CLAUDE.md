@@ -90,6 +90,7 @@ When implementing a new feature from the spec:
 - Proof read and reword docs and/or comments as needed
 - Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead
 - Never remove comments during refactoring if they are still applicable
+- Comments must describe the code as it stands, not its edit history. Don't justify the absence or removal of code (e.g. "no separate X pre-check is needed here", "X was removed because…") — such notes only make sense to someone who saw the prior version and are noise to a fresh reader. Explain what the present code does and why, not what it no longer does.
 - Don't reference planning phases or steps (e.g. "Phase 1", "Step 2") in code, comments, names, fixtures, or commit messages; describe what the code does or, for deferred work, name the missing feature in a `TODO`
 - Wrap prose at 80 characters — Markdown, plans, design write-ups, and doc-comment text; Rust code still follows rustfmt (120)
 - Mark performance/parallelism opportunities with a `TODO(rayon)` (or `TODO(perf)`) comment in new code and when refactoring existing code, instead of optimizing prematurely; say what is independent or parallelizable so the seam is actionable later

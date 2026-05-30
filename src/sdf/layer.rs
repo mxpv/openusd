@@ -220,8 +220,6 @@ impl Layer {
         let path: Path = path.into();
         let type_name: String = type_name.into();
 
-        // `ensure_prim_chain` validates `path` via `namespace_chain`, so no
-        // separate `require_prim_path` pre-check is needed.
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
@@ -243,7 +241,6 @@ impl Layer {
     pub fn override_prim(&mut self, path: impl Into<Path>) -> Result<PrimSpecMut<'_>, AuthoringError> {
         let path: Path = path.into();
 
-        // `ensure_prim_chain` validates `path` via `namespace_chain`.
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
