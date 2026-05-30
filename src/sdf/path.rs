@@ -141,6 +141,19 @@ impl Path {
         // Split at last slash.
         // "/A/B/C.foo[target].bar:baz" will become "/A/B" and "C.foo[target].bar:baz"
         let Some((before, after)) = self.path.rsplit_once('/') else {
+            // Relative single segment (no slash): strip a trailing property or
+            // variant selection. `is_property_path` separates `Foo.bar` from a
+            // relative `..`, which has no property tail and is its own prim.
+            if self.is_property_path() {
+                if let Some(dot) = self.path.find('.') {
+                    return Path::from_str_unchecked(&self.path[..dot]);
+                }
+            }
+            if self.path.ends_with('}') {
+                if let Some(open) = self.path.rfind('{') {
+                    return Path::from_str_unchecked(&self.path[..open]);
+                }
+            }
             return self.clone();
         };
 
@@ -218,8 +231,16 @@ impl Path {
             return Some(PathElement::Property(&self.path[dot + 1..]));
         }
         // For a prim or variant path the last element is the last component;
-        // reuse the single variant-grammar definition in `components`.
-        self.components().last().map(|c| match c {
+        // reuse the single variant-grammar definition in `components`. A
+        // non-empty remainder means the path has an unparsed tail (malformed,
+        // or syntax this method doesn't model), so there is no clean final
+        // element.
+        let mut components = self.components();
+        let last = components.by_ref().last();
+        if !components.remainder().is_empty() {
+            return None;
+        }
+        last.map(|c| match c {
             PathComponent::Prim(name) => PathElement::Prim(name),
             PathComponent::Variant { set, selection } => PathElement::Variant { set, selection },
         })
@@ -695,6 +716,13 @@ mod tests {
 
             ("../.foo[target].bar", ".."),
             ("../.foo[target].bar:baz", ".."),
+
+            // Relative single segment (no slash): strip the property/variant.
+            ("Foo.bar", "Foo"),
+            ("Foo{x=y}", "Foo"),
+            ("Foo", "Foo"),
+            (".bar", ""),
+            ("..", ".."),
         ];
 
         for (path, expected) in cases {
@@ -770,6 +798,11 @@ mod tests {
         assert_eq!(last("/A{x=y}{p=q}").as_deref(), Some("{p=q}"));
         assert_eq!(last("/"), None);
         assert_eq!(last(""), None);
+        // An unparsed tail (malformed, or target syntax this method doesn't
+        // model) has no clean final element — None, not the last parsed prim.
+        assert_eq!(last("/A{bad"), None);
+        assert_eq!(last("/A.rel[/Target]"), None);
+        assert_eq!(last("/{x=y}"), None);
     }
 
     #[test]
@@ -783,9 +816,24 @@ mod tests {
 
         assert_eq!(split("/World/Mesh.points"), owned("/World/Mesh", "points"));
         assert_eq!(split("/Mat.inputs:diffuse"), owned("/Mat", "inputs:diffuse"));
+        // Relative property (no slash) decomposes too — the inverse of
+        // append_property.
+        assert_eq!(split("Foo.bar"), owned("Foo", "bar"));
         // Not a property path.
         assert_eq!(split("/World/Mesh"), None);
         assert_eq!(split("/"), None);
+    }
+
+    #[test]
+    fn test_property_suffix() {
+        let suffix = |s: &str| Path::from_str_unchecked(s).property_suffix().to_owned();
+
+        assert_eq!(suffix("/A.points"), ".points");
+        assert_eq!(suffix("/A/B.inputs:diffuse"), ".inputs:diffuse");
+        // Relative property (no slash).
+        assert_eq!(suffix("Foo.bar"), ".bar");
+        // A prim path has no property suffix.
+        assert_eq!(suffix("/A"), "");
     }
 
     #[test]
@@ -884,14 +932,18 @@ mod tests {
             ("/A{x=y}{p=q}",  Some("/A{x=y}")),
             ("/A{x=y}/B",    Some("/A{x=y}")),
             ("/A{x=y}.attr", Some("/A{x=y}")),
+            // Relative paths must not self-parent (would loop a parent walk).
+            ("Foo.bar",      Some("Foo")),
+            ("Foo",          None),
+            ("..",           None),
         ];
 
         for &(path, expected) in cases {
-            assert_eq!(
-                Path::new(path).unwrap().parent().as_ref().map(|p| p.as_str()),
-                expected,
-                "parent of {path:?}",
-            );
+            let parent = Path::new(path).unwrap().parent();
+            let parent = parent.as_ref().map(|p| p.as_str());
+            assert_eq!(parent, expected, "parent of {path:?}");
+            // A parent must make progress — never return the path itself.
+            assert_ne!(parent, Some(path), "self-parent on {path:?}");
         }
     }
 
