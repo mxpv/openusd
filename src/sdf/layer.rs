@@ -11,8 +11,9 @@ use anyhow::Result;
 
 use super::schema::{ChildrenKey, FieldKey};
 use super::{
-    AbstractData, AttributeSpec, AttributeSpecMut, Data, LayerData, Path, PrimSpec, PrimSpecMut, PseudoRootSpec,
-    PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, Spec, SpecError, SpecType, Specifier, Value, Variability,
+    AbstractData, AttributeSpec, AttributeSpecMut, Data, LayerData, Path, PathComponent, PrimSpec, PrimSpecMut,
+    PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, Spec, SpecError, SpecType, Specifier,
+    Value, Variability,
 };
 use crate::{usda, usdc};
 
@@ -650,24 +651,16 @@ struct ChainElement {
     child_name: String,
 }
 
-/// A component of a prim path, yielded in root → leaf order by
-/// [`parse_prim_path`].
-enum PathToken<'a> {
-    /// A prim name registered under its parent's `primChildren`.
-    Prim(&'a str),
-    /// A `{set=sel}` variant selection on the current prim.
-    Variant { set: &'a str, selection: &'a str },
-}
-
-/// Parse and validate a prim path that may carry `{set=sel}` variant
-/// selections, invoking `emit` for each [`PathToken`] in root → leaf order.
+/// Validate that `target` is an authorable prim path and invoke `emit` for
+/// each of its components ([`Path::components`]) in root → leaf order.
 ///
-/// Validates that `target` is absolute, non-root, non-property and that every
-/// prim name, variant set name, and variant selection is a USD identifier.
-/// This is the single definition of the authorable prim-path grammar; both
-/// [`require_prim_path`] (validate only, no allocation) and [`namespace_chain`]
-/// (build the spec chain) drive it, so they cannot drift apart.
-fn parse_prim_path(target: &Path, mut emit: impl FnMut(PathToken<'_>)) -> Result<(), AuthoringError> {
+/// Adds the authoring rules on top of the shared prim-path grammar: `target`
+/// must be absolute, non-root, and non-property, every prim name and variant
+/// set / selection must be a USD identifier, and the whole path must parse (no
+/// malformed tail). Both [`require_prim_path`] (validate only, no allocation)
+/// and [`namespace_chain`] (build the spec chain) drive this, so they cannot
+/// drift apart.
+fn parse_prim_path(target: &Path, mut emit: impl FnMut(PathComponent<'_>)) -> Result<(), AuthoringError> {
     let invalid = |reason: &'static str| AuthoringError::InvalidPath {
         path: target.clone(),
         reason,
@@ -679,41 +672,27 @@ fn parse_prim_path(target: &Path, mut emit: impl FnMut(PathToken<'_>)) -> Result
         return Err(invalid("expected prim path, got property path"));
     }
 
-    let mut rest = &target.as_str()[1..];
-    while !rest.is_empty() {
-        // A prim name runs up to the next path separator or variant opener.
-        let end = rest.find(['/', '{']).unwrap_or(rest.len());
-        let name = &rest[..end];
-        if !Path::is_valid_identifier(name) {
-            return Err(invalid("prim path component is not a USD identifier"));
-        }
-        emit(PathToken::Prim(name));
-        rest = &rest[end..];
-
-        // Zero or more variant selections may follow the prim name.
-        while let Some(after_open) = rest.strip_prefix('{') {
-            let close = after_open
-                .find('}')
-                .ok_or_else(|| invalid("unterminated variant selection"))?;
-            let (set, selection) = after_open[..close]
-                .split_once('=')
-                .ok_or_else(|| invalid("variant selection is missing '='"))?;
-            if !Path::is_valid_identifier(set) {
-                return Err(invalid("variant set name is not a USD identifier"));
+    let mut components = target.components();
+    for component in components.by_ref() {
+        match component {
+            PathComponent::Prim(name) => {
+                if !Path::is_valid_identifier(name) {
+                    return Err(invalid("prim path component is not a USD identifier"));
+                }
             }
-            if selection.is_empty() || !Path::is_valid_identifier(selection) {
-                return Err(invalid("variant selection is not a USD identifier"));
+            PathComponent::Variant { set, selection } => {
+                if !Path::is_valid_identifier(set) {
+                    return Err(invalid("variant set name is not a USD identifier"));
+                }
+                if selection.is_empty() || !Path::is_valid_identifier(selection) {
+                    return Err(invalid("variant selection is not a USD identifier"));
+                }
             }
-            emit(PathToken::Variant { set, selection });
-            rest = &after_open[close + 1..];
         }
-
-        match rest.strip_prefix('/') {
-            Some(next) if !next.is_empty() => rest = next,
-            None if rest.is_empty() => {}
-            // A trailing or doubled separator (`Some("")`) or leftover junk.
-            _ => return Err(invalid("malformed prim path")),
-        }
+        emit(component);
+    }
+    if !components.remainder().is_empty() {
+        return Err(invalid("malformed prim path"));
     }
     Ok(())
 }
@@ -725,8 +704,8 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
     let mut elems = Vec::new();
     let mut cursor = Path::abs_root();
 
-    parse_prim_path(target, |token| match token {
-        PathToken::Prim(name) => {
+    parse_prim_path(target, |component| match component {
+        PathComponent::Prim(name) => {
             let path = cursor.append_path(name).expect("name validated as an identifier");
             elems.push(ChainElement {
                 path: path.clone(),
@@ -736,7 +715,7 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
             });
             cursor = path;
         }
-        PathToken::Variant { set, selection } => {
+        PathComponent::Variant { set, selection } => {
             elems.push(ChainElement {
                 path: cursor.append_variant_selection(set, ""),
                 spec_type: SpecType::VariantSet,
@@ -830,28 +809,17 @@ fn require_prim_leaf(path: &Path) -> Result<(), AuthoringError> {
 /// "points")`. Returns an error if `path` is not an absolute property path
 /// whose owning prim portion is itself a valid prim path.
 fn split_property_path(path: &Path) -> Result<(Path, String), AuthoringError> {
-    if !path.is_property_path() {
-        return Err(AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "expected property path",
-        });
-    }
-    let prim_path = path.prim_path();
+    let (prim_path, suffix) = path.split_property().ok_or(AuthoringError::InvalidPath {
+        path: path.clone(),
+        reason: "expected property path",
+    })?;
     // Owning prim must be an absolute, non-root, non-property path — guards
     // against relative roots ("A.foo"), root-level properties ("/.foo"), and
     // paths whose `prim_path()` returned a structurally invalid string.
     require_prim_path(&prim_path)?;
-    let suffix = path
-        .as_str()
-        .strip_prefix(prim_path.as_str())
-        .and_then(|t| t.strip_prefix('.'))
-        .ok_or(AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "malformed property path",
-        })?;
     // Property names are colon-separated identifiers — reject target/connection
     // brackets, embedded dots, and other syntax that would round-trip as garbage.
-    if suffix.is_empty() || !suffix.split(':').all(Path::is_valid_identifier) {
+    if !suffix.split(':').all(Path::is_valid_identifier) {
         return Err(AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "property name must be a colon-separated identifier",
