@@ -609,7 +609,10 @@ impl PrimIndex {
                             } else {
                                 value
                             };
-                            if field == clip::keys::ASSET_PATHS {
+                            // Both the explicit `assetPaths` and a template's
+                            // `templateAssetPath` anchor their relative clip
+                            // asset paths against the layer that authored them.
+                            if field == clip::keys::ASSET_PATHS || field == clip::keys::TEMPLATE_ASSET_PATH {
                                 asset_layers.insert(set_name.clone(), node.layer_index);
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
                                 manifest_layers.insert(set_name.clone(), node.layer_index);

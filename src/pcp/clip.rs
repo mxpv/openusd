@@ -23,6 +23,18 @@ pub(crate) mod keys {
     pub const ACTIVE: &str = "active";
     /// `(stageTime, clipTime)` pairs forming the stage-to-clip timing curve.
     pub const TIMES: &str = "times";
+
+    // ── Template clip keys (spec 12.3.4.1.3) ──────────────────────────────
+    /// `#`-pattern asset path expanded into explicit `assetPaths`.
+    pub const TEMPLATE_ASSET_PATH: &str = "templateAssetPath";
+    /// Inclusive start of the time range searched for template clips.
+    pub const TEMPLATE_START_TIME: &str = "templateStartTime";
+    /// Inclusive end of the time range searched for template clips.
+    pub const TEMPLATE_END_TIME: &str = "templateEndTime";
+    /// Step between successive template clip times.
+    pub const TEMPLATE_STRIDE: &str = "templateStride";
+    /// Offset applied to each clip's active stage time.
+    pub const TEMPLATE_ACTIVE_OFFSET: &str = "templateActiveOffset";
 }
 
 /// A single explicit clip set: a named group of value clips with sequencing
@@ -86,31 +98,40 @@ impl ClipSet {
     }
 
     /// Parses a single clip set from its metadata dictionary. Returns `None`
-    /// when the set has no explicit `assetPaths` (template form is deferred).
+    /// when the set declares neither explicit `assetPaths` nor a usable
+    /// `templateAssetPath`.
+    ///
+    /// Template sets (spec 12.3.4.1.3) authoring `templateAssetPath` +
+    /// `templateStartTime` / `templateEndTime` / `templateStride` (and
+    /// optionally `templateActiveOffset`) are expanded here into the explicit
+    /// `assetPaths` / `active` / `times` form before resolution, so the rest
+    /// of the pipeline only ever sees explicit clip sets. Explicit
+    /// `assetPaths`, when authored, take precedence over the template form.
     fn parse_one(name: &str, set: &HashMap<String, Value>) -> Option<ClipSet> {
-        // TODO: handle template clips (spec 12.3.4.1.3). When a set authors
-        // `templateAssetPath` instead of `assetPaths`, derive the explicit
-        // `assetPaths`/`active`/`times` from the template metadata here rather
-        // than skipping the set.
-        let asset_paths = set.get(keys::ASSET_PATHS).and_then(as_string_vec)?;
-
         let prim_path = set
             .get(keys::PRIM_PATH)
             .and_then(as_string)
             .and_then(|s| Path::new(&s).ok());
         let manifest_asset = set.get(keys::MANIFEST_ASSET_PATH).and_then(as_asset);
 
-        let mut active: Vec<(f64, usize)> = set
-            .get(keys::ACTIVE)
-            .map(as_pairs)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(stage, index)| (stage, index as usize))
-            .collect();
-        active.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Explicit form wins; otherwise expand a template set.
+        let (asset_paths, active, times) = match set.get(keys::ASSET_PATHS).and_then(as_string_vec) {
+            Some(asset_paths) => {
+                let mut active: Vec<(f64, usize)> = set
+                    .get(keys::ACTIVE)
+                    .map(as_pairs)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(stage, index)| (stage, index as usize))
+                    .collect();
+                active.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-        let mut times = set.get(keys::TIMES).map(as_pairs).unwrap_or_default();
-        times.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut times = set.get(keys::TIMES).map(as_pairs).unwrap_or_default();
+                times.sort_by(|a, b| a.0.total_cmp(&b.0));
+                (asset_paths, active, times)
+            }
+            None => expand_template(set)?,
+        };
 
         Some(ClipSet {
             name: name.to_string(),
@@ -179,9 +200,166 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
     clip0 + ratio * (clip1 - clip0)
 }
 
+/// Expand a template clip set (spec 12.3.4.1.3) into explicit
+/// `(assetPaths, active, times)`.
+///
+/// Iterates clip times from `templateStartTime` to `templateEndTime`
+/// (inclusive) by `templateStride`, substituting each time into the
+/// `#`-pattern `templateAssetPath`. Each generated clip `i` contributes
+/// `assetPaths[i]`, an `active` entry `(stageTime, i)`, and a `times`
+/// entry `(clipTime, clipTime)`. `templateActiveOffset`, when authored,
+/// shifts each clip's active stage time to `clipTime + offset`.
+///
+/// Returns `None` when the required template fields are missing or
+/// invalid (non-positive stride, `end < start`, `|activeOffset| > stride`,
+/// or an unparseable pattern).
+///
+/// Times are scaled by a fixed promotion factor during iteration so a
+/// fractional `stride` accumulates without binary-float drift, matching
+/// C++ `Usd_ClipSetDefinition` template derivation.
+/// Derived `(assetPaths, active, times)` from a template clip set.
+type TemplateExpansion = (Vec<String>, Vec<(f64, usize)>, Vec<(f64, f64)>);
+
+fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
+    let template = set.get(keys::TEMPLATE_ASSET_PATH).and_then(as_asset)?;
+    let start = set.get(keys::TEMPLATE_START_TIME).and_then(as_f64)?;
+    let end = set.get(keys::TEMPLATE_END_TIME).and_then(as_f64)?;
+    let stride = set.get(keys::TEMPLATE_STRIDE).and_then(as_f64)?;
+    let active_offset = set.get(keys::TEMPLATE_ACTIVE_OFFSET).and_then(as_f64);
+
+    if stride.is_nan() || stride <= 0.0 || end < start {
+        return None;
+    }
+    // Spec 12.3.4.1.3: the active offset magnitude may not exceed the stride.
+    if active_offset.is_some_and(|off| off.abs() > stride) {
+        return None;
+    }
+
+    let pattern = HashPattern::parse(&template)?;
+
+    // Promote to integers so a fractional stride doesn't accumulate float
+    // drift across the loop (C++ uses the same trick).
+    const PROMOTION: f64 = 10000.0;
+    let end_p = end * PROMOTION;
+    let stride_p = stride * PROMOTION;
+
+    let mut asset_paths = Vec::new();
+    let mut active = Vec::new();
+    let mut times = Vec::new();
+    let mut t = start * PROMOTION;
+    let mut index = 0usize;
+    // `+ 0.5` keeps the inclusive endpoint despite residual rounding.
+    while t <= end_p + 0.5 {
+        let clip_time = t / PROMOTION;
+        asset_paths.push(pattern.format(clip_time));
+        times.push((clip_time, clip_time));
+        let stage_time = match active_offset {
+            Some(off) => (t + off * PROMOTION) / PROMOTION,
+            None => clip_time,
+        };
+        active.push((stage_time, index));
+        index += 1;
+        t += stride_p;
+    }
+
+    if asset_paths.is_empty() {
+        return None;
+    }
+    active.sort_by(|a, b| a.0.total_cmp(&b.0));
+    times.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Some((asset_paths, active, times))
+}
+
+/// A parsed `templateAssetPath` pattern: a prefix, one or two adjacent
+/// `#`-groups (integer, optionally followed by a subinteger group), and
+/// a suffix. Per spec the groups must be adjacent and number one or two.
+struct HashPattern {
+    prefix: String,
+    int_width: usize,
+    /// Width of the subinteger group, when the pattern has two groups.
+    frac_width: Option<usize>,
+    suffix: String,
+}
+
+impl HashPattern {
+    /// Parse `path/basename.###.usd` or `path/basename.##.##.usd`.
+    /// Returns `None` when there is no `#`-group, more than two groups,
+    /// or stray `#` outside the (adjacent) groups.
+    fn parse(template: &str) -> Option<HashPattern> {
+        let first = template.find('#')?;
+        let prefix = template[..first].to_string();
+        let rest = &template[first..];
+
+        // First (integer) group.
+        let int_width = rest.chars().take_while(|&c| c == '#').count();
+        let after_int = &rest[int_width..];
+
+        // Optional `.<##...>` subinteger group immediately following.
+        let (frac_width, suffix) = if let Some(dot_rest) = after_int.strip_prefix('.') {
+            if dot_rest.starts_with('#') {
+                let frac_width = dot_rest.chars().take_while(|&c| c == '#').count();
+                (Some(frac_width), dot_rest[frac_width..].to_string())
+            } else {
+                (None, after_int.to_string())
+            }
+        } else {
+            (None, after_int.to_string())
+        };
+
+        // Spec: hash groups must be adjacent and number one or two — any
+        // further `#` in the suffix means a malformed (3+ group) pattern.
+        if suffix.contains('#') {
+            return None;
+        }
+
+        Some(HashPattern {
+            prefix,
+            int_width,
+            frac_width,
+            suffix,
+        })
+    }
+
+    /// Substitute `time` into the pattern. Integer group zero-pads to the
+    /// hash count (widening when the value needs more digits); the
+    /// subinteger group is fixed-width fractional precision.
+    fn format(&self, time: f64) -> String {
+        let body = match self.frac_width {
+            // Two groups: `<int>.<frac>` at the given widths (spec example
+            // `foo.#.###.usd` @ 1.15 -> `foo.1.150.usd`).
+            Some(frac_width) => {
+                let rendered = format!("{:.*}", frac_width, time);
+                let (int_part, frac_part) = rendered.split_once('.').unwrap_or((rendered.as_str(), ""));
+                let neg = int_part.starts_with('-');
+                let digits = int_part.trim_start_matches('-');
+                let padded = format!("{:0>width$}", digits, width = self.int_width);
+                let sign = if neg { "-" } else { "" };
+                format!("{sign}{padded}.{frac_part}")
+            }
+            // One group: zero-padded integer (spec example `foo.###.usd`
+            // @ 12 -> `foo.012.usd`).
+            None => format!("{:0width$}", time.round() as i64, width = self.int_width),
+        };
+        format!("{}{}{}", self.prefix, body, self.suffix)
+    }
+}
+
 fn as_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) | Value::Token(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Extracts a scalar `f64` from the numeric template-timing fields,
+/// which may be authored as `double`, `float`, or integer.
+fn as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Double(d) => Some(*d),
+        Value::Float(f) => Some(*f as f64),
+        Value::Int(i) => Some(*i as f64),
+        Value::Int64(i) => Some(*i as f64),
+        Value::Half(h) => Some(h.to_f32() as f64),
         _ => None,
     }
 }
@@ -213,6 +391,120 @@ fn as_pairs(value: &Value) -> Vec<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Template hash substitution (clipsAPI.h doc examples) ──────────────
+
+    #[test]
+    fn hash_substitution_integer() {
+        // foo.##.usd  @ 12  => foo.12.usd
+        assert_eq!(HashPattern::parse("foo.##.usd").unwrap().format(12.0), "foo.12.usd");
+        // foo.###.usd @ 12  => foo.012.usd
+        assert_eq!(HashPattern::parse("foo.###.usd").unwrap().format(12.0), "foo.012.usd");
+        // foo.#.usd   @ 333 => foo.333.usd
+        assert_eq!(HashPattern::parse("foo.#.usd").unwrap().format(333.0), "foo.333.usd");
+    }
+
+    #[test]
+    fn hash_substitution_subinteger() {
+        // foo.#.###.usd @ 1.15 => foo.1.150.usd
+        assert_eq!(
+            HashPattern::parse("foo.#.###.usd").unwrap().format(1.15),
+            "foo.1.150.usd"
+        );
+        // foo.#.##.usd  @ 1.1  => foo.1.10.usd
+        assert_eq!(HashPattern::parse("foo.#.##.usd").unwrap().format(1.1), "foo.1.10.usd");
+    }
+
+    #[test]
+    fn hash_pattern_rejects_three_groups() {
+        assert!(HashPattern::parse("foo.#.#.#.usd").is_none());
+        assert!(HashPattern::parse("foo.usd").is_none());
+    }
+
+    #[test]
+    fn template_expands_to_explicit_clip_set() {
+        use std::collections::HashMap;
+        let mut set = HashMap::new();
+        set.insert(
+            keys::TEMPLATE_ASSET_PATH.to_string(),
+            Value::AssetPath("clip.##.usd".into()),
+        );
+        set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(101.0));
+        set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(103.0));
+        set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
+
+        let parsed = ClipSet::parse_one("default", &set).expect("template set");
+        assert_eq!(
+            parsed.asset_paths,
+            vec![
+                "clip.101.usd".to_string(),
+                "clip.102.usd".to_string(),
+                "clip.103.usd".to_string()
+            ],
+        );
+        assert_eq!(parsed.active, vec![(101.0, 0), (102.0, 1), (103.0, 2)]);
+        assert_eq!(parsed.times, vec![(101.0, 101.0), (102.0, 102.0), (103.0, 103.0)]);
+    }
+
+    #[test]
+    fn template_active_offset_shifts_active_times() {
+        use std::collections::HashMap;
+        let mut set = HashMap::new();
+        set.insert(
+            keys::TEMPLATE_ASSET_PATH.to_string(),
+            Value::AssetPath("c.#.usd".into()),
+        );
+        set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
+        set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
+        set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
+        set.insert(keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(-0.5));
+
+        let parsed = ClipSet::parse_one("default", &set).expect("template set");
+        // clipTimes unchanged; active stage times shifted by the offset.
+        assert_eq!(parsed.active, vec![(-0.5, 0), (0.5, 1), (1.5, 2)]);
+        assert_eq!(parsed.times, vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]);
+    }
+
+    #[test]
+    fn template_rejects_invalid_metadata() {
+        use std::collections::HashMap;
+        let base = |off: f64, stride: f64| {
+            let mut set = HashMap::new();
+            set.insert(
+                keys::TEMPLATE_ASSET_PATH.to_string(),
+                Value::AssetPath("c.#.usd".into()),
+            );
+            set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
+            set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
+            set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(stride));
+            set.insert(keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(off));
+            set
+        };
+        // |activeOffset| > stride is rejected (spec 12.3.4.1.3).
+        assert!(ClipSet::parse_one("default", &base(2.0, 1.0)).is_none());
+        // Non-positive stride is rejected.
+        assert!(ClipSet::parse_one("default", &base(0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn explicit_asset_paths_win_over_template() {
+        use std::collections::HashMap;
+        let mut set = HashMap::new();
+        set.insert(
+            keys::ASSET_PATHS.to_string(),
+            Value::StringVec(vec!["explicit.usd".into()]),
+        );
+        set.insert(
+            keys::TEMPLATE_ASSET_PATH.to_string(),
+            Value::AssetPath("c.#.usd".into()),
+        );
+        set.insert(keys::TEMPLATE_START_TIME.to_string(), Value::Double(0.0));
+        set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
+        set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
+
+        let parsed = ClipSet::parse_one("default", &set).expect("explicit set");
+        assert_eq!(parsed.asset_paths, vec!["explicit.usd".to_string()]);
+    }
 
     fn clip_set(active: Vec<(f64, usize)>, times: Vec<(f64, f64)>) -> ClipSet {
         ClipSet {

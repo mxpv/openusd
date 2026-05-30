@@ -1659,6 +1659,24 @@ mod tests {
         Ok(())
     }
 
+    /// A template clip set (`templateAssetPath` + start/end/stride) is
+    /// expanded to explicit clips and resolves end to end through
+    /// `value_at` (spec 12.3.4.1.3): `clip.1.usda` drives t=1, `clip.2.usda`
+    /// drives t=2.
+    #[test]
+    fn resolves_template_clip_values() -> Result<()> {
+        let root = format!("{}/fixtures/clip_template/root.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+        // Exact-match sampler: each clip authors a single sample at its frame.
+        let interp =
+            |samples: &sdf::TimeSampleMap, t: f64| samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone());
+
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &interp);
+        assert_eq!(size(&mut cache, 1.0)?, Some(sdf::Value::Double(10.0)));
+        assert_eq!(size(&mut cache, 2.0)?, Some(sdf::Value::Double(20.0)));
+        Ok(())
+    }
+
     /// Instances sharing a prototype compose their subtree once: a
     /// non-canonical instance's descendant is served by the canonical one and
     /// is never indexed (spec 11.3.3).
