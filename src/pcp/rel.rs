@@ -98,34 +98,12 @@ impl Relocates {
             return Ok(None);
         };
 
-        // Try raw (unchained) relocates first.
-        let raw_relocates = self.raw_effective_relocates(&parent, indices);
-        let mut result = None;
-        for (src, tgt) in &raw_relocates {
-            if tgt.is_empty() {
-                continue;
-            }
-            if let Some(sp) = composed_path.replace_prefix(tgt, src) {
-                result = Some(sp);
-                break;
-            }
-        }
-
-        // Fall back to chained relocates when raw didn't match. This handles
-        // cases where the composed path is in a namespace created by chaining
-        // multiple relocates (e.g. A→B in layer1, B→C in layer2).
-        if result.is_none() {
-            let chained_relocates = self.effective_relocates(&parent, indices);
-            for (src, tgt) in &chained_relocates {
-                if tgt.is_empty() {
-                    continue;
-                }
-                if let Some(sp) = composed_path.replace_prefix(tgt, src) {
-                    result = Some(sp);
-                    break;
-                }
-            }
-        }
+        // Try raw (unchained) relocates first, then fall back to chained
+        // relocates only when raw didn't match. Chaining handles a composed
+        // path in a namespace created by multiple relocates (e.g. A→B in
+        // layer1, B→C in layer2).
+        let result = Self::first_source(&self.raw_effective_relocates(&parent, indices), composed_path)
+            .or_else(|| Self::first_source(&self.effective_relocates(&parent, indices), composed_path));
 
         // Chain: if the source is itself a relocate target, resolve further.
         // Only chain if the deeper source actually has specs in some layer,
@@ -142,6 +120,19 @@ impl Relocates {
         }
         visited.remove(composed_path);
         Ok(result)
+    }
+
+    /// Returns the first relocate whose target prefixes `composed`, remapped
+    /// back onto the relocate source. Relocates with an empty target are
+    /// skipped (a deletion, not a rename).
+    fn first_source(relocates: &[(Path, Path)], composed: &Path) -> Option<Path> {
+        relocates.iter().find_map(|(src, tgt)| {
+            if tgt.is_empty() {
+                None
+            } else {
+                composed.replace_prefix(tgt, src)
+            }
+        })
     }
 
     // ------------------------------------------------------------------

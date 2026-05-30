@@ -158,6 +158,14 @@ impl Path {
         Path::from_str_unchecked(&self.path[..sz])
     }
 
+    /// Returns the property portion of this path — the trailing segment after
+    /// the owning prim, beginning with `.` (e.g. `.radius` in `/Light.radius`,
+    /// `.foo[/T].bar` for a target/namespaced property). Empty for a prim
+    /// (non-property) path.
+    pub fn property_suffix(&self) -> &str {
+        &self.path[self.prim_path().as_str().len()..]
+    }
+
     /// Returns the parent path, or `None` for the pseudo-root `/` and empty paths.
     ///
     /// ```text

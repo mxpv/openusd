@@ -164,7 +164,6 @@ impl Changes {
     }
 
     fn classify_root_entry(&mut self, _cache: &Cache, _layer: usize, entry: &ChangeEntry) {
-        let mut significant_at_root = false;
         for &key in &entry.info_changed {
             if key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
@@ -173,11 +172,8 @@ impl Changes {
             } else if key == FieldKey::LayerRelocates.as_str() {
                 self.layer_stack |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
             } else if key == FieldKey::DefaultPrim.as_str() {
-                significant_at_root = true;
+                self.cache.did_change_significantly.insert(Path::abs_root());
             }
-        }
-        if significant_at_root {
-            self.cache.did_change_significantly.insert(Path::abs_root());
         }
     }
 

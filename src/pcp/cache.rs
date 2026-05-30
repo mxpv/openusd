@@ -195,7 +195,7 @@ impl Cache {
         }
 
         let prim = attr_path.prim_path();
-        let suffix = attr_path.as_str()[prim.as_str().len()..].to_owned();
+        let suffix = attr_path.property_suffix().to_owned();
         let local_layers = self.local_layers();
 
         self.ensure_index(&prim)?;
@@ -798,12 +798,9 @@ impl Cache {
         if redirected == prim {
             return Ok(path.clone());
         }
-        if path.is_property_path() {
-            let suffix = &path.as_str()[prim.as_str().len()..];
-            Ok(Path::new(&format!("{redirected}{suffix}"))?)
-        } else {
-            Ok(redirected)
-        }
+        // Re-anchor any property suffix onto the redirected prim; for a prim
+        // path this is the redirected prim itself.
+        Ok(path.replace_prefix(&prim, &redirected).unwrap_or(redirected))
     }
 
     /// Resolves a field value from the strongest opinion across all composition nodes.
@@ -820,7 +817,7 @@ impl Cache {
 
         if path.is_property_path() {
             let prim_path = path.prim_path();
-            let prop_suffix = &path.as_str()[prim_path.as_str().len()..];
+            let prop_suffix = path.property_suffix();
             self.ensure_index(&prim_path)?;
             self.indices[&prim_path].resolve_field(field, &self.stack, Some(prop_suffix))
         } else {
@@ -917,7 +914,7 @@ impl Cache {
             return Ok(Vec::new());
         }
         let prim = path.prim_path();
-        let prop_suffix = path.as_str()[prim.as_str().len()..].to_owned();
+        let prop_suffix = path.property_suffix().to_owned();
         let anchor = self.redirect_anchor(&prim)?;
 
         // Resolve against the canonical instance's subtree when shared.
