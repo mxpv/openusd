@@ -176,6 +176,28 @@ impl Path {
         &self.path[self.prim_path().as_str().len()..]
     }
 
+    /// Splits a property path into its owning prim and the property name (the
+    /// portion after the `.`), or `None` if this is not a property path. The
+    /// inverse of [`append_property`](Self::append_property).
+    ///
+    /// The property name is returned verbatim and may carry namespaces (`:`)
+    /// or further target/connection syntax (`[..]`, `.`); callers that require
+    /// a plain property name should validate it.
+    ///
+    /// ```text
+    /// "/World/Mesh.points"   -> Some(("/World/Mesh", "points"))
+    /// "/Mat.inputs:diffuse"  -> Some(("/Mat", "inputs:diffuse"))
+    /// "/World/Mesh"          -> None
+    /// ```
+    pub fn split_property(&self) -> Option<(Path, &str)> {
+        if !self.is_property_path() {
+            return None;
+        }
+        let prim = self.prim_path();
+        let name = self.path[prim.as_str().len()..].strip_prefix('.')?;
+        Some((prim, name))
+    }
+
     /// Returns the parent path, or `None` for the pseudo-root `/` and empty paths.
     ///
     /// ```text
@@ -210,6 +232,32 @@ impl Path {
         match self.path.rsplit_once('/') {
             Some((_, after)) => Some(after),
             None => Some(&self.path),
+        }
+    }
+
+    /// Iterates the prim-namespace components of this path — prim names and
+    /// `{set=sel}` variant selections — in root → leaf order.
+    ///
+    /// The iterator is lenient and does no validation: it yields the raw
+    /// slices between delimiters and stops at the first thing it cannot parse
+    /// as a prim/variant component (a property suffix, a malformed variant, or
+    /// a stray separator), leaving that tail in
+    /// [`remainder`](PathComponents::remainder). It is the single definition of
+    /// the prim-path grammar; validating consumers layer their checks on top.
+    ///
+    /// Unlike [`strip_all_variant_selections`](Self::strip_all_variant_selections),
+    /// which is a blunt string strip that also removes variant segments
+    /// embedded inside relationship-target brackets, this models only the
+    /// structured prim namespace.
+    ///
+    /// ```text
+    /// "/A{x=y}/B" -> [Prim("A"), Variant{x, y}, Prim("B")]
+    /// "/A.attr"   -> [Prim("A")]  (remainder ".attr")
+    /// ```
+    pub fn components(&self) -> PathComponents<'_> {
+        PathComponents {
+            rest: self.path.strip_prefix('/').unwrap_or(&self.path),
+            in_variants: false,
         }
     }
 
@@ -393,6 +441,86 @@ impl Path {
     }
 }
 
+/// A prim-namespace component of a [`Path`], yielded by [`Path::components`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathComponent<'a> {
+    /// A prim name (registered under its parent's `primChildren`).
+    Prim(&'a str),
+    /// A `{set=sel}` variant selection on the current prim.
+    Variant {
+        /// The variant set name (between `{` and `=`).
+        set: &'a str,
+        /// The selected variant (between `=` and `}`); may be empty for a
+        /// variant-set path like `/Prim{set=}`.
+        selection: &'a str,
+    },
+}
+
+/// Iterator over the prim-namespace components of a [`Path`]. See
+/// [`Path::components`].
+pub struct PathComponents<'a> {
+    /// Unparsed remainder of the path string.
+    rest: &'a str,
+    /// `false` when the next component is a prim name; `true` while collecting
+    /// the variant selections that follow a prim name.
+    in_variants: bool,
+}
+
+impl<'a> PathComponents<'a> {
+    /// The unparsed tail left after iteration: empty for a well-formed prim
+    /// path, otherwise the property suffix or the malformed segment at which
+    /// parsing stopped.
+    pub fn remainder(&self) -> &'a str {
+        self.rest
+    }
+}
+
+impl<'a> Iterator for PathComponents<'a> {
+    type Item = PathComponent<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if !self.in_variants {
+                if self.rest.is_empty() {
+                    return None;
+                }
+                // A prim name runs up to the next separator, variant opener, or
+                // property separator.
+                let end = self.rest.find(['/', '{', '.']).unwrap_or(self.rest.len());
+                let name = &self.rest[..end];
+                if name.is_empty() {
+                    return None;
+                }
+                self.rest = &self.rest[end..];
+                self.in_variants = true;
+                return Some(PathComponent::Prim(name));
+            }
+
+            // Variant selections attach directly to the prim name.
+            if let Some(after_open) = self.rest.strip_prefix('{') {
+                let Some(close) = after_open.find('}') else {
+                    return None; // unterminated; left in `rest`
+                };
+                let Some((set, selection)) = after_open[..close].split_once('=') else {
+                    return None; // missing `=`; left in `rest`
+                };
+                self.rest = &after_open[close + 1..];
+                return Some(PathComponent::Variant { set, selection });
+            }
+
+            // A single `/` separates the next prim; anything else (trailing or
+            // doubled `/`, a property `.`, junk) ends the prim namespace.
+            match self.rest.strip_prefix('/') {
+                Some(next) if !next.is_empty() && !next.starts_with('/') => {
+                    self.rest = next;
+                    self.in_variants = false;
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
 impl From<&Path> for Path {
     fn from(p: &Path) -> Self {
         p.clone()
@@ -561,6 +689,60 @@ mod tests {
             let p = Path::new(input).unwrap();
             assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
         }
+    }
+
+    #[test]
+    fn test_split_property() {
+        let split = |s: &str| {
+            Path::from_str_unchecked(s)
+                .split_property()
+                .map(|(p, n)| (p.path, n.to_owned()))
+        };
+        let owned = |p: &str, n: &str| Some((p.to_owned(), n.to_owned()));
+
+        assert_eq!(split("/World/Mesh.points"), owned("/World/Mesh", "points"));
+        assert_eq!(split("/Mat.inputs:diffuse"), owned("/Mat", "inputs:diffuse"));
+        // Not a property path.
+        assert_eq!(split("/World/Mesh"), None);
+        assert_eq!(split("/"), None);
+    }
+
+    #[test]
+    fn test_components() {
+        // Render each component as an owned string so the result doesn't borrow
+        // the temporary `Path`: a prim is its name, a variant is `{set=sel}`.
+        let parse = |s: &str| -> (Vec<String>, String) {
+            let p = Path::from_str_unchecked(s);
+            let mut it = p.components();
+            let items = it
+                .by_ref()
+                .map(|c| match c {
+                    PathComponent::Prim(name) => name.to_owned(),
+                    PathComponent::Variant { set, selection } => format!("{{{set}={selection}}}"),
+                })
+                .collect();
+            (items, it.remainder().to_owned())
+        };
+        let case = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // Prim names and variant selections, in order, fully consumed.
+        assert_eq!(parse("/A/B/C"), (case(&["A", "B", "C"]), String::new()));
+        assert_eq!(parse("/A{x=y}/B"), (case(&["A", "{x=y}", "B"]), String::new()));
+        assert_eq!(parse("/A{x=y}{p=q}"), (case(&["A", "{x=y}", "{p=q}"]), String::new()));
+        // An empty selection (variant-set path) is yielded verbatim.
+        assert_eq!(parse("/A{x=}"), (case(&["A", "{x=}"]), String::new()));
+
+        // A property suffix ends the prim namespace and stays in the remainder.
+        assert_eq!(parse("/A.attr"), (case(&["A"]), ".attr".to_owned()));
+
+        // Malformed input stops parsing, leaving the bad tail in the remainder.
+        assert_eq!(parse("/A{x=y"), (case(&["A"]), "{x=y".to_owned()));
+        assert_eq!(parse("/A{x}"), (case(&["A"]), "{x}".to_owned()));
+        assert_eq!(parse("/A/"), (case(&["A"]), "/".to_owned()));
+        assert_eq!(parse("/A//B"), (case(&["A"]), "//B".to_owned()));
+
+        // The root and empty paths have no components.
+        assert_eq!(parse("/"), (Vec::<String>::new(), String::new()));
     }
 
     #[test]

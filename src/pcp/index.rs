@@ -878,7 +878,7 @@ impl<'a> IndexBuilder<'a> {
         // prefix equals the parent path, then remap by appending the child name.
         // This mirrors C++ behavior where each level only uses its direct
         // parent's arc mappings for descendant propagation.
-        let child_name = path.as_str().rsplit('/').next().unwrap_or("");
+        let child_name = path.name().unwrap_or("");
         if !child_name.is_empty() {
             let parent = path.parent();
             let ancestor_sites: Vec<_> = self
@@ -889,7 +889,7 @@ impl<'a> IndexBuilder<'a> {
                     // Map the parent path through this arc. Only arcs whose target
                     // prefix matches the parent will succeed.
                     let parent_in_source = a.map.map_target_to_source(parent.as_ref()?)?;
-                    let remapped = Path::new(&format!("{parent_in_source}/{child_name}")).ok()?;
+                    let remapped = parent_in_source.append_path(child_name).ok()?;
                     Some((remapped, a.layer_index, a.arc, a.map.clone()))
                 })
                 .collect();
@@ -1489,14 +1489,15 @@ impl<'a> IndexBuilder<'a> {
             // so pair it with its target-stack sublayer offset.
             if let Some(source_parent) = source.parent() {
                 if source_parent != Path::abs_root() {
-                    let child_name = source.as_str().rsplit('/').next().unwrap_or("");
+                    let child_name = source.name().unwrap_or("");
                     let parent_index = PrimIndex::build_with_context(&source_parent, self.stack, self.ctx)?;
                     let ancestor_sites: Vec<_> = parent_index
                         .nodes()
                         .iter()
                         .filter(|n| n.arc != ArcType::Root)
                         .filter_map(|n| {
-                            Path::new(&format!("{}/{child_name}", n.path))
+                            n.path
+                                .append_path(child_name)
                                 .ok()
                                 .map(|p| (p, n.layer_index, n.arc, n.path.clone()))
                         })

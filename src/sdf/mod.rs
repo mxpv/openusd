@@ -22,7 +22,7 @@ pub use change::{ChangeEntry, ChangeFlags, ChangeList};
 pub use data::Data;
 pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::apply_ordering;
-pub use path::{path, Path};
+pub use path::{path, Path, PathComponent, PathComponents};
 pub use schema::{ChildrenKey, FieldKey};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, PrimSpec, PrimSpecMut, PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec,
