@@ -109,6 +109,8 @@ Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a su
 
 Test function names MUST be terse — 2–4 underscore-separated words, no more. Match the existing naming convention of the file. Prefer `add_api_schema_dup_delete` over `add_api_schema_clears_duplicate_delete_opinions`, `light_api_skips_non_light` over `read_light_api_returns_none_on_non_light_prim`. Drop redundant prefixes like `read_`/`reads_` when the test file already targets a reader; favour the subject + outcome (`light_api_via_applied_schema`) over verbose sentences.
 
+To pull a typed payload out of a `Value` in tests, use the `EnumTryAs`-generated `try_as_*()` accessor followed by `unwrap()`/`expect("…")` rather than a `let Value::Variant(x) = … else { panic!() }` block. Keep the descriptive message by preferring `expect`.
+
 ## Dependencies
 
 Key external dependencies:
