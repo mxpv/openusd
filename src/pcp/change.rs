@@ -129,9 +129,10 @@ impl Changes {
             self.fanout_significant(cache, layer, path);
             // An opinion authored inside a variant (`/Prim{set=sel}/child`)
             // composes into the variant-stripped prim (`/Prim/child`). That
-            // composed cache key is not on the variant path's ancestor chain
-            // (`/Prim{set=sel}` → `/`), so fanning out from the variant path
-            // alone leaves a cached miss there stale; invalidate it too.
+            // composed cache key is not on the authored path's ancestor chain
+            // (`/Prim{set=sel}/child` → `/Prim{set=sel}` → `/Prim` → `/`), so
+            // fanning out from the variant path alone leaves a cached miss
+            // there stale; invalidate it too.
             let stripped = path.strip_all_variant_selections();
             if stripped != *path {
                 self.fanout_significant(cache, layer, &stripped);
