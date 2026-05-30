@@ -30,7 +30,7 @@ Follow these steps:
    - Write the changelog to a temp file (e.g. `/tmp/CHANGELOG-<version>.md`), NOT to the repo. It is only used for the GitHub release notes.
    - Show the changelog to the user and wait for confirmation before proceeding.
 
-4. **Bump version and commit**: Edit the `version` field in Cargo.toml to `<version>`. Stage Cargo.toml (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
+4. **Bump version and commit**: Edit the `version` field in Cargo.toml to `<version>`. Also update the dependency example in the "Getting started" section of README.md to the new version (use the `major.minor` form, e.g. `openusd = "0.5"` for `0.5.0`). Stage Cargo.toml and README.md (Cargo.lock is gitignored). Commit with message `Bump crate version to <version>`.
 
 5. **Tag**: Create tag `v<version>` on the version bump commit. Do NOT move the tag later — it must stay on this commit.
 

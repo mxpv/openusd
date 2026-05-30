@@ -34,7 +34,7 @@ For a detailed comparison with the C++ reference implementation and current prog
   - Composed [prim, attribute, and relationship handles](src/usd/prim.rs) with chained fluent edits.
   - `EditTarget` routing of opinions to a specific layer; in-memory stages for anonymous-root authoring.
   - Applied API schema authoring.
-- Domain schema readers (feature-gated, layered on the composed stage)
+- Domain schema readers (opt-in [feature flags](#feature-flags), layered on the composed stage)
   - [`UsdGeom`](src/schemas/geom) — Imageable / Boundable / Xformable, intrinsic shapes, Camera, Mesh, Curves, PointInstancer.
   - [`UsdLux`](src/schemas/lux) — concrete light prims plus LightAPI / ShapingAPI / ShadowAPI and friends.
   - [`UsdPhysics`](src/schemas/physics) — scene, joints, collisions, and per-DOF limit / drive APIs.
@@ -59,16 +59,47 @@ The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d
 > [!WARNING]
 > This crate is under active development. No API stability is guaranteed until version 1.0.
 
-To begin, simply clone the repository including its submodules.
 Make sure you have [`Rust`](https://www.rust-lang.org/tools/install) installed on your system, `rustup` will do the rest.
 
-```bash
-# Clone the project
-git clone --recurse-submodules https://github.com/mxpv/openusd.git
-cd openusd
+Add the crate to your `Cargo.toml` (or run `cargo add openusd`):
 
-# Run examples
-cargo run --example dump_usdc -- ~/caldera/layers/cameras.usd
+```toml
+[dependencies]
+openusd = "0.4"
+```
+
+If you need the latest unreleased changes, depend on the crate directly from the
+git repository:
+
+```toml
+[dependencies]
+openusd = { git = "https://github.com/mxpv/openusd.git" }
+```
+
+To pin a specific revision, add a `rev` field:
+
+```toml
+[dependencies]
+openusd = { git = "https://github.com/mxpv/openusd.git", rev = "4c02084" }
+```
+
+### Feature flags
+
+The core library (formats, composition, and the `Stage` API) is always
+available. Domain schema readers are gated behind opt-in features so you only
+pay for what you use:
+
+| Feature | Enables |
+|---------|---------|
+| `geom` | [`UsdGeom`](src/schemas/geom) — Imageable, Boundable, Xformable, shapes, Camera, Mesh, Curves, PointInstancer |
+| `lux` | [`UsdLux`](src/schemas/lux) — light prims and Light/Shaping/Shadow APIs |
+| `physics` | [`UsdPhysics`](src/schemas/physics) — scenes, joints, collisions, limit/drive APIs |
+| `skel` | [`UsdSkel`](src/schemas/skel) — skeleton reader and skinning toolkit |
+| `serde` | `serde` support for serializing core types |
+
+```toml
+[dependencies]
+openusd = { version = "0.4", features = ["geom", "lux"] }
 ```
 
 ## Example
@@ -126,6 +157,21 @@ let binding = mesh
     .add_target(sdf::Path::new("/World/Material")?)?;
 ```
 
+More runnable examples live in the [`examples/`](examples) directory:
+
+```bash
+cargo run --example dump_usdc -- path/to/file.usdc
+cargo run --example write_usda
+cargo run --example author_variant_and_reference
+```
+
 ## Minimum supported Rust version (MSRV)
 
-The project typically targets the latest stable Rust version. Please refer to [rust-toolchain.toml](./rust-toolchain.toml) for exact version currently used by our CIs.
+The project targets stable Rust and aims for the latest Rust editions. The MSRV
+is bumped on an as-needed basis, whenever it makes sense for the project. Please
+refer to [rust-toolchain.toml](./rust-toolchain.toml) for the exact version
+currently used by our CIs.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
