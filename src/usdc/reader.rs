@@ -1300,6 +1300,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::TimeCode if value.is_array() => sdf::Value::TimeCodeVec(self.read_floats(value)?),
             Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?),
 
+            Type::PathExpression if value.is_array() => {
+                // Path-expression arrays are stored like string arrays
+                // (string-table indices); surface them as a `StringVec`, as the
+                // `Value` enum has no dedicated path-expression array variant.
+                self.set_position(value.payload())?;
+                sdf::Value::StringVec(self.read_string_vec()?)
+            }
             Type::PathExpression => {
                 let expr = self.read_asset_path(value)?;
                 sdf::Value::PathExpression(expr)

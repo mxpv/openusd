@@ -361,21 +361,19 @@ fn token_values() {
 }
 
 #[test]
-fn assetpath_single() {
-    // The reader cannot yet unpack `AssetPath[]` arrays, so only the scalar is
-    // checked here. See `assetpath_array` for the array case.
-    let data = scene("assetpath");
-    assert_eq!(scalar_str(&value(&data, "/root.single", "default")), "Hello/World");
+fn assetpath_values() {
+    assert_strings(&scene("assetpath"));
 }
 
 #[test]
-fn path_expression_single() {
-    // `PathExpression[]` arrays are not yet readable; cover the scalar only.
+fn path_expression_values() {
     let data = scene("pathexpression");
     assert_eq!(
         value(&data, "/root.single", "default"),
         Value::PathExpression("/root/Foo".into())
     );
+    let array = str_vec(&value(&data, "/root.array", "default"));
+    assert_eq!(array, vec!["/root/Spam", "/root/Eggs"]);
 }
 
 #[test]
