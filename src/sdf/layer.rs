@@ -220,6 +220,7 @@ impl Layer {
         let path: Path = path.into();
         let type_name: String = type_name.into();
 
+        require_prim_leaf(&path)?;
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
@@ -241,6 +242,7 @@ impl Layer {
     pub fn override_prim(&mut self, path: impl Into<Path>) -> Result<PrimSpecMut<'_>, AuthoringError> {
         let path: Path = path.into();
 
+        require_prim_leaf(&path)?;
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
@@ -806,6 +808,22 @@ fn require_spec_type_or_absent(data: &Data, path: &Path, expected: SpecType) -> 
 /// drives the parser with a no-op rather than building the spec chain.
 fn require_prim_path(path: &Path) -> Result<(), AuthoringError> {
     parse_prim_path(path, |_| {})
+}
+
+/// Reject a target whose leaf is a variant selection (e.g. `/Prim{set=sel}`).
+///
+/// Such a path identifies a variant spec, not a prim, so `create_prim` /
+/// `override_prim` cannot author a `PrimSpec` there. (Properties and children
+/// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}/child` — remain
+/// valid; only the bare variant selection as the leaf is rejected.)
+fn require_prim_leaf(path: &Path) -> Result<(), AuthoringError> {
+    if path.is_prim_variant_selection_path() {
+        return Err(AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "expected a prim path, but the leaf is a variant selection",
+        });
+    }
+    Ok(())
 }
 
 /// Split a property path like `/World/Mesh.points` into `(/World/Mesh,

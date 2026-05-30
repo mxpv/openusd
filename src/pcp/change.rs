@@ -127,6 +127,15 @@ impl Changes {
 
         if significant {
             self.fanout_significant(cache, layer, path);
+            // An opinion authored inside a variant (`/Prim{set=sel}/child`)
+            // composes into the variant-stripped prim (`/Prim/child`). That
+            // composed cache key is not on the variant path's ancestor chain
+            // (`/Prim{set=sel}` → `/`), so fanning out from the variant path
+            // alone leaves a cached miss there stale; invalidate it too.
+            let stripped = path.strip_all_variant_selections();
+            if stripped != *path {
+                self.fanout_significant(cache, layer, &stripped);
+            }
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
             if cache.layer_authors_field(layer, path, FieldKey::Instanceable.as_str()) {
                 // An inert add whose spec carries `instanceable` flips the
