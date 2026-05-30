@@ -68,10 +68,7 @@ where
             let mut index = filespec.fieldset_index;
 
             while index < file.fieldsets.len() {
-                let current = match file.fieldsets[index] {
-                    Some(value) => value,
-                    None => break,
-                };
+                let Some(current) = file.fieldsets[index] else { break };
 
                 index += 1;
 

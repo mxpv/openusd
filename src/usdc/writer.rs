@@ -337,15 +337,20 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     // -----------------------------------------------------------------
 
     fn encode_paths(&mut self) -> Result<(Vec<u32>, Vec<i32>, Vec<i32>)> {
-        let paths = self.paths.items.clone();
-        let by_index: HashMap<Path, u32> = paths.iter().enumerate().map(|(i, p)| (p.clone(), i as u32)).collect();
+        let by_index: HashMap<Path, u32> = self
+            .paths
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i as u32))
+            .collect();
 
         // Build parent → children map. Skip empty paths — they can appear in
         // `Value::Path` / ListOp items as placeholders (e.g. internal payload
         // paths) and are represented by the reader as the default empty slot
         // in the paths array.
         let mut children: HashMap<Path, Vec<Path>> = HashMap::new();
-        for p in &paths {
+        for p in &self.paths.items {
             if p.as_str() == "/" || p.is_empty() {
                 continue;
             }
@@ -357,9 +362,10 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         }
 
         let root = Path::abs_root();
-        let mut path_indexes = Vec::with_capacity(paths.len());
-        let mut tokens = Vec::with_capacity(paths.len());
-        let mut jumps = Vec::with_capacity(paths.len());
+        let len = self.paths.items.len();
+        let mut path_indexes = Vec::with_capacity(len);
+        let mut tokens = Vec::with_capacity(len);
+        let mut jumps = Vec::with_capacity(len);
 
         self.emit_path_node(
             &root,

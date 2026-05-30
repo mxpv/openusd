@@ -710,43 +710,25 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(out)
     }
 
-    fn read_string_vec(&mut self) -> Result<Vec<String>> {
+    /// Reads a count-prefixed vector of `u32` indices and maps each through
+    /// `lookup` to produce the element value.
+    fn read_indexed_vec<T>(&mut self, lookup: impl Fn(&Self, usize) -> T) -> Result<Vec<T>> {
         let count = self.reader.read_count()?;
         let indices = self.reader.read_vec::<u32>(count)?;
 
-        let vec = indices
-            .into_iter()
-            .map(|string_index| {
-                let token_index = self.strings[string_index as usize];
-                self.tokens[token_index].clone()
-            })
-            .collect();
+        Ok(indices.into_iter().map(|index| lookup(self, index as usize)).collect())
+    }
 
-        Ok(vec)
+    fn read_string_vec(&mut self) -> Result<Vec<String>> {
+        self.read_indexed_vec(|file, index| file.tokens[file.strings[index]].clone())
     }
 
     fn read_token_vec(&mut self) -> Result<Vec<String>> {
-        let count = self.reader.read_count()?;
-        let indices = self.reader.read_vec::<u32>(count)?;
-
-        let vec = indices
-            .into_iter()
-            .map(|index| self.tokens[index as usize].clone())
-            .collect();
-
-        Ok(vec)
+        self.read_indexed_vec(|file, index| file.tokens[index].clone())
     }
 
     fn read_path_vec(&mut self) -> Result<Vec<sdf::Path>> {
-        let count = self.reader.read_count()?;
-        let indices = self.reader.read_vec::<u32>(count)?;
-
-        let vec = indices
-            .into_iter()
-            .map(|index| self.paths[index as usize].clone())
-            .collect();
-
-        Ok(vec)
+        self.read_indexed_vec(|file, index| file.paths[index].clone())
     }
 
     /// Reads a count-prefixed vector of POD values.
@@ -866,16 +848,12 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
 
         let flat: Vec<T> = self.reader.read_vec(count * N)?;
 
-        // Reinterpret the flat vec as a vec of fixed-size arrays.
-        // SAFETY: [T; N] has the same layout as N contiguous T values, and T: Pod.
-        let mut result = Vec::with_capacity(count);
-        for chunk in flat.chunks_exact(N) {
-            let arr: [T; N] = chunk.try_into().unwrap_or_else(|_| {
-                // This branch is unreachable because chunks_exact(N) always yields N elements.
-                unreachable!()
-            });
-            result.push(arr);
-        }
+        // Reinterpret the flat vec as a vec of fixed-size arrays. `chunks_exact(N)`
+        // always yields slices of exactly N elements, so `try_into` cannot fail.
+        let result = flat
+            .chunks_exact(N)
+            .map(|chunk| chunk.try_into().expect("chunks_exact yields N elements"))
+            .collect();
 
         Ok(result)
     }
