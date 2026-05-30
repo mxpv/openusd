@@ -14,7 +14,7 @@ use bytemuck::{bytes_of, Pod};
 use half::f16;
 use num_traits::{AsPrimitive, PrimInt};
 
-use crate::sdf::{AbstractData, LayerOffset, ListOp, Path, Payload, Reference, Value};
+use crate::sdf::{AbstractData, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value};
 
 use super::coding;
 use super::layout::{
@@ -136,8 +136,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 if p.as_str() == "/" {
                     continue;
                 }
-                let (segment, _) = last_segment(p);
-                segment.to_owned()
+                path_element_token(p).0
             };
             self.tokens.intern(segment);
         }
@@ -149,7 +148,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
     /// time [`encode_paths`] DFSes from the root.
     fn intern_path(&mut self, path: Path) -> u32 {
         if !self.paths.index.contains_key(&path) {
-            if let Some(parent) = parent_of(&path) {
+            if let Some(parent) = path.parent() {
                 self.intern_path(parent);
             }
         }
@@ -354,7 +353,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             if p.as_str() == "/" || p.is_empty() {
                 continue;
             }
-            let parent = parent_of(p).ok_or_else(|| anyhow::anyhow!("path {p} has no parent but is not root"))?;
+            let parent = p
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("path {p} has no parent but is not root"))?;
             children.entry(parent).or_default().push(p.clone());
         }
         for list in children.values_mut() {
@@ -403,8 +404,8 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         if is_root_chain_root {
             tokens.push(0);
         } else {
-            let (segment, is_prop) = last_segment(node);
-            let tok_idx = self.tokens.intern(segment.to_owned()) as i32;
+            let (segment, is_prop) = path_element_token(node);
+            let tok_idx = self.tokens.intern(segment) as i32;
             tokens.push(if is_prop { -tok_idx } else { tok_idx });
         }
 
@@ -1119,54 +1120,18 @@ fn kid_had_child(existing: &i32) -> bool {
     *existing == -1 || *existing > 0
 }
 
-fn parent_of(path: &Path) -> Option<Path> {
-    let s = path.as_str();
-    if s.is_empty() || s == "/" {
-        return None;
+/// The path table stores each spec as `(parent, element-token, is-property)`.
+/// Returns the interned-token string for a path's final element and whether it
+/// is a property (the reader appends a property via `.`, encoded as a negative
+/// token index). Variant selections are stored with their braces so they
+/// round-trip verbatim.
+fn path_element_token(path: &Path) -> (String, bool) {
+    match path.last_element() {
+        Some(PathElement::Prim(name)) => (name.to_owned(), false),
+        Some(PathElement::Property(name)) => (name.to_owned(), true),
+        Some(PathElement::Variant { set, selection }) => (format!("{{{set}={selection}}}"), false),
+        None => (String::new(), false),
     }
-
-    // Variant segment parent: /Prim{set=sel} → /Prim
-    if s.ends_with('}') {
-        if let Some(pos) = s.rfind('{') {
-            return Path::new(&s[..pos]).ok();
-        }
-    }
-
-    // Property path: /Prim.x → /Prim (prim path).
-    if path.is_property_path() {
-        return Some(path.prim_path());
-    }
-
-    // Regular prim path.
-    match s.rsplit_once('/') {
-        Some(("", _)) => Some(Path::abs_root()),
-        Some((before, _)) => Path::new(before).ok(),
-        None => None,
-    }
-}
-
-/// Returns `(segment, is_property)` where `segment` is the last element of the
-/// path and `is_property` is true if the element was attached via `.`.
-fn last_segment(path: &Path) -> (&str, bool) {
-    let s = path.as_str();
-
-    if s.ends_with('}') {
-        if let Some(pos) = s.rfind('{') {
-            return (&s[pos..], false);
-        }
-    }
-
-    if path.is_property_path() {
-        if let Some(pos) = s.rfind('.') {
-            return (&s[pos + 1..], true);
-        }
-    }
-
-    if let Some(pos) = s.rfind('/') {
-        return (&s[pos + 1..], false);
-    }
-
-    (s, false)
 }
 
 fn lz4_compress_single_chunk(input: &[u8]) -> Vec<u8> {

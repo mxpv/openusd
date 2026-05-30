@@ -198,17 +198,65 @@ impl Path {
         Some((prim, name))
     }
 
-    /// Returns the parent path, or `None` for the pseudo-root `/` and empty paths.
+    /// Returns the final namespace element of this path and its kind, or `None`
+    /// for the pseudo-root `/` and empty paths. The inverse of the
+    /// `append_property` / `append_variant_selection` / child-`append_path`
+    /// family: an element appended to [`parent`](Self::parent) reconstructs the
+    /// path.
     ///
     /// ```text
-    /// "/A/B/C" -> Some("/A/B")
-    /// "/A"     -> Some("/")
-    /// "/"      -> None
-    /// ""       -> None
+    /// "/A/B"          -> Some(Prim("B"))
+    /// "/A.points"     -> Some(Property("points"))
+    /// "/A{set=sel}"   -> Some(Variant { set: "set", selection: "sel" })
+    /// ```
+    pub fn last_element(&self) -> Option<PathElement<'_>> {
+        if self.path.is_empty() || self.path == "/" {
+            return None;
+        }
+        if self.is_property_path() {
+            let dot = self.path.rfind('.')?;
+            return Some(PathElement::Property(&self.path[dot + 1..]));
+        }
+        if self.path.ends_with('}') {
+            if let Some(open) = self.path.rfind('{') {
+                let inner = &self.path[open + 1..self.path.len() - 1];
+                if let Some((set, selection)) = inner.split_once('=') {
+                    return Some(PathElement::Variant { set, selection });
+                }
+            }
+        }
+        match self.path.rsplit_once('/') {
+            Some((_, name)) => Some(PathElement::Prim(name)),
+            None => Some(PathElement::Prim(&self.path)),
+        }
+    }
+
+    /// Returns the parent path, or `None` for the pseudo-root `/` and empty
+    /// paths. Mirrors C++ `SdfPath::GetParentPath`: a property's parent is its
+    /// owning prim, a variant selection's parent is the prim (or enclosing
+    /// variant) it qualifies, and a prim's parent is its namespace parent.
+    ///
+    /// ```text
+    /// "/A/B/C"      -> Some("/A/B")
+    /// "/A"          -> Some("/")
+    /// "/A.attr"     -> Some("/A")
+    /// "/A{x=y}"     -> Some("/A")
+    /// "/A{x=y}{p=q}"-> Some("/A{x=y}")
+    /// "/"           -> None
+    /// ""            -> None
     /// ```
     pub fn parent(&self) -> Option<Path> {
         if self.path.is_empty() || self.path == "/" {
             return None;
+        }
+        if self.is_property_path() {
+            return Some(self.prim_path());
+        }
+        // Drop a trailing `{set=sel}` variant selection.
+        if self.path.ends_with('}') {
+            if let Some(open) = self.path.rfind('{') {
+                return Some(Path::from_str_unchecked(&self.path[..open]));
+            }
         }
         match self.path.rsplit_once('/') {
             Some(("", _)) => Some(Path::abs_root()),
@@ -456,6 +504,23 @@ pub enum PathComponent<'a> {
     },
 }
 
+/// The final namespace element of a [`Path`], returned by
+/// [`Path::last_element`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathElement<'a> {
+    /// A prim name.
+    Prim(&'a str),
+    /// A property name (the segment after the final `.`).
+    Property(&'a str),
+    /// A `{set=sel}` variant selection.
+    Variant {
+        /// The variant set name.
+        set: &'a str,
+        /// The selected variant.
+        selection: &'a str,
+    },
+}
+
 /// Iterator over the prim-namespace components of a [`Path`]. See
 /// [`Path::components`].
 pub struct PathComponents<'a> {
@@ -692,6 +757,28 @@ mod tests {
     }
 
     #[test]
+    fn test_last_element() {
+        // Render the element as an owned string so it doesn't borrow the
+        // temporary `Path`: `name`, `.name` for a property, `{set=sel}`.
+        let last = |s: &str| -> Option<String> {
+            Path::from_str_unchecked(s).last_element().map(|e| match e {
+                PathElement::Prim(name) => name.to_owned(),
+                PathElement::Property(name) => format!(".{name}"),
+                PathElement::Variant { set, selection } => format!("{{{set}={selection}}}"),
+            })
+        };
+
+        assert_eq!(last("/A/B").as_deref(), Some("B"));
+        assert_eq!(last("/A").as_deref(), Some("A"));
+        assert_eq!(last("/A.points").as_deref(), Some(".points"));
+        assert_eq!(last("/A.inputs:diffuse").as_deref(), Some(".inputs:diffuse"));
+        assert_eq!(last("/A{set=sel}").as_deref(), Some("{set=sel}"));
+        assert_eq!(last("/A{x=y}{p=q}").as_deref(), Some("{p=q}"));
+        assert_eq!(last("/"), None);
+        assert_eq!(last(""), None);
+    }
+
+    #[test]
     fn test_split_property() {
         let split = |s: &str| {
             Path::from_str_unchecked(s)
@@ -788,11 +875,21 @@ mod tests {
     fn test_parent() {
         #[rustfmt::skip]
         let cases: &[(&str, Option<&str>)] = &[
-            ("/A/B/C", Some("/A/B")),
-            ("/A/B",   Some("/A")),
-            ("/A",     Some("/")),
-            ("/",      None),
-            ("",       None),
+            ("/A/B/C",       Some("/A/B")),
+            ("/A/B",         Some("/A")),
+            ("/A",           Some("/")),
+            ("/",            None),
+            ("",             None),
+            // A property's parent is its owning prim.
+            ("/A.attr",      Some("/A")),
+            ("/A/B.attr",    Some("/A/B")),
+            ("/A.foo:bar",   Some("/A")),
+            // A variant selection's parent is the prim (or enclosing variant).
+            ("/A{x=y}",      Some("/A")),
+            ("/A/B{x=y}",    Some("/A/B")),
+            ("/A{x=y}{p=q}",  Some("/A{x=y}")),
+            ("/A{x=y}/B",    Some("/A{x=y}")),
+            ("/A{x=y}.attr", Some("/A{x=y}")),
         ];
 
         for &(path, expected) in cases {
