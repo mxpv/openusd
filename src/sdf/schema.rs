@@ -149,6 +149,7 @@ impl FieldKey {
 }
 
 /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/2864f3d04f396432f22ec5d6928fc37d34bb4c90/pxr/usd/sdf/schema.h#L652>
+#[derive(Clone, Copy)]
 pub enum ChildrenKey {
     ConnectionChildren,
     ExpressionChildren,
