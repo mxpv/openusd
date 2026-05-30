@@ -1311,6 +1311,28 @@ mod tests {
         Ok(())
     }
 
+    /// A bare variant-selection leaf isn't a prim, so prim authoring rejects it
+    /// (rather than panicking on the `PrimSpecMut` downcast or writing prim
+    /// fields onto the variant spec).
+    #[test]
+    fn prim_authoring_rejects_variant_leaf() -> Result<()> {
+        let mut layer = sdf::Layer::new_anonymous("variants.usda");
+        layer.create_prim("/Prim", sdf::Specifier::Def, "Xform")?;
+        assert!(matches!(
+            layer
+                .create_prim("/Prim{set=sel}", sdf::Specifier::Def, "Xform")
+                .unwrap_err(),
+            sdf::AuthoringError::InvalidPath { .. }
+        ));
+        assert!(matches!(
+            layer.override_prim("/Prim{set=sel}").unwrap_err(),
+            sdf::AuthoringError::InvalidPath { .. }
+        ));
+        // The rejected calls must not have authored a variant spec.
+        assert_eq!(layer.spec_type(&sdf::path("/Prim{set=sel}")?), None);
+        Ok(())
+    }
+
     #[test]
     fn usda_roundtrip() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("scene.usda");

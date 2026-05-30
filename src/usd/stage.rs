@@ -3524,6 +3524,45 @@ def "I2" (
         Ok(())
     }
 
+    /// Authoring the variant-owning prim itself through a variant target maps
+    /// to the bare variant selection, which is not a prim — it must error, not
+    /// panic.
+    #[test]
+    fn define_prim_at_variant_leaf_errors() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.edit_target().layer_index();
+        stage.define_prim("/Prim")?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        // `/Prim` maps to the variant selection `/Prim{set=sel}`.
+        assert!(matches!(
+            stage.define_prim("/Prim"),
+            Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
+        ));
+        Ok(())
+    }
+
+    /// A significant edit inside a variant must invalidate the composed
+    /// (variant-stripped) prim, whose cache key is not on the variant path's
+    /// ancestor chain.
+    #[test]
+    fn variant_edit_invalidates_stripped_path() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.edit_target().layer_index();
+        stage.define_prim("/Prim")?;
+
+        // Cache a composed miss at the scene path.
+        assert_eq!(stage.spec_type("/Prim/child")?, None);
+        assert!(stage.is_indexed(&sdf::path("/Prim/child")?));
+
+        // Author the child inside the variant: `/Prim/child` -> `/Prim{set=sel}/child`.
+        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        stage.define_prim("/Prim/child")?;
+
+        // The stripped composed key must be dropped so the next query rebuilds.
+        assert!(!stage.is_indexed(&sdf::path("/Prim/child")?));
+        Ok(())
+    }
+
     // --- Value clips (spec 12.3.4) ---
 
     fn clip_asset(name: &str) -> String {

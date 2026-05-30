@@ -127,6 +127,16 @@ impl Path {
         !tail.is_empty() && tail.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
     }
 
+    /// Returns `true` if this path's final component is a variant selection,
+    /// e.g. `/Prim{set=sel}` — as opposed to a prim, property, or the root.
+    ///
+    /// Mirrors C++ `SdfPath::IsPrimVariantSelectionPath`. A variant selection
+    /// path identifies a variant spec, not a prim, so it is not a valid target
+    /// for prim authoring.
+    pub fn is_prim_variant_selection_path(&self) -> bool {
+        self.path.ends_with('}')
+    }
+
     pub fn prim_path(&self) -> Path {
         // Split at last slash.
         // "/A/B/C.foo[target].bar:baz" will become "/A/B" and "C.foo[target].bar:baz"
