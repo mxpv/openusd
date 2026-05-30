@@ -13,6 +13,6 @@ pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
 pub use prim::{Attribute, Prim, Relationship};
 pub use stage::{
-    CompositionError, EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError, StageBuilder,
-    StagePopulationMask,
+    CompositionError, EditContext, EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    StageBuilder, StagePopulationMask,
 };
