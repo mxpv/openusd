@@ -697,15 +697,21 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
-        let target = self.edit_target.borrow().clone();
-        let spec_path = target
-            .map_to_spec_path(scene_path)
-            .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
-                path: scene_path.clone(),
-            })?;
+        // Resolve the target layer and mapped path from a short-lived borrow
+        // so authoring doesn't deep-clone the `EditTarget` (its `MapFunction`
+        // owns heap path pairs) on every call.
+        let (index, spec_path) = {
+            let target = self.edit_target.borrow();
+            let spec_path =
+                target
+                    .map_to_spec_path(scene_path)
+                    .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
+                        path: scene_path.clone(),
+                    })?;
+            (target.layer_index, spec_path)
+        };
         let mut cache = self.graph.borrow_mut();
         let count = cache.layer_count();
-        let index = target.layer_index;
         let result = {
             let layer = cache
                 .layer_mut(index)

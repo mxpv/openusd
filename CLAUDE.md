@@ -80,6 +80,7 @@ When implementing a new feature from the spec:
 - All warnings treated as errors in CI
 - Comprehensive test coverage (50% minimum) with grcov
 - Security auditing with cargo-deny
+- Pre-1.0: backward compatibility is not a constraint. Prefer the cleanest design and change or remove public APIs freely; don't keep deprecated shims, compatibility shims, or worse-but-compatible behavior. Update all call sites in the same change.
 
 ## Code Quality
 

@@ -220,7 +220,8 @@ impl Layer {
         let path: Path = path.into();
         let type_name: String = type_name.into();
 
-        require_prim_path(&path)?;
+        // `ensure_prim_chain` validates `path` via `namespace_chain`, so no
+        // separate `require_prim_path` pre-check is needed.
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
@@ -242,7 +243,7 @@ impl Layer {
     pub fn override_prim(&mut self, path: impl Into<Path>) -> Result<PrimSpecMut<'_>, AuthoringError> {
         let path: Path = path.into();
 
-        require_prim_path(&path)?;
+        // `ensure_prim_chain` validates `path` via `namespace_chain`.
         let data = self.writable_data_mut()?;
         ensure_prim_chain(data, &path)?;
 
@@ -562,6 +563,13 @@ impl AbstractData for Layer {
 /// Errors with [`AuthoringError::InvalidPath`] if any ancestor or `target`
 /// path already holds a spec of a non-prim type — stamping `primChildren`
 /// onto an Attribute or Relationship spec would corrupt the layer.
+//
+// TODO(perf): the Stage tier rebuilds this chain per authoring op —
+// `missing_prim_ancestors` / `missing_prim_chain_inclusive` walk
+// `namespace_chain` to report auto-created ancestors, then `create_*` walk it
+// again here. The chain is independent of the layer mutation, so it could be
+// built once and threaded through (e.g. `create_*` could accept a prevalidated
+// chain) instead of re-parsing the path two or three times per write.
 fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringError> {
     let chain = namespace_chain(target)?;
     let abs_root = Path::abs_root();
@@ -703,9 +711,9 @@ fn parse_prim_path(target: &Path, mut emit: impl FnMut(PathToken<'_>)) -> Result
 
         match rest.strip_prefix('/') {
             Some(next) if !next.is_empty() => rest = next,
-            Some(_) => return Err(invalid("malformed prim path")),
             None if rest.is_empty() => {}
-            None => return Err(invalid("malformed prim path")),
+            // A trailing or doubled separator (`Some("")`) or leftover junk.
+            _ => return Err(invalid("malformed prim path")),
         }
     }
     Ok(())
