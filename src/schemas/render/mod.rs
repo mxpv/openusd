@@ -34,6 +34,12 @@ mod author;
 mod read;
 mod types;
 
-pub use author::{define_render_settings, RenderSettingsAuthor, SettingsBaseSetters};
-pub use read::{read_render_settings, read_settings_base};
-pub use types::{AspectRatioConformPolicy, ProductType, ReadRenderSettings, ReadSettingsBase, SourceType};
+pub use author::{
+    define_render_product, define_render_settings, define_render_var, RenderProductAuthor, RenderSettingsAuthor,
+    RenderVarAuthor, SettingsBaseSetters,
+};
+pub use read::{read_render_product, read_render_settings, read_render_var, read_settings_base};
+pub use types::{
+    AspectRatioConformPolicy, ProductType, ReadRenderProduct, ReadRenderSettings, ReadRenderVar, ReadSettingsBase,
+    SourceType,
+};
