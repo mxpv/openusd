@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
 use super::tokens::*;
@@ -160,7 +160,7 @@ pub fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
 // ── value-read helpers ──────────────────────────────────────────────
 
 fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    stage.field::<Value>(prim.append_property(name)?, "default")
+    stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
 }
 
 fn read_f32(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f32>> {
@@ -217,7 +217,7 @@ fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
 
 fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<String>> {
     let rel_path = prim.append_property(rel_name)?;
-    let paths = match stage.field::<Value>(rel_path, "targetPaths")? {
+    let paths = match stage.field::<Value>(rel_path, FieldKey::TargetPaths)? {
         Some(Value::PathListOp(op)) => op.flatten(),
         Some(Value::PathVec(v)) => v,
         _ => Vec::new(),
