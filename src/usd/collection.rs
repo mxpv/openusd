@@ -118,8 +118,7 @@ impl Collection {
 
     /// `collection:<name>:<suffix>` property path on the prim.
     fn prop(&self, suffix: &str) -> Result<Path> {
-        self.prim
-            .append_property(&format!("{NS_COLLECTION}{}:{suffix}", self.name))
+        self.prim.append_property(&self.rel_name(suffix))
     }
 
     /// `expansionRule` — defaults to [`ExpansionRule::ExpandPrims`].
