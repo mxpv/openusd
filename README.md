@@ -39,6 +39,7 @@ For a detailed comparison with the C++ reference implementation and current prog
   - [`UsdLux`](src/schemas/lux) — concrete light prims plus LightAPI / ShapingAPI / ShadowAPI and friends.
   - [`UsdPhysics`](src/schemas/physics) — scene, joints, collisions, and per-DOF limit / drive APIs.
   - [`UsdSkel`](src/schemas/skel) — schema reader plus a pure-math skinning toolkit (topology, anim mapping, LBS, blend shapes).
+  - [`UsdShade`](src/schemas/shade) — Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, and UsdPreviewSurface.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
@@ -48,11 +49,11 @@ The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d
 
 | Area | Status | Notes |
 |------|--------|-------|
-| [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark: Passes | 10 tests against JSON baselines |
-| [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark: Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](tests/binary_format.rs) |
-| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark: Passes | All 276 tests covering text and binary formats, including 20 relocation tests |
-| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check: Partial | 8 tests in [`tests/value_resolution.rs`](tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
-| [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark: Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
+| [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark:&nbsp;Passes | 10 tests against JSON baselines |
+| [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark:&nbsp;Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](tests/binary_format.rs) |
+| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | All 276 tests covering text and binary formats, including 20 relocation tests |
+| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check:&nbsp;Partial | 8 tests in [`tests/value_resolution.rs`](tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
+| [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark:&nbsp;Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
 
 ## Getting started
 
@@ -95,6 +96,7 @@ pay for what you use:
 | `lux` | [`UsdLux`](src/schemas/lux) — light prims and Light/Shaping/Shadow APIs |
 | `physics` | [`UsdPhysics`](src/schemas/physics) — scenes, joints, collisions, limit/drive APIs |
 | `skel` | [`UsdSkel`](src/schemas/skel) — skeleton reader and skinning toolkit |
+| `shade` | [`UsdShade`](src/schemas/shade) — materials, shader networks, bindings, UsdPreviewSurface |
 | `serde` | `serde` support for serializing core types |
 
 ```toml
