@@ -21,18 +21,40 @@ use super::types::*;
 /// Not type-gated — both concrete schemas carry these attributes, and the
 /// computed render spec reads the base off each prim regardless of which.
 pub fn read_settings_base(stage: &Stage, prim: &Path) -> Result<ReadSettingsBase> {
-    let d = ReadSettingsBase::default();
+    read_base_with_fallback(stage, prim, &ReadSettingsBase::default())
+}
+
+/// Read the base attributes on a `RenderProduct`, layering authored
+/// product opinions over the already-resolved settings `base`.
+///
+/// This is the product-overrides-settings rule (spec): a product attribute
+/// overrides the settings value **only if it is explicitly authored on the
+/// product** — mirroring C++ `_Get(attr, val, getDefaultValue=false)`,
+/// which uses the value only when `attr.HasAuthoredValue()`. An unauthored
+/// product attribute inherits the (fallback-resolved) settings value, never
+/// the bare spec default.
+pub fn read_base_overriding(stage: &Stage, product: &Path, base: &ReadSettingsBase) -> Result<ReadSettingsBase> {
+    read_base_with_fallback(stage, product, base)
+}
+
+/// Reads each base attribute, falling back to the matching field of
+/// `fallback` for any unauthored attribute. With `fallback = defaults`
+/// this resolves the spec fallbacks; with `fallback = settings-base` it
+/// implements the product override.
+fn read_base_with_fallback(stage: &Stage, prim: &Path, fallback: &ReadSettingsBase) -> Result<ReadSettingsBase> {
     Ok(ReadSettingsBase {
-        resolution: read_int2(stage, prim, A_RESOLUTION)?.unwrap_or(d.resolution),
-        pixel_aspect_ratio: read_f32(stage, prim, A_PIXEL_ASPECT_RATIO)?.unwrap_or(d.pixel_aspect_ratio),
+        resolution: read_int2(stage, prim, A_RESOLUTION)?.unwrap_or(fallback.resolution),
+        pixel_aspect_ratio: read_f32(stage, prim, A_PIXEL_ASPECT_RATIO)?.unwrap_or(fallback.pixel_aspect_ratio),
         aspect_ratio_conform_policy: read_token(stage, prim, A_ASPECT_RATIO_CONFORM_POLICY)?
             .and_then(|t| AspectRatioConformPolicy::from_token(&t))
-            .unwrap_or(d.aspect_ratio_conform_policy),
-        data_window_ndc: read_float4(stage, prim, A_DATA_WINDOW_NDC)?.unwrap_or(d.data_window_ndc),
-        instantaneous_shutter: read_bool(stage, prim, A_INSTANTANEOUS_SHUTTER)?.unwrap_or(d.instantaneous_shutter),
-        disable_motion_blur: read_bool(stage, prim, A_DISABLE_MOTION_BLUR)?.unwrap_or(d.disable_motion_blur),
-        disable_depth_of_field: read_bool(stage, prim, A_DISABLE_DEPTH_OF_FIELD)?.unwrap_or(d.disable_depth_of_field),
-        camera: read_rel_first_target(stage, prim, REL_CAMERA)?,
+            .unwrap_or(fallback.aspect_ratio_conform_policy),
+        data_window_ndc: read_float4(stage, prim, A_DATA_WINDOW_NDC)?.unwrap_or(fallback.data_window_ndc),
+        instantaneous_shutter: read_bool(stage, prim, A_INSTANTANEOUS_SHUTTER)?
+            .unwrap_or(fallback.instantaneous_shutter),
+        disable_motion_blur: read_bool(stage, prim, A_DISABLE_MOTION_BLUR)?.unwrap_or(fallback.disable_motion_blur),
+        disable_depth_of_field: read_bool(stage, prim, A_DISABLE_DEPTH_OF_FIELD)?
+            .unwrap_or(fallback.disable_depth_of_field),
+        camera: read_rel_first_target(stage, prim, REL_CAMERA)?.or_else(|| fallback.camera.clone()),
     })
 }
 
@@ -150,4 +172,52 @@ fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<St
 
 fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Option<String>> {
     Ok(read_rel_targets(stage, prim, rel_name)?.into_iter().next())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schemas::render::{define_render_product, define_render_settings, SettingsBaseSetters};
+    use crate::sdf;
+
+    /// A product attribute overrides the settings value only where the
+    /// product authors it; everything else inherits the resolved settings.
+    #[test]
+    fn product_overrides_only_authored_attrs() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        define_render_settings(&stage, sdf::path("/Render/Settings")?)?
+            .set_resolution([1920, 1080])?
+            .set_pixel_aspect_ratio(2.0)?;
+        // Product authors only `resolution`.
+        define_render_product(&stage, sdf::path("/Render/Products/p")?)?.set_resolution([512, 512])?;
+
+        let settings_base = read_settings_base(&stage, &sdf::path("/Render/Settings")?)?;
+        let resolved = read_base_overriding(&stage, &sdf::path("/Render/Products/p")?, &settings_base)?;
+        assert_eq!(resolved.resolution, [512, 512]); // overridden by the product
+        assert!((resolved.pixel_aspect_ratio - 2.0).abs() < 1e-6); // inherited from settings
+        Ok(())
+    }
+
+    /// A product that authors nothing inherits the settings verbatim — and
+    /// an unauthored product attribute inherits the *settings* value, not
+    /// the bare spec default.
+    #[test]
+    fn product_without_opinions_inherits_settings() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        define_render_settings(&stage, sdf::path("/Render/Settings")?)?
+            .set_resolution([800, 600])?
+            .set_aspect_ratio_conform_policy(AspectRatioConformPolicy::CropAperture)?;
+        define_render_product(&stage, sdf::path("/Render/Products/p")?)?;
+
+        let settings_base = read_settings_base(&stage, &sdf::path("/Render/Settings")?)?;
+        let resolved = read_base_overriding(&stage, &sdf::path("/Render/Products/p")?, &settings_base)?;
+        assert_eq!(resolved, settings_base);
+        assert_eq!(resolved.resolution, [800, 600]);
+        // Not the ExpandAperture spec default — the settings value carries.
+        assert_eq!(
+            resolved.aspect_ratio_conform_policy,
+            AspectRatioConformPolicy::CropAperture
+        );
+        Ok(())
+    }
 }
