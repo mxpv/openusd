@@ -843,6 +843,16 @@ impl Stage {
         self.graph.borrow().default_prim()
     }
 
+    /// Returns composed pseudo-root stage metadata, honoring a session-layer
+    /// opinion over the root layer (C++ `UsdStage::GetMetadata`).
+    ///
+    /// Distinct from [`Stage::field`] on [`sdf::Path::abs_root`], which reads
+    /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
+    /// Returns the raw [`sdf::Value`]; the caller coerces it.
+    pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
+        self.graph.borrow().stage_metadata(field.as_ref())
+    }
+
     /// Returns the stage-level interpolation mode used by
     /// [`Stage::value_at`]. AOUSD §12.5 defaults this to
     /// [`InterpolationType::Linear`].

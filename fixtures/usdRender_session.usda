@@ -1,0 +1,5 @@
+#usda 1.0
+(
+    """Session layer overriding the stage's renderSettingsPrimPath."""
+    renderSettingsPrimPath = "/Render/sessionSettings"
+)

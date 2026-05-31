@@ -16,6 +16,18 @@ fn open() -> Result<Stage> {
     Stage::open(FIXTURE)
 }
 
+/// A `renderSettingsPrimPath` authored in the session layer overrides the
+/// root layer's opinion, matching C++ `UsdStage::GetMetadata` composition.
+#[test]
+fn session_layer_overrides_settings_prim_path() -> Result<()> {
+    let stage = Stage::builder()
+        .session_layer("fixtures/usdRender_session.usda")
+        .open(FIXTURE)?;
+    let path = get_stage_render_settings(&stage)?.expect("renderSettingsPrimPath");
+    assert_eq!(path.as_str(), "/Render/sessionSettings");
+    Ok(())
+}
+
 #[test]
 fn reads_render_settings() -> Result<()> {
     let stage = open()?;
