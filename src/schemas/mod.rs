@@ -18,6 +18,7 @@
 //! | `skel`    | `skel`    | `UsdSkel` reader + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS). |
 //! | `lux`     | `lux`     | `UsdLux` reader (8 concrete light prims + LightAPI / ShapingAPI / ShadowAPI / LightListAPI). |
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
+//! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
@@ -26,6 +27,7 @@
     feature = "geom",
     feature = "lux",
     feature = "physics",
+    feature = "render",
     feature = "shade",
     feature = "skel"
 ))]
@@ -37,6 +39,8 @@ pub mod geom;
 pub mod lux;
 #[cfg(feature = "physics")]
 pub mod physics;
+#[cfg(feature = "render")]
+pub mod render;
 #[cfg(feature = "shade")]
 pub mod shade;
 #[cfg(feature = "skel")]
