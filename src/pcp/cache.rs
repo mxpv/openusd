@@ -363,9 +363,13 @@ impl Cache {
             }
 
             // (a) Manifest default: synthesize a sample at the clip's active
-            //     time (spec 12.3.4.6).
-            if let Some(value) = self.manifest_default(resolved, &clip_path)? {
-                return Ok(Some(value));
+            //     time (spec 12.3.4.6). Reached only when the manifest declared
+            //     the attribute, so the manifest asset is authored.
+            if let Some(manifest) = set.manifest_asset.as_deref() {
+                let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
+                if let Some(value) = self.manifest_default(manifest, manifest_layer, &clip_path)? {
+                    return Ok(Some(value));
+                }
             }
 
             // (b) interpolateMissingClipValues: interpolate the gap across the
@@ -411,14 +415,10 @@ impl Cache {
 
     /// Reads the manifest's authored `default` for `clip_path` (spec 12.3.4.6):
     /// when the active clip has a gap, the manifest default stands in as the
-    /// sample value. Returns `None` when no manifest is authored, the manifest
-    /// is unresolved, or it holds no usable default for the attribute.
-    fn manifest_default(&mut self, resolved: &ResolvedClipSet, clip_path: &Path) -> Result<Option<Value>> {
-        let Some(manifest) = resolved.set.manifest_asset.clone() else {
-            return Ok(None);
-        };
-        let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
-        let value = match self.clip_layer(&manifest, manifest_layer)? {
+    /// sample value. Returns `None` when the manifest is unresolved or holds no
+    /// usable default for the attribute.
+    fn manifest_default(&mut self, manifest: &str, manifest_layer: usize, clip_path: &Path) -> Result<Option<Value>> {
+        let value = match self.clip_layer(manifest, manifest_layer)? {
             Some(layer) => layer
                 .data()
                 .try_get(clip_path, FieldKey::Default.as_str())?
