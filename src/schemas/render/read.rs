@@ -109,6 +109,17 @@ pub fn read_render_var(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderVa
     }))
 }
 
+/// Read a camera prim's `(horizontalAperture, verticalAperture)`, falling
+/// back to `UsdGeomCamera`'s defaults `(20.955, 15.2908)` mm. Reads the
+/// aperture attributes by name so it needs no dependency on the `geom`
+/// feature — the conform policy only needs these two floats.
+pub fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
+    Ok([
+        read_f32(stage, camera, "horizontalAperture")?.unwrap_or(20.955),
+        read_f32(stage, camera, "verticalAperture")?.unwrap_or(15.2908),
+    ])
+}
+
 // ── value-read helpers ──────────────────────────────────────────────
 
 fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
@@ -218,6 +229,20 @@ mod tests {
             resolved.aspect_ratio_conform_policy,
             AspectRatioConformPolicy::CropAperture
         );
+        Ok(())
+    }
+
+    #[test]
+    fn camera_aperture_reads_authored_then_defaults() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let cam = stage.define_prim(sdf::path("/World/Cam")?)?.set_type_name("Camera")?;
+        stage
+            .create_attribute(cam.path().append_property("horizontalAperture")?, "float")?
+            .set(Value::Float(36.0))?;
+        // verticalAperture left unauthored → falls back to the USD default.
+        let aperture = read_camera_aperture(&stage, &sdf::path("/World/Cam")?)?;
+        assert!((aperture[0] - 36.0).abs() < 1e-4);
+        assert!((aperture[1] - 15.2908).abs() < 1e-4);
         Ok(())
     }
 }
