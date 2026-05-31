@@ -8,7 +8,7 @@
 //! (spec 12.3.4.1.3) are resolved to explicit metadata elsewhere and are not
 //! parsed by [`ClipSet::parse_all`].
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{LayerOffset, Path, Value};
 use std::collections::HashMap;
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
@@ -175,6 +175,26 @@ impl ClipSet {
     /// unchanged.
     pub(crate) fn map_stage_to_clip(&self, stage_time: f64) -> f64 {
         map_stage_to_clip(&self.times, stage_time)
+    }
+
+    /// Retimes the schedule through `offset`, shifting the stage component of
+    /// every `active` and `times` entry while leaving the clip-time targets and
+    /// asset paths untouched. A template-derived schedule is produced in clip
+    /// time and brought into stage time here; explicit `active`/`times` are
+    /// retimed as they compose. Re-sorts so a negative scale keeps the stage
+    /// ordering the lookups rely on.
+    pub(crate) fn retime_stage_times(&mut self, offset: LayerOffset) {
+        if offset.is_identity() {
+            return;
+        }
+        for (stage, _) in &mut self.active {
+            *stage = offset.offset + offset.scale * *stage;
+        }
+        for (stage, _) in &mut self.times {
+            *stage = offset.offset + offset.scale * *stage;
+        }
+        self.active.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.times.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
 }
 

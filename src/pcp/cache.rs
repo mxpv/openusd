@@ -1813,6 +1813,19 @@ mod tests {
         Ok(())
     }
 
+    /// A template clip set authored in a sublayer with a layer offset has its
+    /// derived schedule retimed into stage time (spec 12.3.4): the offset of 10
+    /// shifts `clip.1`'s frame to stage t=11 and `clip.2`'s to t=12.
+    #[test]
+    fn template_clip_schedule_retimed_by_offset() -> Result<()> {
+        let root = format!("{}/fixtures/clip_template_offset/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 11.0)?, Some(Value::Double(10.0)));
+        assert_eq!(size(&mut cache, 12.0)?, Some(Value::Double(20.0)));
+        Ok(())
+    }
+
     /// Exact-match sampler: a clip resolves only at a frame it authors.
     fn exact(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
         samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone())
