@@ -18,6 +18,7 @@ use anyhow::Result;
 use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
+use super::connectable::input_path;
 use super::read::{read_input_connections, read_input_value, read_shader_id, resolve_surface_shader};
 use super::tokens::{
     PS_CLEARCOAT, PS_CLEARCOAT_ROUGHNESS, PS_DIFFUSE_COLOR, PS_EMISSIVE_COLOR, PS_IOR, PS_METALLIC, PS_NORMAL,
@@ -125,8 +126,7 @@ fn connected_texture_file(stage: &Stage, shader: &Path, base: &str) -> Result<Op
     if read_shader_id(stage, &tex_prim)?.as_deref() != Some(SHADER_ID_UV_TEXTURE) {
         return Ok(None);
     }
-    let file_attr = tex_prim.append_property(&format!("inputs:{TEX_FILE}"))?;
-    resolve_asset_value(stage, &file_attr)
+    resolve_asset_value(stage, &input_path(&tex_prim, TEX_FILE)?)
 }
 
 /// Resolve an `asset`-typed input to its authored path. When the input is

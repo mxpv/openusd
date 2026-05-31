@@ -12,23 +12,23 @@ use anyhow::Result;
 use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
+use super::connectable::{input_path, output_path};
 use super::tokens::{A_INFO_ID, NS_INPUTS, NS_OUTPUTS, TERMINAL_SURFACE, T_MATERIAL, T_NODE_GRAPH, T_SHADER};
 
 /// Composed default value of `inputs:<base>` on `prim`, if authored.
 pub fn read_input_value(stage: &Stage, prim: &Path, base: &str) -> Result<Option<Value>> {
-    let attr = prim.append_property(&format!("{NS_INPUTS}{base}"))?;
-    stage.field::<Value>(attr, FieldKey::Default.as_str())
+    stage.field::<Value>(input_path(prim, base)?, FieldKey::Default.as_str())
 }
 
 /// Composed `connectionPaths` of `inputs:<base>` on `prim`. Empty when
 /// the input isn't connected.
 pub fn read_input_connections(stage: &Stage, prim: &Path, base: &str) -> Result<Vec<Path>> {
-    stage.connection_paths(&prim.append_property(&format!("{NS_INPUTS}{base}"))?)
+    stage.connection_paths(&input_path(prim, base)?)
 }
 
 /// Composed `connectionPaths` of `outputs:<base>` on `prim`.
 pub fn read_output_connections(stage: &Stage, prim: &Path, base: &str) -> Result<Vec<Path>> {
-    stage.connection_paths(&prim.append_property(&format!("{NS_OUTPUTS}{base}"))?)
+    stage.connection_paths(&output_path(prim, base)?)
 }
 
 /// List the authored input base names (without the `inputs:` prefix)
@@ -64,24 +64,22 @@ pub fn resolve_surface_shader(stage: &Stage, material: &Path) -> Result<Option<P
         return Ok(None);
     }
     // Universal terminal first.
-    let universal = material.append_property(&format!("{NS_OUTPUTS}{TERMINAL_SURFACE}"))?;
-    let mut conns = stage.connection_paths(&universal)?;
+    let mut conns = stage.connection_paths(&output_path(material, TERMINAL_SURFACE)?)?;
     if conns.is_empty() {
         // Fall back to a context-specific surface terminal,
         // `outputs:<context>:surface` (exactly one context segment).
         // Candidates are sorted so the choice is stable regardless of
         // authoring order.
         let suffix = format!(":{TERMINAL_SURFACE}");
-        let mut contexts: Vec<String> = Vec::new();
-        for prop in stage.prim_properties(material.clone())? {
-            if let Some(rest) = prop.strip_prefix(NS_OUTPUTS) {
-                if let Some(ctx) = rest.strip_suffix(&suffix) {
-                    if !ctx.is_empty() && !ctx.contains(':') {
-                        contexts.push(prop);
-                    }
-                }
-            }
-        }
+        let mut contexts: Vec<String> = stage
+            .prim_properties(material.clone())?
+            .into_iter()
+            .filter(|prop| {
+                prop.strip_prefix(NS_OUTPUTS)
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+                    .is_some_and(|ctx| !ctx.is_empty() && !ctx.contains(':'))
+            })
+            .collect();
         contexts.sort();
         for prop in contexts {
             conns = stage.connection_paths(&material.append_property(&prop)?)?;
