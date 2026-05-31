@@ -163,10 +163,16 @@ fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
     stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
 }
 
+/// Narrow a `f64` to `f32`, clamping to the finite `f32` range so a large
+/// authored double can't silently become `inf`.
+fn f64_to_f32(d: f64) -> f32 {
+    d.clamp(f32::MIN as f64, f32::MAX as f64) as f32
+}
+
 fn read_f32(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f32>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Float(f)) => Some(f),
-        Some(Value::Double(d)) => Some(d.clamp(f32::MIN as f64, f32::MAX as f64) as f32),
+        Some(Value::Double(d)) => Some(f64_to_f32(d)),
         Some(Value::Half(h)) => Some(h.to_f32()),
         _ => None,
     })
@@ -196,7 +202,7 @@ fn read_int2(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[i32; 2]>>
 fn read_float4(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 4]>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Vec4f(v)) => Some(v),
-        Some(Value::Vec4d(v)) => Some([v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32]),
+        Some(Value::Vec4d(v)) => Some([f64_to_f32(v[0]), f64_to_f32(v[1]), f64_to_f32(v[2]), f64_to_f32(v[3])]),
         _ => None,
     })
 }

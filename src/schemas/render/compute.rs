@@ -11,6 +11,8 @@
 
 use anyhow::Result;
 
+use std::collections::HashMap;
+
 use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
@@ -38,6 +40,9 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
     let settings_base = settings.base;
 
     let mut render_vars: Vec<RenderVar> = Vec::new();
+    // var path → index into `render_vars`, so de-duplication is O(1) rather
+    // than scanning the vector for each product's vars.
+    let mut var_index: HashMap<String, usize> = HashMap::new();
     let mut products: Vec<Product> = Vec::new();
 
     let products_rel = settings_prim.append_property(super::tokens::REL_PRODUCTS)?;
@@ -66,7 +71,8 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
         };
 
         let ordered_vars_rel = product_path.append_property(super::tokens::REL_ORDERED_VARS)?;
-        let render_var_indices = collect_var_indices(stage, &ordered_vars_rel, &mut render_vars, namespaces)?;
+        let render_var_indices =
+            collect_var_indices(stage, &ordered_vars_rel, &mut render_vars, &mut var_index, namespaces)?;
 
         products.push(Product {
             render_product_path: product_path.as_str().to_string(),
@@ -120,6 +126,9 @@ pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&st
             out.push((name, value));
         }
     }
+    // `prim_properties` order isn't guaranteed stable across backends/layers;
+    // sort by setting name for deterministic output.
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
@@ -130,12 +139,13 @@ fn collect_var_indices(
     stage: &Stage,
     ordered_vars_rel: &Path,
     render_vars: &mut Vec<RenderVar>,
+    var_index: &mut HashMap<String, usize>,
     namespaces: &[&str],
 ) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
     for var_path in stage.forwarded_relationship_targets(ordered_vars_rel)? {
         let key = var_path.as_str().to_string();
-        if let Some(i) = render_vars.iter().position(|v| v.render_var_path == key) {
+        if let Some(&i) = var_index.get(&key) {
             indices.push(i);
             continue;
         }
@@ -143,13 +153,15 @@ fn collect_var_indices(
             continue;
         };
         render_vars.push(RenderVar {
-            render_var_path: key,
+            render_var_path: key.clone(),
             data_type: var.data_type,
             source_name: var.source_name,
             source_type: var.source_type,
             namespaced_settings: compute_namespaced_settings(stage, &var_path, namespaces)?,
         });
-        indices.push(render_vars.len() - 1);
+        let i = render_vars.len() - 1;
+        var_index.insert(key, i);
+        indices.push(i);
     }
     Ok(indices)
 }
