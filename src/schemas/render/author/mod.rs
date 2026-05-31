@@ -11,11 +11,13 @@
 //! [`Stage::set_edit_target`](crate::usd::Stage::set_edit_target).
 
 mod base;
+mod pass;
 mod product;
 mod settings;
 mod var;
 
 pub use base::SettingsBaseSetters;
+pub use pass::{define_render_pass, RenderPassAuthor};
 pub use product::{define_render_product, RenderProductAuthor};
 pub use settings::{define_render_settings, RenderSettingsAuthor};
 pub use var::{define_render_var, RenderVarAuthor};

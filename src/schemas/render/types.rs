@@ -235,6 +235,46 @@ impl Default for ReadRenderVar {
     }
 }
 
+/// A `RenderPass` prim: a node in a multi-pass render graph.
+///
+/// Covers the scalar attributes and the `renderSource` / `inputPasses`
+/// relationships plus the two collection `includeRoot` flags. The
+/// `renderVisibility` / `cameraVisibility` / `prune` / `matte`
+/// collection-membership relationships (a multi-apply `CollectionAPI`)
+/// are not modelled yet — they need collection-membership evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadRenderPass {
+    /// `passType` — categorises the pass within a custom pipeline.
+    pub pass_type: Option<String>,
+    /// `command` — command + args to generate the pass (`{var}` substituted
+    /// by the consumer).
+    pub command: Vec<String>,
+    /// `fileName` — external asset holding the pass's prims/config.
+    pub file_name: Option<String>,
+    /// `renderSource` relationship — first target (settings prim or external).
+    pub render_source: Option<String>,
+    /// `inputPasses` relationship — passes this one depends on.
+    pub input_passes: Vec<String>,
+    /// `collection:renderVisibility:includeRoot` (default `true`).
+    pub render_visibility_include_root: bool,
+    /// `collection:cameraVisibility:includeRoot` (default `true`).
+    pub camera_visibility_include_root: bool,
+}
+
+impl Default for ReadRenderPass {
+    fn default() -> Self {
+        Self {
+            pass_type: None,
+            command: Vec::new(),
+            file_name: None,
+            render_source: None,
+            input_passes: Vec::new(),
+            render_visibility_include_root: true,
+            camera_visibility_include_root: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
