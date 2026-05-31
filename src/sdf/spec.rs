@@ -809,15 +809,40 @@ where
         }
     }
 
-    /// Remove a single target path. Returns `true` if the path was present.
+    /// Remove a single target path, ensuring it is absent from the composed
+    /// result rather than only from this layer's opinions (C++
+    /// `SdfListEditorProxy::Remove`, as used by `UsdRelationship::RemoveTarget`).
+    ///
+    /// In explicit mode the explicit list is the whole composed value, so the
+    /// entry is simply dropped. In list-op mode (including a freshly authored
+    /// relationship with no targets) the path is dropped from this layer's
+    /// add/prepend/append lists and recorded in `deleted_items`, which
+    /// composition honors to suppress the same target authored in a weaker
+    /// layer. Returns `true` when an authored change was made.
     pub fn remove_target(&mut self, path: &sdf::Path) -> bool {
-        if let Some(sdf::Value::PathListOp(op)) = self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
-            return remove_path(&mut op.explicit_items, path)
-                | remove_path(&mut op.added_items, path)
-                | remove_path(&mut op.prepended_items, path)
-                | remove_path(&mut op.appended_items, path);
+        match self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
+            Some(sdf::Value::PathListOp(op)) => {
+                if op.explicit {
+                    return remove_path(&mut op.explicit_items, path);
+                }
+                remove_path(&mut op.added_items, path);
+                remove_path(&mut op.prepended_items, path);
+                remove_path(&mut op.appended_items, path);
+                if op.deleted_items.iter().any(|p| p == path) {
+                    return false;
+                }
+                op.deleted_items.push(path.clone());
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.add(
+                    sdf::FieldKey::TargetPaths,
+                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
+                );
+                true
+            }
         }
-        false
     }
 
     /// Set the `custom` flag.
@@ -1210,6 +1235,43 @@ mod tests {
         rel.add_target(target.clone());
 
         assert_eq!(rel.target_path_list().and_then(|op| op.iter().next()), Some(&target));
+    }
+
+    #[test]
+    fn remove_target_suppresses_weaker() {
+        // Removing a target from a relationship with no local targets must
+        // author a deletion (not no-op), so a target authored in a weaker
+        // layer is suppressed through composition.
+        let mut spec = Spec::new(sdf::SpecType::Relationship);
+        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let target = sdf::Path::new("/Target").expect("valid path");
+        assert!(rel.remove_target(&target));
+
+        let stronger = rel.target_path_list().expect("target list op").clone();
+        assert!(stronger.deleted_items.contains(&target));
+
+        // A weaker layer adds /Target and /Keep; composition drops /Target.
+        let weaker = sdf::PathListOp::explicit([target.clone(), sdf::Path::new("/Keep").unwrap()]);
+        let composed: Vec<_> = stronger.combined_with(&weaker).iter().cloned().collect();
+        assert_eq!(composed, vec![sdf::Path::new("/Keep").unwrap()]);
+    }
+
+    #[test]
+    fn remove_target_explicit_drops_entry() {
+        // In explicit mode the explicit list is the whole value, so removal
+        // just drops the entry without authoring a deletion.
+        let mut spec = Spec::new(sdf::SpecType::Relationship);
+        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let a = sdf::Path::new("/A").unwrap();
+        let b = sdf::Path::new("/B").unwrap();
+        rel.add_target(a.clone());
+        rel.add_target(b.clone());
+        assert!(rel.remove_target(&a));
+
+        let op = rel.target_path_list().expect("target list op");
+        assert!(op.explicit);
+        assert!(op.deleted_items.is_empty());
+        assert_eq!(op.iter().cloned().collect::<Vec<_>>(), vec![b]);
     }
 
     #[test]
