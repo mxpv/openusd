@@ -38,8 +38,8 @@ mod shader;
 mod types;
 
 pub use binding::{
-    bind_material, bind_material_collection, bind_material_for_purpose, read_binding_strength, read_collection_binding,
-    read_direct_binding,
+    bind_material, bind_material_collection, bind_material_for_purpose, compute_bound_material, read_binding_strength,
+    read_collection_binding, read_direct_binding,
 };
 pub use connectable::{create_input, create_output, input_name, input_path, output_name, output_path};
 pub use material::{define_material, define_node_graph, MaterialAuthor, NodeGraphAuthor};
