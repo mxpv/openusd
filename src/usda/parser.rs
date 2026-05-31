@@ -1027,7 +1027,21 @@ impl<'a> Parser<'a> {
                     .context("Unable to build clipSets listOp")?;
                 spec.add(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
             }
-            other => bail!("Unsupported prim metadata: {other}"),
+            // Unknown prim metadata - e.g. DCC / Omniverse hints like
+            // `hide_in_stage_window` or `no_delete`. The Sdf grammar accepts
+            // arbitrary identifier-keyed fields in the metadata block, so
+            // tolerate and stash them on the spec rather than failing the
+            // parse (matches Pixar, which preserves unrecognized metadata).
+            other => {
+                ensure!(
+                    list_op.is_none(),
+                    "list ops are not supported for unknown prim metadata: {other}"
+                );
+                let value = self
+                    .parse_property_metadata_value()
+                    .with_context(|| format!("Unable to parse prim metadata value for {other}"))?;
+                spec.add(other, value);
+            }
         }
 
         Ok(())
@@ -3128,6 +3142,34 @@ def Scope "Root" (
         let path = sdf::path("/Root").unwrap();
         let spec = data.get(&path).unwrap();
         assert_eq!(spec.get("displayName"), Some(&sdf::Value::String("My Root".into())));
+    }
+
+    #[test]
+    fn parse_tolerates_unknown_prim_metadata() {
+        // DCC / Omniverse author non-standard prim metadata; the parser must
+        // not choke on it, and should stash the fields on the spec.
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+
+def Xform "Root" (
+    hide_in_stage_window = false
+    no_delete = true
+    custom_label = "hi"
+    custom_rank = 5
+)
+{
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        let spec = data.get(&sdf::path("/Root").unwrap()).unwrap();
+        assert_eq!(
+            spec.get("hide_in_stage_window"),
+            Some(&sdf::Value::Token("false".into()))
+        );
+        assert_eq!(spec.get("no_delete"), Some(&sdf::Value::Token("true".into())));
+        assert_eq!(spec.get("custom_label"), Some(&sdf::Value::String("hi".into())));
+        assert_eq!(spec.get("custom_rank"), Some(&sdf::Value::Int64(5)));
     }
 
     #[test]
