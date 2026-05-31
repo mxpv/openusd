@@ -30,6 +30,10 @@
 
 pub mod tokens;
 
+mod author;
+mod read;
 mod types;
 
-pub use types::{AspectRatioConformPolicy, ProductType, SourceType};
+pub use author::SettingsBaseSetters;
+pub use read::read_settings_base;
+pub use types::{AspectRatioConformPolicy, ProductType, ReadSettingsBase, SourceType};

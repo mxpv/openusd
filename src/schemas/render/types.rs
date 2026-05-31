@@ -109,6 +109,49 @@ impl SourceType {
     }
 }
 
+/// The attributes shared by `RenderSettings` and `RenderProduct` via
+/// their common abstract base `RenderSettingsBase` (camera + framing).
+///
+/// `Default` matches Pixar's `usdRender/schema.usda` fallbacks exactly,
+/// so a reader can fall back per-field on an unauthored attribute.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadSettingsBase {
+    /// `resolution` — image pixel resolution (default `(2048, 1080)`).
+    pub resolution: [i32; 2],
+    /// `pixelAspectRatio` — pixel width / height (default `1.0`).
+    pub pixel_aspect_ratio: f32,
+    /// `aspectRatioConformPolicy` (default `expandAperture`).
+    pub aspect_ratio_conform_policy: AspectRatioConformPolicy,
+    /// `dataWindowNDC` — render region `(xmin, ymin, xmax, ymax)` in NDC
+    /// (default `(0, 0, 1, 1)`).
+    pub data_window_ndc: [f32; 4],
+    /// `instantaneousShutter` — **deprecated**, superseded by
+    /// `disableMotionBlur` (default `false`).
+    pub instantaneous_shutter: bool,
+    /// `disableMotionBlur` — force the shutter to `[0, 0]` (default `false`).
+    pub disable_motion_blur: bool,
+    /// `disableDepthOfField` — force a pinhole camera (default `false`).
+    pub disable_depth_of_field: bool,
+    /// `camera` relationship — path to the primary `UsdGeomCamera`, if
+    /// authored. No fallback.
+    pub camera: Option<String>,
+}
+
+impl Default for ReadSettingsBase {
+    fn default() -> Self {
+        Self {
+            resolution: [2048, 1080],
+            pixel_aspect_ratio: 1.0,
+            aspect_ratio_conform_policy: AspectRatioConformPolicy::ExpandAperture,
+            data_window_ndc: [0.0, 0.0, 1.0, 1.0],
+            instantaneous_shutter: false,
+            disable_motion_blur: false,
+            disable_depth_of_field: false,
+            camera: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
