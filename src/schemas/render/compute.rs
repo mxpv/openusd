@@ -5,14 +5,13 @@
 //! are resolved (settings, then authored product overrides), the
 //! aspect-ratio conform policy is applied against the bound camera's
 //! aperture, and the products' `orderedVars` are de-duplicated into one
-//! global var list referenced by per-product indices.
-//!
-//! `namespacedSettings` gathering (render-delegate `namespace:`-prefixed
-//! settings) is added in a following commit; the fields are left empty here.
+//! global var list referenced by per-product indices. Render-delegate
+//! `namespace:`-prefixed settings are gathered per level (settings,
+//! product, var) into `namespacedSettings`.
 
 use anyhow::Result;
 
-use crate::sdf::Path;
+use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
 use super::conform::apply_aspect_ratio_policy;
@@ -28,7 +27,11 @@ use super::spec::{Product, RenderSpec, RenderVar};
 /// product copy that base and override it with the product's authored
 /// opinions, apply the conform policy against the bound camera, and gather
 /// the global de-duplicated var list.
-pub fn compute_render_spec(stage: &Stage, settings_prim: &Path) -> Result<Option<RenderSpec>> {
+///
+/// `namespaces` filters the gathered `namespacedSettings` (render-delegate
+/// `namespace:`-prefixed opinions) by top-level namespace; an empty slice
+/// gathers every namespace.
+pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&str]) -> Result<Option<RenderSpec>> {
     let Some(settings) = read_render_settings(stage, settings_prim)? else {
         return Ok(None);
     };
@@ -63,7 +66,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path) -> Result<Option
         };
 
         let ordered_vars_rel = product_path.append_property(super::tokens::REL_ORDERED_VARS)?;
-        let render_var_indices = collect_var_indices(stage, &ordered_vars_rel, &mut render_vars)?;
+        let render_var_indices = collect_var_indices(stage, &ordered_vars_rel, &mut render_vars, namespaces)?;
 
         products.push(Product {
             render_product_path: product_path.as_str().to_string(),
@@ -78,7 +81,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path) -> Result<Option
             aperture_size,
             data_window_ndc: base.data_window_ndc,
             render_var_indices,
-            namespaced_settings: Vec::new(),
+            namespaced_settings: compute_namespaced_settings(stage, &product_path, namespaces)?,
         });
     }
 
@@ -87,14 +90,48 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path) -> Result<Option
         render_vars,
         included_purposes: settings.included_purposes,
         material_binding_purposes: settings.material_binding_purposes,
-        namespaced_settings: Vec::new(),
+        namespaced_settings: compute_namespaced_settings(stage, settings_prim, namespaces)?,
     }))
+}
+
+/// Gather the `namespace:`-prefixed render-delegate settings authored on
+/// `prim` (spec — `_ReadNamespacedSettings`). `namespaces` filters by
+/// top-level namespace; an empty slice gathers every namespace.
+///
+/// Unnamespaced attributes (the schema attrs like `resolution`) are
+/// skipped. The settings-driven-by-a-node-graph case (`outputs:`-connected
+/// values) is left as a TODO until UsdShade's value-producer resolution is
+/// available; only plain authored namespaced attributes are gathered here.
+pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
+    let mut out = Vec::new();
+    for name in stage.prim_properties(prim)? {
+        // TODO(shade): `outputs:`-connected settings are driven by a node
+        // graph; resolving their value producer needs UsdShade.
+        if name.starts_with("outputs:") {
+            continue;
+        }
+        let Some((namespace, _)) = name.split_once(':') else {
+            continue; // unnamespaced — not a delegate setting
+        };
+        if !namespaces.is_empty() && !namespaces.contains(&namespace) {
+            continue;
+        }
+        if let Some(value) = stage.field::<Value>(prim.append_property(&name)?, "default")? {
+            out.push((name, value));
+        }
+    }
+    Ok(out)
 }
 
 /// Resolve a product's `orderedVars` to indices into the shared
 /// `render_vars` list, appending any var not seen before (de-duplication
 /// by var path). Targets that aren't `RenderVar` prims are skipped.
-fn collect_var_indices(stage: &Stage, ordered_vars_rel: &Path, render_vars: &mut Vec<RenderVar>) -> Result<Vec<usize>> {
+fn collect_var_indices(
+    stage: &Stage,
+    ordered_vars_rel: &Path,
+    render_vars: &mut Vec<RenderVar>,
+    namespaces: &[&str],
+) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
     for var_path in stage.forwarded_relationship_targets(ordered_vars_rel)? {
         let key = var_path.as_str().to_string();
@@ -110,7 +147,7 @@ fn collect_var_indices(stage: &Stage, ordered_vars_rel: &Path, render_vars: &mut
             data_type: var.data_type,
             source_name: var.source_name,
             source_type: var.source_type,
-            namespaced_settings: Vec::new(),
+            namespaced_settings: compute_namespaced_settings(stage, &var_path, namespaces)?,
         });
         indices.push(render_vars.len() - 1);
     }
@@ -153,7 +190,7 @@ mod tests {
                 sdf::path("/Render/Products/matte")?,
             ])?;
 
-        let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?)?.expect("RenderSpec");
+        let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
         assert_eq!(spec.products.len(), 2);
         // color + alpha → exactly two global vars (color shared, not duplicated).
         assert_eq!(spec.render_vars.len(), 2);
@@ -185,7 +222,7 @@ mod tests {
             .set_camera(sdf::path("/World/Cam")?)?
             .set_products([sdf::path("/Render/Products/p")?])?;
 
-        let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?)?.expect("RenderSpec");
+        let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
         let p = &spec.products[0];
         assert_eq!(p.camera_path.as_deref(), Some("/World/Cam"));
         // expandAperture, square aperture vs 2:1 image → width grows to 20.
@@ -198,7 +235,35 @@ mod tests {
     fn non_settings_prim_is_none() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/Scope")?)?.set_type_name("Scope")?;
-        assert!(compute_render_spec(&stage, &sdf::path("/Scope")?)?.is_none());
+        assert!(compute_render_spec(&stage, &sdf::path("/Scope")?, &[])?.is_none());
+        Ok(())
+    }
+
+    /// `namespace:`-prefixed delegate settings are gathered (filtered by the
+    /// requested namespace); the unnamespaced schema attrs are not.
+    #[test]
+    fn gathers_namespaced_settings_filtered() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let settings = define_render_settings(&stage, sdf::path("/Render/Settings")?)?
+            .set_resolution([512, 512])?
+            .into_prim();
+        // A render-delegate setting (gathered) and a foreign-namespace one (filtered out).
+        stage
+            .create_attribute(settings.path().append_property("ri:hider:maxsamples")?, "int")?
+            .set(sdf::Value::Int(64))?;
+        stage
+            .create_attribute(settings.path().append_property("karma:foo")?, "int")?
+            .set(sdf::Value::Int(1))?;
+
+        let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &["ri"])?.expect("RenderSpec");
+        // Only the `ri:` setting is gathered; `karma:` filtered, `resolution` unnamespaced.
+        assert_eq!(spec.namespaced_settings.len(), 1);
+        assert_eq!(spec.namespaced_settings[0].0, "ri:hider:maxsamples");
+        assert_eq!(spec.namespaced_settings[0].1, sdf::Value::Int(64));
+
+        // An empty namespace filter gathers both delegate settings.
+        let all = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
+        assert_eq!(all.namespaced_settings.len(), 2);
         Ok(())
     }
 }
