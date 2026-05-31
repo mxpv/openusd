@@ -32,10 +32,11 @@ pub fn apply_aspect_ratio_policy(
     pixel_aspect_ratio: f32,
     aperture: [f32; 2],
 ) -> ConformedAperture {
-    // Guard the divisors so malformed inputs can't yield inf/NaN — with a
-    // zero resolution height or aperture height there is nothing to reconcile,
-    // so return the aperture and pixel aspect unchanged.
-    if resolution[1] == 0 || aperture[1] == 0.0 {
+    // Guard malformed inputs so the divisions below can't yield inf/NaN or a
+    // negative aperture: a non-positive resolution or aperture dimension means
+    // there is nothing to reconcile. Mirrors C++ `_ApplyAspectRatioPolicy`,
+    // which bails on `res[0] <= 0 || res[1] <= 0 || size[0] <= 0 || size[1] <= 0`.
+    if resolution[0] <= 0 || resolution[1] <= 0 || aperture[0] <= 0.0 || aperture[1] <= 0.0 {
         return ConformedAperture {
             aperture_size: aperture,
             pixel_aspect_ratio,
@@ -45,6 +46,17 @@ pub fn apply_aspect_ratio_policy(
     let res_aspect = resolution[0] as f32 / resolution[1] as f32;
     let image_aspect = pixel_aspect_ratio * res_aspect;
     let aperture_aspect = aperture[0] / aperture[1];
+
+    // A non-positive pixel aspect ratio drives `image_aspect` to zero or
+    // below; with the resolution and aperture already positive this is the
+    // remaining way a division could produce a non-finite or negative result,
+    // so leave the aperture unchanged (C++ guards `imageAspectRatio <= 0`).
+    if image_aspect <= 0.0 {
+        return ConformedAperture {
+            aperture_size: aperture,
+            pixel_aspect_ratio,
+        };
+    }
 
     let mut size = aperture;
     let mut par = pixel_aspect_ratio;
@@ -139,13 +151,24 @@ mod tests {
     }
 
     #[test]
-    fn zero_divisors_return_finite_unchanged() {
-        // Malformed inputs must not yield inf/NaN.
-        let c = apply_aspect_ratio_policy(AspectRatioConformPolicy::ExpandAperture, [200, 0], 1.0, [10.0, 10.0]);
-        assert_eq!(c.aperture_size, [10.0, 10.0]);
-        assert!(c.aperture_size.iter().all(|v| v.is_finite()));
-        let c = apply_aspect_ratio_policy(AspectRatioConformPolicy::ExpandAperture, [200, 100], 1.0, [10.0, 0.0]);
-        assert!(c.aperture_size.iter().all(|v| v.is_finite()));
+    fn malformed_inputs_return_finite_unchanged() {
+        // Every non-positive resolution / aperture dimension, plus a
+        // non-positive pixel aspect ratio, must leave the aperture unchanged
+        // and finite rather than dividing by (or toward) zero.
+        let policy = AspectRatioConformPolicy::ExpandAperture;
+        for (res, par, aperture) in [
+            ([200, 0], 1.0, [10.0, 10.0]),    // zero height
+            ([0, 100], 1.0, [10.0, 10.0]),    // zero width
+            ([-200, 100], 1.0, [10.0, 10.0]), // negative width
+            ([200, 100], 1.0, [10.0, 0.0]),   // zero aperture height
+            ([200, 100], 1.0, [0.0, 10.0]),   // zero aperture width
+            ([200, 100], -1.0, [10.0, 10.0]), // negative pixel aspect ratio
+            ([200, 100], 0.0, [10.0, 10.0]),  // zero pixel aspect ratio
+        ] {
+            let c = apply_aspect_ratio_policy(policy, res, par, aperture);
+            assert_eq!(c.aperture_size, aperture);
+            assert!(c.aperture_size.iter().all(|v| v.is_finite()));
+        }
     }
 
     #[test]
