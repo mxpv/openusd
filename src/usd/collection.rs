@@ -403,7 +403,10 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     }
     let mut seen = HashSet::new();
     let mut err: Result<()> = Ok(());
-    let collect_props = query.has_property_expansion;
+    let collect_props = query
+        .rule_map
+        .values()
+        .any(|r| *r == PathRule::ExpandPrimsAndProperties);
 
     // Top-down traversal: `traverse` is pre-order, so a prim's parent is
     // resolved just before it. Propagating the parent's effective rule via
@@ -513,31 +516,17 @@ pub type PathExpansionRuleMap = HashMap<Path, PathRule>;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MembershipQuery {
     rule_map: PathExpansionRuleMap,
-    has_excludes: bool,
-    has_property_expansion: bool,
 }
 
 impl MembershipQuery {
     /// Build a query from a resolved rule map.
     pub fn new(rule_map: PathExpansionRuleMap) -> Self {
-        let has_excludes = rule_map.values().any(|r| *r == PathRule::Exclude);
-        let has_property_expansion = rule_map.values().any(|r| *r == PathRule::ExpandPrimsAndProperties);
-        MembershipQuery {
-            rule_map,
-            has_excludes,
-            has_property_expansion,
-        }
+        MembershipQuery { rule_map }
     }
 
     /// The resolved per-path rule map.
     pub fn rule_map(&self) -> &PathExpansionRuleMap {
         &self.rule_map
-    }
-
-    /// `true` if any path carries the `Exclude` rule — lets a traversal skip
-    /// per-prim membership checks when there's nothing to exclude.
-    pub fn has_excludes(&self) -> bool {
-        self.has_excludes
     }
 
     /// `true` when the query has no opinions (includes nothing).
@@ -743,7 +732,6 @@ mod tests {
     fn closest_ancestor_excludes_win() -> Result<()> {
         // Include /W, exclude the /W/A subtree.
         let q = query(&[("/W", PathRule::ExpandPrims), ("/W/A", PathRule::Exclude)]);
-        assert!(q.has_excludes());
         assert!(q.is_path_included(&sdf::path("/W/B")?)); // under the include
         assert!(!q.is_path_included(&sdf::path("/W/A")?)); // excluded
         assert!(!q.is_path_included(&sdf::path("/W/A/C")?)); // closest ancestor is the exclude
@@ -880,7 +868,6 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         build_collection(&stage, "/W", "c", ExpansionRule::ExpandPrims, true, &[], &["/W/A"])?;
         let q = Collection::new(sdf::path("/W")?, "c").compute_membership_query(&stage)?;
-        assert!(q.has_excludes());
         assert!(q.is_path_included(&sdf::path("/W/B")?));
         assert!(!q.is_path_included(&sdf::path("/W/A")?));
         assert!(!q.is_path_included(&sdf::path("/W/A/C")?));
