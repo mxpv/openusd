@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value};
-use crate::usd::{PrimPredicate, Stage};
+use crate::sdf::{FieldKey, Path, Value, Variability};
+use crate::usd::{Prim, PrimPredicate, Stage};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -190,6 +190,73 @@ impl Collection {
         Ok(MembershipQuery::new(map))
     }
 
+    /// `collection:<name>:<suffix>` relationship/property name (unanchored).
+    fn rel_name(&self, suffix: &str) -> String {
+        format!("{NS_COLLECTION}{}:{suffix}", self.name)
+    }
+
+    /// Set `expansionRule` (`uniform token`).
+    pub fn set_expansion_rule(&self, stage: &Stage, rule: ExpansionRule) -> Result<()> {
+        stage
+            .create_attribute(self.prop(EXPANSION_RULE)?, "token")?
+            .set_variability(Variability::Uniform)?
+            .set_custom(false)?
+            .set(Value::Token(rule.as_token().to_string()))?;
+        Ok(())
+    }
+
+    /// Set `includeRoot` (`uniform bool`).
+    pub fn set_include_root(&self, stage: &Stage, value: bool) -> Result<()> {
+        stage
+            .create_attribute(self.prop(INCLUDE_ROOT)?, "bool")?
+            .set_variability(Variability::Uniform)?
+            .set_custom(false)?
+            .set(Value::Bool(value))?;
+        Ok(())
+    }
+
+    /// Make `path` a member, minimizing edits (spec §15): including `</>`
+    /// sets `includeRoot`; an excluded `path` is first un-excluded; and a
+    /// new `includes` target is added only if `path` would not otherwise be
+    /// a member (e.g. an ancestor already includes it).
+    pub fn include_path(&self, stage: &Stage, path: impl Into<Path>) -> Result<()> {
+        let path = path.into();
+        if path.is_abs_root() {
+            return self.set_include_root(stage, true);
+        }
+        let prim = Prim::new(stage, self.prim.clone());
+        if self.excludes(stage)?.contains(&path) {
+            prim.create_relationship(&self.rel_name(EXCLUDES))?
+                .remove_target(&path)?;
+        }
+        if !self.compute_membership_query(stage)?.is_path_included(&path) {
+            prim.create_relationship(&self.rel_name(INCLUDES))?.add_target(path)?;
+        }
+        Ok(())
+    }
+
+    /// Remove `path` from membership, minimizing edits: a directly-included
+    /// `path` is first un-included; an `excludes` target is added only if
+    /// `path` would otherwise still be a member (under an ancestor include).
+    pub fn exclude_path(&self, stage: &Stage, path: impl Into<Path>) -> Result<()> {
+        let path = path.into();
+        let prim = Prim::new(stage, self.prim.clone());
+        if self.includes(stage)?.contains(&path) {
+            prim.create_relationship(&self.rel_name(INCLUDES))?
+                .remove_target(&path)?;
+        }
+        if self.compute_membership_query(stage)?.is_path_included(&path) {
+            prim.create_relationship(&self.rel_name(EXCLUDES))?.add_target(path)?;
+        }
+        Ok(())
+    }
+
+    /// `true` when the collection cannot include anything in relationship
+    /// mode — no `includes` targets and `includeRoot` is off.
+    pub fn has_no_included_paths(&self, stage: &Stage) -> Result<bool> {
+        Ok(self.includes(stage)?.is_empty() && !self.include_root(stage)?)
+    }
+
     fn build_into(&self, stage: &Stage, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
         let rule = self.expansion_rule(stage)?;
         let path_rule = PathRule::from_expansion(rule);
@@ -219,6 +286,17 @@ impl Collection {
         }
         Ok(())
     }
+}
+
+/// Apply `UsdCollectionAPI` to `prim` with instance name `name` (adds
+/// `CollectionAPI:<name>` to `apiSchemas`) and return a handle. Author its
+/// membership via the returned [`Collection`]'s setters / `include_path` /
+/// `exclude_path`.
+pub fn apply_collection(stage: &Stage, prim: impl Into<Path>, name: impl Into<String>) -> Result<Collection> {
+    let prim = prim.into();
+    let name = name.into();
+    Prim::new(stage, prim.clone()).add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
+    Ok(Collection::new(prim, name))
 }
 
 /// Every `UsdCollectionAPI` instance applied to `prim`, decoded from its
@@ -741,6 +819,52 @@ mod tests {
         assert!(paths.contains(&sdf::path("/W/B")?));
         assert!(!paths.contains(&sdf::path("/W/A")?));
         assert!(!paths.contains(&sdf::path("/W/A/C")?));
+        Ok(())
+    }
+
+    #[test]
+    fn authoring_include_exclude_roundtrip() -> Result<()> {
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.set_expansion_rule(&stage, ExpansionRule::ExpandPrims)?;
+        coll.include_path(&stage, sdf::path("/W/A")?)?;
+        coll.exclude_path(&stage, sdf::path("/W/A/C")?)?;
+
+        // Read back through the membership query.
+        let q = coll.compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A/C")?));
+        // And it's discoverable as an applied collection.
+        assert_eq!(collections_on(&stage, &sdf::path("/W")?)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn include_path_drops_stale_exclude() -> Result<()> {
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.set_include_root(&stage, true)?;
+        coll.exclude_path(&stage, sdf::path("/W/A")?)?;
+        assert!(!coll
+            .compute_membership_query(&stage)?
+            .is_path_included(&sdf::path("/W/A")?));
+
+        // Re-including drops the exclude rather than adding a redundant include.
+        coll.include_path(&stage, sdf::path("/W/A")?)?;
+        assert!(coll.excludes(&stage)?.is_empty());
+        assert!(coll
+            .compute_membership_query(&stage)?
+            .is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn has_no_included_paths_tracks_state() -> Result<()> {
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        assert!(coll.has_no_included_paths(&stage)?);
+        coll.include_path(&stage, sdf::path("/W/A")?)?;
+        assert!(!coll.has_no_included_paths(&stage)?);
         Ok(())
     }
 

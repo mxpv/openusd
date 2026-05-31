@@ -11,8 +11,8 @@ mod prim;
 mod stage;
 
 pub use collection::{
-    collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule, MembershipQuery,
-    PathExpansionRuleMap, PathRule,
+    apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule,
+    MembershipQuery, PathExpansionRuleMap, PathRule,
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
