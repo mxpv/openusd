@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
 use super::conform::apply_aspect_ratio_policy;
@@ -116,7 +116,7 @@ pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&st
         if !namespaces.is_empty() && !namespaces.contains(&namespace) {
             continue;
         }
-        if let Some(value) = stage.field::<Value>(prim.append_property(&name)?, "default")? {
+        if let Some(value) = stage.field::<Value>(prim.append_property(&name)?, FieldKey::Default)? {
             out.push((name, value));
         }
     }
