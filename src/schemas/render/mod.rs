@@ -34,6 +34,6 @@ mod author;
 mod read;
 mod types;
 
-pub use author::SettingsBaseSetters;
-pub use read::read_settings_base;
-pub use types::{AspectRatioConformPolicy, ProductType, ReadSettingsBase, SourceType};
+pub use author::{define_render_settings, RenderSettingsAuthor, SettingsBaseSetters};
+pub use read::{read_render_settings, read_settings_base};
+pub use types::{AspectRatioConformPolicy, ProductType, ReadRenderSettings, ReadSettingsBase, SourceType};

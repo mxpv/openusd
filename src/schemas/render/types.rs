@@ -152,6 +152,39 @@ impl Default for ReadSettingsBase {
     }
 }
 
+/// A `RenderSettings` prim: the inherited base attributes plus the
+/// top-level render configuration.
+///
+/// `Default` matches Pixar's `usdRender/schema.usda` fallbacks
+/// (`includedPurposes = [default, render]`, `materialBindingPurposes =
+/// [full, ""]`); `renderingColorSpace` has no fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadRenderSettings {
+    /// The inherited `RenderSettingsBase` attributes.
+    pub base: ReadSettingsBase,
+    /// `products` relationship — `RenderProduct` prims to produce.
+    pub products: Vec<String>,
+    /// `includedPurposes` (default `["default", "render"]`).
+    pub included_purposes: Vec<String>,
+    /// `materialBindingPurposes` (default `["full", ""]`).
+    pub material_binding_purposes: Vec<String>,
+    /// `renderingColorSpace` — the renderer's linear working space. No
+    /// fallback (unauthored = renderer default).
+    pub rendering_color_space: Option<String>,
+}
+
+impl Default for ReadRenderSettings {
+    fn default() -> Self {
+        Self {
+            base: ReadSettingsBase::default(),
+            products: Vec::new(),
+            included_purposes: vec!["default".to_string(), "render".to_string()],
+            material_binding_purposes: vec!["full".to_string(), String::new()],
+            rendering_color_space: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

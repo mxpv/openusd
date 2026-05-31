@@ -36,6 +36,25 @@ pub fn read_settings_base(stage: &Stage, prim: &Path) -> Result<ReadSettingsBase
     })
 }
 
+/// Read a `RenderSettings` prim — the inherited base attributes plus
+/// the top-level configuration. Returns `None` when `prim` is not typed
+/// `RenderSettings`, so a caller can't fabricate a defaulted struct from
+/// an arbitrary prim.
+pub fn read_render_settings(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderSettings>> {
+    if stage.type_name(prim)?.as_deref() != Some(T_RENDER_SETTINGS) {
+        return Ok(None);
+    }
+    let d = ReadRenderSettings::default();
+    Ok(Some(ReadRenderSettings {
+        base: read_settings_base(stage, prim)?,
+        products: read_rel_targets(stage, prim, REL_PRODUCTS)?,
+        included_purposes: read_token_vec(stage, prim, A_INCLUDED_PURPOSES)?.unwrap_or(d.included_purposes),
+        material_binding_purposes: read_token_vec(stage, prim, A_MATERIAL_BINDING_PURPOSES)?
+            .unwrap_or(d.material_binding_purposes),
+        rendering_color_space: read_token(stage, prim, A_RENDERING_COLOR_SPACE)?,
+    }))
+}
+
 // ── value-read helpers ──────────────────────────────────────────────
 
 fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
@@ -80,12 +99,23 @@ fn read_float4(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 4]
     })
 }
 
-fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Option<String>> {
+fn read_token_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<String>>> {
+    Ok(match attr_value(stage, prim, name)? {
+        Some(Value::TokenVec(v) | Value::StringVec(v)) => Some(v),
+        _ => None,
+    })
+}
+
+fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<String>> {
     let rel_path = prim.append_property(rel_name)?;
     let paths = match stage.field::<Value>(rel_path, "targetPaths")? {
         Some(Value::PathListOp(op)) => op.flatten(),
         Some(Value::PathVec(v)) => v,
         _ => Vec::new(),
     };
-    Ok(paths.into_iter().next().map(|p| p.as_str().to_string()))
+    Ok(paths.into_iter().map(|p| p.as_str().to_string()).collect())
+}
+
+fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Option<String>> {
+    Ok(read_rel_targets(stage, prim, rel_name)?.into_iter().next())
 }
