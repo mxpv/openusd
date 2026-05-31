@@ -299,7 +299,12 @@ impl Collection {
             map.insert(included, path_rule);
         }
 
-        // Excludes applied last so they win over any include at the same path.
+        // This collection's own excludes are applied last so they win over
+        // every include — including paths brought in by nested collections.
+        // (Within the includes pass, later opinions overwrite earlier ones,
+        // matching C++ `_ComputeMembershipQueryImpl`'s merge order: a nested
+        // collection's opinion can be overridden by a later sibling include,
+        // and the owning collection's excludes always take final precedence.)
         for excluded in self.excludes(stage)? {
             map.insert(excluded, PathRule::Exclude);
         }
@@ -370,15 +375,34 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     let mut err: Result<()> = Ok(());
     let collect_props = query.has_property_expansion;
 
+    // Top-down traversal: `traverse` is pre-order, so a prim's parent is
+    // resolved just before it. Propagating the parent's effective rule via
+    // `is_path_included_below` keeps each prim O(1) instead of re-walking its
+    // ancestors. A parent the predicate skipped isn't cached, so its rule is
+    // recomputed once with `effective_rule`.
+    let mut effective: HashMap<Path, PathRule> = HashMap::new();
+
     stage.traverse(predicate, |prim| {
-        if err.is_err() || !query.is_path_included(prim) {
+        if err.is_err() {
+            return;
+        }
+        let parent_rule = match prim.parent() {
+            Some(parent) => effective
+                .get(&parent)
+                .copied()
+                .unwrap_or_else(|| query.effective_rule(&parent)),
+            None => PathRule::Exclude,
+        };
+        let (included, rule) = query.is_path_included_below(prim, parent_rule);
+        effective.insert(prim.clone(), rule);
+        if !included {
             return;
         }
         if seen.insert(prim.clone()) {
             out.push(prim.clone());
         }
         if collect_props {
-            if let Err(e) = push_member_properties(stage, prim, query, &mut seen, &mut out) {
+            if let Err(e) = push_member_properties(stage, prim, rule, query, &mut seen, &mut out) {
                 err = Err(e);
             }
         }
@@ -398,13 +422,15 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
 fn push_member_properties(
     stage: &Stage,
     prim: &Path,
+    prim_rule: PathRule,
     query: &MembershipQuery,
     seen: &mut HashSet<Path>,
     out: &mut Vec<Path>,
 ) -> Result<()> {
     for name in stage.prim_properties(prim.clone())? {
         let prop = prim.append_property(&name)?;
-        if query.is_path_included(&prop) && seen.insert(prop.clone()) {
+        let (included, _) = query.is_path_included_below(&prop, prim_rule);
+        if included && seen.insert(prop.clone()) {
             out.push(prop);
         }
     }
@@ -526,6 +552,23 @@ impl MembershipQuery {
             PathRule::ExpandPrimsAndProperties => true,
         };
         (included, rule)
+    }
+
+    /// The rule governing `path` by its closest-ancestor opinion, or
+    /// [`PathRule::Exclude`] when no ancestor opines. Used to seed the
+    /// top-down traversal in [`compute_included_paths`] for a parent the
+    /// traversal predicate skipped (so it isn't in the rule cache).
+    fn effective_rule(&self, path: &Path) -> PathRule {
+        let mut current = path.clone();
+        loop {
+            if let Some(rule) = self.rule_map.get(&current) {
+                return *rule;
+            }
+            match current.parent() {
+                Some(parent) if !parent.is_empty() => current = parent,
+                _ => return PathRule::Exclude,
+            }
+        }
     }
 }
 
