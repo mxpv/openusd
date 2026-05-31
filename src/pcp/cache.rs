@@ -215,9 +215,15 @@ impl Cache {
             return Ok(value);
         }
 
-        // 3) Value clips, anchored on this prim or an ancestor.
+        // 3) Value clips, anchored on this prim or an ancestor. A clip set that
+        //    owns the attribute resolves it authoritatively: an authored value
+        //    block stops fall-through to weaker sources but presents as `None`,
+        //    matching the local-default handling above and the default below.
         if let Some(value) = self.resolve_clip_value(&prim, &suffix, time, interp)? {
-            return Ok(Some(value));
+            return Ok(match value {
+                Value::ValueBlock | Value::None => None,
+                other => Some(other),
+            });
         }
 
         // 4) Remaining time samples (reference/payload arcs), retimed.
@@ -1840,16 +1846,17 @@ mod tests {
         Ok(())
     }
 
-    /// A manifest-declared attribute with no default and a gap resolves to a
-    /// value block (spec 12.3.4.6): the clip owns the attribute, so the gap
-    /// must not fall through to the referenced time samples (`777.0`).
+    /// A manifest-declared attribute with no default and a gap is
+    /// authoritatively absent (spec 12.3.4.6): the clip owns the attribute, so
+    /// the gap blocks fall-through to the referenced time samples (`777.0`) and
+    /// resolves to `None` rather than the weaker value.
     #[test]
-    fn missing_clip_value_without_default_is_value_block() -> Result<()> {
+    fn missing_clip_value_without_default_blocks() -> Result<()> {
         let root = format!("{}/fixtures/clip_missing_block/root.usda", manifest_dir());
         let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
         let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &exact);
         assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(5.0)));
-        assert_eq!(size(&mut cache, 10.0)?, Some(Value::ValueBlock));
+        assert_eq!(size(&mut cache, 10.0)?, None);
         Ok(())
     }
 
