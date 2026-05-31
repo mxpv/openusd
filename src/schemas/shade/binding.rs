@@ -16,8 +16,8 @@
 
 use anyhow::Result;
 
-use crate::sdf::Path;
-use crate::usd::{Prim, Stage};
+use crate::sdf::{Path, Value};
+use crate::usd::{Prim, Relationship, Stage};
 
 use super::tokens::{
     API_MATERIAL_BINDING, META_BIND_MATERIAL_AS, PURPOSE_ALL, REL_MATERIAL_BINDING, REL_MATERIAL_BINDING_COLLECTION,
@@ -73,12 +73,7 @@ pub fn bind_material_for_purpose(
     stage.override_prim(prim.path().clone())?;
     prim.clone().add_applied_schema(API_MATERIAL_BINDING)?;
     let rel = prim.author_relationship_targets(&direct_binding_rel(purpose), [material.into()])?;
-    if strength != BindingStrength::WeakerThanDescendants {
-        rel.set_metadata(
-            META_BIND_MATERIAL_AS,
-            crate::sdf::Value::Token(strength.as_token().to_string()),
-        )?;
-    }
+    apply_binding_strength(stage, rel, strength)?;
     Ok(())
 }
 
@@ -101,13 +96,31 @@ pub fn bind_material_collection(
         &collection_binding_rel(purpose, binding_name),
         [collection.into(), material.into()],
     )?;
-    if strength != BindingStrength::WeakerThanDescendants {
-        rel.set_metadata(
-            META_BIND_MATERIAL_AS,
-            crate::sdf::Value::Token(strength.as_token().to_string()),
-        )?;
+    apply_binding_strength(stage, rel, strength)?;
+    Ok(())
+}
+
+/// Author `bindMaterialAs` on a freshly-bound relationship. Mirrors C++
+/// `UsdShadeMaterialBindingAPI::SetMaterialBindingStrength`: the default
+/// `weakerThanDescendants` is left unauthored unless a different opinion
+/// already composes (from a weaker layer or a prior binding), in which
+/// case it is authored explicitly to override that stale opinion.
+fn apply_binding_strength(stage: &Stage, rel: Relationship, strength: BindingStrength) -> Result<()> {
+    let needs_write = strength != BindingStrength::WeakerThanDescendants
+        || composed_strength(stage, rel.path())? != BindingStrength::WeakerThanDescendants;
+    if needs_write {
+        rel.set_metadata(META_BIND_MATERIAL_AS, Value::Token(strength.as_token().to_string()))?;
     }
     Ok(())
+}
+
+/// Composed `bindMaterialAs` strength on a binding relationship, falling
+/// back to the spec default when unauthored.
+fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
+    Ok(match stage.field::<Value>(rel.clone(), META_BIND_MATERIAL_AS)? {
+        Some(Value::Token(t)) => BindingStrength::from_token(&t).unwrap_or_default(),
+        _ => BindingStrength::default(),
+    })
 }
 
 /// Read the directly-bound Material for `purpose`
@@ -140,10 +153,7 @@ pub fn read_collection_binding(
 /// ([`BindingStrength::WeakerThanDescendants`]) when unauthored.
 pub fn read_binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Result<BindingStrength> {
     let rel = prim.append_property(&direct_binding_rel(purpose))?;
-    Ok(match stage.field::<crate::sdf::Value>(rel, META_BIND_MATERIAL_AS)? {
-        Some(crate::sdf::Value::Token(t)) => BindingStrength::from_token(&t).unwrap_or_default(),
-        _ => BindingStrength::default(),
-    })
+    composed_strength(stage, &rel)
 }
 
 #[cfg(test)]
@@ -212,6 +222,34 @@ mod tests {
         assert_eq!(
             read_direct_binding(&stage, &sdf::path("/World/Mesh")?, "")?.map(|p| p.as_str().to_string()),
             Some("/World/Mat".to_string()),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rebind_overrides_strength() -> Result<()> {
+        // Rebinding with the default strength must clear a previously
+        // authored stronger opinion, not silently leave it composing.
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
+        bind_material_for_purpose(
+            &stage,
+            sdf::path("/Mesh")?,
+            "",
+            sdf::path("/MatA")?,
+            BindingStrength::StrongerThanDescendants,
+        )?;
+        bind_material_for_purpose(
+            &stage,
+            sdf::path("/Mesh")?,
+            "",
+            sdf::path("/MatB")?,
+            BindingStrength::WeakerThanDescendants,
+        )?;
+
+        assert_eq!(
+            read_binding_strength(&stage, &sdf::path("/Mesh")?, "")?,
+            BindingStrength::WeakerThanDescendants,
         );
         Ok(())
     }
