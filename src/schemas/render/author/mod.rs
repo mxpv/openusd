@@ -11,5 +11,7 @@
 //! [`Stage::set_edit_target`](crate::usd::Stage::set_edit_target).
 
 mod base;
+mod settings;
 
 pub use base::SettingsBaseSetters;
+pub use settings::{define_render_settings, RenderSettingsAuthor};
