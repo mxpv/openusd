@@ -51,8 +51,8 @@ pub trait SettingsBaseSetters<'s>: Sized {
         Ok(self)
     }
 
-    /// Set `instantaneousShutter` (`uniform bool`) — **deprecated**;
-    /// prefer [`Self::set_disable_motion_blur`].
+    /// Set `instantaneousShutter` (`uniform bool`) — deprecated in the C++
+    /// `UsdRender` schema; prefer [`Self::set_disable_motion_blur`].
     fn set_instantaneous_shutter(self, value: bool) -> Result<Self> {
         author_uniform_bool(self.prim().stage(), self.prim().path(), A_INSTANTANEOUS_SHUTTER, value)?;
         Ok(self)

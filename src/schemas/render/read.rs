@@ -28,9 +28,9 @@ pub fn read_settings_base(stage: &Stage, prim: &Path) -> Result<ReadSettingsBase
 /// product opinions over the already-resolved settings `base`.
 ///
 /// This is the product-overrides-settings rule (spec): a product attribute
-/// overrides the settings value **only if it is explicitly authored on the
-/// product** — mirroring C++ `_Get(attr, val, getDefaultValue=false)`,
-/// which uses the value only when `attr.HasAuthoredValue()`. An unauthored
+/// overrides the settings value only if it is explicitly authored on the
+/// product, mirroring C++ `_Get(attr, val, getDefaultValue=false)`, which
+/// uses the value only when `attr.HasAuthoredValue()`. An unauthored
 /// product attribute inherits the (fallback-resolved) settings value, never
 /// the bare spec default.
 pub fn read_base_overriding(stage: &Stage, product: &Path, base: &ReadSettingsBase) -> Result<ReadSettingsBase> {
