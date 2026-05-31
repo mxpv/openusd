@@ -12,15 +12,15 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
 
 - **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys. `Layer` (C++ `SdfLayer`) bundles a resolved identifier with a backing `AbstractData` and exposes a Layer-tier authoring surface (`create_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim` / `clear_default_prim`) plus typed spec views (`PrimSpec[Mut]`, `AttributeSpec[Mut]`, `RelationshipSpec[Mut]`, `PseudoRootSpec[Mut]`). Authoring errors flow through `AuthoringError`.
 
-- **`usda/`** - Text format (`.usda`) reader: Lexer (logos) + recursive descent parser. `TextReader` implements `AbstractData`.
+- **`usda/`** - Text format (`.usda`): Lexer (logos) + recursive descent parser. `TextReader` implements `AbstractData`; `TextWriter` emits `.usda`.
 
-- **`usdc/`** - Binary format (`.usdc`) reader: USD's crate format with compressed data handling. `CrateData` implements `AbstractData`.
+- **`usdc/`** - Binary format (`.usdc`): USD's crate format with compressed data handling. `CrateData` implements `AbstractData`; `CrateWriter` emits `.usdc`.
 
-- **`usdz/`** - Archive format (`.usdz`) reader: ZIP-based package reader.
+- **`usdz/`** - Archive format (`.usdz`): ZIP-based package. `Archive` reads and `ArchiveWriter` emits `.usdz`.
 
 - **`ar/`** - Asset Resolution: `Resolver` trait maps asset paths (`@...@`) to physical locations. `DefaultResolver` searches the filesystem.
 
-- **`layer`** - Layer collection: `collect_layers` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads. Corresponds to C++ `PcpLayerStack`. Defines `layer::Error` for recoverable collection failures (e.g. unresolved assets).
+- **`layer`** - Layer collection: `Collector::collect` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads. Corresponds to C++ `PcpLayerStack`. `Collector` and `DependencyKind` are re-exported from the crate root. Defines `layer::Error` for recoverable collection failures (e.g. unresolved assets).
 
 - **`pcp/`** - Prim Cache Population (composition engine): Implements LIVRPS strength ordering to compose opinions across layers. Corresponds to C++ `Pcp` module.
   - `pcp/mod.rs` — `pcp::Error`: composition errors (arc cycles, unresolved layers, missing/invalid `defaultPrim`). `LayerStack`: bundles layers, identifiers, and precomputed sublayer stacks (C++ `PcpLayerStack`). `VariantFallbackMap`: maps variant set names to ordered fallback selections (C++ `PcpVariantFallbackMap`).
@@ -30,21 +30,26 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
   - `pcp/index.rs` — `PrimIndex`, `Node`, `NodeIndex`, `ArcType`: per-prim composition graph (C++ `PcpPrimIndex`). `ArcType` variants are ordered by LIVERPS strength via `#[repr(u8)]` + derived `Ord`. Nodes are stored in a flat arena (`PrimIndexGraph`) ordered strongest-to-weakest. Each node carries `map_to_parent` and `map_to_root` (`MapFunction`) for namespace translation and retiming (`MapFunction` carries an `sdf::LayerOffset`) across arcs. `IndexBuilder` takes a `&LayerStack` and evaluates LIVRPS with a `CompositionContext` flowing from parent to child; each build takes only `&` references (Rayon-friendly).
   - `pcp/mapping.rs` — `MapFunction`: namespace mapping between composition arcs (C++ `PcpMapFunction`). Stores (source, target) path pairs with longest-prefix matching alongside an `sdf::LayerOffset` time retiming. `compose` concatenates both path and time offsets. Effective offset for a node is `node.map_to_root.time_offset()`.
   - `pcp/rel.rs` — `Relocates`: isolated relocate object owning per-layer `layerRelocates`. Resolves pre-relocation source paths, builds relocated prim indices, and adjusts child name lists. Receives external data (`&LayerStack`, cached indices/contexts) through method parameters; does not reference `Cache` directly.
+  - `pcp/clip.rs` — `ClipSet`: value clips (spec 12.3.4). Parses the explicit `clips` / `clipSets` metadata model and maps stage time to clip time during attribute value resolution. Template clips are resolved to explicit metadata elsewhere.
 
 - **`usd/`** - Composed stage API: `usd::Stage` provides the high-level API for opening USD files and querying the composed scene graph. Delegates composition to `pcp::Cache`. `StageBuilder` configures the stage with a custom resolver, error handler (`on_error`), variant fallback selections (`variant_fallbacks`), an optional session layer (`session_layer`), payload loading behavior (`initial_load_set` / `InitialLoadSet`), and a working-set filter (`population_mask` / `StagePopulationMask`). `StageBuilder::open` loads a root layer from disk; `StageBuilder::in_memory` creates an empty writable anonymous root (C++ `UsdStage::CreateInMemory`). Stage-tier authoring (`define_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim`) routes through the current `EditTarget` (a subset of C++ `UsdEditTarget`): it pairs a `layer_index` with a `pcp::MapFunction` that maps scene paths to spec paths, so authoring through the chokepoint `Stage::with_target_layer_at` writes at `EditTarget::map_to_spec_path`. `EditTarget::for_layer_index` is the identity-mapping local target; `EditTarget::for_local_direct_variant` routes writes into a variant's `{set=sel}` namespace, which `sdf::Layer` materializes end-to-end (`create_prim` / `create_attribute` accept variant-segment paths and build the variant set / variant spec scaffolding via `namespace_chain`; arc-based reference/specialize targets are still TODO). `EditContext` is the RAII guard (C++ `UsdEditContext`) returned by `Stage::edit_context` that restores the previous target on `Drop`. Each authoring closure returns an `sdf::ChangeList` (in layer namespace) that `Cache::process_changes` classifies and applies for surgical invalidation. Errors surface via `StageAuthoringError` (including `OutsideEditTarget` when a path can't be mapped). `usd/prim.rs` defines `Prim` / `Attribute` / `Relationship` composed handles (C++ `UsdPrim` / `UsdAttribute` / `UsdRelationship` analogs) — value-type wrappers around `(stage, path)` returned from the authoring methods. Setters consume `self` and return `Self` so chains bind directly (`let p = stage.define_prim(...)?.set_type_name(...)?.set_kind(...)?`); lookup-style methods (`create_attribute`, `path`, `get`, `time_samples`) take `&self`. Stage-level interpolation lives in `usd/interp.rs` and is exposed as `usd::InterpolationType`. Public users should import modules, e.g. `use openusd::{sdf, usd};`, rather than root-level `Stage` re-exports.
 
 - **`expr`** - Variable expression tokenizer and parser for USD's expression syntax.
+
+- **`schemas/`** - Domain-schema readers/authoring layered on top of the core `sdf` / `usd` machinery (the AOUSD core spec covers composition, value resolution, and file formats — not these schemas). Each sub-module is feature-gated: `geom` (UsdGeom), `physics` (UsdPhysics), `skel` (UsdSkel + skinning), `lux` (UsdLux), `shade` (UsdShade), `render` (UsdRender). `schemas/registry.rs` is the eventual schema-registry surface (currently a stub).
+
+- **`math`** - Shared 4×4 row-major matrix helpers used by the schema layer.
 
 The `AbstractData` trait in `sdf/mod.rs` serves as the central abstraction, providing a unified interface for text, binary, and archive format readers.
 
 ## Development Commands
 
 ```bash
-# Build the project
-cargo build
+# Build the project (use --all-features to include the gated schema modules)
+cargo build --all-features
 
 # Run tests (including comprehensive format validation tests)
-cargo test
+cargo test --all-targets --all-features
 
 # Lint with Clippy (strict warnings as errors)
 cargo clippy --all-targets --all-features -- -D warnings
@@ -117,6 +122,7 @@ To pull a typed payload out of a `Value` in tests, use the `EnumTryAs`-generated
 
 Key external dependencies:
 - `anyhow` - Error handling
+- `bitflags` - Bitflag sets (e.g. `PrimPredicate`)
 - `bytemuck` - Safe transmutation for binary data
 - `half` - 16-bit floating point support (re-exported as `f16`)
 - `logos` - Lexer generator for USDA tokenization
@@ -125,5 +131,8 @@ Key external dependencies:
 - `strum` - Enum derive macros (Display, EnumIs, EnumTryAs, IntoStaticStr, etc.)
 - `thiserror` - Error type derive macros for `layer::Error`, `pcp::Error`, and `CompositionError`
 - `zip` - USDZ archive reading
+- `serde` (optional, `serde` feature) - Serialization support
+
+Domain schemas are gated behind per-module features (`geom`, `lux`, `physics`, `render`, `shade`, `skel`); use `--all-features` when building, testing, or linting.
 
 The project maintains a minimal dependency footprint and uses cargo-deny to prevent license conflicts and vulnerability introduction. Allowed licenses: MIT, Apache-2.0, Zlib, Unicode-3.0.
