@@ -221,14 +221,19 @@ fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
     })
 }
 
+/// Read a relationship's composed target paths. Routes through
+/// [`Stage::relationship_targets`] so the result folds `prepend` / `append`
+/// / `delete` list-op edits across every contributing layer, matching the
+/// composed targets the spec computation sees (C++ `GetTargets`). Reading
+/// the raw `TargetPaths` field would expose only the strongest layer's
+/// list op.
 fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<String>> {
     let rel_path = prim.append_property(rel_name)?;
-    let paths = match stage.field::<Value>(rel_path, FieldKey::TargetPaths)? {
-        Some(Value::PathListOp(op)) => op.flatten(),
-        Some(Value::PathVec(v)) => v,
-        _ => Vec::new(),
-    };
-    Ok(paths.into_iter().map(|p| p.as_str().to_string()).collect())
+    Ok(stage
+        .relationship_targets(&rel_path)?
+        .into_iter()
+        .map(|p| p.as_str().to_string())
+        .collect())
 }
 
 fn read_rel_first_target(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Option<String>> {
