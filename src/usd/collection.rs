@@ -22,7 +22,7 @@
 //! yet *evaluated* — that engine is a separate effort. Relationship-mode
 //! collections are fully supported.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
@@ -171,6 +171,54 @@ impl Collection {
             && self.excludes(stage)?.is_empty()
             && !self.include_root(stage)?)
     }
+
+    /// Resolve this collection's authored opinions into a
+    /// [`MembershipQuery`] (relationship mode, spec §15.2): `includeRoot`
+    /// and each `includes` target take the collection's `expansionRule`,
+    /// each `excludes` target is marked excluded, and an `includes` target
+    /// that is itself another collection is recursively merged in.
+    ///
+    /// Cycles among chained collections are broken (each collection visited
+    /// once); excludes are applied last so they always win over includes.
+    /// Expression-mode collections (`has_expression`) currently resolve to
+    /// an empty query.
+    pub fn compute_membership_query(&self, stage: &Stage) -> Result<MembershipQuery> {
+        let mut map = PathExpansionRuleMap::new();
+        let mut visited = HashSet::new();
+        visited.insert(self.collection_path()?);
+        self.build_into(stage, &mut map, &mut visited)?;
+        Ok(MembershipQuery::new(map))
+    }
+
+    fn build_into(&self, stage: &Stage, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
+        let rule = self.expansion_rule(stage)?;
+        let path_rule = PathRule::from_expansion(rule);
+
+        // `includeRoot` injects the pseudo-root as a top-level include
+        // (no effect under `explicitOnly`).
+        if self.include_root(stage)? && rule != ExpansionRule::ExplicitOnly {
+            map.insert(Path::abs_root(), path_rule);
+        }
+
+        for included in self.includes(stage)? {
+            // A target that is itself a collection is merged recursively.
+            if let Some((prim, name)) = is_collection_api_path(&included) {
+                let nested = Collection::new(prim, name);
+                if visited.insert(nested.collection_path()?) {
+                    nested.build_into(stage, map, visited)?;
+                }
+                // else: cycle / already-merged — skip.
+                continue;
+            }
+            map.insert(included, path_rule);
+        }
+
+        // Excludes applied last so they win over any include at the same path.
+        for excluded in self.excludes(stage)? {
+            map.insert(excluded, PathRule::Exclude);
+        }
+        Ok(())
+    }
 }
 
 /// Every `UsdCollectionAPI` instance applied to `prim`, decoded from its
@@ -219,6 +267,16 @@ pub enum PathRule {
     ExpandPrimsAndProperties,
     /// This path and its descendants are excluded.
     Exclude,
+}
+
+impl PathRule {
+    fn from_expansion(rule: ExpansionRule) -> Self {
+        match rule {
+            ExpansionRule::ExplicitOnly => PathRule::ExplicitOnly,
+            ExpansionRule::ExpandPrims => PathRule::ExpandPrims,
+            ExpansionRule::ExpandPrimsAndProperties => PathRule::ExpandPrimsAndProperties,
+        }
+    }
 }
 
 /// Maps each authored/derived path to the rule that governs it (the
@@ -457,6 +515,116 @@ mod tests {
         // Under an Exclude parent, the child is out.
         let (inc, _) = q.is_path_included_below(&sdf::path("/W/A/B")?, PathRule::Exclude);
         assert!(!inc);
+        Ok(())
+    }
+
+    /// Author a full collection (apiSchema + expansionRule + includeRoot +
+    /// includes/excludes rels) for the compute tests.
+    #[allow(clippy::too_many_arguments)]
+    fn build_collection(
+        stage: &Stage,
+        prim: &str,
+        name: &str,
+        rule: ExpansionRule,
+        include_root: bool,
+        includes: &[&str],
+        excludes: &[&str],
+    ) -> Result<()> {
+        let prim_path = sdf::path(prim)?;
+        stage
+            .define_prim(prim_path.clone())?
+            .set_type_name("Scope")?
+            .add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
+        let coll = Collection::new(prim_path.clone(), name);
+        stage
+            .create_attribute(coll.prop(EXPANSION_RULE)?, "token")?
+            .set_variability(Variability::Uniform)?
+            .set(Value::Token(rule.as_token().to_string()))?;
+        if include_root {
+            stage
+                .create_attribute(coll.prop(INCLUDE_ROOT)?, "bool")?
+                .set_variability(Variability::Uniform)?
+                .set(Value::Bool(true))?;
+        }
+        let prim_handle = crate::usd::Prim::new(stage, prim_path);
+        if !includes.is_empty() {
+            let targets: Vec<Path> = includes.iter().map(|p| sdf::path(p).unwrap()).collect();
+            prim_handle.author_relationship_targets(&format!("collection:{name}:{INCLUDES}"), targets)?;
+        }
+        if !excludes.is_empty() {
+            let targets: Vec<Path> = excludes.iter().map(|p| sdf::path(p).unwrap()).collect();
+            prim_handle.author_relationship_targets(&format!("collection:{name}:{EXCLUDES}"), targets)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compute_basic_includes() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        build_collection(&stage, "/W", "c", ExpansionRule::ExpandPrims, false, &["/W/A"], &[])?;
+        let q = Collection::new(sdf::path("/W")?, "c").compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/A/B")?));
+        assert!(!q.is_path_included(&sdf::path("/W/Other")?));
+        Ok(())
+    }
+
+    #[test]
+    fn compute_include_root_with_excludes() -> Result<()> {
+        // "Everything but /W/A": includeRoot + an exclude.
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        build_collection(&stage, "/W", "c", ExpansionRule::ExpandPrims, true, &[], &["/W/A"])?;
+        let q = Collection::new(sdf::path("/W")?, "c").compute_membership_query(&stage)?;
+        assert!(q.has_excludes());
+        assert!(q.is_path_included(&sdf::path("/W/B")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A/C")?));
+        Ok(())
+    }
+
+    #[test]
+    fn compute_merges_nested_collection() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        // inner includes /W/X; outer includes inner's identity path.
+        build_collection(&stage, "/R", "inner", ExpansionRule::ExpandPrims, false, &["/W/X"], &[])?;
+        build_collection(
+            &stage,
+            "/R",
+            "outer",
+            ExpansionRule::ExpandPrims,
+            false,
+            &["/R.collection:inner"],
+            &[],
+        )?;
+        let q = Collection::new(sdf::path("/R")?, "outer").compute_membership_query(&stage)?;
+        assert!(q.is_path_included(&sdf::path("/W/X/Leaf")?));
+        Ok(())
+    }
+
+    #[test]
+    fn compute_breaks_cycle() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        // a includes b, b includes a — must terminate.
+        build_collection(
+            &stage,
+            "/R",
+            "a",
+            ExpansionRule::ExpandPrims,
+            false,
+            &["/R.collection:b"],
+            &[],
+        )?;
+        build_collection(
+            &stage,
+            "/R",
+            "b",
+            ExpansionRule::ExpandPrims,
+            false,
+            &["/R.collection:a"],
+            &[],
+        )?;
+        let q = Collection::new(sdf::path("/R")?, "a").compute_membership_query(&stage)?;
+        // No hang; the cyclic includes contribute no concrete paths.
+        assert!(q.is_empty());
         Ok(())
     }
 }
