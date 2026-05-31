@@ -433,10 +433,15 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
 
     // Explicitly listed property targets (e.g. an `includes` of `prim.attr`)
     // aren't reached by the prim walk above. Like C++ `_ComputeIncludedImpl`,
-    // these are emitted regardless of whether their owning prim satisfies
+    // these are emitted when the property exists (C++ checks the same via
+    // `GetPropertyAtPath`), regardless of whether their owning prim satisfies
     // `predicate` — only properties reached by prim expansion are gated by it.
     for (path, _) in query.rule_map.iter() {
-        if path.is_property_path() && query.is_path_included(path) && seen.insert(path.clone()) {
+        if path.is_property_path()
+            && query.is_path_included(path)
+            && stage.has_spec(path.clone())?
+            && seen.insert(path.clone())
+        {
             out.push(path.clone());
         }
     }
@@ -1072,6 +1077,30 @@ mod tests {
         let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
         assert!(paths.contains(&sdf::path("/W/B")?));
         assert!(paths.contains(&sdf::path("/W/B.size")?)); // property is a member
+        Ok(())
+    }
+
+    #[test]
+    fn included_paths_skip_missing_property() -> Result<()> {
+        // An explicit property target is emitted only when the property
+        // exists, matching C++ `_ComputeIncludedImpl` / `GetPropertyAtPath`.
+        let stage = scene()?;
+        stage
+            .create_attribute(sdf::path("/W/B.size")?, "float")?
+            .set(Value::Float(1.0))?;
+        build_collection(
+            &stage,
+            "/Col",
+            "c",
+            ExpansionRule::ExpandPrims,
+            false,
+            &["/W/B.size", "/W/B.ghost"],
+            &[],
+        )?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert!(paths.contains(&sdf::path("/W/B.size")?)); // exists → emitted
+        assert!(!paths.contains(&sdf::path("/W/B.ghost")?)); // unauthored → skipped
         Ok(())
     }
 }
