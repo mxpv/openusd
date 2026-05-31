@@ -32,6 +32,16 @@ pub fn apply_aspect_ratio_policy(
     pixel_aspect_ratio: f32,
     aperture: [f32; 2],
 ) -> ConformedAperture {
+    // Guard the divisors so malformed inputs can't yield inf/NaN — with a
+    // zero resolution height or aperture height there is nothing to reconcile,
+    // so return the aperture and pixel aspect unchanged.
+    if resolution[1] == 0 || aperture[1] == 0.0 {
+        return ConformedAperture {
+            aperture_size: aperture,
+            pixel_aspect_ratio,
+        };
+    }
+
     let res_aspect = resolution[0] as f32 / resolution[1] as f32;
     let image_aspect = pixel_aspect_ratio * res_aspect;
     let aperture_aspect = aperture[0] / aperture[1];
@@ -126,6 +136,16 @@ mod tests {
     fn adjust_aperture_height_pins_width() {
         let c = run(AspectRatioConformPolicy::AdjustApertureHeight);
         assert!(approx(c.aperture_size, [10.0, 5.0]));
+    }
+
+    #[test]
+    fn zero_divisors_return_finite_unchanged() {
+        // Malformed inputs must not yield inf/NaN.
+        let c = apply_aspect_ratio_policy(AspectRatioConformPolicy::ExpandAperture, [200, 0], 1.0, [10.0, 10.0]);
+        assert_eq!(c.aperture_size, [10.0, 10.0]);
+        assert!(c.aperture_size.iter().all(|v| v.is_finite()));
+        let c = apply_aspect_ratio_policy(AspectRatioConformPolicy::ExpandAperture, [200, 100], 1.0, [10.0, 0.0]);
+        assert!(c.aperture_size.iter().all(|v| v.is_finite()));
     }
 
     #[test]
