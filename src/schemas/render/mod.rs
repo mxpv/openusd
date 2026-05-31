@@ -28,6 +28,7 @@
 //! `usdRender/schema.usda` fallbacks exactly, so callers can
 //! `unwrap_or_default()` for a spec-correct fallback.
 
+pub mod spec;
 pub mod tokens;
 
 mod author;
