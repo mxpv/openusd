@@ -38,6 +38,7 @@ For a detailed comparison with the C++ reference implementation and current prog
   - [`UsdGeom`](src/schemas/geom) — Imageable / Boundable / Xformable, intrinsic shapes, Camera, Mesh, Curves, PointInstancer.
   - [`UsdLux`](src/schemas/lux) — concrete light prims plus LightAPI / ShapingAPI / ShadowAPI and friends.
   - [`UsdPhysics`](src/schemas/physics) — scene, joints, collisions, and per-DOF limit / drive APIs.
+  - [`UsdRender`](src/schemas/render) — RenderSettings / RenderProduct / RenderVar / RenderPass plus render-product/var conformance helpers.
   - [`UsdSkel`](src/schemas/skel) — schema reader plus a pure-math skinning toolkit (topology, anim mapping, LBS, blend shapes).
   - [`UsdShade`](src/schemas/shade) — Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, and UsdPreviewSurface.
 
@@ -95,6 +96,7 @@ pay for what you use:
 | `geom` | [`UsdGeom`](src/schemas/geom) — Imageable, Boundable, Xformable, shapes, Camera, Mesh, Curves, PointInstancer |
 | `lux` | [`UsdLux`](src/schemas/lux) — light prims and Light/Shaping/Shadow APIs |
 | `physics` | [`UsdPhysics`](src/schemas/physics) — scenes, joints, collisions, limit/drive APIs |
+| `render` | [`UsdRender`](src/schemas/render) — RenderSettings, RenderProduct, RenderVar, RenderPass |
 | `skel` | [`UsdSkel`](src/schemas/skel) — skeleton reader and skinning toolkit |
 | `shade` | [`UsdShade`](src/schemas/shade) — materials, shader networks, bindings, UsdPreviewSurface |
 | `serde` | `serde` support for serializing core types |
