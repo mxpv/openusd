@@ -14,6 +14,7 @@
 //! binding has two (the collection path + the Material). The optional
 //! `bindMaterialAs` metadata on the rel records binding strength.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -171,7 +172,7 @@ pub fn read_binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Resul
 /// resolve in native property order.
 pub fn compute_bound_material(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
     // Cache each collection's membership query across the namespace walk.
-    let mut cache: HashMap<Path, MembershipQuery> = HashMap::new();
+    let mut cache: HashMap<Path, Option<MembershipQuery>> = HashMap::new();
     for pur in purpose_fallbacks(purpose) {
         if let Some(material) = bound_material_for_single_purpose(stage, prim, pur, &mut cache)? {
             return Ok(Some(material));
@@ -187,7 +188,7 @@ fn bound_material_for_single_purpose(
     stage: &Stage,
     prim: &Path,
     purpose: &str,
-    cache: &mut HashMap<Path, MembershipQuery>,
+    cache: &mut HashMap<Path, Option<MembershipQuery>>,
 ) -> Result<Option<Path>> {
     let mut winner: Option<Path> = None;
     let mut current = Some(prim.clone());
@@ -212,7 +213,7 @@ fn winning_binding_at(
     p: &Path,
     queried: &Path,
     purpose: &str,
-    cache: &mut HashMap<Path, MembershipQuery>,
+    cache: &mut HashMap<Path, Option<MembershipQuery>>,
 ) -> Result<Option<(Path, BindingStrength)>> {
     // Collection bindings beat direct, in native property order.
     for (collection, material, strength) in collection_bindings_on(stage, p, purpose)? {
@@ -235,10 +236,13 @@ fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
-        // `rest` is `<purpose>:<name>` (restricted) or `<name>` (all-purpose).
-        let binding_purpose = match rest.split_once(':') {
-            Some((pur, _)) => pur,
-            None => PURPOSE_ALL,
+        // `rest` is `<purpose>:<name>` (restricted) or `<name>` (all-purpose),
+        // classified by token count to mirror C++ `_GetMaterialPurpose`: only a
+        // single-colon remainder is purpose-restricted; a plain name or any
+        // deeper-namespaced name is all-purpose.
+        let binding_purpose = match rest.split(':').collect::<Vec<_>>().as_slice() {
+            [pur, _name] => *pur,
+            _ => PURPOSE_ALL,
         };
         if binding_purpose != purpose {
             continue;
@@ -252,21 +256,25 @@ fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<
 }
 
 /// Whether `queried` is a member of the collection at `collection_path`,
-/// caching the computed membership query by collection path.
+/// caching the result by collection path. A path that is not a collection
+/// identity caches `None` and is never a member.
 fn is_collection_member(
     stage: &Stage,
     collection_path: &Path,
     queried: &Path,
-    cache: &mut HashMap<Path, MembershipQuery>,
+    cache: &mut HashMap<Path, Option<MembershipQuery>>,
 ) -> Result<bool> {
-    if !cache.contains_key(collection_path) {
-        let Some((prim, name)) = is_collection_api_path(collection_path) else {
-            return Ok(false); // not a collection identity path
-        };
-        let query = Collection::new(prim, name).compute_membership_query(stage)?;
-        cache.insert(collection_path.clone(), query);
-    }
-    Ok(cache.get(collection_path).is_some_and(|q| q.is_path_included(queried)))
+    let query = match cache.entry(collection_path.clone()) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let query = match is_collection_api_path(collection_path) {
+                Some((prim, name)) => Some(Collection::new(prim, name).compute_membership_query(stage)?),
+                None => None,
+            };
+            e.insert(query)
+        }
+    };
+    Ok(query.as_ref().is_some_and(|q| q.is_path_included(queried)))
 }
 
 /// Purposes to try in preference order: a restricted purpose first, then the
@@ -552,11 +560,10 @@ mod tests {
             BindingStrength::WeakerThanDescendants,
         )?;
 
-        // Whichever collection-binding rel sorts first in property order wins;
-        // assert the result is one of them and is stable.
-        let first = bound(&stage, "/Set/A", "");
-        assert!(first == Some("/MatSecond".to_string()) || first == Some("/MatFirst".to_string()));
-        assert_eq!(first, bound(&stage, "/Set/A", "")); // deterministic
+        // `aaa` precedes `zzz` in native property order, so its collection
+        // binding (to `/MatSecond`) is the one tested and wins — even though
+        // its collection `second` was authored after `first`.
+        assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatSecond".to_string()));
         Ok(())
     }
 }
