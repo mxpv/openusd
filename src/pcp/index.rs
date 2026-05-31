@@ -578,6 +578,11 @@ impl PrimIndex {
         let mut blocked_sets: HashSet<String> = HashSet::new();
         let mut asset_layers: HashMap<String, usize> = HashMap::new();
         let mut manifest_layers: HashMap<String, usize> = HashMap::new();
+        // Sets with explicit `assetPaths` (whose `active`/`times` are retimed
+        // as they compose) versus the offset of a template set's authoring
+        // node (whose schedule is derived later and retimed afterwards).
+        let mut explicit_sets: HashSet<String> = HashSet::new();
+        let mut template_offsets: HashMap<String, LayerOffset> = HashMap::new();
 
         for node in self.nodes() {
             let Some(value) = stack
@@ -612,8 +617,12 @@ impl PrimIndex {
                             // Both the explicit `assetPaths` and a template's
                             // `templateAssetPath` anchor their relative clip
                             // asset paths against the layer that authored them.
-                            if field == clip::keys::ASSET_PATHS || field == clip::keys::TEMPLATE_ASSET_PATH {
+                            if field == clip::keys::ASSET_PATHS {
                                 asset_layers.insert(set_name.clone(), node.layer_index);
+                                explicit_sets.insert(set_name.clone());
+                            } else if field == clip::keys::TEMPLATE_ASSET_PATH {
+                                asset_layers.insert(set_name.clone(), node.layer_index);
+                                template_offsets.insert(set_name.clone(), node.map_to_root.time_offset());
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
                                 manifest_layers.insert(set_name.clone(), node.layer_index);
                             }
@@ -634,9 +643,17 @@ impl PrimIndex {
 
         Ok(clip::ClipSet::parse_all(&clips, order.as_deref())
             .into_iter()
-            .filter_map(|set| {
+            .filter_map(|mut set| {
                 let asset_layer = asset_layers.get(&set.name).copied()?;
                 let manifest_layer = manifest_layers.get(&set.name).copied();
+                // Explicit `active`/`times` were retimed as they composed. A
+                // template schedule is derived in clip time, so retime its
+                // stage times here by the authoring node's offset.
+                if !explicit_sets.contains(&set.name) {
+                    if let Some(&offset) = template_offsets.get(&set.name) {
+                        set.retime_stage_times(offset);
+                    }
+                }
                 Some(clip::ResolvedClipSet {
                     set,
                     asset_layer,
