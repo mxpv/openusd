@@ -185,6 +185,56 @@ impl Default for ReadRenderSettings {
     }
 }
 
+/// A `RenderProduct` prim: the inherited base attributes (which it may
+/// override) plus the product-specific configuration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadRenderProduct {
+    /// The inherited `RenderSettingsBase` attributes (per-field fallback;
+    /// see the computed render spec for the authored-only override rule).
+    pub base: ReadSettingsBase,
+    /// `productType` (default `raster`).
+    pub product_type: ProductType,
+    /// `productName` — output/display-driver name (default `""`).
+    pub product_name: String,
+    /// `orderedVars` relationship — `RenderVar` prims composited, in order.
+    pub ordered_vars: Vec<String>,
+}
+
+impl Default for ReadRenderProduct {
+    fn default() -> Self {
+        Self {
+            base: ReadSettingsBase::default(),
+            product_type: ProductType::Raster,
+            product_name: String::new(),
+            ordered_vars: Vec::new(),
+        }
+    }
+}
+
+/// A `RenderVar` prim: one output channel (AOV).
+///
+/// `Default` matches Pixar's `usdRender/schema.usda` (`dataType =
+/// color3f`, `sourceName = ""`, `sourceType = raw`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadRenderVar {
+    /// `dataType` — the channel's USD attribute type (default `color3f`).
+    pub data_type: String,
+    /// `sourceName` — the name the renderer looks up (default `""`).
+    pub source_name: String,
+    /// `sourceType` — how `sourceName` is interpreted (default `raw`).
+    pub source_type: SourceType,
+}
+
+impl Default for ReadRenderVar {
+    fn default() -> Self {
+        Self {
+            data_type: "color3f".to_string(),
+            source_name: String::new(),
+            source_type: SourceType::Raw,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

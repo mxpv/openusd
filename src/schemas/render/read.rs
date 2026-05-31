@@ -55,6 +55,38 @@ pub fn read_render_settings(stage: &Stage, prim: &Path) -> Result<Option<ReadRen
     }))
 }
 
+/// Read a `RenderProduct` prim. Returns `None` when `prim` is not typed
+/// `RenderProduct`.
+pub fn read_render_product(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderProduct>> {
+    if stage.type_name(prim)?.as_deref() != Some(T_RENDER_PRODUCT) {
+        return Ok(None);
+    }
+    Ok(Some(ReadRenderProduct {
+        base: read_settings_base(stage, prim)?,
+        product_type: read_token(stage, prim, A_PRODUCT_TYPE)?
+            .and_then(|t| ProductType::from_token(&t))
+            .unwrap_or_default(),
+        product_name: read_token(stage, prim, A_PRODUCT_NAME)?.unwrap_or_default(),
+        ordered_vars: read_rel_targets(stage, prim, REL_ORDERED_VARS)?,
+    }))
+}
+
+/// Read a `RenderVar` prim. Returns `None` when `prim` is not typed
+/// `RenderVar`.
+pub fn read_render_var(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderVar>> {
+    if stage.type_name(prim)?.as_deref() != Some(T_RENDER_VAR) {
+        return Ok(None);
+    }
+    let d = ReadRenderVar::default();
+    Ok(Some(ReadRenderVar {
+        data_type: read_token(stage, prim, A_DATA_TYPE)?.unwrap_or(d.data_type),
+        source_name: read_token(stage, prim, A_SOURCE_NAME)?.unwrap_or(d.source_name),
+        source_type: read_token(stage, prim, A_SOURCE_TYPE)?
+            .and_then(|t| SourceType::from_token(&t))
+            .unwrap_or(d.source_type),
+    }))
+}
+
 // ── value-read helpers ──────────────────────────────────────────────
 
 fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
