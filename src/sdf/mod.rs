@@ -135,6 +135,14 @@ impl LayerOffset {
         self.offset == 0.0 && self.scale == 1.0
     }
 
+    /// Applies this offset to a time value as `offset + scale * time` — the
+    /// retiming a layer offset performs on the time coordinate of samples and
+    /// clip schedules.
+    #[inline]
+    pub fn apply(&self, time: f64) -> f64 {
+        self.offset + self.scale * time
+    }
+
     /// Returns `true` if this offset is well-formed for composition:
     /// finite `offset` and a strictly positive, finite `scale`.
     ///

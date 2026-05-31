@@ -1668,10 +1668,7 @@ fn retime_samples(samples: sdf::TimeSampleMap, offset: LayerOffset) -> sdf::Time
     if offset.is_identity() {
         return samples;
     }
-    samples
-        .into_iter()
-        .map(|(t, value)| (offset.offset + offset.scale * t, value))
-        .collect()
+    samples.into_iter().map(|(t, value)| (offset.apply(t), value)).collect()
 }
 
 /// Maps the stage-time component of clip `active`/`times` pairs through the
@@ -1684,7 +1681,7 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
         Value::Vec2dVec(pairs) => Value::Vec2dVec(
             pairs
                 .into_iter()
-                .map(|[stage, data]| [offset.offset + offset.scale * stage, data])
+                .map(|[stage, data]| [offset.apply(stage), data])
                 .collect(),
         ),
         other => other,

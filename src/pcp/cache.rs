@@ -109,6 +109,16 @@ enum FieldValue {
     Authored(Option<Value>),
 }
 
+/// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
+/// [`Value::None`]) to `None`, passing any real value through as `Some`. An
+/// authored block stops fall-through to weaker sources yet presents as absent.
+fn block_to_none(value: Value) -> Option<Value> {
+    match value {
+        Value::ValueBlock | Value::None => None,
+        other => Some(other),
+    }
+}
+
 impl Cache {
     /// Creates a new composition graph from a prebuilt layer stack.
     pub(crate) fn new(stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
@@ -220,10 +230,7 @@ impl Cache {
         //    block stops fall-through to weaker sources but presents as `None`,
         //    matching the local-default handling above and the default below.
         if let Some(value) = self.resolve_clip_value(&prim, &suffix, time, interp)? {
-            return Ok(match value {
-                Value::ValueBlock | Value::None => None,
-                other => Some(other),
-            });
+            return Ok(block_to_none(value));
         }
 
         // 4) Remaining time samples (reference/payload arcs), retimed.
@@ -233,10 +240,7 @@ impl Cache {
 
         // 5) Fall back to the strongest authored default.
         let default = self.indices[&prim].resolve_field(FieldKey::Default.as_str(), &self.stack, Some(&suffix))?;
-        Ok(default.and_then(|value| match value {
-            Value::ValueBlock | Value::None => None,
-            other => Some(other),
-        }))
+        Ok(default.and_then(block_to_none))
     }
 
     fn resolve_local_field_value(
@@ -258,10 +262,7 @@ impl Cache {
             let Some(value) = self.stack.layer(node.layer_index).try_get(&query_path, field)? else {
                 continue;
             };
-            return Ok(match value.into_owned() {
-                Value::ValueBlock | Value::None => FieldValue::Authored(None),
-                other => FieldValue::Authored(Some(other)),
-            });
+            return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
         }
 
         Ok(FieldValue::NotAuthored)
@@ -430,10 +431,7 @@ impl Cache {
                 .map(|value| value.into_owned()),
             None => None,
         };
-        Ok(value.and_then(|value| match value {
-            Value::ValueBlock | Value::None => None,
-            other => Some(other),
-        }))
+        Ok(value.and_then(block_to_none))
     }
 
     /// Fills a gap in the active clip by interpolating across the nearest
