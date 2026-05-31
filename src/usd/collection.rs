@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path, Value, Variability};
-use crate::usd::{Prim, PrimPredicate, Stage};
+use crate::usd::{Prim, PrimPredicate, Relationship, Stage};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -194,6 +194,13 @@ impl Collection {
         format!("{NS_COLLECTION}{}:{suffix}", self.name)
     }
 
+    /// Create the collection's `<suffix>` relationship on the edit target as a
+    /// non-custom schema property — `includes`/`excludes` are built-in schema
+    /// relationships, like the `expansionRule`/`includeRoot` attributes above.
+    fn schema_rel<'s>(&self, prim: &Prim<'s>, suffix: &str) -> Result<Relationship<'s>> {
+        Ok(prim.create_relationship(&self.rel_name(suffix))?.set_custom(false)?)
+    }
+
     /// Set `expansionRule` (`uniform token`).
     pub fn set_expansion_rule(&self, stage: &Stage, rule: ExpansionRule) -> Result<()> {
         stage
@@ -237,13 +244,12 @@ impl Collection {
         // ancestor includes `path`, so re-resolve only when one was removed;
         // otherwise membership is unchanged from the check above.
         if self.excludes(stage)?.contains(&path) {
-            prim.create_relationship(&self.rel_name(EXCLUDES))?
-                .remove_target(&path)?;
+            self.schema_rel(&prim, EXCLUDES)?.remove_target(&path)?;
             if self.compute_membership_query(stage)?.is_path_included(&path) {
                 return Ok(()); // dropping the exclude was enough
             }
         }
-        prim.create_relationship(&self.rel_name(INCLUDES))?.add_target(path)?;
+        self.schema_rel(&prim, INCLUDES)?.add_target(path)?;
         Ok(())
     }
 
@@ -269,14 +275,13 @@ impl Collection {
         // member (via an ancestor / includeRoot) or the collection is now
         // empty (recording the intent).
         if !query.is_empty() && self.includes(stage)?.contains(&path) {
-            prim.create_relationship(&self.rel_name(INCLUDES))?
-                .remove_target(&path)?;
+            self.schema_rel(&prim, INCLUDES)?.remove_target(&path)?;
             let query = self.compute_membership_query(stage)?;
             if !query.is_empty() && !query.is_path_included(&path) {
                 return Ok(()); // dropping the include was enough
             }
         }
-        prim.create_relationship(&self.rel_name(EXCLUDES))?.add_target(path)?;
+        self.schema_rel(&prim, EXCLUDES)?.add_target(path)?;
         Ok(())
     }
 
@@ -793,7 +798,17 @@ mod tests {
             ("/W/B.size", PathRule::ExpandPrimsAndProperties),
         ]);
         for p in [
-            "/W", "/W/A", "/W/A/C", "/W/B", "/W/B/D", "/W/B.size", "/W/C", "/W/C/D", "/W/D", "/W.x", "/Other",
+            "/W",
+            "/W/A",
+            "/W/A/C",
+            "/W/B",
+            "/W/B/D",
+            "/W/B.size",
+            "/W/C",
+            "/W/C/D",
+            "/W/D",
+            "/W.x",
+            "/Other",
         ] {
             let path = sdf::path(p)?;
             assert_eq!(
@@ -1013,6 +1028,24 @@ mod tests {
         assert!(coll
             .compute_membership_query(&stage)?
             .is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn authored_relationships_not_custom() -> Result<()> {
+        // includes/excludes are schema relationships, so authoring them via
+        // include_path/exclude_path must mark them non-custom.
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.include_path(&stage, sdf::path("/W")?)?;
+        coll.exclude_path(&stage, sdf::path("/W/A")?)?;
+        for suffix in [INCLUDES, EXCLUDES] {
+            assert_eq!(
+                stage.field::<Value>(coll.prop(suffix)?, FieldKey::Custom)?,
+                Some(Value::Bool(false)),
+                "collection:c:{suffix} should be authored non-custom"
+            );
+        }
         Ok(())
     }
 
