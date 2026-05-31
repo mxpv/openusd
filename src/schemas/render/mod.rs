@@ -44,8 +44,8 @@ pub use author::{
 pub use compute::{compute_namespaced_settings, compute_render_spec};
 pub use conform::{apply_aspect_ratio_policy, ConformedAperture};
 pub use read::{
-    read_base_overriding, read_camera_aperture, read_render_pass, read_render_product, read_render_settings,
-    read_render_var, read_settings_base,
+    get_stage_render_settings, read_base_overriding, read_camera_aperture, read_render_pass, read_render_product,
+    read_render_settings, read_render_var, read_settings_base,
 };
 pub use types::{
     AspectRatioConformPolicy, ProductType, ReadRenderPass, ReadRenderProduct, ReadRenderSettings, ReadRenderVar,

@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    renderSettingsPrimPath = "/Render/settings"
+)
+
+def Xform "World"
+{
+    def Camera "Camera"
+    {
+        float horizontalAperture = 24
+        float verticalAperture = 24
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "settings"
+    {
+        rel camera = </World/Camera>
+        uniform int2 resolution = (1920, 1080)
+        uniform token aspectRatioConformPolicy = "expandAperture"
+        uniform token[] includedPurposes = ["default", "render"]
+        uniform token[] materialBindingPurposes = ["full", ""]
+        uniform token renderingColorSpace = "lin_rec709"
+        rel products = </Render/products/beauty>
+        int ri:hider:maxsamples = 64
+    }
+
+    def Scope "products"
+    {
+        def RenderProduct "beauty"
+        {
+            uniform token productType = "raster"
+            token productName = "beauty.exr"
+            uniform int2 resolution = (1024, 512)
+            rel orderedVars = [</Render/vars/color>, </Render/vars/alpha>]
+        }
+    }
+
+    def Scope "vars"
+    {
+        def RenderVar "color"
+        {
+            uniform token dataType = "color3f"
+            uniform token sourceType = "raw"
+            uniform string sourceName = "Ci"
+        }
+
+        def RenderVar "alpha"
+        {
+            uniform token dataType = "float"
+            uniform string sourceName = "a"
+        }
+    }
+}

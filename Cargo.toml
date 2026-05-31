@@ -72,3 +72,7 @@ required-features = ["lux"]
 [[test]]
 name = "shade_reader"
 required-features = ["shade"]
+
+[[test]]
+name = "render_reader"
+required-features = ["render"]

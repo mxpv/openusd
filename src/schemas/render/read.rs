@@ -109,6 +109,21 @@ pub fn read_render_var(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderVa
     }))
 }
 
+/// Resolve the stage's default `RenderSettings` prim from the
+/// `renderSettingsPrimPath` root-layer metadata (spec). Returns `None`
+/// when the metadata is unauthored.
+///
+/// Read-only: authoring this stage metadata needs a generic root-layer
+/// metadata setter that the core `Stage` API does not yet expose.
+pub fn get_stage_render_settings(stage: &Stage) -> Result<Option<Path>> {
+    Ok(
+        match stage.field::<Value>(Path::abs_root(), META_RENDER_SETTINGS_PRIM_PATH)? {
+            Some(Value::String(s) | Value::Token(s)) => Some(Path::new(&s)?),
+            _ => None,
+        },
+    )
+}
+
 /// Read a `RenderPass` prim. Returns `None` when `prim` is not typed
 /// `RenderPass`. The `renderVisibility` / `cameraVisibility` / `prune` /
 /// `matte` collection memberships are not modelled yet (only their
