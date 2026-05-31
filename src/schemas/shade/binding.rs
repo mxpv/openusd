@@ -70,6 +70,7 @@ pub fn bind_material_for_purpose(
     strength: BindingStrength,
 ) -> Result<()> {
     let prim = Prim::new(stage, prim.into());
+    stage.override_prim(prim.path().clone())?;
     prim.clone().add_applied_schema(API_MATERIAL_BINDING)?;
     let rel = prim.author_relationship_targets(&direct_binding_rel(purpose), [material.into()])?;
     if strength != BindingStrength::WeakerThanDescendants {
@@ -94,6 +95,7 @@ pub fn bind_material_collection(
     strength: BindingStrength,
 ) -> Result<()> {
     let prim = Prim::new(stage, prim.into());
+    stage.override_prim(prim.path().clone())?;
     prim.clone().add_applied_schema(API_MATERIAL_BINDING)?;
     let rel = prim.author_relationship_targets(
         &collection_binding_rel(purpose, binding_name),
@@ -113,7 +115,7 @@ pub fn bind_material_collection(
 /// binding). Returns `None` when no such binding is authored.
 pub fn read_direct_binding(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
     let rel = prim.append_property(&direct_binding_rel(purpose))?;
-    Ok(read_rel_targets(stage, &rel)?.into_iter().next())
+    Ok(stage.relationship_targets(&rel)?.into_iter().next())
 }
 
 /// Read a collection binding `(collection, material)` for
@@ -126,7 +128,7 @@ pub fn read_collection_binding(
     purpose: &str,
 ) -> Result<Option<(Path, Path)>> {
     let rel = prim.append_property(&collection_binding_rel(purpose, binding_name))?;
-    let targets = read_rel_targets(stage, &rel)?;
+    let targets = stage.relationship_targets(&rel)?;
     Ok(match targets.as_slice() {
         [collection, material] => Some((collection.clone(), material.clone())),
         _ => None,
@@ -141,15 +143,6 @@ pub fn read_binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Resul
     Ok(match stage.field::<crate::sdf::Value>(rel, META_BIND_MATERIAL_AS)? {
         Some(crate::sdf::Value::Token(t)) => BindingStrength::from_token(&t).unwrap_or_default(),
         _ => BindingStrength::default(),
-    })
-}
-
-fn read_rel_targets(stage: &Stage, rel: &Path) -> Result<Vec<Path>> {
-    use crate::sdf::Value;
-    Ok(match stage.field::<Value>(rel.clone(), "targetPaths")? {
-        Some(Value::PathListOp(op)) => op.flatten(),
-        Some(Value::PathVec(v)) => v,
-        _ => Vec::new(),
     })
 }
 
@@ -204,6 +197,22 @@ mod tests {
         );
         // The all-purpose binding wasn't authored.
         assert!(read_direct_binding(&stage, &sdf::path("/Mesh")?, "")?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bind_without_predefine() -> Result<()> {
+        // Binding a prim that has no spec on the edit target yet must
+        // still apply the API and author the relationship — `bind_*`
+        // creates the `over` itself.
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        bind_material(&stage, sdf::path("/World/Mesh")?, sdf::path("/World/Mat")?)?;
+
+        assert!(stage.has_api_schema(&sdf::path("/World/Mesh")?, "MaterialBindingAPI")?);
+        assert_eq!(
+            read_direct_binding(&stage, &sdf::path("/World/Mesh")?, "")?.map(|p| p.as_str().to_string()),
+            Some("/World/Mat".to_string()),
+        );
         Ok(())
     }
 
