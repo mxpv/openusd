@@ -51,7 +51,7 @@ The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d
 | [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark: Passes | 10 tests against JSON baselines |
 | [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark: Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](tests/binary_format.rs) |
 | [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark: Passes | All 276 tests covering text and binary formats, including 20 relocation tests |
-| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :construction: Planned | Requires time-sample support in the core |
+| [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check: Partial | 8 tests in [`tests/value_resolution.rs`](tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
 | [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark: Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
 
 ## Getting started
