@@ -363,9 +363,10 @@ impl HashPattern {
                 let sign = if neg { "-" } else { "" };
                 format!("{sign}{padded}.{frac_part}")
             }
-            // One group: zero-padded integer (spec example `foo.###.usd`
+            // One group: zero-padded integer, truncating the clip time toward
+            // zero like the C++ `int(time)` cast (spec example `foo.###.usd`
             // @ 12 -> `foo.012.usd`).
-            None => format!("{:0width$}", time.round() as i64, width = self.int_width),
+            None => format!("{:0width$}", time as i64, width = self.int_width),
         };
         format!("{}{}{}", self.prefix, body, self.suffix)
     }
@@ -436,6 +437,9 @@ mod tests {
         assert_eq!(HashPattern::parse("foo.###.usd").unwrap().format(12.0), "foo.012.usd");
         // foo.#.usd   @ 333 => foo.333.usd
         assert_eq!(HashPattern::parse("foo.#.usd").unwrap().format(333.0), "foo.333.usd");
+        // Fractional clip times truncate toward zero, not round:
+        // foo.#.usd @ 1.6 => foo.1.usd.
+        assert_eq!(HashPattern::parse("foo.#.usd").unwrap().format(1.6), "foo.1.usd");
     }
 
     #[test]
