@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
 use super::tokens::{A_INFO_ID, NS_INPUTS, NS_OUTPUTS, TERMINAL_SURFACE, T_MATERIAL, T_NODE_GRAPH, T_SHADER};
@@ -17,27 +17,18 @@ use super::tokens::{A_INFO_ID, NS_INPUTS, NS_OUTPUTS, TERMINAL_SURFACE, T_MATERI
 /// Composed default value of `inputs:<base>` on `prim`, if authored.
 pub fn read_input_value(stage: &Stage, prim: &Path, base: &str) -> Result<Option<Value>> {
     let attr = prim.append_property(&format!("{NS_INPUTS}{base}"))?;
-    stage.field::<Value>(attr, "default")
+    stage.field::<Value>(attr, FieldKey::Default.as_str())
 }
 
 /// Composed `connectionPaths` of `inputs:<base>` on `prim`. Empty when
 /// the input isn't connected.
 pub fn read_input_connections(stage: &Stage, prim: &Path, base: &str) -> Result<Vec<Path>> {
-    read_connections(stage, &prim.append_property(&format!("{NS_INPUTS}{base}"))?)
+    stage.connection_paths(&prim.append_property(&format!("{NS_INPUTS}{base}"))?)
 }
 
 /// Composed `connectionPaths` of `outputs:<base>` on `prim`.
 pub fn read_output_connections(stage: &Stage, prim: &Path, base: &str) -> Result<Vec<Path>> {
-    read_connections(stage, &prim.append_property(&format!("{NS_OUTPUTS}{base}"))?)
-}
-
-/// Composed `connectionPaths` of any property path, flattened.
-pub fn read_connections(stage: &Stage, attr: &Path) -> Result<Vec<Path>> {
-    Ok(match stage.field::<Value>(attr.clone(), "connectionPaths")? {
-        Some(Value::PathListOp(op)) => op.flatten(),
-        Some(Value::PathVec(v)) => v,
-        _ => Vec::new(),
-    })
+    stage.connection_paths(&prim.append_property(&format!("{NS_OUTPUTS}{base}"))?)
 }
 
 /// List the authored input base names (without the `inputs:` prefix)
@@ -73,17 +64,29 @@ pub fn resolve_surface_shader(stage: &Stage, material: &Path) -> Result<Option<P
         return Ok(None);
     }
     // Universal terminal first.
-    let universal = material.append_property(&format!("outputs:{TERMINAL_SURFACE}"))?;
-    let mut conns = read_connections(stage, &universal)?;
+    let universal = material.append_property(&format!("{NS_OUTPUTS}{TERMINAL_SURFACE}"))?;
+    let mut conns = stage.connection_paths(&universal)?;
     if conns.is_empty() {
-        // Fall back to the first authored context-specific surface terminal,
-        // e.g. `outputs:ri:surface`.
+        // Fall back to a context-specific surface terminal,
+        // `outputs:<context>:surface` (exactly one context segment).
+        // Candidates are sorted so the choice is stable regardless of
+        // authoring order.
+        let suffix = format!(":{TERMINAL_SURFACE}");
+        let mut contexts: Vec<String> = Vec::new();
         for prop in stage.prim_properties(material.clone())? {
-            if prop.starts_with(NS_OUTPUTS) && prop.ends_with(&format!(":{TERMINAL_SURFACE}")) {
-                conns = read_connections(stage, &material.append_property(&prop)?)?;
-                if !conns.is_empty() {
-                    break;
+            if let Some(rest) = prop.strip_prefix(NS_OUTPUTS) {
+                if let Some(ctx) = rest.strip_suffix(&suffix) {
+                    if !ctx.is_empty() && !ctx.contains(':') {
+                        contexts.push(prop);
+                    }
                 }
+            }
+        }
+        contexts.sort();
+        for prop in contexts {
+            conns = stage.connection_paths(&material.append_property(&prop)?)?;
+            if !conns.is_empty() {
+                break;
             }
         }
     }
@@ -98,7 +101,7 @@ pub fn resolve_surface_shader(stage: &Stage, material: &Path) -> Result<Option<P
 /// The `info:id` token on a Shader prim, if authored.
 pub fn read_shader_id(stage: &Stage, shader: &Path) -> Result<Option<String>> {
     Ok(
-        match stage.field::<Value>(shader.append_property(A_INFO_ID)?, "default")? {
+        match stage.field::<Value>(shader.append_property(A_INFO_ID)?, FieldKey::Default.as_str())? {
             Some(Value::Token(t)) | Some(Value::String(t)) => Some(t),
             _ => None,
         },
@@ -161,6 +164,22 @@ mod tests {
             read_input_value(&stage, &resolved, "diffuseColor")?,
             Some(Value::Vec3f([1.0, 0.0, 0.0])),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn context_surface_fallback() -> Result<()> {
+        use crate::schemas::shade::{define_material, define_shader};
+
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let shader = define_shader(&stage, sdf::path("/Mat/Surface")?)?.set_id("UsdPreviewSurface")?;
+        shader.create_output("surface", "token")?;
+        // Only a context-specific terminal is authored (no universal one).
+        define_material(&stage, sdf::path("/Mat")?)?
+            .connect_surface_for("ri", sdf::path("/Mat/Surface.outputs:surface")?)?;
+
+        let resolved = resolve_surface_shader(&stage, &sdf::path("/Mat")?)?.expect("surface shader");
+        assert_eq!(resolved.as_str(), "/Mat/Surface");
         Ok(())
     }
 

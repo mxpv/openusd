@@ -9,6 +9,8 @@ use anyhow::Result;
 use crate::sdf::{Path, Value, Variability};
 use crate::usd::{Attribute, Prim, Stage};
 
+use crate::schemas::common::author_uniform_token;
+
 use super::connectable::{create_input, create_output};
 use super::tokens::{
     A_INFO_ID, A_INFO_IMPLEMENTATION_SOURCE, A_INFO_SOURCE_ASSET, A_INFO_SOURCE_ASSET_SUBIDENTIFIER,
@@ -81,13 +83,14 @@ impl<'s> ShaderAuthor<'s> {
         Ok(self)
     }
 
-    /// Set `info:sourceCode` (string) — inline shader source. Pairs
-    /// with `info:implementationSource = "sourceCode"`.
+    /// Set `info:sourceCode` (uniform string) — inline shader source.
+    /// Pairs with `info:implementationSource = "sourceCode"`.
     pub fn set_source_code(self, code: impl Into<String>) -> Result<Self> {
         let attr = self.prim.path().append_property(A_INFO_SOURCE_CODE)?;
         self.prim
             .stage()
             .create_attribute(attr, "string")?
+            .set_variability(Variability::Uniform)?
             .set_custom(false)?
             .set(Value::String(code.into()))?;
         Ok(self)
@@ -106,20 +109,13 @@ impl<'s> ShaderAuthor<'s> {
     }
 }
 
-fn author_uniform_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
-    let attr = prim.append_property(name)?;
-    stage
-        .create_attribute(attr, "token")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Token(value.into()))?;
-    Ok(())
-}
-
+/// Author a `uniform asset` attribute. NodeDefAPI `info:*` asset fields
+/// (`info:sourceAsset`) are uniform per the UsdShade schema.
 fn author_asset(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
     let attr = prim.append_property(name)?;
     stage
         .create_attribute(attr, "asset")?
+        .set_variability(Variability::Uniform)?
         .set_custom(false)?
         .set(Value::AssetPath(value.into()))?;
     Ok(())

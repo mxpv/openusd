@@ -15,7 +15,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
+use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
 use super::read::{read_input_connections, read_input_value, read_shader_id, resolve_surface_shader};
@@ -110,6 +110,10 @@ pub fn read_preview_surface(stage: &Stage, material: &Path) -> Result<Option<Rea
     }))
 }
 
+/// Upper bound on connection hops [`resolve_asset_value`] follows before
+/// giving up, guarding against connection cycles.
+const MAX_CONNECTION_HOPS: usize = 8;
+
 /// If `shader`'s `inputs:<base>` connects to a `UsdUVTexture`, return
 /// that texture's `inputs:file` asset path.
 fn connected_texture_file(stage: &Stage, shader: &Path, base: &str) -> Result<Option<String>> {
@@ -122,10 +126,29 @@ fn connected_texture_file(stage: &Stage, shader: &Path, base: &str) -> Result<Op
         return Ok(None);
     }
     let file_attr = tex_prim.append_property(&format!("inputs:{TEX_FILE}"))?;
-    Ok(match stage.field::<Value>(file_attr, "default")? {
-        Some(Value::AssetPath(p)) | Some(Value::String(p)) | Some(Value::Token(p)) => Some(p),
-        _ => None,
-    })
+    resolve_asset_value(stage, &file_attr)
+}
+
+/// Resolve an `asset`-typed input to its authored path. When the input is
+/// connected — e.g. a Material interface input that drives the texture's
+/// `inputs:file` — the connection is followed to the property carrying the
+/// value. Returns `None` when no asset value is reachable.
+///
+/// TODO: the returned path is the raw authored token; anchoring it to the
+/// layer that authored the opinion is not yet done.
+fn resolve_asset_value(stage: &Stage, attr: &Path) -> Result<Option<String>> {
+    let mut current = attr.clone();
+    for _ in 0..MAX_CONNECTION_HOPS {
+        if let Some(source) = stage.connection_paths(&current)?.into_iter().next() {
+            current = source;
+            continue;
+        }
+        return Ok(match stage.field::<Value>(current, FieldKey::Default.as_str())? {
+            Some(Value::AssetPath(p)) | Some(Value::String(p)) | Some(Value::Token(p)) => Some(p),
+            _ => None,
+        });
+    }
+    Ok(None)
 }
 
 fn read_color_channel(stage: &Stage, shader: &Path, base: &str) -> Result<Channel<[f32; 3]>> {
@@ -187,6 +210,34 @@ mod tests {
         // Unauthored channels stay Unset.
         assert!(!ps.opacity.is_set());
         assert!(!ps.ior.is_set());
+        Ok(())
+    }
+
+    #[test]
+    fn interface_driven_texture() -> Result<()> {
+        use crate::schemas::shade::{define_material, define_shader};
+
+        let stage = Stage::builder().in_memory("anon.usda")?;
+
+        // The texture's file path is driven by a Material interface input
+        // rather than authored directly on the texture.
+        let mat = define_material(&stage, sdf::path("/Mat")?)?;
+        mat.create_input("diffuseTexFile", "asset")?
+            .set(Value::AssetPath("./albedo.png".into()))?;
+
+        let tex = define_shader(&stage, sdf::path("/Mat/DiffuseTex")?)?.set_id("UsdUVTexture")?;
+        tex.create_input("file", "asset")?
+            .set_connections([sdf::path("/Mat.inputs:diffuseTexFile")?])?;
+        tex.create_output("rgb", "float3")?;
+
+        let surf = define_shader(&stage, sdf::path("/Mat/Surface")?)?.set_id("UsdPreviewSurface")?;
+        surf.create_input("diffuseColor", "color3f")?
+            .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
+        surf.create_output("surface", "token")?;
+        mat.connect_surface(sdf::path("/Mat/Surface.outputs:surface")?)?;
+
+        let ps = read_preview_surface(&stage, &sdf::path("/Mat")?)?.expect("UsdPreviewSurface");
+        assert_eq!(ps.diffuse_color.texture(), Some("./albedo.png"));
         Ok(())
     }
 
