@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path, Value};
-use crate::usd::Stage;
+use crate::usd::{PrimPredicate, Stage};
 
 /// Multiple-apply API schema name; instances appear in `apiSchemas` as
 /// `CollectionAPI:<name>`.
@@ -255,6 +255,65 @@ pub fn is_collection_api_path(path: &Path) -> Option<(Path, String)> {
     Some((prim, rest.to_string()))
 }
 
+/// Enumerate the paths that `query` includes on `stage`, restricted to the
+/// prims `predicate` admits (spec §15.2). Returns prim members in traversal
+/// order; under `expandPrimsAndProperties` each included prim's member
+/// properties follow it, and explicitly listed property targets are
+/// included too.
+///
+/// Walks the stage and tests each prim with
+/// [`MembershipQuery::is_path_included`], which honors excludes by the
+/// closest-ancestor rule.
+pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate: PrimPredicate) -> Result<Vec<Path>> {
+    let mut out = Vec::new();
+    if query.is_empty() {
+        return Ok(out);
+    }
+    let mut seen = HashSet::new();
+    let mut err: Result<()> = Ok(());
+    let collect_props = query.has_property_expansion;
+
+    stage.traverse(predicate, |prim| {
+        if err.is_err() || !query.is_path_included(prim) {
+            return;
+        }
+        if seen.insert(prim.clone()) {
+            out.push(prim.clone());
+        }
+        if collect_props {
+            if let Err(e) = push_member_properties(stage, prim, query, &mut seen, &mut out) {
+                err = Err(e);
+            }
+        }
+    })?;
+    err?;
+
+    // Explicitly listed property targets (e.g. an `includes` of `prim.attr`)
+    // aren't reached by the prim walk above.
+    for (path, _) in query.rule_map.iter() {
+        if path.is_property_path() && query.is_path_included(path) && seen.insert(path.clone()) {
+            out.push(path.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn push_member_properties(
+    stage: &Stage,
+    prim: &Path,
+    query: &MembershipQuery,
+    seen: &mut HashSet<Path>,
+    out: &mut Vec<Path>,
+) -> Result<()> {
+    for name in stage.prim_properties(prim.clone())? {
+        let prop = prim.append_property(&name)?;
+        if query.is_path_included(&prop) && seen.insert(prop.clone()) {
+            out.push(prop);
+        }
+    }
+    Ok(())
+}
+
 /// The rule attached to one path in a resolved [`MembershipQuery`] map,
 /// including the `Exclude` sentinel that marks an excluded subtree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,13 +353,19 @@ pub type PathExpansionRuleMap = HashMap<Path, PathRule>;
 pub struct MembershipQuery {
     rule_map: PathExpansionRuleMap,
     has_excludes: bool,
+    has_property_expansion: bool,
 }
 
 impl MembershipQuery {
     /// Build a query from a resolved rule map.
     pub fn new(rule_map: PathExpansionRuleMap) -> Self {
         let has_excludes = rule_map.values().any(|r| *r == PathRule::Exclude);
-        MembershipQuery { rule_map, has_excludes }
+        let has_property_expansion = rule_map.values().any(|r| *r == PathRule::ExpandPrimsAndProperties);
+        MembershipQuery {
+            rule_map,
+            has_excludes,
+            has_property_expansion,
+        }
     }
 
     /// The resolved per-path rule map.
@@ -625,6 +690,79 @@ mod tests {
         let q = Collection::new(sdf::path("/R")?, "a").compute_membership_query(&stage)?;
         // No hang; the cyclic includes contribute no concrete paths.
         assert!(q.is_empty());
+        Ok(())
+    }
+
+    /// A small scene: /W with children A (and A/C) and B.
+    fn scene() -> Result<Stage> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        for p in ["/W", "/W/A", "/W/A/C", "/W/B"] {
+            stage.define_prim(sdf::path(p)?)?.set_type_name("Scope")?;
+        }
+        Ok(stage)
+    }
+
+    #[test]
+    fn included_paths_expand_prims() -> Result<()> {
+        let stage = scene()?;
+        build_collection(&stage, "/Col", "c", ExpansionRule::ExpandPrims, false, &["/W/A"], &[])?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let mut paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        paths.sort();
+        assert_eq!(paths, vec![sdf::path("/W/A")?, sdf::path("/W/A/C")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn included_paths_explicit_only() -> Result<()> {
+        let stage = scene()?;
+        build_collection(&stage, "/Col", "c", ExpansionRule::ExplicitOnly, false, &["/W/A"], &[])?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert_eq!(paths, vec![sdf::path("/W/A")?]); // no descendants
+        Ok(())
+    }
+
+    #[test]
+    fn included_paths_include_root_minus_excludes() -> Result<()> {
+        let stage = scene()?;
+        // Everything under /W except the /W/A subtree.
+        build_collection(
+            &stage,
+            "/Col",
+            "c",
+            ExpansionRule::ExpandPrims,
+            true,
+            &["/W"],
+            &["/W/A"],
+        )?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert!(paths.contains(&sdf::path("/W/B")?));
+        assert!(!paths.contains(&sdf::path("/W/A")?));
+        assert!(!paths.contains(&sdf::path("/W/A/C")?));
+        Ok(())
+    }
+
+    #[test]
+    fn included_paths_expand_properties() -> Result<()> {
+        let stage = scene()?;
+        stage
+            .create_attribute(sdf::path("/W/B.size")?, "float")?
+            .set(Value::Float(1.0))?;
+        build_collection(
+            &stage,
+            "/Col",
+            "c",
+            ExpansionRule::ExpandPrimsAndProperties,
+            false,
+            &["/W/B"],
+            &[],
+        )?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert!(paths.contains(&sdf::path("/W/B")?));
+        assert!(paths.contains(&sdf::path("/W/B.size")?)); // property is a member
         Ok(())
     }
 }
