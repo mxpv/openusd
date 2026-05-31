@@ -10,7 +10,9 @@ mod interp;
 mod prim;
 mod stage;
 
-pub use collection::{collections_on, is_collection_api_path, Collection, ExpansionRule};
+pub use collection::{
+    collections_on, is_collection_api_path, Collection, ExpansionRule, MembershipQuery, PathExpansionRuleMap, PathRule,
+};
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
 pub use prim::{Attribute, Prim, Relationship};
