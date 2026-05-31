@@ -161,22 +161,39 @@ pub fn read_binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Resul
 /// Resolve the material bound to `prim` for `purpose`, walking `prim` and
 /// its ancestors (spec §15 / `UsdShadeMaterialBindingAPI::ComputeBoundMaterial`).
 ///
-/// A binding on a closer prim wins over one on an ancestor, **unless** the
-/// ancestor binding is `strongerThanDescendants` (the topmost such ancestor
-/// then wins). At a single prim, a collection-based binding whose collection
-/// includes `prim` beats a direct binding, collection bindings resolve in
-/// native property order, and a restricted-purpose binding (`purpose != ""`)
-/// is preferred over an all-purpose one.
+/// A restricted purpose (`purpose != ""`) is resolved across the whole
+/// ancestor chain before falling back to all-purpose, so a restricted binding
+/// on any ancestor outranks an all-purpose binding on a closer prim. Within a
+/// single purpose, a binding on a closer prim wins over one on an ancestor
+/// unless the ancestor binding is `strongerThanDescendants` (the topmost such
+/// ancestor then wins). At a single prim, a collection-based binding whose
+/// collection includes `prim` beats a direct binding, and collection bindings
+/// resolve in native property order.
 pub fn compute_bound_material(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
     // Cache each collection's membership query across the namespace walk.
     let mut cache: HashMap<Path, MembershipQuery> = HashMap::new();
+    for pur in purpose_fallbacks(purpose) {
+        if let Some(material) = bound_material_for_single_purpose(stage, prim, pur, &mut cache)? {
+            return Ok(Some(material));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve the bound material for one concrete `purpose` by walking `prim` and
+/// its ancestors. The closest binding wins unless a `strongerThanDescendants`
+/// ancestor overrides it (the topmost such ancestor then wins).
+fn bound_material_for_single_purpose(
+    stage: &Stage,
+    prim: &Path,
+    purpose: &str,
+    cache: &mut HashMap<Path, MembershipQuery>,
+) -> Result<Option<Path>> {
     let mut winner: Option<Path> = None;
     let mut current = Some(prim.clone());
     while let Some(p) = current {
         if !p.is_abs_root() {
-            if let Some((material, strength)) = winning_binding_at(stage, &p, prim, purpose, &mut cache)? {
-                // Closest binding wins by default; a `strongerThanDescendants`
-                // ancestor overrides it (so the topmost such ancestor wins).
+            if let Some((material, strength)) = winning_binding_at(stage, &p, prim, purpose, cache)? {
                 if winner.is_none() || strength == BindingStrength::StrongerThanDescendants {
                     winner = Some(material);
                 }
@@ -187,10 +204,9 @@ pub fn compute_bound_material(stage: &Stage, prim: &Path, purpose: &str) -> Resu
     Ok(winner)
 }
 
-/// The binding that wins at a single prim `p` for `purpose`, as
-/// `(material, strength)`. Collection bindings (whose collection includes
-/// `queried`) beat the direct binding, in native property order; a
-/// restricted-purpose binding is preferred over an all-purpose one.
+/// The binding that wins at a single prim `p` for a concrete `purpose`, as
+/// `(material, strength)`. A collection binding whose collection includes
+/// `queried` beats the direct binding, in native property order.
 fn winning_binding_at(
     stage: &Stage,
     p: &Path,
@@ -198,16 +214,14 @@ fn winning_binding_at(
     purpose: &str,
     cache: &mut HashMap<Path, MembershipQuery>,
 ) -> Result<Option<(Path, BindingStrength)>> {
-    for pur in purpose_fallbacks(purpose) {
-        // Collection bindings beat direct, in native property order.
-        for (collection, material, strength) in collection_bindings_on(stage, p, pur)? {
-            if is_collection_member(stage, &collection, queried, cache)? {
-                return Ok(Some((material, strength)));
-            }
+    // Collection bindings beat direct, in native property order.
+    for (collection, material, strength) in collection_bindings_on(stage, p, purpose)? {
+        if is_collection_member(stage, &collection, queried, cache)? {
+            return Ok(Some((material, strength)));
         }
-        if let Some(material) = read_direct_binding(stage, p, pur)? {
-            return Ok(Some((material, read_binding_strength(stage, p, pur)?)));
-        }
+    }
+    if let Some(material) = read_direct_binding(stage, p, purpose)? {
+        return Ok(Some((material, read_binding_strength(stage, p, purpose)?)));
     }
     Ok(None)
 }
@@ -392,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_material_inherits_then_closer_wins() -> Result<()> {
+    fn closer_binding_wins() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
@@ -412,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn stronger_than_descendants_ancestor_overrides_closer() -> Result<()> {
+    fn stronger_ancestor_wins() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
@@ -432,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn restricted_purpose_preferred_then_falls_back() -> Result<()> {
+    fn restricted_purpose_preferred() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Mesh")?.set_type_name("Mesh")?;
         bind_material(&stage, sdf::path("/Mesh")?, sdf::path("/MatAll")?)?; // all-purpose
@@ -448,6 +462,30 @@ mod tests {
         assert_eq!(bound(&stage, "/Mesh", "preview"), Some("/MatPreview".to_string()));
         // A purpose with no restricted binding falls back to all-purpose.
         assert_eq!(bound(&stage, "/Mesh", "full"), Some("/MatAll".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn restricted_ancestor_wins() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim("/Set")?.set_type_name("Xform")?;
+        stage.define_prim("/Set/Mesh")?.set_type_name("Mesh")?;
+        // Restricted "preview" binding on the ancestor; the queried prim
+        // carries only an all-purpose binding.
+        bind_material_for_purpose(
+            &stage,
+            sdf::path("/Set")?,
+            "preview",
+            sdf::path("/MatPreview")?,
+            BindingStrength::WeakerThanDescendants,
+        )?;
+        bind_material(&stage, sdf::path("/Set/Mesh")?, sdf::path("/MatAll")?)?;
+
+        // The restricted purpose is resolved across the whole chain first, so
+        // the ancestor's "preview" binding outranks the closer all-purpose one.
+        assert_eq!(bound(&stage, "/Set/Mesh", "preview"), Some("/MatPreview".to_string()));
+        // An unrestricted query still gets the closer all-purpose binding.
+        assert_eq!(bound(&stage, "/Set/Mesh", ""), Some("/MatAll".to_string()));
         Ok(())
     }
 
@@ -474,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_binding_beats_direct_for_members() -> Result<()> {
+    fn collection_beats_direct() -> Result<()> {
         let stage = collection_scene()?;
         // /Set/A is a collection member → the collection binding wins over direct.
         assert_eq!(bound(&stage, "/Set/A", ""), Some("/MatMetal".to_string()));
@@ -484,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_bindings_resolve_in_native_order() -> Result<()> {
+    fn collection_native_order() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim("/Set")?.set_type_name("Xform")?;
         stage.define_prim("/Set/A")?.set_type_name("Mesh")?;
