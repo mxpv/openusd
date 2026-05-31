@@ -614,14 +614,20 @@ impl PrimIndex {
                             } else {
                                 value
                             };
-                            // Both the explicit `assetPaths` and a template's
-                            // `templateAssetPath` anchor their relative clip
-                            // asset paths against the layer that authored them.
+                            // Relative clip asset paths anchor on the layer that
+                            // authored them. Explicit `assetPaths` win over a
+                            // template in parse_one, so they always set the
+                            // anchor, while `templateAssetPath` only sets it when
+                            // no explicit `assetPaths` has been composed — else a
+                            // weaker template layer would mis-anchor the explicit
+                            // paths the stronger layer authored.
                             if field == clip::keys::ASSET_PATHS {
                                 asset_layers.insert(set_name.clone(), node.layer_index);
                                 explicit_sets.insert(set_name.clone());
                             } else if field == clip::keys::TEMPLATE_ASSET_PATH {
-                                asset_layers.insert(set_name.clone(), node.layer_index);
+                                if !explicit_sets.contains(&set_name) {
+                                    asset_layers.insert(set_name.clone(), node.layer_index);
+                                }
                                 template_offsets.insert(set_name.clone(), node.map_to_root.time_offset());
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
                                 manifest_layers.insert(set_name.clone(), node.layer_index);
