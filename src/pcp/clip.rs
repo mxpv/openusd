@@ -181,20 +181,23 @@ impl ClipSet {
     /// every `active` and `times` entry while leaving the clip-time targets and
     /// asset paths untouched. A template-derived schedule is produced in clip
     /// time and brought into stage time here; explicit `active`/`times` are
-    /// retimed as they compose. Re-sorts so a negative scale keeps the stage
-    /// ordering the lookups rely on.
+    /// retimed as they compose.
     pub(crate) fn retime_stage_times(&mut self, offset: LayerOffset) {
         if offset.is_identity() {
             return;
         }
         for (stage, _) in &mut self.active {
-            *stage = offset.offset + offset.scale * *stage;
+            *stage = offset.apply(*stage);
         }
         for (stage, _) in &mut self.times {
-            *stage = offset.offset + offset.scale * *stage;
+            *stage = offset.apply(*stage);
         }
-        self.active.sort_by(|a, b| a.0.total_cmp(&b.0));
-        self.times.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // A positive scale preserves the existing stage ordering; only a
+        // negative scale (time reversal) needs a re-sort.
+        if offset.scale < 0.0 {
+            self.active.sort_by(|a, b| a.0.total_cmp(&b.0));
+            self.times.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
     }
 }
 
@@ -284,7 +287,7 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     // lead/trail range maps linearly to clip time instead of clamping to the
     // first or last clip time (spec 12.3.4.1.3, matching C++ derivation).
     if let Some(off) = active_offset {
-        let front = (start * PROMOTION - off.abs() * PROMOTION) / PROMOTION;
+        let front = start - off.abs();
         times.push((front, front));
     }
 
@@ -305,7 +308,7 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     }
 
     if let Some(off) = active_offset {
-        let back = (end_p + off.abs() * PROMOTION) / PROMOTION;
+        let back = end + off.abs();
         times.push((back, back));
     }
 
