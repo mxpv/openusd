@@ -125,8 +125,9 @@ pub struct ReadSettingsBase {
     /// `dataWindowNDC` — render region `(xmin, ymin, xmax, ymax)` in NDC
     /// (default `(0, 0, 1, 1)`).
     pub data_window_ndc: [f32; 4],
-    /// `instantaneousShutter` — **deprecated**, superseded by
-    /// `disableMotionBlur` (default `false`).
+    /// `instantaneousShutter` — deprecated in the C++ `UsdRender` schema,
+    /// superseded by `disableMotionBlur`. Still read so older assets that
+    /// author it round-trip (default `false`).
     pub instantaneous_shutter: bool,
     /// `disableMotionBlur` — force the shutter to `[0, 0]` (default `false`).
     pub disable_motion_blur: bool,

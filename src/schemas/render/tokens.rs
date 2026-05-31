@@ -20,8 +20,8 @@ pub const A_RESOLUTION: &str = "resolution";
 pub const A_PIXEL_ASPECT_RATIO: &str = "pixelAspectRatio";
 pub const A_ASPECT_RATIO_CONFORM_POLICY: &str = "aspectRatioConformPolicy";
 pub const A_DATA_WINDOW_NDC: &str = "dataWindowNDC";
-/// Deprecated — superseded by [`A_DISABLE_MOTION_BLUR`]; still read for
-/// back-compat.
+/// Deprecated in the C++ `UsdRender` schema, superseded by
+/// [`A_DISABLE_MOTION_BLUR`]; still read so older assets round-trip.
 pub const A_INSTANTANEOUS_SHUTTER: &str = "instantaneousShutter";
 pub const A_DISABLE_MOTION_BLUR: &str = "disableMotionBlur";
 pub const A_DISABLE_DEPTH_OF_FIELD: &str = "disableDepthOfField";
