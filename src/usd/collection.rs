@@ -341,6 +341,12 @@ impl Collection {
 pub fn apply_collection(stage: &Stage, prim: impl Into<Path>, name: impl Into<String>) -> Result<Collection> {
     let prim = prim.into();
     let name = name.into();
+    // The instance name is a single token (`:` is the namespace delimiter), so
+    // reject anything that isn't a valid identifier before it produces an
+    // ambiguous `collection:<name>:...` namespace.
+    if !Path::is_valid_identifier(&name) {
+        anyhow::bail!("invalid collection name {name:?}: must be a valid identifier");
+    }
     // Author an `over` when the prim has no spec on the edit-target layer yet,
     // mirroring C++ `UsdCollectionAPI::Apply` (which authors the spec as
     // needed). `override_prim` is idempotent when a spec already exists.
@@ -363,11 +369,11 @@ pub fn collections_on(stage: &Stage, prim: &Path) -> Result<Vec<Collection>> {
 }
 
 /// Decode the instance name from a `CollectionAPI:<name>` apiSchema entry.
+/// Rejects malformed entries (`CollectionAPI:`, `CollectionAPI:a:b`) so a
+/// handle is only built for a valid single-token instance name.
 fn instance_name(api_schema: &str) -> Option<String> {
-    api_schema
-        .strip_prefix(API_COLLECTION)?
-        .strip_prefix(':')
-        .map(str::to_string)
+    let rest = api_schema.strip_prefix(API_COLLECTION)?.strip_prefix(':')?;
+    Path::is_valid_identifier(rest).then(|| rest.to_string())
 }
 
 /// If `path` is a collection identity path `<prim>.collection:<name>`,
@@ -378,10 +384,7 @@ fn instance_name(api_schema: &str) -> Option<String> {
 pub fn is_collection_api_path(path: &Path) -> Option<(Path, String)> {
     let (prim, property) = path.split_property()?;
     let rest = property.strip_prefix(NS_COLLECTION)?;
-    if rest.is_empty() || rest.contains(':') {
-        return None;
-    }
-    Some((prim, rest.to_string()))
+    Path::is_valid_identifier(rest).then(|| (prim, rest.to_string()))
 }
 
 /// Enumerate the paths that `query` includes on `stage`, restricted to the
@@ -441,12 +444,13 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     // these are emitted when the property exists (C++ checks the same via
     // `GetPropertyAtPath`), regardless of whether their owning prim satisfies
     // `predicate` — only properties reached by prim expansion are gated by it.
-    for (path, _) in query.rule_map.iter() {
-        if path.is_property_path()
-            && query.is_path_included(path)
-            && stage.has_spec(path.clone())?
-            && seen.insert(path.clone())
-        {
+    //
+    // Sort first: `rule_map` is a `HashMap`, so iterating it directly would
+    // yield these tail entries in a non-deterministic order.
+    let mut props: Vec<&Path> = query.rule_map.keys().filter(|p| p.is_property_path()).collect();
+    props.sort();
+    for path in props {
+        if query.is_path_included(path) && stage.has_spec(path.clone())? && seen.insert(path.clone()) {
             out.push(path.clone());
         }
     }
@@ -1028,6 +1032,58 @@ mod tests {
         assert!(coll
             .compute_membership_query(&stage)?
             .is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_rejects_bad_name() -> Result<()> {
+        let stage = scene()?;
+        assert!(apply_collection(&stage, sdf::path("/W")?, "").is_err()); // empty
+        assert!(apply_collection(&stage, sdf::path("/W")?, "a:b").is_err()); // extra ':'
+        assert!(apply_collection(&stage, sdf::path("/W")?, "render").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn skips_malformed_schemas() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage
+            .define_prim(sdf::path("/W")?)?
+            .set_type_name("Scope")?
+            .add_applied_schema("CollectionAPI:render")?
+            .add_applied_schema("CollectionAPI:")? // empty instance name
+            .add_applied_schema("CollectionAPI:a:b")?; // extra ':'
+        let names: Vec<String> = collections_on(&stage, &sdf::path("/W")?)?
+            .into_iter()
+            .map(|c| c.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["render".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_props_sorted() -> Result<()> {
+        // Explicit property targets come from a HashMap; the result must be
+        // sorted so it is deterministic across runs.
+        let stage = scene()?;
+        for p in ["/W/B.a", "/W/B.c", "/W/B.b"] {
+            stage.create_attribute(sdf::path(p)?, "float")?.set(Value::Float(0.0))?;
+        }
+        build_collection(
+            &stage,
+            "/Col",
+            "c",
+            ExpansionRule::ExplicitOnly,
+            false,
+            &["/W/B.c", "/W/B.a", "/W/B.b"],
+            &[],
+        )?;
+        let q = Collection::new(sdf::path("/Col")?, "c").compute_membership_query(&stage)?;
+        let paths = compute_included_paths(&stage, &q, PrimPredicate::DEFAULT)?;
+        assert_eq!(
+            paths,
+            vec![sdf::path("/W/B.a")?, sdf::path("/W/B.b")?, sdf::path("/W/B.c")?]
+        );
         Ok(())
     }
 
