@@ -811,35 +811,19 @@ where
 
     /// Remove a single target path, ensuring it is absent from the composed
     /// result rather than only from this layer's opinions (C++
-    /// `SdfListEditorProxy::Remove`, as used by `UsdRelationship::RemoveTarget`).
+    /// `UsdRelationship::RemoveTarget`). Delegates to [`ListOp::remove`]; when
+    /// no targets are authored here yet it records a deletion so the same
+    /// target from a weaker layer is suppressed. Returns `true` when an
+    /// authored change was made.
     ///
-    /// In explicit mode the explicit list is the whole composed value, so the
-    /// entry is simply dropped. In list-op mode (including a freshly authored
-    /// relationship with no targets) the path is dropped from this layer's
-    /// add/prepend/append lists and recorded in `deleted_items`, which
-    /// composition honors to suppress the same target authored in a weaker
-    /// layer. Returns `true` when an authored change was made.
+    /// [`ListOp::remove`]: sdf::ListOp::remove
     pub fn remove_target(&mut self, path: &sdf::Path) -> bool {
         match self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => {
-                if op.explicit {
-                    return remove_path(&mut op.explicit_items, path);
-                }
-                // Drop any local opinion that would add `path`.
-                let mut changed = remove_path(&mut op.explicit_items, path);
-                changed |= remove_path(&mut op.added_items, path);
-                changed |= remove_path(&mut op.prepended_items, path);
-                changed |= remove_path(&mut op.appended_items, path);
-                // Record a deletion so a weaker layer's target is suppressed,
-                // unless one is already authored.
-                if !op.deleted_items.iter().any(|p| p == path) {
-                    op.deleted_items.push(path.clone());
-                    changed = true;
-                }
-                changed
-            }
+            Some(sdf::Value::PathListOp(op)) => op.remove(path),
             Some(_) => false,
             None => {
+                // No authored targets here yet: record a deletion so the same
+                // target from a weaker layer is suppressed through composition.
                 self.add(
                     sdf::FieldKey::TargetPaths,
                     sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),

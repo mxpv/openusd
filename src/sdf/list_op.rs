@@ -113,6 +113,30 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             && self.ordered_items.is_empty()
     }
 
+    /// Remove `item` so it is absent from the composed result, mirroring C++
+    /// `SdfListEditorProxy::Remove`.
+    ///
+    /// In explicit mode the explicit list is the whole value, so the entry is
+    /// simply dropped. Otherwise any local opinion that would add `item` is
+    /// dropped and `item` is recorded in `deleted_items` (unless already
+    /// present), which [`combined_with`](Self::combined_with) honors to
+    /// suppress the same item authored in a weaker layer. Returns whether
+    /// anything changed.
+    pub fn remove(&mut self, item: &T) -> bool {
+        if self.explicit {
+            return remove_one(&mut self.explicit_items, item);
+        }
+        let mut changed = remove_one(&mut self.explicit_items, item);
+        changed |= remove_one(&mut self.added_items, item);
+        changed |= remove_one(&mut self.prepended_items, item);
+        changed |= remove_one(&mut self.appended_items, item);
+        if !self.deleted_items.iter().any(|i| i == item) {
+            self.deleted_items.push(item.clone());
+            changed = true;
+        }
+        changed
+    }
+
     /// Compose this (stronger) list op with a weaker one, producing a single
     /// equivalent list op.
     ///
@@ -335,6 +359,16 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
 
         result
     }
+}
+
+/// Remove the first occurrence of `item` from `items`, returning whether it
+/// was present.
+fn remove_one<T: PartialEq>(items: &mut Vec<T>, item: &T) -> bool {
+    let Some(idx) = items.iter().position(|i| i == item) else {
+        return false;
+    };
+    items.remove(idx);
+    true
 }
 
 /// Merge two `reorder` lists with the stronger taking precedence on
