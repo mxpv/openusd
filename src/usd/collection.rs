@@ -229,13 +229,17 @@ impl Collection {
             return self.set_include_root(stage, true);
         }
         let prim = Prim::new(stage, self.prim.clone());
+        // Drop a direct exclude of `path`. That can flip membership when an
+        // ancestor includes `path`, so re-resolve only when one was removed;
+        // otherwise membership is unchanged from the check above.
         if self.excludes(stage)?.contains(&path) {
             prim.create_relationship(&self.rel_name(EXCLUDES))?
                 .remove_target(&path)?;
+            if self.compute_membership_query(stage)?.is_path_included(&path) {
+                return Ok(()); // dropping the exclude was enough
+            }
         }
-        if !self.compute_membership_query(stage)?.is_path_included(&path) {
-            prim.create_relationship(&self.rel_name(INCLUDES))?.add_target(path)?;
-        }
+        prim.create_relationship(&self.rel_name(INCLUDES))?.add_target(path)?;
         Ok(())
     }
 
@@ -255,14 +259,20 @@ impl Collection {
             return self.set_include_root(stage, false);
         }
         let prim = Prim::new(stage, self.prim.clone());
-        if self.includes(stage)?.contains(&path) {
+        // Drop a direct include of `path`. That can flip membership when an
+        // ancestor still includes `path`, so re-resolve only when one was
+        // removed; an explicit exclude is then added when `path` remains a
+        // member (via an ancestor / includeRoot) or the collection is now
+        // empty (recording the intent).
+        if !query.is_empty() && self.includes(stage)?.contains(&path) {
             prim.create_relationship(&self.rel_name(INCLUDES))?
                 .remove_target(&path)?;
+            let query = self.compute_membership_query(stage)?;
+            if !query.is_empty() && !query.is_path_included(&path) {
+                return Ok(()); // dropping the include was enough
+            }
         }
-        let query = self.compute_membership_query(stage)?;
-        if query.is_empty() || query.is_path_included(&path) {
-            prim.create_relationship(&self.rel_name(EXCLUDES))?.add_target(path)?;
-        }
+        prim.create_relationship(&self.rel_name(EXCLUDES))?.add_target(path)?;
         Ok(())
     }
 
@@ -277,6 +287,9 @@ impl Collection {
     }
 
     fn build_into(&self, stage: &Stage, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
+        // TODO(perf): each (possibly nested) invocation re-reads expansionRule,
+        // includeRoot, includes and excludes from the stage as separate field
+        // lookups; snapshot a collection's authored opinions once per build.
         let rule = self.expansion_rule(stage)?;
         let path_rule = PathRule::from_expansion(rule);
 
