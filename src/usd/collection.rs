@@ -319,7 +319,12 @@ impl Collection {
 pub fn apply_collection(stage: &Stage, prim: impl Into<Path>, name: impl Into<String>) -> Result<Collection> {
     let prim = prim.into();
     let name = name.into();
-    Prim::new(stage, prim.clone()).add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
+    // Author an `over` when the prim has no spec on the edit-target layer yet,
+    // mirroring C++ `UsdCollectionAPI::Apply` (which authors the spec as
+    // needed). `override_prim` is idempotent when a spec already exists.
+    stage
+        .override_prim(prim.clone())?
+        .add_applied_schema(format!("{API_COLLECTION}:{name}"))?;
     Ok(Collection::new(prim, name))
 }
 
@@ -914,6 +919,20 @@ mod tests {
         // Re-including drops the exclude rather than adding a redundant include.
         coll.include_path(&stage, sdf::path("/W/A")?)?;
         assert!(coll.excludes(&stage)?.is_empty());
+        assert!(coll
+            .compute_membership_query(&stage)?
+            .is_path_included(&sdf::path("/W/A")?));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_authors_missing_prim() -> Result<()> {
+        // The prim is never `define`d, so it has no spec on the edit target.
+        // apply_collection must author an `over` rather than fail.
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.include_path(&stage, sdf::path("/W/A")?)?;
+        assert_eq!(collections_on(&stage, &sdf::path("/W")?)?.len(), 1);
         assert!(coll
             .compute_membership_query(&stage)?
             .is_path_included(&sdf::path("/W/A")?));
