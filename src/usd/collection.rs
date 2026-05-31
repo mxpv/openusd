@@ -219,6 +219,11 @@ impl Collection {
     /// an ancestor), do nothing; including `</>` sets `includeRoot`; an
     /// excluded `path` is first un-excluded; and a new `includes` target is
     /// added only if `path` would still not be a member.
+    ///
+    /// Un-excluding compares `path` against authored targets by exact path
+    /// equality, which holds for the absolute paths authored here; it would
+    /// miss a target that composes to `path` through a different authored form
+    /// (e.g. remapped across a reference).
     pub fn include_path(&self, stage: &Stage, path: impl Into<Path>) -> Result<()> {
         let path = path.into();
         if self.compute_membership_query(stage)?.is_path_included(&path) {
@@ -427,7 +432,9 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     err?;
 
     // Explicitly listed property targets (e.g. an `includes` of `prim.attr`)
-    // aren't reached by the prim walk above.
+    // aren't reached by the prim walk above. Like C++ `_ComputeIncludedImpl`,
+    // these are emitted regardless of whether their owning prim satisfies
+    // `predicate` — only properties reached by prim expansion are gated by it.
     for (path, _) in query.rule_map.iter() {
         if path.is_property_path() && query.is_path_included(path) && seen.insert(path.clone()) {
             out.push(path.clone());
