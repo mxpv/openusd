@@ -109,6 +109,28 @@ pub fn read_render_var(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderVa
     }))
 }
 
+/// Read a `RenderPass` prim. Returns `None` when `prim` is not typed
+/// `RenderPass`. The `renderVisibility` / `cameraVisibility` / `prune` /
+/// `matte` collection memberships are not modelled yet (only their
+/// `includeRoot` flags are read).
+pub fn read_render_pass(stage: &Stage, prim: &Path) -> Result<Option<ReadRenderPass>> {
+    if stage.type_name(prim)?.as_deref() != Some(T_RENDER_PASS) {
+        return Ok(None);
+    }
+    let d = ReadRenderPass::default();
+    Ok(Some(ReadRenderPass {
+        pass_type: read_token(stage, prim, A_PASS_TYPE)?,
+        command: read_token_vec(stage, prim, A_COMMAND)?.unwrap_or_default(),
+        file_name: read_asset(stage, prim, A_FILE_NAME)?,
+        render_source: read_rel_first_target(stage, prim, REL_RENDER_SOURCE)?,
+        input_passes: read_rel_targets(stage, prim, REL_INPUT_PASSES)?,
+        render_visibility_include_root: read_bool(stage, prim, A_RENDER_VISIBILITY_INCLUDE_ROOT)?
+            .unwrap_or(d.render_visibility_include_root),
+        camera_visibility_include_root: read_bool(stage, prim, A_CAMERA_VISIBILITY_INCLUDE_ROOT)?
+            .unwrap_or(d.camera_visibility_include_root),
+    }))
+}
+
 /// Read a camera prim's `(horizontalAperture, verticalAperture)`, falling
 /// back to `UsdGeomCamera`'s defaults `(20.955, 15.2908)` mm. Reads the
 /// aperture attributes by name so it needs no dependency on the `geom`
@@ -167,6 +189,13 @@ fn read_float4(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 4]
 fn read_token_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<String>>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::TokenVec(v) | Value::StringVec(v)) => Some(v),
+        _ => None,
+    })
+}
+
+fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
+    Ok(match attr_value(stage, prim, name)? {
+        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
         _ => None,
     })
 }
