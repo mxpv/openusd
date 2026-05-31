@@ -215,12 +215,16 @@ impl Collection {
         Ok(())
     }
 
-    /// Make `path` a member, minimizing edits (spec §15): including `</>`
-    /// sets `includeRoot`; an excluded `path` is first un-excluded; and a
-    /// new `includes` target is added only if `path` would not otherwise be
-    /// a member (e.g. an ancestor already includes it).
+    /// Make `path` a member, minimizing edits (spec §15, mirroring C++
+    /// `UsdCollectionAPI::IncludePath`): if it is already included (e.g. via
+    /// an ancestor), do nothing; including `</>` sets `includeRoot`; an
+    /// excluded `path` is first un-excluded; and a new `includes` target is
+    /// added only if `path` would still not be a member.
     pub fn include_path(&self, stage: &Stage, path: impl Into<Path>) -> Result<()> {
         let path = path.into();
+        if self.compute_membership_query(stage)?.is_path_included(&path) {
+            return Ok(()); // already included — no edit
+        }
         if path.is_abs_root() {
             return self.set_include_root(stage, true);
         }
@@ -235,26 +239,41 @@ impl Collection {
         Ok(())
     }
 
-    /// Remove `path` from membership, minimizing edits: a directly-included
-    /// `path` is first un-included; an `excludes` target is added only if
-    /// `path` would otherwise still be a member (under an ancestor include).
+    /// Remove `path` from membership, minimizing edits (mirroring C++
+    /// `UsdCollectionAPI::ExcludePath`): on a non-empty collection where
+    /// `path` is already a non-member, do nothing; excluding `</>` clears
+    /// `includeRoot`; a directly-included `path` is first un-included; and an
+    /// `excludes` target is added when the collection is empty (recording the
+    /// intent) or `path` would otherwise still be a member.
     pub fn exclude_path(&self, stage: &Stage, path: impl Into<Path>) -> Result<()> {
         let path = path.into();
+        let query = self.compute_membership_query(stage)?;
+        if !query.is_empty() && !query.is_path_included(&path) {
+            return Ok(()); // already not a member — no edit
+        }
+        if path.is_abs_root() {
+            return self.set_include_root(stage, false);
+        }
         let prim = Prim::new(stage, self.prim.clone());
         if self.includes(stage)?.contains(&path) {
             prim.create_relationship(&self.rel_name(INCLUDES))?
                 .remove_target(&path)?;
         }
-        if self.compute_membership_query(stage)?.is_path_included(&path) {
+        let query = self.compute_membership_query(stage)?;
+        if query.is_empty() || query.is_path_included(&path) {
             prim.create_relationship(&self.rel_name(EXCLUDES))?.add_target(path)?;
         }
         Ok(())
     }
 
-    /// `true` when the collection cannot include anything in relationship
-    /// mode — no `includes` targets and `includeRoot` is off.
+    /// `true` when the collection includes nothing (mirroring C++
+    /// `UsdCollectionAPI::HasNoIncludedPaths`): no `includes`, `includeRoot`
+    /// off, and either an `excludes` opinion exists or there is no membership
+    /// expression. (The expression term matters once expression mode lands.)
     pub fn has_no_included_paths(&self, stage: &Stage) -> Result<bool> {
-        Ok(self.includes(stage)?.is_empty() && !self.include_root(stage)?)
+        Ok(self.includes(stage)?.is_empty()
+            && !self.include_root(stage)?
+            && (!self.excludes(stage)?.is_empty() || self.membership_expression(stage)?.is_none()))
     }
 
     fn build_into(&self, stage: &Stage, map: &mut PathExpansionRuleMap, visited: &mut HashSet<Path>) -> Result<()> {
@@ -865,6 +884,38 @@ mod tests {
         assert!(coll.has_no_included_paths(&stage)?);
         coll.include_path(&stage, sdf::path("/W/A")?)?;
         assert!(!coll.has_no_included_paths(&stage)?);
+        Ok(())
+    }
+
+    #[test]
+    fn exclude_path_on_empty_collection_records_target() -> Result<()> {
+        // C++ parity: excluding on an empty collection authors the exclude.
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.exclude_path(&stage, sdf::path("/W/A")?)?;
+        assert_eq!(coll.excludes(&stage)?, vec![sdf::path("/W/A")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn exclude_root_clears_include_root() -> Result<()> {
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.set_include_root(&stage, true)?;
+        coll.exclude_path(&stage, Path::abs_root())?;
+        assert!(!coll.include_root(&stage)?);
+        Ok(())
+    }
+
+    #[test]
+    fn include_path_already_included_is_noop() -> Result<()> {
+        // Including a descendant of an already-included expandPrims path
+        // authors no redundant target.
+        let stage = scene()?;
+        let coll = apply_collection(&stage, sdf::path("/W")?, "c")?;
+        coll.include_path(&stage, sdf::path("/W/A")?)?; // /W/A (+ descendants)
+        coll.include_path(&stage, sdf::path("/W/A/C")?)?; // already included
+        assert_eq!(coll.includes(&stage)?, vec![sdf::path("/W/A")?]); // no /W/A/C added
         Ok(())
     }
 
