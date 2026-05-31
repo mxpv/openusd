@@ -156,8 +156,8 @@ that broader spec behavior can be considered fully covered.
 
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
-| [CollectionAPI](https://openusd.org/release/api/class_usd_collection_a_p_i.html) | `15.1` | :construction: | | |
-| Authoring and evaluating collections | `15.2` | :construction: | | |
+| [CollectionAPI](https://openusd.org/release/api/class_usd_collection_a_p_i.html) | `15.1` | :white_check_mark: | `main` | Multi-apply `UsdCollectionAPI` in `usd::collection`: instance discovery, `expansionRule` / `includeRoot` / `includes` / `excludes` accessors, read + authoring (`apply_collection`, `include_path` / `exclude_path` with edit minimization)<br>Remaining — pattern-based `membershipExpression` mode (the `SdfPathExpression` engine) |
+| Authoring and evaluating collections | `15.2` | :white_check_mark: | `main` | `MembershipQuery` (closest-ancestor `is_path_included`), `compute_membership_query` with nested-collection merge + cycle guard, and `compute_included_paths` stage traversal (excludes pruning, property expansion) |
 
 ## Core File Formats (Spec 16)
 
