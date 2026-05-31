@@ -1062,6 +1062,32 @@ impl Cache {
         Ok(targets)
     }
 
+    /// Returns pseudo-root stage metadata, composing session-layer opinions
+    /// over the root layer (strongest first).
+    ///
+    /// Unlike [`Self::root_layer_field`] — which is root-layer-only for the
+    /// spec 12.2.7 fields such as `defaultPrim` — general stage metadata
+    /// (e.g. `renderSettingsPrimPath`) honors a session-layer override,
+    /// matching C++ `UsdStage::GetMetadata`. A [`Value::ValueBlock`] in a
+    /// stronger layer blocks weaker opinions.
+    pub fn stage_metadata(&self, field: &str) -> Result<Option<Value>> {
+        let root = Path::abs_root();
+        // Slots `0..session_layer_count` hold the session layers; the root
+        // layer sits at `session_layer_count`. Walk session-then-root so the
+        // session opinion wins.
+        for index in 0..=self.stack.session_layer_count {
+            let Some(layer) = self.stack.layers.get(index) else {
+                break;
+            };
+            match layer.try_get(&root, field)? {
+                Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
+                Some(value) => return Ok(Some(value.into_owned())),
+                None => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Returns pseudo-root layer metadata from the root layer only.
     ///
     /// Session-layer and sublayer opinions are intentionally ignored here,
