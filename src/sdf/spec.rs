@@ -825,14 +825,18 @@ where
                 if op.explicit {
                     return remove_path(&mut op.explicit_items, path);
                 }
-                remove_path(&mut op.added_items, path);
-                remove_path(&mut op.prepended_items, path);
-                remove_path(&mut op.appended_items, path);
-                if op.deleted_items.iter().any(|p| p == path) {
-                    return false;
+                // Drop any local opinion that would add `path`.
+                let mut changed = remove_path(&mut op.explicit_items, path);
+                changed |= remove_path(&mut op.added_items, path);
+                changed |= remove_path(&mut op.prepended_items, path);
+                changed |= remove_path(&mut op.appended_items, path);
+                // Record a deletion so a weaker layer's target is suppressed,
+                // unless one is already authored.
+                if !op.deleted_items.iter().any(|p| p == path) {
+                    op.deleted_items.push(path.clone());
+                    changed = true;
                 }
-                op.deleted_items.push(path.clone());
-                true
+                changed
             }
             Some(_) => false,
             None => {
@@ -1272,6 +1276,24 @@ mod tests {
         assert!(op.explicit);
         assert!(op.deleted_items.is_empty());
         assert_eq!(op.iter().cloned().collect::<Vec<_>>(), vec![b]);
+    }
+
+    #[test]
+    fn remove_target_reports_change() {
+        // A non-explicit op that adds /X while /X is already deleted: removal
+        // still mutates added_items, so it must report a change so relationship
+        // change tracking emits an entry.
+        let x = sdf::Path::new("/X").unwrap();
+        let mut op = sdf::PathListOp::added([x.clone()]);
+        op.deleted_items.push(x.clone());
+        let mut spec = Spec::new(sdf::SpecType::Relationship);
+        spec.add(sdf::FieldKey::TargetPaths, sdf::Value::PathListOp(op));
+
+        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        assert!(rel.remove_target(&x));
+        let op = rel.target_path_list().expect("target list op");
+        assert!(op.added_items.is_empty());
+        assert!(op.deleted_items.contains(&x));
     }
 
     #[test]
