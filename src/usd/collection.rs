@@ -4,8 +4,8 @@
 //! *instance name*; its properties live under `collection:<name>:`. A
 //! collection names a set of paths via the relationship-linking language —
 //! `includes` / `excludes` relationships, an `expansionRule`, and an
-//! `includeRoot` flag — which a [`MembershipQuery`](membership::MembershipQuery)
-//! resolves into actual membership.
+//! `includeRoot` flag — which a [`MembershipQuery`] resolves into actual
+//! membership.
 //!
 //! Collections are a *core* USD feature (not tied to any one schema
 //! family): UsdShade material binding, UsdRender render passes, UsdPhysics
@@ -13,14 +13,16 @@
 //! module is therefore always compiled, like
 //! [`ConnectionGraph`](super::ConnectionGraph).
 //!
-//! Membership resolution lives in [`membership`]; this file is the schema
-//! surface — locating collections on a prim and reading their authored
-//! opinions.
+//! [`Collection`] is the schema surface — locating collections on a prim
+//! and reading their authored opinions. [`MembershipQuery`] is the resolved
+//! path-membership predicate built from those opinions.
 //!
 //! The newer pattern-based `membershipExpression` mode (an
 //! `SdfPathExpression` predicate) is read here as a raw string but is not
 //! yet *evaluated* — that engine is a separate effort. Relationship-mode
 //! collections are fully supported.
+
+use std::collections::HashMap;
 
 use anyhow::Result;
 
@@ -205,11 +207,118 @@ pub fn is_collection_api_path(path: &Path) -> Option<(Path, String)> {
     Some((prim, rest.to_string()))
 }
 
+/// The rule attached to one path in a resolved [`MembershipQuery`] map,
+/// including the `Exclude` sentinel that marks an excluded subtree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRule {
+    /// Only this exact path is a member (no descendant expansion).
+    ExplicitOnly,
+    /// This path and its prim descendants are members.
+    ExpandPrims,
+    /// This path, its prim descendants, and their properties are members.
+    ExpandPrimsAndProperties,
+    /// This path and its descendants are excluded.
+    Exclude,
+}
+
+/// Maps each authored/derived path to the rule that governs it (the
+/// `Exclude` sentinel marks excluded subtrees). The resolved form of a
+/// collection's includes/excludes/expansionRule/includeRoot opinions.
+pub type PathExpansionRuleMap = HashMap<Path, PathRule>;
+
+/// A resolved, stage-free membership predicate for a collection (the
+/// relationship-linking mode). Build it once (see
+/// `compute_membership_query`) and query [`is_path_included`] cheaply; it
+/// clones freely so consumers can cache one per collection path.
+///
+/// [`is_path_included`]: MembershipQuery::is_path_included
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MembershipQuery {
+    rule_map: PathExpansionRuleMap,
+    has_excludes: bool,
+}
+
+impl MembershipQuery {
+    /// Build a query from a resolved rule map.
+    pub fn new(rule_map: PathExpansionRuleMap) -> Self {
+        let has_excludes = rule_map.values().any(|r| *r == PathRule::Exclude);
+        MembershipQuery { rule_map, has_excludes }
+    }
+
+    /// The resolved per-path rule map.
+    pub fn rule_map(&self) -> &PathExpansionRuleMap {
+        &self.rule_map
+    }
+
+    /// `true` if any path carries the `Exclude` rule — lets a traversal skip
+    /// per-prim membership checks when there's nothing to exclude.
+    pub fn has_excludes(&self) -> bool {
+        self.has_excludes
+    }
+
+    /// `true` when the query has no opinions (includes nothing).
+    pub fn is_empty(&self) -> bool {
+        self.rule_map.is_empty()
+    }
+
+    /// Whether `path` is a member, by walking from `path` toward the root and
+    /// taking the **closest ancestor with an opinion** (spec §15.2):
+    ///
+    /// - `Exclude` → not a member;
+    /// - `ExplicitOnly` → member only if the opinion is on `path` itself;
+    /// - `ExpandPrims` → prim members always; a property only if it is itself
+    ///   the explicitly listed path;
+    /// - `ExpandPrimsAndProperties` → member.
+    ///
+    /// Paths with no ancestor opinion are not members.
+    pub fn is_path_included(&self, path: &Path) -> bool {
+        let is_property = path.is_property_path();
+        let mut current = path.clone();
+        loop {
+            if let Some(rule) = self.rule_map.get(&current) {
+                let on_self = &current == path;
+                return match rule {
+                    PathRule::Exclude => false,
+                    PathRule::ExplicitOnly => on_self,
+                    PathRule::ExpandPrims => !is_property || on_self,
+                    PathRule::ExpandPrimsAndProperties => true,
+                };
+            }
+            match current.parent() {
+                Some(parent) if !parent.is_empty() => current = parent,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Fast top-down variant for stage traversal: given the rule that applies
+    /// to `path`'s parent, decide inclusion and the rule to propagate to
+    /// `path`'s own children — without re-walking ancestors. An opinion
+    /// authored directly on `path` overrides the inherited `parent_rule`.
+    pub fn is_path_included_below(&self, path: &Path, parent_rule: PathRule) -> (bool, PathRule) {
+        let rule = self.rule_map.get(path).copied().unwrap_or(parent_rule);
+        let on_self = self.rule_map.contains_key(path);
+        let is_property = path.is_property_path();
+        let included = match rule {
+            PathRule::Exclude => false,
+            PathRule::ExplicitOnly => on_self,
+            PathRule::ExpandPrims => !is_property || on_self,
+            PathRule::ExpandPrimsAndProperties => true,
+        };
+        (included, rule)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sdf;
     use crate::sdf::Variability;
+
+    fn query(entries: &[(&str, PathRule)]) -> MembershipQuery {
+        let map = entries.iter().map(|(p, r)| (sdf::path(p).unwrap(), *r)).collect();
+        MembershipQuery::new(map)
+    }
 
     fn author_collection(stage: &Stage, prim: &str, name: &str) -> Result<()> {
         stage
@@ -296,6 +405,58 @@ mod tests {
         let bare = Collection::new(sdf::path("/X")?, "c");
         assert_eq!(bare.expansion_rule(&stage)?, ExpansionRule::ExpandPrims);
         assert!(!bare.include_root(&stage)?);
+        Ok(())
+    }
+
+    #[test]
+    fn expand_prims_includes_descendant_prims_not_properties() -> Result<()> {
+        let q = query(&[("/W/A", PathRule::ExpandPrims)]);
+        assert!(q.is_path_included(&sdf::path("/W/A")?)); // the include itself
+        assert!(q.is_path_included(&sdf::path("/W/A/B")?)); // descendant prim
+        assert!(!q.is_path_included(&sdf::path("/W")?)); // ancestor, not a member
+        assert!(!q.is_path_included(&sdf::path("/W/A.x")?)); // property: not under expandPrims
+        assert!(!q.is_path_included(&sdf::path("/W/Other")?)); // unrelated
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_only_matches_exact_paths() -> Result<()> {
+        let q = query(&[("/W/A", PathRule::ExplicitOnly)]);
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(!q.is_path_included(&sdf::path("/W/A/B")?)); // no descendant expansion
+        Ok(())
+    }
+
+    #[test]
+    fn expand_prims_and_properties_includes_properties() -> Result<()> {
+        let q = query(&[("/W/A", PathRule::ExpandPrimsAndProperties)]);
+        assert!(q.is_path_included(&sdf::path("/W/A")?));
+        assert!(q.is_path_included(&sdf::path("/W/A/B")?));
+        assert!(q.is_path_included(&sdf::path("/W/A.x")?)); // property is a member
+        Ok(())
+    }
+
+    #[test]
+    fn closest_ancestor_excludes_win() -> Result<()> {
+        // Include /W, exclude the /W/A subtree.
+        let q = query(&[("/W", PathRule::ExpandPrims), ("/W/A", PathRule::Exclude)]);
+        assert!(q.has_excludes());
+        assert!(q.is_path_included(&sdf::path("/W/B")?)); // under the include
+        assert!(!q.is_path_included(&sdf::path("/W/A")?)); // excluded
+        assert!(!q.is_path_included(&sdf::path("/W/A/C")?)); // closest ancestor is the exclude
+        Ok(())
+    }
+
+    #[test]
+    fn below_propagates_parent_rule() -> Result<()> {
+        let q = query(&[("/W", PathRule::ExpandPrims)]);
+        // A child with no own opinion inherits the parent rule and is included.
+        let (inc, rule) = q.is_path_included_below(&sdf::path("/W/A")?, PathRule::ExpandPrims);
+        assert!(inc);
+        assert_eq!(rule, PathRule::ExpandPrims);
+        // Under an Exclude parent, the child is out.
+        let (inc, _) = q.is_path_included_below(&sdf::path("/W/A/B")?, PathRule::Exclude);
+        assert!(!inc);
         Ok(())
     }
 }
