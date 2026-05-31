@@ -1826,6 +1826,19 @@ mod tests {
         Ok(())
     }
 
+    /// When a stronger layer authors explicit `assetPaths` and a weaker
+    /// sublayer authors `templateAssetPath` for the same set, the explicit
+    /// paths win (spec 12.3.4.1.3) and must anchor on the layer that authored
+    /// them: `@./clip.usda@` resolves next to the root, not the sublayer.
+    #[test]
+    fn explicit_asset_paths_anchor_over_template() -> Result<()> {
+        let root = format!("{}/fixtures/clip_asset_anchor/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let size = |cache: &mut Cache, t: f64| cache.value_at(&sdf::path("/Model.size").unwrap(), t, &exact);
+        assert_eq!(size(&mut cache, 0.0)?, Some(Value::Double(42.0)));
+        Ok(())
+    }
+
     /// Exact-match sampler: a clip resolves only at a frame it authors.
     fn exact(samples: &sdf::TimeSampleMap, t: f64) -> Option<Value> {
         samples.iter().find(|(time, _)| *time == t).map(|(_, v)| v.clone())

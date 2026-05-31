@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    subLayers = [
+        @./sub/sub.usda@
+    ]
+    defaultPrim = "Model"
+)
+
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            double2[] active = [(0, 0)]
+            string primPath = "/Model"
+        }
+    }
+)
+{
+    float size
+}
