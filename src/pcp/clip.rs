@@ -211,6 +211,9 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
     clip0 + ratio * (clip1 - clip0)
 }
 
+/// Derived `(assetPaths, active, times)` from a template clip set.
+type TemplateExpansion = (Vec<String>, Vec<(f64, usize)>, Vec<(f64, f64)>);
+
 /// Expand a template clip set (spec 12.3.4.1.3) into explicit
 /// `(assetPaths, active, times)`.
 ///
@@ -219,7 +222,8 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
 /// `#`-pattern `templateAssetPath`. Each generated clip `i` contributes
 /// `assetPaths[i]`, an `active` entry `(stageTime, i)`, and a `times`
 /// entry `(clipTime, clipTime)`. `templateActiveOffset`, when authored,
-/// shifts each clip's active stage time to `clipTime + offset`.
+/// shifts each clip's active stage time to `clipTime + offset` and adds
+/// boundary knots to `times` at `start - |offset|` and `end + |offset|`.
 ///
 /// Returns `None` when the required template fields are missing or
 /// invalid (non-positive stride, `end < start`, `|activeOffset| > stride`,
@@ -228,9 +232,6 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
 /// Times are scaled by a fixed promotion factor during iteration so a
 /// fractional `stride` accumulates without binary-float drift, matching
 /// C++ `Usd_ClipSetDefinition` template derivation.
-/// Derived `(assetPaths, active, times)` from a template clip set.
-type TemplateExpansion = (Vec<String>, Vec<(f64, usize)>, Vec<(f64, f64)>);
-
 fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     let template = set.get(keys::TEMPLATE_ASSET_PATH).and_then(as_asset)?;
     let start = set.get(keys::TEMPLATE_START_TIME).and_then(as_f64)?;
@@ -257,6 +258,16 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     let mut asset_paths = Vec::new();
     let mut active = Vec::new();
     let mut times = Vec::new();
+
+    // An active offset lets a query reach `|offset|` before the first clip and
+    // after the last. Author timing knots at those expanded boundaries so the
+    // lead/trail range maps linearly to clip time instead of clamping to the
+    // first or last clip time (spec 12.3.4.1.3, matching C++ derivation).
+    if let Some(off) = active_offset {
+        let front = (start * PROMOTION - off.abs() * PROMOTION) / PROMOTION;
+        times.push((front, front));
+    }
+
     let mut t = start * PROMOTION;
     let mut index = 0usize;
     // `+ 0.5` keeps the inclusive endpoint despite residual rounding.
@@ -271,6 +282,11 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
         active.push((stage_time, index));
         index += 1;
         t += stride_p;
+    }
+
+    if let Some(off) = active_offset {
+        let back = (end_p + off.abs() * PROMOTION) / PROMOTION;
+        times.push((back, back));
     }
 
     if asset_paths.is_empty() {
@@ -478,9 +494,13 @@ mod tests {
         set.insert(keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(-0.5));
 
         let parsed = ClipSet::parse_one("default", &set).expect("template set");
-        // clipTimes unchanged; active stage times shifted by the offset.
+        // Active stage times shift by the offset; `times` keeps the clip-time
+        // knots plus boundary knots expanded by |offset| at each end.
         assert_eq!(parsed.active, vec![(-0.5, 0), (0.5, 1), (1.5, 2)]);
-        assert_eq!(parsed.times, vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]);
+        assert_eq!(
+            parsed.times,
+            vec![(-0.5, -0.5), (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (2.5, 2.5)]
+        );
     }
 
     #[test]
