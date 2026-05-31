@@ -321,17 +321,23 @@ impl Cache {
             let base = set.prim_path.clone().unwrap_or_else(|| anchor_prim.clone());
             let clip_path = Path::new(&format!("{base}{relative}{suffix}"))?;
 
+            // Resolve the manifest once: its declaration gates the set and its
+            // default later fills a gap (spec 12.3.4.6).
+            let manifest = set
+                .manifest_asset
+                .as_deref()
+                .map(|asset| (asset, resolved.manifest_layer.unwrap_or(resolved.asset_layer)));
+
             // A manifest, when authored, declares which attributes the clips
             // provide. A set whose manifest does not declare this attribute is
             // skipped. A set that *does* declare it owns the attribute's
             // time-varying value (spec 12.3.4.6): a gap in the active clip
             // resolves to a manifest default or a value block, never to a
             // weaker value source.
-            let manifest_declared = match &set.manifest_asset {
-                Some(manifest) => {
-                    let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
-                    let declared = match self.clip_layer(manifest, manifest_layer)? {
-                        Some(layer) => layer.data().has_spec(&clip_path),
+            let manifest_declared = match manifest {
+                Some((asset, layer)) => {
+                    let declared = match self.clip_layer(asset, layer)? {
+                        Some(opened) => opened.data().has_spec(&clip_path),
                         None => false,
                     };
                     if !declared {
@@ -365,9 +371,8 @@ impl Cache {
             // (a) Manifest default: synthesize a sample at the clip's active
             //     time (spec 12.3.4.6). Reached only when the manifest declared
             //     the attribute, so the manifest asset is authored.
-            if let Some(manifest) = set.manifest_asset.as_deref() {
-                let manifest_layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
-                if let Some(value) = self.manifest_default(manifest, manifest_layer, &clip_path)? {
+            if let Some((asset, layer)) = manifest {
+                if let Some(value) = self.manifest_default(asset, layer, &clip_path)? {
                     return Ok(Some(value));
                 }
             }
