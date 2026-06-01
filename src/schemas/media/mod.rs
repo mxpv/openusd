@@ -9,7 +9,7 @@
 //! # Defaults
 //!
 //! [`ReadSpatialAudio`]'s `Default` matches Pixar's `usdMedia/schema.usda`
-//! fallbacks (`auralMode = spatial`, `playbackMode = onceImageVisible`,
+//! fallbacks (`auralMode = spatial`, `playbackMode = onceFromStart`,
 //! `gain = 1.0`), so callers can `unwrap_or_default()` for a spec-correct
 //! fallback.
 
