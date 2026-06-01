@@ -34,7 +34,7 @@ pub fn read_nodegraph_node(stage: &Stage, prim: &Path) -> Result<Option<ReadNode
         display_color: read_color3f(stage, prim, A_NODE_DISPLAY_COLOR)?,
         icon: read_asset(stage, prim, A_NODE_ICON)?,
         expansion_state: read_token(stage, prim, A_NODE_EXPANSION_STATE)?.and_then(|t| ExpansionState::from_token(&t)),
-        doc_uri: read_string(stage, prim, A_NODE_DOC_URI)?,
+        doc_uri: read_token(stage, prim, A_NODE_DOC_URI)?,
     }))
 }
 
@@ -60,13 +60,6 @@ fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
     })
 }
 
-fn read_string(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::String(s) | Value::Token(s)) => Some(s),
-        _ => None,
-    })
-}
-
 fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
@@ -77,7 +70,8 @@ fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
 fn read_int(stage: &Stage, prim: &Path, name: &str) -> Result<Option<i32>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Int(i)) => Some(i),
-        Some(Value::Int64(i)) => Some(i as i32),
+        // Checked narrow so an out-of-range Int64 doesn't silently wrap.
+        Some(Value::Int64(i)) => i32::try_from(i).ok(),
         _ => None,
     })
 }
