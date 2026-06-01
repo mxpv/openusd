@@ -1824,6 +1824,38 @@ mod tests {
         Ok(())
     }
 
+    /// A relocated prim's index carries relocate nodes (tagged
+    /// `RELOCATE_SOURCE`) whose grafted source subtree forms a consistent
+    /// tree: every stored parent link is mirrored by the parent's child list.
+    #[test]
+    fn relocate_nodes_form_subtree() -> Result<()> {
+        use super::super::index::NodeFlags;
+
+        let root = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             BasicRelocateToAnimInterface_root/usda/root.usd",
+            manifest_dir()
+        );
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let path = sdf::path("/Model/Anim/Path")?;
+        cache.ensure_index(&path)?;
+        let index = &cache.indices[&path];
+
+        assert!(
+            index.nodes().any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
+            "relocated prim has relocate nodes"
+        );
+        for (id, node) in index.nodes_with_ids() {
+            if let Some(parent) = node.parent() {
+                assert!(
+                    index.children(parent).contains(&id),
+                    "relocate node {id:?} parent {parent:?} missing it as a child"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// A template clip set (`templateAssetPath` + start/end/stride) is
     /// expanded to explicit clips and resolves end to end through
     /// `value_at` (spec 12.3.4.1.3): `clip.1.usda` drives t=1, `clip.2.usda`
