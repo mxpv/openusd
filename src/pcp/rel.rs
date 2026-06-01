@@ -142,10 +142,9 @@ impl Relocates {
     /// Adds relocate nodes to a prim index for a relocated prim.
     ///
     /// Builds a full composition index for the source path and merges its
-    /// nodes. The source index captures all opinions (through references,
-    /// variants, inherits) including those propagated via
-    /// `Cache::propagate_parent_specs`. For each inherit/specialize node
-    /// in the source parent, also checks the class child path for
+    /// nodes. The recursive build captures all of the source's opinions
+    /// (through references, variants, inherits). For each inherit/specialize
+    /// node in the source parent, this also checks the class child path for
     /// additional specs.
     pub fn add_relocate_nodes(
         &self,
@@ -179,9 +178,8 @@ impl Relocates {
         }
 
         // Check the source parent's composition arcs for additional child
-        // specs and implied inherit/specialize opinions. This mirrors
-        // Cache::propagate_parent_specs (which is not called by
-        // PrimIndex::build_with_cache) and also handles cases where the
+        // specs and implied inherit/specialize opinions. This descends the
+        // source parent's class arcs directly, covering cases where the
         // source_index has cached nodes with wrong variant selections or
         // overrides from class prims in unreachable layers.
         if let Some(source_parent) = source_path.parent() {

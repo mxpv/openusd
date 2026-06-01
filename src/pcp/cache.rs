@@ -21,7 +21,6 @@ use crate::sdf::{AbstractData, Path, SpecType, Value};
 use super::clip::ResolvedClipSet;
 use super::deps::Dependencies;
 use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
-use super::mapping::MapFunction;
 use super::rel::Relocates;
 use super::{LayerStack, VariantFallbackMap};
 
@@ -1301,13 +1300,6 @@ impl Cache {
             Err(e) => return Err(e.into()),
         };
 
-        // Propagate specs from parent nodes for inherit-only children.
-        if index.is_empty() {
-            if let Some(name) = path.name() {
-                self.propagate_parent_specs(path, name, &mut index);
-            }
-        }
-
         // For relocated prims, merge source path opinions.
         if !self.relocates.is_empty() {
             if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices)? {
@@ -1378,77 +1370,14 @@ impl Cache {
         }
     }
 
-    /// Propagates child specs reachable through the parent's composition nodes.
+    /// Merges a children field (the union, strongest-first) across every node
+    /// in the prim's composition index.
     ///
-    /// When a child prim has no direct spec in any layer, it may still exist
-    /// through an ancestor composition arc (e.g. a child of an inherited class
-    /// with no local override). For each non-Root node in the parent's index,
-    /// if that node's layer has a spec at `node.path / child_name`, add it as
-    /// an implied node mapped to the composed child path. The parent's index is
-    /// now a full composition tree (inherit/specialize/relocate targets are
-    /// grafted with their subtrees), so this single structural descent finds
-    /// everything the former ancestor-arc and layer-target fallback scans did.
-    fn propagate_parent_specs(&self, child_path: &Path, child_name: &str, index: &mut PrimIndex) {
-        let Some(parent_path) = child_path.parent() else {
-            return;
-        };
-        let Some(parent_index) = self.indices.get(&parent_path) else {
-            return;
-        };
-
-        for parent_node in parent_index.nodes() {
-            if parent_node.arc == ArcType::Root {
-                continue;
-            }
-            let Ok(node_child_path) = parent_node.path.append_path(child_name) else {
-                continue;
-            };
-            self.push_implied_nodes(
-                index,
-                &node_child_path,
-                child_path,
-                parent_node.arc,
-                parent_node.map_to_root.time_offset(),
-                parent_node.introduced_by_specialize(),
-            );
-        }
-    }
-
-    /// Adds an implied node for every layer that has a spec at `source`,
-    /// mapping `source → composed` with the given arc, retiming, and global
-    /// weakness. Used by [`Self::propagate_parent_specs`].
-    fn push_implied_nodes(
-        &self,
-        index: &mut PrimIndex,
-        source: &Path,
-        composed: &Path,
-        arc: ArcType,
-        time_offset: sdf::LayerOffset,
-        introduced_by_specialize: bool,
-    ) {
-        for li in 0..self.stack.len() {
-            if self.stack.layer(li).has_spec(source) {
-                let map =
-                    MapFunction::from_pair_identity(source.clone(), composed.clone()).with_time_offset(time_offset);
-                index.push_node(Node::new(
-                    li,
-                    source.clone(),
-                    arc,
-                    map.clone(),
-                    map,
-                    introduced_by_specialize,
-                ));
-            }
-        }
-    }
-
-    /// Merges a children field across all nodes in the prim index.
-    ///
-    /// Also discovers children from inherit/specialize targets declared in
-    /// the layer data when those targets weren't successfully merged during
-    /// index building. This bridges the gap between the index builder's
-    /// `merge_full_index` (which uses default context) and the full
-    /// composition needed to discover class children.
+    /// The recursive build grafts inherit/specialize/reference targets with
+    /// their subtrees, so the index nodes already cover class children; this is
+    /// a single structural walk with no separate target rediscovery. On an
+    /// instance prim, `primChildren` from local opinions are dropped (spec
+    /// 11.3.3) so the children come only from the composition arcs.
     fn composed_children(&mut self, path: &Path, children_field: ChildrenKey) -> Result<Vec<String>> {
         self.ensure_index(path)?;
 
