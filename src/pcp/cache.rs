@@ -743,7 +743,6 @@ impl Cache {
     fn instance_key(&self, index: &PrimIndex, local: &HashSet<usize>) -> InstanceKey {
         let arcs = index
             .nodes()
-            .iter()
             .filter(|node| !Self::is_local_opinion(node, local))
             .map(|node| {
                 let offset = node.map_to_root.time_offset();

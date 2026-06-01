@@ -177,11 +177,11 @@ impl Relocates {
         if let Some(source_parent) = source_path.parent() {
             if let Some(source_name) = source_path.name() {
                 let parent_nodes: Vec<Node> = if let Some(parent_index) = indices.get(&source_parent) {
-                    parent_index.nodes().to_vec()
+                    parent_index.nodes().cloned().collect()
                 } else {
                     let ctx = Self::build_source_context(&source_parent, stack, contexts);
                     PrimIndex::build_with_cache(&source_parent, stack, &ctx, indices)
-                        .map(|idx| idx.nodes().to_vec())
+                        .map(|idx| idx.nodes().cloned().collect())
                         .unwrap_or_default()
                 };
 
@@ -222,18 +222,15 @@ impl Relocates {
         // (e.g. root.usd at /CharRig/Rig/LegsRig/SymLegRig/.../Seg2). Those
         // overrides are in the cached prim for that composed path but not in
         // the source index built from the relocate chain.
-        if let Some(first_node) = index.nodes().first() {
-            let first_li = first_node.layer_index;
-            let first_path = first_node.path.clone();
-            let mut existing: Vec<(usize, Path)> =
-                index.nodes().iter().map(|n| (n.layer_index, n.path.clone())).collect();
+        let first = index.nodes().next().map(|n| (n.layer_index, n.path.clone()));
+        if let Some((first_li, first_path)) = first {
+            let mut existing: Vec<(usize, Path)> = index.nodes().map(|n| (n.layer_index, n.path.clone())).collect();
             // Find ALL cached prims whose index contains a node at the same
             // (layer, path) as the first relocate node, and merge any
             // additional opinions from all of them.
             for cached_index in indices.values() {
                 let matched = cached_index
                     .nodes()
-                    .iter()
                     .any(|cn| cn.layer_index == first_li && cn.path == first_path);
                 if !matched {
                     continue;
@@ -329,7 +326,7 @@ impl Relocates {
         let Some(cached_index) = indices.get(path) else {
             return;
         };
-        let nodes: Vec<Node> = cached_index.nodes().to_vec();
+        let nodes: Vec<Node> = cached_index.nodes().cloned().collect();
         for node in &nodes {
             if let Some(relocates) = self.layer_relocates.get(&node.layer_index) {
                 for (src, tgt) in relocates {
@@ -563,11 +560,11 @@ impl Relocates {
         contexts: &HashMap<Path, CompositionContext>,
     ) -> Vec<Node> {
         if let Some(index) = indices.get(path) {
-            return index.nodes().to_vec();
+            return index.nodes().cloned().collect();
         }
         let ctx = Self::build_source_context(path, stack, contexts);
         PrimIndex::build_with_context(path, stack, &ctx)
-            .map(|idx| idx.nodes().to_vec())
+            .map(|idx| idx.nodes().cloned().collect())
             .unwrap_or_default()
     }
 

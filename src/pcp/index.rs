@@ -207,12 +207,17 @@ impl Node {
 
 /// Arena-based composition graph.
 ///
-/// Stores [`Node`]s in a flat `Vec` where links between nodes are encoded
-/// as [`NodeId`] values. Nodes are ordered strongest-to-weakest by
-/// insertion order (matching the LIVRPS evaluation sequence).
+/// `nodes` is the node arena in insertion (structural) order: it is only ever
+/// appended to, never reordered, so a [`NodeId`] (an index into it) stays
+/// valid for the life of the index and is safe to store in another node's
+/// `parent`/`children`/`origin`. Strongest-to-weakest strength order is a
+/// separate projection, `strength_order`, holding the same handles permuted —
+/// value resolution walks it, not the arena. Dereferencing the graph yields
+/// the arena slice for the builder's structural lookups.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PrimIndexGraph {
     nodes: Vec<Node>,
+    strength_order: Vec<NodeId>,
 }
 
 impl PrimIndexGraph {
@@ -229,8 +234,9 @@ impl PrimIndexGraph {
     /// `parent` identifies the structural parent in the composition graph.
     /// When valid, `map_to_root` is composed from the parent's `map_to_root`
     /// and the new node's `map_to_parent`, and the new node is recorded in the
-    /// parent's children. Nodes are appended in insertion order (strongest to
-    /// weakest); the returned handle stays valid for the life of the index.
+    /// parent's children. The node is appended to the arena and to the strength
+    /// projection (initially in insertion order); the returned handle stays
+    /// valid for the life of the index.
     fn add_child(
         &mut self,
         parent: NodeId,
@@ -259,11 +265,15 @@ impl PrimIndexGraph {
             self.nodes[parent.idx()].children.push(idx);
         }
         self.nodes.push(node);
+        self.strength_order.push(idx);
         idx
     }
 }
 
 impl std::ops::Deref for PrimIndexGraph {
+    /// Dereferences to the node arena in insertion (structural) order. The
+    /// builder relies on this for positional lookups while composing; strength
+    /// order is reached through [`PrimIndex::nodes`].
     type Target = [Node];
     fn deref(&self) -> &[Node] {
         &self.nodes
@@ -272,12 +282,13 @@ impl std::ops::Deref for PrimIndexGraph {
 
 /// Composition index for a single prim.
 ///
-/// Contains a graph of [`Node`]s ordered from strongest to weakest.
-/// Value resolution walks nodes in strength order and takes the first
-/// opinion found.
+/// Holds the composition tree as a node arena plus a strength-order
+/// projection. Value resolution walks [`nodes`](Self::nodes) (strongest first)
+/// and takes the first opinion found; tree structure is reached through
+/// [`root`](Self::root) / [`children`](Self::children).
 #[derive(Debug, Clone, Default)]
 pub struct PrimIndex {
-    /// Composition graph with nodes in strength order.
+    /// Composition graph: node arena plus strength-order projection.
     graph: PrimIndexGraph,
 }
 
@@ -300,12 +311,24 @@ impl PrimIndex {
 
     /// Returns `true` if any node was introduced by a composition arc.
     pub(crate) fn has_composition_arc(&self) -> bool {
-        self.nodes().iter().any(|node| node.arc != ArcType::Root)
+        self.arena().iter().any(|node| node.arc != ArcType::Root)
     }
 
-    /// Returns the nodes in strength order (index 0 = strongest).
-    pub fn nodes(&self) -> &[Node] {
-        &self.graph
+    /// Iterates the nodes in strength order (strongest first).
+    ///
+    /// This is the order value resolution uses: it walks the strength-order
+    /// projection, so specializes appear last (spec 10.4.1) regardless of where
+    /// they sit in the arena. The iterator is cheap and re-creatable; call it
+    /// again for another pass rather than collecting.
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+        let nodes = &self.graph.nodes;
+        self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
+    }
+
+    /// Returns the node arena in insertion (structural) order, indexed by
+    /// [`NodeId`]. Use [`nodes`](Self::nodes) for strength-ordered resolution.
+    pub(crate) fn arena(&self) -> &[Node] {
+        &self.graph.nodes
     }
 
     /// Returns the root of the composition tree, or `None` when empty.
@@ -332,23 +355,29 @@ impl PrimIndex {
         &self.node(id).children
     }
 
-    /// Appends a node to the end of the composition graph.
+    /// Appends a node to the end of the composition graph, weakest in strength.
     pub(crate) fn push_node(&mut self, node: Node) {
+        let id = NodeId(self.graph.nodes.len() as u32);
         self.graph.nodes.push(node);
+        self.graph.strength_order.push(id);
     }
 
     /// Inserts a relocate node at the correct LIVERPS strength position.
     ///
-    /// Finds the first node whose arc type is weaker than `Relocate`
-    /// (i.e. `Reference`, `Payload`, or `Specialize`) and inserts before it.
+    /// The node is appended to the arena (keeping every handle stable) and its
+    /// handle is spliced into the strength projection before the first node
+    /// weaker than `Relocate` (i.e. `Reference`, `Payload`, or `Specialize`).
     pub(crate) fn insert_relocate_node(&mut self, node: Node) {
+        let id = NodeId(self.graph.nodes.len() as u32);
+        self.graph.nodes.push(node);
+        let nodes = &self.graph.nodes;
         let pos = self
             .graph
-            .nodes
+            .strength_order
             .iter()
-            .position(|n| n.arc > ArcType::Relocate)
-            .unwrap_or(self.graph.nodes.len());
-        self.graph.nodes.insert(pos, node);
+            .position(|sid| nodes[sid.idx()].arc > ArcType::Relocate)
+            .unwrap_or(self.graph.strength_order.len());
+        self.graph.strength_order.insert(pos, id);
     }
 
     /// Builds a prim index using composition context from the parent prim.
@@ -577,7 +606,7 @@ impl PrimIndex {
         stack: &'a LayerStack,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
-        self.nodes().iter().filter_map(move |node| {
+        self.nodes().filter_map(move |node| {
             let query_path = match Self::query_path(node, prop_suffix) {
                 Ok(path) => path,
                 Err(err) => return Some(Err(err)),
@@ -1085,19 +1114,20 @@ impl<'a> IndexBuilder<'a> {
         Ok(())
     }
 
-    /// Reorders nodes so that all opinions introduced through specializes arcs
-    /// appear after all other opinions, implementing the global weakness
-    /// requirement from spec section 10.4.1.
-    //
-    // TODO(strength-projection): sorting the arena invalidates the stored
-    // `parent`/`children` handles for indices that contain specializes. Once
-    // the separate strength-order projection lands, partition that projection
-    // here instead and leave the arena (and its handles) untouched.
+    /// Reorders the strength projection so that all opinions introduced through
+    /// specializes arcs appear after all other opinions, implementing the global
+    /// weakness requirement from spec section 10.4.1.
+    ///
+    /// Only the `strength_order` projection is partitioned; the node arena (and
+    /// every stored `parent`/`children` handle) is left untouched.
     fn apply_specialize_weakness(&mut self) {
-        // Stable sort with a bool key (false < true) acts as an in-place
-        // stable partition: non-specialize nodes stay first, specialize nodes
-        // move to the end, and relative order within each group is preserved.
-        self.output.nodes.sort_by_key(|n| n.introduced_by_specialize());
+        // Stable sort with a bool key (false < true) acts as a stable
+        // partition: non-specialize handles stay first, specialize handles move
+        // to the end, and relative order within each group is preserved.
+        let nodes = &self.output.nodes;
+        self.output
+            .strength_order
+            .sort_by_key(|id| nodes[id.idx()].introduced_by_specialize());
     }
 
     /// Re-resolve variants across all accumulated nodes until no new nodes
@@ -1116,7 +1146,7 @@ impl<'a> IndexBuilder<'a> {
             let before = self.output.len();
 
             let mut selections =
-                resolve_variant_selections_in(&self.output, &self.stack.layers, &self.ctx.variant_fallbacks);
+                resolve_variant_selections_in(self.output.iter(), &self.stack.layers, &self.ctx.variant_fallbacks);
             for (set, sel) in &self.ctx.selections {
                 selections.entry(set.clone()).or_insert_with(|| sel.clone());
             }
@@ -1549,7 +1579,7 @@ impl<'a> IndexBuilder<'a> {
             // Gather selections from ALL output nodes (not just this site) so
             // cross-site selections are visible during the first pass.
             let mut selections = resolve_variant_selections_in(
-                &self.output[..current_end],
+                self.output[..current_end].iter(),
                 &self.stack.layers,
                 &self.ctx.variant_fallbacks,
             );
@@ -1668,7 +1698,6 @@ impl<'a> IndexBuilder<'a> {
                     let parent_index = PrimIndex::build_with_context(&source_parent, self.stack, self.ctx)?;
                     let ancestor_sites: Vec<_> = parent_index
                         .nodes()
-                        .iter()
                         .filter(|n| n.arc != ArcType::Root)
                         .filter_map(|n| {
                             n.path
@@ -1753,15 +1782,15 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 ///
 /// Gathers explicit selections (first opinion wins), then falls back to
 /// the first variant name in each variant set as the default.
-fn resolve_variant_selections_in(
-    nodes: &[Node],
+fn resolve_variant_selections_in<'a>(
+    nodes: impl Iterator<Item = &'a Node> + Clone,
     layers: &[sdf::Layer],
     variant_fallbacks: &VariantFallbackMap,
 ) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
     // Gather explicit selections (first opinion wins).
-    for node in nodes {
+    for node in nodes.clone() {
         let data = &layers[node.layer_index];
         if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
             if let Value::VariantSelectionMap(map) = value.into_owned() {
@@ -2025,9 +2054,9 @@ mod tests {
         let stack = load_stack(&composition_path("active.usda"))?;
         let index = build(&stack, "/World");
 
-        assert_eq!(index.nodes().len(), 1);
-        assert_eq!(index.nodes()[0].layer_index, 0);
-        assert_eq!(index.nodes()[0].arc, ArcType::Root);
+        assert_eq!(index.nodes().count(), 1);
+        assert_eq!(index.nodes().next().unwrap().layer_index, 0);
+        assert_eq!(index.nodes().next().unwrap().arc, ArcType::Root);
         Ok(())
     }
 
@@ -2036,9 +2065,10 @@ mod tests {
         let stack = load_stack(&fixture_path("sublayer_override.usda"))?;
         let index = build(&stack, "/World");
 
-        assert_eq!(index.nodes().len(), 2, "both layers should have /World");
-        assert_eq!(index.nodes()[0].layer_index, 0, "stronger layer first");
-        assert_eq!(index.nodes()[1].layer_index, 1, "weaker layer second");
+        let ns: Vec<_> = index.nodes().collect();
+        assert_eq!(ns.len(), 2, "both layers should have /World");
+        assert_eq!(ns[0].layer_index, 0, "stronger layer first");
+        assert_eq!(ns[1].layer_index, 1, "weaker layer second");
         Ok(())
     }
 
@@ -2047,8 +2077,8 @@ mod tests {
         let stack = load_stack(&fixture_path("sublayer_override.usda"))?;
         let index = build(&stack, "/World/Sphere");
 
-        assert_eq!(index.nodes().len(), 1);
-        assert_eq!(index.nodes()[0].layer_index, 0);
+        assert_eq!(index.nodes().count(), 1);
+        assert_eq!(index.nodes().next().unwrap().layer_index, 0);
         Ok(())
     }
 
@@ -2066,7 +2096,7 @@ mod tests {
         let stack = load_stack(&fixture_path("ref_external.usda"))?;
         let index = build(&stack, "/World/MyPrim");
 
-        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Reference));
+        assert!(index.nodes().any(|n| n.arc == ArcType::Reference));
         Ok(())
     }
 
@@ -2091,19 +2121,20 @@ mod tests {
         let root = index.root().expect("non-empty index has a root");
         assert_eq!(index.node(root).arc, ArcType::Root);
 
-        // The reference is parented under a node, not orphaned.
+        // The reference is parented under a node, not orphaned. NodeId indexes
+        // the arena (structural order), so enumerate the arena, not the strength
+        // projection.
         let reference = index
-            .nodes()
+            .arena()
             .iter()
-            .enumerate()
-            .find(|(_, n)| n.arc == ArcType::Reference)
-            .map(|(i, _)| NodeId(i as u32))
+            .position(|n| n.arc == ArcType::Reference)
+            .map(|i| NodeId(i as u32))
             .expect("reference fixture has a reference node");
         let parent = index.parent(reference).expect("reference has a parent");
         assert!(index.children(parent).contains(&reference));
 
         // Every parent link is mirrored by the parent's children list.
-        for i in 0..index.nodes().len() {
+        for (i, _) in index.arena().iter().enumerate() {
             let id = NodeId(i as u32);
             if let Some(parent) = index.parent(id) {
                 assert!(
@@ -2120,7 +2151,7 @@ mod tests {
         let stack = load_stack(&composition_path("class_inherit.usda"))?;
         let index = build(&stack, "/World/cubeWithoutSetColor");
 
-        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Inherit));
+        assert!(index.nodes().any(|n| n.arc == ArcType::Inherit));
         Ok(())
     }
 
@@ -2128,7 +2159,7 @@ mod tests {
     fn inherit_root_is_strongest() -> Result<()> {
         let stack = load_stack(&composition_path("class_inherit.usda"))?;
         let index = build(&stack, "/World/cubeWithSetColor");
-        let arcs: Vec<_> = index.nodes().iter().map(|n| n.arc).collect();
+        let arcs: Vec<_> = index.nodes().map(|n| n.arc).collect();
 
         assert_eq!(arcs[0], ArcType::Root);
         assert!(arcs.contains(&ArcType::Inherit));
@@ -2144,9 +2175,9 @@ mod tests {
         let stack = load_stack(&path)?;
         let index = build(&stack, "/World/Sphere");
 
-        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Variant));
+        assert!(index.nodes().any(|n| n.arc == ArcType::Variant));
 
-        let variant_node = index.nodes().iter().find(|n| n.arc == ArcType::Variant).unwrap();
+        let variant_node = index.nodes().find(|n| n.arc == ArcType::Variant).unwrap();
         assert_eq!(variant_node.path.as_str(), "/World/Sphere{size=small}");
         Ok(())
     }
@@ -2156,7 +2187,7 @@ mod tests {
         let stack = load_stack(&composition_path("inherit_and_specialize.usda"))?;
         let index = build(&stack, "/World/cubeScene/specializes");
 
-        assert!(index.nodes().iter().any(|n| n.arc == ArcType::Specialize));
+        assert!(index.nodes().any(|n| n.arc == ArcType::Specialize));
         Ok(())
     }
 
@@ -2249,21 +2280,18 @@ mod tests {
         assert!(
             index
                 .nodes()
-                .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/A"),
             "should have node from A.usd"
         );
         assert!(
             index
                 .nodes()
-                .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/B"),
             "should have node from B.usd"
         );
         assert!(
             index
                 .nodes()
-                .iter()
                 .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/C"),
             "should have node from C.usd via nested reference"
         );
@@ -2289,13 +2317,12 @@ mod tests {
         let index = build(&stack, "/B");
 
         assert!(
-            index.nodes().iter().any(|n| n.arc == ArcType::Specialize),
+            index.nodes().any(|n| n.arc == ArcType::Specialize),
             "should have specialize node from variant"
         );
         assert!(
             index
                 .nodes()
-                .iter()
                 .any(|n| n.path.as_str().contains("{nestedVariantSet=nestedVariant}")),
             "should have /A's variant node"
         );
@@ -2320,10 +2347,7 @@ mod tests {
 
         let index = build(&stack, "/main_cam/Lens");
         assert!(
-            index
-                .nodes()
-                .iter()
-                .any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
+            index.nodes().any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
             "should have inherit node for _localclass_Lens"
         );
         Ok(())
@@ -2342,7 +2366,7 @@ mod tests {
         let index = build(&stack, "/bob");
 
         assert!(
-            index.nodes().iter().any(|n| n.path.as_str().contains("{geotype=cube}")),
+            index.nodes().any(|n| n.path.as_str().contains("{geotype=cube}")),
             "should have geotype=cube variant node from inherited selection"
         );
         Ok(())
@@ -2452,7 +2476,6 @@ def "Prim" (
     fn variant_paths(index: &PrimIndex) -> Vec<String> {
         index
             .nodes()
-            .iter()
             .filter(|n| n.arc == ArcType::Variant)
             .map(|n| n.path.as_str().to_string())
             .collect()
@@ -2561,7 +2584,7 @@ def "Prim" (
         index.insert_relocate_node(node(ArcType::Relocate));
         index.insert_relocate_node(node(ArcType::Relocate));
 
-        let arcs: Vec<ArcType> = index.nodes().iter().map(|n| n.arc).collect();
+        let arcs: Vec<ArcType> = index.nodes().map(|n| n.arc).collect();
         assert_eq!(
             arcs,
             vec![
@@ -2597,7 +2620,6 @@ def "Prim" (
     fn prim_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String)> {
         index
             .nodes()
-            .iter()
             .map(|n| {
                 (
                     layer_name(stack.identifier(n.layer_index)).to_owned(),
@@ -2641,16 +2663,17 @@ def "Prim" (
             ]
         );
 
-        // Verify the introduced_by_specialize flag: first 3 nodes are non-specialize,
-        // remaining 6 are specialize.
-        for node in &index.nodes()[..3] {
+        // Verify the specialize flag in strength order: first 3 nodes are
+        // non-specialize, remaining 6 are specialize.
+        let ns: Vec<_> = index.nodes().collect();
+        for node in &ns[..3] {
             assert!(
                 !node.introduced_by_specialize(),
                 "node {:?} should not be specialize",
                 node.path
             );
         }
-        for node in &index.nodes()[3..] {
+        for node in &ns[3..] {
             assert!(
                 node.introduced_by_specialize(),
                 "node {:?} should be specialize",
@@ -2671,13 +2694,12 @@ def "Prim" (
         // Non-specialize opinions must come before all specialize opinions.
         let first_spec = index
             .nodes()
-            .iter()
             .position(|n| n.introduced_by_specialize())
             .expect("should have specialize nodes");
         assert!(first_spec >= 2, "at least Root + Reference before specializes");
 
         // All nodes after the first specialize must also be specialize.
-        for node in &index.nodes()[first_spec..] {
+        for node in index.nodes().skip(first_spec) {
             assert!(
                 node.introduced_by_specialize(),
                 "node {:?} should be globally weak",
@@ -2721,7 +2743,7 @@ def "Prim" (
 
         index.insert_relocate_node(node(ArcType::Relocate));
 
-        let arcs: Vec<ArcType> = index.nodes().iter().map(|n| n.arc).collect();
+        let arcs: Vec<ArcType> = index.nodes().map(|n| n.arc).collect();
         assert_eq!(arcs, vec![ArcType::Root, ArcType::Variant, ArcType::Relocate]);
     }
 
@@ -2749,7 +2771,6 @@ def "Prim" (
     fn offset_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String, ArcType, f64, f64)> {
         index
             .nodes()
-            .iter()
             .map(|n| {
                 let off = n.map_to_root.time_offset();
                 (
