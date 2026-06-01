@@ -2,11 +2,12 @@
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::Path;
 use crate::usd::Stage;
 
 use super::tokens::*;
 use super::types::*;
+use crate::schemas::common::{read_asset, read_int, read_token};
 
 /// Read a `Volume` prim, enumerating its `field:<name>` relationships as
 /// `(field name, target path)` pairs (sorted by field name). Returns `None`
@@ -63,32 +64,5 @@ fn read_field_asset(stage: &Stage, prim: &Path) -> Result<ReadFieldAsset> {
         vector_data_role_hint: read_token(stage, prim, A_VECTOR_DATA_ROLE_HINT)?
             .and_then(|t| VectorDataRoleHint::from_token(&t))
             .unwrap_or_default(),
-    })
-}
-
-fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
-}
-
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::Token(s) | Value::String(s)) => Some(s),
-        _ => None,
-    })
-}
-
-fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
-        _ => None,
-    })
-}
-
-fn read_int(stage: &Stage, prim: &Path, name: &str) -> Result<Option<i32>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::Int(i)) => Some(i),
-        // Checked narrow so an out-of-range Int64 doesn't silently wrap.
-        Some(Value::Int64(i)) => i32::try_from(i).ok(),
-        _ => None,
     })
 }

@@ -17,6 +17,7 @@ use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
+use crate::schemas::common::read_token;
 
 /// Returns `true` when `PhysicsRigidBodyAPI` is applied to the prim.
 pub fn read_has_rigid_body(stage: &Stage, prim: &Path) -> Result<bool> {
@@ -386,13 +387,6 @@ fn read_quatf(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 4]>
     Ok(match read_attr_value(stage, prim, name)? {
         Some(Value::Quatf(q)) => Some(q),
         Some(Value::Quatd(q)) => Some([q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]),
-        _ => None,
-    })
-}
-
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match read_attr_value(stage, prim, name)? {
-        Some(Value::Token(s)) | Some(Value::String(s)) => Some(s),
         _ => None,
     })
 }

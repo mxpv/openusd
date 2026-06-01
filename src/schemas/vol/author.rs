@@ -1,11 +1,11 @@
 //! Authoring for the [UsdVol](super) schema family.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
-use crate::sdf::{Path, Value, Variability};
+use crate::sdf::Path;
 use crate::usd::{Prim, Stage};
 
-use crate::schemas::common::{author_rel_targets, author_uniform_token};
+use crate::schemas::common::{author_asset, author_int, author_rel_targets, author_token};
 use crate::schemas::vol::tokens::*;
 use crate::schemas::vol::types::VectorDataRoleHint;
 
@@ -15,33 +15,34 @@ pub trait FieldAssetSetters<'s>: Sized {
     /// Borrow the underlying prim handle.
     fn prim(&self) -> &Prim<'s>;
 
-    /// Set `filePath` (`uniform asset`).
+    /// Set `filePath` (`asset`). The UsdVol schema declares this animatable,
+    /// so it is authored varying to allow time-sampled volume file sequences.
     fn set_file_path(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_asset(self.prim().stage(), self.prim().path(), A_FILE_PATH, value.into())?;
+        author_asset(self.prim().stage(), self.prim().path(), A_FILE_PATH, value)?;
         Ok(self)
     }
 
-    /// Set `fieldName` (`uniform token`).
+    /// Set `fieldName` (`token`).
     fn set_field_name(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.prim().stage(), self.prim().path(), A_FIELD_NAME, value)?;
+        author_token(self.prim().stage(), self.prim().path(), A_FIELD_NAME, value)?;
         Ok(self)
     }
 
-    /// Set `fieldIndex` (`uniform int`).
+    /// Set `fieldIndex` (`int`).
     fn set_field_index(self, value: i32) -> Result<Self> {
-        author_uniform_int(self.prim().stage(), self.prim().path(), A_FIELD_INDEX, value)?;
+        author_int(self.prim().stage(), self.prim().path(), A_FIELD_INDEX, value)?;
         Ok(self)
     }
 
-    /// Set `fieldDataType` (`uniform token`).
+    /// Set `fieldDataType` (`token`).
     fn set_field_data_type(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.prim().stage(), self.prim().path(), A_FIELD_DATA_TYPE, value)?;
+        author_token(self.prim().stage(), self.prim().path(), A_FIELD_DATA_TYPE, value)?;
         Ok(self)
     }
 
-    /// Set `vectorDataRoleHint` (`uniform token`).
+    /// Set `vectorDataRoleHint` (`token`).
     fn set_vector_data_role_hint(self, value: VectorDataRoleHint) -> Result<Self> {
-        author_uniform_token(
+        author_token(
             self.prim().stage(),
             self.prim().path(),
             A_VECTOR_DATA_ROLE_HINT,
@@ -67,8 +68,13 @@ impl<'s> VolumeAuthor<'s> {
     }
 
     /// Associate field `name` with the `FieldAsset` prim at `target`,
-    /// authoring the `field:<name>` relationship.
+    /// authoring the `field:<name>` relationship. `name` must be non-empty,
+    /// otherwise the property name would end in a colon (`field:`), which is
+    /// not a valid USD property name.
     pub fn add_field(self, name: &str, target: impl Into<Path>) -> Result<Self> {
+        if name.is_empty() {
+            bail!("Volume field name must not be empty");
+        }
         author_rel_targets(
             self.prim.stage(),
             self.prim.path(),
@@ -95,9 +101,9 @@ impl<'s> OpenVdbAssetAuthor<'s> {
         self.prim
     }
 
-    /// Set `fieldClass` (`uniform token`) - the OpenVDB grid class.
+    /// Set `fieldClass` (`token`) - the OpenVDB grid class.
     pub fn set_field_class(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.prim.stage(), self.prim.path(), A_FIELD_CLASS, value)?;
+        author_token(self.prim.stage(), self.prim.path(), A_FIELD_CLASS, value)?;
         Ok(self)
     }
 }
@@ -124,9 +130,9 @@ impl<'s> Field3dAssetAuthor<'s> {
         self.prim
     }
 
-    /// Set `fieldPurpose` (`uniform token`).
+    /// Set `fieldPurpose` (`token`).
     pub fn set_field_purpose(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_token(self.prim.stage(), self.prim.path(), A_FIELD_PURPOSE, value)?;
+        author_token(self.prim.stage(), self.prim.path(), A_FIELD_PURPOSE, value)?;
         Ok(self)
     }
 }
@@ -135,24 +141,4 @@ impl<'s> FieldAssetSetters<'s> for Field3dAssetAuthor<'s> {
     fn prim(&self) -> &Prim<'s> {
         &self.prim
     }
-}
-
-fn author_uniform_asset(stage: &Stage, prim: &Path, name: &str, value: String) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "asset")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::AssetPath(value))?;
-    Ok(())
-}
-
-fn author_uniform_int(stage: &Stage, prim: &Path, name: &str, value: i32) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "int")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Int(value))?;
-    Ok(())
 }

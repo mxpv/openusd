@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value, Variability};
+use crate::sdf::{FieldKey, Path, Value, Variability};
 use crate::usd::{Attribute, Prim, Stage};
 
 /// Author a `varying float` attribute on `prim` with the given default value.
@@ -40,6 +40,36 @@ pub(crate) fn author_bool(stage: &Stage, prim: &Path, name: &str, value: bool) -
     Ok(())
 }
 
+/// Author a `varying token` attribute on `prim` with the given default value.
+pub(crate) fn author_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
+    let attr_path = prim.append_property(name)?;
+    stage
+        .create_attribute(attr_path, "token")?
+        .set_custom(false)?
+        .set(Value::Token(value.into()))?;
+    Ok(())
+}
+
+/// Author a `varying asset` attribute on `prim` with the given default value.
+pub(crate) fn author_asset(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
+    let attr_path = prim.append_property(name)?;
+    stage
+        .create_attribute(attr_path, "asset")?
+        .set_custom(false)?
+        .set(Value::AssetPath(value.into()))?;
+    Ok(())
+}
+
+/// Author a `varying int` attribute on `prim` with the given default value.
+pub(crate) fn author_int(stage: &Stage, prim: &Path, name: &str, value: i32) -> Result<()> {
+    let attr_path = prim.append_property(name)?;
+    stage
+        .create_attribute(attr_path, "int")?
+        .set_custom(false)?
+        .set(Value::Int(value))?;
+    Ok(())
+}
+
 /// Author a `uniform token` attribute on `prim` with the given default value.
 pub(crate) fn author_uniform_token(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
     let attr_path = prim.append_property(name)?;
@@ -48,6 +78,17 @@ pub(crate) fn author_uniform_token(stage: &Stage, prim: &Path, name: &str, value
         .set_variability(Variability::Uniform)?
         .set_custom(false)?
         .set(Value::Token(value.into()))?;
+    Ok(())
+}
+
+/// Author a `uniform asset` attribute on `prim` with the given default value.
+pub(crate) fn author_uniform_asset(stage: &Stage, prim: &Path, name: &str, value: impl Into<String>) -> Result<()> {
+    let attr_path = prim.append_property(name)?;
+    stage
+        .create_attribute(attr_path, "asset")?
+        .set_variability(Variability::Uniform)?
+        .set_custom(false)?
+        .set(Value::AssetPath(value.into()))?;
     Ok(())
 }
 
@@ -86,4 +127,36 @@ pub(crate) fn varying_attribute<'s>(
     Ok(Prim::new(stage, prim.clone())
         .create_attribute(name, type_name)?
         .set_custom(false)?)
+}
+
+/// Resolve the `default` field of the attribute `name` on `prim` as a raw
+/// [`Value`]. The building block the typed `read_*` helpers below share.
+pub(crate) fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
+    stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
+}
+
+/// Read a `token` (or `string`) attribute as a `String`.
+pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
+    Ok(match attr_value(stage, prim, name)? {
+        Some(Value::Token(s) | Value::String(s)) => Some(s),
+        _ => None,
+    })
+}
+
+/// Read an `asset` (or `string` / `token`) attribute as its path `String`.
+pub(crate) fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
+    Ok(match attr_value(stage, prim, name)? {
+        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
+        _ => None,
+    })
+}
+
+/// Read an `int` attribute. An `int64` opinion is accepted via a checked
+/// narrow so an out-of-range value yields `None` rather than silently wrapping.
+pub(crate) fn read_int(stage: &Stage, prim: &Path, name: &str) -> Result<Option<i32>> {
+    Ok(match attr_value(stage, prim, name)? {
+        Some(Value::Int(i)) => Some(i),
+        Some(Value::Int64(i)) => i32::try_from(i).ok(),
+        _ => None,
+    })
 }

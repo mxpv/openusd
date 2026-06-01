@@ -86,4 +86,12 @@ mod tests {
         assert!(read_openvdb_asset(&stage, &sdf::path("/V/vel")?)?.is_none());
         Ok(())
     }
+
+    #[test]
+    fn add_field_rejects_empty() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let result = define_volume(&stage, sdf::path("/V")?)?.add_field("", sdf::path("/V/density")?);
+        assert!(result.is_err());
+        Ok(())
+    }
 }

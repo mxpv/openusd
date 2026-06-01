@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::sdf::{Path, Value, Variability};
 use crate::usd::{Prim, Stage};
 
-use crate::schemas::common::{author_rel_targets, author_uniform_token};
+use crate::schemas::common::{author_rel_targets, author_uniform_asset, author_uniform_token};
 use crate::schemas::render::tokens::*;
 
 /// Author a `def RenderPass` prim at `path`. Returns a chainable
@@ -49,7 +49,7 @@ impl<'s> RenderPassAuthor<'s> {
 
     /// Set `fileName` (`uniform asset`).
     pub fn set_file_name(self, value: impl Into<String>) -> Result<Self> {
-        author_uniform_asset(self.prim.stage(), self.prim.path(), A_FILE_NAME, value.into())?;
+        author_uniform_asset(self.prim.stage(), self.prim.path(), A_FILE_NAME, value)?;
         Ok(self)
     }
 
@@ -109,16 +109,6 @@ fn author_uniform_string_vec(stage: &Stage, prim: &Path, name: &str, value: Vec<
         .set_variability(Variability::Uniform)?
         .set_custom(false)?
         .set(Value::StringVec(value))?;
-    Ok(())
-}
-
-fn author_uniform_asset(stage: &Stage, prim: &Path, name: &str, value: String) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "asset")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::AssetPath(value))?;
     Ok(())
 }
 
