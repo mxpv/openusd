@@ -1485,9 +1485,8 @@ impl Cache {
             }
         }
 
-        // For prim children, also check inherit/specialize targets from each
-        // node's layer data. The inherit might not have been merged into the
-        // index (empty target), but the target's children should still appear.
+        // Recover children contributed by inherit/specialize targets that the
+        // composition graph did not capture. See `add_inherited_children`.
         if matches!(children_field, ChildrenKey::PrimChildren) {
             self.add_inherited_children(path, &mut result);
         }
@@ -1495,8 +1494,26 @@ impl Cache {
         Ok(result)
     }
 
-    /// Adds children from inherit/specialize targets that weren't merged
-    /// during index building. Follows inherit chains recursively.
+    /// Recovers children that the composition graph missed because an inherit
+    /// on a *propagated* node was never followed.
+    ///
+    /// The builder only follows composition arcs at sites it evaluates through
+    /// `eval_site`. A child that exists purely through a parent's inherit (a
+    /// local class hierarchy) is filled in afterward by
+    /// [`Self::propagate_parent_specs`] as a raw spec node, whose own
+    /// `inherits`/`specializes` are never composed — so that node's inherited
+    /// children never enter the index. The deeper cause is implied-class node
+    /// mapping: an implied inherit node maps to the composed class sibling
+    /// rather than to the inheriting prim, so descendant propagation through it
+    /// lands at the wrong path (e.g. a child reachable only in the reference's
+    /// pre-map namespace is never checked).
+    ///
+    /// This pass compensates at child-discovery time by following each node's
+    /// inherit/specialize targets through every ancestor-arc remapping (both
+    /// directions) and pulling their children, recursing through inherit
+    /// chains. Retiring it requires fixing the implied-class mapping in the
+    /// builder so propagated children compose normally — its own effort,
+    /// gated by the `TrickyLocalClassHierarchyWithRelocates` golden.
     fn add_inherited_children(&self, path: &Path, result: &mut Vec<String>) {
         let mut visited = Vec::new();
         self.add_inherited_children_inner(path, result, &mut visited);
