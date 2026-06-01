@@ -471,8 +471,14 @@ impl PrimIndex {
         stack: &LayerStack,
         parent_ctx: &CompositionContext,
     ) -> CompositionContext {
-        // Gather variant selections from this prim's nodes.
-        let selections = resolve_variant_selections_in(self.nodes(), &stack.layers, &parent_ctx.variant_fallbacks);
+        // Gather variant selections from this prim's nodes; ancestor selections
+        // outrank this prim's local fallbacks.
+        let selections = resolve_variant_selections_in(
+            self.nodes(),
+            &stack.layers,
+            &parent_ctx.variant_fallbacks,
+            &parent_ctx.selections,
+        );
 
         // Build ancestor arcs: for each non-Root node whose map_to_root is
         // not a no-op, record it so children can remap through it.
@@ -1080,10 +1086,11 @@ impl<'a> IndexBuilder<'a> {
 
     /// Build the prim index for the given composed path.
     ///
-    /// Evaluates all composition sites (root + ancestor-derived), then loops
-    /// until stable: if variant resolution produces new nodes (because R/P
-    /// arcs introduced variant sets that V hadn't seen), their arcs are
-    /// followed and variants re-resolved.
+    /// Evaluates all composition sites (root + ancestor-derived). Arc targets
+    /// are composed recursively in the referencing prim's context (including
+    /// its variant selections), so a variant set a reference or payload brings
+    /// in is resolved during that recursive build rather than by a separate
+    /// re-resolution pass.
     fn build(&mut self, path: &Path) -> Result<(), Error> {
         // A prim inside an instance discards every local opinion (spec 11.3.3):
         // its subtree is composed purely from the arcs the instance brings in,
@@ -1158,10 +1165,6 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
-        // Loop until stable: R/P arcs may introduce variant sets that V
-        // hadn't seen. Re-resolve variants and follow any new arcs.
-        self.stabilize()?;
-
         // Global weakness: specializes opinions are globally weaker than all
         // other opinions (spec 10.4.1). Stable-partition so non-specialize
         // nodes come first, preserving relative order within each group.
@@ -1184,88 +1187,6 @@ impl<'a> IndexBuilder<'a> {
         self.output
             .strength_order
             .sort_by_key(|id| nodes[id.idx()].introduced_by_specialize());
-    }
-
-    /// Re-resolve variants across all accumulated nodes until no new nodes
-    /// are produced. Handles the LIVRPS ordering gap where V runs before R/P
-    /// but variant sets may come from referenced/payloaded layers.
-    fn stabilize(&mut self) -> Result<(), Error> {
-        // Track already-processed variant paths across loop iterations.
-        let mut processed: HashSet<Path> = self
-            .output
-            .iter()
-            .filter(|n| n.arc == ArcType::Variant)
-            .map(|n| n.path.clone())
-            .collect();
-
-        loop {
-            let before = self.output.len();
-
-            let mut selections =
-                resolve_variant_selections_in(self.output.iter(), &self.stack.layers, &self.ctx.variant_fallbacks);
-            for (set, sel) in &self.ctx.selections {
-                selections.entry(set.clone()).or_insert_with(|| sel.clone());
-            }
-
-            let orig_len = self.output.len();
-            for (set_name, selection) in &selections {
-                for idx in 0..orig_len {
-                    let variant_path = self.output[idx].path.append_variant_selection(set_name, selection);
-                    if !processed.insert(variant_path.clone()) {
-                        continue;
-                    }
-                    let base_node = NodeId(idx as u32);
-                    let base_prim_path = self.output[idx].path.clone();
-
-                    // Propagate specialize context from base node for global weakness.
-                    let prev_in_specialize = self.in_specialize;
-                    if self.output[idx].introduced_by_specialize() {
-                        self.in_specialize = true;
-                    }
-
-                    let (start, end) = self.add_variant_nodes(&variant_path, &base_prim_path, base_node);
-                    // Follow arcs from newly discovered variant nodes.
-                    if start < end {
-                        let new_nodes: Vec<Node> = self.output[start..end].to_vec();
-                        let refs =
-                            compose_arc_list_in::<Reference>(&new_nodes, FieldKey::References, &self.stack.layers)?;
-                        for reference in &refs {
-                            self.eval_arc_target(
-                                &reference.asset_path,
-                                &reference.prim_path,
-                                ArcType::Reference,
-                                &Path::abs_root(),
-                                0,
-                                base_node,
-                                reference.layer_offset.sanitized(),
-                            )?;
-                        }
-                        if self.stack.load_payloads {
-                            let payloads = collect_payloads_in(&new_nodes, &self.stack.layers)?;
-                            for payload in &payloads {
-                                self.eval_arc_target(
-                                    &payload.asset_path,
-                                    &payload.prim_path,
-                                    ArcType::Payload,
-                                    &Path::abs_root(),
-                                    0,
-                                    base_node,
-                                    payload.layer_offset.unwrap_or_default().sanitized(),
-                                )?;
-                            }
-                        }
-                    }
-
-                    self.in_specialize = prev_in_specialize;
-                }
-            }
-
-            // Stable — no new nodes produced.
-            if self.output.len() == before {
-                break;
-            }
-        }
-        Ok(())
     }
 
     /// Evaluate a single composition site: run LIVRPS for `path` within
@@ -1537,6 +1458,27 @@ impl<'a> IndexBuilder<'a> {
             .unwrap_or_else(|| LayerStack::build_sublayer_stack(root_layer, &self.stack.layers, &*self.stack.resolver))
     }
 
+    /// Seed context for building an arc target whose own namespace parent
+    /// contributes no context (a top-level class/base prim). The target
+    /// inherits the referencing prim's variant selections — resolved from the
+    /// opinions composed so far, including the prim's own authored selection —
+    /// plus the incoming ancestor selections and fallbacks, so a variant set
+    /// the target brings in resolves during this recursive build rather than
+    /// needing a global re-resolution pass.
+    fn arc_target_seed_context(&self) -> CompositionContext {
+        let selections = resolve_variant_selections_in(
+            self.output.iter(),
+            &self.stack.layers,
+            &self.ctx.variant_fallbacks,
+            &self.ctx.selections,
+        );
+        CompositionContext {
+            selections,
+            variant_fallbacks: self.ctx.variant_fallbacks.clone(),
+            ..Default::default()
+        }
+    }
+
     /// Build a full PrimIndex for a target path and merge its nodes into this
     /// builder's output. Used for inherit/specialize targets that need their
     /// own ancestor propagation.
@@ -1584,10 +1526,10 @@ impl<'a> IndexBuilder<'a> {
                         let parent_idx = &self.target_indices[&parent];
                         parent_idx.context_for_children(self.stack, self.ctx)
                     } else {
-                        CompositionContext::default()
+                        self.arc_target_seed_context()
                     }
                 } else {
-                    CompositionContext::default()
+                    self.arc_target_seed_context()
                 };
                 let idx = PrimIndex::build_with_context(target, self.stack, &ctx)?;
                 self.target_indices.insert(target.clone(), idx);
@@ -1674,15 +1616,12 @@ impl<'a> IndexBuilder<'a> {
             let current_end = self.output.len();
             // Gather selections from ALL output nodes (not just this site) so
             // cross-site selections are visible during the first pass.
-            let mut selections = resolve_variant_selections_in(
+            let selections = resolve_variant_selections_in(
                 self.output[..current_end].iter(),
                 &self.stack.layers,
                 &self.ctx.variant_fallbacks,
+                &self.ctx.selections,
             );
-            // Merge accumulated selections (includes ancestor context).
-            for (set, sel) in &self.ctx.selections {
-                selections.entry(set.clone()).or_insert_with(|| sel.clone());
-            }
             if selections.is_empty() {
                 break;
             }
@@ -1876,12 +1815,17 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 
 /// Resolves variant selections by walking nodes strongest-to-weakest.
 ///
-/// Gathers explicit selections (first opinion wins), then falls back to
-/// the first variant name in each variant set as the default.
+/// Precedence: an explicit selection authored on a node wins (first opinion
+/// wins); then `seed` selections inherited from the composition context (e.g.
+/// a selection authored on a referencing prim) fill remaining sets; finally
+/// each still-unselected variant set defaults to its fallback, then to its
+/// first variant. Seeding context selections ahead of the fallback is what
+/// lets a referencing prim's selection beat the target's own default.
 fn resolve_variant_selections_in<'a>(
     nodes: impl Iterator<Item = &'a Node> + Clone,
     layers: &[sdf::Layer],
     variant_fallbacks: &VariantFallbackMap,
+    seed: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
@@ -1895,6 +1839,11 @@ fn resolve_variant_selections_in<'a>(
                 }
             }
         }
+    }
+
+    // Context-inherited selections rank above any local fallback default.
+    for (set_name, selection) in seed {
+        selections.entry(set_name.clone()).or_insert_with(|| selection.clone());
     }
 
     // For variant sets without an explicit selection, try the fallback map
@@ -2145,6 +2094,18 @@ mod tests {
         Ok(LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true))
     }
 
+    /// Builds a single-layer stack from in-memory `root.usd` data.
+    fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerStack {
+        let layers = vec![sdf::Layer::new("root.usd", root)];
+        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+    }
+
+    /// Builds a two-layer stack from in-memory `root.usd` + `ref.usd` data.
+    fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerStack {
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
+        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+    }
+
     #[test]
     fn single_layer_root_node() -> Result<()> {
         let stack = load_stack(&composition_path("active.usda"))?;
@@ -2233,6 +2194,77 @@ mod tests {
         assert_send_sync::<PrimIndex>();
         assert_send_sync::<Node>();
         assert_send_sync::<NodeId>();
+    }
+
+    /// A variant set defined in a referenced layer with the selection authored
+    /// on the referencing prim must still produce the selected variant's node.
+    /// This is exactly the LIVRPS-ordering gap `stabilize` exists to close: the
+    /// variant set only becomes visible after the reference is composed.
+    #[test]
+    fn variant_from_external_reference() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Model\" (\n  references = @ref.usd@</Ref>\n  variants = { string v = \"b\" }\n) {}\n",
+        );
+        let refl = parse_usda(
+            "#usda 1.0\ndef \"Ref\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom string x = \"a\" }\n    \"b\" { custom string x = \"b\" }\n  }\n}\n",
+        );
+        let stack = two_layer_stack(root, refl);
+        let index = build(&stack, "/Model");
+        assert!(
+            index
+                .nodes()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str().contains("{v=b}")),
+            "selected variant from the referenced layer must be composed"
+        );
+        Ok(())
+    }
+
+    /// Like the above but the variant set arrives through an internal reference
+    /// (same layer stack), which the builder grafts via `merge_full_index`.
+    #[test]
+    fn variant_from_internal_reference() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Base\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom string x = \"a\" }\n    \"b\" { custom string x = \"b\" }\n  }\n}\ndef \"Model\" (\n  references = </Base>\n  variants = { string v = \"b\" }\n) {}\n",
+        );
+        let stack = one_layer_stack(root);
+        let index = build(&stack, "/Model");
+        // The variant arrives grafted through the reference, so its node carries
+        // the Reference arc; what matters is that the selected variant (v=b),
+        // not the fallback (v=a), was composed.
+        assert!(
+            index.nodes().any(|n| n.path.as_str().contains("{v=b}")),
+            "selected variant from the internal-reference target must be composed"
+        );
+        assert!(
+            !index.nodes().any(|n| n.path.as_str().contains("{v=a}")),
+            "fallback variant must not be composed when v=b is selected"
+        );
+        Ok(())
+    }
+
+    /// The selected variant itself contains a reference that brings in content.
+    /// This exercises following arcs out of a late-discovered variant node.
+    #[test]
+    fn variant_contains_reference() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Model\" (\n  references = @ref.usd@</Ref>\n  variants = { string v = \"b\" }\n) {}\n",
+        );
+        let refl = parse_usda(
+            "#usda 1.0\ndef \"Inner\" { custom string y = \"inner\" }\ndef \"Ref\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" {}\n    \"b\" ( references = </Inner> ) {}\n  }\n}\n",
+        );
+        let stack = two_layer_stack(root, refl);
+        let index = build(&stack, "/Model");
+        assert!(
+            index
+                .nodes()
+                .any(|n| n.arc == ArcType::Variant && n.path.as_str().contains("{v=b}")),
+            "selected variant node present"
+        );
+        assert!(
+            index.nodes().any(|n| n.path.as_str() == "/Inner"),
+            "reference inside the selected variant must be followed"
+        );
+        Ok(())
     }
 
     /// The builder records structural parent/child links: a reference node hangs
