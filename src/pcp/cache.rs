@@ -1195,22 +1195,19 @@ impl Cache {
 
         let ancestor_arcs = self.collect_ancestor_arcs(&parent);
 
-        // Scan both the parent's nodes and the prim's own specs (if any) for
-        // inherit/specialize targets.
+        // Scan each parent composition node for inherit/specialize targets: the
+        // parent's own path in that node's namespace, and the prim's path there
+        // (the node's path extended by the prim name). A layer that authors the
+        // prim directly contributes to the parent at the parent path, so it is
+        // already covered here — no separate all-layers scan of the prim path is
+        // needed.
         let mut nodes_to_scan: Vec<(Path, usize)> = Vec::new();
         for node in parent_index.nodes() {
             nodes_to_scan.push((node.path.clone(), node.layer_index));
-            // Also check the node's child path (the prim itself in this node's namespace).
             if let Some(name) = path.name() {
                 if let Ok(child_in_node) = node.path.append_path(name) {
                     nodes_to_scan.push((child_in_node, node.layer_index));
                 }
-            }
-        }
-        // Also check the prim's own path in all layers.
-        for li in 0..self.stack.len() {
-            if self.stack.layer(li).has_spec(path) {
-                nodes_to_scan.push((path.clone(), li));
             }
         }
 
@@ -1483,8 +1480,7 @@ mod tests {
     /// A child reachable only through a chain of local-class inherits composes
     /// its own inherited grandchildren: `SymArmRig` inherits `_Class_ArmRig`
     /// (whose `ArmRegion` over inherits `Body/_class_Region`), so
-    /// `SymArmRig/ArmRegion` must expose `Region`. This is the case the deleted
-    /// `add_inherited_children` fallback used to recover.
+    /// `SymArmRig/ArmRegion` must expose `Region`.
     #[test]
     fn inherited_child_chain_composes() -> Result<()> {
         let root = format!(
