@@ -372,6 +372,65 @@ impl PrimIndex {
         &self.node(id).children
     }
 
+    /// Renders the composition tree for debugging (C++ `PcpPrimIndex::DumpToString`).
+    ///
+    /// Walks depth-first from each root, four spaces of indent per depth, with
+    /// children in strength order. Each line carries the arc type, layer index,
+    /// node path, strength rank, and any non-identity time offset, origin, or
+    /// flags. Layers are shown by index (the index owns no layer identifiers);
+    /// the output is deterministic, which makes it a useful structural harness.
+    /// The arena currently composes as a forest (sublayer and implied opinions
+    /// attach as separate roots); the grafts collapse most of it to one tree.
+    pub fn dump_to_string(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut rank = vec![0usize; self.graph.nodes.len()];
+        for (r, id) in self.graph.strength_order.iter().enumerate() {
+            rank[id.idx()] = r;
+        }
+
+        let mut out = String::new();
+        let mut stack: Vec<(NodeId, usize)> = self
+            .graph
+            .strength_order
+            .iter()
+            .rev()
+            .filter(|id| self.node(**id).parent.is_none())
+            .map(|&id| (id, 0))
+            .collect();
+
+        while let Some((id, depth)) = stack.pop() {
+            let node = self.node(id);
+            let _ = write!(
+                out,
+                "{:indent$}{:?} [{}] {} #{}",
+                "",
+                node.arc,
+                node.layer_index,
+                node.path,
+                rank[id.idx()],
+                indent = depth * 4
+            );
+            let offset = node.map_to_root.time_offset();
+            if !offset.is_identity() {
+                let _ = write!(out, " offset=({},{})", offset.offset, offset.scale);
+            }
+            if let Some(origin) = node.origin {
+                let _ = write!(out, " origin={}", origin.0);
+            }
+            if !node.flags.is_empty() {
+                let _ = write!(out, " {:?}", node.flags);
+            }
+            out.push('\n');
+
+            // Push children in reverse so the strongest sibling pops first.
+            for &child in node.children.iter().rev() {
+                stack.push((child, depth + 1));
+            }
+        }
+        out
+    }
+
     /// Appends a node to the end of the composition graph, weakest in strength.
     pub(crate) fn push_node(&mut self, node: Node) {
         let id = NodeId(self.graph.nodes.len() as u32);
@@ -2334,6 +2393,41 @@ mod tests {
         );
         // Grafted nodes record the inheriting node as their arc origin.
         assert!(index.node(base).origin().is_some(), "grafted node carries an origin");
+        Ok(())
+    }
+
+    /// `dump_to_string` renders the composition tree depth-first with deeper
+    /// nesting indented further: the grafted reference sits under the inherit,
+    /// which sits under the root.
+    #[test]
+    fn dump_renders_tree() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Model\" ( inherits = </Class> ) {}\ndef \"Class\" ( references = @base.usd@</Base> ) {}\n",
+        );
+        let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/Model");
+
+        let dump = index.dump_to_string();
+        let line = |needle: &str| {
+            dump.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("dump missing {needle}: {dump}"))
+        };
+        let indent = |l: &str| l.len() - l.trim_start().len();
+
+        // Every line carries a strength rank; nesting deepens with indentation.
+        assert!(dump.lines().all(|l| l.contains('#')), "each line has a strength rank");
+        assert!(line("/Model").starts_with("Root"), "root prim is the tree root");
+        assert!(
+            indent(line("/Class")) > indent(line("/Model")),
+            "inherit nests under the root"
+        );
+        assert!(
+            indent(line("/Base")) > indent(line("/Class")),
+            "grafted reference nests under the inherit"
+        );
         Ok(())
     }
 
