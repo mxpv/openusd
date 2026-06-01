@@ -173,7 +173,8 @@ impl Relocates {
                 Some(_) => node.map_to_parent.clone(),
                 None => MapFunction::from_pair_identity(node.path.clone(), composed_path.clone()),
             };
-            let new_id = index.graft_relocate_node(grafted_parent, node.layer_index, node.path.clone(), map_to_parent);
+            let new_id =
+                index.graft_relocate_node(grafted_parent, node.layer_index(), node.path.clone(), map_to_parent);
             remap[sid.idx()] = Some(new_id);
         }
 
@@ -217,7 +218,7 @@ impl Relocates {
                             continue;
                         };
                         for node in class_index.nodes() {
-                            Self::push_relocate_node(index, node.layer_index, &node.path, composed_path);
+                            Self::push_relocate_node(index, node.layer_index(), &node.path, composed_path);
                         }
                     }
                 }
@@ -230,22 +231,23 @@ impl Relocates {
         // (e.g. root.usd at /CharRig/Rig/LegsRig/SymLegRig/.../Seg2). Those
         // overrides are in the cached prim for that composed path but not in
         // the source index built from the relocate chain.
-        let first = index.nodes().next().map(|n| (n.layer_index, n.path.clone()));
+        let first = index.nodes().next().map(|n| (n.layer_index(), n.path.clone()));
         if let Some((first_li, first_path)) = first {
-            let mut existing: HashSet<(usize, Path)> = index.nodes().map(|n| (n.layer_index, n.path.clone())).collect();
+            let mut existing: HashSet<(usize, Path)> =
+                index.nodes().map(|n| (n.layer_index(), n.path.clone())).collect();
             // Find ALL cached prims whose index contains a node at the same
             // (layer, path) as the first relocate node, and merge any
             // additional opinions from all of them.
             for cached_index in indices.values() {
                 let matched = cached_index
                     .nodes()
-                    .any(|cn| cn.layer_index == first_li && cn.path == first_path);
+                    .any(|cn| cn.layer_index() == first_li && cn.path == first_path);
                 if !matched {
                     continue;
                 }
                 for extra in cached_index.nodes() {
-                    if existing.insert((extra.layer_index, extra.path.clone())) {
-                        Self::push_relocate_node(index, extra.layer_index, &extra.path, composed_path);
+                    if existing.insert((extra.layer_index(), extra.path.clone())) {
+                        Self::push_relocate_node(index, extra.layer_index(), &extra.path, composed_path);
                     }
                 }
             }
@@ -293,7 +295,7 @@ impl Relocates {
             return;
         };
         for node in source_index.nodes() {
-            Self::push_relocate_node(index, node.layer_index, &node.path, composed_path);
+            Self::push_relocate_node(index, node.layer_index(), &node.path, composed_path);
         }
         if source_index.is_empty() {
             if let Some(sp) = source_path.parent() {
@@ -331,7 +333,7 @@ impl Relocates {
             return;
         };
         for node in cached_index.nodes() {
-            if let Some(relocates) = self.layer_relocates.get(&node.layer_index) {
+            if let Some(relocates) = self.layer_relocates.get(&node.layer_index()) {
                 for (src, tgt) in relocates {
                     // Target child: add if target's parent matches this node's path.
                     if !tgt.is_empty() {
@@ -491,9 +493,9 @@ impl Relocates {
                     }
                     if !maps
                         .iter()
-                        .any(|(li, m)| *li == node.layer_index && *m == node.map_to_root)
+                        .any(|(li, m)| *li == node.layer_index() && *m == node.map_to_root)
                     {
-                        maps.push((node.layer_index, node.map_to_root.clone()));
+                        maps.push((node.layer_index(), node.map_to_root.clone()));
                     }
                 }
             }
@@ -515,12 +517,12 @@ impl Relocates {
                 if node.arc == ArcType::Relocate {
                     continue;
                 }
-                if relocate_layers.contains(&node.layer_index)
+                if relocate_layers.contains(&node.layer_index())
                     && !maps
                         .iter()
-                        .any(|(li, m)| *li == node.layer_index && *m == node.map_to_root)
+                        .any(|(li, m)| *li == node.layer_index() && *m == node.map_to_root)
                 {
-                    maps.push((node.layer_index, node.map_to_root.clone()));
+                    maps.push((node.layer_index(), node.map_to_root.clone()));
                 }
             }
         }

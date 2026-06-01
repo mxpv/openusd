@@ -121,8 +121,12 @@ bitflags! {
 /// place in the composition tree; access them through [`PrimIndex`].
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// Index into the stage's layer list.
-    pub layer_index: usize,
+    /// The layer stack contributing opinions at this site (C++
+    /// `PcpNode::GetLayerStack`): each member is a `(layer index, sublayer
+    /// offset)` pair, strongest sublayer first. A member's sublayer offset is
+    /// composed atop `map_to_root`'s arc offset during value resolution (see
+    /// [`layers`](Self::layers)).
+    layer_stack: Vec<(usize, LayerOffset)>,
     /// The path within that layer (may differ from composed path due to remapping).
     pub path: Path,
     /// The composition arc that introduced this node.
@@ -175,7 +179,10 @@ impl Node {
             NodeFlags::empty()
         };
         Self {
-            layer_index,
+            // A node lists one layer until the per-site model folds a whole
+            // sublayer stack into it; that lone layer's sublayer offset is
+            // already baked into `map_to_root`, so its entry offset is identity.
+            layer_stack: vec![(layer_index, LayerOffset::IDENTITY)],
             path,
             arc,
             map_to_parent,
@@ -187,6 +194,25 @@ impl Node {
             specialize_chain_depth: 0,
             flags,
         }
+    }
+
+    /// Index of the strongest layer contributing at this site. A representative
+    /// for callers that key on a single layer (dependencies, dumps); value
+    /// resolution iterates [`layers`](Self::layers) instead.
+    pub fn layer_index(&self) -> usize {
+        self.layer_stack[0].0
+    }
+
+    /// Iterates the site's contributing layers strongest first, each paired
+    /// with its effective time offset to the root namespace: `map_to_root`'s
+    /// arc offset with the member's sublayer offset composed on top. Value
+    /// resolution reads opinions through this iterator so one per-site node can
+    /// fold every sublayer.
+    pub fn layers(&self) -> impl Iterator<Item = (usize, LayerOffset)> + '_ {
+        let arc_offset = self.map_to_root.time_offset();
+        self.layer_stack
+            .iter()
+            .map(move |&(li, sub)| (li, arc_offset.concatenate(&sub)))
     }
 
     /// Structural parent, or `None` for a root node.
@@ -697,7 +723,7 @@ impl PrimIndex {
                 "{:indent$}{:?} [{}] {} #{}",
                 "",
                 node.arc,
-                node.layer_index,
+                node.layer_index(),
                 node.path,
                 rank[id.idx()],
                 indent = depth * 4
@@ -897,7 +923,7 @@ impl PrimIndex {
             }
             ancestor_arcs.push(AncestorArc {
                 map: node.map_to_root.clone(),
-                layer_index: node.layer_index,
+                layer_index: node.layer_index(),
                 arc: node.arc,
             });
         }
@@ -1079,7 +1105,7 @@ impl PrimIndex {
                 Ok(path) => path,
                 Err(err) => return Some(Err(err)),
             };
-            match stack.layer(node.layer_index).try_get(&query_path, field) {
+            match stack.layer(node.layer_index()).try_get(&query_path, field) {
                 Ok(Some(value)) => Some(Ok(Opinion {
                     node,
                     query_path,
@@ -1160,7 +1186,7 @@ impl PrimIndex {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
             let Opinion { node, value, .. } = opinion?;
-            if local_layers.is_some_and(|local| !local.contains(&node.layer_index)) {
+            if local_layers.is_some_and(|local| !local.contains(&node.layer_index())) {
                 continue;
             }
             match value.into_owned() {
@@ -1227,7 +1253,7 @@ impl PrimIndex {
 
         for node in self.nodes() {
             let Some(value) = stack
-                .layer(node.layer_index)
+                .layer(node.layer_index())
                 .try_get(&node.path, FieldKey::Clips.as_str())?
             else {
                 continue;
@@ -1263,15 +1289,15 @@ impl PrimIndex {
                             // weaker template layer would mis-anchor the explicit
                             // paths the stronger layer authored.
                             if field == clip::keys::ASSET_PATHS {
-                                asset_layers.insert(set_name.clone(), node.layer_index);
+                                asset_layers.insert(set_name.clone(), node.layer_index());
                                 explicit_sets.insert(set_name.clone());
                             } else if field == clip::keys::TEMPLATE_ASSET_PATH {
                                 if !explicit_sets.contains(&set_name) {
-                                    asset_layers.insert(set_name.clone(), node.layer_index);
+                                    asset_layers.insert(set_name.clone(), node.layer_index());
                                 }
                                 template_offsets.insert(set_name.clone(), node.map_to_root.time_offset());
                             } else if field == clip::keys::MANIFEST_ASSET_PATH {
-                                manifest_layers.insert(set_name.clone(), node.layer_index);
+                                manifest_layers.insert(set_name.clone(), node.layer_index());
                             }
                             composed.insert(field, value);
                         }
@@ -1968,7 +1994,7 @@ impl<'a> IndexBuilder<'a> {
         // with the flattened mapping.
         let mut remap: Vec<Option<NodeId>> = vec![None; target_index.arena().len()];
         for (tid, node) in target_index.nodes_with_ids() {
-            if !self.seen.insert((node.layer_index, node.path.clone(), arc)) {
+            if !self.seen.insert((node.layer_index(), node.path.clone(), arc)) {
                 continue;
             }
             let grafted_parent = node.parent().and_then(|tp| remap[tp.idx()]);
@@ -1986,7 +2012,7 @@ impl<'a> IndexBuilder<'a> {
             };
             let new_id = self.output.add_child(
                 struct_parent,
-                node.layer_index,
+                node.layer_index(),
                 node.path.clone(),
                 arc,
                 node_map,
@@ -2183,7 +2209,7 @@ impl<'a> IndexBuilder<'a> {
                             n.path
                                 .append_path(child_name)
                                 .ok()
-                                .map(|p| (p, n.layer_index, n.arc, n.path.clone()))
+                                .map(|p| (p, n.layer_index(), n.arc, n.path.clone()))
                         })
                         .collect();
                     for (rpath, li, a, node_path) in &ancestor_sites {
@@ -2276,7 +2302,7 @@ impl<'a> IndexBuilder<'a> {
                 if let Some(cached) = self.cached_indices.get(&implied_path) {
                     let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
                     for (cid, node) in cached.nodes_with_ids() {
-                        if !self.seen.insert((node.layer_index, node.path.clone(), *arc)) {
+                        if !self.seen.insert((node.layer_index(), node.path.clone(), *arc)) {
                             continue;
                         }
                         let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
@@ -2289,7 +2315,7 @@ impl<'a> IndexBuilder<'a> {
                         };
                         let new_id = self.output.add_child(
                             struct_parent,
-                            node.layer_index,
+                            node.layer_index(),
                             node.path.clone(),
                             *arc,
                             node_map,
@@ -2407,7 +2433,7 @@ fn resolve_variant_selections_in<'a>(
 
     // Gather explicit selections for sets the seed did not already fix.
     for node in &ordered {
-        let data = &layers[node.layer_index];
+        let data = &layers[node.layer_index()];
         if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
             if let Value::VariantSelectionMap(map) = value.into_owned() {
                 for (set_name, selection) in map {
@@ -2420,7 +2446,7 @@ fn resolve_variant_selections_in<'a>(
     // For variant sets without an explicit selection, try the fallback map
     // first, then fall back to the first variant name in the set.
     for node in &ordered {
-        let data = &layers[node.layer_index];
+        let data = &layers[node.layer_index()];
         let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
             continue;
         };
@@ -2519,7 +2545,7 @@ where
     let mut combined: Option<ListOp<T>> = None;
 
     for node in nodes {
-        let data = &layers[node.layer_index];
+        let data = &layers[node.layer_index()];
         let Some(value) = data.try_get(&node.path, field)? else {
             continue;
         };
@@ -2542,7 +2568,7 @@ fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payl
     let mut combined: Option<PayloadListOp> = None;
 
     for node in nodes {
-        let data = &layers[node.layer_index];
+        let data = &layers[node.layer_index()];
         let Some(value) = data.try_get(&node.path, FieldKey::Payload.as_str())? else {
             continue;
         };
@@ -2683,7 +2709,7 @@ mod tests {
         let index = build(&stack, "/World");
 
         assert_eq!(index.nodes().count(), 1);
-        assert_eq!(index.nodes().next().unwrap().layer_index, 0);
+        assert_eq!(index.nodes().next().unwrap().layer_index(), 0);
         assert_eq!(index.nodes().next().unwrap().arc, ArcType::Root);
         Ok(())
     }
@@ -2695,8 +2721,8 @@ mod tests {
 
         let ns: Vec<_> = index.nodes().collect();
         assert_eq!(ns.len(), 2, "both layers should have /World");
-        assert_eq!(ns[0].layer_index, 0, "stronger layer first");
-        assert_eq!(ns[1].layer_index, 1, "weaker layer second");
+        assert_eq!(ns[0].layer_index(), 0, "stronger layer first");
+        assert_eq!(ns[1].layer_index(), 1, "weaker layer second");
         Ok(())
     }
 
@@ -2706,7 +2732,7 @@ mod tests {
         let index = build(&stack, "/World/Sphere");
 
         assert_eq!(index.nodes().count(), 1);
-        assert_eq!(index.nodes().next().unwrap().layer_index, 0);
+        assert_eq!(index.nodes().next().unwrap().layer_index(), 0);
         Ok(())
     }
 
@@ -3460,7 +3486,7 @@ def "Prim" (
             .nodes()
             .map(|n| {
                 (
-                    layer_name(stack.identifier(n.layer_index)).to_owned(),
+                    layer_name(stack.identifier(n.layer_index())).to_owned(),
                     n.path.to_string(),
                 )
             })
@@ -3612,7 +3638,7 @@ def "Prim" (
             .map(|n| {
                 let off = n.map_to_root.time_offset();
                 (
-                    layer_name(stack.identifier(n.layer_index)).to_owned(),
+                    layer_name(stack.identifier(n.layer_index())).to_owned(),
                     n.path.to_string(),
                     n.arc,
                     off.offset,
