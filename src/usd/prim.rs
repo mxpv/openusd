@@ -119,6 +119,32 @@ impl<'s> Prim<'s> {
         Ok(self)
     }
 
+    /// Author a prim-level metadata field (e.g. `assetInfo`, `customData`,
+    /// `kind`). Mirrors C++ `UsdObject::SetMetadata` for a prim.
+    ///
+    /// `key` is `&'static str` so the change-tracking layer can record it
+    /// without copying; pass a `pub const FOO: &str = "..."` token rather than
+    /// a runtime-built string.
+    pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+        let value = value.into();
+        self.stage.with_target_layer_at(&self.path, |layer, path| {
+            let data = layer.writable_data_mut()?;
+            match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
+                Some(mut spec) => {
+                    spec.add(key, value);
+                    let mut cl = sdf::ChangeList::new();
+                    cl.entry_mut(&path).info_changed.insert(key);
+                    Ok(cl)
+                }
+                None => Err(sdf::AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "no prim spec at path on the edit target layer",
+                }),
+            }
+        })?;
+        Ok(self)
+    }
+
     /// Author an attribute spec named `name` under this prim. Mirrors C++
     /// `UsdPrim::CreateAttribute`. Defaults `variability = Varying`,
     /// `custom = true` — override via the returned [`Attribute`] handle's
@@ -1341,6 +1367,22 @@ mod tests {
         };
         assert_eq!(op.appended_items, vec!["ExistingAPI".to_string()]);
         assert_eq!(op.prepended_items, vec!["NewAPI".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn set_prim_metadata() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("hint".to_string(), sdf::Value::String("v".to_string()));
+        stage
+            .define_prim("/World")?
+            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+
+        let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
+            panic!("expected customData dictionary");
+        };
+        assert_eq!(read.get("hint"), Some(&sdf::Value::String("v".to_string())));
         Ok(())
     }
 }
