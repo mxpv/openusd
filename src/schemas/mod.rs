@@ -19,6 +19,7 @@
 //! | `lux`     | `lux`     | `UsdLux` reader (8 concrete light prims + LightAPI / ShapingAPI / ShadowAPI / LightListAPI). |
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
 //! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
+//! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
@@ -29,7 +30,8 @@
     feature = "physics",
     feature = "render",
     feature = "shade",
-    feature = "skel"
+    feature = "skel",
+    feature = "vol"
 ))]
 mod common;
 
@@ -45,5 +47,7 @@ pub mod render;
 pub mod shade;
 #[cfg(feature = "skel")]
 pub mod skel;
+#[cfg(feature = "vol")]
+pub mod vol;
 
 pub mod registry;
