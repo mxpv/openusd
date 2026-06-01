@@ -1355,7 +1355,17 @@ impl Stage {
     /// returns a [`pcp::Error`], the error handler decides whether to skip
     /// (returning a default value) or abort (propagating the error).
     fn try_or_handle<T: Default>(&self, f: impl FnOnce(&mut pcp::Cache) -> Result<T>) -> Result<T> {
-        match f(&mut self.graph.borrow_mut()) {
+        let mut cache = self.graph.borrow_mut();
+        let result = f(&mut cache);
+        // Surface recoverable errors collected while building indices (e.g.
+        // arc-to-private-site permission errors, spec 10.3.3) through the same
+        // handler. Drop the cache borrow first so the handler may re-enter.
+        let pending = cache.take_pending_errors();
+        drop(cache);
+        for error in pending {
+            (self.on_composition_error)(error)?;
+        }
+        match result {
             Ok(val) => Ok(val),
             Err(e) => match e.downcast::<pcp::Error>() {
                 Ok(pcp_err) => {
@@ -1664,6 +1674,40 @@ mod tests {
     }
 
     // --- Basic stage opening (vendor/usd-wg-assets) ---
+
+    /// A direct arc to a `permission = private` site is reported through
+    /// `on_error` during composition, while the prim still composes (spec
+    /// 10.3.3). `/Model` inherits the private `/_PrivateClass` in
+    /// `ErrorPermissionDenied_root`.
+    #[test]
+    fn arc_permission_denied_surfaced() -> Result<()> {
+        use std::rc::Rc;
+
+        let path = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             ErrorPermissionDenied_root/usda/root.usd",
+            manifest_dir()
+        );
+        let collected = Rc::new(RefCell::new(Vec::new()));
+        let sink = collected.clone();
+        let stage = StageBuilder::new()
+            .on_error(move |e| {
+                sink.borrow_mut().push(format!("{e}"));
+                Ok(())
+            })
+            .open(&path)?;
+
+        // Querying /Model composes the private inherit: the error reaches the
+        // handler, and visibility is unchanged (the inherited attr composes).
+        assert!(stage.has_spec("/Model.attr")?, "private inherit must stay visible");
+        assert!(
+            collected.borrow().iter().any(|m| m.contains("private")),
+            "on_error should have received the permission error, got {:?}",
+            collected.borrow()
+        );
+
+        Ok(())
+    }
 
     /// A single-layer .usda file should load with correct defaultPrim and
     /// root prim list.
