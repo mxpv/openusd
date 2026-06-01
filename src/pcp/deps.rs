@@ -35,7 +35,8 @@ impl Dependencies {
 
     /// Register every `(layer_index, node.path)` site referenced by `index` as
     /// a dependency of `prim_index_path`. Replaces any prior registration for
-    /// the same prim.
+    /// the same prim. A site whose node spans several sublayers registers each
+    /// member layer, so a change to any of them fans out to this prim.
     ///
     /// The implicit "self" edge — a Root node whose path equals the prim's
     /// own path — is skipped to keep the map compact. C++
@@ -55,15 +56,17 @@ impl Dependencies {
             if node.arc == ArcType::Root && node.path == *prim_index_path {
                 continue;
             }
-            let key = (node.layer_index(), node.path.clone());
-            if !seen.insert(key.clone()) {
-                continue;
+            for (layer, _) in node.layers() {
+                let key = (layer, node.path.clone());
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                registered.push(key);
+                self.per_layer[layer]
+                    .entry(node.path.clone())
+                    .or_default()
+                    .push(prim_index_path.clone());
             }
-            registered.push(key);
-            self.per_layer[node.layer_index()]
-                .entry(node.path.clone())
-                .or_default()
-                .push(prim_index_path.clone());
         }
 
         // Ensure the prim's own path is findable on every layer. Without

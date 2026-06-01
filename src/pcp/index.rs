@@ -606,14 +606,24 @@ pub struct PrimIndex {
 }
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
+///
+/// One opinion is yielded per contributing layer of a node's layer stack, so a
+/// per-site node fans out into one opinion per sublayer that authored the
+/// field.
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
-    /// The path queried in the node's layer (the node path with the property
-    /// suffix applied).
+    /// Index of the contributing layer within the node's layer stack.
+    layer: usize,
+    /// The path queried in the contributing layer (the node path with the
+    /// property suffix applied).
     query_path: Cow<'a, Path>,
     /// The authored value at `query_path`.
     value: Cow<'a, Value>,
+    /// Effective time offset of the contributing layer to the root namespace
+    /// (the node's arc offset with the layer's sublayer offset composed on
+    /// top). Used to retime time samples and clip schedules.
+    offset: LayerOffset,
 }
 
 impl PrimIndex {
@@ -1032,6 +1042,7 @@ impl PrimIndex {
                 node,
                 query_path,
                 value,
+                ..
             } = opinion?;
             // A bare `PathVec` (no list-op envelope) is treated as an explicit
             // replacement of weaker opinions — the natural interpretation for
@@ -1100,20 +1111,32 @@ impl PrimIndex {
         stack: &'a LayerStack,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
-        self.nodes().filter_map(move |node| {
+        // Each node fans out into one opinion per contributing layer in its
+        // layer stack, strongest sublayer first, so a per-site node surfaces
+        // every sublayer that authored the field.
+        //
+        // TODO(perf): collecting per node allocates a small Vec; a custom
+        // iterator over (node, layer) pairs would avoid it on the hot path.
+        self.nodes().flat_map(move |node| {
             let query_path = match Self::query_path(node, prop_suffix) {
                 Ok(path) => path,
-                Err(err) => return Some(Err(err)),
+                Err(err) => return vec![Err(err)],
             };
-            match stack.layer(node.layer_index()).try_get(&query_path, field) {
-                Ok(Some(value)) => Some(Ok(Opinion {
-                    node,
-                    query_path,
-                    value,
-                })),
-                Ok(None) => None,
-                Err(err) => Some(Err(err)),
+            let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
+            for (layer, offset) in node.layers() {
+                match stack.layer(layer).try_get(&query_path, field) {
+                    Ok(Some(value)) => out.push(Ok(Opinion {
+                        node,
+                        layer,
+                        query_path: query_path.clone(),
+                        value,
+                        offset,
+                    })),
+                    Ok(None) => {}
+                    Err(err) => out.push(Err(err)),
+                }
             }
+            out
         })
     }
 
@@ -1174,9 +1197,9 @@ impl PrimIndex {
         self.time_samples_in(stack, prop_suffix, Some(local_layers))
     }
 
-    /// Shared `timeSamples` walk. When `local_layers` is `Some`, nodes whose
-    /// layer is outside that set are skipped so only root-layer-stack opinions
-    /// contribute.
+    /// Shared `timeSamples` walk. When `local_layers` is `Some`, opinions
+    /// whose contributing layer is outside that set are skipped so only
+    /// root-layer-stack opinions contribute.
     fn time_samples_in(
         &self,
         stack: &LayerStack,
@@ -1185,14 +1208,16 @@ impl PrimIndex {
     ) -> Result<Option<sdf::TimeSampleMap>> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
-            let Opinion { node, value, .. } = opinion?;
-            if local_layers.is_some_and(|local| !local.contains(&node.layer_index())) {
+            let Opinion {
+                layer, value, offset, ..
+            } = opinion?;
+            if local_layers.is_some_and(|local| !local.contains(&layer)) {
                 continue;
             }
             match value.into_owned() {
                 Value::ValueBlock => return Ok(None),
                 Value::TimeSamples(samples) => {
-                    return Ok(Some(retime_samples(samples, node.map_to_root.time_offset())));
+                    return Ok(Some(retime_samples(samples, offset)));
                 }
                 _ => continue,
             }
@@ -1251,59 +1276,60 @@ impl PrimIndex {
         let mut explicit_sets: HashSet<String> = HashSet::new();
         let mut template_offsets: HashMap<String, LayerOffset> = HashMap::new();
 
-        for node in self.nodes() {
-            let Some(value) = stack
-                .layer(node.layer_index())
-                .try_get(&node.path, FieldKey::Clips.as_str())?
-            else {
-                continue;
-            };
-            match value.into_owned() {
-                Value::ValueBlock => break,
-                Value::Dictionary(dict) => {
-                    for (set_name, set_value) in dict {
-                        if blocked_sets.contains(&set_name) {
-                            continue;
-                        }
-                        let Value::Dictionary(fields) = set_value else {
-                            if !sets.contains_key(&set_name) {
-                                blocked_sets.insert(set_name);
-                            }
-                            continue;
-                        };
-                        let composed = sets.entry(set_name.clone()).or_default();
-                        for (field, value) in fields {
-                            if composed.contains_key(&field) {
+        // Each node fans out into its contributing layers, strongest first; a
+        // value block on any layer stops every weaker opinion (spec 12.3.4).
+        'opinions: for node in self.nodes() {
+            for (layer, offset) in node.layers() {
+                let Some(value) = stack.layer(layer).try_get(&node.path, FieldKey::Clips.as_str())? else {
+                    continue;
+                };
+                match value.into_owned() {
+                    Value::ValueBlock => break 'opinions,
+                    Value::Dictionary(dict) => {
+                        for (set_name, set_value) in dict {
+                            if blocked_sets.contains(&set_name) {
                                 continue;
                             }
-                            let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
-                                retime_clip_stage_times(value, node.map_to_root.time_offset())
-                            } else {
-                                value
-                            };
-                            // Relative clip asset paths anchor on the layer that
-                            // authored them. Explicit `assetPaths` win over a
-                            // template in parse_one, so they always set the
-                            // anchor, while `templateAssetPath` only sets it when
-                            // no explicit `assetPaths` has been composed — else a
-                            // weaker template layer would mis-anchor the explicit
-                            // paths the stronger layer authored.
-                            if field == clip::keys::ASSET_PATHS {
-                                asset_layers.insert(set_name.clone(), node.layer_index());
-                                explicit_sets.insert(set_name.clone());
-                            } else if field == clip::keys::TEMPLATE_ASSET_PATH {
-                                if !explicit_sets.contains(&set_name) {
-                                    asset_layers.insert(set_name.clone(), node.layer_index());
+                            let Value::Dictionary(fields) = set_value else {
+                                if !sets.contains_key(&set_name) {
+                                    blocked_sets.insert(set_name);
                                 }
-                                template_offsets.insert(set_name.clone(), node.map_to_root.time_offset());
-                            } else if field == clip::keys::MANIFEST_ASSET_PATH {
-                                manifest_layers.insert(set_name.clone(), node.layer_index());
+                                continue;
+                            };
+                            let composed = sets.entry(set_name.clone()).or_default();
+                            for (field, value) in fields {
+                                if composed.contains_key(&field) {
+                                    continue;
+                                }
+                                let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
+                                    retime_clip_stage_times(value, offset)
+                                } else {
+                                    value
+                                };
+                                // Relative clip asset paths anchor on the layer that
+                                // authored them. Explicit `assetPaths` win over a
+                                // template in parse_one, so they always set the
+                                // anchor, while `templateAssetPath` only sets it when
+                                // no explicit `assetPaths` has been composed — else a
+                                // weaker template layer would mis-anchor the explicit
+                                // paths the stronger layer authored.
+                                if field == clip::keys::ASSET_PATHS {
+                                    asset_layers.insert(set_name.clone(), layer);
+                                    explicit_sets.insert(set_name.clone());
+                                } else if field == clip::keys::TEMPLATE_ASSET_PATH {
+                                    if !explicit_sets.contains(&set_name) {
+                                        asset_layers.insert(set_name.clone(), layer);
+                                    }
+                                    template_offsets.insert(set_name.clone(), offset);
+                                } else if field == clip::keys::MANIFEST_ASSET_PATH {
+                                    manifest_layers.insert(set_name.clone(), layer);
+                                }
+                                composed.insert(field, value);
                             }
-                            composed.insert(field, value);
                         }
                     }
+                    _ => continue,
                 }
-                _ => continue,
             }
         }
 
