@@ -14,7 +14,7 @@ fn reads_spatial_audio_from_fixture() -> Result<()> {
     let a = read_spatial_audio(&stage, &sdf::path("/World/Ambient")?)?.expect("SpatialAudio");
     assert_eq!(a.file_path.as_deref(), Some("./ambient.wav"));
     assert_eq!(a.aural_mode, AuralMode::NonSpatial);
-    assert_eq!(a.playback_mode, PlaybackMode::OnStart);
+    assert_eq!(a.playback_mode, PlaybackMode::LoopFromStart);
     assert_eq!(a.media_offset, 2.5);
     assert_eq!(a.gain, 0.5);
     // Unauthored timecode fields fall back to the spec default.

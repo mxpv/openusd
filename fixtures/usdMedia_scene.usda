@@ -13,7 +13,7 @@ def Xform "World"
     {
         uniform asset filePath = @./ambient.wav@
         uniform token auralMode = "nonSpatial"
-        uniform token playbackMode = "onStart"
+        uniform token playbackMode = "loopFromStart"
         uniform double mediaOffset = 2.5
         double gain = 0.5
     }

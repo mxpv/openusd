@@ -29,37 +29,41 @@ impl AuralMode {
     }
 }
 
-/// `playbackMode` — when the audio plays relative to the prim's
-/// visibility / the stage's animation.
+/// `playbackMode` — how/when the audio plays relative to the stage's
+/// `startTimeCode` / `endTimeCode` (spec `UsdMediaSpatialAudio`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackMode {
-    /// Play once when the prim first becomes visible (the spec default).
+    /// Play once, starting at `startTime` (the spec default).
     #[default]
-    OnceImageVisible,
-    /// Play once when the prim first becomes inactive.
-    OnceImageInactive,
-    /// Play once at the stage's start time.
-    OnStart,
-    /// Do not play (`none`).
-    NoPlayback,
+    OnceFromStart,
+    /// Play once, from `startTime` to `endTime`.
+    OnceFromStartToEnd,
+    /// Loop, starting at `startTime`.
+    LoopFromStart,
+    /// Loop, between `startTime` and `endTime`.
+    LoopFromStartToEnd,
+    /// Loop over the whole stage playback range.
+    LoopFromStage,
 }
 
 impl PlaybackMode {
     pub fn as_token(self) -> &'static str {
         match self {
-            PlaybackMode::OnceImageVisible => PLAYBACK_ONCE_IMAGE_VISIBLE,
-            PlaybackMode::OnceImageInactive => PLAYBACK_ONCE_IMAGE_INACTIVE,
-            PlaybackMode::OnStart => PLAYBACK_ON_START,
-            PlaybackMode::NoPlayback => PLAYBACK_NONE,
+            PlaybackMode::OnceFromStart => PLAYBACK_ONCE_FROM_START,
+            PlaybackMode::OnceFromStartToEnd => PLAYBACK_ONCE_FROM_START_TO_END,
+            PlaybackMode::LoopFromStart => PLAYBACK_LOOP_FROM_START,
+            PlaybackMode::LoopFromStartToEnd => PLAYBACK_LOOP_FROM_START_TO_END,
+            PlaybackMode::LoopFromStage => PLAYBACK_LOOP_FROM_STAGE,
         }
     }
 
     pub fn from_token(s: &str) -> Option<Self> {
         Some(match s {
-            PLAYBACK_ONCE_IMAGE_VISIBLE => PlaybackMode::OnceImageVisible,
-            PLAYBACK_ONCE_IMAGE_INACTIVE => PlaybackMode::OnceImageInactive,
-            PLAYBACK_ON_START => PlaybackMode::OnStart,
-            PLAYBACK_NONE => PlaybackMode::NoPlayback,
+            PLAYBACK_ONCE_FROM_START => PlaybackMode::OnceFromStart,
+            PLAYBACK_ONCE_FROM_START_TO_END => PlaybackMode::OnceFromStartToEnd,
+            PLAYBACK_LOOP_FROM_START => PlaybackMode::LoopFromStart,
+            PLAYBACK_LOOP_FROM_START_TO_END => PlaybackMode::LoopFromStartToEnd,
+            PLAYBACK_LOOP_FROM_STAGE => PlaybackMode::LoopFromStage,
             _ => return None,
         })
     }
@@ -76,7 +80,7 @@ pub struct ReadSpatialAudio {
     pub file_path: Option<String>,
     /// `auralMode` (default `spatial`).
     pub aural_mode: AuralMode,
-    /// `playbackMode` (default `onceImageVisible`).
+    /// `playbackMode` (default `onceFromStart`).
     pub playback_mode: PlaybackMode,
     /// `startTime` - media start in stage time (default `0`).
     pub start_time: f64,
@@ -93,7 +97,7 @@ impl Default for ReadSpatialAudio {
         Self {
             file_path: None,
             aural_mode: AuralMode::Spatial,
-            playback_mode: PlaybackMode::OnceImageVisible,
+            playback_mode: PlaybackMode::OnceFromStart,
             start_time: 0.0,
             end_time: 0.0,
             media_offset: 0.0,
