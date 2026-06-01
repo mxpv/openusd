@@ -50,7 +50,8 @@ pub struct ReadFieldAsset {
     pub field_index: Option<i32>,
     /// `fieldDataType` - the field's data type token.
     pub field_data_type: Option<String>,
-    /// `vectorDataRoleHint` (default `None`).
+    /// `vectorDataRoleHint` - defaults to the token `None`
+    /// ([`VectorDataRoleHint::NoRole`], not `Option::None`).
     pub vector_data_role_hint: VectorDataRoleHint,
 }
 

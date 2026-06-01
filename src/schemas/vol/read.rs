@@ -87,7 +87,8 @@ fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> 
 fn read_int(stage: &Stage, prim: &Path, name: &str) -> Result<Option<i32>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Int(i)) => Some(i),
-        Some(Value::Int64(i)) => Some(i as i32),
+        // Checked narrow so an out-of-range Int64 doesn't silently wrap.
+        Some(Value::Int64(i)) => i32::try_from(i).ok(),
         _ => None,
     })
 }
