@@ -325,6 +325,13 @@ impl PrimIndex {
         self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
     }
 
+    /// Iterates `(handle, node)` pairs in strength order. Used by the subtree
+    /// graft, which needs each node's [`NodeId`] to rebuild parent links.
+    pub(crate) fn nodes_with_ids(&self) -> impl Iterator<Item = (NodeId, &Node)> + '_ {
+        let nodes = &self.graph.nodes;
+        self.graph.strength_order.iter().map(move |&id| (id, &nodes[id.idx()]))
+    }
+
     /// Returns the node arena in insertion (structural) order, indexed by
     /// [`NodeId`]. Use [`nodes`](Self::nodes) for strength-ordered resolution.
     pub(crate) fn arena(&self) -> &[Node] {
@@ -1527,23 +1534,45 @@ impl<'a> IndexBuilder<'a> {
         } else {
             target.clone()
         };
-        for node in target_index.nodes() {
-            if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                // Each node maps from its own path to the parent's composed path.
-                // Preserve the target node's internal time composition by
-                // concatenating `arc_offset` with its own `map_to_root` offset.
-                let composed_offset = arc_offset.concatenate(&node.map_to_root.time_offset());
-                let node_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone())
-                    .with_time_offset(composed_offset);
-                self.output.add_child(
-                    parent,
-                    node.layer_index,
-                    node.path.clone(),
-                    arc,
-                    node_map,
-                    self.in_specialize,
-                );
+
+        // Graft the target's composed subtree, preserving its internal
+        // parent/child links. A target root re-parents under `parent`, mapping
+        // the target namespace onto the inheriting prim with the arc's offset;
+        // each internal node keeps its own `map_to_parent` and hangs under its
+        // grafted parent, so `map_to_root` composes down the real chain. Nodes
+        // already contributed elsewhere are skipped (dedup); a node orphaned by
+        // a skipped ancestor falls back to attaching directly under `parent`
+        // with the flattened mapping.
+        let mut remap: Vec<Option<NodeId>> = vec![None; target_index.arena().len()];
+        for (tid, node) in target_index.nodes_with_ids() {
+            if !self.seen.insert((node.layer_index, node.path.clone(), arc)) {
+                continue;
             }
+            let grafted_parent = node.parent().and_then(|tp| remap[tp.idx()]);
+            let (struct_parent, node_map) = match grafted_parent {
+                Some(grafted) => (grafted, node.map_to_parent.clone()),
+                None => {
+                    // Target root or orphan: map straight to the parent's
+                    // composed path, folding the arc offset over the node's own
+                    // internal time composition.
+                    let composed_offset = arc_offset.concatenate(&node.map_to_root.time_offset());
+                    let flat_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone())
+                        .with_time_offset(composed_offset);
+                    (parent, flat_map)
+                }
+            };
+            let new_id = self.output.add_child(
+                struct_parent,
+                node.layer_index,
+                node.path.clone(),
+                arc,
+                node_map,
+                self.in_specialize,
+            );
+            if parent.is_valid() {
+                self.output.nodes[new_id.idx()].origin = Some(parent);
+            }
+            remap[tid.idx()] = Some(new_id);
         }
 
         self.in_specialize = prev_in_specialize;
@@ -2143,6 +2172,41 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// The subtree graft keeps an inherit target's own composition nested: a
+    /// reference brought in by the inherited class hangs under the grafted class
+    /// node, not flattened onto the inheriting prim.
+    #[test]
+    fn graft_preserves_subtree() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Model\" ( inherits = </Class> ) {}\ndef \"Class\" ( references = @base.usd@</Base> ) {}\n",
+        );
+        let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+
+        let index = build(&stack, "/Model");
+        let find = |p: &str| {
+            index
+                .arena()
+                .iter()
+                .position(|n| n.path.as_str() == p)
+                .map(|i| NodeId(i as u32))
+        };
+        let class = find("/Class").expect("inherited /Class node");
+        let base = find("/Base").expect("grafted /Base node from /Class's reference");
+
+        // /Base entered through /Class's own reference, so it must hang under the
+        // grafted /Class node rather than be flattened onto /Model.
+        assert_eq!(
+            index.parent(base),
+            Some(class),
+            "reference subtree preserved under its inherit root"
+        );
+        // Grafted nodes record the inheriting node as their arc origin.
+        assert!(index.node(base).origin().is_some(), "grafted node carries an origin");
         Ok(())
     }
 
