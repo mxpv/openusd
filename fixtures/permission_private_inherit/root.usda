@@ -1,0 +1,25 @@
+#usda 1.0
+
+def "PublicClass"
+{
+    custom double attr = 1
+}
+
+def "PrivateClass" (
+    permission = private
+)
+{
+    custom double attr = 5
+}
+
+def "ViaPublic" (
+    inherits = </PublicClass>
+)
+{
+}
+
+def "ViaPrivate" (
+    inherits = </PrivateClass>
+)
+{
+}
