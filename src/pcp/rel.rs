@@ -575,6 +575,12 @@ impl Relocates {
 
     /// Pushes a Relocate-arc node into the index, mapping `source_path` to
     /// `composed_path`.
+    ///
+    /// TODO: this carries a single `layer_index`, so a relocate source site
+    /// spanning several sublayers loses every member but the strongest. Under
+    /// the per-site node model the relocate node should carry the source's
+    /// full layer stack (route through `add_site_child`); tracked as the
+    /// relocates item in `docs/pcp_remaining_work_plan.md`.
     fn push_relocate_node(index: &mut PrimIndex, layer_index: usize, source_path: &Path, composed_path: &Path) {
         let m = MapFunction::from_pair_identity(source_path.clone(), composed_path.clone());
         index.insert_relocate_node(Node::new(

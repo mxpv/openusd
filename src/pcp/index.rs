@@ -1334,60 +1334,58 @@ impl PrimIndex {
         let mut explicit_sets: HashSet<String> = HashSet::new();
         let mut template_offsets: HashMap<String, LayerOffset> = HashMap::new();
 
-        // Each node fans out into its contributing layers, strongest first; a
-        // value block on any layer stops every weaker opinion (spec 12.3.4).
-        'opinions: for node in self.nodes() {
-            for (layer, offset) in node.layers() {
-                let Some(value) = stack.layer(layer).try_get(&node.path, FieldKey::Clips.as_str())? else {
-                    continue;
-                };
-                match value.into_owned() {
-                    Value::ValueBlock => break 'opinions,
-                    Value::Dictionary(dict) => {
-                        for (set_name, set_value) in dict {
-                            if blocked_sets.contains(&set_name) {
+        // Opinions fan out per contributing sublayer, strongest first; a value
+        // block on any layer stops every weaker opinion (spec 12.3.4).
+        for opinion in self.opinions(FieldKey::Clips.as_str(), stack, None) {
+            let Opinion {
+                layer, value, offset, ..
+            } = opinion?;
+            match value.into_owned() {
+                Value::ValueBlock => break,
+                Value::Dictionary(dict) => {
+                    for (set_name, set_value) in dict {
+                        if blocked_sets.contains(&set_name) {
+                            continue;
+                        }
+                        let Value::Dictionary(fields) = set_value else {
+                            if !sets.contains_key(&set_name) {
+                                blocked_sets.insert(set_name);
+                            }
+                            continue;
+                        };
+                        let composed = sets.entry(set_name.clone()).or_default();
+                        for (field, value) in fields {
+                            if composed.contains_key(&field) {
                                 continue;
                             }
-                            let Value::Dictionary(fields) = set_value else {
-                                if !sets.contains_key(&set_name) {
-                                    blocked_sets.insert(set_name);
-                                }
-                                continue;
+                            let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
+                                retime_clip_stage_times(value, offset)
+                            } else {
+                                value
                             };
-                            let composed = sets.entry(set_name.clone()).or_default();
-                            for (field, value) in fields {
-                                if composed.contains_key(&field) {
-                                    continue;
-                                }
-                                let value = if field == clip::keys::ACTIVE || field == clip::keys::TIMES {
-                                    retime_clip_stage_times(value, offset)
-                                } else {
-                                    value
-                                };
-                                // Relative clip asset paths anchor on the layer that
-                                // authored them. Explicit `assetPaths` win over a
-                                // template in parse_one, so they always set the
-                                // anchor, while `templateAssetPath` only sets it when
-                                // no explicit `assetPaths` has been composed — else a
-                                // weaker template layer would mis-anchor the explicit
-                                // paths the stronger layer authored.
-                                if field == clip::keys::ASSET_PATHS {
+                            // Relative clip asset paths anchor on the layer that
+                            // authored them. Explicit `assetPaths` win over a
+                            // template in parse_one, so they always set the
+                            // anchor, while `templateAssetPath` only sets it when
+                            // no explicit `assetPaths` has been composed — else a
+                            // weaker template layer would mis-anchor the explicit
+                            // paths the stronger layer authored.
+                            if field == clip::keys::ASSET_PATHS {
+                                asset_layers.insert(set_name.clone(), layer);
+                                explicit_sets.insert(set_name.clone());
+                            } else if field == clip::keys::TEMPLATE_ASSET_PATH {
+                                if !explicit_sets.contains(&set_name) {
                                     asset_layers.insert(set_name.clone(), layer);
-                                    explicit_sets.insert(set_name.clone());
-                                } else if field == clip::keys::TEMPLATE_ASSET_PATH {
-                                    if !explicit_sets.contains(&set_name) {
-                                        asset_layers.insert(set_name.clone(), layer);
-                                    }
-                                    template_offsets.insert(set_name.clone(), offset);
-                                } else if field == clip::keys::MANIFEST_ASSET_PATH {
-                                    manifest_layers.insert(set_name.clone(), layer);
                                 }
-                                composed.insert(field, value);
+                                template_offsets.insert(set_name.clone(), offset);
+                            } else if field == clip::keys::MANIFEST_ASSET_PATH {
+                                manifest_layers.insert(set_name.clone(), layer);
                             }
+                            composed.insert(field, value);
                         }
                     }
-                    _ => continue,
                 }
+                _ => continue,
             }
         }
 
@@ -2279,29 +2277,31 @@ impl<'a> IndexBuilder<'a> {
             // referencing site's `outer_stack` so the target's own inherits can
             // propagate implied classes back into the referencing namespace.
             let before = self.output.len();
-            self.eval_site(
-                &source,
-                &target_stack,
-                arc,
-                depth + 1,
-                parent,
-                arc_map.clone(),
-                outer_stack,
-            )?;
-            // The target authored no spec (composition added nothing). Keep a
-            // culled node carrying the target layer stack so an editor and
-            // change tracking still see the arc; it contributes no opinions to
-            // value resolution (C++ `PcpPrimIndex` culling).
-            if self.output.len() == before && !target_stack.is_empty() {
-                let id = self.output.add_site_child(
-                    parent,
-                    target_stack.clone(),
-                    source.clone(),
-                    arc,
-                    arc_map,
-                    self.in_specialize,
-                );
-                self.output.nodes[id.idx()].flags |= NodeFlags::CULLED;
+            self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map, outer_stack)?;
+            // Composition added nothing. Keep a culled node for the members not
+            // already contributed at this site (filtering empties out a target
+            // whose layers were consumed elsewhere, leaving only the genuinely
+            // empty target), so an editor and change tracking still see the arc;
+            // it contributes no opinions to value resolution (C++ culling).
+            if self.output.len() == before {
+                let members: Vec<(usize, LayerOffset)> = target_stack
+                    .iter()
+                    .copied()
+                    .filter(|&(li, _)| self.seen.insert((li, source.clone(), arc)))
+                    .collect();
+                if !members.is_empty() {
+                    let culled_map =
+                        MapFunction::from_pair(source.clone(), context_path.clone()).with_time_offset(arc_offset);
+                    let id = self.output.add_site_child(
+                        parent,
+                        members,
+                        source.clone(),
+                        arc,
+                        culled_map,
+                        self.in_specialize,
+                    );
+                    self.output.nodes[id.idx()].flags |= NodeFlags::CULLED;
+                }
             }
             // Also propagate ancestor arcs within the target layer: the
             // reference target may sit under a prim that itself carries arcs
@@ -2652,10 +2652,51 @@ fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String
     }
 }
 
-/// Composes a list-op field across nodes, returning the flattened list.
+/// Composes a list-op field across nodes' layer stacks, returning the
+/// flattened list.
 ///
-/// Surface backend decode errors to the caller; treat absent fields and
-/// wrong-typed values as "no opinion at this node".
+/// Each node fans out into its contributing sublayers, strongest first.
+/// `decode` turns a raw field value into a `ListOp<T>` (returning `None` for a
+/// wrong-typed value, treated as no opinion); `retime` rewrites each item by
+/// the contributing sublayer's offset (a no-op for offset-free arcs). Backend
+/// decode errors surface to the caller.
+fn compose_list_op_in<T, D, R>(
+    nodes: &[Node],
+    field: &str,
+    layers: &[sdf::Layer],
+    decode: D,
+    mut retime: R,
+) -> Result<Vec<T>>
+where
+    T: Default + Clone + PartialEq,
+    D: Fn(Value) -> Option<ListOp<T>>,
+    R: FnMut(&mut T, LayerOffset),
+{
+    let mut combined: Option<ListOp<T>> = None;
+
+    for node in nodes {
+        for &(layer, sub) in node.layer_stack() {
+            let Some(value) = layers[layer].try_get(&node.path, field)? else {
+                continue;
+            };
+            let Some(mut list_op) = decode(value.into_owned()) else {
+                continue;
+            };
+            if !sub.is_identity() {
+                list_op.iter_mut().for_each(|item| retime(item, sub));
+            }
+            combined = Some(match combined {
+                Some(stronger) => stronger.combined_with(&list_op),
+                None => list_op,
+            });
+        }
+    }
+
+    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+}
+
+/// Composes an offset-free list-op field (inherits, specializes) by decoding
+/// each opinion through `TryInto` and combining across the layer stack.
 fn compose_arc_list_in<T: Default + Clone + PartialEq>(
     nodes: &[Node],
     field: FieldKey,
@@ -2664,110 +2705,43 @@ fn compose_arc_list_in<T: Default + Clone + PartialEq>(
 where
     Value: TryInto<ListOp<T>>,
 {
-    let field = field.as_str();
-    let mut combined: Option<ListOp<T>> = None;
-
-    for node in nodes {
-        for &(layer, _) in node.layer_stack() {
-            let data = &layers[layer];
-            let Some(value) = data.try_get(&node.path, field)? else {
-                continue;
-            };
-            let Ok(list_op) = value.into_owned().try_into() else {
-                continue;
-            };
-            combined = Some(match combined {
-                Some(stronger) => stronger.combined_with(&list_op),
-                None => list_op,
-            });
-        }
-    }
-
-    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+    compose_list_op_in(nodes, field.as_str(), layers, |v| v.try_into().ok(), |_, _| {})
 }
 
-/// Applies `f` to every item across all of a list-op's buckets in place.
-fn map_list_op_items<T: Default + Clone + PartialEq>(op: &mut ListOp<T>, mut f: impl FnMut(&mut T)) {
-    for bucket in [
-        &mut op.explicit_items,
-        &mut op.added_items,
-        &mut op.prepended_items,
-        &mut op.appended_items,
-        &mut op.deleted_items,
-        &mut op.ordered_items,
-    ] {
-        bucket.iter_mut().for_each(&mut f);
-    }
-}
-
-/// Composes the `references` list-op across nodes, folding each authoring
-/// sublayer's offset into its references' layer offsets (C++
-/// `PcpComposeSiteReferences`). A reference brought in by a sublayer with a
-/// non-identity offset retimes its target by that offset, which the per-site
-/// node otherwise carries only per member.
+/// Composes the `references` list-op, folding each authoring sublayer's offset
+/// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
+/// reference brought in by a sublayer with a non-identity offset retimes its
+/// target by that offset, which the per-site node otherwise carries only per
+/// member.
 fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Reference>> {
-    let field = FieldKey::References.as_str();
-    let mut combined: Option<ListOp<Reference>> = None;
-
-    for node in nodes {
-        for &(layer, sub) in node.layer_stack() {
-            let data = &layers[layer];
-            let Some(value) = data.try_get(&node.path, field)? else {
-                continue;
-            };
-            let Ok(mut list_op): Result<ListOp<Reference>, _> = value.into_owned().try_into() else {
-                continue;
-            };
-            if !sub.is_identity() {
-                map_list_op_items(&mut list_op, |r| r.layer_offset = sub.concatenate(&r.layer_offset));
-            }
-            combined = Some(match combined {
-                Some(stronger) => stronger.combined_with(&list_op),
-                None => list_op,
-            });
-        }
-    }
-
-    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+    compose_list_op_in(
+        nodes,
+        FieldKey::References.as_str(),
+        layers,
+        |v| v.try_into().ok(),
+        |r: &mut Reference, sub| r.layer_offset = sub.concatenate(&r.layer_offset),
+    )
 }
 
 /// Collects payloads from nodes, handling both single `Payload` and
 /// `PayloadListOp`. Each authoring sublayer's offset is folded into its
-/// payloads' layer offsets, mirroring [`compose_references_in`]. Surfaces
-/// backend decode errors; skips absent or wrong-typed values.
+/// payloads' layer offsets, mirroring [`compose_references_in`].
 fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payload>> {
-    let mut combined: Option<PayloadListOp> = None;
-
-    for node in nodes {
-        for &(layer, sub) in node.layer_stack() {
-            let data = &layers[layer];
-            let Some(value) = data.try_get(&node.path, FieldKey::Payload.as_str())? else {
-                continue;
-            };
-
-            let mut list_op = match value.into_owned() {
-                Value::Payload(p) => PayloadListOp {
-                    explicit: true,
-                    explicit_items: vec![p],
-                    ..Default::default()
-                },
-                Value::PayloadListOp(op) => op,
-                _ => continue,
-            };
-            if !sub.is_identity() {
-                map_list_op_items(&mut list_op, |p| {
-                    p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default()))
-                });
-            }
-
-            combined = Some(match combined {
-                Some(stronger) => stronger.combined_with(&list_op),
-                None => list_op,
-            });
-        }
-    }
-
-    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+    compose_list_op_in(
+        nodes,
+        FieldKey::Payload.as_str(),
+        layers,
+        |v| match v {
+            Value::Payload(p) => Some(PayloadListOp {
+                explicit: true,
+                explicit_items: vec![p],
+                ..Default::default()
+            }),
+            Value::PayloadListOp(op) => Some(op),
+            _ => None,
+        },
+        |p: &mut Payload, sub| p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default())),
+    )
 }
 
 /// Finds a layer index whose identifier matches `asset_path`.
