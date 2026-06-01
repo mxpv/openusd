@@ -55,12 +55,12 @@ impl Dependencies {
             if node.arc == ArcType::Root && node.path == *prim_index_path {
                 continue;
             }
-            let key = (node.layer_index, node.path.clone());
+            let key = (node.layer_index(), node.path.clone());
             if !seen.insert(key.clone()) {
                 continue;
             }
             registered.push(key);
-            self.per_layer[node.layer_index]
+            self.per_layer[node.layer_index()]
                 .entry(node.path.clone())
                 .or_default()
                 .push(prim_index_path.clone());

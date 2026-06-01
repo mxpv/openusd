@@ -254,11 +254,11 @@ impl Cache {
         };
 
         for node in index.nodes() {
-            if !local_layers.contains(&node.layer_index) {
+            if !local_layers.contains(&node.layer_index()) {
                 continue;
             }
             let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            let Some(value) = self.stack.layer(node.layer_index).try_get(&query_path, field)? else {
+            let Some(value) = self.stack.layer(node.layer_index()).try_get(&query_path, field)? else {
                 continue;
             };
             return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
@@ -645,7 +645,7 @@ impl Cache {
             let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
                 continue;
             };
-            if let Some(found) = probe(self.stack.layer(node.layer_index), &prop_path) {
+            if let Some(found) = probe(self.stack.layer(node.layer_index()), &prop_path) {
                 return Ok(Some(found));
             }
         }
@@ -681,7 +681,7 @@ impl Cache {
             return Ok(None);
         };
         for node in index.nodes() {
-            if let Some(ty) = self.stack.layer(node.layer_index).spec_type(&node.path) {
+            if let Some(ty) = self.stack.layer(node.layer_index()).spec_type(&node.path) {
                 return Ok(Some(ty));
             }
         }
@@ -729,7 +729,7 @@ impl Cache {
     /// composition arc. These are discarded on instance subtrees (spec
     /// 11.3.3). The `local` set is [`Self::local_layers`].
     fn is_local_opinion(node: &Node, local: &HashSet<usize>) -> bool {
-        node.arc == ArcType::Root && local.contains(&node.layer_index)
+        node.arc == ArcType::Root && local.contains(&node.layer_index())
     }
 
     /// Computes the instancing key for an already-built instance index: the
@@ -747,7 +747,7 @@ impl Cache {
                 let offset = node.map_to_root.time_offset();
                 InstanceArc {
                     arc: node.arc as u8,
-                    layer: self.stack.identifier(node.layer_index).to_string(),
+                    layer: self.stack.identifier(node.layer_index()).to_string(),
                     path: node.path.to_string(),
                     offset_bits: offset.offset.to_bits(),
                     scale_bits: offset.scale.to_bits(),
@@ -1203,10 +1203,10 @@ impl Cache {
         // needed.
         let mut nodes_to_scan: Vec<(Path, usize)> = Vec::new();
         for node in parent_index.nodes() {
-            nodes_to_scan.push((node.path.clone(), node.layer_index));
+            nodes_to_scan.push((node.path.clone(), node.layer_index()));
             if let Some(name) = path.name() {
                 if let Ok(child_in_node) = node.path.append_path(name) {
-                    nodes_to_scan.push((child_in_node, node.layer_index));
+                    nodes_to_scan.push((child_in_node, node.layer_index()));
                 }
             }
         }
@@ -1402,7 +1402,7 @@ impl Cache {
             }
             if let Ok(value) = self
                 .stack
-                .layer(node.layer_index)
+                .layer(node.layer_index())
                 .get(&node.path, children_field.as_str())
             {
                 if let Value::TokenVec(names) = value.into_owned() {
