@@ -1408,6 +1408,9 @@ impl<'a> Parser<'a> {
             (Type::Asset, false) => sdf::Value::AssetPath(self.parse_asset_path()?),
             (Type::Asset, true) => sdf::Value::StringVec(self.parse_asset_path_array()?),
 
+            (Type::TimeCode, false) => sdf::Value::TimeCode(self.parse_token()?),
+            (Type::TimeCode, true) => sdf::Value::TimeCodeVec(self.parse_array()?),
+
             (Type::Uchar, false) => sdf::Value::Uchar(self.parse_token()?),
             (Type::Uchar, true) => sdf::Value::UcharVec(self.parse_array()?),
 
@@ -1515,6 +1518,7 @@ impl<'a> Parser<'a> {
             "quath" => Type::Quath,
             "string" | "token" => Type::String,
             "asset" => Type::Asset,
+            "timecode" => Type::TimeCode,
             "dictionary" => Type::Dictionary,
             _ => bail!("Unsupported type: {name}"),
         };
@@ -1849,6 +1853,7 @@ enum Type {
     String,
     Token,
     Asset,
+    TimeCode,
     Matrix2d,
     Matrix3d,
     Matrix4d,
@@ -3125,6 +3130,27 @@ over MfScope "TestOver"
     }
 
     /// Prim metadata `displayName` should be parsed as a string.
+    #[test]
+    fn parse_timecode_attribute() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def "P" {
+    uniform timecode startTime = 24
+    timecode[] beats = [0, 12, 24]
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        assert_eq!(
+            data.get(&sdf::path("/P.startTime").unwrap()).unwrap().get("default"),
+            Some(&sdf::Value::TimeCode(24.0)),
+        );
+        assert_eq!(
+            data.get(&sdf::path("/P.beats").unwrap()).unwrap().get("default"),
+            Some(&sdf::Value::TimeCodeVec(vec![0.0, 12.0, 24.0])),
+        );
+    }
+
     #[test]
     fn parse_prim_display_name() {
         let mut parser = Parser::new(
