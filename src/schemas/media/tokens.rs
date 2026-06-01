@@ -19,7 +19,8 @@ pub const AURAL_SPATIAL: &str = "spatial";
 pub const AURAL_NON_SPATIAL: &str = "nonSpatial";
 
 // ── `playbackMode` token values ─────────────────────────────────────
-pub const PLAYBACK_ONCE_IMAGE_VISIBLE: &str = "onceImageVisible";
-pub const PLAYBACK_ONCE_IMAGE_INACTIVE: &str = "onceImageInactive";
-pub const PLAYBACK_ON_START: &str = "onStart";
-pub const PLAYBACK_NONE: &str = "none";
+pub const PLAYBACK_ONCE_FROM_START: &str = "onceFromStart";
+pub const PLAYBACK_ONCE_FROM_START_TO_END: &str = "onceFromStartToEnd";
+pub const PLAYBACK_LOOP_FROM_START: &str = "loopFromStart";
+pub const PLAYBACK_LOOP_FROM_START_TO_END: &str = "loopFromStartToEnd";
+pub const PLAYBACK_LOOP_FROM_STAGE: &str = "loopFromStage";

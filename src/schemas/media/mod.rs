@@ -36,7 +36,7 @@ mod tests {
         define_spatial_audio(&stage, sdf::path("/World/Audio")?)?
             .set_file_path("./ambient.wav")?
             .set_aural_mode(AuralMode::NonSpatial)?
-            .set_playback_mode(PlaybackMode::OnStart)?
+            .set_playback_mode(PlaybackMode::LoopFromStartToEnd)?
             .set_start_time(24.0)?
             .set_end_time(48.0)?
             .set_media_offset(2.5)?
@@ -45,7 +45,7 @@ mod tests {
         let a = read_spatial_audio(&stage, &sdf::path("/World/Audio")?)?.expect("SpatialAudio");
         assert_eq!(a.file_path.as_deref(), Some("./ambient.wav"));
         assert_eq!(a.aural_mode, AuralMode::NonSpatial);
-        assert_eq!(a.playback_mode, PlaybackMode::OnStart);
+        assert_eq!(a.playback_mode, PlaybackMode::LoopFromStartToEnd);
         assert_eq!(a.start_time, 24.0);
         assert_eq!(a.end_time, 48.0);
         assert_eq!(a.media_offset, 2.5);
@@ -61,6 +61,7 @@ mod tests {
         let a = read_spatial_audio(&stage, &sdf::path("/Audio")?)?.expect("SpatialAudio");
         assert_eq!(a, ReadSpatialAudio::default());
         assert_eq!(a.aural_mode, AuralMode::Spatial);
+        assert_eq!(a.playback_mode, PlaybackMode::OnceFromStart);
         assert_eq!(a.gain, 1.0);
 
         // A non-SpatialAudio prim reads back as None.
