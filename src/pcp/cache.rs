@@ -1485,180 +1485,7 @@ impl Cache {
             }
         }
 
-        // Recover children contributed by inherit/specialize targets that the
-        // composition graph did not capture. See `add_inherited_children`.
-        if matches!(children_field, ChildrenKey::PrimChildren) {
-            self.add_inherited_children(path, &mut result);
-        }
-
         Ok(result)
-    }
-
-    /// Recovers children that the composition graph missed because an inherit
-    /// on a *propagated* node was never followed.
-    ///
-    /// The builder only follows composition arcs at sites it evaluates through
-    /// `eval_site`. A child that exists purely through a parent's inherit (a
-    /// local class hierarchy) is filled in afterward by
-    /// [`Self::propagate_parent_specs`] as a raw spec node, whose own
-    /// `inherits`/`specializes` are never composed — so that node's inherited
-    /// children never enter the index. The deeper cause is implied-class node
-    /// mapping: an implied inherit node maps to the composed class sibling
-    /// rather than to the inheriting prim, so descendant propagation through it
-    /// lands at the wrong path (e.g. a child reachable only in the reference's
-    /// pre-map namespace is never checked).
-    ///
-    /// This pass compensates at child-discovery time by following each node's
-    /// inherit/specialize targets through every ancestor-arc remapping (both
-    /// directions) and pulling their children, recursing through inherit
-    /// chains. Retiring it requires fixing the implied-class mapping in the
-    /// builder so propagated children compose normally — its own effort,
-    /// gated by the `TrickyLocalClassHierarchyWithRelocates` golden.
-    fn add_inherited_children(&self, path: &Path, result: &mut Vec<String>) {
-        let mut visited = Vec::new();
-        self.add_inherited_children_inner(path, result, &mut visited);
-    }
-
-    fn add_inherited_children_inner(&self, path: &Path, result: &mut Vec<String>, visited: &mut Vec<Path>) {
-        if visited.contains(path) {
-            return;
-        }
-        visited.push(path.clone());
-
-        let Some(index) = self.indices.get(path) else {
-            return;
-        };
-
-        let ancestor_arcs = self.collect_ancestor_arcs(path);
-
-        for node in index.nodes() {
-            for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = self.stack.layer(node.layer_index).get(&node.path, field.as_str()) else {
-                    continue;
-                };
-                let Value::PathListOp(list_op) = val.into_owned() else {
-                    continue;
-                };
-                for target in &list_op.flatten() {
-                    let raw = path.make_absolute(target);
-
-                    // Build namespace-remapped variants of the target path.
-                    let mut targets = vec![raw.clone()];
-                    for a in &ancestor_arcs {
-                        if let Some(composed) = a.map.map_source_to_target(&raw) {
-                            if composed != raw && !targets.contains(&composed) {
-                                targets.push(composed);
-                            }
-                        }
-                        if let Some(alt) = a.map.map_target_to_source(&raw) {
-                            if alt != raw && !targets.contains(&alt) {
-                                targets.push(alt);
-                            }
-                        }
-                    }
-
-                    // Add children from inherit targets — check both cached
-                    // entries and raw layer data (for uncached targets).
-                    for tgt in &targets {
-                        if let Some(tgt_index) = self.indices.get(tgt) {
-                            for tgt_node in tgt_index.nodes() {
-                                if let Ok(val) = self
-                                    .stack
-                                    .layer(tgt_node.layer_index)
-                                    .get(&tgt_node.path, ChildrenKey::PrimChildren.as_str())
-                                {
-                                    if let Value::TokenVec(names) = val.into_owned() {
-                                        for name in names {
-                                            if !result.contains(&name) {
-                                                result.push(name);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            self.add_inherited_children_inner(tgt, result, visited);
-                        }
-                        self.find_children_in_layers(tgt, result, &ancestor_arcs, visited);
-                    }
-
-                    for tgt in &targets {
-                        for li in 0..self.stack.len() {
-                            if let Ok(val) = self.stack.layer(li).get(tgt, ChildrenKey::PrimChildren.as_str()) {
-                                if let Value::TokenVec(names) = val.into_owned() {
-                                    for name in names {
-                                        if !result.contains(&name) {
-                                            result.push(name);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Finds children at a path by checking layer data, recursively following
-    /// inherit/specialize chains. Used when the target isn't cached and its
-    /// children come from an inherit chain in the layer data.
-    fn find_children_in_layers(
-        &self,
-        path: &Path,
-        result: &mut Vec<String>,
-        ancestor_arcs: &[&AncestorArc],
-        visited: &mut Vec<Path>,
-    ) {
-        if visited.contains(path) {
-            return;
-        }
-        visited.push(path.clone());
-
-        // Direct children at this path in any layer.
-        for li in 0..self.stack.len() {
-            if let Ok(val) = self.stack.layer(li).get(path, ChildrenKey::PrimChildren.as_str()) {
-                if let Value::TokenVec(names) = val.into_owned() {
-                    for name in names {
-                        if !result.contains(&name) {
-                            result.push(name);
-                        }
-                    }
-                }
-            }
-        }
-
-        // If no direct children found, follow the path's own inherit targets.
-        if result.is_empty() {
-            for li in 0..self.stack.len() {
-                for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                    let Ok(val) = self.stack.layer(li).get(path, field.as_str()) else {
-                        continue;
-                    };
-                    let Value::PathListOp(list_op) = val.into_owned() else {
-                        continue;
-                    };
-                    for inh_target in &list_op.flatten() {
-                        let resolved = path.make_absolute(inh_target);
-                        let mut paths = vec![resolved.clone()];
-                        for a in ancestor_arcs {
-                            if let Some(alt) = a.map.map_source_to_target(&resolved) {
-                                if alt != resolved && !paths.contains(&alt) {
-                                    paths.push(alt);
-                                }
-                            }
-                            if let Some(alt) = a.map.map_target_to_source(&resolved) {
-                                if alt != resolved && !paths.contains(&alt) {
-                                    paths.push(alt);
-                                }
-                            }
-                        }
-                        for p in &paths {
-                            self.find_children_in_layers(p, result, ancestor_arcs, visited);
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1717,6 +1544,27 @@ mod tests {
         // Second lookup is a cache hit; a bogus path resolves to None.
         assert!(cache.clip_layer("./clip.usda", 0)?.is_some());
         assert!(cache.clip_layer("./does_not_exist.usda", 0)?.is_none());
+        Ok(())
+    }
+
+    /// A child reachable only through a chain of local-class inherits composes
+    /// its own inherited grandchildren: `SymArmRig` inherits `_Class_ArmRig`
+    /// (whose `ArmRegion` over inherits `Body/_class_Region`), so
+    /// `SymArmRig/ArmRegion` must expose `Region`. This is the case the deleted
+    /// `add_inherited_children` fallback used to recover.
+    #[test]
+    fn inherited_child_chain_composes() -> Result<()> {
+        let root = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             TrickyLocalClassHierarchyWithRelocates_root/usda/root.usd",
+            manifest_dir()
+        );
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let arm_region = sdf::path("/C_1/ArmsRig/SymArmRig/ArmRegion")?;
+        assert!(
+            cache.prim_children(&arm_region)?.contains(&"Region".to_string()),
+            "deep local-class inherit chain must surface the inherited grandchild"
+        );
         Ok(())
     }
 

@@ -1423,13 +1423,23 @@ impl<'a> IndexBuilder<'a> {
             self.in_specialize = true;
         }
 
-        let paths_to_check: Vec<Path> = self.output[start..]
+        // Capture each inherit/specialize node with the composed path it
+        // contributes to (the prim being built). Implied nodes must map onto
+        // this prim — not the composed class sibling — so that descendant
+        // propagation through them lands on the inheriting prim.
+        let inherited: Vec<(Path, Path)> = self.output[start..]
             .iter()
             .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
-            .map(|n| n.path.clone())
+            .map(|n| {
+                let prim = n
+                    .map_to_root
+                    .map_source_to_target(&n.path)
+                    .unwrap_or_else(|| n.path.clone());
+                (n.path.clone(), prim)
+            })
             .collect();
 
-        for node_path in &paths_to_check {
+        for (node_path, prim) in &inherited {
             for (idx, mapping) in self.ctx.ancestor_arcs.iter().enumerate() {
                 let Some(remapped) = mapping.map.map_source_to_target(node_path) else {
                     continue;
@@ -1452,7 +1462,7 @@ impl<'a> IndexBuilder<'a> {
                             Some(grafted) => (grafted, node.map_to_parent.clone()),
                             None => (
                                 NodeId::INVALID,
-                                MapFunction::from_pair_identity(node.path.clone(), remapped.clone()),
+                                MapFunction::from_pair_identity(node.path.clone(), prim.clone()),
                             ),
                         };
                         let new_id = self.output.add_child(
@@ -1468,7 +1478,7 @@ impl<'a> IndexBuilder<'a> {
                     }
                 } else {
                     // Fallback: check individual layers for direct specs.
-                    let implied_map = MapFunction::from_pair_identity(node_path.clone(), remapped.clone());
+                    let implied_map = MapFunction::from_pair_identity(remapped.clone(), prim.clone());
                     for li in 0..self.stack.len() {
                         if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
                             let new_id = self.output.add_child(
@@ -1496,10 +1506,15 @@ impl<'a> IndexBuilder<'a> {
                     if self.stack.layer(li).has_spec(&other_remapped)
                         && self.seen.insert((li, other_remapped.clone(), arc))
                     {
-                        let other_map = MapFunction::from_pair_identity(node_path.clone(), other_remapped.clone());
-                        let new_id =
-                            self.output
-                                .add_child(origin, li, other_remapped, arc, other_map, self.in_specialize);
+                        let other_map = MapFunction::from_pair_identity(other_remapped.clone(), prim.clone());
+                        let new_id = self.output.add_child(
+                            NodeId::INVALID,
+                            li,
+                            other_remapped,
+                            arc,
+                            other_map,
+                            self.in_specialize,
+                        );
                         self.output.mark_implied(new_id, origin);
                     }
                 }
