@@ -150,7 +150,7 @@ use crate::sdf::{self, AbstractData, Path, Value};
 pub(crate) use cache::Cache;
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
-pub use index::{ArcType, Node, NodeIndex, PrimIndex};
+pub use index::{ArcType, Node, NodeId, PrimIndex};
 pub use mapping::MapFunction;
 
 /// Maps variant set names to ordered lists of fallback selections.

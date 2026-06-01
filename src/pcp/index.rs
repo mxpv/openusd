@@ -47,11 +47,11 @@ pub enum ArcType {
 ///
 /// A lightweight handle identifying a single [`Node`] within a
 /// [`PrimIndex`]'s composition graph. The sentinel value [`INVALID`](Self::INVALID)
-/// represents "no node" (analogous to C++ `_invalidNodeIndex`).
+/// represents "no node" (analogous to C++ `_invalidNodeId`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeIndex(u32);
+pub struct NodeId(u32);
 
-impl NodeIndex {
+impl NodeId {
     /// Sentinel: no node.
     pub const INVALID: Self = Self(u32::MAX);
 
@@ -94,7 +94,7 @@ pub struct Node {
 /// Arena-based composition graph.
 ///
 /// Stores [`Node`]s in a flat `Vec` where links between nodes are encoded
-/// as [`NodeIndex`] values. Nodes are ordered strongest-to-weakest by
+/// as [`NodeId`] values. Nodes are ordered strongest-to-weakest by
 /// insertion order (matching the LIVRPS evaluation sequence).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PrimIndexGraph {
@@ -118,19 +118,19 @@ impl PrimIndexGraph {
     /// (strongest to weakest).
     fn add_child(
         &mut self,
-        parent: NodeIndex,
+        parent: NodeId,
         layer_index: usize,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
         introduced_by_specialize: bool,
-    ) -> NodeIndex {
+    ) -> NodeId {
         let map_to_root = if parent.is_valid() {
             self.nodes[parent.idx()].map_to_root.compose(&map_to_parent)
         } else {
             map_to_parent.clone()
         };
-        let idx = NodeIndex(self.nodes.len() as u32);
+        let idx = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node {
             layer_index,
             path,
@@ -895,7 +895,7 @@ impl<'a> IndexBuilder<'a> {
                 &root_stack,
                 ArcType::Root,
                 0,
-                NodeIndex::INVALID,
+                NodeId::INVALID,
                 MapFunction::identity(),
             )?;
         }
@@ -925,7 +925,7 @@ impl<'a> IndexBuilder<'a> {
                 // Pass IDENTITY for the per-layer sublayer offset so the
                 // L-loop doesn't compose the sublayer offset a second time.
                 let layer_entry = [(*li, LayerOffset::IDENTITY)];
-                self.eval_site(rpath, &layer_entry, *arc, 0, NodeIndex::INVALID, map.clone())?;
+                self.eval_site(rpath, &layer_entry, *arc, 0, NodeId::INVALID, map.clone())?;
             }
         }
 
@@ -979,7 +979,7 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
-                    let base_node = NodeIndex(idx as u32);
+                    let base_node = NodeId(idx as u32);
                     let base_prim_path = self.output[idx].path.clone();
 
                     // Propagate specialize context from base node for global weakness.
@@ -1048,7 +1048,7 @@ impl<'a> IndexBuilder<'a> {
         layer_stack: &[(usize, LayerOffset)],
         arc: ArcType,
         depth: usize,
-        parent: NodeIndex,
+        parent: NodeId,
         map_to_parent: MapFunction,
     ) -> Result<(), Error> {
         if depth > MAX_COMPOSITION_DEPTH {
@@ -1089,7 +1089,7 @@ impl<'a> IndexBuilder<'a> {
         layer_stack: &[(usize, LayerOffset)],
         arc: ArcType,
         depth: usize,
-        parent: NodeIndex,
+        parent: NodeId,
         map_to_parent: MapFunction,
     ) -> Result<(), Error> {
         let site_start = self.output.len();
@@ -1098,7 +1098,7 @@ impl<'a> IndexBuilder<'a> {
         // The first L node becomes the "site representative" — parent for
         // subsequent arcs discovered at this site.
         let base_time_offset = map_to_parent.time_offset();
-        let mut site_node = NodeIndex::INVALID;
+        let mut site_node = NodeId::INVALID;
         for &(i, sub_offset) in layer_stack {
             if self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
                 // Compose the per-layer sublayer offset atop the arc's own
@@ -1195,7 +1195,7 @@ impl<'a> IndexBuilder<'a> {
     /// uses the cached index if available (giving full LIVRPS evaluation
     /// matching C++ PCP's `EvalImpliedClasses`), otherwise falls back to
     /// direct layer spec lookups.
-    fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeIndex) {
+    fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeId) {
         if self.ctx.ancestor_arcs.is_empty() {
             return;
         }
@@ -1227,7 +1227,7 @@ impl<'a> IndexBuilder<'a> {
                         if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
                             let implied_map = MapFunction::from_pair_identity(node.path.clone(), remapped.clone());
                             self.output.add_child(
-                                NodeIndex::INVALID,
+                                NodeId::INVALID,
                                 node.layer_index,
                                 node.path.clone(),
                                 arc,
@@ -1242,7 +1242,7 @@ impl<'a> IndexBuilder<'a> {
                     for li in 0..self.stack.len() {
                         if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
                             self.output.add_child(
-                                NodeIndex::INVALID,
+                                NodeId::INVALID,
                                 li,
                                 remapped.clone(),
                                 arc,
@@ -1301,7 +1301,7 @@ impl<'a> IndexBuilder<'a> {
         &mut self,
         target: &Path,
         arc: ArcType,
-        parent: NodeIndex,
+        parent: NodeId,
         arc_offset: LayerOffset,
     ) -> Result<(), Error> {
         // Track specialize context for global weakness (spec 10.4.1).
@@ -1373,7 +1373,7 @@ impl<'a> IndexBuilder<'a> {
 
     /// Adds variant nodes for `variant_path` across all layers. Returns
     /// the index range of newly added nodes.
-    fn add_variant_nodes(&mut self, variant_path: &Path, base: &Path, parent: NodeIndex) -> (usize, usize) {
+    fn add_variant_nodes(&mut self, variant_path: &Path, base: &Path, parent: NodeId) -> (usize, usize) {
         let start = self.output.len();
         let variant_map = MapFunction::from_pair_identity(variant_path.clone(), base.clone());
         for (i, layer) in self.stack.layers.iter().enumerate() {
@@ -1393,7 +1393,7 @@ impl<'a> IndexBuilder<'a> {
 
     /// Resolve variant selections iteratively, handling nested variant sets
     /// and variant sets on inherited classes.
-    fn eval_variants(&mut self, site_start: usize, parent: NodeIndex) {
+    fn eval_variants(&mut self, site_start: usize, parent: NodeId) {
         let mut processed = HashSet::new();
         loop {
             let current_end = self.output.len();
@@ -1445,7 +1445,7 @@ impl<'a> IndexBuilder<'a> {
         arc: ArcType,
         context_path: &Path,
         depth: usize,
-        parent: NodeIndex,
+        parent: NodeId,
         arc_offset: LayerOffset,
     ) -> Result<(), Error> {
         if asset_path.is_empty() {
