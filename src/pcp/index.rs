@@ -143,9 +143,8 @@ impl Node {
     /// Builds a standalone node with no structural links.
     ///
     /// Callers that append through [`PrimIndexGraph::add_child`] have their
-    /// `parent`/`children` populated by the builder; direct
-    /// [`PrimIndex::push_node`] users (relocates, implied-spec propagation)
-    /// start parentless.
+    /// `parent`/`children` populated by the builder; the relocate inserts and
+    /// grafts set the links explicitly afterward.
     pub(crate) fn new(
         layer_index: usize,
         path: Path,
@@ -432,6 +431,11 @@ impl PrimIndex {
     }
 
     /// Appends a node to the end of the composition graph, weakest in strength.
+    ///
+    /// Test-only scaffolding for assembling synthetic indices; production
+    /// composition appends through [`PrimIndexGraph::add_child`] or the
+    /// relocate grafts so structural links are populated.
+    #[cfg(test)]
     pub(crate) fn push_node(&mut self, node: Node) {
         let id = NodeId(self.graph.nodes.len() as u32);
         self.graph.nodes.push(node);
@@ -1580,8 +1584,8 @@ impl<'a> IndexBuilder<'a> {
         }
 
         if !self.target_indices.contains_key(target) {
-            // Prefer the composition cache — it has the fully-composed result
-            // including propagate_parent_specs.
+            // Prefer the composition cache — it holds the fully-composed result,
+            // including any children propagated through ancestor arcs.
             if let Some(cached) = self.cached_indices.get(target) {
                 self.target_indices.insert(target.clone(), cached.clone());
             } else {
