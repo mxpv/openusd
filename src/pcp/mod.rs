@@ -46,7 +46,7 @@
 //! |------|---------------|-------------|
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
-//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
+//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition tree: an arena-backed, single-rooted tree of [`Node`]s with parent/child and origin links, plus a strength-order projection. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
@@ -135,6 +135,99 @@
 //! Property-tier authoring (attribute values, time samples, relationship
 //! targets) never invalidates the prim graph: those queries read live
 //! layer data on every call.
+//!
+//! # Remaining work
+//!
+//! The engine covers LIVRPS, value resolution, relocates, variants,
+//! instancing, value clips, and surgical invalidation. The sections below
+//! document the known gaps and current limits.
+//!
+//! ## Permissions (`permission = private`)
+//!
+//! A *direct* arc (a reference/inherit/payload/specialize authored at the prim)
+//! to a private target is denied: its node subtree is marked
+//! [`NodeFlags::PERMISSION_DENIED`] so it stops contributing to value
+//! resolution while staying visible structurally, and the denial is reported as
+//! [`Error::ArcPermissionDenied`] (C++ `_AddArc` + `_InertSubtree`). Two pieces
+//! are still missing:
+//!
+//! - Descendant propagation. The inerting in `Cache::ensure_index` marks only
+//!   the arc's subtree *within the prim's own index*. A private target's
+//!   children that compose as separate descendant prims — where the arc is
+//!   *extended* to the descendant rather than authored there, so the per-prim
+//!   detector does not match it — are not inerted. The fix is to carry the
+//!   denial down the lazy per-prim builds, e.g. on the `CompositionContext`.
+//! - Connection / relationship-target validity. A connection or
+//!   relationship target pointing at a site private relative to where the
+//!   target is authored is invalid and must be dropped (C++
+//!   `_EnforcePermissions` plus connection/target validation). This needs a
+//!   value-resolution surface for target validity and is its own multi-commit
+//!   effort. `NodeFlags::PERMISSION_PRIVATE` / `RESTRICTED` are reserved for it.
+//!
+//! ## Ordered prim children — relocates during the fold
+//!
+//! Child names fold weakest-to-strongest with `primOrder` reapplied per layer
+//! (mirroring C++ `PcpComposeSiteChildNames`). Relocates are still applied once
+//! *after* the fold rather than per layer stack *during* it, so a scene that
+//! combines multi-sublayer `primOrder` with relocates can order children
+//! differently from C++. Folding relocates into the per-node merge is the
+//! remaining piece, intertwined with the relocates-in-build work below.
+//!
+//! ## Relocates composed during the build
+//!
+//! Relocate nodes are grafted *after* the build and spliced into the finalized
+//! strength projection (`Cache` → `Relocates`, `splice_relocate`), bypassing
+//! the DFS and the strength comparator. A unified model would compose relocates
+//! *during* the build so the DFS orders them like any other arc and the splice
+//! can be deleted. This is intertwined with relocate source-resolution in the
+//! `rel` module and is a multi-commit effort; the relocate compliance tests are
+//! the guard. No observable change is intended.
+//!
+//! ## Structural specializes
+//!
+//! Specializes global weakness (spec 10.4.1) is realized in the *projection*:
+//! `finalize_strength_order` appends specialize-flagged nodes as a globally-weak
+//! band, and `compute_specialize_chain_depths` recovers each node's chain
+//! position with a per-path-maximum heuristic. The *tree* still nests specialize
+//! subtrees where they were composed; C++ `_EvalImpliedSpecializes` physically
+//! copies them to be children of the root. Re-parenting specialize subtree roots
+//! to the synthetic root on the final index would let the plain DFS place them
+//! at the weak end (dropping the projection's specialize partition) and let the
+//! chain depth be read straight from the parent chain (dropping the heuristic).
+//! The catch: the cache hands out a stored index as a graft source, so
+//! re-parenting it in place would flatten nesting downstream — this needs care
+//! to apply only to indices that will not be grafted. No observable change is
+//! intended.
+//!
+//! ## Compliance coverage against the reference `pcp.txt` dumps
+//!
+//! The vendor composition suite ships a `pcp.txt` baseline per asset
+//! (`vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/*/`)
+//! that records the fully composed result — prim stack, property stacks, child
+//! names, variant selections, and reported errors. Today the integration suite
+//! checks prim/property/child *existence* through the `Stage`, and only a
+//! handful of `pcp::index` tests assert exact node order against these dumps.
+//! A harness that parses every `pcp.txt` and diffs the composed prim stack /
+//! property stack / child-name order / variant selections against it would turn
+//! these baselines into a systematic compliance gate, catching ordering,
+//! permission, and strength regressions the existence checks miss.
+//!
+//! ## Lower-priority / opportunistic
+//!
+//! - Cross-prim parallelism. `Cache::ensure_index` composes prims one at a
+//!   time; each build is a pure function of `&LayerStack`, the parent context,
+//!   and the cached indices, so sibling prims could compose in parallel (see
+//!   the `TODO(rayon)`). The blocker is the shared `indices` map that
+//!   inherit/specialize targets read mid-build — it needs a concurrent map or a
+//!   targets-first build order. The [`PrimIndex`] is already `Send + Sync`;
+//!   keep it so.
+//! - Materialize empty inherit / specialize / variant targets as culled nodes.
+//!   Only empty external reference/payload targets are materialized today; an
+//!   editor that wants those class/variant arcs visible would need the same
+//!   treatment for them.
+//! - Finer-grained change classification. `Changes::did_change` collapses the
+//!   prim and spec tiers into the significant tier (drop the index and every
+//!   descendant). A finer split would rebuild less on a local edit.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

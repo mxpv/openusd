@@ -18,8 +18,8 @@ For a detailed comparison with the C++ reference implementation and current prog
   - [List-edit composition](https://openusd.org/release/glossary.html#usdglossary-listediting) across layers.
   - Per-prim node graph with namespace mapping across composition arcs.
   - Non-destructive namespace remapping via [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates).
+  - Permission restrictions — a direct arc to a `permission = private` prim is reported and its opinions are dropped from value resolution.
   - [Variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html) with string interpolation and built-in functions.
-  - Passes [AOUSD compliance tests](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets).
 - Composed [`Stage`](src/usd/stage.rs)
   - Recursive layer collection with cycle detection and pluggable asset resolution.
   - Lazy per-prim composition with caching, depth-first traversal, and typed field access.
@@ -52,7 +52,7 @@ The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d
 |------|--------|-------|
 | [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark:&nbsp;Passes | 10 tests against JSON baselines |
 | [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark:&nbsp;Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](tests/binary_format.rs) |
-| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | All 276 tests covering text and binary formats, including 20 relocation tests |
+| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | [`tests/composition.rs`](tests/composition.rs) verifies composed prim/property/child existence (text + binary). Exact `pcp.txt` result diffing (strength order, stacks) is not yet covered |
 | [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check:&nbsp;Partial | 8 tests in [`tests/value_resolution.rs`](tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
 | [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark:&nbsp;Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
 
