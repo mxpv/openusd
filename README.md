@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="openusd logo" width="200">
+</p>
+
 # openusd
 
 [![Crates.io Version](https://img.shields.io/crates/v/openusd)](https://crates.io/crates/openusd)
