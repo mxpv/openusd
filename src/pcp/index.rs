@@ -70,6 +70,13 @@ impl NodeId {
     }
 }
 
+impl Default for NodeId {
+    /// The default handle is the [`INVALID`](Self::INVALID) sentinel.
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
 bitflags! {
     /// Per-node composition state, mirroring the booleans carried by C++
     /// `PcpNodeRef`.
@@ -198,6 +205,12 @@ impl Node {
         self.flags
     }
 
+    /// True when this node contributes no opinions and exists only to give the
+    /// composition graph structure (the synthetic tree root).
+    pub fn is_inert(&self) -> bool {
+        self.flags.contains(NodeFlags::INERT)
+    }
+
     /// True when this node was introduced through a specializes arc (directly
     /// or transitively), making it globally weak per spec section 10.4.1.
     pub(crate) fn introduced_by_specialize(&self) -> bool {
@@ -214,10 +227,17 @@ impl Node {
 /// separate projection, `strength_order`, holding the same handles permuted —
 /// value resolution walks it, not the arena. Dereferencing the graph yields
 /// the arena slice for the builder's structural lookups.
+///
+/// `root` is the synthetic, inert tree root created by
+/// [`init_root`](Self::init_root): every otherwise-parentless node attaches
+/// under it, so the graph is a single rooted tree rather than a forest. It is
+/// [`NodeId::INVALID`] for the hand-built test graphs that never call
+/// `init_root`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PrimIndexGraph {
     nodes: Vec<Node>,
     strength_order: Vec<NodeId>,
+    root: NodeId,
 }
 
 impl PrimIndexGraph {
@@ -225,16 +245,43 @@ impl PrimIndexGraph {
         self.nodes.len()
     }
 
-    fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+    /// Creates the synthetic, inert tree root (C++ unified graph root) and
+    /// records it as [`root`](Self::root). Must be the first node, so it takes
+    /// [`NodeId`] 0.
+    ///
+    /// Its identity `map_to_parent`/`map_to_root` make re-parenting an
+    /// otherwise-parentless node under it offset-neutral
+    /// (`identity ∘ child.map_to_parent == child.map_to_parent`), so a former
+    /// forest root keeps the `map_to_root` it had with no parent. The node is
+    /// flagged [`INERT`](NodeFlags::INERT) and skipped by value resolution.
+    fn init_root(&mut self, path: Path) -> NodeId {
+        debug_assert!(self.nodes.is_empty(), "synthetic root must be the first node");
+        let id = NodeId(self.nodes.len() as u32);
+        let depth = path.prim_element_count() as u16;
+        let mut node = Node::new(
+            0,
+            path,
+            ArcType::Root,
+            MapFunction::identity(),
+            MapFunction::identity(),
+            false,
+        );
+        node.namespace_depth = depth;
+        node.flags |= NodeFlags::INERT;
+        self.nodes.push(node);
+        self.strength_order.push(id);
+        self.root = id;
+        id
     }
 
     /// Appends a node to the graph, linking it under `parent`.
     ///
-    /// `parent` identifies the structural parent in the composition graph.
-    /// When valid, `map_to_root` is composed from the parent's `map_to_root`
-    /// and the new node's `map_to_parent`, and the new node is recorded in the
-    /// parent's children. The node is appended to the arena and to the strength
+    /// `parent` identifies the structural parent in the composition graph. An
+    /// [`INVALID`](NodeId::INVALID) `parent` attaches the node under the
+    /// synthetic [`root`](Self::root) when one exists, keeping the graph a
+    /// single tree; `map_to_root` then composes through that identity-mapped
+    /// root, leaving it equal to `map_to_parent`. The new node is recorded in
+    /// its parent's children, appended to the arena and to the strength
     /// projection (initially in insertion order); the returned handle stays
     /// valid for the life of the index.
     fn add_child(
@@ -246,18 +293,25 @@ impl PrimIndexGraph {
         map_to_parent: MapFunction,
         introduced_by_specialize: bool,
     ) -> NodeId {
-        let map_to_root = if parent.is_valid() {
-            self.nodes[parent.idx()].map_to_root.compose(&map_to_parent)
+        // A caller-supplied `INVALID` parent means "a root site": the arc is
+        // introduced at this prim. Such nodes re-parent under the synthetic
+        // root for structure, but their namespace depth still derives from
+        // their own path (the conceptual parent site), not the synthetic root.
+        let root_site = !parent.is_valid();
+        let struct_parent = if root_site { self.root } else { parent };
+
+        let map_to_root = if struct_parent.is_valid() {
+            self.nodes[struct_parent.idx()].map_to_root.compose(&map_to_parent)
         } else {
             map_to_parent.clone()
         };
         // Namespace depth is the prim-element count of the parent site path at
         // arc introduction (C++ `PcpNode_GetNonVariantPathElementCount`); a
-        // root node uses its own path.
-        let namespace_depth = if parent.is_valid() {
-            self.nodes[parent.idx()].path.prim_element_count()
-        } else {
+        // root site uses its own path.
+        let namespace_depth = if root_site {
             path.prim_element_count()
+        } else {
+            self.nodes[parent.idx()].path.prim_element_count()
         } as u16;
         let idx = NodeId(self.nodes.len() as u32);
         let mut node = Node::new(
@@ -269,9 +323,9 @@ impl PrimIndexGraph {
             introduced_by_specialize,
         );
         node.namespace_depth = namespace_depth;
-        if parent.is_valid() {
-            node.parent = Some(parent);
-            self.nodes[parent.idx()].children.push(idx);
+        if struct_parent.is_valid() {
+            node.parent = Some(struct_parent);
+            self.nodes[struct_parent.idx()].children.push(idx);
         }
         self.nodes.push(node);
         self.strength_order.push(idx);
@@ -422,8 +476,12 @@ struct Opinion<'a> {
 
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
+    ///
+    /// A prim with no opinions still owns the synthetic, inert tree root, so
+    /// emptiness is the absence of any non-inert node rather than an empty
+    /// arena.
     pub fn is_empty(&self) -> bool {
-        self.graph.is_empty()
+        !self.graph.iter().any(|node| !node.is_inert())
     }
 
     /// Returns `true` if any node was introduced by a composition arc.
@@ -439,14 +497,24 @@ impl PrimIndex {
     /// again for another pass rather than collecting.
     pub fn nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
         let nodes = &self.graph.nodes;
-        self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
+        self.graph
+            .strength_order
+            .iter()
+            .map(move |id| &nodes[id.idx()])
+            .filter(|node| !node.is_inert())
     }
 
     /// Iterates `(handle, node)` pairs in strength order. Used by the subtree
-    /// graft, which needs each node's [`NodeId`] to rebuild parent links.
+    /// graft, which needs each node's [`NodeId`] to rebuild parent links. The
+    /// inert synthetic root is skipped, so a grafted target's real roots become
+    /// orphans that re-parent under the destination's own root.
     pub(crate) fn nodes_with_ids(&self) -> impl Iterator<Item = (NodeId, &Node)> + '_ {
         let nodes = &self.graph.nodes;
-        self.graph.strength_order.iter().map(move |&id| (id, &nodes[id.idx()]))
+        self.graph
+            .strength_order
+            .iter()
+            .map(move |&id| (id, &nodes[id.idx()]))
+            .filter(|(_, node)| !node.is_inert())
     }
 
     /// Returns the node arena in insertion (structural) order, indexed by
@@ -457,11 +525,10 @@ impl PrimIndex {
 
     /// Returns the root of the composition tree, or `None` when empty.
     ///
-    /// The root is the first node appended during the build (the strongest
-    /// root-layer-stack opinion, or the first arc-derived node for prims whose
-    /// local opinions are discarded inside an instance).
+    /// The root is the synthetic, inert node created first during the build;
+    /// every contributing node descends from it.
     pub fn root(&self) -> Option<NodeId> {
-        (!self.is_empty()).then_some(NodeId(0))
+        self.graph.root.is_valid().then_some(self.graph.root)
     }
 
     /// Returns the node behind a handle.
@@ -481,13 +548,14 @@ impl PrimIndex {
 
     /// Renders the composition tree for debugging (C++ `PcpPrimIndex::DumpToString`).
     ///
-    /// Walks depth-first from each root, four spaces of indent per depth, with
-    /// children in strength order. Each line carries the arc type, layer index,
-    /// node path, strength rank, and any non-identity time offset, origin, or
-    /// flags. Layers are shown by index (the index owns no layer identifiers);
-    /// the output is deterministic, which makes it a useful structural harness.
-    /// The arena currently composes as a forest (sublayer and implied opinions
-    /// attach as separate roots); the grafts collapse most of it to one tree.
+    /// Walks depth-first from the synthetic root, four spaces of indent per
+    /// depth, with children in strength order. Each line carries the arc type,
+    /// layer index, node path, strength rank, and any non-identity time offset,
+    /// origin, or flags. Layers are shown by index (the index owns no layer
+    /// identifiers); the output is deterministic, which makes it a useful
+    /// structural harness. The graph is a single rooted tree: the inert
+    /// synthetic root is the sole parent-less node, and every contributing node
+    /// descends from it.
     pub fn dump_to_string(&self) -> String {
         use std::fmt::Write as _;
 
@@ -561,6 +629,15 @@ impl PrimIndex {
         node.flags |= NodeFlags::RELOCATE_SOURCE;
         node.namespace_depth = node.path.prim_element_count() as u16;
         let id = NodeId(self.graph.nodes.len() as u32);
+        // Attach under the synthetic root so the graph stays a single tree.
+        // Composing through the identity-mapped root leaves `map_to_root` equal
+        // to the node's own `map_to_parent`.
+        if self.graph.root.is_valid() {
+            let root = self.graph.root;
+            node.map_to_root = self.graph.nodes[root.idx()].map_to_root.compose(&node.map_to_parent);
+            node.parent = Some(root);
+            self.graph.nodes[root.idx()].children.push(id);
+        }
         self.graph.nodes.push(node);
         self.splice_relocate(id);
     }
@@ -579,7 +656,11 @@ impl PrimIndex {
         path: Path,
         map_to_parent: MapFunction,
     ) -> NodeId {
-        let map_to_root = match parent {
+        // A `None` parent is a root site: re-parent under the synthetic root
+        // for structure while taking the namespace depth from the node's own
+        // path (the conceptual parent site).
+        let struct_parent = parent.or_else(|| self.graph.root.is_valid().then_some(self.graph.root));
+        let map_to_root = match struct_parent {
             Some(p) => self.graph.nodes[p.idx()].map_to_root.compose(&map_to_parent),
             None => map_to_parent.clone(),
         };
@@ -591,7 +672,7 @@ impl PrimIndex {
         let mut node = Node::new(layer_index, path, ArcType::Relocate, map_to_parent, map_to_root, false);
         node.flags |= NodeFlags::RELOCATE_SOURCE;
         node.namespace_depth = namespace_depth;
-        if let Some(p) = parent {
+        if let Some(p) = struct_parent {
             node.parent = Some(p);
             self.graph.nodes[p.idx()].children.push(id);
         }
@@ -1311,6 +1392,13 @@ impl<'a> IndexBuilder<'a> {
     /// in is resolved during that recursive build rather than by a separate
     /// re-resolution pass.
     fn build(&mut self, path: &Path) -> Result<(), Error> {
+        // The synthetic, inert tree root owns every otherwise-parentless node,
+        // making the composition graph a single rooted tree. It must exist
+        // before any site is evaluated so the root `L` site, ancestor arcs, and
+        // implied classes attach under it. A prim with no opinions keeps only
+        // this inert root, so `is_empty()` still reports it as empty.
+        self.output.init_root(path.clone());
+
         // A prim inside an instance discards every local opinion (spec 11.3.3):
         // its subtree is composed purely from the arcs the instance brings in,
         // which arrive through ancestor-arc propagation below. Skipping the
@@ -1692,8 +1780,11 @@ impl<'a> IndexBuilder<'a> {
     /// the target brings in resolves during this recursive build rather than
     /// needing a global re-resolution pass.
     fn arc_target_seed_context(&self) -> CompositionContext {
+        // Skip the inert synthetic root: it carries no opinions and a
+        // placeholder layer index, so reading a selection off it would inject a
+        // spurious opinion from an unrelated layer.
         let selections = resolve_variant_selections_in(
-            self.output.iter(),
+            self.output.iter().filter(|n| !n.is_inert()),
             &self.stack.layers,
             &self.ctx.variant_fallbacks,
             &self.ctx.selections,
@@ -1889,9 +1980,11 @@ impl<'a> IndexBuilder<'a> {
         loop {
             let current_end = self.output.len();
             // Gather selections from ALL output nodes (not just this site) so
-            // cross-site selections are visible during the first pass.
+            // cross-site selections are visible during the first pass. The
+            // inert synthetic root carries no opinions and a placeholder layer
+            // index, so it is skipped to avoid reading a spurious selection.
             let selections = resolve_variant_selections_in(
-                self.output[..current_end].iter(),
+                self.output[..current_end].iter().filter(|n| !n.is_inert()),
                 &self.stack.layers,
                 &self.ctx.variant_fallbacks,
                 &self.ctx.selections,
