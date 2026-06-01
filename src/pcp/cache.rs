@@ -1112,47 +1112,28 @@ impl Cache {
 
     /// Returns the composed list of child names for a prim path.
     ///
-    /// Merges the children field across all composition nodes, returning the
-    /// union with strongest-first ordering. When relocates are present,
-    /// source children are hidden and target children are added. Finally,
-    /// the strongest opinion of `primOrder` (if any) is applied to the
-    /// resulting list (see [`sdf::apply_ordering`]).
-    ///
-    /// Composition note: the strongest `primOrder` opinion wins outright,
-    /// matching how single-valued fields like `defaultPrim` compose. C++
-    /// `Pcp` instead folds each layer's order onto the running union as
-    /// nodes merge weakest-to-strongest, which can yield different results
-    /// when multiple sublayers contribute partial orderings.
+    /// Merges `primChildren` across all composition nodes weakest-to-strongest,
+    /// reapplying each layer's `primOrder` as it folds (see
+    /// [`Self::composed_children`]). When relocates are present, source children
+    /// are then hidden and target children added.
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = &self.effective_path(path)?;
-        let mut children = self.composed_children(path, ChildrenKey::PrimChildren)?;
+        let mut children = self.composed_children(path, ChildrenKey::PrimChildren, FieldKey::PrimOrder)?;
 
         if !self.relocates.is_empty() {
             self.apply_relocates_to_children(path, &mut children);
         }
 
-        self.apply_order_field(path, FieldKey::PrimOrder, &mut children)?;
         Ok(children)
     }
 
     /// Returns the composed list of property names for a prim path.
     ///
-    /// Applies the strongest `propertyOrder` opinion to the unioned property
-    /// list. See [`Cache::prim_children`] for the composition-rule caveat.
+    /// Merges `propertyChildren` weakest-to-strongest, reapplying each layer's
+    /// `propertyOrder` as it folds (see [`Self::composed_children`]).
     pub fn prim_properties(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = &self.effective_path(path)?;
-        let mut properties = self.composed_children(path, ChildrenKey::PropertyChildren)?;
-        self.apply_order_field(path, FieldKey::PropertyOrder, &mut properties)?;
-        Ok(properties)
-    }
-
-    /// Apply the strongest opinion of `field` (a `TokenVec`) as a child-list
-    /// ordering. The index for `path` must already be cached.
-    fn apply_order_field(&self, path: &Path, field: FieldKey, items: &mut [String]) -> Result<()> {
-        if let Some(Value::TokenVec(order)) = self.indices[path].resolve_field(field.as_str(), &self.stack, None)? {
-            sdf::apply_ordering(items, &order);
-        }
-        Ok(())
+        self.composed_children(path, ChildrenKey::PropertyChildren, FieldKey::PropertyOrder)
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -1379,15 +1360,31 @@ impl Cache {
         }
     }
 
-    /// Merges a children field (the union, strongest-first) across every node
-    /// in the prim's composition index.
+    /// Composes a children-name field (`primChildren` / `propertyChildren`)
+    /// across the prim's composition index, folding opinions
+    /// weakest-to-strongest and reapplying the order field (`primOrder` /
+    /// `propertyOrder`) after each contributing layer.
+    ///
+    /// This mirrors C++ `PcpComposeSiteChildNames`: nodes are visited weakest
+    /// first (the reverse of strength order), and within each node its
+    /// contributing layers are visited weakest first. Each layer appends its
+    /// not-yet-seen names in authored order — so a name keeps its weakest
+    /// position — and the layer's order opinion then reshuffles the running
+    /// list. Folding the order after every layer, rather than applying only the
+    /// strongest opinion once at the end, is what lets several sublayers
+    /// contribute partial orderings that compose like C++ `Pcp`.
     ///
     /// The recursive build grafts inherit/specialize/reference targets with
     /// their subtrees, so the index nodes already cover class children; this is
     /// a single structural walk with no separate target rediscovery. On an
     /// instance prim, `primChildren` from local opinions are dropped (spec
     /// 11.3.3) so the children come only from the composition arcs.
-    fn composed_children(&mut self, path: &Path, children_field: ChildrenKey) -> Result<Vec<String>> {
+    fn composed_children(
+        &mut self,
+        path: &Path,
+        children_field: ChildrenKey,
+        order_field: FieldKey,
+    ) -> Result<Vec<String>> {
         self.ensure_index(path)?;
 
         // An instance prim's children come only from its composition arcs;
@@ -1404,20 +1401,30 @@ impl Cache {
         let index = &self.indices[path];
         let mut result: Vec<String> = Vec::new();
 
-        for node in index.nodes() {
-            if drop_local && Self::is_local_opinion(node, &local) {
-                continue;
-            }
-            for (layer, _) in node.layers() {
-                if let Ok(value) = self.stack.layer(layer).get(&node.path, children_field.as_str()) {
-                    if let Value::TokenVec(names) = value.into_owned() {
-                        for name in names {
-                            if !result.contains(&name) {
-                                result.push(name);
-                            }
-                        }
+        // Collect (node path, layer) pairs strongest-first, then fold in
+        // reverse so the merge runs weakest-to-strongest. `node.layers()` and
+        // `index.nodes()` are not double-ended, so the pairs are materialized.
+        let sites: Vec<(Path, usize)> = index
+            .nodes()
+            .filter(|node| !(drop_local && Self::is_local_opinion(node, &local)))
+            .flat_map(|node| node.layers().map(move |(layer, _)| (node.path.clone(), layer)))
+            .collect();
+
+        for (node_path, layer) in sites.into_iter().rev() {
+            let layer_data = self.stack.layer(layer);
+            if let Ok(Value::TokenVec(names)) = layer_data
+                .get(&node_path, children_field.as_str())
+                .map(|v| v.into_owned())
+            {
+                for name in names {
+                    if !result.contains(&name) {
+                        result.push(name);
                     }
                 }
+            }
+            if let Ok(Value::TokenVec(order)) = layer_data.get(&node_path, order_field.as_str()).map(|v| v.into_owned())
+            {
+                sdf::apply_ordering(&mut result, &order);
             }
         }
 
@@ -1500,6 +1507,20 @@ mod tests {
             cache.prim_children(&arm_region)?.contains(&"Region".to_string()),
             "deep local-class inherit chain must surface the inherited grandchild"
         );
+        Ok(())
+    }
+
+    /// Child names fold weakest-to-strongest, reapplying each layer's
+    /// `primOrder` as it merges. `sub.usda` (weaker) authors `a b c` reordered
+    /// to `c b a`; `root.usda` (stronger) adds `d` and reorders `a d`. The fold
+    /// yields `[c, b, a, d]` — a strongest-`primOrder`-wins union would instead
+    /// give `[a, d, b, c]`.
+    #[test]
+    fn child_names_fold_weak_to_strong() -> Result<()> {
+        let root = format!("{}/fixtures/child_order_fold/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let children = cache.prim_children(&sdf::path("/P")?)?;
+        assert_eq!(children, vec!["c", "b", "a", "d"]);
         Ok(())
     }
 
