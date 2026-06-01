@@ -5,16 +5,29 @@
 
 def Xform "World"
 {
-    # startTime / endTime (uniform timecode) are exercised by the in-memory
-    # authoring roundtrip test; the USDA parser does not yet accept the
-    # `timecode` attribute type, so they're omitted here (they read back as
-    # the spec default 0).
     def SpatialAudio "Ambient"
     {
         uniform asset filePath = @./ambient.wav@
         uniform token auralMode = "nonSpatial"
         uniform token playbackMode = "loopFromStart"
+        uniform timecode startTime = 24
+        uniform timecode endTime = 48
         uniform double mediaOffset = 2.5
         double gain = 0.5
+    }
+
+    def Xform "Chair" (
+        prepend apiSchemas = ["AssetPreviewsAPI"]
+        assetInfo = {
+            dictionary previews = {
+                dictionary thumbnails = {
+                    dictionary default = {
+                        asset defaultImage = @./chair_thumb.jpg@
+                    }
+                }
+            }
+        }
+    )
+    {
     }
 }

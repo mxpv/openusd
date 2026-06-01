@@ -5,6 +5,16 @@
 // ── Concrete prim type names ────────────────────────────────────────
 pub const T_SPATIAL_AUDIO: &str = "SpatialAudio";
 
+// ── Applied API schema names ────────────────────────────────────────
+pub const API_ASSET_PREVIEWS: &str = "AssetPreviewsAPI";
+
+// ── `assetInfo` thumbnail-preview dictionary keys (AssetPreviewsAPI) ─
+// `assetInfo = { previews = { thumbnails = { default = { asset defaultImage = @…@ } } } }`
+pub const PREVIEWS: &str = "previews";
+pub const THUMBNAILS: &str = "thumbnails";
+pub const PREVIEW_DEFAULT: &str = "default";
+pub const DEFAULT_IMAGE: &str = "defaultImage";
+
 // ── SpatialAudio attribute names ────────────────────────────────────
 pub const A_FILE_PATH: &str = "filePath";
 pub const A_AURAL_MODE: &str = "auralMode";

@@ -16,10 +16,12 @@
 pub mod tokens;
 
 mod author;
+mod previews;
 mod read;
 mod types;
 
 pub use author::{define_spatial_audio, SpatialAudioAuthor};
+pub use previews::{apply_asset_previews, read_default_thumbnail, set_default_thumbnail};
 pub use read::read_spatial_audio;
 pub use types::{AuralMode, PlaybackMode, ReadSpatialAudio};
 
