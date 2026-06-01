@@ -102,6 +102,22 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .chain(&self.added_items)
     }
 
+    /// Returns a mutable iterator over the items in **every** bucket so callers
+    /// can rewrite each item in place (e.g. retiming a reference's layer
+    /// offset). Unlike [`iter`](Self::iter), this includes `deleted_items` and
+    /// `ordered_items` — a rewrite must touch every item or a delete/reorder
+    /// would no longer match its retimed counterpart. Keeps the full set of
+    /// buckets defined in one place.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.explicit_items
+            .iter_mut()
+            .chain(&mut self.added_items)
+            .chain(&mut self.prepended_items)
+            .chain(&mut self.appended_items)
+            .chain(&mut self.deleted_items)
+            .chain(&mut self.ordered_items)
+    }
+
     /// Returns true if this list op has no effect (all fields empty, not explicit).
     pub fn is_empty(&self) -> bool {
         !self.explicit
