@@ -220,16 +220,26 @@ impl MapFunction {
         best
     }
 
-    /// Composes two mappings: applies `inner` first, then `self`.
+    /// Composes two mappings: applies `inner` first, then `self`, so the result
+    /// maps `h(x) = self(inner(x))` (C++ `PcpMapFunction::Compose`).
     ///
-    /// The result maps `inner`'s source namespace directly to `self`'s
-    /// target namespace. Each of `inner`'s target entries is mapped
-    /// through `self` to produce the composed pairs. Pairs whose inner
-    /// target falls outside `self`'s domain are silently dropped.
+    /// True function composition needs both halves:
     ///
-    /// Time offsets compose as well: the outer offset (`self`) is
-    /// concatenated with the deeper offset (`inner`) per the spec retiming
-    /// formula — see [`sdf::LayerOffset::concatenate`].
+    /// 1. Each of `inner`'s pairs `(s, t)` maps to `(s, self(t))` — `inner`'s
+    ///    output range carried through `self`.
+    /// 2. Each of `self`'s pairs `(s, t)` maps to `(inner⁻¹(s), t)` — `self`'s
+    ///    input domain pulled back through `inner`. Without this half a pair
+    ///    of `self` whose source lies *below* `inner`'s targets is lost, which
+    ///    breaks conjugations like the implied-class map.
+    ///
+    /// Pairs whose mapping falls outside the other function's domain are
+    /// dropped. When a source is produced by both halves, the half-1 pair wins
+    /// (a map never sends two targets to one source). Longest-prefix order is
+    /// restored by [`MapFunction::new`].
+    ///
+    /// Time offsets compose too: the outer offset (`self`) is concatenated with
+    /// the deeper offset (`inner`) per the spec retiming formula — see
+    /// [`sdf::LayerOffset::concatenate`].
     pub fn compose(&self, inner: &MapFunction) -> MapFunction {
         // Skip the concat in the overwhelmingly common case where neither
         // side carries a retiming — composition gets called per Node at
@@ -249,12 +259,25 @@ impl MapFunction {
             return self.clone().with_time_offset(time_offset);
         }
 
-        let mut pairs = Vec::new();
+        let mut pairs: Vec<(Path, Path)> = Vec::new();
+
+        // Half 1: inner's output range carried through self.
         for (inner_src, inner_tgt) in inner.path_map.as_slice() {
             if let Some(composed_tgt) = self.map_source_to_target(inner_tgt) {
                 pairs.push((inner_src.clone(), composed_tgt));
             }
         }
+
+        // Half 2: self's input domain pulled back through inner. A source
+        // already produced by half 1 keeps that (stronger) mapping.
+        for (outer_src, outer_tgt) in self.path_map.as_slice() {
+            if let Some(source) = inner.map_target_to_source(outer_src) {
+                if !pairs.iter().any(|(s, _)| *s == source) {
+                    pairs.push((source, outer_tgt.clone()));
+                }
+            }
+        }
+
         MapFunction::new(pairs).with_time_offset(time_offset)
     }
 
@@ -373,6 +396,20 @@ mod tests {
         let composed = f2.compose(&f1);
         assert_eq!(composed.map_source_to_target(&p("/A")), Some(p("/C")));
         assert_eq!(composed.map_source_to_target(&p("/A/D")), Some(p("/C/D")));
+    }
+
+    #[test]
+    fn compose_includes_outer_domain_below_inner() {
+        // Half 2 of composition: `self` has a pair whose source lies below
+        // `inner`'s target range. `self ∘ inner` must map /A/X -> /Y (inner
+        // sends /A -> /B, then self sends /B/X -> /Y). The simplified
+        // composition dropped this; the general one pulls the outer domain
+        // back through inner.
+        let inner = MapFunction::from_pair(p("/A"), p("/B"));
+        let outer = MapFunction::from_pair(p("/B/X"), p("/Y"));
+        let composed = outer.compose(&inner);
+        assert_eq!(composed.map_source_to_target(&p("/A/X")), Some(p("/Y")));
+        assert_eq!(composed.map_source_to_target(&p("/A/X/leaf")), Some(p("/Y/leaf")));
     }
 
     #[test]
