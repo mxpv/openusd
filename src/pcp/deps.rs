@@ -52,7 +52,9 @@ impl Dependencies {
         // entry (the order is irrelevant to lookups but helps debug).
         let mut seen: HashSet<(usize, Path)> = HashSet::new();
         let mut registered: Vec<(usize, Path)> = Vec::new();
-        for node in index.nodes() {
+        // Include culled arc nodes (empty targets): authoring a spec at such a
+        // site must invalidate this prim so the node un-culls on recomposition.
+        for node in index.all_nodes() {
             if node.arc == ArcType::Root && node.path == *prim_index_path {
                 continue;
             }

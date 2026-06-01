@@ -256,6 +256,14 @@ impl Node {
         self.flags.contains(NodeFlags::INERT)
     }
 
+    /// True when this node is retained for composition structure (so an editor
+    /// or change tracking can see its arc) but contributes no opinions to value
+    /// resolution. Set on an arc whose target site authors no spec (C++
+    /// `PcpPrimIndex` culling).
+    pub fn is_culled(&self) -> bool {
+        self.flags.contains(NodeFlags::CULLED)
+    }
+
     /// True when this node was introduced through a specializes arc (directly
     /// or transitively), making it globally weak per spec section 10.4.1.
     pub(crate) fn introduced_by_specialize(&self) -> bool {
@@ -664,25 +672,40 @@ struct Opinion<'a> {
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     ///
-    /// A prim with no opinions still owns the synthetic, inert tree root, so
-    /// emptiness is the absence of any non-inert node rather than an empty
-    /// arena.
+    /// A prim with no opinions still owns the synthetic, inert tree root, and
+    /// may own culled arc nodes kept only for structure, so emptiness is the
+    /// absence of any node that contributes to value resolution.
     pub fn is_empty(&self) -> bool {
-        !self.graph.iter().any(|node| !node.is_inert())
+        !self.graph.iter().any(|node| !node.is_inert() && !node.is_culled())
     }
 
-    /// Returns `true` if any node was introduced by a composition arc.
+    /// Returns `true` if any node that contributes opinions was introduced by a
+    /// composition arc. Culled arc nodes (empty targets) do not count: they add
+    /// no shared content, so a prim that only references an empty target is not
+    /// treated as composed for instancing.
     pub(crate) fn has_composition_arc(&self) -> bool {
-        self.arena().iter().any(|node| node.arc != ArcType::Root)
+        self.arena()
+            .iter()
+            .any(|node| node.arc != ArcType::Root && !node.is_culled())
     }
 
     /// Iterates the nodes in strength order (strongest first).
     ///
     /// This is the order value resolution uses: it walks the strength-order
     /// projection, so specializes appear last (spec 10.4.1) regardless of where
-    /// they sit in the arena. The iterator is cheap and re-creatable; call it
+    /// they sit in the arena. Inert and culled nodes are skipped — they
+    /// contribute no opinions. The iterator is cheap and re-creatable; call it
     /// again for another pass rather than collecting.
     pub fn nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+        self.all_nodes().filter(|node| !node.is_culled())
+    }
+
+    /// Iterates every retained node in strength order, including culled arc
+    /// nodes (an arc whose target authors no spec). Skips only the inert
+    /// synthetic root. Used for composition introspection and change tracking,
+    /// where the full arc structure matters even where it contributes no
+    /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
+    pub fn all_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
         let nodes = &self.graph.nodes;
         self.graph
             .strength_order
@@ -2255,7 +2278,31 @@ impl<'a> IndexBuilder<'a> {
             // (layer, path) to appear under different arc types. Pass the
             // referencing site's `outer_stack` so the target's own inherits can
             // propagate implied classes back into the referencing namespace.
-            self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map, outer_stack)?;
+            let before = self.output.len();
+            self.eval_site(
+                &source,
+                &target_stack,
+                arc,
+                depth + 1,
+                parent,
+                arc_map.clone(),
+                outer_stack,
+            )?;
+            // The target authored no spec (composition added nothing). Keep a
+            // culled node carrying the target layer stack so an editor and
+            // change tracking still see the arc; it contributes no opinions to
+            // value resolution (C++ `PcpPrimIndex` culling).
+            if self.output.len() == before && !target_stack.is_empty() {
+                let id = self.output.add_site_child(
+                    parent,
+                    target_stack.clone(),
+                    source.clone(),
+                    arc,
+                    arc_map,
+                    self.in_specialize,
+                );
+                self.output.nodes[id.idx()].flags |= NodeFlags::CULLED;
+            }
             // Also propagate ancestor arcs within the target layer: the
             // reference target may sit under a prim that itself carries arcs
             // (an ancestral reference), so its descendants must reach those.
@@ -2883,6 +2930,33 @@ mod tests {
         let index = build(&stack, "/World/MyPrim");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Reference));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_reference_target_culled() -> Result<()> {
+        // /A references a prim the target layer never defines.
+        let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {\n  custom double x = 1\n}\n");
+        let base = parse_usda("#usda 1.0\ndef \"Other\" {}\n");
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/A");
+
+        // The empty target is retained as a culled node so an editor sees the
+        // arc, but value resolution skips it and the prim is not composed.
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Reference && n.is_culled()),
+            "empty reference target kept as a culled node"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Reference),
+            "culled reference contributes no opinion to resolution"
+        );
+        assert!(
+            !index.has_composition_arc(),
+            "an empty reference does not compose the prim"
+        );
+        assert!(!index.is_empty(), "the prim's own opinions remain");
         Ok(())
     }
 
