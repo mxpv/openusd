@@ -1224,7 +1224,11 @@ impl Cache {
                     continue;
                 };
                 for target in &list_op.flatten() {
-                    let raw = parent.make_absolute(target);
+                    // Anchor a relative inherit/specialize target at the path it
+                    // is authored on (the scanned node's namespace), matching the
+                    // index builder's `path.make_absolute`. Anchoring at the
+                    // composed parent would mis-resolve `../` targets by a level.
+                    let raw = scan_path.make_absolute(target);
                     // Try composed-namespace versions via ancestor arcs.
                     for a in &ancestor_arcs {
                         if let Some(composed) = a.map.map_source_to_target(&raw) {

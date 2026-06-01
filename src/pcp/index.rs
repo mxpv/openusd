@@ -1433,11 +1433,11 @@ impl<'a> IndexBuilder<'a> {
                 LayerOffset::IDENTITY,
                 layer_stack,
             )?;
-            self.add_implied_nodes(before, ArcType::Inherit, site_node);
+            self.add_implied_nodes(before, depth, site_node)?;
             for vt in variant_expanded_targets(path, &resolved) {
                 let before = self.output.len();
                 self.merge_full_index(&vt, ArcType::Inherit, site_node, LayerOffset::IDENTITY, layer_stack)?;
-                self.add_implied_nodes(before, ArcType::Inherit, site_node);
+                self.add_implied_nodes(before, depth, site_node)?;
             }
         }
 
@@ -1512,7 +1512,7 @@ impl<'a> IndexBuilder<'a> {
                 LayerOffset::IDENTITY,
                 layer_stack,
             )?;
-            self.add_implied_nodes(before, ArcType::Specialize, site_node);
+            self.add_implied_nodes(before, depth, site_node)?;
         }
 
         // Cascade implied classes for every class arc in this site's subtree up
@@ -1532,131 +1532,34 @@ impl<'a> IndexBuilder<'a> {
         Ok(())
     }
 
-    /// Propagate implied arcs for inherit/specialize nodes added since `start`.
+    /// Propagate implied classes for inherit/specialize nodes added since
+    /// `start` through this prim's ancestor composition arcs.
     ///
-    /// Remaps through ancestor arc namespace mappings. For each remapped path,
-    /// grafts the cached index's composed subtree if available (giving full
-    /// LIVRPS evaluation matching C++ PCP's `EvalImpliedClasses`), otherwise
-    /// falls back to direct layer spec lookups. Every node added here is tagged
-    /// [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin` set to the
-    /// inherit/specialize node that triggered the propagation.
-    ///
-    /// TODO: this and [`propagate_implied_through_transfer`] are two
-    /// implementations of the same C++ `_EvalImpliedClasses` concept — this one
-    /// remaps through `ctx.ancestor_arcs` (with a direct all-layer fallback),
-    /// the other conjugates a class arc through a reference transfer. Collapse
-    /// them into a single transfer-conjugation mechanism when the implied-class
-    /// path is next revised.
-    fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeId) {
+    /// Each ancestor arc is a transfer the class is conjugated across — the same
+    /// `_EvalImpliedClassTree` mechanism [`propagate_implied_through_transfer`]
+    /// uses for a directly-followed reference, here driven by the arcs
+    /// accumulated from ancestor prims. A class inherited inside an ancestor's
+    /// referenced layer stack must also hold in this build's namespace so its
+    /// opinions there contribute; the implied class is composed against the
+    /// build's ambient layer stack (no flat scan of every loaded layer) and
+    /// tagged [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin`.
+    fn add_implied_nodes(&mut self, start: usize, depth: usize, origin: NodeId) -> Result<(), Error> {
         if self.ctx.ancestor_arcs.is_empty() {
-            return;
+            return Ok(());
         }
-
-        // Track specialize context for global weakness (spec 10.4.1).
-        let prev_in_specialize = self.in_specialize;
-        if arc == ArcType::Specialize {
-            self.in_specialize = true;
-        }
-
-        // Capture each inherit/specialize node with the composed path it
-        // contributes to (the prim being built). Implied nodes must map onto
-        // this prim — not the composed class sibling — so that descendant
-        // propagation through them lands on the inheriting prim.
-        let inherited: Vec<(Path, Path)> = self.output[start..]
+        // Clone the transfers up front so the `&mut self` propagation calls do
+        // not alias the borrow of `self.ctx.ancestor_arcs`.
+        let transfers: Vec<MapFunction> = self
+            .ctx
+            .ancestor_arcs
             .iter()
-            .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
-            .map(|n| {
-                let prim = n
-                    .map_to_root
-                    .map_source_to_target(&n.path)
-                    .unwrap_or_else(|| n.path.clone());
-                (n.path.clone(), prim)
-            })
+            .map(|a| a.map.with_root_identity())
             .collect();
-
-        for (node_path, prim) in &inherited {
-            for (idx, mapping) in self.ctx.ancestor_arcs.iter().enumerate() {
-                let Some(remapped) = mapping.map.map_source_to_target(node_path) else {
-                    continue;
-                };
-                if remapped == *node_path {
-                    continue;
-                }
-
-                // Use cached index for full LIVRPS evaluation when available,
-                // grafting its composed subtree so the implied class keeps its
-                // internal structure (mirroring C++ PCP's `EvalImpliedClasses`).
-                if let Some(cached) = self.cached_indices.get(&remapped) {
-                    let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
-                    for (cid, node) in cached.nodes_with_ids() {
-                        if !self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                            continue;
-                        }
-                        let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
-                        let (struct_parent, node_map) = match grafted_parent {
-                            Some(grafted) => (grafted, node.map_to_parent.clone()),
-                            None => (
-                                NodeId::INVALID,
-                                MapFunction::from_pair_identity(node.path.clone(), prim.clone()),
-                            ),
-                        };
-                        let new_id = self.output.add_child(
-                            struct_parent,
-                            node.layer_index,
-                            node.path.clone(),
-                            arc,
-                            node_map,
-                            self.in_specialize,
-                        );
-                        self.output.mark_implied(new_id, origin);
-                        remap[cid.idx()] = Some(new_id);
-                    }
-                } else {
-                    // Fallback: check individual layers for direct specs.
-                    let implied_map = MapFunction::from_pair_identity(remapped.clone(), prim.clone());
-                    for li in 0..self.stack.len() {
-                        if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
-                            let new_id = self.output.add_child(
-                                NodeId::INVALID,
-                                li,
-                                remapped.clone(),
-                                arc,
-                                implied_map.clone(),
-                                self.in_specialize,
-                            );
-                            self.output.mark_implied(new_id, origin);
-                        }
-                    }
-                }
-
-                // Cross-remap through other ancestor arcs: composed → other source namespace.
-                for (other_idx, other) in self.ctx.ancestor_arcs.iter().enumerate() {
-                    if other_idx == idx {
-                        continue;
-                    }
-                    let Some(other_remapped) = other.map.map_target_to_source(&remapped) else {
-                        continue;
-                    };
-                    let li = other.layer_index;
-                    if self.stack.layer(li).has_spec(&other_remapped)
-                        && self.seen.insert((li, other_remapped.clone(), arc))
-                    {
-                        let other_map = MapFunction::from_pair_identity(other_remapped.clone(), prim.clone());
-                        let new_id = self.output.add_child(
-                            NodeId::INVALID,
-                            li,
-                            other_remapped,
-                            arc,
-                            other_map,
-                            self.in_specialize,
-                        );
-                        self.output.mark_implied(new_id, origin);
-                    }
-                }
-            }
+        let ambient = self.ambient.clone();
+        for transfer in &transfers {
+            self.propagate_implied_through_transfer(start, transfer, &ambient, depth, origin)?;
         }
-
-        self.in_specialize = prev_in_specialize;
+        Ok(())
     }
 
     fn get_sublayer_stack(&self, root_layer: usize) -> Vec<(usize, LayerOffset)> {
@@ -2041,6 +1944,12 @@ impl<'a> IndexBuilder<'a> {
     /// the implied class is composed against `outer_stack` — the referencing
     /// layer stack — so outer opinions on the class contribute. Each implied
     /// node is tagged [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin`.
+    ///
+    /// When `outer_stack` is the stage root layer stack, the fully-composed
+    /// index for the implied class is grafted from `cached_indices` if present,
+    /// so an implied class keeps the deep structure its own ancestral arcs gave
+    /// it (a local-class chain's inherited grandchildren). Otherwise it is
+    /// composed inline against `outer_stack`.
     fn propagate_implied_through_transfer(
         &mut self,
         start: usize,
@@ -2049,6 +1958,8 @@ impl<'a> IndexBuilder<'a> {
         depth: usize,
         origin: NodeId,
     ) -> Result<(), Error> {
+        let outer_is_root = self.ambient_is_root && outer_stack == self.ambient.as_slice();
+
         // Snapshot the class arcs before composing any implied node, since
         // composing appends to `self.output`.
         let class_nodes: Vec<(Path, Path, ArcType)> = self.output[start..]
@@ -2067,6 +1978,59 @@ impl<'a> IndexBuilder<'a> {
             let Some(implied_path) = transfer.map_source_to_target(class_path) else {
                 continue;
             };
+
+            // Skip a node-to-itself arc: if the implied class's site is already
+            // being composed up the call stack, adding it would self-reference.
+            // C++ PCP guards against this in `_AddClassBasedArc`; it surfaces
+            // when an implied inherit propagates through a relocated prim back
+            // onto its own site (bug 69932).
+            if let Some(&(root_layer, _)) = outer_stack.first() {
+                if self.eval_stack.contains(&(root_layer, implied_path.clone())) {
+                    continue;
+                }
+            }
+
+            // Prefer the fully-composed cached index: a stage-prim implied class
+            // at root ambient is composed by the cache (following its own arcs),
+            // and the cache precaches inherit targets so it is available here
+            // regardless of traversal order. Graft its subtree onto the
+            // inheriting prim — a root node maps the class namespace onto
+            // `inheriting_prim`, internal nodes keep their own `map_to_parent`.
+            // `cached_indices` outlives `self`, so its borrow does not block the
+            // `self.output` mutations below.
+            if outer_is_root {
+                if let Some(cached) = self.cached_indices.get(&implied_path) {
+                    let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
+                    for (cid, node) in cached.nodes_with_ids() {
+                        if !self.seen.insert((node.layer_index, node.path.clone(), *arc)) {
+                            continue;
+                        }
+                        let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
+                        let (struct_parent, node_map) = match grafted_parent {
+                            Some(grafted) => (grafted, node.map_to_parent.clone()),
+                            None => (
+                                NodeId::INVALID,
+                                MapFunction::from_pair_identity(node.path.clone(), inheriting_prim.clone()),
+                            ),
+                        };
+                        let new_id = self.output.add_child(
+                            struct_parent,
+                            node.layer_index,
+                            node.path.clone(),
+                            *arc,
+                            node_map,
+                            *arc == ArcType::Specialize,
+                        );
+                        self.output.mark_implied(new_id, origin);
+                        remap[cid.idx()] = Some(new_id);
+                    }
+                    continue;
+                }
+            }
+
+            // Not a cached stage prim (composing within a referenced layer
+            // stack): the class is local to that stack, so compose it inline
+            // against `outer_stack`.
             let before = self.output.len();
             let map = MapFunction::from_pair_identity(implied_path.clone(), inheriting_prim.clone());
             self.eval_site(&implied_path, outer_stack, *arc, depth + 1, NodeId::INVALID, map, &[])?;
