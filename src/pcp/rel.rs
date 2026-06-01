@@ -575,13 +575,13 @@ impl Relocates {
     /// `composed_path`.
     fn push_relocate_node(index: &mut PrimIndex, layer_index: usize, source_path: &Path, composed_path: &Path) {
         let m = MapFunction::from_pair_identity(source_path.clone(), composed_path.clone());
-        index.insert_relocate_node(Node {
+        index.insert_relocate_node(Node::new(
             layer_index,
-            path: source_path.clone(),
-            arc: ArcType::Relocate,
-            map_to_parent: m.clone(),
-            map_to_root: m,
-            introduced_by_specialize: false,
-        });
+            source_path.clone(),
+            ArcType::Relocate,
+            m.clone(),
+            m,
+            false,
+        ));
     }
 }

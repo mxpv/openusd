@@ -193,14 +193,7 @@ mod tests {
         let mut idx = PrimIndex::default();
         for (arc, layer_index, node_path) in nodes {
             let map = MapFunction::from_pair_identity(node_path.clone(), prim_path.clone());
-            idx.push_node(Node {
-                layer_index,
-                path: node_path,
-                arc,
-                map_to_parent: map.clone(),
-                map_to_root: map,
-                introduced_by_specialize: false,
-            });
+            idx.push_node(Node::new(layer_index, node_path, arc, map.clone(), map, false));
         }
         idx
     }

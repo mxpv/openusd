@@ -1291,6 +1291,12 @@ impl Cache {
                 ..Default::default()
             });
 
+        // TODO(rayon): `build_with_cache` is a pure function of `&self.stack`,
+        // `&parent_ctx`, and `&self.indices`, so sibling prims compose
+        // independently and this is the natural per-prim `par_iter` boundary.
+        // The blocker is the shared `self.indices` map that inherit/specialize
+        // targets read mid-build — parallelizing the driver needs a concurrent
+        // map or a topological (targets-first) build order.
         let mut index = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
             Ok(idx) => idx,
             Err(e) => return Err(e.into()),
@@ -1420,14 +1426,14 @@ impl Cache {
             if self.stack.layer(li).has_spec(source) {
                 let map =
                     MapFunction::from_pair_identity(source.clone(), composed.clone()).with_time_offset(time_offset);
-                index.push_node(Node {
-                    layer_index: li,
-                    path: source.clone(),
+                index.push_node(Node::new(
+                    li,
+                    source.clone(),
                     arc,
-                    map_to_parent: map.clone(),
-                    map_to_root: map,
+                    map.clone(),
+                    map,
                     introduced_by_specialize,
-                });
+                ));
             }
         }
     }
@@ -1472,7 +1478,7 @@ impl Cache {
                 child_path,
                 parent_node.arc,
                 parent_node.map_to_root.time_offset(),
-                parent_node.introduced_by_specialize,
+                parent_node.introduced_by_specialize(),
             );
         }
     }
@@ -1542,7 +1548,7 @@ impl Cache {
                             }
                         }
                     }
-                    let specialize = arc == ArcType::Specialize || parent_node.introduced_by_specialize;
+                    let specialize = arc == ArcType::Specialize || parent_node.introduced_by_specialize();
                     for check in &paths_to_check {
                         self.push_implied_nodes(
                             index,
