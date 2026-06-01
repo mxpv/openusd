@@ -268,6 +268,16 @@ impl PrimIndexGraph {
         self.strength_order.push(idx);
         idx
     }
+
+    /// Tags a node as introduced by implied-class propagation, recording the
+    /// originating arc node. Pure metadata: it does not affect resolution.
+    fn mark_implied(&mut self, id: NodeId, origin: NodeId) {
+        let node = &mut self.nodes[id.idx()];
+        node.flags |= NodeFlags::IMPLIED_CLASS;
+        if origin.is_valid() {
+            node.origin = Some(origin);
+        }
+    }
 }
 
 impl std::ops::Deref for PrimIndexGraph {
@@ -1378,9 +1388,11 @@ impl<'a> IndexBuilder<'a> {
     /// Propagate implied arcs for inherit/specialize nodes added since `start`.
     ///
     /// Remaps through ancestor arc namespace mappings. For each remapped path,
-    /// uses the cached index if available (giving full LIVRPS evaluation
-    /// matching C++ PCP's `EvalImpliedClasses`), otherwise falls back to
-    /// direct layer spec lookups.
+    /// grafts the cached index's composed subtree if available (giving full
+    /// LIVRPS evaluation matching C++ PCP's `EvalImpliedClasses`), otherwise
+    /// falls back to direct layer spec lookups. Every node added here is tagged
+    /// [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin` set to the
+    /// inherit/specialize node that triggered the propagation.
     fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeId) {
         if self.ctx.ancestor_arcs.is_empty() {
             return;
@@ -1407,27 +1419,40 @@ impl<'a> IndexBuilder<'a> {
                     continue;
                 }
 
-                // Use cached index for full LIVRPS evaluation when available.
+                // Use cached index for full LIVRPS evaluation when available,
+                // grafting its composed subtree so the implied class keeps its
+                // internal structure (mirroring C++ PCP's `EvalImpliedClasses`).
                 if let Some(cached) = self.cached_indices.get(&remapped) {
-                    for node in cached.nodes() {
-                        if self.seen.insert((node.layer_index, node.path.clone(), arc)) {
-                            let implied_map = MapFunction::from_pair_identity(node.path.clone(), remapped.clone());
-                            self.output.add_child(
-                                NodeId::INVALID,
-                                node.layer_index,
-                                node.path.clone(),
-                                arc,
-                                implied_map,
-                                self.in_specialize,
-                            );
+                    let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
+                    for (cid, node) in cached.nodes_with_ids() {
+                        if !self.seen.insert((node.layer_index, node.path.clone(), arc)) {
+                            continue;
                         }
+                        let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
+                        let (struct_parent, node_map) = match grafted_parent {
+                            Some(grafted) => (grafted, node.map_to_parent.clone()),
+                            None => (
+                                NodeId::INVALID,
+                                MapFunction::from_pair_identity(node.path.clone(), remapped.clone()),
+                            ),
+                        };
+                        let new_id = self.output.add_child(
+                            struct_parent,
+                            node.layer_index,
+                            node.path.clone(),
+                            arc,
+                            node_map,
+                            self.in_specialize,
+                        );
+                        self.output.mark_implied(new_id, origin);
+                        remap[cid.idx()] = Some(new_id);
                     }
                 } else {
                     // Fallback: check individual layers for direct specs.
                     let implied_map = MapFunction::from_pair_identity(node_path.clone(), remapped.clone());
                     for li in 0..self.stack.len() {
                         if self.stack.layer(li).has_spec(&remapped) && self.seen.insert((li, remapped.clone(), arc)) {
-                            self.output.add_child(
+                            let new_id = self.output.add_child(
                                 NodeId::INVALID,
                                 li,
                                 remapped.clone(),
@@ -1435,6 +1460,7 @@ impl<'a> IndexBuilder<'a> {
                                 implied_map.clone(),
                                 self.in_specialize,
                             );
+                            self.output.mark_implied(new_id, origin);
                         }
                     }
                 }
@@ -1452,8 +1478,10 @@ impl<'a> IndexBuilder<'a> {
                         && self.seen.insert((li, other_remapped.clone(), arc))
                     {
                         let other_map = MapFunction::from_pair_identity(node_path.clone(), other_remapped.clone());
-                        self.output
-                            .add_child(origin, li, other_remapped, arc, other_map, self.in_specialize);
+                        let new_id =
+                            self.output
+                                .add_child(origin, li, other_remapped, arc, other_map, self.in_specialize);
+                        self.output.mark_implied(new_id, origin);
                     }
                 }
             }
@@ -2126,6 +2154,34 @@ mod tests {
         let index = build(&stack, "/World/MyPrim");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Reference));
+        Ok(())
+    }
+
+    /// An inherit that remaps through a reference ancestor arc into the
+    /// referencing namespace is added as an implied-class node, flagged
+    /// `IMPLIED_CLASS` with the originating inherit node recorded.
+    #[test]
+    fn implied_class_flagged() -> Result<()> {
+        let root = parse_usda(
+            "#usda 1.0\ndef \"Model\" ( references = @ref.usd@</Ref> ) {\n  over \"Class\" { custom string x = \"rootimplied\" }\n}\n",
+        );
+        let refl = parse_usda(
+            "#usda 1.0\ndef \"Ref\" {\n  def \"Sub\" ( inherits = </Ref/Class> ) {}\n  class \"Class\" { custom string x = \"ref\" }\n}\n",
+        );
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+
+        let index = build(&stack, "/Model/Sub");
+        let implied = index
+            .arena()
+            .iter()
+            .find(|n| n.path.as_str() == "/Model/Class")
+            .expect("implied class node in the referencing namespace");
+        assert!(
+            implied.flags().contains(NodeFlags::IMPLIED_CLASS),
+            "implied class node is flagged"
+        );
+        assert!(implied.origin().is_some(), "implied class records its origin");
         Ok(())
     }
 
