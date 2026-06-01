@@ -304,6 +304,27 @@ impl MapFunction {
             .collect();
         MapFunction::new(pairs)
     }
+
+    /// Builds the implied-class map for propagating a class arc across this
+    /// transfer arc (C++ `PcpMapFunction::ImpliedClass`).
+    ///
+    /// `self` is the transfer function `T` — the map-to-parent of the
+    /// reference/payload (or other arc) the class is being propagated across —
+    /// and `class_arc` is the class arc's own map `C` in the source (referenced)
+    /// namespace. The implied class map in the parent (referencing) namespace is
+    /// the conjugation `T ∘ C ∘ T⁻¹`: it carries the same class relationship
+    /// through the arc so it holds in the parent's namespace, with any
+    /// relocations or offsets in `T` flowing through automatically.
+    ///
+    /// Classes deliberately cross reference encapsulation, so callers pass a `T`
+    /// that carries the `(/, /)` identity catch-all (C++ `AddRootIdentity`) to
+    /// let a class rooted outside the arc's restricted domain still map.
+    pub fn implied_class(&self, class_arc: &MapFunction) -> MapFunction {
+        if self.is_identity() {
+            return class_arc.clone();
+        }
+        self.compose(&class_arc.compose(&self.inverse()))
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +562,31 @@ mod tests {
         let composed = outer.compose(&inner);
         assert_eq!(composed.map_source_to_target(&p("/A")), Some(p("/B")));
         assert_eq!(composed.time_offset(), sdf::LayerOffset::new(50.0, 2.0));
+    }
+
+    #[test]
+    fn implied_class_conjugates_through_transfer() {
+        // The Sullivan example from C++ `_GetImpliedClass`: Sullivan_1
+        // references Sullivan; Sullivan/Rig inherits Sullivan/_class_Rig. The
+        // class arc maps /Sullivan/_class_Rig -> /Sullivan/Rig; the reference
+        // maps /Sullivan -> /Sullivan_1. The implied class on the referencing
+        // side must map /Sullivan_1/_class_Rig -> /Sullivan_1/Rig.
+        let transfer = MapFunction::from_pair_identity(p("/Sullivan"), p("/Sullivan_1"));
+        let class_arc = MapFunction::from_pair_identity(p("/Sullivan/_class_Rig"), p("/Sullivan/Rig"));
+        let implied = transfer.implied_class(&class_arc);
+        assert_eq!(
+            implied.map_source_to_target(&p("/Sullivan_1/_class_Rig")),
+            Some(p("/Sullivan_1/Rig"))
+        );
+    }
+
+    #[test]
+    fn implied_class_identity_transfer_returns_class() {
+        // An identity transfer leaves the class arc unchanged — within the same
+        // layer stack there is nothing to move it across.
+        let class_arc = MapFunction::from_pair_identity(p("/_class_Rig"), p("/Rig"));
+        let implied = MapFunction::identity().implied_class(&class_arc);
+        assert_eq!(implied, class_arc);
     }
 
     #[test]
