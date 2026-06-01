@@ -137,8 +137,10 @@ pub struct Node {
     /// Structural children, in the order they were introduced (strength order
     /// among siblings).
     children: Vec<NodeId>,
-    /// Node that introduced this arc (C++ `GetOriginNode`). `None` until
-    /// implied-class and graft propagation populate it.
+    /// Node that introduced this arc (C++ `GetOriginNode`): the parent for a
+    /// direct arc (set at [`add_child`](PrimIndexGraph::add_child) time), or
+    /// the propagated-from node for an implied class or graft. `None` only for
+    /// the synthetic root, which has no parent.
     origin: Option<NodeId>,
     /// Namespace depth at which the introducing arc was authored. Used by
     /// implied inherits/specializes that propagate toward the root.
@@ -197,7 +199,9 @@ impl Node {
         &self.children
     }
 
-    /// Node that introduced this arc, if known (C++ `GetOriginNode`).
+    /// Node that introduced this arc (C++ `GetOriginNode`): the parent for a
+    /// direct arc, the propagated-from node for an implied class or graft, or
+    /// `None` for the synthetic root.
     pub fn origin(&self) -> Option<NodeId> {
         self.origin
     }
@@ -332,6 +336,10 @@ impl PrimIndexGraph {
         node.namespace_depth = namespace_depth;
         if struct_parent.is_valid() {
             node.parent = Some(struct_parent);
+            // A directly-authored arc's origin is its parent (C++
+            // `GetOriginNode`). Implied-class and graft propagation overwrite
+            // this afterward; setting it here makes `origin` total.
+            node.origin = Some(struct_parent);
             self.nodes[struct_parent.idx()].children.push(idx);
         }
         self.nodes.push(node);
@@ -396,15 +404,16 @@ impl PrimIndexGraph {
             return nb.namespace_depth.cmp(&na.namespace_depth);
         }
 
-        // 3. Origin strength, only when the two origins differ. The origin is
-        // the node an implied arc was propagated from (`origin`); for a
-        // directly-authored arc C++ `GetOriginNode` returns the parent, so two
-        // direct siblings share an origin and fall through to the tiebreak
-        // below. Comparing origins recurses only over strictly-older nodes
-        // (an origin is always created before the node carrying it), so the
+        // 3. Origin strength, only when the two origins differ. `origin` is
+        // total (C++ `GetOriginNode`): the node an implied arc was propagated
+        // from, or the parent for a directly-authored arc, so two direct
+        // siblings share an origin and fall through to the tiebreak below. The
+        // synthetic root is the sole node without an origin; it stands in for
+        // itself. Comparing origins recurses only over strictly-older nodes (an
+        // origin is always created before the node carrying it), so the
         // recursion is well-founded.
-        let oa = na.origin.or(na.parent).unwrap_or(a);
-        let ob = nb.origin.or(nb.parent).unwrap_or(b);
+        let oa = na.origin.unwrap_or(a);
+        let ob = nb.origin.unwrap_or(b);
         if oa != ob {
             let ord = self.compare_node_strength(oa, ob);
             if ord != Ordering::Equal {
@@ -697,8 +706,13 @@ impl PrimIndex {
             if !offset.is_identity() {
                 let _ = write!(out, " offset=({},{})", offset.offset, offset.scale);
             }
+            // Show origin only when it differs from the structural parent —
+            // i.e. for implied classes and grafts. A direct arc always origins
+            // on its parent, so printing it there is redundant noise.
             if let Some(origin) = node.origin {
-                let _ = write!(out, " origin={}", origin.0);
+                if Some(origin) != node.parent {
+                    let _ = write!(out, " origin={}", origin.0);
+                }
             }
             if !node.flags.is_empty() {
                 let _ = write!(out, " {:?}", node.flags);
@@ -743,6 +757,7 @@ impl PrimIndex {
             let root = self.graph.root;
             node.map_to_root = self.graph.nodes[root.idx()].map_to_root.compose(&node.map_to_parent);
             node.parent = Some(root);
+            node.origin = Some(root);
             self.graph.nodes[root.idx()].children.push(id);
         }
         self.graph.nodes.push(node);
@@ -781,6 +796,7 @@ impl PrimIndex {
         node.namespace_depth = namespace_depth;
         if let Some(p) = struct_parent {
             node.parent = Some(p);
+            node.origin = Some(p);
             self.graph.nodes[p.idx()].children.push(id);
         }
         self.graph.nodes.push(node);
