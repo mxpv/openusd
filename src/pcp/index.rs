@@ -541,7 +541,7 @@ impl PrimIndex {
                 return Ok(cached.clone());
             }
         }
-        let mut builder = IndexBuilder::new(stack, ctx, cached_indices, ambient.to_vec());
+        let mut builder = IndexBuilder::new(stack, ctx, cached_indices, ambient.to_vec(), ambient_is_root);
         builder.build(path)?;
         Ok(PrimIndex { graph: builder.output })
     }
@@ -1160,6 +1160,11 @@ struct IndexBuilder<'a> {
     /// prim, or a referenced asset's sublayer stack for an arc target reached
     /// within that reference).
     ambient: Vec<(usize, LayerOffset)>,
+    /// Whether [`ambient`](Self::ambient) is the stage's root layer stack. Lets
+    /// `merge_full_index` decide if an arc target is composed at root ambient
+    /// (where the stage-keyed `cached_indices` apply) without rebuilding the
+    /// root layer stack to compare against.
+    ambient_is_root: bool,
 }
 
 impl<'a> IndexBuilder<'a> {
@@ -1168,6 +1173,7 @@ impl<'a> IndexBuilder<'a> {
         ctx: &'a CompositionContext,
         cached_indices: &'a HashMap<Path, PrimIndex>,
         ambient: Vec<(usize, LayerOffset)>,
+        ambient_is_root: bool,
     ) -> Self {
         Self {
             stack,
@@ -1179,6 +1185,7 @@ impl<'a> IndexBuilder<'a> {
             target_indices: HashMap::new(),
             in_specialize: false,
             ambient,
+            ambient_is_root,
         }
     }
 
@@ -1533,6 +1540,13 @@ impl<'a> IndexBuilder<'a> {
     /// falls back to direct layer spec lookups. Every node added here is tagged
     /// [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin` set to the
     /// inherit/specialize node that triggered the propagation.
+    ///
+    /// TODO: this and [`propagate_implied_through_transfer`] are two
+    /// implementations of the same C++ `_EvalImpliedClasses` concept — this one
+    /// remaps through `ctx.ancestor_arcs` (with a direct all-layer fallback),
+    /// the other conjugates a class arc through a reference transfer. Collapse
+    /// them into a single transfer-conjugation mechanism when the implied-class
+    /// path is next revised.
     fn add_implied_nodes(&mut self, start: usize, arc: ArcType, origin: NodeId) {
         if self.ctx.ancestor_arcs.is_empty() {
             return;
@@ -1740,9 +1754,12 @@ impl<'a> IndexBuilder<'a> {
             self.in_specialize = true;
         }
 
-        // TODO(perf): comparing against a freshly built root layer stack on
-        // every merge is O(layers); thread the flag from the caller instead.
-        let ambient_is_root = ambient == self.stack.root_layer_stack().as_slice();
+        // An arc target is composed at root ambient only when this builder is
+        // itself at root ambient and the merge runs against that same stack
+        // (class arcs and internal references compose within the site's stack).
+        // Comparing against the stored `ambient` avoids rebuilding the root
+        // layer stack on every merge.
+        let ambient_is_root = self.ambient_is_root && ambient == self.ambient.as_slice();
 
         if !self.target_indices.contains_key(target) {
             // Compose the target within `ambient` using the ancestral context of
