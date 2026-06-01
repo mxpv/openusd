@@ -3129,7 +3129,7 @@ over MfScope "TestOver"
         );
     }
 
-    /// Prim metadata `displayName` should be parsed as a string.
+    /// `timecode` / `timecode[]` attributes parse to `Value::TimeCode(Vec)`.
     #[test]
     fn parse_timecode_attribute() {
         let mut parser = Parser::new(
@@ -3151,6 +3151,7 @@ def "P" {
         );
     }
 
+    /// Prim metadata `displayName` should be parsed as a string.
     #[test]
     fn parse_prim_display_name() {
         let mut parser = Parser::new(
