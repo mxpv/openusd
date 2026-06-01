@@ -45,7 +45,7 @@
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
-//! | `index` | `PcpPrimIndex` | Per-prim composition graph: arena-based DAG of [`Node`]s with parent/child/sibling and origin links. |
+//! | `index` | `PcpPrimIndex` | Per-prim composition tree: an arena-backed, single-rooted tree of [`Node`]s with parent/child and origin links, plus a strength-order projection. |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
 //! | `rel` | — | [`Relocates`](rel::Relocates): isolated relocate state and logic. Owned by `Cache`, receives external data through parameters. |
@@ -54,13 +54,16 @@
 //!
 //! # Architecture
 //!
-//! Each [`PrimIndex`](index::PrimIndex) is an arena-based graph of [`Node`]s.
-//! Nodes carry two namespace mappings: `map_to_parent` (translates paths to
-//! the parent node's namespace) and `map_to_root` (translates directly to the
-//! root namespace). These [`MapFunction`]s are the foundation for namespace
-//! remapping across composition arcs (including relocates). After
-//! construction, nodes are ordered strongest-to-weakest so value resolution
-//! is a linear scan.
+//! Each [`PrimIndex`](index::PrimIndex) is an arena-backed, single-rooted tree
+//! of [`Node`]s: a synthetic, inert root owns every otherwise-parentless node,
+//! so the graph is one tree rather than a forest. Nodes carry two namespace
+//! mappings: `map_to_parent` (translates paths to the parent node's namespace)
+//! and `map_to_root` (translates directly to the root namespace). These
+//! [`MapFunction`]s are the foundation for namespace remapping across
+//! composition arcs (including relocates). After construction, a separate
+//! projection orders the nodes strongest-to-weakest — a pre-order DFS of
+//! strength-ordered children followed by the globally-weak specializes band —
+//! so value resolution is a linear scan.
 //!
 //! Composition is driven by a [`CompositionContext`](index::CompositionContext)
 //! that flows from parent prims to children. The context carries:
