@@ -1455,8 +1455,9 @@ struct IndexBuilder<'a> {
     /// targets. Avoids rebuilding the same target within a single prim's composition.
     target_indices: HashMap<Path, PrimIndex>,
     /// True when evaluation is within a specializes arc context.
-    /// All nodes created while true are marked for global weakness
-    /// reordering per spec section 10.4.1.
+    /// All nodes created while true are flagged `HAS_SPECIALIZES`, which the
+    /// strength comparator uses to place them in the globally-weak band per
+    /// spec section 10.4.1.
     in_specialize: bool,
     /// Layer stack the root `L` site scans (the root layer stack for a stage
     /// prim, or a referenced asset's sublayer stack for an arc target reached
