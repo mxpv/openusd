@@ -327,6 +327,24 @@ impl Path {
         }
     }
 
+    /// Counts the prim-name components of this path, skipping variant
+    /// selections (C++ `PcpNode_GetNonVariantPathElementCount`).
+    ///
+    /// This is the namespace depth used to compare composition-node strength:
+    /// a `{set=sel}` segment is part of the same prim, so it does not deepen
+    /// the count.
+    ///
+    /// ```text
+    /// "/A{x=y}/B" -> 2
+    /// "/A/B"      -> 2
+    /// "/"         -> 0
+    /// ```
+    pub fn prim_element_count(&self) -> usize {
+        self.components()
+            .filter(|c| matches!(c, PathComponent::Prim(_)))
+            .count()
+    }
+
     /// Returns this path with every `{set=sel}` variant segment removed.
     ///
     /// Equivalent to C++ `SdfPath::StripAllVariantSelections`. Both trailing
@@ -625,6 +643,14 @@ impl From<String> for Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prim_element_count() {
+        assert_eq!(Path::new("/A/B").unwrap().prim_element_count(), 2);
+        assert_eq!(Path::new("/A{x=y}/B").unwrap().prim_element_count(), 2);
+        assert_eq!(Path::new("/A{x=y}").unwrap().prim_element_count(), 1);
+        assert_eq!(Path::abs_root().prim_element_count(), 0);
+    }
 
     #[test]
     fn test_append_property() {
