@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
-use super::index::{ArcType, CompositionContext, Node, PrimIndex};
+use super::index::{ArcType, CompositionContext, Node, NodeId, PrimIndex};
 use super::mapping::MapFunction;
 use super::{Error, LayerStack};
 
@@ -163,9 +163,19 @@ impl Relocates {
             return Ok(());
         };
 
-        // Merge source nodes.
-        for node in source_index.nodes() {
-            Self::push_relocate_node(index, node.layer_index, &node.path, composed_path);
+        // Merge source nodes, grafting the source subtree so relocate nodes
+        // keep the source's internal parent/child structure instead of
+        // flattening to a list. A source root maps straight to the composed
+        // path; internal nodes keep their own map-to-parent and compose down.
+        let mut remap: Vec<Option<NodeId>> = vec![None; source_index.arena().len()];
+        for (sid, node) in source_index.nodes_with_ids() {
+            let grafted_parent = node.parent().and_then(|sp| remap[sp.idx()]);
+            let map_to_parent = match grafted_parent {
+                Some(_) => node.map_to_parent.clone(),
+                None => MapFunction::from_pair_identity(node.path.clone(), composed_path.clone()),
+            };
+            let new_id = index.graft_relocate_node(grafted_parent, node.layer_index, node.path.clone(), map_to_parent);
+            remap[sid.idx()] = Some(new_id);
         }
 
         // Check the source parent's composition arcs for additional child
@@ -224,7 +234,7 @@ impl Relocates {
         // the source index built from the relocate chain.
         let first = index.nodes().next().map(|n| (n.layer_index, n.path.clone()));
         if let Some((first_li, first_path)) = first {
-            let mut existing: Vec<(usize, Path)> = index.nodes().map(|n| (n.layer_index, n.path.clone())).collect();
+            let mut existing: HashSet<(usize, Path)> = index.nodes().map(|n| (n.layer_index, n.path.clone())).collect();
             // Find ALL cached prims whose index contains a node at the same
             // (layer, path) as the first relocate node, and merge any
             // additional opinions from all of them.
@@ -236,11 +246,7 @@ impl Relocates {
                     continue;
                 }
                 for extra in cached_index.nodes() {
-                    if !existing
-                        .iter()
-                        .any(|(li, p)| *li == extra.layer_index && *p == extra.path)
-                    {
-                        existing.push((extra.layer_index, extra.path.clone()));
+                    if existing.insert((extra.layer_index, extra.path.clone())) {
                         Self::push_relocate_node(index, extra.layer_index, &extra.path, composed_path);
                     }
                 }
@@ -326,8 +332,7 @@ impl Relocates {
         let Some(cached_index) = indices.get(path) else {
             return;
         };
-        let nodes: Vec<Node> = cached_index.nodes().cloned().collect();
-        for node in &nodes {
+        for node in cached_index.nodes() {
             if let Some(relocates) = self.layer_relocates.get(&node.layer_index) {
                 for (src, tgt) in relocates {
                     // Target child: add if target's parent matches this node's path.

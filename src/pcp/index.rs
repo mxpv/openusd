@@ -379,14 +379,53 @@ impl PrimIndex {
         self.graph.strength_order.push(id);
     }
 
-    /// Inserts a relocate node at the correct LIVERPS strength position.
+    /// Inserts a standalone relocate node at the correct LIVERPS strength
+    /// position.
     ///
-    /// The node is appended to the arena (keeping every handle stable) and its
-    /// handle is spliced into the strength projection before the first node
-    /// weaker than `Relocate` (i.e. `Reference`, `Payload`, or `Specialize`).
-    pub(crate) fn insert_relocate_node(&mut self, node: Node) {
+    /// The node is tagged [`RELOCATE_SOURCE`](NodeFlags::RELOCATE_SOURCE),
+    /// appended to the arena (keeping every handle stable), and its handle is
+    /// spliced into the strength projection before the first node weaker than
+    /// `Relocate` (i.e. `Reference`, `Payload`, or `Specialize`).
+    pub(crate) fn insert_relocate_node(&mut self, mut node: Node) {
+        node.flags |= NodeFlags::RELOCATE_SOURCE;
         let id = NodeId(self.graph.nodes.len() as u32);
         self.graph.nodes.push(node);
+        self.splice_relocate(id);
+    }
+
+    /// Grafts a relocate node under `parent` (or as a root when `None`),
+    /// preserving the source subtree's structure.
+    ///
+    /// `map_to_parent` translates the node's namespace to its grafted parent
+    /// (or straight to the composed path for a root); `map_to_root` composes
+    /// down the grafted chain. The handle is spliced into the relocate strength
+    /// band exactly like [`insert_relocate_node`](Self::insert_relocate_node).
+    pub(crate) fn graft_relocate_node(
+        &mut self,
+        parent: Option<NodeId>,
+        layer_index: usize,
+        path: Path,
+        map_to_parent: MapFunction,
+    ) -> NodeId {
+        let map_to_root = match parent {
+            Some(p) => self.graph.nodes[p.idx()].map_to_root.compose(&map_to_parent),
+            None => map_to_parent.clone(),
+        };
+        let id = NodeId(self.graph.nodes.len() as u32);
+        let mut node = Node::new(layer_index, path, ArcType::Relocate, map_to_parent, map_to_root, false);
+        node.flags |= NodeFlags::RELOCATE_SOURCE;
+        if let Some(p) = parent {
+            node.parent = Some(p);
+            self.graph.nodes[p.idx()].children.push(id);
+        }
+        self.graph.nodes.push(node);
+        self.splice_relocate(id);
+        id
+    }
+
+    /// Splices a just-appended relocate node's handle into the strength
+    /// projection ahead of the first node weaker than `Relocate`.
+    fn splice_relocate(&mut self, id: NodeId) {
         let nodes = &self.graph.nodes;
         let pos = self
             .graph
@@ -2718,6 +2757,15 @@ def "Prim" (
                 ArcType::Specialize,
             ]
         );
+
+        // Relocate nodes are tagged RELOCATE_SOURCE; nothing else is.
+        for node in index.nodes() {
+            assert_eq!(
+                node.flags().contains(NodeFlags::RELOCATE_SOURCE),
+                node.arc == ArcType::Relocate,
+                "only relocate nodes carry RELOCATE_SOURCE"
+            );
+        }
     }
 
     /// Helper: path into the spec supplemental composition test assets.
