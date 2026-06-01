@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, Path, Value};
+use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
 
 use super::index::{ArcType, CompositionContext, Node, NodeId, PrimIndex};
 use super::mapping::MapFunction;
@@ -173,8 +173,12 @@ impl Relocates {
                 Some(_) => node.map_to_parent.clone(),
                 None => MapFunction::from_pair_identity(node.path.clone(), composed_path.clone()),
             };
-            let new_id =
-                index.graft_relocate_node(grafted_parent, node.layer_index(), node.path.clone(), map_to_parent);
+            let new_id = index.graft_relocate_node(
+                grafted_parent,
+                node.layer_stack().to_vec(),
+                node.path.clone(),
+                map_to_parent,
+            );
             remap[sid.idx()] = Some(new_id);
         }
 
@@ -202,11 +206,11 @@ impl Relocates {
                         continue;
                     };
 
-                    // Non-Root arcs: check all layers for child specs.
-                    for li in 0..stack.len() {
-                        if stack.layer(li).has_spec(&child_path) {
-                            Self::push_relocate_node(index, li, &child_path, composed_path);
-                        }
+                    // Non-Root arcs: check all layers for child specs, folding
+                    // every authoring sublayer into one per-site relocate node.
+                    let members = Self::site_layer_stack(&child_path, stack);
+                    if !members.is_empty() {
+                        Self::push_relocate_node(index, members, &child_path, composed_path);
                     }
 
                     // Inherit/Specialize arcs: also build the class child's
@@ -218,7 +222,7 @@ impl Relocates {
                             continue;
                         };
                         for node in class_index.nodes() {
-                            Self::push_relocate_node(index, node.layer_index(), &node.path, composed_path);
+                            Self::push_relocate_node(index, node.layer_stack().to_vec(), &node.path, composed_path);
                         }
                     }
                 }
@@ -247,7 +251,7 @@ impl Relocates {
                 }
                 for extra in cached_index.nodes() {
                     if existing.insert((extra.layer_index(), extra.path.clone())) {
-                        Self::push_relocate_node(index, extra.layer_index(), &extra.path, composed_path);
+                        Self::push_relocate_node(index, extra.layer_stack().to_vec(), &extra.path, composed_path);
                     }
                 }
             }
@@ -295,7 +299,7 @@ impl Relocates {
             return;
         };
         for node in source_index.nodes() {
-            Self::push_relocate_node(index, node.layer_index(), &node.path, composed_path);
+            Self::push_relocate_node(index, node.layer_stack().to_vec(), &node.path, composed_path);
         }
         if source_index.is_empty() {
             if let Some(sp) = source_path.parent() {
@@ -308,10 +312,9 @@ impl Relocates {
                         let Ok(child_path) = pn.path.append_path(sn) else {
                             continue;
                         };
-                        for li in 0..stack.len() {
-                            if stack.layer(li).has_spec(&child_path) {
-                                Self::push_relocate_node(index, li, &child_path, composed_path);
-                            }
+                        let members = Self::site_layer_stack(&child_path, stack);
+                        if !members.is_empty() {
+                            Self::push_relocate_node(index, members, &child_path, composed_path);
                         }
                     }
                 }
@@ -574,22 +577,34 @@ impl Relocates {
     }
 
     /// Pushes a Relocate-arc node into the index, mapping `source_path` to
-    /// `composed_path`.
-    ///
-    /// TODO: this carries a single `layer_index`, so a relocate source site
-    /// spanning several sublayers loses every member but the strongest. Under
-    /// the per-site node model the relocate node should carry the source's
-    /// full layer stack (route through `add_site_child`); tracked as the
-    /// relocates item in `docs/pcp_remaining_work_plan.md`.
-    fn push_relocate_node(index: &mut PrimIndex, layer_index: usize, source_path: &Path, composed_path: &Path) {
+    /// `composed_path`. `layer_stack` lists every `(layer index, sublayer
+    /// offset)` member contributing at the source site, strongest first, so a
+    /// relocate source spanning several sublayers keeps all of them.
+    fn push_relocate_node(
+        index: &mut PrimIndex,
+        layer_stack: Vec<(usize, LayerOffset)>,
+        source_path: &Path,
+        composed_path: &Path,
+    ) {
         let m = MapFunction::from_pair_identity(source_path.clone(), composed_path.clone());
-        index.insert_relocate_node(Node::new(
-            layer_index,
+        index.insert_relocate_node(Node::new_site(
+            layer_stack,
             source_path.clone(),
             ArcType::Relocate,
             m.clone(),
             m,
             false,
         ));
+    }
+
+    /// Collects the layers in the stack that author a spec at `path` as a
+    /// per-site layer stack (strongest first, identity sublayer offsets). The
+    /// scanned layers are the ambient stack's own sublayers, whose offsets are
+    /// already folded into the node's map-to-root, so each member is identity.
+    fn site_layer_stack(path: &Path, stack: &LayerStack) -> Vec<(usize, LayerOffset)> {
+        (0..stack.len())
+            .filter(|&li| stack.layer(li).has_spec(path))
+            .map(|li| (li, LayerOffset::IDENTITY))
+            .collect()
     }
 }

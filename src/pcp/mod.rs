@@ -33,7 +33,9 @@
 //!   layer's namespace mapping.
 //! - When composing a prim that is a relocate target, the cache finds the
 //!   pre-relocation source path, builds a full composition index for it,
-//!   and merges the resulting nodes as `Relocate` arc nodes.
+//!   and merges the resulting nodes as `Relocate` arc nodes. Each grafted
+//!   node carries the source site's full layer stack, so a relocate source
+//!   spanning several sublayers keeps every member, not just the strongest.
 //! - Prim children are adjusted to hide relocated source children and
 //!   expose target children, including children created by relocates
 //!   within referenced layers.

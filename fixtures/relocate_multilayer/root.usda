@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    subLayers = [
+        @./sub.usda@
+    ]
+    relocates = {
+        </World/Src>: </World/Dst>
+    }
+)
+
+def "World"
+{
+    def "Src"
+    {
+        custom double rootOpinion = 1
+    }
+}
