@@ -1,0 +1,26 @@
+#usda 1.0
+(
+    defaultPrim = "Mat"
+)
+
+def Material "Mat"
+{
+    def Shader "Surface" (
+        prepend apiSchemas = ["SceneGraphPrimAPI", "NodeGraphNodeAPI"]
+    )
+    {
+        uniform token ui:displayName = "Surface"
+        uniform token ui:displayGroup = "Shading"
+        uniform float2 ui:nodegraph:node:pos = (12, 34)
+        uniform float2 ui:nodegraph:node:size = (180, 90)
+        uniform int ui:nodegraph:node:stackingOrder = 3
+        uniform color3f ui:nodegraph:node:displayColor = (0.2, 0.4, 0.8)
+        uniform token ui:nodegraph:node:expansionState = "minimized"
+        uniform string ui:nodegraph:node:docURI = "https://example.com/node"
+    }
+
+    def Backdrop "Note"
+    {
+        uniform token ui:description = "lighting nodes"
+    }
+}

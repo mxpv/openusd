@@ -19,6 +19,7 @@
 //! | `lux`     | `lux`     | `UsdLux` reader (8 concrete light prims + LightAPI / ShapingAPI / ShadowAPI / LightListAPI). |
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
 //! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
+//! | `ui`      | `ui`      | `UsdUI` reader + authoring (SceneGraphPrimAPI / NodeGraphNodeAPI / Backdrop). |
 //! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
 //! | `media`   | `media`   | `UsdMedia` reader + authoring (`SpatialAudio`). |
 //!
@@ -33,6 +34,7 @@
     feature = "render",
     feature = "shade",
     feature = "skel",
+    feature = "ui",
     feature = "vol"
 ))]
 mod common;
@@ -51,6 +53,8 @@ pub mod render;
 pub mod shade;
 #[cfg(feature = "skel")]
 pub mod skel;
+#[cfg(feature = "ui")]
+pub mod ui;
 #[cfg(feature = "vol")]
 pub mod vol;
 
