@@ -203,6 +203,14 @@ impl Node {
         self.layer_stack[0].0
     }
 
+    /// The site's contributing layers as stored: `(layer index, sublayer
+    /// offset)` members, strongest first. Used when grafting a node into
+    /// another index, which copies the stack verbatim. Value resolution should
+    /// use [`layers`](Self::layers) instead, which folds in the arc offset.
+    pub(crate) fn layer_stack(&self) -> &[(usize, LayerOffset)] {
+        &self.layer_stack
+    }
+
     /// Iterates the site's contributing layers strongest first, each paired
     /// with its effective time offset to the root namespace: `map_to_root`'s
     /// arc offset with the member's sublayer offset composed on top. Value
@@ -370,6 +378,33 @@ impl PrimIndexGraph {
         }
         self.nodes.push(node);
         idx
+    }
+
+    /// Like [`add_child`](Self::add_child) but for a site spanning several
+    /// sublayers: `layer_stack` lists every contributing `(layer index,
+    /// sublayer offset)`, strongest sublayer first. The first member is the
+    /// site representative; the remaining members are folded into the node's
+    /// layer stack so value resolution reads each sublayer in turn. Panics on
+    /// an empty `layer_stack`.
+    fn add_site_child(
+        &mut self,
+        parent: NodeId,
+        layer_stack: Vec<(usize, LayerOffset)>,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> NodeId {
+        let id = self.add_child(
+            parent,
+            layer_stack[0].0,
+            path,
+            arc,
+            map_to_parent,
+            introduced_by_specialize,
+        );
+        self.nodes[id.idx()].layer_stack = layer_stack;
+        id
     }
 
     /// Tags a node as introduced by implied-class propagation, recording the
@@ -933,7 +968,7 @@ impl PrimIndex {
             }
             ancestor_arcs.push(AncestorArc {
                 map: node.map_to_root.clone(),
-                layer_index: node.layer_index(),
+                layer_stack: node.layer_stack().to_vec(),
                 arc: node.arc,
             });
         }
@@ -1489,8 +1524,9 @@ pub(crate) struct AncestorArc {
     /// Namespace mapping from this arc's source to the composed namespace.
     /// Convention: source is the arc target's namespace, target is composed.
     pub map: MapFunction,
-    /// Layer index where the arc target lives.
-    pub layer_index: usize,
+    /// Layer stack of the arc target site: each `(layer index, sublayer
+    /// offset)` member that a descendant must rescan to find its own site.
+    pub layer_stack: Vec<(usize, LayerOffset)>,
     /// Arc type that introduced this mapping.
     pub arc: ArcType,
 }
@@ -1618,7 +1654,7 @@ impl<'a> IndexBuilder<'a> {
                     // prefix matches the parent will succeed.
                     let parent_in_source = a.map.map_target_to_source(parent.as_ref()?)?;
                     let remapped = parent_in_source.append_path(child_name).ok()?;
-                    Some((remapped, a.layer_index, a.arc, a.map.clone()))
+                    Some((remapped, a.layer_stack.clone(), a.arc, a.map.clone()))
                 })
                 .collect();
             // A class an ancestral arc brings in (e.g. a referenced prim's
@@ -1627,13 +1663,11 @@ impl<'a> IndexBuilder<'a> {
             // the inherited prim references whose implied node sits at the same
             // path but in the ambient (referencing) layer stack.
             let ambient = self.ambient.clone();
-            for (rpath, li, arc, map) in &ancestor_sites {
-                // `map` carries the ancestor node's effective `map_to_root`,
-                // which already includes any sublayer offset applied to `li`.
-                // Pass IDENTITY for the per-layer sublayer offset so the
-                // L-loop doesn't compose the sublayer offset a second time.
-                let layer_entry = [(*li, LayerOffset::IDENTITY)];
-                self.eval_site(rpath, &layer_entry, *arc, 0, NodeId::INVALID, map.clone(), &ambient)?;
+            for (rpath, layer_stack, arc, map) in &ancestor_sites {
+                // `map` carries the ancestor node's arc offset to the root; the
+                // L-loop composes each member's sublayer offset on top, so the
+                // site's whole layer stack must be rescanned at the child path.
+                self.eval_site(rpath, layer_stack, *arc, 0, NodeId::INVALID, map.clone(), &ambient)?;
             }
         }
 
@@ -1710,26 +1744,26 @@ impl<'a> IndexBuilder<'a> {
     ) -> Result<(), Error> {
         let site_start = self.output.len();
 
-        // L — Local opinions: check each layer in the stack for a spec.
-        // The first L node becomes the "site representative" — parent for
-        // subsequent arcs discovered at this site.
-        let base_time_offset = map_to_parent.time_offset();
+        // L — Local opinions: one node for the whole site (C++ `PcpNode` =
+        // (layerStack, path)). Collect every sublayer that authors a spec,
+        // strongest first, pairing each with its sublayer offset; value
+        // resolution folds that offset atop the arc offset per member. The site
+        // node is the representative — parent for subsequent arcs at this site.
+        let members: Vec<(usize, LayerOffset)> = layer_stack
+            .iter()
+            .filter(|&&(i, _)| self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)))
+            .copied()
+            .collect();
         let mut site_node = NodeId::INVALID;
-        for &(i, sub_offset) in layer_stack {
-            if self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)) {
-                // Compose the per-layer sublayer offset atop the arc's own
-                // time offset so this L-node's effective retiming flows through
-                // the usual map_to_root composition at add_child time.
-                let layer_map = map_to_parent
-                    .clone()
-                    .with_time_offset(base_time_offset.concatenate(&sub_offset));
-                let idx = self
-                    .output
-                    .add_child(parent, i, path.clone(), arc, layer_map, self.in_specialize);
-                if !site_node.is_valid() {
-                    site_node = idx;
-                }
-            }
+        if !members.is_empty() {
+            site_node = self.output.add_site_child(
+                parent,
+                members,
+                path.clone(),
+                arc,
+                map_to_parent.clone(),
+                self.in_specialize,
+            );
         }
 
         // I — Inherits: compose InheritPaths. A class arc targets a prim in the
@@ -1777,11 +1811,7 @@ impl<'a> IndexBuilder<'a> {
         let opinion_end = self.output.len();
 
         // R — References.
-        let references = compose_arc_list_in::<Reference>(
-            &self.output[site_start..opinion_end],
-            FieldKey::References,
-            &self.stack.layers,
-        )?;
+        let references = compose_references_in(&self.output[site_start..opinion_end], &self.stack.layers)?;
         for reference in &references {
             self.eval_arc_target(
                 &reference.asset_path,
@@ -2020,7 +2050,16 @@ impl<'a> IndexBuilder<'a> {
         // with the flattened mapping.
         let mut remap: Vec<Option<NodeId>> = vec![None; target_index.arena().len()];
         for (tid, node) in target_index.nodes_with_ids() {
-            if !self.seen.insert((node.layer_index(), node.path.clone(), arc)) {
+            // Keep only the site's members not already contributed at this
+            // (path, arc); a fully-deduped node is skipped, orphaning its
+            // children onto `parent` with a flattened mapping.
+            let members: Vec<(usize, LayerOffset)> = node
+                .layer_stack()
+                .iter()
+                .copied()
+                .filter(|&(li, _)| self.seen.insert((li, node.path.clone(), arc)))
+                .collect();
+            if members.is_empty() {
                 continue;
             }
             let grafted_parent = node.parent().and_then(|tp| remap[tp.idx()]);
@@ -2036,9 +2075,9 @@ impl<'a> IndexBuilder<'a> {
                     (parent, flat_map)
                 }
             };
-            let new_id = self.output.add_child(
+            let new_id = self.output.add_site_child(
                 struct_parent,
-                node.layer_index(),
+                members,
                 node.path.clone(),
                 arc,
                 node_map,
@@ -2070,19 +2109,25 @@ impl<'a> IndexBuilder<'a> {
     ) -> (usize, usize) {
         let start = self.output.len();
         let variant_map = MapFunction::from_pair_identity(variant_path.clone(), base.clone());
-        for &(i, _) in layer_stack {
-            if self.stack.layer(i).has_spec(variant_path)
-                && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
-            {
-                self.output.add_child(
-                    parent,
-                    i,
-                    variant_path.clone(),
-                    ArcType::Variant,
-                    variant_map.clone(),
-                    self.in_specialize,
-                );
-            }
+        // One variant node for the whole site, folding every sublayer that
+        // authors the selected variant (strongest first) with its offset.
+        let members: Vec<(usize, LayerOffset)> = layer_stack
+            .iter()
+            .filter(|&&(i, _)| {
+                self.stack.layer(i).has_spec(variant_path)
+                    && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
+            })
+            .copied()
+            .collect();
+        if !members.is_empty() {
+            self.output.add_site_child(
+                parent,
+                members,
+                variant_path.clone(),
+                ArcType::Variant,
+                variant_map,
+                self.in_specialize,
+            );
         }
         (start, self.output.len())
     }
@@ -2235,19 +2280,13 @@ impl<'a> IndexBuilder<'a> {
                             n.path
                                 .append_path(child_name)
                                 .ok()
-                                .map(|p| (p, n.layer_index(), n.arc, n.path.clone()))
+                                .map(|p| (p, n.layer_stack().to_vec(), n.arc, n.path.clone()))
                         })
                         .collect();
-                    for (rpath, li, a, node_path) in &ancestor_sites {
+                    for (rpath, layer_stack, a, node_path) in &ancestor_sites {
                         let ancestor_map = MapFunction::from_pair(node_path.clone(), context_path.clone())
                             .with_time_offset(arc_offset);
-                        let sub_off = target_stack
-                            .iter()
-                            .find(|(i, _)| *i == *li)
-                            .map(|(_, o)| *o)
-                            .unwrap_or_default();
-                        let layer_entry = [(*li, sub_off)];
-                        self.eval_site(rpath, &layer_entry, *a, depth + 1, parent, ancestor_map, outer_stack)?;
+                        self.eval_site(rpath, layer_stack, *a, depth + 1, parent, ancestor_map, outer_stack)?;
                     }
                 }
             }
@@ -2328,7 +2367,13 @@ impl<'a> IndexBuilder<'a> {
                 if let Some(cached) = self.cached_indices.get(&implied_path) {
                     let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
                     for (cid, node) in cached.nodes_with_ids() {
-                        if !self.seen.insert((node.layer_index(), node.path.clone(), *arc)) {
+                        let members: Vec<(usize, LayerOffset)> = node
+                            .layer_stack()
+                            .iter()
+                            .copied()
+                            .filter(|&(li, _)| self.seen.insert((li, node.path.clone(), *arc)))
+                            .collect();
+                        if members.is_empty() {
                             continue;
                         }
                         let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
@@ -2339,9 +2384,9 @@ impl<'a> IndexBuilder<'a> {
                                 MapFunction::from_pair_identity(node.path.clone(), inheriting_prim.clone()),
                             ),
                         };
-                        let new_id = self.output.add_child(
+                        let new_id = self.output.add_site_child(
                             struct_parent,
-                            node.layer_index(),
+                            members,
                             node.path.clone(),
                             *arc,
                             node_map,
@@ -2457,13 +2502,16 @@ fn resolve_variant_selections_in<'a>(
     let mut ordered: Vec<&Node> = nodes.collect();
     ordered.sort_by_key(|n| n.arc);
 
-    // Gather explicit selections for sets the seed did not already fix.
+    // Gather explicit selections for sets the seed did not already fix. Each
+    // node fans out into its layer stack, strongest sublayer first.
     for node in &ordered {
-        let data = &layers[node.layer_index()];
-        if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
-            if let Value::VariantSelectionMap(map) = value.into_owned() {
-                for (set_name, selection) in map {
-                    selections.entry(set_name).or_insert(selection);
+        for &(layer, _) in node.layer_stack() {
+            let data = &layers[layer];
+            if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
+                if let Value::VariantSelectionMap(map) = value.into_owned() {
+                    for (set_name, selection) in map {
+                        selections.entry(set_name).or_insert(selection);
+                    }
                 }
             }
         }
@@ -2472,34 +2520,36 @@ fn resolve_variant_selections_in<'a>(
     // For variant sets without an explicit selection, try the fallback map
     // first, then fall back to the first variant name in the set.
     for node in &ordered {
-        let data = &layers[node.layer_index()];
-        let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
-            continue;
-        };
-        let Value::TokenVec(set_names) = value.into_owned() else {
-            continue;
-        };
-        for set_name in set_names {
-            let Entry::Vacant(entry) = selections.entry(set_name) else {
+        for &(layer, _) in node.layer_stack() {
+            let data = &layers[layer];
+            let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
-            let set_path = node.path.append_variant_selection(entry.key(), "");
-            let Ok(val) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) else {
+            let Value::TokenVec(set_names) = value.into_owned() else {
                 continue;
             };
-            let Value::TokenVec(variants) = val.into_owned() else {
-                continue;
-            };
-            // Try fallback selections in order — use the first one that
-            // exists in this variant set.
-            let fallbacks = variant_fallbacks.get(entry.key());
-            if let Some(fb) = fallbacks.iter().find(|fb| variants.contains(fb)) {
-                entry.insert(fb.clone());
-                continue;
-            }
-            // No fallback matched — default to the first variant.
-            if let Some(first) = variants.into_iter().next() {
-                entry.insert(first);
+            for set_name in set_names {
+                let Entry::Vacant(entry) = selections.entry(set_name) else {
+                    continue;
+                };
+                let set_path = node.path.append_variant_selection(entry.key(), "");
+                let Ok(val) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) else {
+                    continue;
+                };
+                let Value::TokenVec(variants) = val.into_owned() else {
+                    continue;
+                };
+                // Try fallback selections in order — use the first one that
+                // exists in this variant set.
+                let fallbacks = variant_fallbacks.get(entry.key());
+                if let Some(fb) = fallbacks.iter().find(|fb| variants.contains(fb)) {
+                    entry.insert(fb.clone());
+                    continue;
+                }
+                // No fallback matched — default to the first variant.
+                if let Some(first) = variants.into_iter().next() {
+                    entry.insert(first);
+                }
             }
         }
     }
@@ -2571,48 +2621,103 @@ where
     let mut combined: Option<ListOp<T>> = None;
 
     for node in nodes {
-        let data = &layers[node.layer_index()];
-        let Some(value) = data.try_get(&node.path, field)? else {
-            continue;
-        };
-        let Ok(list_op) = value.into_owned().try_into() else {
-            continue;
-        };
-        combined = Some(match combined {
-            Some(stronger) => stronger.combined_with(&list_op),
-            None => list_op,
-        });
+        for &(layer, _) in node.layer_stack() {
+            let data = &layers[layer];
+            let Some(value) = data.try_get(&node.path, field)? else {
+                continue;
+            };
+            let Ok(list_op) = value.into_owned().try_into() else {
+                continue;
+            };
+            combined = Some(match combined {
+                Some(stronger) => stronger.combined_with(&list_op),
+                None => list_op,
+            });
+        }
+    }
+
+    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+}
+
+/// Applies `f` to every item across all of a list-op's buckets in place.
+fn map_list_op_items<T: Default + Clone + PartialEq>(op: &mut ListOp<T>, mut f: impl FnMut(&mut T)) {
+    for bucket in [
+        &mut op.explicit_items,
+        &mut op.added_items,
+        &mut op.prepended_items,
+        &mut op.appended_items,
+        &mut op.deleted_items,
+        &mut op.ordered_items,
+    ] {
+        bucket.iter_mut().for_each(&mut f);
+    }
+}
+
+/// Composes the `references` list-op across nodes, folding each authoring
+/// sublayer's offset into its references' layer offsets (C++
+/// `PcpComposeSiteReferences`). A reference brought in by a sublayer with a
+/// non-identity offset retimes its target by that offset, which the per-site
+/// node otherwise carries only per member.
+fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Reference>> {
+    let field = FieldKey::References.as_str();
+    let mut combined: Option<ListOp<Reference>> = None;
+
+    for node in nodes {
+        for &(layer, sub) in node.layer_stack() {
+            let data = &layers[layer];
+            let Some(value) = data.try_get(&node.path, field)? else {
+                continue;
+            };
+            let Ok(mut list_op): Result<ListOp<Reference>, _> = value.into_owned().try_into() else {
+                continue;
+            };
+            if !sub.is_identity() {
+                map_list_op_items(&mut list_op, |r| r.layer_offset = sub.concatenate(&r.layer_offset));
+            }
+            combined = Some(match combined {
+                Some(stronger) => stronger.combined_with(&list_op),
+                None => list_op,
+            });
+        }
     }
 
     Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
 }
 
 /// Collects payloads from nodes, handling both single `Payload` and
-/// `PayloadListOp`. Surfaces backend decode errors; skips absent or
-/// wrong-typed values.
+/// `PayloadListOp`. Each authoring sublayer's offset is folded into its
+/// payloads' layer offsets, mirroring [`compose_references_in`]. Surfaces
+/// backend decode errors; skips absent or wrong-typed values.
 fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payload>> {
     let mut combined: Option<PayloadListOp> = None;
 
     for node in nodes {
-        let data = &layers[node.layer_index()];
-        let Some(value) = data.try_get(&node.path, FieldKey::Payload.as_str())? else {
-            continue;
-        };
+        for &(layer, sub) in node.layer_stack() {
+            let data = &layers[layer];
+            let Some(value) = data.try_get(&node.path, FieldKey::Payload.as_str())? else {
+                continue;
+            };
 
-        let list_op = match value.into_owned() {
-            Value::Payload(p) => PayloadListOp {
-                explicit: true,
-                explicit_items: vec![p],
-                ..Default::default()
-            },
-            Value::PayloadListOp(op) => op,
-            _ => continue,
-        };
+            let mut list_op = match value.into_owned() {
+                Value::Payload(p) => PayloadListOp {
+                    explicit: true,
+                    explicit_items: vec![p],
+                    ..Default::default()
+                },
+                Value::PayloadListOp(op) => op,
+                _ => continue,
+            };
+            if !sub.is_identity() {
+                map_list_op_items(&mut list_op, |p| {
+                    p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default()))
+                });
+            }
 
-        combined = Some(match combined {
-            Some(stronger) => stronger.combined_with(&list_op),
-            None => list_op,
-        });
+            combined = Some(match combined {
+                Some(stronger) => stronger.combined_with(&list_op),
+                None => list_op,
+            });
+        }
     }
 
     Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
@@ -2741,14 +2846,15 @@ mod tests {
     }
 
     #[test]
-    fn sublayer_two_root_nodes() -> Result<()> {
+    fn sublayer_site_layer_order() -> Result<()> {
         let stack = load_stack(&fixture_path("sublayer_override.usda"))?;
         let index = build(&stack, "/World");
 
         let ns: Vec<_> = index.nodes().collect();
-        assert_eq!(ns.len(), 2, "both layers should have /World");
-        assert_eq!(ns[0].layer_index(), 0, "stronger layer first");
-        assert_eq!(ns[1].layer_index(), 1, "weaker layer second");
+        assert_eq!(ns.len(), 1, "one per-site node spans both sublayers");
+        assert_eq!(ns[0].arc, ArcType::Root);
+        let layers: Vec<usize> = ns[0].layers().map(|(li, _)| li).collect();
+        assert_eq!(layers, vec![0, 1], "stronger sublayer first");
         Ok(())
     }
 
@@ -3661,15 +3767,21 @@ def "Prim" (
     fn offset_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String, ArcType, f64, f64)> {
         index
             .nodes()
-            .map(|n| {
-                let off = n.map_to_root.time_offset();
-                (
-                    layer_name(stack.identifier(n.layer_index())).to_owned(),
-                    n.path.to_string(),
-                    n.arc,
-                    off.offset,
-                    off.scale,
-                )
+            .flat_map(|n| {
+                let path = n.path.to_string();
+                let arc = n.arc;
+                // Expand each per-site node into one row per contributing
+                // sublayer, carrying that layer's effective offset (the arc
+                // offset with the sublayer offset composed on top).
+                n.layers().map(move |(li, off)| {
+                    (
+                        layer_name(stack.identifier(li)).to_owned(),
+                        path.clone(),
+                        arc,
+                        off.offset,
+                        off.scale,
+                    )
+                })
             })
             .collect()
     }
