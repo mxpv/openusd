@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
+use bitflags::bitflags;
 
 use crate::ar::Resolver;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
@@ -43,11 +44,13 @@ pub enum ArcType {
     Specialize,
 }
 
-/// Compact index into the graph's node arena.
+/// Stable handle to a [`Node`] within a [`PrimIndex`]'s composition graph
+/// (C++ `PcpNodeRef`).
 ///
-/// A lightweight handle identifying a single [`Node`] within a
-/// [`PrimIndex`]'s composition graph. The sentinel value [`INVALID`](Self::INVALID)
-/// represents "no node" (analogous to C++ `_invalidNodeId`).
+/// A handle stays valid for the life of the index: the node arena is only
+/// ever appended to, never reordered, so a `NodeId` is safe to store in
+/// another node's `parent`/`children`/`origin`. The sentinel value
+/// [`INVALID`](Self::INVALID) represents the absence of a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(u32);
 
@@ -55,23 +58,59 @@ impl NodeId {
     /// Sentinel: no node.
     pub const INVALID: Self = Self(u32::MAX);
 
-    /// Returns `true` if this index points to an actual node.
+    /// Returns `true` if this handle points to an actual node.
     pub fn is_valid(self) -> bool {
         self.0 != u32::MAX
     }
 
-    /// Converts to a `usize` for indexing into a `Vec`.
+    /// Converts to a `usize` for indexing into the arena.
     pub(crate) fn idx(self) -> usize {
         self.0 as usize
     }
 }
 
-/// A single node in the composition graph.
+bitflags! {
+    /// Per-node composition state, mirroring the booleans carried by C++
+    /// `PcpNodeRef`.
+    ///
+    /// Most bits are reserved for parity features not yet wired up; only the
+    /// flags set during composition today affect resolution. Reserving the
+    /// full surface now keeps later work from re-editing [`Node`].
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct NodeFlags: u16 {
+        /// Contributes no opinions; kept only for graph structure.
+        const INERT = 1 << 0;
+        /// Hidden from value resolution but retained for change tracking.
+        const CULLED = 1 << 1;
+        /// Subtree namespace-restricted by a relocate.
+        const RESTRICTED = 1 << 2;
+        /// Blocked by `permission = private` on a stronger site.
+        const PERMISSION_DENIED = 1 << 3;
+        /// This site is itself `permission = private`.
+        const PERMISSION_PRIVATE = 1 << 4;
+        /// Children are prohibited (e.g. an unloaded payload).
+        const PROHIBITED_CHILDREN = 1 << 5;
+        /// Added by implied inherit/specialize propagation.
+        const IMPLIED_CLASS = 1 << 6;
+        /// Introduced by a directly-authored arc (not implied).
+        const DIRECT = 1 << 7;
+        /// Introduced through a specializes arc; globally weak (spec 10.4.1).
+        const HAS_SPECIALIZES = 1 << 8;
+        /// Introduced by a relocate.
+        const RELOCATE_SOURCE = 1 << 9;
+        /// Lies inside a selected variant branch.
+        const VARIANT_BRANCH = 1 << 10;
+    }
+}
+
+/// A single node in the composition graph (C++ `PcpNodeRef`).
 ///
 /// Each node represents a site (layer + path) contributing opinions to a
 /// composed prim. The identity fields (`layer_index`, `path`, `arc`)
 /// define *what* this node contributes. The namespace mappings
 /// (`map_to_parent`, `map_to_root`) translate paths across composition arcs.
+/// The structure fields (`parent`, `children`, `origin`) record the node's
+/// place in the composition tree; access them through [`PrimIndex`].
 #[derive(Debug, Clone)]
 pub struct Node {
     /// Index into the stage's layer list.
@@ -85,10 +124,85 @@ pub struct Node {
     /// Maps paths from this node's namespace directly to the root namespace.
     /// Computed as `parent.map_to_root.compose(self.map_to_parent)`.
     pub map_to_root: MapFunction,
-    /// True when this node was introduced through a specializes composition
-    /// arc (directly or transitively). Nodes with this flag are globally
-    /// weaker than all other opinions per spec section 10.4.1.
-    pub(crate) introduced_by_specialize: bool,
+    /// Structural parent in the composition tree, or `None` for a root node.
+    parent: Option<NodeId>,
+    /// Structural children, in the order they were introduced (strength order
+    /// among siblings).
+    children: Vec<NodeId>,
+    /// Node that introduced this arc (C++ `GetOriginNode`). `None` until
+    /// implied-class and graft propagation populate it.
+    origin: Option<NodeId>,
+    /// Namespace depth at which the introducing arc was authored. Used by
+    /// implied inherits/specializes that propagate toward the root.
+    namespace_depth: u16,
+    /// Composition state bits (see [`NodeFlags`]).
+    flags: NodeFlags,
+}
+
+impl Node {
+    /// Builds a standalone node with no structural links.
+    ///
+    /// Callers that append through [`PrimIndexGraph::add_child`] have their
+    /// `parent`/`children` populated by the builder; direct
+    /// [`PrimIndex::push_node`] users (relocates, implied-spec propagation)
+    /// start parentless.
+    pub(crate) fn new(
+        layer_index: usize,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        map_to_root: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> Self {
+        let flags = if introduced_by_specialize {
+            NodeFlags::HAS_SPECIALIZES
+        } else {
+            NodeFlags::empty()
+        };
+        Self {
+            layer_index,
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+            parent: None,
+            children: Vec::new(),
+            origin: None,
+            namespace_depth: 0,
+            flags,
+        }
+    }
+
+    /// Structural parent, or `None` for a root node.
+    pub fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    /// Structural children, in strength order among siblings.
+    pub fn children(&self) -> &[NodeId] {
+        &self.children
+    }
+
+    /// Node that introduced this arc, if known (C++ `GetOriginNode`).
+    pub fn origin(&self) -> Option<NodeId> {
+        self.origin
+    }
+
+    /// Namespace depth at which the introducing arc was authored.
+    pub fn namespace_depth(&self) -> u16 {
+        self.namespace_depth
+    }
+
+    /// Composition state bits.
+    pub fn flags(&self) -> NodeFlags {
+        self.flags
+    }
+
+    /// True when this node was introduced through a specializes arc (directly
+    /// or transitively), making it globally weak per spec section 10.4.1.
+    pub(crate) fn introduced_by_specialize(&self) -> bool {
+        self.flags.contains(NodeFlags::HAS_SPECIALIZES)
+    }
 }
 
 /// Arena-based composition graph.
@@ -110,12 +224,13 @@ impl PrimIndexGraph {
         self.nodes.is_empty()
     }
 
-    /// Appends a node to the graph and computes its `map_to_root`.
+    /// Appends a node to the graph, linking it under `parent`.
     ///
     /// `parent` identifies the structural parent in the composition graph.
     /// When valid, `map_to_root` is composed from the parent's `map_to_root`
-    /// and the new node's `map_to_parent`. Nodes are ordered by insertion
-    /// (strongest to weakest).
+    /// and the new node's `map_to_parent`, and the new node is recorded in the
+    /// parent's children. Nodes are appended in insertion order (strongest to
+    /// weakest); the returned handle stays valid for the life of the index.
     fn add_child(
         &mut self,
         parent: NodeId,
@@ -131,14 +246,19 @@ impl PrimIndexGraph {
             map_to_parent.clone()
         };
         let idx = NodeId(self.nodes.len() as u32);
-        self.nodes.push(Node {
+        let mut node = Node::new(
             layer_index,
             path,
             arc,
             map_to_parent,
             map_to_root,
             introduced_by_specialize,
-        });
+        );
+        if parent.is_valid() {
+            node.parent = Some(parent);
+            self.nodes[parent.idx()].children.push(idx);
+        }
+        self.nodes.push(node);
         idx
     }
 }
@@ -186,6 +306,30 @@ impl PrimIndex {
     /// Returns the nodes in strength order (index 0 = strongest).
     pub fn nodes(&self) -> &[Node] {
         &self.graph
+    }
+
+    /// Returns the root of the composition tree, or `None` when empty.
+    ///
+    /// The root is the first node appended during the build (the strongest
+    /// root-layer-stack opinion, or the first arc-derived node for prims whose
+    /// local opinions are discarded inside an instance).
+    pub fn root(&self) -> Option<NodeId> {
+        (!self.is_empty()).then_some(NodeId(0))
+    }
+
+    /// Returns the node behind a handle.
+    pub fn node(&self, id: NodeId) -> &Node {
+        &self.graph.nodes[id.idx()]
+    }
+
+    /// Returns the structural parent of a node, or `None` for a root.
+    pub fn parent(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id).parent
+    }
+
+    /// Returns the structural children of a node, in strength order.
+    pub fn children(&self, id: NodeId) -> &[NodeId] {
+        &self.node(id).children
     }
 
     /// Appends a node to the end of the composition graph.
@@ -944,11 +1088,16 @@ impl<'a> IndexBuilder<'a> {
     /// Reorders nodes so that all opinions introduced through specializes arcs
     /// appear after all other opinions, implementing the global weakness
     /// requirement from spec section 10.4.1.
+    //
+    // TODO(strength-projection): sorting the arena invalidates the stored
+    // `parent`/`children` handles for indices that contain specializes. Once
+    // the separate strength-order projection lands, partition that projection
+    // here instead and leave the arena (and its handles) untouched.
     fn apply_specialize_weakness(&mut self) {
         // Stable sort with a bool key (false < true) acts as an in-place
         // stable partition: non-specialize nodes stay first, specialize nodes
         // move to the end, and relative order within each group is preserved.
-        self.output.nodes.sort_by_key(|n| n.introduced_by_specialize);
+        self.output.nodes.sort_by_key(|n| n.introduced_by_specialize());
     }
 
     /// Re-resolve variants across all accumulated nodes until no new nodes
@@ -984,7 +1133,7 @@ impl<'a> IndexBuilder<'a> {
 
                     // Propagate specialize context from base node for global weakness.
                     let prev_in_specialize = self.in_specialize;
-                    if self.output[idx].introduced_by_specialize {
+                    if self.output[idx].introduced_by_specialize() {
                         self.in_specialize = true;
                     }
 
@@ -1921,6 +2070,51 @@ mod tests {
         Ok(())
     }
 
+    /// `PrimIndex` must stay `Send + Sync` so per-prim composition can run in
+    /// parallel; the arena-handle representation (no `Rc`/`RefCell`) guarantees
+    /// it. This fails to compile if a non-thread-safe field is ever added.
+    #[test]
+    fn prim_index_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PrimIndex>();
+        assert_send_sync::<Node>();
+        assert_send_sync::<NodeId>();
+    }
+
+    /// The builder records structural parent/child links: a reference node hangs
+    /// under a root node, and every stored parent agrees with its child list.
+    #[test]
+    fn structural_links_consistent() -> Result<()> {
+        let stack = load_stack(&fixture_path("ref_external.usda"))?;
+        let index = build(&stack, "/World/MyPrim");
+
+        let root = index.root().expect("non-empty index has a root");
+        assert_eq!(index.node(root).arc, ArcType::Root);
+
+        // The reference is parented under a node, not orphaned.
+        let reference = index
+            .nodes()
+            .iter()
+            .enumerate()
+            .find(|(_, n)| n.arc == ArcType::Reference)
+            .map(|(i, _)| NodeId(i as u32))
+            .expect("reference fixture has a reference node");
+        let parent = index.parent(reference).expect("reference has a parent");
+        assert!(index.children(parent).contains(&reference));
+
+        // Every parent link is mirrored by the parent's children list.
+        for i in 0..index.nodes().len() {
+            let id = NodeId(i as u32);
+            if let Some(parent) = index.parent(id) {
+                assert!(
+                    index.children(parent).contains(&id),
+                    "node {i} parent {parent:?} missing it as a child"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn inherit_arc_present() -> Result<()> {
         let stack = load_stack(&composition_path("class_inherit.usda"))?;
@@ -2353,14 +2547,7 @@ def "Prim" (
     #[test]
     fn insert_relocate_node_before_references() {
         let p = |s: &str| Path::from(s.to_string());
-        let node = |arc: ArcType| Node {
-            layer_index: 0,
-            path: p("/X"),
-            arc,
-            map_to_parent: MapFunction::identity(),
-            map_to_root: MapFunction::identity(),
-            introduced_by_specialize: false,
-        };
+        let node = |arc: ArcType| Node::new(0, p("/X"), arc, MapFunction::identity(), MapFunction::identity(), false);
 
         let mut index = PrimIndex::default();
         index.push_node(node(ArcType::Root));
@@ -2458,14 +2645,14 @@ def "Prim" (
         // remaining 6 are specialize.
         for node in &index.nodes()[..3] {
             assert!(
-                !node.introduced_by_specialize,
+                !node.introduced_by_specialize(),
                 "node {:?} should not be specialize",
                 node.path
             );
         }
         for node in &index.nodes()[3..] {
             assert!(
-                node.introduced_by_specialize,
+                node.introduced_by_specialize(),
                 "node {:?} should be specialize",
                 node.path
             );
@@ -2485,14 +2672,14 @@ def "Prim" (
         let first_spec = index
             .nodes()
             .iter()
-            .position(|n| n.introduced_by_specialize)
+            .position(|n| n.introduced_by_specialize())
             .expect("should have specialize nodes");
         assert!(first_spec >= 2, "at least Root + Reference before specializes");
 
         // All nodes after the first specialize must also be specialize.
         for node in &index.nodes()[first_spec..] {
             assert!(
-                node.introduced_by_specialize,
+                node.introduced_by_specialize(),
                 "node {:?} should be globally weak",
                 node.path
             );
@@ -2526,14 +2713,7 @@ def "Prim" (
     #[test]
     fn insert_relocate_node_appends_when_no_rps() {
         let p = |s: &str| Path::from(s.to_string());
-        let node = |arc: ArcType| Node {
-            layer_index: 0,
-            path: p("/X"),
-            arc,
-            map_to_parent: MapFunction::identity(),
-            map_to_root: MapFunction::identity(),
-            introduced_by_specialize: false,
-        };
+        let node = |arc: ArcType| Node::new(0, p("/X"), arc, MapFunction::identity(), MapFunction::identity(), false);
 
         let mut index = PrimIndex::default();
         index.push_node(node(ArcType::Root));
