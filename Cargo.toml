@@ -12,6 +12,7 @@ keywords = ["usd", "usda", "usdc", "usdz", "pxr"]
 [features]
 geom = []
 lux = []
+media = []
 physics = []
 render = []
 shade = []
@@ -81,3 +82,7 @@ required-features = ["render"]
 [[test]]
 name = "vol_reader"
 required-features = ["vol"]
+
+[[test]]
+name = "media_reader"
+required-features = ["media"]

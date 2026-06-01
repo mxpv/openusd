@@ -20,6 +20,7 @@
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
 //! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
 //! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
+//! | `media`   | `media`   | `UsdMedia` reader + authoring (`SpatialAudio`). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
@@ -27,6 +28,7 @@
 #[cfg(any(
     feature = "geom",
     feature = "lux",
+    feature = "media",
     feature = "physics",
     feature = "render",
     feature = "shade",
@@ -39,6 +41,8 @@ mod common;
 pub mod geom;
 #[cfg(feature = "lux")]
 pub mod lux;
+#[cfg(feature = "media")]
+pub mod media;
 #[cfg(feature = "physics")]
 pub mod physics;
 #[cfg(feature = "render")]
