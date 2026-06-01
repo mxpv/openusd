@@ -143,6 +143,12 @@ pub struct Node {
     /// Namespace depth at which the introducing arc was authored. Used by
     /// implied inherits/specializes that propagate toward the root.
     namespace_depth: u16,
+    /// Position of this node's prim in its specializes chain: 0 for a directly
+    /// specialized class, 1 for the class it specializes, and so on. A specialize
+    /// source is weaker than its target (spec 10.4.1), so a lower depth is
+    /// stronger. Set during [`finalize_strength_order`](PrimIndexGraph::finalize_strength_order);
+    /// meaningful only for specialize-introduced nodes.
+    specialize_chain_depth: u16,
     /// Composition state bits (see [`NodeFlags`]).
     flags: NodeFlags,
 }
@@ -176,6 +182,7 @@ impl Node {
             children: Vec::new(),
             origin: None,
             namespace_depth: 0,
+            specialize_chain_depth: 0,
             flags,
         }
     }
@@ -358,9 +365,11 @@ impl PrimIndexGraph {
     /// when `a` is the stronger sibling.
     ///
     /// Keys, in priority order (spec 10.3): arc type (lower discriminant
-    /// stronger); namespace depth (deeper stronger); origin strength (the
-    /// node whose origin is reached first in a strong-to-weak walk); finally
-    /// sibling number — the earlier-created node (lower [`NodeId`]) is stronger.
+    /// stronger); for two specializes, specializes-chain depth (a source is
+    /// weaker than its target); namespace depth (deeper stronger, skipped for
+    /// specializes); origin strength (the node whose origin is reached first in
+    /// a strong-to-weak walk); finally sibling number — the earlier-created
+    /// node (lower [`NodeId`]) is stronger.
     fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         let na = &self.nodes[a.idx()];
         let nb = &self.nodes[b.idx()];
@@ -370,8 +379,20 @@ impl PrimIndexGraph {
             return na.arc.cmp(&nb.arc);
         }
 
-        // 2. Namespace depth: a deeper arc-introduction site is stronger.
-        if na.namespace_depth != nb.namespace_depth {
+        let both_specialize = na.introduced_by_specialize() && nb.introduced_by_specialize();
+
+        // 2a. Specializes-chain depth: a class is stronger than the class it
+        // specializes (C++ `_OriginsAreNestedArcs`: the source of a specializes
+        // arc is weaker than its target regardless of namespace depth, spec
+        // 10.4.1). Lower depth is stronger.
+        if both_specialize && na.specialize_chain_depth != nb.specialize_chain_depth {
+            return na.specialize_chain_depth.cmp(&nb.specialize_chain_depth);
+        }
+
+        // 2b. Namespace depth: a deeper arc-introduction site is stronger. C++
+        // skips this for specializes whose origins are nested arcs (handled by
+        // the chain-depth key above), so it is skipped for two specializes.
+        if !both_specialize && na.namespace_depth != nb.namespace_depth {
             return nb.namespace_depth.cmp(&na.namespace_depth);
         }
 
@@ -434,20 +455,29 @@ impl PrimIndexGraph {
         }
     }
 
-    /// Rebuilds the strength-order projection as a pre-order DFS of the tree,
-    /// visiting each node's children strongest-first (C++ finalize: a pre-order
-    /// DFS of strength-ordered children equals strength order). The result runs
-    /// strongest to weakest; reversing it gives weak-to-strong.
+    /// Rebuilds the strength-order projection: a pre-order DFS of the tree for
+    /// non-specialize nodes, followed by the globally-weak specialize band
+    /// (spec 10.4.1). The result runs strongest to weakest; reversing it gives
+    /// weak-to-strong.
     ///
     /// Each node's `children` are first sorted by
-    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength).
-    /// That comparator reads only arc type, namespace depth, origin chains, and
-    /// arena order — never the children order being computed — so the sort is
-    /// well-defined before the projection exists.
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength),
+    /// so the DFS yields strength order among siblings. The specialize band is
+    /// then ordered by the same comparator over the whole band: in C++ the
+    /// specializes nodes are copied to the root and ordered there as siblings
+    /// (`_EvalImpliedSpecializes`); ordering them directly with the sibling
+    /// comparator reproduces that without mutating the tree, so the nested
+    /// structure the grafts depend on is preserved.
+    ///
+    /// The comparator reads only arc type, specializes-chain depth, namespace
+    /// depth, origin chains, and arena order — never the projection being
+    /// computed — so it is well-defined here.
     fn finalize_strength_order(&mut self) {
         if !self.root.is_valid() {
             return;
         }
+
+        self.compute_specialize_chain_depths();
 
         // Order every node's children by sibling strength. `children` is taken
         // out so the comparator can borrow the arena immutably during the sort.
@@ -460,15 +490,61 @@ impl PrimIndexGraph {
         // Pre-order DFS from the root: visit a node, then its children in
         // strength order. Pushing children reversed makes the strongest pop
         // first.
-        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut dfs = Vec::with_capacity(self.nodes.len());
         let mut stack = vec![self.root];
         while let Some(id) = stack.pop() {
-            order.push(id);
+            dfs.push(id);
             for &child in self.nodes[id.idx()].children.iter().rev() {
                 stack.push(child);
             }
         }
+
+        // Specializes are globally weaker than every other opinion (spec
+        // 10.4.1). Keep the non-specialize nodes in DFS order, then append the
+        // specialize band ordered among itself by the sibling comparator (which
+        // treats the band as siblings at the root, mirroring copy-to-root).
+        let (mut order, mut specials): (Vec<NodeId>, Vec<NodeId>) = dfs
+            .into_iter()
+            .partition(|id| !self.nodes[id.idx()].introduced_by_specialize());
+        specials.sort_by(|&a, &b| self.compare_sibling_node_strength(a, b));
+        order.append(&mut specials);
         self.strength_order = order;
+    }
+
+    /// Records, on every specialize-introduced node, the depth of its prim in
+    /// the specializes chain: the number of specialize ancestors of the deepest
+    /// node at that prim's path. A directly specialized class is depth 0, the
+    /// class it specializes is depth 1, and so on, so a lower depth sorts
+    /// stronger (a specializes source is weaker than its target, spec 10.4.1).
+    ///
+    /// The per-path maximum recovers the chain position even for the implied
+    /// copies a class brings in across references, which hang flat rather than
+    /// nested under the class they specialize.
+    fn compute_specialize_chain_depths(&mut self) {
+        let mut depth_by_path: HashMap<Path, u16> = HashMap::new();
+        for node in &self.nodes {
+            if !node.introduced_by_specialize() {
+                continue;
+            }
+            let mut depth = 0u16;
+            let mut parent = node.parent;
+            while let Some(pid) = parent {
+                let pnode = &self.nodes[pid.idx()];
+                if pnode.introduced_by_specialize() {
+                    depth += 1;
+                }
+                parent = pnode.parent;
+            }
+            depth_by_path
+                .entry(node.path.clone())
+                .and_modify(|d| *d = (*d).max(depth))
+                .or_insert(depth);
+        }
+        for node in &mut self.nodes {
+            if node.introduced_by_specialize() {
+                node.specialize_chain_depth = depth_by_path.get(&node.path).copied().unwrap_or(0);
+            }
+        }
     }
 }
 
@@ -1492,78 +1568,12 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
-        // Build the strength-order projection as a pre-order DFS of the tree,
-        // visiting each node's children strongest-first.
+        // Build the strength-order projection: a DFS of the tree for
+        // non-specialize nodes, then the globally-weak specialize band (spec
+        // 10.4.1), all ordered by the node strength comparator.
         self.output.finalize_strength_order();
 
-        // Global weakness: specializes opinions are globally weaker than all
-        // other opinions (spec 10.4.1). Stable-partition so non-specialize
-        // nodes come first, preserving the DFS order within each group.
-        self.apply_specialize_weakness();
-
         Ok(())
-    }
-
-    /// Reorders the strength projection so that all opinions introduced through
-    /// specializes arcs appear after all other opinions, implementing the global
-    /// weakness requirement from spec section 10.4.1.
-    ///
-    /// Only the `strength_order` projection is partitioned; the node arena (and
-    /// every stored `parent`/`children` handle) is left untouched.
-    fn apply_specialize_weakness(&mut self) {
-        // Non-specialize nodes keep their order and stay strongest; specialize
-        // nodes move to the end (spec 10.4.1) and are ordered among themselves by
-        // strength: first by position in the specializes chain (a more-derived
-        // class outranks the base it specializes), then by layer-stack strength
-        // (an outer reference's opinion on the class outranks an inner one).
-        //
-        // TODO: layer index approximates reference strength (outer layer stacks
-        // collect first, so lower index ≈ stronger); a full
-        // `PcpCompareSiblingNodeStrength` would order by origin strength instead.
-        let rank = self.specialize_chain_ranks();
-        let nodes = &self.output.nodes;
-        self.output.strength_order.sort_by(|&a, &b| {
-            let (na, nb) = (&nodes[a.idx()], &nodes[b.idx()]);
-            match (na.introduced_by_specialize(), nb.introduced_by_specialize()) {
-                // Stable sort keeps the relative order of the non-specialize band.
-                (false, false) => std::cmp::Ordering::Equal,
-                (false, true) => std::cmp::Ordering::Less,
-                (true, false) => std::cmp::Ordering::Greater,
-                (true, true) => {
-                    let ra = rank.get(&na.path).copied().unwrap_or(0);
-                    let rb = rank.get(&nb.path).copied().unwrap_or(0);
-                    ra.cmp(&rb).then(na.layer_index.cmp(&nb.layer_index))
-                }
-            }
-        });
-    }
-
-    /// Maps each specialized class path to its depth in the specializes chain:
-    /// the number of specialize-arc ancestors of the directly-composed node at
-    /// that path (`/Specializes` specializes `/Base` → rank 0 and 1). Implied
-    /// copies of a class hang flat (no specialize ancestors), so the per-path
-    /// maximum recovers the rank the direct node established.
-    fn specialize_chain_ranks(&self) -> HashMap<Path, u16> {
-        let mut ranks: HashMap<Path, u16> = HashMap::new();
-        for node in self.output.nodes.iter() {
-            if !node.introduced_by_specialize() {
-                continue;
-            }
-            let mut rank = 0u16;
-            let mut parent = node.parent();
-            while let Some(pid) = parent {
-                let pnode = &self.output.nodes[pid.idx()];
-                if pnode.introduced_by_specialize() {
-                    rank += 1;
-                }
-                parent = pnode.parent();
-            }
-            ranks
-                .entry(node.path.clone())
-                .and_modify(|r| *r = (*r).max(rank))
-                .or_insert(rank);
-        }
-        ranks
     }
 
     /// Evaluate a single composition site: run LIVRPS for `path` within
@@ -1688,7 +1698,7 @@ impl<'a> IndexBuilder<'a> {
         // referenced prim's own selection.
         if matches!(arc, ArcType::Reference | ArcType::Payload) && !outer_stack.is_empty() {
             let transfer = map_to_parent.with_root_identity();
-            self.propagate_implied_through_transfer(inherit_start, &transfer, outer_stack, depth, site_node)?;
+            self.propagate_implied_through_transfer(inherit_start, &transfer, outer_stack, depth, parent)?;
         }
 
         // V — Variants: resolve selections iteratively (nested variant sets).
@@ -1763,7 +1773,7 @@ impl<'a> IndexBuilder<'a> {
         // pass that runs before variants resolve, for variant-selection timing.
         if !outer_stack.is_empty() {
             let transfer = map_to_parent.with_root_identity();
-            self.propagate_implied_through_transfer(site_start, &transfer, outer_stack, depth, site_node)?;
+            self.propagate_implied_through_transfer(site_start, &transfer, outer_stack, depth, parent)?;
         }
 
         Ok(())
@@ -2185,7 +2195,12 @@ impl<'a> IndexBuilder<'a> {
     /// outside the arc's domain still maps) into the referencing namespace, and
     /// the implied class is composed against `outer_stack` — the referencing
     /// layer stack — so outer opinions on the class contribute. Each implied
-    /// node is tagged [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin`.
+    /// node is tagged [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin`,
+    /// the node in the referencing namespace the class is propagated under
+    /// (the reference/payload site's parent). Because that origin is stronger
+    /// for an outer reference than for an inner one, the strength comparator
+    /// orders an implied class's opinions by reference nesting (spec 10.4.1)
+    /// without consulting layer indices.
     ///
     /// When `outer_stack` is the stage root layer stack, the fully-composed
     /// index for the implied class is grafted from `cached_indices` if present,
