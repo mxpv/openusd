@@ -5,6 +5,7 @@
 //! [module-level docs](super) for the full composition overview.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -250,6 +251,14 @@ impl PrimIndexGraph {
         } else {
             map_to_parent.clone()
         };
+        // Namespace depth is the prim-element count of the parent site path at
+        // arc introduction (C++ `PcpNode_GetNonVariantPathElementCount`); a
+        // root node uses its own path.
+        let namespace_depth = if parent.is_valid() {
+            self.nodes[parent.idx()].path.prim_element_count()
+        } else {
+            path.prim_element_count()
+        } as u16;
         let idx = NodeId(self.nodes.len() as u32);
         let mut node = Node::new(
             layer_index,
@@ -259,6 +268,7 @@ impl PrimIndexGraph {
             map_to_root,
             introduced_by_specialize,
         );
+        node.namespace_depth = namespace_depth;
         if parent.is_valid() {
             node.parent = Some(parent);
             self.nodes[parent.idx()].children.push(idx);
@@ -275,6 +285,104 @@ impl PrimIndexGraph {
         node.flags |= NodeFlags::IMPLIED_CLASS;
         if origin.is_valid() {
             node.origin = Some(origin);
+        }
+    }
+
+    /// Collects the chain of nodes from `id` up to its tree root, node first
+    /// and root last.
+    // TODO: drive the strength-order projection from these comparators; until
+    // the DFS projection consumes them they have no non-test caller.
+    #[allow(dead_code)]
+    fn chain_to_root(&self, id: NodeId) -> Vec<NodeId> {
+        let mut chain = vec![id];
+        let mut cur = id;
+        while let Some(parent) = self.nodes[cur.idx()].parent {
+            chain.push(parent);
+            cur = parent;
+        }
+        chain
+    }
+
+    /// Compares two sibling nodes (nodes sharing a parent) by strength,
+    /// porting C++ `PcpCompareSiblingNodeStrength`. Returns [`Ordering::Less`]
+    /// when `a` is the stronger sibling.
+    ///
+    /// Keys, in priority order (spec 10.3): arc type (lower discriminant
+    /// stronger); namespace depth (deeper stronger); origin strength (the
+    /// node whose origin is reached first in a strong-to-weak walk); finally
+    /// sibling number — the earlier-created node (lower [`NodeId`]) is stronger.
+    #[allow(dead_code)]
+    fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
+        let na = &self.nodes[a.idx()];
+        let nb = &self.nodes[b.idx()];
+
+        // 1. Arc type: lower discriminant (e.g. Inherit) is stronger.
+        if na.arc != nb.arc {
+            return na.arc.cmp(&nb.arc);
+        }
+
+        // 2. Namespace depth: a deeper arc-introduction site is stronger.
+        if na.namespace_depth != nb.namespace_depth {
+            return nb.namespace_depth.cmp(&na.namespace_depth);
+        }
+
+        // 3. Origin strength, only when the two origins differ. The origin is
+        // the node an implied arc was propagated from (`origin`); for a
+        // directly-authored arc C++ `GetOriginNode` returns the parent, so two
+        // direct siblings share an origin and fall through to the tiebreak
+        // below. Comparing origins recurses only over strictly-older nodes
+        // (an origin is always created before the node carrying it), so the
+        // recursion is well-founded.
+        let oa = na.origin.or(na.parent).unwrap_or(a);
+        let ob = nb.origin.or(nb.parent).unwrap_or(b);
+        if oa != ob {
+            let ord = self.compare_node_strength(oa, ob);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+
+        // 4. Sibling number: the earlier-created node (lower arena index) was
+        // introduced first and is stronger.
+        a.0.cmp(&b.0)
+    }
+
+    /// Compares two arbitrary nodes in the same tree by strength, porting C++
+    /// `PcpCompareNodeStrength`. Returns [`Ordering::Less`] when `a` is stronger.
+    ///
+    /// Walks each node's chain to the shared root to find their lowest common
+    /// ancestor. When one node is an ancestor of the other, the ancestor is
+    /// stronger; otherwise the two diverging children are siblings, compared by
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength).
+    #[allow(dead_code)]
+    fn compare_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
+        if a == b {
+            return Ordering::Equal;
+        }
+        let chain_a = self.chain_to_root(a);
+        let chain_b = self.chain_to_root(b);
+
+        // Walk both chains from the root downward (chains are leaf-first) until
+        // they diverge. The last shared node is the lowest common ancestor.
+        let mut ia = chain_a.len();
+        let mut ib = chain_b.len();
+        while ia > 0 && ib > 0 {
+            let ca = chain_a[ia - 1];
+            let cb = chain_b[ib - 1];
+            if ca != cb {
+                // First divergence: `ca` and `cb` are siblings under the LCA.
+                return self.compare_sibling_node_strength(ca, cb);
+            }
+            ia -= 1;
+            ib -= 1;
+        }
+
+        // One chain is a prefix of the other: the shorter (the ancestor) wins.
+        match (ia, ib) {
+            (0, 0) => Ordering::Equal,
+            (0, _) => Ordering::Less,
+            (_, 0) => Ordering::Greater,
+            _ => Ordering::Equal,
         }
     }
 }
@@ -451,6 +559,7 @@ impl PrimIndex {
     /// `Relocate` (i.e. `Reference`, `Payload`, or `Specialize`).
     pub(crate) fn insert_relocate_node(&mut self, mut node: Node) {
         node.flags |= NodeFlags::RELOCATE_SOURCE;
+        node.namespace_depth = node.path.prim_element_count() as u16;
         let id = NodeId(self.graph.nodes.len() as u32);
         self.graph.nodes.push(node);
         self.splice_relocate(id);
@@ -474,9 +583,14 @@ impl PrimIndex {
             Some(p) => self.graph.nodes[p.idx()].map_to_root.compose(&map_to_parent),
             None => map_to_parent.clone(),
         };
+        let namespace_depth = match parent {
+            Some(p) => self.graph.nodes[p.idx()].path.prim_element_count(),
+            None => path.prim_element_count(),
+        } as u16;
         let id = NodeId(self.graph.nodes.len() as u32);
         let mut node = Node::new(layer_index, path, ArcType::Relocate, map_to_parent, map_to_root, false);
         node.flags |= NodeFlags::RELOCATE_SOURCE;
+        node.namespace_depth = namespace_depth;
         if let Some(p) = parent {
             node.parent = Some(p);
             self.graph.nodes[p.idx()].children.push(id);
@@ -3078,6 +3192,38 @@ def "Prim" (
             "all fallbacks invalid — should use first variant 'full': got {paths:?}"
         );
         Ok(())
+    }
+
+    /// Exercises the node strength comparators on a hand-built tree, covering
+    /// every key: arc type, namespace depth, and the sibling-number tiebreak,
+    /// plus the ancestor-stronger rule for arbitrary nodes.
+    #[test]
+    fn node_strength_comparator() {
+        let p = |s: &str| Path::from(s.to_string());
+        let id = MapFunction::identity();
+        let mut g = PrimIndexGraph::default();
+        let root = g.add_child(NodeId::INVALID, 0, p("/A"), ArcType::Root, id.clone(), false);
+        let inh = g.add_child(root, 0, p("/Class"), ArcType::Inherit, id.clone(), false);
+        let r1 = g.add_child(root, 0, p("/R1"), ArcType::Reference, id.clone(), false);
+        let r2 = g.add_child(root, 0, p("/R2"), ArcType::Reference, id.clone(), false);
+
+        // Arc type: an inherit outranks a reference.
+        assert_eq!(g.compare_sibling_node_strength(inh, r1), Ordering::Less);
+        // Sibling number breaks ties between same-arc siblings: earlier wins.
+        assert_eq!(g.compare_sibling_node_strength(r1, r2), Ordering::Less);
+        assert_eq!(g.compare_sibling_node_strength(r2, r1), Ordering::Greater);
+
+        // Arbitrary nodes: an ancestor outranks its descendant.
+        assert_eq!(g.compare_node_strength(root, inh), Ordering::Less);
+        assert_eq!(g.compare_node_strength(inh, root), Ordering::Greater);
+        // Cousins resolve through their diverging ancestors.
+        assert_eq!(g.compare_node_strength(inh, r2), Ordering::Less);
+        assert_eq!(g.compare_node_strength(r2, r2), Ordering::Equal);
+
+        // Namespace depth: a deeper arc-introduction site is stronger.
+        let deep = g.add_child(root, 0, p("/D"), ArcType::Reference, id.clone(), false);
+        g.nodes[deep.idx()].namespace_depth = 5;
+        assert_eq!(g.compare_sibling_node_strength(deep, r1), Ordering::Less);
     }
 
     #[test]
