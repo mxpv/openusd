@@ -305,6 +305,22 @@ impl MapFunction {
         MapFunction::new(pairs)
     }
 
+    /// Returns this mapping with the `(/, /)` root-identity pair added if it is
+    /// not already present (C++ `PcpMapFunction::AddRootIdentity`).
+    ///
+    /// A reference/payload arc maps only its restricted domain (the referenced
+    /// prim's namespace). When propagating implied classes, a class rooted
+    /// outside that domain must still map across the arc, so the transfer
+    /// function is given the root identity catch-all first. The time offset is
+    /// preserved.
+    pub fn with_root_identity(&self) -> MapFunction {
+        let mut pairs: Vec<(Path, Path)> = self.path_map.as_slice().to_vec();
+        if !pairs.iter().any(|(s, t)| s.as_str() == "/" && t.as_str() == "/") {
+            pairs.push((Path::abs_root(), Path::abs_root()));
+        }
+        MapFunction::new(pairs).with_time_offset(self.time_offset)
+    }
+
     /// Builds the implied-class map for propagating a class arc across this
     /// transfer arc (C++ `PcpMapFunction::ImpliedClass`).
     ///

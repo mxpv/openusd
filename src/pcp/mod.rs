@@ -225,10 +225,6 @@ pub(crate) struct LayerStack {
     pub session_layer_count: usize,
     /// Whether payload arcs should be expanded during prim index construction.
     pub load_payloads: bool,
-    /// O(1) lookup: effective sublayer offset of each layer in the first
-    /// stack that contains it. Precomputed from `sublayer_stacks` to keep
-    /// per-prim composition off the linear-scan hot path.
-    layer_offsets: HashMap<usize, sdf::LayerOffset>,
     /// Resolver used to anchor relative asset paths when locating layers.
     pub(crate) resolver: Box<dyn Resolver>,
 }
@@ -244,18 +240,11 @@ impl LayerStack {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &*resolver)))
             .collect();
-        let mut layer_offsets: HashMap<usize, sdf::LayerOffset> = HashMap::new();
-        for stack in sublayer_stacks.values() {
-            for &(li, off) in stack {
-                layer_offsets.entry(li).or_insert(off);
-            }
-        }
         Self {
             layers,
             sublayer_stacks,
             session_layer_count,
             load_payloads,
-            layer_offsets,
             resolver,
         }
     }
@@ -285,28 +274,14 @@ impl LayerStack {
         self.layers.get_mut(index)
     }
 
-    /// Recompute the precomputed `sublayer_stacks` and `layer_offsets` maps
-    /// from the current layers. Used by
+    /// Recompute the precomputed `sublayer_stacks` map from the current layers.
+    /// Used by
     /// [`Cache::recompute_layer_stack`](super::cache::Cache::recompute_layer_stack)
     /// after authoring touched `subLayers` / `subLayerOffsets`.
-    //
-    // TODO: when one layer appears in multiple sublayer stacks with
-    // different effective offsets, the `entry().or_insert(off)` below picks
-    // whichever offset is seen first by `HashMap::values()`, which is
-    // iteration-order non-deterministic. The same bug exists in
-    // [`LayerStack::new`]; making it observable across an authoring call is
-    // what's new here. A per-stack incremental relocate diff would let us
-    // drop this rebuild entirely on most authoring calls.
     fn calc_precomputed(&mut self) {
         self.sublayer_stacks = (0..self.layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
             .collect();
-        self.layer_offsets.clear();
-        for stack in self.sublayer_stacks.values() {
-            for &(li, off) in stack {
-                self.layer_offsets.entry(li).or_insert(off);
-            }
-        }
     }
 
     /// Returns the root layer (the first non-session layer), if any.
@@ -317,23 +292,32 @@ impl LayerStack {
         self.layers.get(self.session_layer_count)
     }
 
+    /// Assembles the stage's root layer stack: the session layers (identity
+    /// offset) followed by the root layer and its sublayers with their
+    /// effective offsets (spec 10.3.1). This is the set of layers a top-level
+    /// prim index scans for local opinions; referenced layer stacks are reached
+    /// only by following arcs.
+    pub(crate) fn root_layer_stack(&self) -> Vec<(usize, sdf::LayerOffset)> {
+        let mut seen = HashSet::new();
+        let mut stack = Vec::new();
+        for i in 0..self.session_layer_count {
+            stack.push((i, sdf::LayerOffset::IDENTITY));
+            seen.insert(i);
+        }
+        let root = self.session_layer_count;
+        if let Some(sublayers) = self.sublayer_stacks.get(&root) {
+            for &(i, offset) in sublayers {
+                if seen.insert(i) {
+                    stack.push((i, offset));
+                }
+            }
+        }
+        stack
+    }
+
     /// Returns the layer identifier at the given index.
     pub fn identifier(&self, index: usize) -> &str {
         &self.layers[index].identifier
-    }
-
-    /// Returns the effective sublayer offset for `layer_index` relative to
-    /// whichever stack first contains it.
-    ///
-    /// Intended for call sites that discover a layer without threading the
-    /// full stack context (ancestor-arc propagation, `cache.rs` scans, and
-    /// the flat L-stage scan used by [`IndexBuilder::build`]). O(1) — backed
-    /// by a map precomputed in [`LayerStack::new`].
-    pub(crate) fn effective_offset_for_layer(&self, layer_index: usize) -> sdf::LayerOffset {
-        self.layer_offsets
-            .get(&layer_index)
-            .copied()
-            .unwrap_or(sdf::LayerOffset::IDENTITY)
     }
 
     /// Returns the layer indices + effective offsets for a sublayer stack
