@@ -1535,6 +1535,33 @@ mod tests {
         Ok(())
     }
 
+    /// A relocate source spanning several sublayers keeps every member in the
+    /// per-site relocate node — the weaker sublayer opinion must not be lost.
+    /// `/World/Src` (authored in both `root.usda` and `sub.usda`) relocates to
+    /// `/World/Dst`, whose relocate node must carry both layers.
+    #[test]
+    fn relocate_source_spans_sublayers() -> Result<()> {
+        use super::super::index::NodeFlags;
+
+        let root = format!("{}/fixtures/relocate_multilayer/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let path = sdf::path("/World/Dst")?;
+        cache.ensure_index(&path)?;
+        let index = &cache.indices[&path];
+
+        let relocate = index
+            .nodes()
+            .find(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE))
+            .expect("relocated prim has a relocate node");
+        let layers: Vec<usize> = relocate.layers().map(|(li, _)| li).collect();
+        assert_eq!(
+            layers,
+            vec![0, 1],
+            "relocate node folds both authoring sublayers, strongest first"
+        );
+        Ok(())
+    }
+
     /// A template clip set (`templateAssetPath` + start/end/stride) is
     /// expanded to explicit clips and resolves end to end through
     /// `value_at` (spec 12.3.4.1.3): `clip.1.usda` drives t=1, `clip.2.usda`

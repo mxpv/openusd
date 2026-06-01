@@ -196,6 +196,31 @@ impl Node {
         }
     }
 
+    /// Builds a standalone node spanning a whole sublayer stack: `layer_stack`
+    /// lists every contributing `(layer index, sublayer offset)` member,
+    /// strongest first. Like [`new`](Self::new) but for a per-site node not
+    /// appended through [`PrimIndexGraph::add_site_child`] (the relocate
+    /// inserts). Panics on an empty `layer_stack`.
+    pub(crate) fn new_site(
+        layer_stack: Vec<(usize, LayerOffset)>,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        map_to_root: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> Self {
+        let mut node = Self::new(
+            layer_stack[0].0,
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+            introduced_by_specialize,
+        );
+        node.layer_stack = layer_stack;
+        node
+    }
+
     /// Index of the strongest layer contributing at this site. A representative
     /// for callers that key on a single layer (dependencies, dumps); value
     /// resolution iterates [`layers`](Self::layers) instead.
@@ -868,7 +893,7 @@ impl PrimIndex {
     pub(crate) fn graft_relocate_node(
         &mut self,
         parent: Option<NodeId>,
-        layer_index: usize,
+        layer_stack: Vec<(usize, LayerOffset)>,
         path: Path,
         map_to_parent: MapFunction,
     ) -> NodeId {
@@ -885,7 +910,7 @@ impl PrimIndex {
             None => path.prim_element_count(),
         } as u16;
         let id = NodeId(self.graph.nodes.len() as u32);
-        let mut node = Node::new(layer_index, path, ArcType::Relocate, map_to_parent, map_to_root, false);
+        let mut node = Node::new_site(layer_stack, path, ArcType::Relocate, map_to_parent, map_to_root, false);
         node.flags |= NodeFlags::RELOCATE_SOURCE;
         node.namespace_depth = namespace_depth;
         if let Some(p) = struct_parent {
