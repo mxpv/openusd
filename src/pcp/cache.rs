@@ -254,14 +254,16 @@ impl Cache {
         };
 
         for node in index.nodes() {
-            if !local_layers.contains(&node.layer_index()) {
-                continue;
-            }
             let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            let Some(value) = self.stack.layer(node.layer_index()).try_get(&query_path, field)? else {
-                continue;
-            };
-            return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
+            for (layer, _) in node.layers() {
+                if !local_layers.contains(&layer) {
+                    continue;
+                }
+                let Some(value) = self.stack.layer(layer).try_get(&query_path, field)? else {
+                    continue;
+                };
+                return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
+            }
         }
 
         Ok(FieldValue::NotAuthored)
@@ -645,8 +647,10 @@ impl Cache {
             let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
                 continue;
             };
-            if let Some(found) = probe(self.stack.layer(node.layer_index()), &prop_path) {
-                return Ok(Some(found));
+            for (layer, _) in node.layers() {
+                if let Some(found) = probe(self.stack.layer(layer), &prop_path) {
+                    return Ok(Some(found));
+                }
             }
         }
         Ok(None)
@@ -681,8 +685,10 @@ impl Cache {
             return Ok(None);
         };
         for node in index.nodes() {
-            if let Some(ty) = self.stack.layer(node.layer_index()).spec_type(&node.path) {
-                return Ok(Some(ty));
+            for (layer, _) in node.layers() {
+                if let Some(ty) = self.stack.layer(layer).spec_type(&node.path) {
+                    return Ok(Some(ty));
+                }
             }
         }
         Ok(None)
@@ -1203,10 +1209,12 @@ impl Cache {
         // needed.
         let mut nodes_to_scan: Vec<(Path, usize)> = Vec::new();
         for node in parent_index.nodes() {
-            nodes_to_scan.push((node.path.clone(), node.layer_index()));
-            if let Some(name) = path.name() {
-                if let Ok(child_in_node) = node.path.append_path(name) {
-                    nodes_to_scan.push((child_in_node, node.layer_index()));
+            for (layer, _) in node.layers() {
+                nodes_to_scan.push((node.path.clone(), layer));
+                if let Some(name) = path.name() {
+                    if let Ok(child_in_node) = node.path.append_path(name) {
+                        nodes_to_scan.push((child_in_node, layer));
+                    }
                 }
             }
         }
@@ -1400,15 +1408,13 @@ impl Cache {
             if drop_local && Self::is_local_opinion(node, &local) {
                 continue;
             }
-            if let Ok(value) = self
-                .stack
-                .layer(node.layer_index())
-                .get(&node.path, children_field.as_str())
-            {
-                if let Value::TokenVec(names) = value.into_owned() {
-                    for name in names {
-                        if !result.contains(&name) {
-                            result.push(name);
+            for (layer, _) in node.layers() {
+                if let Ok(value) = self.stack.layer(layer).get(&node.path, children_field.as_str()) {
+                    if let Value::TokenVec(names) = value.into_owned() {
+                        for name in names {
+                            if !result.contains(&name) {
+                                result.push(name);
+                            }
                         }
                     }
                 }
