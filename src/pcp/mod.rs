@@ -431,6 +431,20 @@ pub enum Error {
         site_path: Path,
     },
 
+    /// A direct composition arc (a reference/inherit/payload/specialize
+    /// authored at the prim) targets a site whose composed permission is
+    /// `private` (spec 10.3.3). C++ records `PcpErrorArcPermissionDenied`; the
+    /// arc is reported but the node is retained, so this is recoverable.
+    #[error("{arc:?} arc at {site_path} targets private site {target_path}")]
+    ArcPermissionDenied {
+        /// The prim where the arc is authored.
+        site_path: Path,
+        /// The composition arc type.
+        arc: ArcType,
+        /// The private site the arc targets.
+        target_path: Path,
+    },
+
     /// Unexpected internal failure surfaced during composition (typically I/O
     /// or value-decoding errors from the underlying layer data).
     #[error(transparent)]

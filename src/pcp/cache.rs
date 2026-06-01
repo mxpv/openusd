@@ -20,9 +20,9 @@ use crate::sdf::{AbstractData, Path, SpecType, Value};
 
 use super::clip::ResolvedClipSet;
 use super::deps::Dependencies;
-use super::index::{AncestorArc, ArcType, CompositionContext, Node, PrimIndex};
+use super::index::{AncestorArc, ArcType, CompositionContext, Node, NodeFlags, PrimIndex};
 use super::rel::Relocates;
-use super::{LayerStack, VariantFallbackMap};
+use super::{Error, LayerStack, VariantFallbackMap};
 
 /// Lazily-built composition graph.
 ///
@@ -65,6 +65,13 @@ pub struct Cache {
     prototype_keys: HashMap<InstanceKey, Path>,
     /// Counter for minting `/__Prototype_N` identities in registration order.
     prototype_count: usize,
+    /// Recoverable composition errors produced since the last drain, awaiting
+    /// report — the analog of C++ `PcpCache::ComputePrimIndex`'s `allErrors`
+    /// out-param. Each freshly built index pushes its detected errors here; the
+    /// owning [`Stage`](crate::usd::Stage) drains them after each query (once
+    /// the cache borrow is released, so the handler may re-enter) and routes
+    /// them to its error handler.
+    pending_errors: Vec<Error>,
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
@@ -133,7 +140,16 @@ impl Cache {
             prototypes: HashMap::new(),
             prototype_keys: HashMap::new(),
             prototype_count: 0,
+            pending_errors: Vec::new(),
         }
+    }
+
+    /// Drains the recoverable composition errors produced since the last call
+    /// (e.g. arc-to-private-site permission errors, spec 10.3.3). The
+    /// [`Stage`](crate::usd::Stage) calls this after each query and forwards
+    /// each error to its handler.
+    pub(crate) fn take_pending_errors(&mut self) -> Vec<Error> {
+        std::mem::take(&mut self.pending_errors)
     }
 
     /// Loads a value-clip or manifest layer referenced by `asset_path`,
@@ -1239,6 +1255,53 @@ impl Cache {
         }
     }
 
+    /// Returns an [`Error::ArcPermissionDenied`] for each direct composition arc
+    /// on `path` whose target site is `permission = private` (spec 10.3.3).
+    ///
+    /// A direct arc is a reference/inherit/payload/specialize authored at this
+    /// prim — its node sits at the prim's own namespace depth and is not an
+    /// implied class. Mirroring C++ `_AddArc`, the offending node is left in the
+    /// index (value resolution, child names, and `has_spec` are unchanged); only
+    /// the error is collected, for the [`Stage`](crate::usd::Stage) to surface.
+    /// The result is a pure function of the index, so it is recomputed on demand
+    /// rather than stored. The enforcement that drops a private target's
+    /// contribution is future work (`PERMISSION_DENIED` / `PERMISSION_PRIVATE`
+    /// are reserved).
+    fn detect_arc_permissions(&self, path: &Path, index: &PrimIndex) -> Vec<Error> {
+        let depth = path.prim_element_count() as u16;
+        let mut errors = Vec::new();
+        for node in index.all_nodes() {
+            let is_direct_arc = matches!(
+                node.arc,
+                ArcType::Inherit | ArcType::Specialize | ArcType::Reference | ArcType::Payload
+            ) && node.namespace_depth() == depth
+                && !node.flags().contains(NodeFlags::IMPLIED_CLASS);
+            if is_direct_arc && self.target_is_private(node) {
+                errors.push(Error::ArcPermissionDenied {
+                    site_path: path.clone(),
+                    arc: node.arc,
+                    target_path: node.path.clone(),
+                });
+            }
+        }
+        errors
+    }
+
+    /// Returns `true` when the strongest `permission` opinion at a direct arc's
+    /// target site (read across the node's contributing layers) is `private`.
+    fn target_is_private(&self, node: &Node) -> bool {
+        for (layer, _) in node.layers() {
+            if let Ok(Some(value)) = self
+                .stack
+                .layer(layer)
+                .try_get(&node.path, FieldKey::Permission.as_str())
+            {
+                return matches!(value.as_ref(), Value::Permission(sdf::Permission::Private));
+            }
+        }
+        false
+    }
+
     // ------------------------------------------------------------------
     // Core composition
     // ------------------------------------------------------------------
@@ -1317,6 +1380,10 @@ impl Cache {
                 index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
                 Some(Value::Bool(true))
             );
+
+        // Queue recoverable composition errors for the stage to surface
+        // (re-derivable later via `local_errors`, so not stored per-prim).
+        self.pending_errors.extend(self.detect_arc_permissions(path, &index));
 
         let mut child_context = index.context_for_children(&self.stack, &parent_ctx);
         child_context.within_instance = parent_ctx.within_instance || is_instance;
@@ -1402,8 +1469,9 @@ impl Cache {
         let mut result: Vec<String> = Vec::new();
 
         // Collect (node path, layer) pairs strongest-first, then fold in
-        // reverse so the merge runs weakest-to-strongest. `node.layers()` and
-        // `index.nodes()` are not double-ended, so the pairs are materialized.
+        // reverse so the merge runs weakest-to-strongest across both nodes and,
+        // within each node, its layers. `node.layers()` and `index.nodes()` are
+        // not double-ended, so the flattened pairs are reversed together.
         let sites: Vec<(Path, usize)> = index
             .nodes()
             .filter(|node| !(drop_local && Self::is_local_opinion(node, &local)))
@@ -1521,6 +1589,43 @@ mod tests {
         let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
         let children = cache.prim_children(&sdf::path("/P")?)?;
         assert_eq!(children, vec!["c", "b", "a", "d"]);
+        Ok(())
+    }
+
+    /// A direct inherit to a `permission = private` class is reported as a
+    /// non-fatal `ArcPermissionDenied` (spec 10.3.3), while the private class
+    /// stays in the prim stack — C++ keeps the node and only records the error.
+    /// Ground truth: `ErrorPermissionDenied_root` (`/Model` inherits the
+    /// private `/_PrivateClass`).
+    #[test]
+    fn inherit_private_class_reports_arc() -> Result<()> {
+        let root = format!(
+            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
+             ErrorPermissionDenied_root/usda/root.usd",
+            manifest_dir()
+        );
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let model = sdf::path("/Model")?;
+        let private = sdf::path("/_PrivateClass")?;
+        cache.ensure_index(&model)?;
+
+        // Visibility is unchanged: the private class still composes into the
+        // prim stack and contributes its opinions.
+        assert!(
+            cache.indices[&model].nodes().any(|n| n.path == private),
+            "private inherited class must remain in the prim stack"
+        );
+
+        // The direct inherit-to-private arc is queued for the stage to surface.
+        let pending = cache.take_pending_errors();
+        assert!(
+            pending.iter().any(|e| matches!(
+                e,
+                Error::ArcPermissionDenied { site_path, arc, target_path }
+                    if *site_path == model && *arc == ArcType::Inherit && *target_path == private
+            )),
+            "expected ArcPermissionDenied for /Model -> /_PrivateClass, got {pending:?}"
+        );
         Ok(())
     }
 
