@@ -269,7 +269,6 @@ impl PrimIndexGraph {
         node.namespace_depth = depth;
         node.flags |= NodeFlags::INERT;
         self.nodes.push(node);
-        self.strength_order.push(id);
         self.root = id;
         id
     }
@@ -281,9 +280,10 @@ impl PrimIndexGraph {
     /// synthetic [`root`](Self::root) when one exists, keeping the graph a
     /// single tree; `map_to_root` then composes through that identity-mapped
     /// root, leaving it equal to `map_to_parent`. The new node is recorded in
-    /// its parent's children, appended to the arena and to the strength
-    /// projection (initially in insertion order); the returned handle stays
-    /// valid for the life of the index.
+    /// its parent's children and appended to the arena; the strength projection
+    /// is built once at the end of the build by
+    /// [`finalize_strength_order`](Self::finalize_strength_order). The returned
+    /// handle stays valid for the life of the index.
     fn add_child(
         &mut self,
         parent: NodeId,
@@ -328,7 +328,6 @@ impl PrimIndexGraph {
             self.nodes[struct_parent.idx()].children.push(idx);
         }
         self.nodes.push(node);
-        self.strength_order.push(idx);
         idx
     }
 
@@ -344,9 +343,6 @@ impl PrimIndexGraph {
 
     /// Collects the chain of nodes from `id` up to its tree root, node first
     /// and root last.
-    // TODO: drive the strength-order projection from these comparators; until
-    // the DFS projection consumes them they have no non-test caller.
-    #[allow(dead_code)]
     fn chain_to_root(&self, id: NodeId) -> Vec<NodeId> {
         let mut chain = vec![id];
         let mut cur = id;
@@ -365,7 +361,6 @@ impl PrimIndexGraph {
     /// stronger); namespace depth (deeper stronger); origin strength (the
     /// node whose origin is reached first in a strong-to-weak walk); finally
     /// sibling number — the earlier-created node (lower [`NodeId`]) is stronger.
-    #[allow(dead_code)]
     fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         let na = &self.nodes[a.idx()];
         let nb = &self.nodes[b.idx()];
@@ -408,7 +403,6 @@ impl PrimIndexGraph {
     /// ancestor. When one node is an ancestor of the other, the ancestor is
     /// stronger; otherwise the two diverging children are siblings, compared by
     /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength).
-    #[allow(dead_code)]
     fn compare_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         if a == b {
             return Ordering::Equal;
@@ -438,6 +432,43 @@ impl PrimIndexGraph {
             (_, 0) => Ordering::Greater,
             _ => Ordering::Equal,
         }
+    }
+
+    /// Rebuilds the strength-order projection as a pre-order DFS of the tree,
+    /// visiting each node's children strongest-first (C++ finalize: a pre-order
+    /// DFS of strength-ordered children equals strength order). The result runs
+    /// strongest to weakest; reversing it gives weak-to-strong.
+    ///
+    /// Each node's `children` are first sorted by
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength).
+    /// That comparator reads only arc type, namespace depth, origin chains, and
+    /// arena order — never the children order being computed — so the sort is
+    /// well-defined before the projection exists.
+    fn finalize_strength_order(&mut self) {
+        if !self.root.is_valid() {
+            return;
+        }
+
+        // Order every node's children by sibling strength. `children` is taken
+        // out so the comparator can borrow the arena immutably during the sort.
+        for i in 0..self.nodes.len() {
+            let mut children = std::mem::take(&mut self.nodes[i].children);
+            children.sort_by(|&a, &b| self.compare_sibling_node_strength(a, b));
+            self.nodes[i].children = children;
+        }
+
+        // Pre-order DFS from the root: visit a node, then its children in
+        // strength order. Pushing children reversed makes the strongest pop
+        // first.
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            order.push(id);
+            for &child in self.nodes[id.idx()].children.iter().rev() {
+                stack.push(child);
+            }
+        }
+        self.strength_order = order;
     }
 }
 
@@ -1461,9 +1492,13 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
+        // Build the strength-order projection as a pre-order DFS of the tree,
+        // visiting each node's children strongest-first.
+        self.output.finalize_strength_order();
+
         // Global weakness: specializes opinions are globally weaker than all
         // other opinions (spec 10.4.1). Stable-partition so non-specialize
-        // nodes come first, preserving relative order within each group.
+        // nodes come first, preserving the DFS order within each group.
         self.apply_specialize_weakness();
 
         Ok(())
