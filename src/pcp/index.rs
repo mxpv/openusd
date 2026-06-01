@@ -517,10 +517,31 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &HashMap<Path, PrimIndex>,
     ) -> Result<Self, Error> {
-        if let Some(cached) = cached_indices.get(path) {
-            return Ok(cached.clone());
+        Self::build_with_cache_in(path, stack, ctx, cached_indices, &stack.root_layer_stack(), true)
+    }
+
+    /// Builds a prim index whose root `L` site scans the given `ambient` layer
+    /// stack rather than the stage's root layer stack.
+    ///
+    /// `ambient` is the layer stack the prim is composed in: the root layer
+    /// stack for a stage prim, or a referenced asset's sublayer stack for an
+    /// arc target reached within that reference. `ambient_is_root` records
+    /// whether `ambient` is the stage's root layer stack, which is the only
+    /// case where the shared `cached_indices` (keyed by stage path) apply.
+    pub(crate) fn build_with_cache_in(
+        path: &Path,
+        stack: &LayerStack,
+        ctx: &CompositionContext,
+        cached_indices: &HashMap<Path, PrimIndex>,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+    ) -> Result<Self, Error> {
+        if ambient_is_root {
+            if let Some(cached) = cached_indices.get(path) {
+                return Ok(cached.clone());
+            }
         }
-        let mut builder = IndexBuilder::new(stack, ctx, cached_indices);
+        let mut builder = IndexBuilder::new(stack, ctx, cached_indices, ambient.to_vec());
         builder.build(path)?;
         Ok(PrimIndex { graph: builder.output })
     }
@@ -543,13 +564,17 @@ impl PrimIndex {
             &parent_ctx.selections,
         );
 
-        // Build ancestor arcs: for each non-Root node whose map_to_root is
-        // not a no-op, record it so children can remap through it.
-        // We use map_to_root (not map_to_parent) because ancestor propagation
-        // needs to translate all the way to the composed namespace.
+        // Build ancestor arcs: record every non-Root node so children can
+        // remap through it. We use map_to_root (not map_to_parent) because
+        // ancestor propagation needs to translate all the way to the composed
+        // namespace. An arc is kept even when its path mapping is a no-op
+        // (e.g. a reference whose target shares the prim's path): it still
+        // crosses into another layer, so a child must follow it to reach the
+        // referenced layer's descendants. Root nodes are skipped — the child's
+        // own root `L` site rescans the root layer stack.
         let mut ancestor_arcs = parent_ctx.ancestor_arcs.clone();
         for node in self.nodes() {
-            if node.arc == ArcType::Root || node.map_to_root.is_noop() {
+            if node.arc == ArcType::Root {
                 continue;
             }
             ancestor_arcs.push(AncestorArc {
@@ -1131,10 +1156,19 @@ struct IndexBuilder<'a> {
     /// All nodes created while true are marked for global weakness
     /// reordering per spec section 10.4.1.
     in_specialize: bool,
+    /// Layer stack the root `L` site scans (the root layer stack for a stage
+    /// prim, or a referenced asset's sublayer stack for an arc target reached
+    /// within that reference).
+    ambient: Vec<(usize, LayerOffset)>,
 }
 
 impl<'a> IndexBuilder<'a> {
-    fn new(stack: &'a LayerStack, ctx: &'a CompositionContext, cached_indices: &'a HashMap<Path, PrimIndex>) -> Self {
+    fn new(
+        stack: &'a LayerStack,
+        ctx: &'a CompositionContext,
+        cached_indices: &'a HashMap<Path, PrimIndex>,
+        ambient: Vec<(usize, LayerOffset)>,
+    ) -> Self {
         Self {
             stack,
             ctx,
@@ -1144,6 +1178,7 @@ impl<'a> IndexBuilder<'a> {
             eval_stack: HashSet::new(),
             target_indices: HashMap::new(),
             in_specialize: false,
+            ambient,
         }
     }
 
@@ -1162,40 +1197,23 @@ impl<'a> IndexBuilder<'a> {
         // place — a post-build node prune would drop the local `Root` node but
         // leave the Reference/Inherit/Variant nodes that local opinion spawned.
         if !self.ctx.within_instance {
-            // The root L stage conceptually scans the stage's root layer stack,
-            // but the existing engine approximates implied-arc propagation by
-            // scanning every loaded layer flat (so inherits/specializes pick up
-            // opinions from referenced layer stacks without a separate
-            // propagation pass). Each layer still carries its own effective
-            // sublayer offset so that retiming flows through correctly.
-            let mut seen_layers = HashSet::new();
-            let mut root_stack = Vec::new();
-            for i in 0..self.stack.session_layer_count {
-                root_stack.push((i, LayerOffset::IDENTITY));
-                seen_layers.insert(i);
-            }
-            let root = self.stack.session_layer_count;
-            if let Some(stack) = self.stack.sublayer_stacks.get(&root) {
-                for &(i, offset) in stack {
-                    if seen_layers.insert(i) {
-                        root_stack.push((i, offset));
-                    }
-                }
-            }
-            for i in 0..self.stack.len() {
-                if seen_layers.insert(i) {
-                    root_stack.push((i, self.stack.effective_offset_for_layer(i)));
-                }
-            }
+            // The root L stage scans this build's ambient layer stack (the stage
+            // root layer stack for a stage prim, or a referenced asset's
+            // sublayer stack for an arc target). Opinions from other layer
+            // stacks are not scanned here — they enter only by following their
+            // arcs, which compose as real child subtrees with implied-class
+            // propagation.
+            let ambient = self.ambient.clone();
 
             // Evaluate root composition site (no parent — this is the graph root).
             self.eval_site(
                 path,
-                &root_stack,
+                &ambient,
                 ArcType::Root,
                 0,
                 NodeId::INVALID,
                 MapFunction::identity(),
+                &[],
             )?;
         }
 
@@ -1218,13 +1236,19 @@ impl<'a> IndexBuilder<'a> {
                     Some((remapped, a.layer_index, a.arc, a.map.clone()))
                 })
                 .collect();
+            // A class an ancestral arc brings in (e.g. a referenced prim's
+            // inherit) propagates its implied class into this build's ambient
+            // stack, so pass it as the outer stack. This reaches a global class
+            // the inherited prim references whose implied node sits at the same
+            // path but in the ambient (referencing) layer stack.
+            let ambient = self.ambient.clone();
             for (rpath, li, arc, map) in &ancestor_sites {
                 // `map` carries the ancestor node's effective `map_to_root`,
                 // which already includes any sublayer offset applied to `li`.
                 // Pass IDENTITY for the per-layer sublayer offset so the
                 // L-loop doesn't compose the sublayer offset a second time.
                 let layer_entry = [(*li, LayerOffset::IDENTITY)];
-                self.eval_site(rpath, &layer_entry, *arc, 0, NodeId::INVALID, map.clone())?;
+                self.eval_site(rpath, &layer_entry, *arc, 0, NodeId::INVALID, map.clone(), &ambient)?;
             }
         }
 
@@ -1243,13 +1267,59 @@ impl<'a> IndexBuilder<'a> {
     /// Only the `strength_order` projection is partitioned; the node arena (and
     /// every stored `parent`/`children` handle) is left untouched.
     fn apply_specialize_weakness(&mut self) {
-        // Stable sort with a bool key (false < true) acts as a stable
-        // partition: non-specialize handles stay first, specialize handles move
-        // to the end, and relative order within each group is preserved.
+        // Non-specialize nodes keep their order and stay strongest; specialize
+        // nodes move to the end (spec 10.4.1) and are ordered among themselves by
+        // strength: first by position in the specializes chain (a more-derived
+        // class outranks the base it specializes), then by layer-stack strength
+        // (an outer reference's opinion on the class outranks an inner one).
+        //
+        // TODO: layer index approximates reference strength (outer layer stacks
+        // collect first, so lower index ≈ stronger); a full
+        // `PcpCompareSiblingNodeStrength` would order by origin strength instead.
+        let rank = self.specialize_chain_ranks();
         let nodes = &self.output.nodes;
-        self.output
-            .strength_order
-            .sort_by_key(|id| nodes[id.idx()].introduced_by_specialize());
+        self.output.strength_order.sort_by(|&a, &b| {
+            let (na, nb) = (&nodes[a.idx()], &nodes[b.idx()]);
+            match (na.introduced_by_specialize(), nb.introduced_by_specialize()) {
+                // Stable sort keeps the relative order of the non-specialize band.
+                (false, false) => std::cmp::Ordering::Equal,
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (true, true) => {
+                    let ra = rank.get(&na.path).copied().unwrap_or(0);
+                    let rb = rank.get(&nb.path).copied().unwrap_or(0);
+                    ra.cmp(&rb).then(na.layer_index.cmp(&nb.layer_index))
+                }
+            }
+        });
+    }
+
+    /// Maps each specialized class path to its depth in the specializes chain:
+    /// the number of specialize-arc ancestors of the directly-composed node at
+    /// that path (`/Specializes` specializes `/Base` → rank 0 and 1). Implied
+    /// copies of a class hang flat (no specialize ancestors), so the per-path
+    /// maximum recovers the rank the direct node established.
+    fn specialize_chain_ranks(&self) -> HashMap<Path, u16> {
+        let mut ranks: HashMap<Path, u16> = HashMap::new();
+        for node in self.output.nodes.iter() {
+            if !node.introduced_by_specialize() {
+                continue;
+            }
+            let mut rank = 0u16;
+            let mut parent = node.parent();
+            while let Some(pid) = parent {
+                let pnode = &self.output.nodes[pid.idx()];
+                if pnode.introduced_by_specialize() {
+                    rank += 1;
+                }
+                parent = pnode.parent();
+            }
+            ranks
+                .entry(node.path.clone())
+                .and_modify(|r| *r = (*r).max(rank))
+                .or_insert(rank);
+        }
+        ranks
     }
 
     /// Evaluate a single composition site: run LIVRPS for `path` within
@@ -1261,6 +1331,7 @@ impl<'a> IndexBuilder<'a> {
     /// applied by the arc that introduced this site; each per-layer entry's
     /// sublayer offset is composed on top for the L-node produced by that
     /// layer.
+    #[allow(clippy::too_many_arguments)]
     fn eval_site(
         &mut self,
         path: &Path,
@@ -1269,6 +1340,7 @@ impl<'a> IndexBuilder<'a> {
         depth: usize,
         parent: NodeId,
         map_to_parent: MapFunction,
+        outer_stack: &[(usize, LayerOffset)],
     ) -> Result<(), Error> {
         if depth > MAX_COMPOSITION_DEPTH {
             return Err(Error::ArcCycle {
@@ -1296,12 +1368,13 @@ impl<'a> IndexBuilder<'a> {
             self.in_specialize = true;
         }
 
-        let result = self.eval_site_body(path, layer_stack, arc, depth, parent, map_to_parent);
+        let result = self.eval_site_body(path, layer_stack, arc, depth, parent, map_to_parent, outer_stack);
         self.in_specialize = prev_in_specialize;
         self.eval_stack.remove(&site_key);
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn eval_site_body(
         &mut self,
         path: &Path,
@@ -1310,6 +1383,7 @@ impl<'a> IndexBuilder<'a> {
         depth: usize,
         parent: NodeId,
         map_to_parent: MapFunction,
+        outer_stack: &[(usize, LayerOffset)],
     ) -> Result<(), Error> {
         let site_start = self.output.len();
 
@@ -1335,25 +1409,46 @@ impl<'a> IndexBuilder<'a> {
             }
         }
 
-        // I — Inherits: compose InheritPaths. Build a full index for each
-        // target (which includes ancestor context) and merge its nodes.
+        // I — Inherits: compose InheritPaths. A class arc targets a prim in the
+        // same layer stack as the inheriting site, so compose it within that
+        // ambient `layer_stack` rather than re-rooting at the root layer stack.
         // Implied arcs are propagated inline through ancestor arc mappings.
+        let inherit_start = self.output.len();
         let inherits =
             compose_arc_list_in::<Path>(&self.output[site_start..], FieldKey::InheritPaths, &self.stack.layers)?;
         for inherit_path in &inherits {
             let resolved = path.make_absolute(inherit_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Inherit, site_node, LayerOffset::IDENTITY)?;
+            self.merge_full_index(
+                &resolved,
+                ArcType::Inherit,
+                site_node,
+                LayerOffset::IDENTITY,
+                layer_stack,
+            )?;
             self.add_implied_nodes(before, ArcType::Inherit, site_node);
             for vt in variant_expanded_targets(path, &resolved) {
                 let before = self.output.len();
-                self.merge_full_index(&vt, ArcType::Inherit, site_node, LayerOffset::IDENTITY)?;
+                self.merge_full_index(&vt, ArcType::Inherit, site_node, LayerOffset::IDENTITY, layer_stack)?;
                 self.add_implied_nodes(before, ArcType::Inherit, site_node);
             }
         }
 
+        // Implied classes through a reference/payload transfer. A class the
+        // referenced prim inherits lives in the referenced layer stack, but the
+        // same relationship must hold in the referencing namespace so outer
+        // opinions on the class contribute (spec 10.3.2.3.2). Conjugate each
+        // inherit just composed through this arc's transfer and compose the
+        // implied class against the OUTER layer stack — before variants, so a
+        // variant selection authored on the implied class outranks the
+        // referenced prim's own selection.
+        if matches!(arc, ArcType::Reference | ArcType::Payload) && !outer_stack.is_empty() {
+            let transfer = map_to_parent.with_root_identity();
+            self.propagate_implied_through_transfer(inherit_start, &transfer, outer_stack, depth, site_node)?;
+        }
+
         // V — Variants: resolve selections iteratively (nested variant sets).
-        self.eval_variants(site_start, site_node);
+        self.eval_variants(site_start, site_node, layer_stack);
 
         // Collect range of all opinion nodes (L + I + V) for R/P/S lookups.
         let opinion_end = self.output.len();
@@ -1373,6 +1468,7 @@ impl<'a> IndexBuilder<'a> {
                 depth,
                 site_node,
                 reference.layer_offset.sanitized(),
+                layer_stack,
             )?;
         }
 
@@ -1388,6 +1484,7 @@ impl<'a> IndexBuilder<'a> {
                     depth,
                     site_node,
                     payload.layer_offset.unwrap_or_default().sanitized(),
+                    layer_stack,
                 )?;
             }
         }
@@ -1401,8 +1498,28 @@ impl<'a> IndexBuilder<'a> {
         for specialize_path in &specializes {
             let resolved = path.make_absolute(specialize_path);
             let before = self.output.len();
-            self.merge_full_index(&resolved, ArcType::Specialize, site_node, LayerOffset::IDENTITY)?;
+            self.merge_full_index(
+                &resolved,
+                ArcType::Specialize,
+                site_node,
+                LayerOffset::IDENTITY,
+                layer_stack,
+            )?;
             self.add_implied_nodes(before, ArcType::Specialize, site_node);
+        }
+
+        // Cascade implied classes for every class arc in this site's subtree up
+        // through the arc that introduced the site, into `outer_stack` (the
+        // referencing layer stack). Running at the end — after all of L/I/V/R/P/S
+        // composed — over the whole subtree is what carries a class up the full
+        // reference chain to the root: each nesting level re-propagates what the
+        // level below produced, so a class inherited several references deep
+        // still reaches the root namespace (spec 10.3.2.3.2, and 10.4.1 for the
+        // specializes case). The post-inherit propagation above is the narrower
+        // pass that runs before variants resolve, for variant-selection timing.
+        if !outer_stack.is_empty() {
+            let transfer = map_to_parent.with_root_identity();
+            self.propagate_implied_through_transfer(site_start, &transfer, outer_stack, depth, site_node)?;
         }
 
         Ok(())
@@ -1557,13 +1674,52 @@ impl<'a> IndexBuilder<'a> {
         }
     }
 
-    /// Build a full PrimIndex for a target path and merge its nodes into this
-    /// builder's output. Used for inherit/specialize targets that need their
-    /// own ancestor propagation.
+    /// Compose the ancestral [`CompositionContext`] for an arc target built
+    /// within `ambient`.
     ///
-    /// Checks the composition cache first (for fully-composed indices including
-    /// ancestor-propagated specs), then the builder-local cache, and finally
-    /// builds from scratch with the current prim's context.
+    /// Recurses up the target's namespace: each ancestor is composed in the same
+    /// `ambient` from its own parent's context, so the chain carries each
+    /// ancestor's arcs and variant selections without the referencing prim's
+    /// ancestor arcs leaking in. The recursion bottoms out at a root-level
+    /// ancestor with the seed context (the referencing prim's variant selections
+    /// and fallbacks), and `context_for_children` threads those selections down.
+    /// Intermediate indices are memoised in `target_indices`.
+    fn target_ctx(
+        &mut self,
+        path: &Path,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+    ) -> Result<CompositionContext, Error> {
+        let parent = match path.parent() {
+            Some(p) if p != Path::abs_root() => p,
+            _ => return Ok(self.arc_target_seed_context()),
+        };
+        let parent_ctx = self.target_ctx(&parent, ambient, ambient_is_root)?;
+        if !self.target_indices.contains_key(&parent) {
+            let parent_idx = PrimIndex::build_with_cache_in(
+                &parent,
+                self.stack,
+                &parent_ctx,
+                self.cached_indices,
+                ambient,
+                ambient_is_root,
+            )?;
+            self.target_indices.insert(parent.clone(), parent_idx);
+        }
+        Ok(self.target_indices[&parent].context_for_children(self.stack, &parent_ctx))
+    }
+
+    /// Build a full PrimIndex for an arc target and merge its nodes into this
+    /// builder's output. Used for inherit, specialize, and internal-reference
+    /// targets, which need their own ancestral composition (their namespace
+    /// parent's arcs and variant selections).
+    ///
+    /// The target is composed within `ambient` — the layer stack the arc lives
+    /// in (the same stack as the referencing site for class arcs and internal
+    /// references), not the stage root layer stack. Its ancestral context comes
+    /// from composing the target's namespace parent in the same `ambient`. The
+    /// stage-keyed `cached_indices` are consulted only when `ambient` is the
+    /// stage root layer stack (handled inside `build_with_cache_in`).
     ///
     /// `arc_offset` is the layer offset of the arc introducing this merge
     /// (identity for inherit/specialize, non-identity only for internal
@@ -1576,6 +1732,7 @@ impl<'a> IndexBuilder<'a> {
         arc: ArcType,
         parent: NodeId,
         arc_offset: LayerOffset,
+        ambient: &[(usize, LayerOffset)],
     ) -> Result<(), Error> {
         // Track specialize context for global weakness (spec 10.4.1).
         let prev_in_specialize = self.in_specialize;
@@ -1583,35 +1740,27 @@ impl<'a> IndexBuilder<'a> {
             self.in_specialize = true;
         }
 
+        // TODO(perf): comparing against a freshly built root layer stack on
+        // every merge is O(layers); thread the flag from the caller instead.
+        let ambient_is_root = ambient == self.stack.root_layer_stack().as_slice();
+
         if !self.target_indices.contains_key(target) {
-            // Prefer the composition cache — it holds the fully-composed result,
-            // including any children propagated through ancestor arcs.
-            if let Some(cached) = self.cached_indices.get(target) {
-                self.target_indices.insert(target.clone(), cached.clone());
-            } else {
-                // Build the target's ancestor context using the current prim's
-                // context so ancestor arcs are available.
-                let ctx = if let Some(parent) = target.parent() {
-                    if parent != Path::abs_root() {
-                        if !self.target_indices.contains_key(&parent) {
-                            let parent_idx = if let Some(cp) = self.cached_indices.get(&parent) {
-                                cp.clone()
-                            } else {
-                                PrimIndex::build_with_context(&parent, self.stack, self.ctx)?
-                            };
-                            self.target_indices.insert(parent.clone(), parent_idx);
-                        }
-                        let parent_idx = &self.target_indices[&parent];
-                        parent_idx.context_for_children(self.stack, self.ctx)
-                    } else {
-                        self.arc_target_seed_context()
-                    }
-                } else {
-                    self.arc_target_seed_context()
-                };
-                let idx = PrimIndex::build_with_context(target, self.stack, &ctx)?;
-                self.target_indices.insert(target.clone(), idx);
-            }
+            // Compose the target within `ambient` using the ancestral context of
+            // its own namespace parent (composed recursively in the same
+            // `ambient`), not the referencing prim's. Carrying the referencing
+            // prim's ancestor arcs would re-introduce them as opinions on the
+            // target's namespace, where they do not belong (and self-cycles when
+            // such an arc maps back onto the target's own path).
+            let ctx = self.target_ctx(target, ambient, ambient_is_root)?;
+            let idx = PrimIndex::build_with_cache_in(
+                target,
+                self.stack,
+                &ctx,
+                self.cached_indices,
+                ambient,
+                ambient_is_root,
+            )?;
+            self.target_indices.insert(target.clone(), idx);
         }
         let target_index = &self.target_indices[target];
         // The mapping for merged nodes translates from the target's namespace
@@ -1666,13 +1815,26 @@ impl<'a> IndexBuilder<'a> {
         Ok(())
     }
 
-    /// Adds variant nodes for `variant_path` across all layers. Returns
-    /// the index range of newly added nodes.
-    fn add_variant_nodes(&mut self, variant_path: &Path, base: &Path, parent: NodeId) -> (usize, usize) {
+    /// Adds variant nodes for `variant_path` from the site's ambient
+    /// `layer_stack`. Returns the index range of newly added nodes.
+    ///
+    /// A variant set is authored in the layer stack the prim is composed in, so
+    /// only those layers are scanned — not every loaded layer. Scanning all
+    /// layers would pull a same-named variant from an unrelated referenced layer
+    /// stack into this composition.
+    fn add_variant_nodes(
+        &mut self,
+        variant_path: &Path,
+        base: &Path,
+        parent: NodeId,
+        layer_stack: &[(usize, LayerOffset)],
+    ) -> (usize, usize) {
         let start = self.output.len();
         let variant_map = MapFunction::from_pair_identity(variant_path.clone(), base.clone());
-        for (i, layer) in self.stack.layers.iter().enumerate() {
-            if layer.has_spec(variant_path) && self.seen.insert((i, variant_path.clone(), ArcType::Variant)) {
+        for &(i, _) in layer_stack {
+            if self.stack.layer(i).has_spec(variant_path)
+                && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
+            {
                 self.output.add_child(
                     parent,
                     i,
@@ -1688,7 +1850,7 @@ impl<'a> IndexBuilder<'a> {
 
     /// Resolve variant selections iteratively, handling nested variant sets
     /// and variant sets on inherited classes.
-    fn eval_variants(&mut self, site_start: usize, parent: NodeId) {
+    fn eval_variants(&mut self, site_start: usize, parent: NodeId, layer_stack: &[(usize, LayerOffset)]) {
         let mut processed = HashSet::new();
         loop {
             let current_end = self.output.len();
@@ -1713,7 +1875,7 @@ impl<'a> IndexBuilder<'a> {
                     if !processed.insert(variant_path.clone()) {
                         continue;
                     }
-                    self.add_variant_nodes(&variant_path, base, parent);
+                    self.add_variant_nodes(&variant_path, base, parent, layer_stack);
                 }
             }
 
@@ -1739,16 +1901,20 @@ impl<'a> IndexBuilder<'a> {
         depth: usize,
         parent: NodeId,
         arc_offset: LayerOffset,
+        outer_stack: &[(usize, LayerOffset)],
     ) -> Result<(), Error> {
         if asset_path.is_empty() {
-            // Internal reference — build full index for target (with ancestor
-            // context) so variant selections and arc mappings propagate.
+            // Internal reference — the target lives in the same layer stack as
+            // the referencing site, so compose it within that ambient stack
+            // (`outer_stack`, which the caller set to the site's layer stack)
+            // with its own ancestral context, rather than re-rooting at the
+            // stage's root layer stack.
             if prim_path.is_empty() {
                 return Ok(());
             }
-            self.merge_full_index(prim_path, arc, parent, arc_offset)?;
+            self.merge_full_index(prim_path, arc, parent, arc_offset, outer_stack)?;
             for vt in variant_expanded_targets(context_path, prim_path) {
-                self.merge_full_index(&vt, arc, parent, arc_offset)?;
+                self.merge_full_index(&vt, arc, parent, arc_offset, outer_stack)?;
             }
         } else {
             // External reference — evaluate in a fresh sub-builder so the
@@ -1800,15 +1966,27 @@ impl<'a> IndexBuilder<'a> {
             let target_stack = self.get_sublayer_stack(layer_index);
             let arc_map = MapFunction::from_pair(source.clone(), context_path.clone()).with_time_offset(arc_offset);
             // Evaluate directly — arc-type-aware dedup allows the same
-            // (layer, path) to appear under different arc types.
-            self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map)?;
-            // Also propagate ancestor arcs within the target layer. Each
-            // ancestor arc's layer lives in the target's own sublayer stack,
-            // so pair it with its target-stack sublayer offset.
+            // (layer, path) to appear under different arc types. Pass the
+            // referencing site's `outer_stack` so the target's own inherits can
+            // propagate implied classes back into the referencing namespace.
+            self.eval_site(&source, &target_stack, arc, depth + 1, parent, arc_map, outer_stack)?;
+            // Also propagate ancestor arcs within the target layer: the
+            // reference target may sit under a prim that itself carries arcs
+            // (an ancestral reference), so its descendants must reach those.
+            // Compose the target's namespace parent within the target's own
+            // sublayer stack (not the stage root), from a clean seed context.
             if let Some(source_parent) = source.parent() {
                 if source_parent != Path::abs_root() {
                     let child_name = source.name().unwrap_or("");
-                    let parent_index = PrimIndex::build_with_context(&source_parent, self.stack, self.ctx)?;
+                    let seed = self.arc_target_seed_context();
+                    let parent_index = PrimIndex::build_with_cache_in(
+                        &source_parent,
+                        self.stack,
+                        &seed,
+                        self.cached_indices,
+                        &target_stack,
+                        false,
+                    )?;
                     let ancestor_sites: Vec<_> = parent_index
                         .nodes()
                         .filter(|n| n.arc != ArcType::Root)
@@ -1828,9 +2006,55 @@ impl<'a> IndexBuilder<'a> {
                             .map(|(_, o)| *o)
                             .unwrap_or_default();
                         let layer_entry = [(*li, sub_off)];
-                        self.eval_site(rpath, &layer_entry, *a, depth + 1, parent, ancestor_map)?;
+                        self.eval_site(rpath, &layer_entry, *a, depth + 1, parent, ancestor_map, outer_stack)?;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Propagate implied classes for class arcs found in a freshly composed
+    /// arc-target subtree (C++ `_EvalImpliedClassTree`).
+    ///
+    /// `start` bounds the subtree's nodes. For each inherit/specialize node in
+    /// it, the class path is conjugated through `transfer` (the arc's
+    /// map-to-parent carrying the `(/, /)` root identity so a class rooted
+    /// outside the arc's domain still maps) into the referencing namespace, and
+    /// the implied class is composed against `outer_stack` — the referencing
+    /// layer stack — so outer opinions on the class contribute. Each implied
+    /// node is tagged [`IMPLIED_CLASS`](NodeFlags::IMPLIED_CLASS) with `origin`.
+    fn propagate_implied_through_transfer(
+        &mut self,
+        start: usize,
+        transfer: &MapFunction,
+        outer_stack: &[(usize, LayerOffset)],
+        depth: usize,
+        origin: NodeId,
+    ) -> Result<(), Error> {
+        // Snapshot the class arcs before composing any implied node, since
+        // composing appends to `self.output`.
+        let class_nodes: Vec<(Path, Path, ArcType)> = self.output[start..]
+            .iter()
+            .filter(|n| n.arc == ArcType::Inherit || n.arc == ArcType::Specialize)
+            .map(|n| {
+                let prim = n
+                    .map_to_root
+                    .map_source_to_target(&n.path)
+                    .unwrap_or_else(|| n.path.clone());
+                (n.path.clone(), prim, n.arc)
+            })
+            .collect();
+
+        for (class_path, inheriting_prim, arc) in &class_nodes {
+            let Some(implied_path) = transfer.map_source_to_target(class_path) else {
+                continue;
+            };
+            let before = self.output.len();
+            let map = MapFunction::from_pair_identity(implied_path.clone(), inheriting_prim.clone());
+            self.eval_site(&implied_path, outer_stack, *arc, depth + 1, NodeId::INVALID, map, &[])?;
+            for id in before..self.output.len() {
+                self.output.mark_implied(NodeId(id as u32), origin);
             }
         }
         Ok(())
@@ -1907,8 +2131,27 @@ fn resolve_variant_selections_in<'a>(
 ) -> HashMap<String, String> {
     let mut selections: HashMap<String, String> = HashMap::new();
 
-    // Gather explicit selections (first opinion wins).
-    for node in nodes.clone() {
+    // Seed selections come from the composition context — a selection already
+    // resolved on a stronger site (a referencing prim, or a namespace ancestor)
+    // that this build is weaker than. They rank above this site's own opinions:
+    // a `complexity=high` authored on the referencing layer stack must beat the
+    // `complexity=low` the referenced layer authored locally (spec 12.2, the
+    // referencing arc is stronger than the referenced opinion).
+    for (set_name, selection) in seed {
+        selections.entry(set_name.clone()).or_insert_with(|| selection.clone());
+    }
+
+    // Order nodes by arc strength so an explicit selection authored on a
+    // stronger arc wins (spec 12.2): a selection on an inherited class beats
+    // one on the referenced prim it is inherited into. `sort_by_key` is stable,
+    // so nodes of equal arc strength keep their composition order. The arena's
+    // strength projection is not finalized during the build, so order here by
+    // the arc type directly.
+    let mut ordered: Vec<&Node> = nodes.collect();
+    ordered.sort_by_key(|n| n.arc);
+
+    // Gather explicit selections for sets the seed did not already fix.
+    for node in &ordered {
         let data = &layers[node.layer_index];
         if let Ok(value) = data.get(&node.path, FieldKey::VariantSelection.as_str()) {
             if let Value::VariantSelectionMap(map) = value.into_owned() {
@@ -1919,14 +2162,9 @@ fn resolve_variant_selections_in<'a>(
         }
     }
 
-    // Context-inherited selections rank above any local fallback default.
-    for (set_name, selection) in seed {
-        selections.entry(set_name.clone()).or_insert_with(|| selection.clone());
-    }
-
     // For variant sets without an explicit selection, try the fallback map
     // first, then fall back to the first variant name in the set.
-    for node in nodes {
+    for node in &ordered {
         let data = &layers[node.layer_index];
         let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
             continue;

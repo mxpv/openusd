@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use openusd::{sdf, usd};
+use openusd::{pcp, sdf, usd};
 
 const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/composition/tests/assets";
 
@@ -38,6 +38,19 @@ enum Format {
     Binary,
 }
 
+/// Variant fallbacks a test relies on. The C++ Pcp test framework registers
+/// variant fallbacks through its plugin registry; our harness has none, so the
+/// few cases that depend on a non-default selection configure it here. `case1`'s
+/// `standin` set must select `render` (its `anim`/`layout`/`sim` variants
+/// reference intentionally-absent files); without the fallback the first
+/// variant, `anim`, is selected and its reference is unresolved.
+fn variant_fallbacks_for(name: &str) -> pcp::VariantFallbackMap {
+    match name {
+        "case1_root" => pcp::VariantFallbackMap::new().add("standin", ["render"]),
+        _ => pcp::VariantFallbackMap::new(),
+    }
+}
+
 fn run(name: &str, format: Format) {
     let test_dir = Path::new(ASSETS).join(name);
     let baseline_path = test_dir.join("pcp.json");
@@ -66,6 +79,7 @@ fn run(name: &str, format: Format) {
 
     let stage = usd::Stage::builder()
         .on_error(|_| Ok(()))
+        .variant_fallbacks(variant_fallbacks_for(name))
         .open(entry.to_str().unwrap())
         .unwrap();
 
