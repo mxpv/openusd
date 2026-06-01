@@ -17,6 +17,7 @@ physics = []
 render = []
 shade = []
 skel = []
+ui = []
 vol = []
 serde = ["dep:serde", "half/serde"]
 
@@ -78,6 +79,10 @@ required-features = ["shade"]
 [[test]]
 name = "render_reader"
 required-features = ["render"]
+
+[[test]]
+name = "ui_reader"
+required-features = ["ui"]
 
 [[test]]
 name = "vol_reader"
