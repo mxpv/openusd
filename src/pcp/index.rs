@@ -294,6 +294,14 @@ impl Node {
     pub(crate) fn introduced_by_specialize(&self) -> bool {
         self.flags.contains(NodeFlags::HAS_SPECIALIZES)
     }
+
+    /// True when this node is a direct arc to a `permission = private` site, or
+    /// lies in such an arc's subtree (spec 10.3.3). It stays visible
+    /// structurally (`nodes`, `has_spec`, child names) but contributes no
+    /// opinions to value resolution — the C++ `_InertSubtree` behavior.
+    pub(crate) fn is_permission_denied(&self) -> bool {
+        self.flags.contains(NodeFlags::PERMISSION_DENIED)
+    }
 }
 
 /// Arena-based composition graph.
@@ -766,6 +774,18 @@ impl PrimIndex {
         self.graph.root.is_valid().then_some(self.graph.root)
     }
 
+    /// Marks `root` and its subtree [`PERMISSION_DENIED`](NodeFlags::PERMISSION_DENIED),
+    /// so value resolution skips their opinions while they stay visible
+    /// structurally — the C++ `_InertSubtree` behavior for a direct arc to a
+    /// `permission = private` site (spec 10.3.3).
+    pub(crate) fn mark_permission_denied_subtree(&mut self, root: NodeId) {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            self.graph.nodes[id.idx()].flags |= NodeFlags::PERMISSION_DENIED;
+            stack.extend_from_slice(&self.graph.nodes[id.idx()].children);
+        }
+    }
+
     /// Returns the node behind a handle.
     pub fn node(&self, id: NodeId) -> &Node {
         &self.graph.nodes[id.idx()]
@@ -1196,31 +1216,35 @@ impl PrimIndex {
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
         // Each node fans out into one opinion per contributing layer in its
         // layer stack, strongest sublayer first, so a per-site node surfaces
-        // every sublayer that authored the field.
+        // every sublayer that authored the field. Permission-denied nodes (a
+        // direct arc to a private site, spec 10.3.3) stay in `nodes` for
+        // structural queries but contribute no opinions here.
         //
         // TODO(perf): collecting per node allocates a small Vec; a custom
         // iterator over (node, layer) pairs would avoid it on the hot path.
-        self.nodes().flat_map(move |node| {
-            let query_path = match Self::query_path(node, prop_suffix) {
-                Ok(path) => path,
-                Err(err) => return vec![Err(err)],
-            };
-            let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
-            for (layer, offset) in node.layers() {
-                match stack.layer(layer).try_get(&query_path, field) {
-                    Ok(Some(value)) => out.push(Ok(Opinion {
-                        node,
-                        layer,
-                        query_path: query_path.clone(),
-                        value,
-                        offset,
-                    })),
-                    Ok(None) => {}
-                    Err(err) => out.push(Err(err)),
+        self.nodes()
+            .filter(|node| !node.is_permission_denied())
+            .flat_map(move |node| {
+                let query_path = match Self::query_path(node, prop_suffix) {
+                    Ok(path) => path,
+                    Err(err) => return vec![Err(err)],
+                };
+                let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
+                for (layer, offset) in node.layers() {
+                    match stack.layer(layer).try_get(&query_path, field) {
+                        Ok(Some(value)) => out.push(Ok(Opinion {
+                            node,
+                            layer,
+                            query_path: query_path.clone(),
+                            value,
+                            offset,
+                        })),
+                        Ok(None) => {}
+                        Err(err) => out.push(Err(err)),
+                    }
                 }
-            }
-            out
-        })
+                out
+            })
     }
 
     /// Walks nodes from strongest to weakest, returning the first opinion.
