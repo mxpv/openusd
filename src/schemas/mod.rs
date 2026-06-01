@@ -22,6 +22,7 @@
 //! | `ui`      | `ui`      | `UsdUI` reader + authoring (SceneGraphPrimAPI / NodeGraphNodeAPI / Backdrop). |
 //! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
 //! | `media`   | `media`   | `UsdMedia` reader + authoring (`SpatialAudio`). |
+//! | `proc`    | `proc`    | `UsdProc` reader + authoring (`GenerativeProcedural`). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).
@@ -31,6 +32,7 @@
     feature = "lux",
     feature = "media",
     feature = "physics",
+    feature = "proc",
     feature = "render",
     feature = "shade",
     feature = "skel",
@@ -47,6 +49,8 @@ pub mod lux;
 pub mod media;
 #[cfg(feature = "physics")]
 pub mod physics;
+#[cfg(feature = "proc")]
+pub mod proc;
 #[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "shade")]
