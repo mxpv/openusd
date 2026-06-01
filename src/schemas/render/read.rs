@@ -8,11 +8,12 @@
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::{Path, Value};
 use crate::usd::Stage;
 
 use super::tokens::*;
 use super::types::*;
+use crate::schemas::common::{attr_value, read_asset, read_token};
 
 /// Read the attributes shared by `RenderSettings` / `RenderProduct` via
 /// their abstract base `RenderSettingsBase`. Per-field fallback to the
@@ -158,10 +159,6 @@ pub fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
 
 // ── value-read helpers ──────────────────────────────────────────────
 
-fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
-}
-
 /// Narrow a `f64` to `f32`, clamping to the finite `f32` range so a large
 /// authored double can't silently become `inf`.
 fn f64_to_f32(d: f64) -> f32 {
@@ -184,13 +181,6 @@ fn read_bool(stage: &Stage, prim: &Path, name: &str) -> Result<Option<bool>> {
     })
 }
 
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::Token(s) | Value::String(s)) => Some(s),
-        _ => None,
-    })
-}
-
 fn read_int2(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[i32; 2]>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Vec2i(v)) => Some(v),
@@ -209,13 +199,6 @@ fn read_float4(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 4]
 fn read_token_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<String>>> {
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::TokenVec(v) | Value::StringVec(v)) => Some(v),
-        _ => None,
-    })
-}
-
-fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
         _ => None,
     })
 }

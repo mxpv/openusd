@@ -38,8 +38,9 @@ impl VectorDataRoleHint {
 }
 
 /// The `FieldAsset` attributes shared by `OpenVDBAsset` / `Field3DAsset`
-/// (file-backed grid fields). `vectorDataRoleHint` defaults to `None`; the
-/// rest have no spec default.
+/// (file-backed grid fields). `vectorDataRoleHint` defaults to the token
+/// `None` ([`VectorDataRoleHint::NoRole`], not `Option::None`); the rest
+/// have no spec default.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadFieldAsset {
     /// `filePath` - the volume file on disk.

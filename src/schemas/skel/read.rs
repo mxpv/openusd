@@ -18,6 +18,7 @@ use crate::usd::{PrimPredicate, Stage};
 
 use super::tokens::*;
 use super::types::*;
+use crate::schemas::common::read_token;
 
 /// Read a `SkelRoot` prim. Returns `None` when the prim isn't typed
 /// `SkelRoot`.
@@ -279,13 +280,6 @@ fn read_attr_default(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Va
 fn read_attr_field(stage: &Stage, prim: &Path, attr_name: &str, field: &str) -> Result<Option<Value>> {
     let attr_path = prim.append_property(attr_name)?;
     stage.field::<Value>(attr_path, field)
-}
-
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match read_attr_default(stage, prim, name)? {
-        Some(Value::Token(s)) | Some(Value::String(s)) => Some(s),
-        _ => None,
-    })
 }
 
 fn read_token_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Vec<String>> {
