@@ -30,17 +30,17 @@ use super::light_api::LightApiSetters;
 /// only when they need a non-sun value.
 ///
 /// [`ReadDistantLight::default`]: crate::schemas::lux::ReadDistantLight
-pub fn define_distant_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<DistantLightAuthor<'s>> {
+pub fn define_distant_light(stage: &Stage, path: impl Into<Path>) -> Result<DistantLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_DISTANT_LIGHT)?;
     Ok(DistantLightAuthor { prim })
 }
 
-pub struct DistantLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct DistantLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> DistantLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DistantLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -53,8 +53,8 @@ impl<'s> DistantLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for DistantLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for DistantLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -67,17 +67,17 @@ impl<'s> LightApiSetters<'s> for DistantLightAuthor<'s> {
 /// Per the schema, GeometryLight uses an arbitrary geometric prim
 /// (typically a Mesh) as the emissive surface. The `geometry` rel must
 /// point at that source prim.
-pub fn define_geometry_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<GeometryLightAuthor<'s>> {
+pub fn define_geometry_light(stage: &Stage, path: impl Into<Path>) -> Result<GeometryLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_GEOMETRY_LIGHT)?;
     Ok(GeometryLightAuthor { prim })
 }
 
-pub struct GeometryLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct GeometryLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> GeometryLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl GeometryLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -89,8 +89,8 @@ impl<'s> GeometryLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for GeometryLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for GeometryLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

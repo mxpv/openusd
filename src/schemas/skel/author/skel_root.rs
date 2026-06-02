@@ -17,7 +17,7 @@ use crate::schemas::skel::tokens::T_SKEL_ROOT;
 /// authored separately. The prim only carries the typed `SkelRoot`
 /// `typeName` so downstream traversals (`find_skel_roots`,
 /// `discover_bindings`) recognise the subtree.
-pub fn define_skel_root<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Prim<'s>> {
+pub fn define_skel_root(stage: &Stage, path: impl Into<Path>) -> Result<Prim> {
     Ok(stage.define_prim(path)?.set_type_name(T_SKEL_ROOT)?)
 }
 

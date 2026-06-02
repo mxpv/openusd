@@ -197,7 +197,7 @@ impl Collection {
     /// Create the collection's `<suffix>` relationship on the edit target as a
     /// non-custom schema property — `includes`/`excludes` are built-in schema
     /// relationships, like the `expansionRule`/`includeRoot` attributes above.
-    fn schema_rel<'s>(&self, prim: &Prim<'s>, suffix: &str) -> Result<Relationship<'s>> {
+    fn schema_rel(&self, prim: &Prim, suffix: &str) -> Result<Relationship> {
         Ok(prim.create_relationship(&self.rel_name(suffix))?.set_custom(false)?)
     }
 

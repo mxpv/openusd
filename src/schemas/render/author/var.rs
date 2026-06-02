@@ -11,17 +11,17 @@ use crate::schemas::render::types::SourceType;
 
 /// Author a `def RenderVar` prim at `path`. Returns a chainable
 /// [`RenderVarAuthor`].
-pub fn define_render_var<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RenderVarAuthor<'s>> {
+pub fn define_render_var(stage: &Stage, path: impl Into<Path>) -> Result<RenderVarAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_RENDER_VAR)?;
     Ok(RenderVarAuthor { prim })
 }
 
-pub struct RenderVarAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RenderVarAuthor {
+    prim: Prim,
 }
 
-impl<'s> RenderVarAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RenderVarAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

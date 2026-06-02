@@ -23,17 +23,17 @@ use crate::schemas::geom::types::{ElementType, Interpolation, Orientation};
 use super::common::{author_int_vec, author_point3f_array, author_primvar, author_uniform_token};
 
 /// Author a `def Mesh` prim and return a chainable [`MeshAuthor`].
-pub fn define_mesh<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MeshAuthor<'s>> {
+pub fn define_mesh(stage: &Stage, path: impl Into<Path>) -> Result<MeshAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_MESH)?;
     Ok(MeshAuthor { prim })
 }
 
-pub struct MeshAuthor<'s> {
-    prim: Prim<'s>,
+pub struct MeshAuthor {
+    prim: Prim,
 }
 
-impl<'s> MeshAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl MeshAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -138,17 +138,17 @@ impl<'s> MeshAuthor<'s> {
 }
 
 /// Author a `def GeomSubset` prim under a Mesh.
-pub fn define_subset<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SubsetAuthor<'s>> {
+pub fn define_subset(stage: &Stage, path: impl Into<Path>) -> Result<SubsetAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_GEOM_SUBSET)?;
     Ok(SubsetAuthor { prim })
 }
 
-pub struct SubsetAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SubsetAuthor {
+    prim: Prim,
 }
 
-impl<'s> SubsetAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SubsetAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

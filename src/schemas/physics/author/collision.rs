@@ -18,17 +18,17 @@ use super::common::{author_bool, author_float, author_rel_targets, author_unifor
 
 /// Apply `PhysicsCollisionAPI` to the prim at `path` and return a
 /// chainable [`CollisionAuthor`].
-pub fn apply_collision<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<CollisionAuthor<'s>> {
+pub fn apply_collision(stage: &Stage, path: impl Into<Path>) -> Result<CollisionAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_COLLISION)?;
     Ok(CollisionAuthor { prim })
 }
 
-pub struct CollisionAuthor<'s> {
-    prim: Prim<'s>,
+pub struct CollisionAuthor {
+    prim: Prim,
 }
 
-impl<'s> CollisionAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl CollisionAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -51,17 +51,17 @@ impl<'s> CollisionAuthor<'s> {
 /// Apply `PhysicsMeshCollisionAPI` to a Mesh prim at `path` and return
 /// a chainable [`MeshCollisionAuthor`]. Per spec, this API must be
 /// applied alongside `PhysicsCollisionAPI` on a `UsdGeomMesh`.
-pub fn apply_mesh_collision<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MeshCollisionAuthor<'s>> {
+pub fn apply_mesh_collision(stage: &Stage, path: impl Into<Path>) -> Result<MeshCollisionAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_MESH_COLLISION)?;
     Ok(MeshCollisionAuthor { prim })
 }
 
-pub struct MeshCollisionAuthor<'s> {
-    prim: Prim<'s>,
+pub struct MeshCollisionAuthor {
+    prim: Prim,
 }
 
-impl<'s> MeshCollisionAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl MeshCollisionAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -79,17 +79,17 @@ impl<'s> MeshCollisionAuthor<'s> {
 
 /// Apply `PhysicsMaterialAPI` to a Material prim at `path` and return
 /// a chainable [`MaterialAuthor`].
-pub fn apply_physics_material<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MaterialAuthor<'s>> {
+pub fn apply_physics_material(stage: &Stage, path: impl Into<Path>) -> Result<MaterialAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_PHYSICS_MATERIAL)?;
     Ok(MaterialAuthor { prim })
 }
 
-pub struct MaterialAuthor<'s> {
-    prim: Prim<'s>,
+pub struct MaterialAuthor {
+    prim: Prim,
 }
 
-impl<'s> MaterialAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl MaterialAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

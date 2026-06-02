@@ -24,17 +24,17 @@ use super::common::{
 /// Apply `PhysicsRigidBodyAPI` to the prim at `path` and return a
 /// chainable [`RigidBodyAuthor`] for the 6 spec-defined attrs plus the
 /// `simulationOwner` relationship.
-pub fn apply_rigid_body<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RigidBodyAuthor<'s>> {
+pub fn apply_rigid_body(stage: &Stage, path: impl Into<Path>) -> Result<RigidBodyAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_RIGID_BODY)?;
     Ok(RigidBodyAuthor { prim })
 }
 
-pub struct RigidBodyAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RigidBodyAuthor {
+    prim: Prim,
 }
 
-impl<'s> RigidBodyAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RigidBodyAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -87,17 +87,17 @@ impl<'s> RigidBodyAuthor<'s> {
 
 /// Apply `PhysicsMassAPI` to the prim at `path` and return a chainable
 /// [`MassAuthor`] for the 5 spec-defined attrs.
-pub fn apply_mass<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MassAuthor<'s>> {
+pub fn apply_mass(stage: &Stage, path: impl Into<Path>) -> Result<MassAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_MASS)?;
     Ok(MassAuthor { prim })
 }
 
-pub struct MassAuthor<'s> {
-    prim: Prim<'s>,
+pub struct MassAuthor {
+    prim: Prim,
 }
 
-impl<'s> MassAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl MassAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

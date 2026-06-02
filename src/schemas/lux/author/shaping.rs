@@ -22,17 +22,17 @@ use super::common::{author_input_asset, author_input_bool, author_input_color3f,
 /// Apply `ShapingAPI` to the prim at `path` and return a chainable
 /// [`ShapingAuthor`] for the 7 spec-defined inputs (focus + focusTint,
 /// cone angle/softness, IES file/angleScale/normalize).
-pub fn apply_shaping<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<ShapingAuthor<'s>> {
+pub fn apply_shaping(stage: &Stage, path: impl Into<Path>) -> Result<ShapingAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_SHAPING)?;
     Ok(ShapingAuthor { prim })
 }
 
-pub struct ShapingAuthor<'s> {
-    prim: Prim<'s>,
+pub struct ShapingAuthor {
+    prim: Prim,
 }
 
-impl<'s> ShapingAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl ShapingAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -83,17 +83,17 @@ impl<'s> ShapingAuthor<'s> {
 
 /// Apply `ShadowAPI` to the prim at `path` and return a chainable
 /// [`ShadowAuthor`] for the 5 spec-defined inputs.
-pub fn apply_shadow<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<ShadowAuthor<'s>> {
+pub fn apply_shadow(stage: &Stage, path: impl Into<Path>) -> Result<ShadowAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_SHADOW)?;
     Ok(ShadowAuthor { prim })
 }
 
-pub struct ShadowAuthor<'s> {
-    prim: Prim<'s>,
+pub struct ShadowAuthor {
+    prim: Prim,
 }
 
-impl<'s> ShadowAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl ShadowAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

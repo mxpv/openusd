@@ -23,17 +23,17 @@ use super::light_api::LightApiSetters;
 /// Author a `def DiskLight` prim at `path`. Returns a chainable
 /// [`DiskLightAuthor`] exposing LightAPI setters via
 /// [`LightApiSetters`] plus the disk-specific `inputs:radius`.
-pub fn define_disk_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<DiskLightAuthor<'s>> {
+pub fn define_disk_light(stage: &Stage, path: impl Into<Path>) -> Result<DiskLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_DISK_LIGHT)?;
     Ok(DiskLightAuthor { prim })
 }
 
-pub struct DiskLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct DiskLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> DiskLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DiskLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -44,8 +44,8 @@ impl<'s> DiskLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for DiskLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for DiskLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -55,17 +55,17 @@ impl<'s> LightApiSetters<'s> for DiskLightAuthor<'s> {
 /// Author a `def RectLight` prim at `path`. Per spec, the rectangle is
 /// centered in the XY plane (1 unit in each axis by default) and emits
 /// light along the -Z axis.
-pub fn define_rect_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RectLightAuthor<'s>> {
+pub fn define_rect_light(stage: &Stage, path: impl Into<Path>) -> Result<RectLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_RECT_LIGHT)?;
     Ok(RectLightAuthor { prim })
 }
 
-pub struct RectLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RectLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> RectLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RectLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -88,8 +88,8 @@ impl<'s> RectLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for RectLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for RectLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -97,17 +97,17 @@ impl<'s> LightApiSetters<'s> for RectLightAuthor<'s> {
 // ── SphereLight ─────────────────────────────────────────────────────
 
 /// Author a `def SphereLight` prim at `path`.
-pub fn define_sphere_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SphereLightAuthor<'s>> {
+pub fn define_sphere_light(stage: &Stage, path: impl Into<Path>) -> Result<SphereLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SPHERE_LIGHT)?;
     Ok(SphereLightAuthor { prim })
 }
 
-pub struct SphereLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SphereLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> SphereLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SphereLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -125,8 +125,8 @@ impl<'s> SphereLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for SphereLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for SphereLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -135,17 +135,17 @@ impl<'s> LightApiSetters<'s> for SphereLightAuthor<'s> {
 
 /// Author a `def CylinderLight` prim at `path`. The cylinder is
 /// centered at the origin with its major axis along X per spec.
-pub fn define_cylinder_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<CylinderLightAuthor<'s>> {
+pub fn define_cylinder_light(stage: &Stage, path: impl Into<Path>) -> Result<CylinderLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_CYLINDER_LIGHT)?;
     Ok(CylinderLightAuthor { prim })
 }
 
-pub struct CylinderLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct CylinderLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> CylinderLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl CylinderLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -169,8 +169,8 @@ impl<'s> CylinderLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for CylinderLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for CylinderLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -180,17 +180,17 @@ impl<'s> LightApiSetters<'s> for CylinderLightAuthor<'s> {
 /// Author a `def PortalLight` prim at `path`. A portal is a rectangle
 /// in the local XY plane used to guide sampling of an enclosing
 /// DomeLight (spec default size 1×1).
-pub fn define_portal_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PortalLightAuthor<'s>> {
+pub fn define_portal_light(stage: &Stage, path: impl Into<Path>) -> Result<PortalLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PORTAL_LIGHT)?;
     Ok(PortalLightAuthor { prim })
 }
 
-pub struct PortalLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PortalLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> PortalLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PortalLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -207,8 +207,8 @@ impl<'s> PortalLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for PortalLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for PortalLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

@@ -49,8 +49,8 @@ impl JointAxis {
 /// Each implementor exposes a `prim()` accessor; the trait's default
 /// methods route through the shared free functions so the
 /// attribute-name choices live in one place.
-pub trait JointSetters<'s>: Sized {
-    fn prim(&self) -> &Prim<'s>;
+pub trait JointSetters: Sized {
+    fn prim(&self) -> &Prim;
 
     /// Set `physics:body0` rel target (UsdGeomXformable).
     fn set_body0(self, body: impl Into<Path>) -> Result<Self> {
@@ -137,23 +137,23 @@ pub trait JointSetters<'s>: Sized {
 /// Author a `def PhysicsJoint` prim — generic 6-DOF joint base. All
 /// degrees of freedom are free until a [`super::apply_limit`] /
 /// [`super::apply_drive`] caller restricts them.
-pub fn define_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<JointAuthor<'s>> {
+pub fn define_joint(stage: &Stage, path: impl Into<Path>) -> Result<JointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_JOINT)?;
     Ok(JointAuthor { prim })
 }
 
-pub struct JointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct JointAuthor {
+    prim: Prim,
 }
 
-impl<'s> JointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl JointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 }
 
-impl<'s> JointSetters<'s> for JointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for JointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -161,23 +161,23 @@ impl<'s> JointSetters<'s> for JointAuthor<'s> {
 // ── PhysicsFixedJoint ───────────────────────────────────────────────
 
 /// Author a `def PhysicsFixedJoint` prim — all DOFs locked.
-pub fn define_fixed_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<FixedJointAuthor<'s>> {
+pub fn define_fixed_joint(stage: &Stage, path: impl Into<Path>) -> Result<FixedJointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_FIXED_JOINT)?;
     Ok(FixedJointAuthor { prim })
 }
 
-pub struct FixedJointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct FixedJointAuthor {
+    prim: Prim,
 }
 
-impl<'s> FixedJointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl FixedJointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 }
 
-impl<'s> JointSetters<'s> for FixedJointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for FixedJointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -185,17 +185,17 @@ impl<'s> JointSetters<'s> for FixedJointAuthor<'s> {
 // ── PhysicsRevoluteJoint ────────────────────────────────────────────
 
 /// Author a `def PhysicsRevoluteJoint` prim — single rotational axis.
-pub fn define_revolute_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RevoluteJointAuthor<'s>> {
+pub fn define_revolute_joint(stage: &Stage, path: impl Into<Path>) -> Result<RevoluteJointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_REVOLUTE_JOINT)?;
     Ok(RevoluteJointAuthor { prim })
 }
 
-pub struct RevoluteJointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RevoluteJointAuthor {
+    prim: Prim,
 }
 
-impl<'s> RevoluteJointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RevoluteJointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -218,8 +218,8 @@ impl<'s> RevoluteJointAuthor<'s> {
     }
 }
 
-impl<'s> JointSetters<'s> for RevoluteJointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for RevoluteJointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -227,17 +227,17 @@ impl<'s> JointSetters<'s> for RevoluteJointAuthor<'s> {
 // ── PhysicsPrismaticJoint ───────────────────────────────────────────
 
 /// Author a `def PhysicsPrismaticJoint` prim — single translational axis.
-pub fn define_prismatic_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PrismaticJointAuthor<'s>> {
+pub fn define_prismatic_joint(stage: &Stage, path: impl Into<Path>) -> Result<PrismaticJointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_PRISMATIC_JOINT)?;
     Ok(PrismaticJointAuthor { prim })
 }
 
-pub struct PrismaticJointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PrismaticJointAuthor {
+    prim: Prim,
 }
 
-impl<'s> PrismaticJointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PrismaticJointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -260,8 +260,8 @@ impl<'s> PrismaticJointAuthor<'s> {
     }
 }
 
-impl<'s> JointSetters<'s> for PrismaticJointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for PrismaticJointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -270,17 +270,17 @@ impl<'s> JointSetters<'s> for PrismaticJointAuthor<'s> {
 
 /// Author a `def PhysicsSphericalJoint` prim — ball joint with cone
 /// limits around `axis`.
-pub fn define_spherical_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SphericalJointAuthor<'s>> {
+pub fn define_spherical_joint(stage: &Stage, path: impl Into<Path>) -> Result<SphericalJointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_SPHERICAL_JOINT)?;
     Ok(SphericalJointAuthor { prim })
 }
 
-pub struct SphericalJointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SphericalJointAuthor {
+    prim: Prim,
 }
 
-impl<'s> SphericalJointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SphericalJointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -303,8 +303,8 @@ impl<'s> SphericalJointAuthor<'s> {
     }
 }
 
-impl<'s> JointSetters<'s> for SphericalJointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for SphericalJointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -312,17 +312,17 @@ impl<'s> JointSetters<'s> for SphericalJointAuthor<'s> {
 // ── PhysicsDistanceJoint ────────────────────────────────────────────
 
 /// Author a `def PhysicsDistanceJoint` prim — min/max distance constraint.
-pub fn define_distance_joint<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<DistanceJointAuthor<'s>> {
+pub fn define_distance_joint(stage: &Stage, path: impl Into<Path>) -> Result<DistanceJointAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_DISTANCE_JOINT)?;
     Ok(DistanceJointAuthor { prim })
 }
 
-pub struct DistanceJointAuthor<'s> {
-    prim: Prim<'s>,
+pub struct DistanceJointAuthor {
+    prim: Prim,
 }
 
-impl<'s> DistanceJointAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DistanceJointAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -339,8 +339,8 @@ impl<'s> DistanceJointAuthor<'s> {
     }
 }
 
-impl<'s> JointSetters<'s> for DistanceJointAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl JointSetters for DistanceJointAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

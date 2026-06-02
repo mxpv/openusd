@@ -28,17 +28,17 @@ use crate::sdf::{Value, Variability};
 
 // ── BasisCurves ────────────────────────────────────────────────────
 
-pub fn define_basis_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<BasisCurvesAuthor<'s>> {
+pub fn define_basis_curves(stage: &Stage, path: impl Into<Path>) -> Result<BasisCurvesAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_BASIS_CURVES)?;
     Ok(BasisCurvesAuthor { prim })
 }
 
-pub struct BasisCurvesAuthor<'s> {
-    prim: Prim<'s>,
+pub struct BasisCurvesAuthor {
+    prim: Prim,
 }
 
-impl<'s> BasisCurvesAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl BasisCurvesAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -84,17 +84,17 @@ impl<'s> BasisCurvesAuthor<'s> {
 
 // ── NurbsCurves ────────────────────────────────────────────────────
 
-pub fn define_nurbs_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<NurbsCurvesAuthor<'s>> {
+pub fn define_nurbs_curves(stage: &Stage, path: impl Into<Path>) -> Result<NurbsCurvesAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_NURBS_CURVES)?;
     Ok(NurbsCurvesAuthor { prim })
 }
 
-pub struct NurbsCurvesAuthor<'s> {
-    prim: Prim<'s>,
+pub struct NurbsCurvesAuthor {
+    prim: Prim,
 }
 
-impl<'s> NurbsCurvesAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl NurbsCurvesAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -139,17 +139,17 @@ impl<'s> NurbsCurvesAuthor<'s> {
 
 // ── NurbsPatch ─────────────────────────────────────────────────────
 
-pub fn define_nurbs_patch<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<NurbsPatchAuthor<'s>> {
+pub fn define_nurbs_patch(stage: &Stage, path: impl Into<Path>) -> Result<NurbsPatchAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_NURBS_PATCH)?;
     Ok(NurbsPatchAuthor { prim })
 }
 
-pub struct NurbsPatchAuthor<'s> {
-    prim: Prim<'s>,
+pub struct NurbsPatchAuthor {
+    prim: Prim,
 }
 
-impl<'s> NurbsPatchAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl NurbsPatchAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -228,17 +228,17 @@ impl<'s> NurbsPatchAuthor<'s> {
 
 // ── HermiteCurves ──────────────────────────────────────────────────
 
-pub fn define_hermite_curves<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<HermiteCurvesAuthor<'s>> {
+pub fn define_hermite_curves(stage: &Stage, path: impl Into<Path>) -> Result<HermiteCurvesAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_HERMITE_CURVES)?;
     Ok(HermiteCurvesAuthor { prim })
 }
 
-pub struct HermiteCurvesAuthor<'s> {
-    prim: Prim<'s>,
+pub struct HermiteCurvesAuthor {
+    prim: Prim,
 }
 
-impl<'s> HermiteCurvesAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl HermiteCurvesAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -270,17 +270,17 @@ impl<'s> HermiteCurvesAuthor<'s> {
 
 // ── Points ─────────────────────────────────────────────────────────
 
-pub fn define_points<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PointsAuthor<'s>> {
+pub fn define_points(stage: &Stage, path: impl Into<Path>) -> Result<PointsAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_POINTS)?;
     Ok(PointsAuthor { prim })
 }
 
-pub struct PointsAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PointsAuthor {
+    prim: Prim,
 }
 
-impl<'s> PointsAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PointsAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -308,17 +308,17 @@ impl<'s> PointsAuthor<'s> {
 
 // ── TetMesh ────────────────────────────────────────────────────────
 
-pub fn define_tet_mesh<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<TetMeshAuthor<'s>> {
+pub fn define_tet_mesh(stage: &Stage, path: impl Into<Path>) -> Result<TetMeshAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_TET_MESH)?;
     Ok(TetMeshAuthor { prim })
 }
 
-pub struct TetMeshAuthor<'s> {
-    prim: Prim<'s>,
+pub struct TetMeshAuthor {
+    prim: Prim,
 }
 
-impl<'s> TetMeshAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl TetMeshAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     pub fn set_points(self, points: Vec<[f32; 3]>) -> Result<Self> {
@@ -336,17 +336,17 @@ impl<'s> TetMeshAuthor<'s> {
 
 // ── PointInstancer ─────────────────────────────────────────────────
 
-pub fn define_point_instancer<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PointInstancerAuthor<'s>> {
+pub fn define_point_instancer(stage: &Stage, path: impl Into<Path>) -> Result<PointInstancerAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_POINT_INSTANCER)?;
     Ok(PointInstancerAuthor { prim })
 }
 
-pub struct PointInstancerAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PointInstancerAuthor {
+    prim: Prim,
 }
 
-impl<'s> PointInstancerAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PointInstancerAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
     /// Set the `prototypes` rel targets — paths to the prototype prims.

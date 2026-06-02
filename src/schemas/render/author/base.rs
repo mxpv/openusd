@@ -18,9 +18,9 @@ use crate::schemas::render::types::AspectRatioConformPolicy;
 /// (`resolution`, `pixelAspectRatio`, `aspectRatioConformPolicy`,
 /// `dataWindowNDC`, the motion-blur / depth-of-field toggles, and the
 /// `camera` relationship). Implementors expose their underlying prim.
-pub trait SettingsBaseSetters<'s>: Sized {
+pub trait SettingsBaseSetters: Sized {
     /// Borrow the underlying prim handle.
-    fn prim(&self) -> &Prim<'s>;
+    fn prim(&self) -> &Prim;
 
     /// Set `resolution` (`uniform int2`).
     fn set_resolution(self, value: [i32; 2]) -> Result<Self> {
@@ -128,11 +128,11 @@ mod tests {
 
     /// Minimal host for the shared trait so it can be exercised before the
     /// concrete `RenderSettings` / `RenderProduct` handles exist.
-    struct TestBase<'s> {
-        prim: Prim<'s>,
+    struct TestBase {
+        prim: Prim,
     }
-    impl<'s> SettingsBaseSetters<'s> for TestBase<'s> {
-        fn prim(&self) -> &Prim<'s> {
+    impl SettingsBaseSetters for TestBase {
+        fn prim(&self) -> &Prim {
             &self.prim
         }
     }

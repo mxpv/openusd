@@ -36,18 +36,18 @@ use crate::schemas::skel::types::{InfluenceInterpolation, SkinningMethod};
 /// - `primvars:skel:jointWeights` (float[] primvar with
 ///   `elementSize` + `interpolation` metadata)
 /// - `skel:blendShapes` (uniform token[])
-pub fn apply_skel_binding<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SkelBindingAuthor<'s>> {
+pub fn apply_skel_binding(stage: &Stage, path: impl Into<Path>) -> Result<SkelBindingAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_SKEL_BINDING)?;
     Ok(SkelBindingAuthor { prim })
 }
 
 /// Chainable SkelBindingAPI authoring handle.
-pub struct SkelBindingAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SkelBindingAuthor {
+    prim: Prim,
 }
 
-impl<'s> SkelBindingAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SkelBindingAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

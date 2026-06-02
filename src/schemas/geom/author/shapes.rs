@@ -22,28 +22,28 @@ use super::common::{author_bool, author_double, author_uniform_token};
 /// Author a `def Xform` prim — a transformable grouping prim, no
 /// geometry of its own. Combine with [`super::set_translate`] / friends
 /// to compose a transform stack.
-pub fn define_xform<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Prim<'s>> {
+pub fn define_xform(stage: &Stage, path: impl Into<Path>) -> Result<Prim> {
     Ok(stage.define_prim(path)?.set_type_name(T_XFORM)?)
 }
 
 /// Author a `def Scope` prim — a pure grouping prim (not transformable).
-pub fn define_scope<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Prim<'s>> {
+pub fn define_scope(stage: &Stage, path: impl Into<Path>) -> Result<Prim> {
     Ok(stage.define_prim(path)?.set_type_name(T_SCOPE)?)
 }
 
 // ── Cube ────────────────────────────────────────────────────────────
 
-pub fn define_cube<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<CubeAuthor<'s>> {
+pub fn define_cube(stage: &Stage, path: impl Into<Path>) -> Result<CubeAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_CUBE)?;
     Ok(CubeAuthor { prim })
 }
 
-pub struct CubeAuthor<'s> {
-    prim: Prim<'s>,
+pub struct CubeAuthor {
+    prim: Prim,
 }
 
-impl<'s> CubeAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl CubeAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -56,17 +56,17 @@ impl<'s> CubeAuthor<'s> {
 
 // ── Sphere ──────────────────────────────────────────────────────────
 
-pub fn define_sphere<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SphereAuthor<'s>> {
+pub fn define_sphere(stage: &Stage, path: impl Into<Path>) -> Result<SphereAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SPHERE)?;
     Ok(SphereAuthor { prim })
 }
 
-pub struct SphereAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SphereAuthor {
+    prim: Prim,
 }
 
-impl<'s> SphereAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SphereAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -81,17 +81,17 @@ impl<'s> SphereAuthor<'s> {
 
 macro_rules! axial_shape {
     ($author:ident, $define_fn:ident, $type_name:expr) => {
-        pub fn $define_fn<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<$author<'s>> {
+        pub fn $define_fn(stage: &Stage, path: impl Into<Path>) -> Result<$author> {
             let prim = stage.define_prim(path)?.set_type_name($type_name)?;
             Ok($author { prim })
         }
 
-        pub struct $author<'s> {
-            prim: Prim<'s>,
+        pub struct $author {
+            prim: Prim,
         }
 
-        impl<'s> $author<'s> {
-            pub fn into_prim(self) -> Prim<'s> {
+        impl $author {
+            pub fn into_prim(self) -> Prim {
                 self.prim
             }
 
@@ -122,17 +122,17 @@ axial_shape!(ConeAuthor, define_cone, T_CONE);
 
 // ── Plane ───────────────────────────────────────────────────────────
 
-pub fn define_plane<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PlaneAuthor<'s>> {
+pub fn define_plane(stage: &Stage, path: impl Into<Path>) -> Result<PlaneAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PLANE)?;
     Ok(PlaneAuthor { prim })
 }
 
-pub struct PlaneAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PlaneAuthor {
+    prim: Prim,
 }
 
-impl<'s> PlaneAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PlaneAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

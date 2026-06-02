@@ -22,17 +22,17 @@ use super::light_api::LightApiSetters;
 /// Author a `def DomeLight` prim at `path`. Returns a chainable
 /// [`DomeLightAuthor`] for the dome-specific attributes plus the
 /// shared LightAPI setters via [`LightApiSetters`].
-pub fn define_dome_light<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<DomeLightAuthor<'s>> {
+pub fn define_dome_light(stage: &Stage, path: impl Into<Path>) -> Result<DomeLightAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_DOME_LIGHT)?;
     Ok(DomeLightAuthor { prim })
 }
 
-pub struct DomeLightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct DomeLightAuthor {
+    prim: Prim,
 }
 
-impl<'s> DomeLightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DomeLightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -75,8 +75,8 @@ impl<'s> DomeLightAuthor<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for DomeLightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for DomeLightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
@@ -86,17 +86,17 @@ impl<'s> LightApiSetters<'s> for DomeLightAuthor<'s> {
 /// Author a `def DomeLight_1` prim at `path`. Same attribute set as
 /// [`DomeLightAuthor`] plus the `poleAxis` token introduced in the
 /// versioned `DomeLight_1` schema.
-pub fn define_dome_light_1<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<DomeLight1Author<'s>> {
+pub fn define_dome_light_1(stage: &Stage, path: impl Into<Path>) -> Result<DomeLight1Author> {
     let prim = stage.define_prim(path)?.set_type_name(T_DOME_LIGHT_1)?;
     Ok(DomeLight1Author { prim })
 }
 
-pub struct DomeLight1Author<'s> {
-    prim: Prim<'s>,
+pub struct DomeLight1Author {
+    prim: Prim,
 }
 
-impl<'s> DomeLight1Author<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DomeLight1Author {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -147,8 +147,8 @@ impl<'s> DomeLight1Author<'s> {
     }
 }
 
-impl<'s> LightApiSetters<'s> for DomeLight1Author<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for DomeLight1Author {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

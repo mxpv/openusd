@@ -15,20 +15,17 @@ use crate::schemas::proc::tokens::*;
 
 /// Author a `def GenerativeProcedural` prim at `path`. Returns a chainable
 /// [`GenerativeProceduralAuthor`].
-pub fn define_generative_procedural<'s>(
-    stage: &'s Stage,
-    path: impl Into<Path>,
-) -> Result<GenerativeProceduralAuthor<'s>> {
+pub fn define_generative_procedural(stage: &Stage, path: impl Into<Path>) -> Result<GenerativeProceduralAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_GENERATIVE_PROCEDURAL)?;
     Ok(GenerativeProceduralAuthor { prim })
 }
 
-pub struct GenerativeProceduralAuthor<'s> {
-    prim: Prim<'s>,
+pub struct GenerativeProceduralAuthor {
+    prim: Prim,
 }
 
-impl<'s> GenerativeProceduralAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl GenerativeProceduralAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
