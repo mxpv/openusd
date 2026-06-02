@@ -1083,20 +1083,27 @@ impl PrimIndex {
         }
     }
 
-    /// Composes the explicitly authored variant selections for this prim across
-    /// its nodes, strongest arc first (C++
-    /// `PcpPrimIndex::ComposeAuthoredVariantSelections`). Returns `(set,
-    /// selection)` pairs sorted by set name. Only authored `variantSelection`
-    /// opinions are reported — fallback and first-variant defaults are not
-    /// applied here (those drive which variant *branch* is composed, visible in
-    /// the prim stack, not in this authored-selection list).
-    pub(crate) fn authored_variant_selections(&self, layers: &[sdf::Layer]) -> Vec<(String, String)> {
-        let mut ordered: Vec<&Node> = self.nodes().collect();
-        ordered.sort_by_key(|n| n.arc);
-
+    /// The variant selections composed onto this prim, as `(set, selection)`
+    /// pairs sorted by set name. Collected from every node whose site path is a
+    /// variant selection path (`/Prim{set=sel}`), strongest first, mirroring the
+    /// C++ `testPcpCompositionResults` dump (which walks the node graph and
+    /// records `node.path.GetVariantSelection()` for each
+    /// `IsPrimVariantSelectionPath` node). This is purely structural — whatever
+    /// variant branches the build grafted in, regardless of whether the
+    /// selection was authored, a fallback, or a default — so it stays consistent
+    /// with the variant sites shown in the prim stack.
+    pub(crate) fn variant_selections(&self) -> Vec<(String, String)> {
         let mut selections: HashMap<String, String> = HashMap::new();
-        gather_authored_variant_selections(&ordered, layers, &mut selections);
-
+        for node in self.all_nodes() {
+            if !node.path.is_prim_variant_selection_path() {
+                continue;
+            }
+            if let Some(sdf::PathElement::Variant { set, selection }) = node.path.last_element() {
+                selections
+                    .entry(set.to_string())
+                    .or_insert_with(|| selection.to_string());
+            }
+        }
         let mut out: Vec<(String, String)> = selections.into_iter().collect();
         out.sort();
         out
@@ -2619,28 +2626,6 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
     results
 }
 
-/// Reads each node's authored `variantSelection` opinions (every layer in its
-/// stack, strongest sublayer first) into `selections`, keeping the strongest
-/// opinion per set name. `ordered` must already be arc-strength sorted so a
-/// selection on a stronger arc wins.
-fn gather_authored_variant_selections(
-    ordered: &[&Node],
-    layers: &[sdf::Layer],
-    selections: &mut HashMap<String, String>,
-) {
-    for node in ordered {
-        for &(layer, _) in node.layer_stack() {
-            if let Ok(value) = layers[layer].get(&node.path, FieldKey::VariantSelection.as_str()) {
-                if let Value::VariantSelectionMap(map) = value.into_owned() {
-                    for (set_name, selection) in map {
-                        selections.entry(set_name).or_insert(selection);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Resolves variant selections across a prim's composition nodes.
 ///
 /// Precedence: `seed` selections inherited from the composition context win
@@ -2690,8 +2675,19 @@ fn resolve_variant_selections_in<'a>(
     let mut ordered: Vec<&Node> = nodes.collect();
     ordered.sort_by_key(|n| n.arc);
 
-    // Gather explicit selections for sets the seed did not already fix.
-    gather_authored_variant_selections(&ordered, layers, &mut selections);
+    // Gather explicit selections for sets the seed did not already fix. Each
+    // node fans out into its layer stack, strongest sublayer first.
+    for node in &ordered {
+        for &(layer, _) in node.layer_stack() {
+            if let Ok(value) = layers[layer].get(&node.path, FieldKey::VariantSelection.as_str()) {
+                if let Value::VariantSelectionMap(map) = value.into_owned() {
+                    for (set_name, selection) in map {
+                        selections.entry(set_name).or_insert(selection);
+                    }
+                }
+            }
+        }
+    }
 
     // For variant sets without an explicit selection, try the fallback map
     // first, then fall back to the first variant name in the set.

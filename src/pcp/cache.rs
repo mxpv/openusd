@@ -1209,14 +1209,16 @@ impl Cache {
             .collect()
     }
 
-    /// Returns the explicitly authored variant selections composed onto a prim,
-    /// as `(set, selection)` pairs sorted by set name. Backs C++
-    /// `UsdVariantSets::GetAllVariantSelections`. Fallback and first-variant
-    /// defaults are not applied — only authored `variantSelection` opinions.
+    /// Returns the variant selections composed onto a prim, as `(set,
+    /// selection)` pairs sorted by set name. Backs C++
+    /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
+    /// selections — authored, fallback, or default — read from the variant
+    /// selection sites composed into the index, so they match the variant
+    /// branches that actually contribute opinions.
     pub fn variant_selections(&mut self, path: &Path) -> Result<Vec<(String, String)>> {
         let path = self.effective_path(&path.prim_path())?;
         self.ensure_index(&path)?;
-        Ok(self.indices[&path].authored_variant_selections(&self.stack.layers))
+        Ok(self.indices[&path].variant_selections())
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.

@@ -957,10 +957,11 @@ impl<'s> VariantSets<'s> {
         Self { stage, prim }
     }
 
-    /// Returns the explicitly authored variant selections composed onto the
-    /// prim, as `(set, selection)` pairs sorted by set name. Mirrors C++
-    /// `UsdVariantSets::GetAllVariantSelections`. Fallback and first-variant
-    /// defaults are not applied — only authored `variantSelection` opinions.
+    /// Returns the variant selections composed onto the prim, as `(set,
+    /// selection)` pairs sorted by set name. Mirrors C++
+    /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
+    /// selections — authored, fallback, or default — read from the variant
+    /// selection sites that actually contribute to the prim.
     //
     // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
