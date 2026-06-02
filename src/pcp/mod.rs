@@ -145,18 +145,14 @@
 //! ## Permissions (`permission = private`)
 //!
 //! A *direct* arc (a reference/inherit/payload/specialize authored at the prim)
-//! to a private target is denied: its node subtree is marked
+//! to a private target is denied: every node reached through it is marked
 //! [`NodeFlags::PERMISSION_DENIED`] so it stops contributing to value
 //! resolution while staying visible structurally, and the denial is reported as
-//! [`Error::ArcPermissionDenied`] (C++ `_AddArc` + `_InertSubtree`). Two pieces
-//! are still missing:
+//! [`Error::ArcPermissionDenied`] (C++ `_AddArc` + `_InertSubtree`). The denied
+//! target paths flow down the `CompositionContext` so descendant prims composed
+//! separately (where the arc is *extended*, not authored) are inerted too. One
+//! piece is still missing:
 //!
-//! - Descendant propagation. The inerting in `Cache::ensure_index` marks only
-//!   the arc's subtree *within the prim's own index*. A private target's
-//!   children that compose as separate descendant prims — where the arc is
-//!   *extended* to the descendant rather than authored there, so the per-prim
-//!   detector does not match it — are not inerted. The fix is to carry the
-//!   denial down the lazy per-prim builds, e.g. on the `CompositionContext`.
 //! - Connection / relationship-target validity. A connection or
 //!   relationship target pointing at a site private relative to where the
 //!   target is authored is invalid and must be dropped (C++
@@ -176,12 +172,13 @@
 //! ## Relocates composed during the build
 //!
 //! Relocate nodes are grafted *after* the build and spliced into the finalized
-//! strength projection (`Cache` → `Relocates`, `splice_relocate`), bypassing
-//! the DFS and the strength comparator. A unified model would compose relocates
-//! *during* the build so the DFS orders them like any other arc and the splice
-//! can be deleted. This is intertwined with relocate source-resolution in the
-//! `rel` module and is a multi-commit effort; the relocate compliance tests are
-//! the guard. No observable change is intended.
+//! strength projection (`Cache` → `Relocates`, `splice_relocate`); the splice
+//! orders the relocate band by the strength comparator, but the nodes still
+//! bypass the DFS that places every other arc. A unified model would compose
+//! relocates *during* the build so the DFS orders them like any other arc and
+//! the splice can be deleted. This is intertwined with relocate
+//! source-resolution in the `rel` module and is a multi-commit effort; the
+//! relocate compliance tests are the guard. No observable change is intended.
 //!
 //! ## Structural specializes
 //!

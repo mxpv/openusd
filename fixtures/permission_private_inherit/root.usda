@@ -3,6 +3,11 @@
 def "PublicClass"
 {
     custom double attr = 1
+
+    def "Child"
+    {
+        custom double cattr = 2
+    }
 }
 
 def "PrivateClass" (
@@ -10,6 +15,11 @@ def "PrivateClass" (
 )
 {
     custom double attr = 5
+
+    def "Child"
+    {
+        custom double cattr = 6
+    }
 }
 
 def "ViaPublic" (
