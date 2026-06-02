@@ -111,7 +111,12 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             if let Some(field_names) = data.list(path) {
                 for name in field_names {
                     let value = data.get(path, &name)?.into_owned();
-                    let token_idx = self.tokens.intern(name);
+                    let token = if name == crate::sdf::ChildrenKey::PropertyChildren.as_str() {
+                        super::CRATE_PROPERTY_CHILDREN.to_owned()
+                    } else {
+                        name
+                    };
+                    let token_idx = self.tokens.intern(token);
                     let rep = self.write_value(&value)?;
                     let field_idx = self.fields.intern((token_idx, rep.0));
                     self.fieldsets.push(Some(field_idx));

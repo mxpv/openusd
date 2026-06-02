@@ -73,7 +73,12 @@ where
                 index += 1;
 
                 let field = &file.fields[current];
-                let name = file.tokens[field.token_index].clone();
+                let raw = &file.tokens[field.token_index];
+                let name = if raw == CRATE_PROPERTY_CHILDREN {
+                    sdf::ChildrenKey::PropertyChildren.as_str().to_owned()
+                } else {
+                    raw.clone()
+                };
 
                 fields.push((name, field.value_rep));
             }
@@ -136,6 +141,12 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
 
     Ok(Box::new(data))
 }
+
+/// The crate (binary) format names the property-children field "properties",
+/// while the rest of the toolkit uses the Sdf token "propertyChildren". The
+/// crate reader (`CrateData::open`) and writer translate between the two at that
+/// boundary, matching the reference crate implementation.
+const CRATE_PROPERTY_CHILDREN: &str = "properties";
 
 #[cfg(test)]
 mod tests {
