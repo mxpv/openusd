@@ -8,6 +8,7 @@ mod collection;
 mod connections;
 mod interp;
 mod prim;
+mod schema;
 mod stage;
 
 pub use collection::{
@@ -17,6 +18,7 @@ pub use collection::{
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
 pub use prim::{Attribute, Prim, Relationship, VariantSets};
+pub use schema::{SchemaBase, SchemaKind};
 pub use stage::{
     CompositionError, EditContext, EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask,
