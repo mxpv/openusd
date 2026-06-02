@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::Path;
 use crate::usd::Stage;
+
+use crate::schemas::common::read_token;
 
 use super::tokens::*;
 use super::types::*;
@@ -18,13 +20,4 @@ pub fn read_generative_procedural(stage: &Stage, prim: &Path) -> Result<Option<R
     Ok(Some(ReadGenerativeProcedural {
         procedural_system: read_token(stage, prim, A_PROCEDURAL_SYSTEM)?,
     }))
-}
-
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(
-        match stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)? {
-            Some(Value::Token(s) | Value::String(s)) => Some(s),
-            _ => None,
-        },
-    )
 }
