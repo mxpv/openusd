@@ -1134,7 +1134,7 @@ impl Cache {
     /// are then hidden and target children added.
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = &self.effective_path(path)?;
-        let mut children = self.composed_children(path, ChildrenKey::PrimChildren, FieldKey::PrimOrder)?;
+        let mut children = self.composed_children(path, ChildrenKey::PrimChildren, Some(FieldKey::PrimOrder))?;
 
         if !self.relocates.is_empty() {
             self.apply_relocates_to_children(path, &mut children);
@@ -1145,11 +1145,13 @@ impl Cache {
 
     /// Returns the composed list of property names for a prim path.
     ///
-    /// Merges `propertyChildren` weakest-to-strongest, reapplying each layer's
-    /// `propertyOrder` as it folds (see [`Self::composed_children`]).
+    /// Merges `propertyChildren` weakest-to-strongest. `propertyOrder` is not
+    /// applied: USD value resolution ignores `reorder properties` (C++
+    /// `_ComposePrimPropertyNames` passes a null order field in USD mode), so
+    /// composed property order follows authoring order alone.
     pub fn prim_properties(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = &self.effective_path(path)?;
-        self.composed_children(path, ChildrenKey::PropertyChildren, FieldKey::PropertyOrder)
+        self.composed_children(path, ChildrenKey::PropertyChildren, None)
     }
 
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
@@ -1515,8 +1517,10 @@ impl Cache {
 
     /// Composes a children-name field (`primChildren` / `propertyChildren`)
     /// across the prim's composition index, folding opinions
-    /// weakest-to-strongest and reapplying the order field (`primOrder` /
-    /// `propertyOrder`) after each contributing layer.
+    /// weakest-to-strongest and reapplying `order_field` after each contributing
+    /// layer. `order_field` is `Some(primOrder)` for prim children and `None`
+    /// for properties, since USD value resolution ignores `reorder properties`
+    /// (C++ `_ComposePrimPropertyNames` passes a null order field in USD mode).
     ///
     /// This mirrors C++ `PcpComposeSiteChildNames`: nodes are visited weakest
     /// first (the reverse of strength order), and within each node its
@@ -1536,7 +1540,7 @@ impl Cache {
         &mut self,
         path: &Path,
         children_field: ChildrenKey,
-        order_field: FieldKey,
+        order_field: Option<FieldKey>,
     ) -> Result<Vec<String>> {
         self.ensure_index(path)?;
 
@@ -1552,6 +1556,7 @@ impl Cache {
         };
 
         let index = &self.indices[path];
+        let order_key = order_field.map(|f| f.as_str());
         let mut result: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -1579,9 +1584,10 @@ impl Cache {
                     }
                 }
             }
-            if let Ok(Value::TokenVec(order)) = layer_data.get(node_path, order_field.as_str()).map(|v| v.into_owned())
-            {
-                sdf::apply_ordering(&mut result, &order);
+            if let Some(order_key) = order_key {
+                if let Ok(Value::TokenVec(order)) = layer_data.get(node_path, order_key).map(|v| v.into_owned()) {
+                    sdf::apply_ordering(&mut result, &order);
+                }
             }
         }
 
