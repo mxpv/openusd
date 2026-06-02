@@ -331,6 +331,25 @@ impl PrimIndexGraph {
         self.nodes.len()
     }
 
+    /// Returns the prim's local root node — the `Root`-arc child of the
+    /// synthetic inert root, carrying the prim's own (sublayer) opinions. An
+    /// implied class anchors here so it ranks among the prim's direct arcs (C++
+    /// `_AddClassBasedArc` adds it under the node owning the prim), regardless
+    /// of how deep the arc that implied it sits or whether an ancestral arc was
+    /// grafted as a separate root-level sibling. [`NodeId::INVALID`] when the
+    /// prim has no local opinion (composed purely through arcs).
+    fn local_root(&self) -> NodeId {
+        if !self.root.is_valid() {
+            return NodeId::INVALID;
+        }
+        self.nodes[self.root.idx()]
+            .children
+            .iter()
+            .copied()
+            .find(|&c| self.nodes[c.idx()].arc == ArcType::Root)
+            .unwrap_or(NodeId::INVALID)
+    }
+
     /// Creates the synthetic, inert tree root (C++ unified graph root) and
     /// records it as [`root`](Self::root). Must be the first node, so it takes
     /// [`NodeId`] 0.
@@ -2550,6 +2569,27 @@ impl<'a> IndexBuilder<'a> {
             // `inheriting_prim`, internal nodes keep their own `map_to_parent`.
             // `cached_indices` outlives `self`, so its borrow does not block the
             // `self.output` mutations below.
+            //
+            // An implied inherit attaches under the inheriting prim's local root
+            // node, sibling to the reference/payload it was implied through. The
+            // strength comparator then ranks it ahead of that arc by arc type
+            // (inherit beats reference, spec 10.4.1 / C++ `_AddClassBasedArc`).
+            // An implied specialize stays an orphan so `finalize_strength_order`
+            // can move it to the globally-weak band.
+            //
+            // The class's site path maps to `inheriting_prim`. The local root
+            // carries the prim's own opinions with an identity `map_to_root`, so
+            // anchoring there leaves the composed mapping (and value resolution)
+            // unchanged — only the node's tree position, and thus strength,
+            // moves. An orphan (no local opinion) keeps the same identity-rooted
+            // mapping.
+            let implied_parent = if *arc == ArcType::Inherit {
+                self.output.local_root()
+            } else {
+                NodeId::INVALID
+            };
+            let anchored = |path: &Path| MapFunction::from_pair_identity(path.clone(), inheriting_prim.clone());
+
             if outer_is_root {
                 if let Some(cached) = self.cached_indices.get(&implied_path) {
                     // Graft the cached class subtree onto the inheriting prim: a
@@ -2561,8 +2601,8 @@ impl<'a> IndexBuilder<'a> {
                         cached,
                         *arc,
                         *arc == ArcType::Specialize,
-                        NodeId::INVALID,
-                        |node| MapFunction::from_pair_identity(node.path.clone(), inheriting_prim.clone()),
+                        implied_parent,
+                        |node| anchored(&node.path),
                         |output, new_id| output.mark_implied(new_id, origin),
                     );
                     continue;
@@ -2573,8 +2613,8 @@ impl<'a> IndexBuilder<'a> {
             // stack): the class is local to that stack, so compose it inline
             // against `outer_stack`.
             let before = self.output.len();
-            let map = MapFunction::from_pair_identity(implied_path.clone(), inheriting_prim.clone());
-            self.eval_site(&implied_path, outer_stack, *arc, depth + 1, NodeId::INVALID, map, &[])?;
+            let map = anchored(&implied_path);
+            self.eval_site(&implied_path, outer_stack, *arc, depth + 1, implied_parent, map, &[])?;
             for id in before..self.output.len() {
                 self.output.mark_implied(NodeId(id as u32), origin);
             }
