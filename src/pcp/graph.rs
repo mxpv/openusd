@@ -1,0 +1,685 @@
+//! Composition graph: arena-backed node tree and strength ordering.
+//!
+//! [`PrimIndexGraph`] stores the composition [`Node`]s of a single prim in an
+//! append-only arena plus a separate strength-order projection. See the
+//! [module-level docs](super) for the composition overview and
+//! [`PrimIndex`](crate::pcp::PrimIndex) for value resolution over the graph.
+
+use std::cmp::Ordering;
+use std::collections::HashMap;
+
+use bitflags::bitflags;
+
+use crate::sdf::{LayerOffset, Path};
+
+use super::mapping::MapFunction;
+
+/// The type of composition arc that introduced a [`Node`].
+///
+/// Variants are ordered by LIVERPS strength (strongest first). The
+/// derived `PartialOrd`/`Ord` use the discriminant, so
+/// `Root < Inherit < … < Specialize`.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArcType {
+    /// Direct opinions from the root layer stack (sublayers).
+    Root,
+    /// Inherited from a class prim.
+    Inherit,
+    /// Contributed by a selected variant.
+    Variant,
+    /// Contributed by a relocate (non-destructive namespace remapping).
+    Relocate,
+    /// Brought in via a reference arc.
+    Reference,
+    /// Brought in via a payload arc.
+    Payload,
+    /// Contributed by a specializes arc (weakest).
+    Specialize,
+}
+
+/// Stable handle to a [`Node`] within a [`PrimIndex`](crate::pcp::PrimIndex)'s
+/// composition graph (C++ `PcpNodeRef`).
+///
+/// A handle stays valid for the life of the index: the node arena is only
+/// ever appended to, never reordered, so a `NodeId` is safe to store in
+/// another node's `parent`/`children`/`origin`. The sentinel value
+/// [`INVALID`](Self::INVALID) represents the absence of a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub(crate) u32);
+
+impl NodeId {
+    /// Sentinel: no node.
+    pub const INVALID: Self = Self(u32::MAX);
+
+    /// Returns `true` if this handle points to an actual node.
+    pub fn is_valid(self) -> bool {
+        self.0 != u32::MAX
+    }
+
+    /// Converts to a `usize` for indexing into the arena.
+    pub(crate) fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl Default for NodeId {
+    /// The default handle is the [`INVALID`](Self::INVALID) sentinel.
+    fn default() -> Self {
+        Self::INVALID
+    }
+}
+
+bitflags! {
+    /// Per-node composition state, mirroring the booleans carried by C++
+    /// `PcpNodeRef`.
+    ///
+    /// Most bits are reserved for parity features not yet wired up; only the
+    /// flags set during composition today affect resolution. Reserving the
+    /// full surface now keeps later work from re-editing [`Node`].
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct NodeFlags: u16 {
+        /// Contributes no opinions; kept only for graph structure.
+        const INERT = 1 << 0;
+        /// Hidden from value resolution but retained for change tracking.
+        const CULLED = 1 << 1;
+        /// Subtree namespace-restricted by a relocate.
+        const RESTRICTED = 1 << 2;
+        /// Blocked by `permission = private` on a stronger site.
+        const PERMISSION_DENIED = 1 << 3;
+        /// This site is itself `permission = private`.
+        const PERMISSION_PRIVATE = 1 << 4;
+        /// Children are prohibited (e.g. an unloaded payload).
+        const PROHIBITED_CHILDREN = 1 << 5;
+        /// Added by implied inherit/specialize propagation.
+        const IMPLIED_CLASS = 1 << 6;
+        /// Introduced by a directly-authored arc (not implied).
+        const DIRECT = 1 << 7;
+        /// Introduced through a specializes arc; globally weak (spec 10.4.1).
+        const HAS_SPECIALIZES = 1 << 8;
+        /// Introduced by a relocate.
+        const RELOCATE_SOURCE = 1 << 9;
+        /// Lies inside a selected variant branch.
+        const VARIANT_BRANCH = 1 << 10;
+    }
+}
+
+/// A single node in the composition graph (C++ `PcpNodeRef`).
+///
+/// Each node represents a site (layer + path) contributing opinions to a
+/// composed prim. The identity fields (`layer_index`, `path`, `arc`)
+/// define *what* this node contributes. The namespace mappings
+/// (`map_to_parent`, `map_to_root`) translate paths across composition arcs.
+/// The structure fields (`parent`, `children`, `origin`) record the node's
+/// place in the composition tree; access them through
+/// [`PrimIndex`](crate::pcp::PrimIndex).
+#[derive(Debug, Clone)]
+pub struct Node {
+    /// The layer stack contributing opinions at this site (C++
+    /// `PcpNode::GetLayerStack`): each member is a `(layer index, sublayer
+    /// offset)` pair, strongest sublayer first. A member's sublayer offset is
+    /// composed atop `map_to_root`'s arc offset during value resolution (see
+    /// [`layers`](Self::layers)).
+    pub(crate) layer_stack: Vec<(usize, LayerOffset)>,
+    /// The path within that layer (may differ from composed path due to remapping).
+    pub path: Path,
+    /// The composition arc that introduced this node.
+    pub arc: ArcType,
+    /// Maps paths from this node's namespace to its parent's namespace.
+    pub map_to_parent: MapFunction,
+    /// Maps paths from this node's namespace directly to the root namespace.
+    /// Computed as `parent.map_to_root.compose(self.map_to_parent)`.
+    pub map_to_root: MapFunction,
+    /// Structural parent in the composition tree, or `None` for a root node.
+    pub(crate) parent: Option<NodeId>,
+    /// Structural children, in the order they were introduced (strength order
+    /// among siblings).
+    pub(crate) children: Vec<NodeId>,
+    /// Node that introduced this arc (C++ `GetOriginNode`): the parent for a
+    /// direct arc (set at [`add_child`](PrimIndexGraph::add_child) time), or
+    /// the propagated-from node for an implied class or graft. `None` only for
+    /// the synthetic root, which has no parent.
+    pub(crate) origin: Option<NodeId>,
+    /// Namespace depth at which the introducing arc was authored. Used by
+    /// implied inherits/specializes that propagate toward the root.
+    pub(crate) namespace_depth: u16,
+    /// Position of this node's prim in its specializes chain: 0 for a directly
+    /// specialized class, 1 for the class it specializes, and so on. A specialize
+    /// source is weaker than its target (spec 10.4.1), so a lower depth is
+    /// stronger. Set during [`finalize_strength_order`](PrimIndexGraph::finalize_strength_order);
+    /// meaningful only for specialize-introduced nodes.
+    pub(crate) specialize_chain_depth: u16,
+    /// Composition state bits (see [`NodeFlags`]).
+    pub(crate) flags: NodeFlags,
+}
+
+impl Node {
+    /// Builds a standalone node with no structural links.
+    ///
+    /// Callers that append through [`PrimIndexGraph::add_child`] have their
+    /// `parent`/`children` populated by the builder; the relocate inserts and
+    /// grafts set the links explicitly afterward.
+    pub(crate) fn new(
+        layer_index: usize,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        map_to_root: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> Self {
+        let flags = if introduced_by_specialize {
+            NodeFlags::HAS_SPECIALIZES
+        } else {
+            NodeFlags::empty()
+        };
+        Self {
+            // A node lists one layer until the per-site model folds a whole
+            // sublayer stack into it; that lone layer's sublayer offset is
+            // already baked into `map_to_root`, so its entry offset is identity.
+            layer_stack: vec![(layer_index, LayerOffset::IDENTITY)],
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+            parent: None,
+            children: Vec::new(),
+            origin: None,
+            namespace_depth: 0,
+            specialize_chain_depth: 0,
+            flags,
+        }
+    }
+
+    /// Builds a standalone node spanning a whole sublayer stack: `layer_stack`
+    /// lists every contributing `(layer index, sublayer offset)` member,
+    /// strongest first. Like [`new`](Self::new) but for a per-site node not
+    /// appended through [`PrimIndexGraph::add_site_child`] (the relocate
+    /// inserts). Panics on an empty `layer_stack`.
+    pub(crate) fn new_site(
+        layer_stack: Vec<(usize, LayerOffset)>,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        map_to_root: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> Self {
+        let mut node = Self::new(
+            layer_stack[0].0,
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+            introduced_by_specialize,
+        );
+        node.layer_stack = layer_stack;
+        node
+    }
+
+    /// Index of the strongest layer contributing at this site. A representative
+    /// for callers that key on a single layer (dependencies, dumps); value
+    /// resolution iterates [`layers`](Self::layers) instead.
+    pub fn layer_index(&self) -> usize {
+        self.layer_stack[0].0
+    }
+
+    /// The site's contributing layers as stored: `(layer index, sublayer
+    /// offset)` members, strongest first. Used when grafting a node into
+    /// another index, which copies the stack verbatim. Value resolution should
+    /// use [`layers`](Self::layers) instead, which folds in the arc offset.
+    pub(crate) fn layer_stack(&self) -> &[(usize, LayerOffset)] {
+        &self.layer_stack
+    }
+
+    /// Iterates the site's contributing layers strongest first, each paired
+    /// with its effective time offset to the root namespace: `map_to_root`'s
+    /// arc offset with the member's sublayer offset composed on top. Value
+    /// resolution reads opinions through this iterator so one per-site node can
+    /// fold every sublayer.
+    pub fn layers(&self) -> impl Iterator<Item = (usize, LayerOffset)> + '_ {
+        let arc_offset = self.map_to_root.time_offset();
+        self.layer_stack
+            .iter()
+            .map(move |&(li, sub)| (li, arc_offset.concatenate(&sub)))
+    }
+
+    /// Structural parent, or `None` for a root node.
+    pub fn parent(&self) -> Option<NodeId> {
+        self.parent
+    }
+
+    /// Structural children, in strength order among siblings.
+    pub fn children(&self) -> &[NodeId] {
+        &self.children
+    }
+
+    /// Node that introduced this arc (C++ `GetOriginNode`): the parent for a
+    /// direct arc, the propagated-from node for an implied class or graft, or
+    /// `None` for the synthetic root.
+    pub fn origin(&self) -> Option<NodeId> {
+        self.origin
+    }
+
+    /// Namespace depth at which the introducing arc was authored.
+    pub fn namespace_depth(&self) -> u16 {
+        self.namespace_depth
+    }
+
+    /// Composition state bits.
+    pub fn flags(&self) -> NodeFlags {
+        self.flags
+    }
+
+    /// True when this node contributes no opinions and exists only to give the
+    /// composition graph structure (the synthetic tree root).
+    pub fn is_inert(&self) -> bool {
+        self.flags.contains(NodeFlags::INERT)
+    }
+
+    /// True when this node is retained for composition structure (so an editor
+    /// or change tracking can see its arc) but contributes no opinions to value
+    /// resolution. Set on an arc whose target site authors no spec (C++
+    /// `PcpPrimIndex` culling).
+    pub fn is_culled(&self) -> bool {
+        self.flags.contains(NodeFlags::CULLED)
+    }
+
+    /// True when this node was introduced through a specializes arc (directly
+    /// or transitively), making it globally weak per spec section 10.4.1.
+    pub(crate) fn introduced_by_specialize(&self) -> bool {
+        self.flags.contains(NodeFlags::HAS_SPECIALIZES)
+    }
+
+    /// True when this node is a direct arc to a `permission = private` site, or
+    /// lies in such an arc's subtree (spec 10.3.3). It stays visible
+    /// structurally (`nodes`, `has_spec`, child names) but contributes no
+    /// opinions to value resolution — the C++ `_InertSubtree` behavior.
+    pub(crate) fn is_permission_denied(&self) -> bool {
+        self.flags.contains(NodeFlags::PERMISSION_DENIED)
+    }
+}
+
+/// Arena-based composition graph.
+///
+/// `nodes` is the node arena in insertion (structural) order: it is only ever
+/// appended to, never reordered, so a [`NodeId`] (an index into it) stays
+/// valid for the life of the index and is safe to store in another node's
+/// `parent`/`children`/`origin`. Strongest-to-weakest strength order is a
+/// separate projection, `strength_order`, holding the same handles permuted —
+/// value resolution walks it, not the arena. Dereferencing the graph yields
+/// the arena slice for the builder's structural lookups.
+///
+/// `root` is the synthetic, inert tree root created by
+/// [`init_root`](Self::init_root): every otherwise-parentless node attaches
+/// under it, so the graph is a single rooted tree rather than a forest. It is
+/// [`NodeId::INVALID`] for the hand-built test graphs that never call
+/// `init_root`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrimIndexGraph {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) strength_order: Vec<NodeId>,
+    pub(crate) root: NodeId,
+}
+
+impl PrimIndexGraph {
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Returns the prim's local root node — the `Root`-arc child of the
+    /// synthetic inert root, carrying the prim's own (sublayer) opinions. An
+    /// implied class anchors here so it ranks among the prim's direct arcs (C++
+    /// `_AddClassBasedArc` adds it under the node owning the prim), regardless
+    /// of how deep the arc that implied it sits or whether an ancestral arc was
+    /// grafted as a separate root-level sibling. [`NodeId::INVALID`] when the
+    /// prim has no local opinion (composed purely through arcs).
+    pub(crate) fn local_root(&self) -> NodeId {
+        if !self.root.is_valid() {
+            return NodeId::INVALID;
+        }
+        self.nodes[self.root.idx()]
+            .children
+            .iter()
+            .copied()
+            .find(|&c| self.nodes[c.idx()].arc == ArcType::Root)
+            .unwrap_or(NodeId::INVALID)
+    }
+
+    /// Creates the synthetic, inert tree root (C++ unified graph root) and
+    /// records it as [`root`](Self::root). Must be the first node, so it takes
+    /// [`NodeId`] 0.
+    ///
+    /// Its identity `map_to_parent`/`map_to_root` make re-parenting an
+    /// otherwise-parentless node under it offset-neutral
+    /// (`identity ∘ child.map_to_parent == child.map_to_parent`), so a former
+    /// forest root keeps the `map_to_root` it had with no parent. The node is
+    /// flagged [`INERT`](NodeFlags::INERT) and skipped by value resolution.
+    pub(crate) fn init_root(&mut self, path: Path) -> NodeId {
+        debug_assert!(self.nodes.is_empty(), "synthetic root must be the first node");
+        let id = NodeId(self.nodes.len() as u32);
+        let depth = path.prim_element_count() as u16;
+        let mut node = Node::new(
+            0,
+            path,
+            ArcType::Root,
+            MapFunction::identity(),
+            MapFunction::identity(),
+            false,
+        );
+        node.namespace_depth = depth;
+        node.flags |= NodeFlags::INERT;
+        self.nodes.push(node);
+        self.root = id;
+        id
+    }
+
+    /// Appends a node to the graph, linking it under `parent`.
+    ///
+    /// `parent` identifies the structural parent in the composition graph. An
+    /// [`INVALID`](NodeId::INVALID) `parent` attaches the node under the
+    /// synthetic [`root`](Self::root) when one exists, keeping the graph a
+    /// single tree; `map_to_root` then composes through that identity-mapped
+    /// root, leaving it equal to `map_to_parent`. The new node is recorded in
+    /// its parent's children and appended to the arena; the strength projection
+    /// is built once at the end of the build by
+    /// [`finalize_strength_order`](Self::finalize_strength_order). The returned
+    /// handle stays valid for the life of the index.
+    pub(crate) fn add_child(
+        &mut self,
+        parent: NodeId,
+        layer_index: usize,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> NodeId {
+        // A caller-supplied `INVALID` parent means "a root site": the arc is
+        // introduced at this prim. Such nodes re-parent under the synthetic
+        // root for structure, but their namespace depth still derives from
+        // their own path (the conceptual parent site), not the synthetic root.
+        let root_site = !parent.is_valid();
+        let struct_parent = if root_site { self.root } else { parent };
+
+        let map_to_root = if struct_parent.is_valid() {
+            self.nodes[struct_parent.idx()].map_to_root.compose(&map_to_parent)
+        } else {
+            map_to_parent.clone()
+        };
+        // Namespace depth is the prim-element count of the parent site path at
+        // arc introduction (C++ `PcpNode_GetNonVariantPathElementCount`); a
+        // root site uses its own path.
+        let namespace_depth = if root_site {
+            path.prim_element_count()
+        } else {
+            self.nodes[parent.idx()].path.prim_element_count()
+        } as u16;
+        let idx = NodeId(self.nodes.len() as u32);
+        let mut node = Node::new(
+            layer_index,
+            path,
+            arc,
+            map_to_parent,
+            map_to_root,
+            introduced_by_specialize,
+        );
+        node.namespace_depth = namespace_depth;
+        if struct_parent.is_valid() {
+            node.parent = Some(struct_parent);
+            // A directly-authored arc's origin is its parent (C++
+            // `GetOriginNode`). Implied-class and graft propagation overwrite
+            // this afterward; setting it here makes `origin` total.
+            node.origin = Some(struct_parent);
+            self.nodes[struct_parent.idx()].children.push(idx);
+        }
+        self.nodes.push(node);
+        idx
+    }
+
+    /// Like [`add_child`](Self::add_child) but for a site spanning several
+    /// sublayers: `layer_stack` lists every contributing `(layer index,
+    /// sublayer offset)`, strongest sublayer first. The first member is the
+    /// site representative; the remaining members are folded into the node's
+    /// layer stack so value resolution reads each sublayer in turn. Panics on
+    /// an empty `layer_stack`.
+    pub(crate) fn add_site_child(
+        &mut self,
+        parent: NodeId,
+        layer_stack: Vec<(usize, LayerOffset)>,
+        path: Path,
+        arc: ArcType,
+        map_to_parent: MapFunction,
+        introduced_by_specialize: bool,
+    ) -> NodeId {
+        let id = self.add_child(
+            parent,
+            layer_stack[0].0,
+            path,
+            arc,
+            map_to_parent,
+            introduced_by_specialize,
+        );
+        self.nodes[id.idx()].layer_stack = layer_stack;
+        id
+    }
+
+    /// Tags a node as introduced by implied-class propagation, recording the
+    /// originating arc node. Pure metadata: it does not affect resolution.
+    pub(crate) fn mark_implied(&mut self, id: NodeId, origin: NodeId) {
+        let node = &mut self.nodes[id.idx()];
+        node.flags |= NodeFlags::IMPLIED_CLASS;
+        if origin.is_valid() {
+            node.origin = Some(origin);
+        }
+    }
+
+    /// Collects the chain of nodes from `id` up to its tree root, node first
+    /// and root last.
+    fn chain_to_root(&self, id: NodeId) -> Vec<NodeId> {
+        let mut chain = vec![id];
+        let mut cur = id;
+        while let Some(parent) = self.nodes[cur.idx()].parent {
+            chain.push(parent);
+            cur = parent;
+        }
+        chain
+    }
+
+    /// Compares two sibling nodes (nodes sharing a parent) by strength,
+    /// porting C++ `PcpCompareSiblingNodeStrength`. Returns [`Ordering::Less`]
+    /// when `a` is the stronger sibling.
+    ///
+    /// Keys, in priority order (spec 10.3): arc type (lower discriminant
+    /// stronger); for two specializes, specializes-chain depth (a source is
+    /// weaker than its target); namespace depth (deeper stronger, skipped for
+    /// specializes); origin strength (the node whose origin is reached first in
+    /// a strong-to-weak walk); finally sibling number — the earlier-created
+    /// node (lower [`NodeId`]) is stronger.
+    pub(crate) fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
+        let na = &self.nodes[a.idx()];
+        let nb = &self.nodes[b.idx()];
+
+        // 1. Arc type: lower discriminant (e.g. Inherit) is stronger.
+        if na.arc != nb.arc {
+            return na.arc.cmp(&nb.arc);
+        }
+
+        let both_specialize = na.introduced_by_specialize() && nb.introduced_by_specialize();
+
+        // 2a. Specializes-chain depth: a class is stronger than the class it
+        // specializes (C++ `_OriginsAreNestedArcs`: the source of a specializes
+        // arc is weaker than its target regardless of namespace depth, spec
+        // 10.4.1). Lower depth is stronger.
+        if both_specialize && na.specialize_chain_depth != nb.specialize_chain_depth {
+            return na.specialize_chain_depth.cmp(&nb.specialize_chain_depth);
+        }
+
+        // 2b. Namespace depth: a deeper arc-introduction site is stronger. C++
+        // skips this for specializes whose origins are nested arcs (handled by
+        // the chain-depth key above), so it is skipped for two specializes.
+        if !both_specialize && na.namespace_depth != nb.namespace_depth {
+            return nb.namespace_depth.cmp(&na.namespace_depth);
+        }
+
+        // 3. Origin strength, only when the two origins differ. `origin` is
+        // total (C++ `GetOriginNode`): the node an implied arc was propagated
+        // from, or the parent for a directly-authored arc, so two direct
+        // siblings share an origin and fall through to the tiebreak below. The
+        // synthetic root is the sole node without an origin; it stands in for
+        // itself. Comparing origins recurses only over strictly-older nodes (an
+        // origin is always created before the node carrying it), so the
+        // recursion is well-founded — except when both nodes default to
+        // themselves (no origin authored): recursing on the same `(a, b)` would
+        // not progress, so skip straight to the sibling-number tiebreak.
+        let oa = na.origin.unwrap_or(a);
+        let ob = nb.origin.unwrap_or(b);
+        if oa != ob && (oa != a || ob != b) {
+            let ord = self.compare_node_strength(oa, ob);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+
+        // 4. Sibling number: the earlier-created node (lower arena index) was
+        // introduced first and is stronger.
+        a.0.cmp(&b.0)
+    }
+
+    /// Compares two arbitrary nodes in the same tree by strength, porting C++
+    /// `PcpCompareNodeStrength`. Returns [`Ordering::Less`] when `a` is stronger.
+    ///
+    /// Walks each node's chain to the shared root to find their lowest common
+    /// ancestor. When one node is an ancestor of the other, the ancestor is
+    /// stronger; otherwise the two diverging children are siblings, compared by
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength).
+    pub(crate) fn compare_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
+        if a == b {
+            return Ordering::Equal;
+        }
+        let chain_a = self.chain_to_root(a);
+        let chain_b = self.chain_to_root(b);
+
+        // Walk both chains from the root downward (chains are leaf-first) until
+        // they diverge. The last shared node is the lowest common ancestor.
+        let mut ia = chain_a.len();
+        let mut ib = chain_b.len();
+        while ia > 0 && ib > 0 {
+            let ca = chain_a[ia - 1];
+            let cb = chain_b[ib - 1];
+            if ca != cb {
+                // First divergence: `ca` and `cb` are siblings under the LCA.
+                return self.compare_sibling_node_strength(ca, cb);
+            }
+            ia -= 1;
+            ib -= 1;
+        }
+
+        // One chain is a prefix of the other: the shorter (the ancestor) wins.
+        match (ia, ib) {
+            (0, 0) => Ordering::Equal,
+            (0, _) => Ordering::Less,
+            (_, 0) => Ordering::Greater,
+            _ => Ordering::Equal,
+        }
+    }
+
+    /// Rebuilds the strength-order projection: a pre-order DFS of the tree for
+    /// non-specialize nodes, followed by the globally-weak specialize band
+    /// (spec 10.4.1). The result runs strongest to weakest; reversing it gives
+    /// weak-to-strong.
+    ///
+    /// Each node's `children` are first sorted by
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength),
+    /// so the DFS yields strength order among siblings. The specialize band is
+    /// then ordered by the same comparator over the whole band: in C++ the
+    /// specializes nodes are copied to the root and ordered there as siblings
+    /// (`_EvalImpliedSpecializes`); ordering them directly with the sibling
+    /// comparator reproduces that without mutating the tree, so the nested
+    /// structure the grafts depend on is preserved.
+    ///
+    /// The comparator reads only arc type, specializes-chain depth, namespace
+    /// depth, origin chains, and arena order — never the projection being
+    /// computed — so it is well-defined here.
+    pub(crate) fn finalize_strength_order(&mut self) {
+        if !self.root.is_valid() {
+            return;
+        }
+
+        self.compute_specialize_chain_depths();
+
+        // Order every node's children by sibling strength. `children` is taken
+        // out so the comparator can borrow the arena immutably during the sort.
+        for i in 0..self.nodes.len() {
+            let mut children = std::mem::take(&mut self.nodes[i].children);
+            children.sort_by(|&a, &b| self.compare_sibling_node_strength(a, b));
+            self.nodes[i].children = children;
+        }
+
+        // Pre-order DFS from the root: visit a node, then its children in
+        // strength order. Pushing children reversed makes the strongest pop
+        // first.
+        let mut dfs = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            dfs.push(id);
+            for &child in self.nodes[id.idx()].children.iter().rev() {
+                stack.push(child);
+            }
+        }
+
+        // Specializes are globally weaker than every other opinion (spec
+        // 10.4.1). Keep the non-specialize nodes in DFS order, then append the
+        // specialize band ordered among itself by the sibling comparator (which
+        // treats the band as siblings at the root, mirroring copy-to-root).
+        let (mut order, mut specials): (Vec<NodeId>, Vec<NodeId>) = dfs
+            .into_iter()
+            .partition(|id| !self.nodes[id.idx()].introduced_by_specialize());
+        specials.sort_by(|&a, &b| self.compare_sibling_node_strength(a, b));
+        order.append(&mut specials);
+        self.strength_order = order;
+    }
+
+    /// Records, on every specialize-introduced node, the depth of its prim in
+    /// the specializes chain: the number of specialize ancestors of the deepest
+    /// node at that prim's path. A directly specialized class is depth 0, the
+    /// class it specializes is depth 1, and so on, so a lower depth sorts
+    /// stronger (a specializes source is weaker than its target, spec 10.4.1).
+    ///
+    /// The per-path maximum recovers the chain position even for the implied
+    /// copies a class brings in across references, which hang flat rather than
+    /// nested under the class they specialize.
+    fn compute_specialize_chain_depths(&mut self) {
+        let mut depth_by_path: HashMap<Path, u16> = HashMap::new();
+        for node in &self.nodes {
+            if !node.introduced_by_specialize() {
+                continue;
+            }
+            let mut depth = 0u16;
+            let mut parent = node.parent;
+            while let Some(pid) = parent {
+                let pnode = &self.nodes[pid.idx()];
+                if pnode.introduced_by_specialize() {
+                    depth += 1;
+                }
+                parent = pnode.parent;
+            }
+            depth_by_path
+                .entry(node.path.clone())
+                .and_modify(|d| *d = (*d).max(depth))
+                .or_insert(depth);
+        }
+        for node in &mut self.nodes {
+            if node.introduced_by_specialize() {
+                node.specialize_chain_depth = depth_by_path.get(&node.path).copied().unwrap_or(0);
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for PrimIndexGraph {
+    /// Dereferences to the node arena in insertion (structural) order. The
+    /// builder relies on this for positional lookups while composing; strength
+    /// order is reached through [`PrimIndex::nodes`].
+    type Target = [Node];
+    fn deref(&self) -> &[Node] {
+        &self.nodes
+    }
+}
