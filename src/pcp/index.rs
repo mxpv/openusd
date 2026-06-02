@@ -1935,6 +1935,43 @@ impl<'a> IndexBuilder<'a> {
         result
     }
 
+    /// Collects the `layer_stack` members that contribute a node for one site
+    /// at `path` under `arc`, as a single `(layerStack, path)` site (C++
+    /// `PcpNode`), strongest sublayer first.
+    ///
+    /// A `(layer, path, arc)` already emitted by another site this build is
+    /// suppressed through `seen`; a layer that appears more than once in
+    /// `layer_stack` (a permitted duplicate sublayer, spec: duplicates allowed
+    /// unless cyclic) contributes a member each time. To keep those duplicates
+    /// while still deduping across sites, `seen` is read against its pre-site
+    /// state and updated once afterward — never mid-collection.
+    ///
+    /// `require_spec` keeps only members that author a spec at `path`, which
+    /// every real site needs; a culled arc passes `false` to retain every
+    /// not-yet-claimed member of its target stack.
+    fn collect_site_members(
+        &mut self,
+        layer_stack: &[(usize, LayerOffset)],
+        path: &Path,
+        arc: ArcType,
+        require_spec: bool,
+    ) -> Vec<(usize, LayerOffset)> {
+        let mut members = Vec::new();
+        let mut keys = Vec::new();
+        for &(i, offset) in layer_stack {
+            if require_spec && !self.stack.layer(i).has_spec(path) {
+                continue;
+            }
+            let key = (i, path.clone(), arc);
+            if !self.seen.contains(&key) {
+                members.push((i, offset));
+                keys.push(key);
+            }
+        }
+        self.seen.extend(keys);
+        members
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn eval_site_body(
         &mut self,
@@ -1953,11 +1990,7 @@ impl<'a> IndexBuilder<'a> {
         // strongest first, pairing each with its sublayer offset; value
         // resolution folds that offset atop the arc offset per member. The site
         // node is the representative — parent for subsequent arcs at this site.
-        let members: Vec<(usize, LayerOffset)> = layer_stack
-            .iter()
-            .filter(|&&(i, _)| self.stack.layer(i).has_spec(path) && self.seen.insert((i, path.clone(), arc)))
-            .copied()
-            .collect();
+        let members = self.collect_site_members(layer_stack, path, arc, true);
         let mut site_node = NodeId::INVALID;
         if !members.is_empty() {
             site_node = self.output.add_site_child(
@@ -2345,14 +2378,7 @@ impl<'a> IndexBuilder<'a> {
         let variant_map = MapFunction::from_pair_identity(variant_path.clone(), base.clone());
         // One variant node for the whole site, folding every sublayer that
         // authors the selected variant (strongest first) with its offset.
-        let members: Vec<(usize, LayerOffset)> = layer_stack
-            .iter()
-            .filter(|&&(i, _)| {
-                self.stack.layer(i).has_spec(variant_path)
-                    && self.seen.insert((i, variant_path.clone(), ArcType::Variant))
-            })
-            .copied()
-            .collect();
+        let members = self.collect_site_members(layer_stack, variant_path, ArcType::Variant, true);
         if !members.is_empty() {
             self.output.add_site_child(
                 parent,
@@ -2508,11 +2534,7 @@ impl<'a> IndexBuilder<'a> {
             // empty target), so an editor and change tracking still see the arc;
             // it contributes no opinions to value resolution (C++ culling).
             if self.output.len() == before {
-                let members: Vec<(usize, LayerOffset)> = target_stack
-                    .iter()
-                    .copied()
-                    .filter(|&(li, _)| self.seen.insert((li, source.clone(), arc)))
-                    .collect();
+                let members = self.collect_site_members(&target_stack, &source, arc, false);
                 if !members.is_empty() {
                     let culled_map =
                         MapFunction::from_pair(source.clone(), context_path.clone()).with_time_offset(arc_offset);

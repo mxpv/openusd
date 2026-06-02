@@ -236,7 +236,7 @@ pub(crate) mod index;
 mod mapping;
 mod rel;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
@@ -393,19 +393,13 @@ impl LayerStack {
     /// prim index scans for local opinions; referenced layer stacks are reached
     /// only by following arcs.
     pub(crate) fn root_layer_stack(&self) -> Vec<(usize, sdf::LayerOffset)> {
-        let mut seen = HashSet::new();
         let mut stack = Vec::new();
         for i in 0..self.session_layer_count {
             stack.push((i, sdf::LayerOffset::IDENTITY));
-            seen.insert(i);
         }
         let root = self.session_layer_count;
         if let Some(sublayers) = self.sublayer_stacks.get(&root) {
-            for &(i, offset) in sublayers {
-                if seen.insert(i) {
-                    stack.push((i, offset));
-                }
-            }
+            stack.extend_from_slice(sublayers);
         }
         stack
     }
@@ -418,27 +412,53 @@ impl LayerStack {
     /// Returns the layer indices + effective offsets for a sublayer stack
     /// rooted at `root_layer`. Each entry's offset is composed from the
     /// root through all nested sublayers per spec 10.3.1.1.
+    ///
+    /// The walk is depth-first pre-order — a layer is emitted before its own
+    /// sublayers and before its later siblings — matching C++
+    /// `PcpLayerStack::_BuildLayerStack`, so a nested sublayer is stronger than
+    /// the next sibling at the parent level. The same layer may appear more than
+    /// once (a diamond of sublayers); only a layer that sublayers itself,
+    /// directly or transitively, is a cycle and is skipped. Cycle detection is
+    /// therefore over the current ancestor chain, not every layer seen.
     pub(crate) fn build_sublayer_stack(
         root_layer: usize,
         layers: &[sdf::Layer],
         resolver: &dyn Resolver,
     ) -> Vec<(usize, sdf::LayerOffset)> {
-        let mut stack: Vec<(usize, sdf::LayerOffset)> = vec![(root_layer, sdf::LayerOffset::IDENTITY)];
-        let mut seen: HashSet<usize> = HashSet::new();
-        seen.insert(root_layer);
-        // BFS so offsets compose with their direct parent sublayer.
-        let mut queue: VecDeque<(usize, sdf::LayerOffset)> = VecDeque::new();
-        queue.push_back((root_layer, sdf::LayerOffset::IDENTITY));
+        let mut stack: Vec<(usize, sdf::LayerOffset)> = Vec::new();
+        let mut ancestors: HashSet<usize> = HashSet::new();
+        Self::collect_sublayers(
+            root_layer,
+            sdf::LayerOffset::IDENTITY,
+            layers,
+            resolver,
+            &mut stack,
+            &mut ancestors,
+        );
+        stack
+    }
 
-        while let Some((idx, parent_effective)) = queue.pop_front() {
-            let root = Path::abs_root();
-            let Ok(value) = layers[idx].get(&root, FieldKey::SubLayers.as_str()) else {
-                continue;
-            };
-            let Value::StringVec(sub_paths) = value.into_owned() else {
-                continue;
-            };
+    /// Appends `idx` and its sublayer subtree to `stack` in depth-first
+    /// pre-order. `ancestors` holds the layers on the path from the root to
+    /// `idx`; a sublayer already on that path is a cycle (C++
+    /// `PcpErrorSublayerCycle`) and is skipped, while a layer reached off the
+    /// path is a permitted duplicate and is expanded again.
+    fn collect_sublayers(
+        idx: usize,
+        effective: sdf::LayerOffset,
+        layers: &[sdf::Layer],
+        resolver: &dyn Resolver,
+        stack: &mut Vec<(usize, sdf::LayerOffset)>,
+        ancestors: &mut HashSet<usize>,
+    ) {
+        stack.push((idx, effective));
+        ancestors.insert(idx);
 
+        let root = Path::abs_root();
+        if let Ok(Value::StringVec(sub_paths)) = layers[idx]
+            .get(&root, FieldKey::SubLayers.as_str())
+            .map(|v| v.into_owned())
+        {
             // Offsets live in a parallel field; missing entries fall back to
             // the identity offset per spec 16.2.18.3.
             let offsets: Vec<sdf::LayerOffset> = layers[idx]
@@ -454,17 +474,16 @@ impl LayerStack {
                 let Some(sub_idx) = index::find_layer(&sub_path, layers, resolver) else {
                     continue;
                 };
-                if !seen.insert(sub_idx) {
+                if ancestors.contains(&sub_idx) {
                     continue;
                 }
                 let local = offsets.get(i).copied().unwrap_or_default().sanitized();
-                let effective = parent_effective.concatenate(&local);
-                stack.push((sub_idx, effective));
-                queue.push_back((sub_idx, effective));
+                let child = effective.concatenate(&local);
+                Self::collect_sublayers(sub_idx, child, layers, resolver, stack, ancestors);
             }
         }
 
-        stack
+        ancestors.remove(&idx);
     }
 }
 
