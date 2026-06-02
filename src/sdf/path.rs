@@ -172,9 +172,11 @@ impl Path {
             return Path::from_str_unchecked(before);
         }
 
-        // "/A/B/C{set=sel}" => "/A/B/C"
+        // Strip the trailing variant selection, keeping any earlier variants on
+        // the same component: "/A/B/C{set=sel}" => "/A/B/C" and a nested
+        // "/A{x=y}B{p=q}" => "/A{x=y}B" (the last `{` opens the trailing variant).
         if after.ends_with('}') {
-            if let Some(pos) = after.find('{') {
+            if let Some(pos) = after.rfind('{') {
                 let sz = before.len() + pos + 1;
                 return Path::from_str_unchecked(&self.path[..sz]);
             }
@@ -549,10 +551,12 @@ impl Path {
         if rest.is_empty() {
             return anchor;
         }
-        // A child attaches to a variant selection directly (`/A{v=s}child`) but
-        // is otherwise separated by `/`; the root already carries its slash.
+        // A property/relational tail (`.attr`, `.outputs:surface`) attaches to
+        // the prim directly via its own `.` — no separator. A prim child
+        // attaches to a variant selection directly (`/A{v=s}child`) but is
+        // otherwise separated by `/`; the root already carries its slash.
         let anchor = anchor.as_str();
-        let sep = if anchor == "/" || anchor.ends_with('}') {
+        let sep = if rest.starts_with('.') || anchor == "/" || anchor.ends_with('}') {
             ""
         } else {
             "/"
@@ -801,6 +805,10 @@ mod tests {
 
             ("/A/B{set=sel}C", "/A/B{set=sel}C"),
             ("/A/B/C{set=sel}", "/A/B/C"),
+
+            // A variant set on a variant-direct child: strip only the trailing
+            // variant, keeping the earlier one on the same component.
+            ("/A{x=y}B{p=q}", "/A{x=y}B"),
 
             // A property authored on a variant-direct child or on the variant.
             ("/A{x=y}B.attr", "/A{x=y}B"),
@@ -1215,6 +1223,10 @@ mod tests {
         assert_eq!(abs("/A{v=s}B", "../C").as_str(), "/A{v=s}C");
         assert_eq!(abs("/A{v=s}B", "C").as_str(), "/A{v=s}B/C");
         assert_eq!(abs("/A{v=s}B", "..").as_str(), "/A{v=s}");
+
+        // A property-relative tail attaches to the prim via `.`, not `/`.
+        assert_eq!(abs("/Shader", ".outputs:surface").as_str(), "/Shader.outputs:surface");
+        assert_eq!(abs("/A/B", "../.attr").as_str(), "/A.attr");
     }
 
     #[test]
