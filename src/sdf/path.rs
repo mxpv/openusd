@@ -312,10 +312,14 @@ impl Path {
             return None;
         }
         // The final prim name begins after the rightmost `/` or `}` (a child of
-        // a variant selection attaches directly, `/A{v=s}B`).
-        match self.path.rfind(['/', '}']) {
-            Some(i) => Some(&self.path[i + 1..]),
-            None => Some(&self.path),
+        // a variant selection attaches directly, `/A{v=s}B`). A path that *ends*
+        // in a variant selection (`/A{v=s}`) has no prim after the `}`, so its
+        // final component is the prim-plus-selection segment after the last `/`.
+        let start = self.path.rfind(['/', '}']).map_or(0, |i| i + 1);
+        if start < self.path.len() {
+            Some(&self.path[start..])
+        } else {
+            Some(self.path.rsplit_once('/').map_or(self.path.as_str(), |(_, name)| name))
         }
     }
 
@@ -532,25 +536,28 @@ impl Path {
             return target.clone();
         }
 
-        // Walk up from the anchor for each leading `..` segment.
-        let base = self.prim_path();
-        let mut anchor = base.as_str();
+        // Walk up from the anchor prim for each leading `..`, using `parent` so
+        // the variant-selection boundary is respected (`/A{v=s}B` → `/A{v=s}`),
+        // unlike a plain `/` split.
+        let mut anchor = self.prim_path();
         let mut rest = s;
         while let Some(tail) = rest.strip_prefix("..") {
-            // Strip one parent from anchor.
-            anchor = anchor
-                .rsplit_once('/')
-                .map_or("/", |(pre, _)| if pre.is_empty() { "/" } else { pre });
+            anchor = anchor.parent().unwrap_or_else(Path::abs_root);
             rest = tail.strip_prefix('/').unwrap_or(tail);
         }
 
         if rest.is_empty() {
-            return Path::from_str_unchecked(anchor);
+            return anchor;
         }
-        if anchor == "/" {
-            return Path::from_str_unchecked(&format!("/{rest}"));
-        }
-        Path::from_str_unchecked(&format!("{anchor}/{rest}"))
+        // A child attaches to a variant selection directly (`/A{v=s}child`) but
+        // is otherwise separated by `/`; the root already carries its slash.
+        let anchor = anchor.as_str();
+        let sep = if anchor == "/" || anchor.ends_with('}') {
+            ""
+        } else {
+            "/"
+        };
+        Path::from_str_unchecked(&format!("{anchor}{sep}{rest}"))
     }
 
     #[inline]
@@ -1202,6 +1209,12 @@ mod tests {
         assert_eq!(abs("/A", "../X").as_str(), "/X");
         assert_eq!(abs("/A/B", "..").as_str(), "/A");
         assert_eq!(abs("/A/B", "C/D").as_str(), "/A/B/C/D");
+
+        // The `..` walk respects the variant-selection boundary: the parent of
+        // `/A{v=s}B` is `/A{v=s}`, and a child reattaches directly after `}`.
+        assert_eq!(abs("/A{v=s}B", "../C").as_str(), "/A{v=s}C");
+        assert_eq!(abs("/A{v=s}B", "C").as_str(), "/A{v=s}B/C");
+        assert_eq!(abs("/A{v=s}B", "..").as_str(), "/A{v=s}");
     }
 
     #[test]
