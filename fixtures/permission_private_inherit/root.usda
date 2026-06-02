@@ -33,3 +33,24 @@ def "ViaPrivate" (
 )
 {
 }
+
+def "InstClass" (
+    permission = private
+    instanceable = true
+)
+{
+    def "Inner"
+    {
+        custom double iattr = 9
+    }
+}
+
+def "InstHost" (
+    inherits = </InstClass>
+)
+{
+    def "Local"
+    {
+        custom double lattr = 7
+    }
+}

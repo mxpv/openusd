@@ -1371,24 +1371,14 @@ impl Cache {
         // than pruned afterwards, which would leave the nodes those local arcs
         // spawned.
 
-        // This prim is an instance when its composition declares
-        // `instanceable = true` and carries an arc; its descendants then
-        // inherit `within_instance`. A nested instance therefore re-arms the
-        // flag for its own subtree. Computed from the freshly built index to
-        // avoid re-entering `ensure_index` for `path`.
-        let is_instance = index.has_composition_arc()
-            && matches!(
-                index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
-                Some(Value::Bool(true))
-            );
-
         // Arc permissions (spec 10.3.3, C++ `_AddArc` + `_InertSubtree`). A
         // direct arc to a `permission = private` site is reported and its target
         // path recorded; an ancestor's denied targets arrive on `parent_ctx`.
         // Every node reached through a denied arc — its grafted subtree here, or
         // the same arc extended to this descendant prim — is then inerted: it
         // stays visible structurally but contributes no opinions to value
-        // resolution.
+        // resolution. This runs before deriving instance state below so a
+        // private target's `instanceable`/arc opinions are already inert.
         let mut denied_prefixes = parent_ctx.denied_prefixes.clone();
         for (node_id, error) in self.detect_arc_permissions(path, &index) {
             let target = index.node(node_id).path.clone();
@@ -1398,6 +1388,18 @@ impl Cache {
             self.pending_errors.push(error);
         }
         index.mark_permission_denied_under(&denied_prefixes);
+
+        // This prim is an instance when its composition declares
+        // `instanceable = true` and carries an arc; its descendants then
+        // inherit `within_instance`. A nested instance therefore re-arms the
+        // flag for its own subtree. Computed from the freshly built index (after
+        // permission inerting, so it agrees with a later `Stage::is_instance`)
+        // to avoid re-entering `ensure_index` for `path`.
+        let is_instance = index.has_composition_arc()
+            && matches!(
+                index.resolve_field(FieldKey::Instanceable.as_str(), &self.stack, None)?,
+                Some(Value::Bool(true))
+            );
 
         let mut child_context = index.context_for_children(&self.stack, &parent_ctx);
         child_context.within_instance = parent_ctx.within_instance || is_instance;
@@ -1710,6 +1712,28 @@ mod tests {
                 .prim_children(&sdf::path("/ViaPrivate")?)?
                 .contains(&"Child".to_string()),
             "the inherited child name stays visible"
+        );
+        Ok(())
+    }
+
+    /// A private arc that authors `instanceable = true` is inerted before
+    /// instance state is derived, so the prim is not treated as an instance and
+    /// its local child opinions survive (the descendant subtree is not composed
+    /// as a discarded-local instance subtree).
+    #[test]
+    fn private_instanceable_arc_not_instance() -> Result<()> {
+        let root = format!("{}/fixtures/permission_private_inherit/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+
+        let host = sdf::path("/InstHost")?;
+        assert!(
+            !cache.is_instance(&host)?,
+            "a private (inerted) instanceable arc must not make the prim an instance"
+        );
+        assert_eq!(
+            cache.resolve_field(&sdf::path("/InstHost/Local.lattr")?, FieldKey::Default.as_str())?,
+            Some(Value::Double(7.0)),
+            "the local child opinion must survive (within_instance not armed)"
         );
         Ok(())
     }

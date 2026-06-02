@@ -2602,12 +2602,19 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 
 /// Resolves variant selections by walking nodes strongest-to-weakest.
 ///
-/// Precedence: an explicit selection authored on a node wins (first opinion
-/// wins); then `seed` selections inherited from the composition context (e.g.
-/// a selection authored on a referencing prim) fill remaining sets; finally
-/// each still-unselected variant set defaults to its fallback, then to its
-/// first variant. Seeding context selections ahead of the fallback is what
-/// lets a referencing prim's selection beat the target's own default.
+/// Precedence: `seed` selections inherited from the composition context win
+/// first — a selection authored on a referencing prim is stronger than the
+/// referenced layer's own opinion (spec 12.2), so it beats both an explicit
+/// selection authored on a node here and the target's own default. Each set
+/// the seed did not fix then takes its strongest explicit node selection, and
+/// any still-unselected set defaults to its fallback, then to its first
+/// variant.
+///
+/// TODO: the seed accumulates selections by set name down the whole namespace,
+/// so a namespace ancestor's selection for its *own* same-named variant set
+/// leaks onto a descendant prim that has an independent set of that name,
+/// overriding the descendant's local selection. Distinguishing an arc seed
+/// from a namespace-ancestor seed would fix it.
 fn resolve_variant_selections_in<'a>(
     nodes: impl Iterator<Item = &'a Node> + Clone,
     layers: &[sdf::Layer],
