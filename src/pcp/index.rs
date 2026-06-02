@@ -2600,21 +2600,28 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
     results
 }
 
-/// Resolves variant selections by walking nodes strongest-to-weakest.
+/// Resolves variant selections across a prim's composition nodes.
 ///
 /// Precedence: `seed` selections inherited from the composition context win
 /// first — a selection authored on a referencing prim is stronger than the
 /// referenced layer's own opinion (spec 12.2), so it beats both an explicit
-/// selection authored on a node here and the target's own default. Each set
-/// the seed did not fix then takes its strongest explicit node selection, and
-/// any still-unselected set defaults to its fallback, then to its first
+/// selection authored on a node here and the target's own default. Each set the
+/// seed did not fix then takes its explicit node selection, nodes ordered by arc
+/// type; any still-unselected set defaults to its fallback, then to its first
 /// variant.
 ///
-/// TODO: the seed accumulates selections by set name down the whole namespace,
-/// so a namespace ancestor's selection for its *own* same-named variant set
-/// leaks onto a descendant prim that has an independent set of that name,
-/// overriding the descendant's local selection. Distinguishing an arc seed
-/// from a namespace-ancestor seed would fix it.
+/// TODO: two approximations remain in the node ordering and the seed.
+/// - Nodes are ordered by `ArcType` alone, not the full node-strength
+///   comparator (arc type plus ancestry / origin / namespace depth). When two
+///   nodes in different subtrees author the same set, arc type can pick the
+///   wrong one. The full comparator needs `NodeId`/graph access and the
+///   strength projection, which is not finalized while the build still calls
+///   this, so the arc-type order is the build-time approximation.
+/// - The seed accumulates selections by set name down the whole namespace, so a
+///   namespace ancestor's selection for its *own* same-named variant set leaks
+///   onto a descendant prim that has an independent set of that name,
+///   overriding the descendant's local selection. Distinguishing an arc seed
+///   from a namespace-ancestor seed would fix it.
 fn resolve_variant_selections_in<'a>(
     nodes: impl Iterator<Item = &'a Node> + Clone,
     layers: &[sdf::Layer],

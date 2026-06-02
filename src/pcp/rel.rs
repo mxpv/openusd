@@ -619,16 +619,17 @@ impl Relocates {
     }
 
     /// Collects the layers that author a spec at `path` as a per-site layer
-    /// stack (strongest first, identity sublayer offsets). Only the root layer
-    /// stack is scanned — relocates compose there — so a same-path spec in an
-    /// unrelated referenced layer stack is not pulled in. Each member's sublayer
-    /// offset is already folded into the node's map-to-root, hence identity.
+    /// stack (strongest first). Only the root layer stack is scanned — relocates
+    /// compose there — so a same-path spec in an unrelated referenced layer
+    /// stack is not pulled in. Each member keeps its effective sublayer offset:
+    /// a relocate arc adds no retiming of its own (its `map_to_root` is
+    /// identity), so the member offset is what `Node::layers` folds in to retime
+    /// an opinion authored in an offset sublayer.
     fn site_layer_stack(path: &Path, stack: &LayerStack) -> Vec<(usize, LayerOffset)> {
         stack
             .root_layer_stack()
             .into_iter()
             .filter(|&(li, _)| stack.layer(li).has_spec(path))
-            .map(|(li, _)| (li, LayerOffset::IDENTITY))
             .collect()
     }
 }
