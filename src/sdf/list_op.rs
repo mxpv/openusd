@@ -324,7 +324,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         };
 
         if !self.ordered_items.is_empty() {
-            apply_ordering(&mut result, &self.ordered_items);
+            super::apply_ordering(&mut result, &self.ordered_items);
         }
 
         result
@@ -370,7 +370,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         };
 
         if !self.ordered_items.is_empty() {
-            apply_ordering(&mut result, &self.ordered_items);
+            super::apply_ordering(&mut result, &self.ordered_items);
         }
 
         result
@@ -402,26 +402,6 @@ fn merge_ordered<T: Clone + PartialEq>(stronger: &[T], weaker: &[T]) -> Vec<T> {
         .chain(weaker.iter().filter(|e| !stronger.contains(e)))
         .cloned()
         .collect()
-}
-
-fn apply_ordering<T: Clone + PartialEq>(items: &mut [T], order: &[T]) {
-    if order.is_empty() || items.is_empty() {
-        return;
-    }
-
-    let slots: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| order.contains(item).then_some(i))
-        .collect();
-    if slots.is_empty() {
-        return;
-    }
-
-    let projected: Vec<&T> = order.iter().filter(|item| items.contains(*item)).collect();
-    for (slot, item) in slots.into_iter().zip(projected) {
-        items[slot].clone_from(item);
-    }
 }
 
 #[cfg(test)]
@@ -552,14 +532,16 @@ mod tests {
         assert_eq!(op.compose_over(&[1, 2, 3]), vec![0, 1, 3, 99]);
     }
 
-    /// Ordered items are reshuffled only within their existing result slots.
+    /// Each ordered item carries the run of following unordered items into the
+    /// order sequence (C++ `SdfApplyListOrdering`): `3` brings `4`, `1` brings
+    /// `2`, emitted as `[3, 4]` then `[1, 2]`.
     #[test]
     fn list_op_compose_ordered_items() {
         let op = ListOp {
             ordered_items: vec![3, 1],
             ..Default::default()
         };
-        assert_eq!(op.compose_over(&[1, 2, 3, 4]), vec![3, 2, 1, 4]);
+        assert_eq!(op.compose_over(&[1, 2, 3, 4]), vec![3, 4, 1, 2]);
     }
 
     /// Composing over an empty weaker list produces results purely from the
@@ -653,7 +635,7 @@ mod tests {
         let composed = stronger.combined_with(&weaker);
         assert!(composed.explicit);
         assert_eq!(composed.ordered_items, vec![3, 1]);
-        assert_eq!(composed.flatten(), vec![3, 2, 1]);
+        assert_eq!(composed.flatten(), vec![3, 1, 2]);
     }
 
     /// `reduced()` keeps `ordered_items` intact so a `reorder` opinion still

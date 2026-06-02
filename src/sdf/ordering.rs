@@ -1,37 +1,52 @@
-//! Children list reordering helper.
+//! List reordering helper.
 //!
-//! Mirrors C++ `Sdf_ApplyOrdering`: names listed in `order` are reshuffled
-//! into order-list sequence at the slots they currently occupy in `children`.
-//! Names not in the order list keep their positions; names in the order list
-//! that are not present in `children` are silently skipped.
+//! Mirrors C++ `SdfApplyListOrdering` / `SdfListOp::_ReorderKeysHelper`: each
+//! entry named in `order` is moved — together with the run of following entries
+//! that are not themselves named in `order` — into the position the order list
+//! dictates. Entries that precede the first ordered name keep their place at the
+//! front; an entry absent from `order` otherwise travels with the ordered entry
+//! it follows.
 //!
-//! Example: `children = [a, b, c, d, e]`, `order = [c, a]` produces
-//! `[c, b, a, d, e]`.
+//! Example: `items = [a, b, c, d, e]`, `order = [c, a]` produces
+//! `[c, d, e, a, b]` — `c` carries its trailing `d, e` and `a` carries `b`,
+//! emitted in `order` sequence ahead of the (here empty) leading block.
 
-/// Reorder `children` in place according to `order`.
+/// Reorders `items` in place according to `order`.
 ///
 /// See the module-level documentation for the precise semantics. The function
-/// is a no-op when either input is empty or when no name in `children`
+/// is a no-op when `order` is empty, `items` is empty, or no entry in `items`
 /// appears in `order`.
-pub fn apply_ordering(children: &mut [String], order: &[String]) {
-    if order.is_empty() || children.is_empty() {
+pub fn apply_ordering<T: Clone + PartialEq>(items: &mut Vec<T>, order: &[T]) {
+    if order.is_empty() || items.is_empty() {
         return;
     }
 
-    let slots: Vec<usize> = children
-        .iter()
-        .enumerate()
-        .filter_map(|(i, name)| order.contains(name).then_some(i))
-        .collect();
-    if slots.is_empty() {
-        return;
+    // Partition `items` into runs: each entry named in `order` starts a run
+    // (with that entry first); each entry absent from `order` joins the run of
+    // the nearest preceding ordered entry, or a leading block when none
+    // precedes it.
+    let mut leading: Vec<T> = Vec::new();
+    let mut runs: Vec<Vec<T>> = Vec::new();
+    for item in items.drain(..) {
+        if order.contains(&item) {
+            runs.push(vec![item]);
+        } else if let Some(run) = runs.last_mut() {
+            run.push(item);
+        } else {
+            leading.push(item);
+        }
     }
 
-    let projected: Vec<&String> = order.iter().filter(|n| children.contains(*n)).collect();
-
-    for (slot, name) in slots.iter().zip(projected.iter()) {
-        children[*slot].clone_from(*name);
+    // Reassemble: the leading block, then each run in `order` sequence, keyed by
+    // its first entry. Removing an emitted run means a name repeated in `order`
+    // contributes only once.
+    let mut result = leading;
+    for name in order {
+        if let Some(pos) = runs.iter().position(|run| run.first() == Some(name)) {
+            result.extend(runs.remove(pos));
+        }
     }
+    *items = result;
 }
 
 #[cfg(test)]
@@ -43,10 +58,10 @@ mod tests {
     }
 
     #[test]
-    fn reorders_named_subset_in_place() {
+    fn ordered_names_carry_trailing_run() {
         let mut children = s(&["a", "b", "c", "d", "e"]);
         apply_ordering(&mut children, &s(&["c", "a"]));
-        assert_eq!(children, s(&["c", "b", "a", "d", "e"]));
+        assert_eq!(children, s(&["c", "d", "e", "a", "b"]));
     }
 
     #[test]
@@ -60,7 +75,14 @@ mod tests {
     fn unknown_names_in_order_are_ignored() {
         let mut children = s(&["a", "b", "c"]);
         apply_ordering(&mut children, &s(&["b", "missing", "a"]));
-        assert_eq!(children, s(&["b", "a", "c"]));
+        assert_eq!(children, s(&["b", "c", "a"]));
+    }
+
+    #[test]
+    fn leading_block_stays_in_front() {
+        let mut children = s(&["p", "q", "b", "a"]);
+        apply_ordering(&mut children, &s(&["a", "b"]));
+        assert_eq!(children, s(&["p", "q", "a", "b"]));
     }
 
     #[test]
