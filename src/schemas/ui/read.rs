@@ -80,6 +80,7 @@ fn read_float2(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 2]
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Vec2f(v)) => Some(v),
         Some(Value::Vec2d(v)) => Some([v[0] as f32, v[1] as f32]),
+        Some(Value::Vec2h(v)) => Some([v[0].to_f32(), v[1].to_f32()]),
         _ => None,
     })
 }
@@ -88,6 +89,7 @@ fn read_color3f(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f32; 3
     Ok(match attr_value(stage, prim, name)? {
         Some(Value::Vec3f(v)) => Some(v),
         Some(Value::Vec3d(v)) => Some([v[0] as f32, v[1] as f32, v[2] as f32]),
+        Some(Value::Vec3h(v)) => Some([v[0].to_f32(), v[1].to_f32(), v[2].to_f32()]),
         _ => None,
     })
 }
