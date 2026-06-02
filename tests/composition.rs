@@ -645,10 +645,13 @@ mod reorder {
     }
 
     #[test]
-    fn property_order_reorders_named_properties() {
+    fn property_order_ignored_in_usd_mode() {
+        // USD value resolution ignores `reorder properties`, so the composed
+        // order follows authoring order despite the `reorder properties = [y, x]`
+        // opinion in the fixture.
         let stage = open_fixture();
         let props = stage.prim_properties(sdf::path("/Props").unwrap()).unwrap();
-        assert_eq!(props, vec!["y", "z", "x"]);
+        assert_eq!(props, vec!["x", "y", "z"]);
     }
 }
 
