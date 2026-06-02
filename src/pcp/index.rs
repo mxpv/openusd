@@ -2015,7 +2015,11 @@ impl<'a> IndexBuilder<'a> {
         let opinion_end = self.output.len();
 
         // R — References.
-        let references = compose_references_in(&self.output[site_start..opinion_end], &self.stack.layers)?;
+        let references = compose_references_in(
+            &self.output[site_start..opinion_end],
+            &self.stack.layers,
+            &*self.stack.resolver,
+        )?;
         for reference in &references {
             self.eval_arc_target(
                 &reference.asset_path,
@@ -2031,7 +2035,11 @@ impl<'a> IndexBuilder<'a> {
 
         // P — Payloads.
         if self.stack.load_payloads {
-            let payloads = collect_payloads_in(&self.output[site_start..opinion_end], &self.stack.layers)?;
+            let payloads = collect_payloads_in(
+                &self.output[site_start..opinion_end],
+                &self.stack.layers,
+                &*self.stack.resolver,
+            )?;
             for payload in &payloads {
                 self.eval_arc_target(
                     &payload.asset_path,
@@ -2897,17 +2905,19 @@ fn dictionary_over(stronger: &mut HashMap<String, Value>, weaker: HashMap<String
 /// wrong-typed value, treated as no opinion); `retime` rewrites each item by
 /// the contributing sublayer's offset (a no-op for offset-free arcs). Backend
 /// decode errors surface to the caller.
-fn compose_list_op_in<T, D, R>(
+fn compose_list_op_in<T, D, R, A>(
     nodes: &[Node],
     field: &str,
     layers: &[sdf::Layer],
     decode: D,
     mut retime: R,
+    mut anchor: A,
 ) -> Result<Vec<T>>
 where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
     R: FnMut(&mut T, LayerOffset),
+    A: FnMut(&mut T, usize),
 {
     let mut combined: Option<ListOp<T>> = None;
 
@@ -2919,6 +2929,11 @@ where
             let Some(mut list_op) = decode(value.into_owned()) else {
                 continue;
             };
+            // Anchor each item to the layer that authored it before composing,
+            // so a relative asset path in different sublayers resolves to
+            // distinct targets and is not wrongly deduped (e.g. `@./ref.usd@`
+            // authored in `sub1/` and `sub2/` are two references, not one).
+            list_op.iter_mut().for_each(|item| anchor(item, layer));
             if !sub.is_identity() {
                 list_op.iter_mut().for_each(|item| retime(item, sub));
             }
@@ -2942,28 +2957,63 @@ fn compose_arc_list_in<T: Default + Clone + PartialEq>(
 where
     Value: TryInto<ListOp<T>>,
 {
-    compose_list_op_in(nodes, field.as_str(), layers, |v| v.try_into().ok(), |_, _| {})
+    compose_list_op_in(
+        nodes,
+        field.as_str(),
+        layers,
+        |v| v.try_into().ok(),
+        |_, _| {},
+        |_, _| {},
+    )
+}
+
+/// Resolves `asset_path` against `layer`'s identifier, yielding the canonical
+/// identifier of the targeted layer. Shared by [`anchor_asset_path`] (binding a
+/// reference to its authoring layer) and [`find_layer`] (locating a parent-
+/// relative sublayer).
+///
+/// TODO(perf): `create_identifier` canonicalizes via the filesystem, so this
+/// runs a `canonicalize` per reference/payload per authoring layer per prim.
+/// Cache resolved identifiers per (layer, asset_path) once the resolver exposes
+/// a pure-string anchoring path.
+fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, resolver: &dyn Resolver) -> String {
+    let anchor = crate::ar::ResolvedPath::new(PathBuf::from(&layer.identifier));
+    resolver.create_identifier(asset_path, Some(&anchor))
+}
+
+/// Anchors a non-empty, non-absolute asset path to the layer that authored it,
+/// so the same relative path in different layers resolves to distinct targets
+/// (C++ resolves a reference's asset path against its authoring layer when the
+/// layer stack is composed). An empty path (internal reference) is left as-is.
+fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, resolver: &dyn Resolver) {
+    if asset_path.is_empty() {
+        return;
+    }
+    *asset_path = resolve_against_layer(asset_path, authoring_layer, resolver);
 }
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
 /// reference brought in by a sublayer with a non-identity offset retimes its
 /// target by that offset, which the per-site node otherwise carries only per
-/// member.
-fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Reference>> {
+/// member. Each reference's asset path is anchored to its authoring layer so
+/// relative paths in distinct sublayers stay distinct.
+fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer], resolver: &dyn Resolver) -> Result<Vec<Reference>> {
     compose_list_op_in(
         nodes,
         FieldKey::References.as_str(),
         layers,
         |v| v.try_into().ok(),
         |r: &mut Reference, sub| r.layer_offset = sub.concatenate(&r.layer_offset),
+        |r: &mut Reference, layer| anchor_asset_path(&mut r.asset_path, &layers[layer], resolver),
     )
 }
 
 /// Collects payloads from nodes, handling both single `Payload` and
 /// `PayloadListOp`. Each authoring sublayer's offset is folded into its
-/// payloads' layer offsets, mirroring [`compose_references_in`].
-fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payload>> {
+/// payloads' layer offsets, mirroring [`compose_references_in`]; each payload's
+/// asset path is anchored to its authoring layer.
+fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer], resolver: &dyn Resolver) -> Result<Vec<Payload>> {
     compose_list_op_in(
         nodes,
         FieldKey::Payload.as_str(),
@@ -2978,6 +3028,7 @@ fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payl
             _ => None,
         },
         |p: &mut Payload, sub| p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default())),
+        |p: &mut Payload, layer| anchor_asset_path(&mut p.asset_path, &layers[layer], resolver),
     )
 }
 
@@ -2990,8 +3041,6 @@ fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer]) -> Result<Vec<Payl
 /// custom asset resolution backends work correctly without any filesystem
 /// access in this function.
 pub(super) fn find_layer(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
-    use crate::ar::ResolvedPath;
-
     let asset_path_ref = std::path::Path::new(asset_path);
     let needle = asset_path_ref.strip_prefix(".").unwrap_or(asset_path_ref);
 
@@ -3008,8 +3057,7 @@ pub(super) fn find_layer(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn
     // filesystem access here.
     if needle.starts_with("..") {
         for anchor_layer in layers {
-            let anchor = ResolvedPath::new(PathBuf::from(&anchor_layer.identifier));
-            let resolved = resolver.create_identifier(asset_path, Some(&anchor));
+            let resolved = resolve_against_layer(asset_path, anchor_layer, resolver);
             if let Some(pos) = layers.iter().position(|layer| layer.identifier == resolved) {
                 return Some(pos);
             }
