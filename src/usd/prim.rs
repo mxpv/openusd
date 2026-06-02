@@ -127,10 +127,30 @@ impl<'s> Prim<'s> {
     /// a runtime-built string.
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
+        self.update_metadata(key, |_| value)
+    }
+
+    /// Read-modify-write a prim-level metadata field on the edit-target layer.
+    /// `f` receives the field's current opinion on that layer (`None` when it
+    /// is unauthored locally) and returns the value to author.
+    ///
+    /// Reading the local opinion rather than the composed value keeps opinions
+    /// on weaker layers from being flattened into the edit target. This matters
+    /// for dictionary-valued metadata such as `assetInfo` / `customData`, which
+    /// value resolution merges key-by-key across layers (spec 12.2.5): a caller
+    /// that merges one nested key should leave the rest to composition.
+    ///
+    /// `key` is `&'static str` for the same change-tracking reason as
+    /// [`set_metadata`](Self::set_metadata).
+    pub fn update_metadata<F>(self, key: &'static str, f: F) -> Result<Self, StageAuthoringError>
+    where
+        F: FnOnce(Option<sdf::Value>) -> sdf::Value,
+    {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
             let data = layer.writable_data_mut()?;
             match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
                 Some(mut spec) => {
+                    let value = f(spec.get(key).cloned());
                     spec.add(key, value);
                     let mut cl = sdf::ChangeList::new();
                     cl.entry_mut(&path).info_changed.insert(key);
@@ -1383,6 +1403,32 @@ mod tests {
             panic!("expected customData dictionary");
         };
         assert_eq!(read.get("hint"), Some(&sdf::Value::String("v".to_string())));
+        Ok(())
+    }
+
+    #[test]
+    fn update_metadata_reads_local() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("a".to_string(), sdf::Value::Int(1));
+        stage
+            .define_prim("/World")?
+            .set_metadata("customData", sdf::Value::Dictionary(dict))?;
+
+        // The closure receives the local opinion and merges into it.
+        stage.define_prim("/World")?.update_metadata("customData", |local| {
+            let Some(sdf::Value::Dictionary(mut d)) = local else {
+                panic!("expected local customData dictionary");
+            };
+            d.insert("b".to_string(), sdf::Value::Int(2));
+            sdf::Value::Dictionary(d)
+        })?;
+
+        let Some(sdf::Value::Dictionary(read)) = stage.field::<sdf::Value>("/World", "customData")? else {
+            panic!("expected customData dictionary");
+        };
+        assert_eq!(read.get("a"), Some(&sdf::Value::Int(1)));
+        assert_eq!(read.get("b"), Some(&sdf::Value::Int(2)));
         Ok(())
     }
 }

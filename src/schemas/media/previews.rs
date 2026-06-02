@@ -19,33 +19,42 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::sdf::{FieldKey, Path, Value};
-use crate::usd::{Prim, Stage};
+use crate::usd::Stage;
+
+use crate::schemas::common::value_as_asset_str;
 
 use super::tokens::*;
 
 /// Apply `AssetPreviewsAPI` to `prim` (adds it to `apiSchemas`). The
 /// thumbnail data itself is authored with [`set_default_thumbnail`].
 pub fn apply_asset_previews(stage: &Stage, prim: impl Into<Path>) -> Result<()> {
-    let prim = prim.into();
-    stage.override_prim(prim.clone())?;
-    Prim::new(stage, prim).add_applied_schema(API_ASSET_PREVIEWS)?;
+    stage.override_prim(prim)?.add_applied_schema(API_ASSET_PREVIEWS)?;
     Ok(())
 }
 
 /// Author the default thumbnail image path under the prim's `assetInfo`
-/// (`previews.thumbnails.default.defaultImage`). Preserves any other
-/// `assetInfo` entries.
+/// (`previews.thumbnails.default.defaultImage`), creating an `over` if the
+/// prim has no spec on the edit-target layer.
+///
+/// Only the `previews` sub-tree is merged into the edit target's own
+/// `assetInfo` opinion; other `assetInfo` keys (whether authored locally or
+/// on weaker layers) are left to compose, so the thumbnail does not flatten
+/// them into the edit target.
 pub fn set_default_thumbnail(stage: &Stage, prim: &Path, image: impl Into<String>) -> Result<()> {
-    let mut asset_info = match stage.field::<Value>(prim.clone(), FieldKey::AssetInfo)? {
-        Some(Value::Dictionary(d)) => d,
-        _ => HashMap::new(),
-    };
-    let previews = nested_dict_mut(&mut asset_info, PREVIEWS);
-    let thumbnails = nested_dict_mut(previews, THUMBNAILS);
-    let default = nested_dict_mut(thumbnails, PREVIEW_DEFAULT);
-    default.insert(DEFAULT_IMAGE.to_string(), Value::AssetPath(image.into()));
-
-    Prim::new(stage, prim.clone()).set_metadata("assetInfo", Value::Dictionary(asset_info))?;
+    let image = image.into();
+    stage
+        .override_prim(prim.clone())?
+        .update_metadata(FieldKey::AssetInfo.as_str(), |local| {
+            let mut asset_info = match local {
+                Some(Value::Dictionary(d)) => d,
+                _ => HashMap::new(),
+            };
+            let previews = nested_dict_mut(&mut asset_info, PREVIEWS);
+            let thumbnails = nested_dict_mut(previews, THUMBNAILS);
+            let default = nested_dict_mut(thumbnails, PREVIEW_DEFAULT);
+            default.insert(DEFAULT_IMAGE.to_string(), Value::AssetPath(image));
+            Value::Dictionary(asset_info)
+        })?;
     Ok(())
 }
 
@@ -60,10 +69,7 @@ pub fn read_default_thumbnail(stage: &Stage, prim: &Path) -> Result<Option<Strin
         .and_then(|d| nested_dict(d, THUMBNAILS))
         .and_then(|d| nested_dict(d, PREVIEW_DEFAULT))
         .and_then(|d| d.get(DEFAULT_IMAGE));
-    Ok(match leaf {
-        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s.clone()),
-        _ => None,
-    })
+    Ok(leaf.and_then(value_as_asset_str).map(str::to_owned))
 }
 
 /// Borrow a nested dictionary by `key`, if present and dictionary-valued.
@@ -83,10 +89,10 @@ fn nested_dict_mut<'a>(d: &'a mut HashMap<String, Value>, key: &str) -> &'a mut 
     if !matches!(entry, Value::Dictionary(_)) {
         *entry = Value::Dictionary(HashMap::new());
     }
-    match entry {
-        Value::Dictionary(inner) => inner,
-        _ => unreachable!("just ensured a dictionary"),
-    }
+    let Value::Dictionary(inner) = entry else {
+        unreachable!("entry was just ensured to be a dictionary")
+    };
+    inner
 }
 
 #[cfg(test)]
