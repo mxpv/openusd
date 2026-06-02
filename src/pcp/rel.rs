@@ -350,7 +350,13 @@ impl Relocates {
             return;
         };
         for node in cached_index.nodes() {
-            if let Some(relocates) = self.layer_relocates.get(&node.layer_index()) {
+            // Check every contributing sublayer of the per-site node, not just
+            // the strongest representative: a weaker sublayer may author the
+            // `layerRelocates` that creates or hides a child here.
+            for (layer, _) in node.layers() {
+                let Some(relocates) = self.layer_relocates.get(&layer) else {
+                    continue;
+                };
                 for (src, tgt) in relocates {
                     // Target child: add if target's parent matches this node's path.
                     if !tgt.is_empty() {
@@ -500,7 +506,9 @@ impl Relocates {
     fn collect_layer_maps(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(usize, MapFunction)> {
         let mut maps: Vec<(usize, MapFunction)> = Vec::new();
 
-        // Walk up ancestors.
+        // Walk up ancestors. A per-site node fans out into every contributing
+        // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
+        // through this node's namespace mapping, not just the representative.
         let mut current = Some(path.clone());
         while let Some(p) = current {
             if let Some(cached_index) = indices.get(&p) {
@@ -508,11 +516,10 @@ impl Relocates {
                     if node.arc == ArcType::Relocate {
                         continue;
                     }
-                    if !maps
-                        .iter()
-                        .any(|(li, m)| *li == node.layer_index() && *m == node.map_to_root)
-                    {
-                        maps.push((node.layer_index(), node.map_to_root.clone()));
+                    for (layer, _) in node.layers() {
+                        if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
+                            maps.push((layer, node.map_to_root.clone()));
+                        }
                     }
                 }
             }
@@ -534,12 +541,12 @@ impl Relocates {
                 if node.arc == ArcType::Relocate {
                     continue;
                 }
-                if relocate_layers.contains(&node.layer_index())
-                    && !maps
-                        .iter()
-                        .any(|(li, m)| *li == node.layer_index() && *m == node.map_to_root)
-                {
-                    maps.push((node.layer_index(), node.map_to_root.clone()));
+                for (layer, _) in node.layers() {
+                    if relocate_layers.contains(&layer)
+                        && !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root)
+                    {
+                        maps.push((layer, node.map_to_root.clone()));
+                    }
                 }
             }
         }
