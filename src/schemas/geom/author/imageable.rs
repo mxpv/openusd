@@ -37,12 +37,12 @@ pub fn set_extent(stage: &Stage, prim: &Path, extent: [[f32; 3]; 2]) -> Result<(
 /// callers wrap an existing prim spec and override `visibility` /
 /// `purpose` / `extent` opinions without explicitly retyping the
 /// path each time.
-pub struct ImageableAuthor<'s> {
-    prim: Prim<'s>,
+pub struct ImageableAuthor {
+    prim: Prim,
 }
 
-impl<'s> ImageableAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl ImageableAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -68,7 +68,7 @@ impl<'s> ImageableAuthor<'s> {
 /// etc.) without dragging in a typed `*Author` for the underlying
 /// schema. Otherwise prefer the free [`set_visibility`] / [`set_purpose`]
 /// / [`set_extent`] helpers, which take a `&Stage` + `&Path` directly.
-pub fn apply_imageable_overrides<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<ImageableAuthor<'s>> {
+pub fn apply_imageable_overrides(stage: &Stage, path: impl Into<Path>) -> Result<ImageableAuthor> {
     let prim = stage.override_prim(path)?;
     Ok(ImageableAuthor { prim })
 }

@@ -20,17 +20,17 @@ use crate::schemas::geom::types::{Projection, StereoRole};
 use super::common::{author_double, author_float, author_uniform_token};
 
 /// Author a `def Camera` prim and return a chainable [`CameraAuthor`].
-pub fn define_camera<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<CameraAuthor<'s>> {
+pub fn define_camera(stage: &Stage, path: impl Into<Path>) -> Result<CameraAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_CAMERA)?;
     Ok(CameraAuthor { prim })
 }
 
-pub struct CameraAuthor<'s> {
-    prim: Prim<'s>,
+pub struct CameraAuthor {
+    prim: Prim,
 }
 
-impl<'s> CameraAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl CameraAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

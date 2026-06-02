@@ -21,18 +21,18 @@ use super::common::{author_uniform_token_array, varying_attribute};
 /// - `scales` (half3[]) — 16-bit per spec; time-sampleable
 /// - `blendShapes` (uniform token[])
 /// - `blendShapeWeights` (float[]) — time-sampleable
-pub fn define_skel_animation<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SkelAnimationAuthor<'s>> {
+pub fn define_skel_animation(stage: &Stage, path: impl Into<Path>) -> Result<SkelAnimationAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SKEL_ANIMATION)?;
     Ok(SkelAnimationAuthor { prim })
 }
 
 /// Chainable SkelAnimation authoring handle.
-pub struct SkelAnimationAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SkelAnimationAuthor {
+    prim: Prim,
 }
 
-impl<'s> SkelAnimationAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SkelAnimationAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

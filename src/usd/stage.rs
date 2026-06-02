@@ -40,6 +40,7 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use anyhow::Result;
 use bitflags::bitflags;
@@ -435,12 +436,18 @@ pub enum StageAuthoringError {
     },
 }
 
-/// A composed USD stage.
+/// Shared state behind a [`Stage`] handle.
 ///
-/// Owns the loaded layer stack and provides composed access to prims,
-/// properties, and metadata. Composition indices are built lazily and
-/// cached in the [`Cache`](crate::pcp::Cache).
-pub struct Stage {
+/// Owns the loaded layer stack and the composed-scene state. Composition
+/// indices are built lazily and cached in the [`Cache`](crate::pcp::Cache).
+/// Reached through [`Stage`]'s [`Deref`](std::ops::Deref); every mutation
+/// goes through a per-field cell so it works from any cloned handle.
+///
+/// `pub` only to satisfy the `Deref` impl on the public `Stage` (a private
+/// `Target` would be an E0446 leak); the enclosing `stage` module is
+/// private and this type is not re-exported, so it is not externally
+/// nameable, and all its fields are private.
+pub struct StageInner {
     /// Lazily-built composition graph caching per-prim indices and contexts.
     graph: RefCell<pcp::Cache>,
     /// Initial payload loading behavior for this stage.
@@ -455,6 +462,24 @@ pub struct Stage {
     interpolation_type: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
+}
+
+/// A composed USD stage.
+///
+/// A cheap reference-counted handle to the shared [`StageInner`] (mirroring
+/// C++ `UsdStageRefPtr`). Cloning bumps the refcount; the composed handles
+/// ([`Prim`](super::Prim) and friends) hold a clone, so they can be stored
+/// and outlive the call that produced them. Provides composed access to
+/// prims, properties, and metadata.
+#[derive(Clone)]
+pub struct Stage(Rc<StageInner>);
+
+impl std::ops::Deref for Stage {
+    type Target = StageInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Stage {
@@ -525,7 +550,7 @@ impl Stage {
     /// returned handle lets callers chain field setters (`set_type_name`,
     /// `set_active`, `set_kind`, …) and child-property authoring
     /// (`create_attribute`, `create_relationship`).
-    pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
+    pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             // Snapshot pre-author state so an idempotent call (existing
@@ -567,7 +592,7 @@ impl Stage {
     /// `path` its specifier is left untouched — `override_prim` does not
     /// downgrade an existing `def` or `class` to `over`. Chain fluent
     /// setters on the returned handle to author additional fields.
-    pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim<'_>, StageAuthoringError> {
+    pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             // `Layer::override_prim` is idempotent at the leaf when a spec
@@ -598,7 +623,7 @@ impl Stage {
         &self,
         path: impl Into<sdf::Path>,
         type_name: impl Into<String>,
-    ) -> Result<super::Attribute<'_>, StageAuthoringError> {
+    ) -> Result<super::Attribute, StageAuthoringError> {
         let path = path.into();
         let type_name = type_name.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
@@ -621,10 +646,7 @@ impl Stage {
     /// layer with default variability `Varying` and `custom = true`, matching
     /// C++ `UsdPrim::CreateRelationship`. Override the defaults and add targets
     /// via the returned [`Relationship`] handle's fluent setters.
-    pub fn create_relationship(
-        &self,
-        path: impl Into<sdf::Path>,
-    ) -> Result<super::Relationship<'_>, StageAuthoringError> {
+    pub fn create_relationship(&self, path: impl Into<sdf::Path>) -> Result<super::Relationship, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             let owning_prim = layer_path.prim_path();
@@ -827,12 +849,12 @@ impl Stage {
     }
 
     /// Returns the stage's initial payload loading behavior.
-    pub const fn initial_load_set(&self) -> InitialLoadSet {
+    pub fn initial_load_set(&self) -> InitialLoadSet {
         self.initial_load_set
     }
 
     /// Returns the population mask used by this stage.
-    pub const fn population_mask(&self) -> &StagePopulationMask {
+    pub fn population_mask(&self) -> &StagePopulationMask {
         &self.population_mask
     }
 
@@ -922,7 +944,7 @@ impl Stage {
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; it is returned unconditionally and does not assert that a prim
     /// is composed at the path (query the handle to find out).
-    pub fn prim_at_path(&self, path: impl Into<sdf::Path>) -> super::Prim<'_> {
+    pub fn prim_at_path(&self, path: impl Into<sdf::Path>) -> super::Prim {
         super::Prim::new(self, path.into().prim_path())
     }
 
@@ -1674,14 +1696,14 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
         let stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
         let on_composition_error = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
         let edit_target = EditTarget::for_layer_index(session_layer_count);
-        Stage {
+        Stage(Rc::new(StageInner {
             graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             on_composition_error,
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
-        }
+        }))
     }
 }
 

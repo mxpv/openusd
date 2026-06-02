@@ -15,17 +15,17 @@ use super::base::SettingsBaseSetters;
 /// [`RenderProductAuthor`] for the product-specific attributes plus the
 /// shared base attributes via [`SettingsBaseSetters`] (which the product
 /// may author to override the settings it is produced from).
-pub fn define_render_product<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RenderProductAuthor<'s>> {
+pub fn define_render_product(stage: &Stage, path: impl Into<Path>) -> Result<RenderProductAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_RENDER_PRODUCT)?;
     Ok(RenderProductAuthor { prim })
 }
 
-pub struct RenderProductAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RenderProductAuthor {
+    prim: Prim,
 }
 
-impl<'s> RenderProductAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RenderProductAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -55,8 +55,8 @@ impl<'s> RenderProductAuthor<'s> {
     }
 }
 
-impl<'s> SettingsBaseSetters<'s> for RenderProductAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl SettingsBaseSetters for RenderProductAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

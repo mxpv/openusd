@@ -21,14 +21,14 @@ use super::tokens::{
 };
 
 /// Author a `def Material` prim and return a chainable [`MaterialAuthor`].
-pub fn define_material<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<MaterialAuthor<'s>> {
+pub fn define_material(stage: &Stage, path: impl Into<Path>) -> Result<MaterialAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_MATERIAL)?;
     Ok(MaterialAuthor { prim })
 }
 
 /// Author a `def NodeGraph` prim and return a chainable
 /// [`NodeGraphAuthor`].
-pub fn define_node_graph<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<NodeGraphAuthor<'s>> {
+pub fn define_node_graph(stage: &Stage, path: impl Into<Path>) -> Result<NodeGraphAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_NODE_GRAPH)?;
     Ok(NodeGraphAuthor { prim })
 }
@@ -45,16 +45,16 @@ fn terminal_output_name(render_context: &str, terminal: &str) -> String {
 }
 
 /// Chainable Material authoring handle. Mirrors C++ `UsdShadeMaterial`.
-pub struct MaterialAuthor<'s> {
-    prim: Prim<'s>,
+pub struct MaterialAuthor {
+    prim: Prim,
 }
 
-impl<'s> MaterialAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl MaterialAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
-    pub fn prim(&self) -> &Prim<'s> {
+    pub fn prim(&self) -> &Prim {
         &self.prim
     }
 
@@ -62,7 +62,7 @@ impl<'s> MaterialAuthor<'s> {
     /// Material. Downstream shaders connect their inputs to this so the
     /// material's look is tweakable from one place (the
     /// "PreviewMaterial interface" pattern).
-    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute> {
         create_input(&self.prim, base, type_name)
     }
 
@@ -101,27 +101,27 @@ impl<'s> MaterialAuthor<'s> {
 }
 
 /// Chainable NodeGraph authoring handle. Mirrors C++ `UsdShadeNodeGraph`.
-pub struct NodeGraphAuthor<'s> {
-    prim: Prim<'s>,
+pub struct NodeGraphAuthor {
+    prim: Prim,
 }
 
-impl<'s> NodeGraphAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl NodeGraphAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
-    pub fn prim(&self) -> &Prim<'s> {
+    pub fn prim(&self) -> &Prim {
         &self.prim
     }
 
     /// Create a public interface `inputs:<base>` of `type_name`.
-    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute> {
         create_input(&self.prim, base, type_name)
     }
 
     /// Create a public `outputs:<base>` of `type_name`, typically
     /// connected to a shader output inside the graph.
-    pub fn create_output(&self, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+    pub fn create_output(&self, base: &str, type_name: &str) -> Result<Attribute> {
         create_output(&self.prim, base, type_name)
     }
 }

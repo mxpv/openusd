@@ -17,17 +17,17 @@ use super::common::{author_float, author_vector3f};
 /// request to use the negative `upAxis`, and `gravityMagnitude < 0` is
 /// a request to use the renderer's Earth-gravity equivalent — both
 /// remain valid authored opinions, the helper just exposes them.
-pub fn define_physics_scene<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<PhysicsSceneAuthor<'s>> {
+pub fn define_physics_scene(stage: &Stage, path: impl Into<Path>) -> Result<PhysicsSceneAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_SCENE)?;
     Ok(PhysicsSceneAuthor { prim })
 }
 
-pub struct PhysicsSceneAuthor<'s> {
-    prim: Prim<'s>,
+pub struct PhysicsSceneAuthor {
+    prim: Prim,
 }
 
-impl<'s> PhysicsSceneAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl PhysicsSceneAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

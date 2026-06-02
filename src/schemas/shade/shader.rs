@@ -20,24 +20,24 @@ use super::types::ImplementationSource;
 
 /// Author a `def Shader` prim at `path` and return a chainable
 /// [`ShaderAuthor`].
-pub fn define_shader<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<ShaderAuthor<'s>> {
+pub fn define_shader(stage: &Stage, path: impl Into<Path>) -> Result<ShaderAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SHADER)?;
     Ok(ShaderAuthor { prim })
 }
 
 /// Chainable Shader authoring handle. Mirrors C++ `UsdShadeShader`
 /// (which is `UsdShadeNodeDefAPI` applied to a `Shader` prim).
-pub struct ShaderAuthor<'s> {
-    prim: Prim<'s>,
+pub struct ShaderAuthor {
+    prim: Prim,
 }
 
-impl<'s> ShaderAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl ShaderAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
     /// Borrow the underlying prim handle.
-    pub fn prim(&self) -> &Prim<'s> {
+    pub fn prim(&self) -> &Prim {
         &self.prim
     }
 
@@ -99,12 +99,12 @@ impl<'s> ShaderAuthor<'s> {
     /// Create a `inputs:<base>` attribute of `type_name`. Returns the
     /// [`Attribute`] handle — chain `.set(value)` for a default or
     /// `.set_connections([..])` to wire it to another property.
-    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+    pub fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute> {
         create_input(&self.prim, base, type_name)
     }
 
     /// Create an `outputs:<base>` attribute of `type_name`.
-    pub fn create_output(&self, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+    pub fn create_output(&self, base: &str, type_name: &str) -> Result<Attribute> {
         create_output(&self.prim, base, type_name)
     }
 }

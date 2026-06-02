@@ -16,21 +16,21 @@ use super::common::{author_uniform_matrix4d_array, author_uniform_token_array};
 /// Per Pixar's `usdSkel/schema.usda`, all four are `uniform` arrays —
 /// the authoring helpers default to that variability without the caller
 /// having to thread it through.
-pub fn define_skeleton<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SkeletonAuthor<'s>> {
+pub fn define_skeleton(stage: &Stage, path: impl Into<Path>) -> Result<SkeletonAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SKELETON)?;
     Ok(SkeletonAuthor { prim })
 }
 
 /// Chainable Skeleton authoring handle. Each setter writes one of the
 /// 4 spec'd uniform arrays.
-pub struct SkeletonAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SkeletonAuthor {
+    prim: Prim,
 }
 
-impl<'s> SkeletonAuthor<'s> {
+impl SkeletonAuthor {
     /// The underlying Skeleton prim handle, ready for further
     /// `apply_*` API authoring or to extract the path.
-    pub fn into_prim(self) -> Prim<'s> {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

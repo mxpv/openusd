@@ -20,18 +20,18 @@ use crate::schemas::skel::tokens::{
 ///
 /// Inbetween shapes (`inbetweens:NAME` with `weight` metadata) are
 /// authored separately via [`BlendShapeAuthor::add_inbetween`].
-pub fn define_blend_shape<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<BlendShapeAuthor<'s>> {
+pub fn define_blend_shape(stage: &Stage, path: impl Into<Path>) -> Result<BlendShapeAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_BLEND_SHAPE)?;
     Ok(BlendShapeAuthor { prim })
 }
 
 /// Chainable BlendShape authoring handle.
-pub struct BlendShapeAuthor<'s> {
-    prim: Prim<'s>,
+pub struct BlendShapeAuthor {
+    prim: Prim,
 }
 
-impl<'s> BlendShapeAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl BlendShapeAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

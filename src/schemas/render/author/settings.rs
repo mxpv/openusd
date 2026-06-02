@@ -13,17 +13,17 @@ use super::base::SettingsBaseSetters;
 /// Author a `def RenderSettings` prim at `path`. Returns a chainable
 /// [`RenderSettingsAuthor`] for the settings-specific attributes plus the
 /// shared base attributes via [`SettingsBaseSetters`].
-pub fn define_render_settings<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RenderSettingsAuthor<'s>> {
+pub fn define_render_settings(stage: &Stage, path: impl Into<Path>) -> Result<RenderSettingsAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_RENDER_SETTINGS)?;
     Ok(RenderSettingsAuthor { prim })
 }
 
-pub struct RenderSettingsAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RenderSettingsAuthor {
+    prim: Prim,
 }
 
-impl<'s> RenderSettingsAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RenderSettingsAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -74,8 +74,8 @@ impl<'s> RenderSettingsAuthor<'s> {
     }
 }
 
-impl<'s> SettingsBaseSetters<'s> for RenderSettingsAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl SettingsBaseSetters for RenderSettingsAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

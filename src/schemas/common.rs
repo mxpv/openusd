@@ -150,12 +150,7 @@ where
 /// Get-or-create a varying attribute of the given `type_name` on `prim`, with
 /// `custom = false`. Callers write the value via the returned [`Attribute`]
 /// fluent setters.
-pub(crate) fn varying_attribute<'s>(
-    stage: &'s Stage,
-    prim: &Path,
-    name: &str,
-    type_name: &str,
-) -> Result<Attribute<'s>> {
+pub(crate) fn varying_attribute(stage: &Stage, prim: &Path, name: &str, type_name: &str) -> Result<Attribute> {
     Ok(Prim::new(stage, prim.clone())
         .create_attribute(name, type_name)?
         .set_custom(false)?)

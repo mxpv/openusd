@@ -34,14 +34,17 @@ use crate::sdf;
 
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
 #[derive(Clone)]
-pub struct Prim<'s> {
-    stage: &'s Stage,
+pub struct Prim {
+    stage: Stage,
     path: sdf::Path,
 }
 
-impl<'s> Prim<'s> {
-    pub(crate) fn new(stage: &'s Stage, path: sdf::Path) -> Self {
-        Self { stage, path }
+impl Prim {
+    pub(crate) fn new(stage: &Stage, path: sdf::Path) -> Self {
+        Self {
+            stage: stage.clone(),
+            path,
+        }
     }
 
     /// Composed namespace path of the prim.
@@ -50,8 +53,8 @@ impl<'s> Prim<'s> {
     }
 
     /// The stage this handle is anchored to.
-    pub fn stage(&self) -> &'s Stage {
-        self.stage
+    pub fn stage(&self) -> &Stage {
+        &self.stage
     }
 
     /// Set the prim's `typeName` field on the edit target's layer.
@@ -169,11 +172,7 @@ impl<'s> Prim<'s> {
     /// `UsdPrim::CreateAttribute`. Defaults `variability = Varying`,
     /// `custom = true` — override via the returned [`Attribute`] handle's
     /// fluent setters.
-    pub fn create_attribute(
-        &self,
-        name: &str,
-        type_name: impl Into<String>,
-    ) -> Result<Attribute<'s>, StageAuthoringError> {
+    pub fn create_attribute(&self, name: &str, type_name: impl Into<String>) -> Result<Attribute, StageAuthoringError> {
         let attr_path = self.path.append_property(name).map_err(|_| {
             // Synthesize the would-be path so the error surfaces the
             // offending name rather than just the parent prim.
@@ -187,7 +186,7 @@ impl<'s> Prim<'s> {
 
     /// Author a relationship spec named `name` under this prim. Mirrors C++
     /// `UsdPrim::CreateRelationship`.
-    pub fn create_relationship(&self, name: &str) -> Result<Relationship<'s>, StageAuthoringError> {
+    pub fn create_relationship(&self, name: &str) -> Result<Relationship, StageAuthoringError> {
         let rel_path = self.path.append_property(name).map_err(|_| {
             // Synthesize the would-be path so the error surfaces the
             // offending name rather than just the parent prim.
@@ -202,11 +201,7 @@ impl<'s> Prim<'s> {
     /// Author a relationship `name` with the given target paths and the
     /// schema-authoring convention `custom = false`. Shortcut for
     /// `create_relationship(name) + set_custom(false) + set_targets`.
-    pub fn author_relationship_targets<I, P>(
-        &self,
-        name: &str,
-        targets: I,
-    ) -> Result<Relationship<'s>, StageAuthoringError>
+    pub fn author_relationship_targets<I, P>(&self, name: &str, targets: I) -> Result<Relationship, StageAuthoringError>
     where
         I: IntoIterator<Item = P>,
         P: Into<sdf::Path>,
@@ -307,15 +302,15 @@ impl<'s> Prim<'s> {
     /// neither authors a spec nor asserts the attribute is composed. An invalid
     /// property name yields a handle whose path falls back to the prim, which
     /// resolves as empty.
-    pub fn attribute(&self, name: &str) -> Attribute<'s> {
-        Attribute::new(self.stage, self.property_path(name))
+    pub fn attribute(&self, name: &str) -> Attribute {
+        Attribute::new(&self.stage, self.property_path(name))
     }
 
     /// Returns a [`Relationship`] handle for the property `name` under this
     /// prim. Mirrors C++ `UsdPrim::GetRelationship`. See [`Self::attribute`]
     /// for the handle's non-authoring, non-validating contract.
-    pub fn relationship(&self, name: &str) -> Relationship<'s> {
-        Relationship::new(self.stage, self.property_path(name))
+    pub fn relationship(&self, name: &str) -> Relationship {
+        Relationship::new(&self.stage, self.property_path(name))
     }
 
     /// Property path for `name` under this prim, falling back to the prim path
@@ -326,8 +321,8 @@ impl<'s> Prim<'s> {
 
     /// Returns the variant sets composed onto this prim. Mirrors C++
     /// `UsdPrim::GetVariantSets`.
-    pub fn variant_sets(&self) -> VariantSets<'s> {
-        VariantSets::new(self.stage, self.path.clone())
+    pub fn variant_sets(&self) -> VariantSets {
+        VariantSets::new(&self.stage, self.path.clone())
     }
 
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
@@ -371,14 +366,17 @@ impl<'s> Prim<'s> {
 /// defaults `variability = Varying`, `custom = true`, matching C++ generic
 /// property authoring. Override via the fluent setters below.
 #[derive(Clone)]
-pub struct Attribute<'s> {
-    stage: &'s Stage,
+pub struct Attribute {
+    stage: Stage,
     path: sdf::Path,
 }
 
-impl<'s> Attribute<'s> {
-    pub(super) fn new(stage: &'s Stage, path: sdf::Path) -> Self {
-        Self { stage, path }
+impl Attribute {
+    pub(super) fn new(stage: &Stage, path: sdf::Path) -> Self {
+        Self {
+            stage: stage.clone(),
+            path,
+        }
     }
 
     /// Composed namespace path of the attribute (e.g. `/World/Mesh.points`).
@@ -387,13 +385,13 @@ impl<'s> Attribute<'s> {
     }
 
     /// The stage this handle is anchored to.
-    pub fn stage(&self) -> &'s Stage {
-        self.stage
+    pub fn stage(&self) -> &Stage {
+        &self.stage
     }
 
     /// Handle to the owning prim.
-    pub fn prim(&self) -> Prim<'s> {
-        Prim::new(self.stage, self.path.prim_path())
+    pub fn prim(&self) -> Prim {
+        Prim::new(&self.stage, self.path.prim_path())
     }
 
     /// Set the attribute's `variability` field. Always authors an explicit
@@ -721,14 +719,17 @@ impl<'s> Attribute<'s> {
 /// with defaults `variability = Varying`, `custom = true`, matching C++
 /// generic property authoring. Override via the fluent setters below.
 #[derive(Clone)]
-pub struct Relationship<'s> {
-    stage: &'s Stage,
+pub struct Relationship {
+    stage: Stage,
     path: sdf::Path,
 }
 
-impl<'s> Relationship<'s> {
-    pub(super) fn new(stage: &'s Stage, path: sdf::Path) -> Self {
-        Self { stage, path }
+impl Relationship {
+    pub(super) fn new(stage: &Stage, path: sdf::Path) -> Self {
+        Self {
+            stage: stage.clone(),
+            path,
+        }
     }
 
     /// Composed namespace path of the relationship.
@@ -737,13 +738,13 @@ impl<'s> Relationship<'s> {
     }
 
     /// The stage this handle is anchored to.
-    pub fn stage(&self) -> &'s Stage {
-        self.stage
+    pub fn stage(&self) -> &Stage {
+        &self.stage
     }
 
     /// Handle to the owning prim.
-    pub fn prim(&self) -> Prim<'s> {
-        Prim::new(self.stage, self.path.prim_path())
+    pub fn prim(&self) -> Prim {
+        Prim::new(&self.stage, self.path.prim_path())
     }
 
     /// Set the relationship's `variability` field. Always authors an
@@ -947,14 +948,17 @@ impl<'s> Relationship<'s> {
 // only as the C++ API shape; if those methods don't materialize, fold the one
 // query back onto `Prim`.
 #[derive(Clone)]
-pub struct VariantSets<'s> {
-    stage: &'s Stage,
+pub struct VariantSets {
+    stage: Stage,
     prim: sdf::Path,
 }
 
-impl<'s> VariantSets<'s> {
-    pub(super) fn new(stage: &'s Stage, prim: sdf::Path) -> Self {
-        Self { stage, prim }
+impl VariantSets {
+    pub(super) fn new(stage: &Stage, prim: sdf::Path) -> Self {
+        Self {
+            stage: stage.clone(),
+            prim,
+        }
     }
 
     /// Returns the variant selections composed onto the prim, as `(set,
@@ -976,6 +980,27 @@ mod tests {
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
+    }
+
+    /// Handles own a refcounted [`Stage`], so they can be collected and
+    /// queried after the expression — and even the original `Stage`
+    /// binding — that produced them is gone. The `'s` borrow used to forbid
+    /// this.
+    #[test]
+    fn handles_outlive_stage() -> anyhow::Result<()> {
+        let prims: Vec<super::Prim> = {
+            let stage = stage()?;
+            stage.define_prim("/A")?.set_type_name("Xform")?;
+            stage.define_prim("/B")?.set_type_name("Scope")?;
+            vec![stage.prim_at_path("/A"), stage.prim_at_path("/B")]
+            // `stage` is dropped here; each handle's cloned `Rc` keeps the
+            // shared state alive.
+        };
+
+        assert_eq!(prims[0].path().as_str(), "/A");
+        let type_name = prims[1].stage().type_name(prims[1].path())?;
+        assert_eq!(type_name.as_deref(), Some("Scope"));
+        Ok(())
     }
 
     /// `Prim::has_clips`/`clip_sets` report composed clip sets, and

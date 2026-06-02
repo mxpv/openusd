@@ -11,18 +11,18 @@ use crate::schemas::ui::types::ExpansionState;
 
 /// Apply `SceneGraphPrimAPI` to `prim` and return a chainable author for
 /// `ui:displayName` / `ui:displayGroup`.
-pub fn apply_scene_graph_prim<'s>(stage: &'s Stage, prim: impl Into<Path>) -> Result<SceneGraphPrimAuthor<'s>> {
+pub fn apply_scene_graph_prim(stage: &Stage, prim: impl Into<Path>) -> Result<SceneGraphPrimAuthor> {
     Ok(SceneGraphPrimAuthor {
         prim: apply_api(stage, prim.into(), API_SCENE_GRAPH_PRIM)?,
     })
 }
 
-pub struct SceneGraphPrimAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SceneGraphPrimAuthor {
+    prim: Prim,
 }
 
-impl<'s> SceneGraphPrimAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SceneGraphPrimAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -41,18 +41,18 @@ impl<'s> SceneGraphPrimAuthor<'s> {
 
 /// Apply `NodeGraphNodeAPI` to `prim` and return a chainable author for the
 /// node-editor layout attributes.
-pub fn apply_nodegraph_node<'s>(stage: &'s Stage, prim: impl Into<Path>) -> Result<NodeGraphNodeAuthor<'s>> {
+pub fn apply_nodegraph_node(stage: &Stage, prim: impl Into<Path>) -> Result<NodeGraphNodeAuthor> {
     Ok(NodeGraphNodeAuthor {
         prim: apply_api(stage, prim.into(), API_NODEGRAPH_NODE)?,
     })
 }
 
-pub struct NodeGraphNodeAuthor<'s> {
-    prim: Prim<'s>,
+pub struct NodeGraphNodeAuthor {
+    prim: Prim,
 }
 
-impl<'s> NodeGraphNodeAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl NodeGraphNodeAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -106,17 +106,17 @@ impl<'s> NodeGraphNodeAuthor<'s> {
 
 /// Author a `def Backdrop` prim at `path`. Returns a chainable
 /// [`BackdropAuthor`].
-pub fn define_backdrop<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<BackdropAuthor<'s>> {
+pub fn define_backdrop(stage: &Stage, path: impl Into<Path>) -> Result<BackdropAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_BACKDROP)?;
     Ok(BackdropAuthor { prim })
 }
 
-pub struct BackdropAuthor<'s> {
-    prim: Prim<'s>,
+pub struct BackdropAuthor {
+    prim: Prim,
 }
 
-impl<'s> BackdropAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl BackdropAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -129,7 +129,7 @@ impl<'s> BackdropAuthor<'s> {
 
 /// Ensure `prim` exists on the edit target and carries `api` in its
 /// `apiSchemas`, returning a handle to it.
-fn apply_api<'s>(stage: &'s Stage, prim: Path, api: &str) -> Result<Prim<'s>> {
+fn apply_api(stage: &Stage, prim: Path, api: &str) -> Result<Prim> {
     stage.override_prim(prim.clone())?;
     Ok(Prim::new(stage, prim).add_applied_schema(api)?)
 }
@@ -161,7 +161,7 @@ fn author_uniform_string(stage: &Stage, prim: &Path, name: &str, value: String) 
 
 /// Create a `uniform`, `custom = false` attribute of `type_name` on `prim`,
 /// returning the handle for the caller to set its value.
-fn uniform<'s>(stage: &'s Stage, prim: &Path, name: &str, type_name: &str) -> Result<crate::usd::Attribute<'s>> {
+fn uniform(stage: &Stage, prim: &Path, name: &str, type_name: &str) -> Result<crate::usd::Attribute> {
     Ok(stage
         .create_attribute(prim.append_property(name)?, type_name)?
         .set_variability(Variability::Uniform)?

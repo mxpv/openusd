@@ -28,14 +28,14 @@ pub fn output_name(base: &str) -> String {
 /// Create a `inputs:<base>` attribute of `type_name` on `prim`
 /// (`custom = false`). Returns the [`Attribute`] handle so the caller
 /// can `.set(...)` a default value or `.set_connections(...)` it.
-pub fn create_input<'s>(prim: &Prim<'s>, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+pub fn create_input(prim: &Prim, base: &str, type_name: &str) -> Result<Attribute> {
     Ok(prim.create_attribute(&input_name(base), type_name)?.set_custom(false)?)
 }
 
 /// Create an `outputs:<base>` attribute of `type_name` on `prim`
 /// (`custom = false`). Outputs typically carry no value — they're the
 /// source endpoint a downstream input connects to.
-pub fn create_output<'s>(prim: &Prim<'s>, base: &str, type_name: &str) -> Result<Attribute<'s>> {
+pub fn create_output(prim: &Prim, base: &str, type_name: &str) -> Result<Attribute> {
     Ok(prim
         .create_attribute(&output_name(base), type_name)?
         .set_custom(false)?)

@@ -16,17 +16,17 @@ use crate::schemas::render::tokens::*;
 
 /// Author a `def RenderPass` prim at `path`. Returns a chainable
 /// [`RenderPassAuthor`].
-pub fn define_render_pass<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<RenderPassAuthor<'s>> {
+pub fn define_render_pass(stage: &Stage, path: impl Into<Path>) -> Result<RenderPassAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_RENDER_PASS)?;
     Ok(RenderPassAuthor { prim })
 }
 
-pub struct RenderPassAuthor<'s> {
-    prim: Prim<'s>,
+pub struct RenderPassAuthor {
+    prim: Prim,
 }
 
-impl<'s> RenderPassAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl RenderPassAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

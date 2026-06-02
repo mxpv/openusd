@@ -19,17 +19,17 @@ use super::common::{author_bool, author_rel_targets, author_string};
 /// prim auto-applies `CollectionAPI:colliders` via the schema
 /// registry; members are managed through that collection rather than
 /// directly here.
-pub fn define_collision_group<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<CollisionGroupAuthor<'s>> {
+pub fn define_collision_group(stage: &Stage, path: impl Into<Path>) -> Result<CollisionGroupAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_PHYSICS_COLLISION_GROUP)?;
     Ok(CollisionGroupAuthor { prim })
 }
 
-pub struct CollisionGroupAuthor<'s> {
-    prim: Prim<'s>,
+pub struct CollisionGroupAuthor {
+    prim: Prim,
 }
 
-impl<'s> CollisionGroupAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl CollisionGroupAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -64,17 +64,17 @@ impl<'s> CollisionGroupAuthor<'s> {
 
 /// Apply `PhysicsFilteredPairsAPI` to the prim at `path` and return a
 /// chainable [`FilteredPairsAuthor`] for the `filteredPairs` rel.
-pub fn apply_filtered_pairs<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<FilteredPairsAuthor<'s>> {
+pub fn apply_filtered_pairs(stage: &Stage, path: impl Into<Path>) -> Result<FilteredPairsAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_FILTERED_PAIRS)?;
     Ok(FilteredPairsAuthor { prim })
 }
 
-pub struct FilteredPairsAuthor<'s> {
-    prim: Prim<'s>,
+pub struct FilteredPairsAuthor {
+    prim: Prim,
 }
 
-impl<'s> FilteredPairsAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl FilteredPairsAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -95,7 +95,7 @@ impl<'s> FilteredPairsAuthor<'s> {
 /// Apply `PhysicsArticulationRootAPI` to the prim at `path`. The API
 /// has no own attributes — it's a marker for reduced-coordinate
 /// articulation roots per the spec.
-pub fn apply_articulation_root<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Prim<'s>> {
+pub fn apply_articulation_root(stage: &Stage, path: impl Into<Path>) -> Result<Prim> {
     Ok(stage.override_prim(path)?.add_applied_schema(API_ARTICULATION_ROOT)?)
 }
 

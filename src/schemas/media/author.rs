@@ -17,17 +17,17 @@ use crate::schemas::media::types::{AuralMode, PlaybackMode};
 
 /// Author a `def SpatialAudio` prim at `path`. Returns a chainable
 /// [`SpatialAudioAuthor`].
-pub fn define_spatial_audio<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<SpatialAudioAuthor<'s>> {
+pub fn define_spatial_audio(stage: &Stage, path: impl Into<Path>) -> Result<SpatialAudioAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_SPATIAL_AUDIO)?;
     Ok(SpatialAudioAuthor { prim })
 }
 
-pub struct SpatialAudioAuthor<'s> {
-    prim: Prim<'s>,
+pub struct SpatialAudioAuthor {
+    prim: Prim,
 }
 
-impl<'s> SpatialAudioAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl SpatialAudioAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

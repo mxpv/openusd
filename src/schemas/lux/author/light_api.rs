@@ -34,7 +34,7 @@ use super::common::{author_input_bool, author_input_color3f, author_input_float,
 /// [`Prim::add_applied_schema`]. The prim spec must already exist on the
 /// active edit target — use [`Stage::define_prim`] (or one of the
 /// `define_*_light` helpers in sibling modules) first.
-pub fn apply_light_api<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<LightAuthor<'s>> {
+pub fn apply_light_api(stage: &Stage, path: impl Into<Path>) -> Result<LightAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_LIGHT)?;
     Ok(LightAuthor { prim })
 }
@@ -45,12 +45,12 @@ pub fn apply_light_api<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Li
 /// light authors (e.g. `RectLightAuthor`) share the same fluent surface
 /// without duplicated methods. Bring the trait into scope to use the
 /// setters: `use openusd::schemas::lux::LightApiSetters;`.
-pub struct LightAuthor<'s> {
-    prim: Prim<'s>,
+pub struct LightAuthor {
+    prim: Prim,
 }
 
-impl<'s> LightAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl LightAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 }
@@ -106,10 +106,10 @@ where
 /// accessor; the trait's default methods route every setter through the
 /// shared free functions above so attribute-name + type-name choices
 /// live in one place.
-pub trait LightApiSetters<'s>: Sized {
+pub trait LightApiSetters: Sized {
     /// Borrow the underlying prim handle. Implementations typically just
     /// return `&self.prim`.
-    fn prim(&self) -> &Prim<'s>;
+    fn prim(&self) -> &Prim;
 
     /// Set `inputs:intensity`. See [`LightAuthor::set_intensity`].
     fn set_intensity(self, value: f32) -> Result<Self> {
@@ -170,8 +170,8 @@ pub trait LightApiSetters<'s>: Sized {
     }
 }
 
-impl<'s> LightApiSetters<'s> for LightAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl LightApiSetters for LightAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }

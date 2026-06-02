@@ -21,17 +21,17 @@ use super::common::author_rel_targets;
 /// Typically applied to a model-hierarchy prim above a payload so
 /// consumers can discover lights without loading the heavy
 /// payload — see the spec's "Publishing a Cached Light List" section.
-pub fn apply_light_list<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<LightListAuthor<'s>> {
+pub fn apply_light_list(stage: &Stage, path: impl Into<Path>) -> Result<LightListAuthor> {
     let prim = stage.override_prim(path)?.add_applied_schema(API_LIGHT_LIST)?;
     Ok(LightListAuthor { prim })
 }
 
-pub struct LightListAuthor<'s> {
-    prim: Prim<'s>,
+pub struct LightListAuthor {
+    prim: Prim,
 }
 
-impl<'s> LightListAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl LightListAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

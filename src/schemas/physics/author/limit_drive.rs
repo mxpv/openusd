@@ -31,19 +31,19 @@ use super::common::{author_float, author_uniform_token};
 
 /// Apply `PhysicsLimitAPI:<dof>` to the joint at `path` and return a
 /// chainable [`LimitAuthor`] for the per-DOF `low` / `high` attrs.
-pub fn apply_limit<'s>(stage: &'s Stage, path: impl Into<Path>, dof: Dof) -> Result<LimitAuthor<'s>> {
+pub fn apply_limit(stage: &Stage, path: impl Into<Path>, dof: Dof) -> Result<LimitAuthor> {
     let api_name = format!("{API_LIMIT}:{}", dof.as_token());
     let prim = stage.override_prim(path)?.add_applied_schema(api_name)?;
     Ok(LimitAuthor { prim, dof })
 }
 
-pub struct LimitAuthor<'s> {
-    prim: Prim<'s>,
+pub struct LimitAuthor {
+    prim: Prim,
     dof: Dof,
 }
 
-impl<'s> LimitAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl LimitAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -78,19 +78,19 @@ fn limit_attr_name(dof: Dof, sub: &str) -> String {
 
 /// Apply `PhysicsDriveAPI:<dof>` to the joint at `path` and return a
 /// chainable [`DriveAuthor`] for the per-DOF drive attrs.
-pub fn apply_drive<'s>(stage: &'s Stage, path: impl Into<Path>, dof: Dof) -> Result<DriveAuthor<'s>> {
+pub fn apply_drive(stage: &Stage, path: impl Into<Path>, dof: Dof) -> Result<DriveAuthor> {
     let api_name = format!("{API_DRIVE}:{}", dof.as_token());
     let prim = stage.override_prim(path)?.add_applied_schema(api_name)?;
     Ok(DriveAuthor { prim, dof })
 }
 
-pub struct DriveAuthor<'s> {
-    prim: Prim<'s>,
+pub struct DriveAuthor {
+    prim: Prim,
     dof: Dof,
 }
 
-impl<'s> DriveAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl DriveAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 

@@ -11,9 +11,9 @@ use crate::schemas::vol::types::VectorDataRoleHint;
 
 /// Shared setters for the `FieldAsset` attributes, mixed into the
 /// `OpenVDBAsset` / `Field3DAsset` author handles.
-pub trait FieldAssetSetters<'s>: Sized {
+pub trait FieldAssetSetters: Sized {
     /// Borrow the underlying prim handle.
-    fn prim(&self) -> &Prim<'s>;
+    fn prim(&self) -> &Prim;
 
     /// Set `filePath` (`asset`). The UsdVol schema declares this animatable,
     /// so it is authored varying to allow time-sampled volume file sequences.
@@ -53,17 +53,17 @@ pub trait FieldAssetSetters<'s>: Sized {
 }
 
 /// Author a `def Volume` prim at `path`. Returns a chainable [`VolumeAuthor`].
-pub fn define_volume<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<VolumeAuthor<'s>> {
+pub fn define_volume(stage: &Stage, path: impl Into<Path>) -> Result<VolumeAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_VOLUME)?;
     Ok(VolumeAuthor { prim })
 }
 
-pub struct VolumeAuthor<'s> {
-    prim: Prim<'s>,
+pub struct VolumeAuthor {
+    prim: Prim,
 }
 
-impl<'s> VolumeAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl VolumeAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -87,17 +87,17 @@ impl<'s> VolumeAuthor<'s> {
 
 /// Author a `def OpenVDBAsset` prim at `path`. Returns a chainable
 /// [`OpenVdbAssetAuthor`] with the shared [`FieldAssetSetters`].
-pub fn define_openvdb_asset<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<OpenVdbAssetAuthor<'s>> {
+pub fn define_openvdb_asset(stage: &Stage, path: impl Into<Path>) -> Result<OpenVdbAssetAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_OPENVDB_ASSET)?;
     Ok(OpenVdbAssetAuthor { prim })
 }
 
-pub struct OpenVdbAssetAuthor<'s> {
-    prim: Prim<'s>,
+pub struct OpenVdbAssetAuthor {
+    prim: Prim,
 }
 
-impl<'s> OpenVdbAssetAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl OpenVdbAssetAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -108,25 +108,25 @@ impl<'s> OpenVdbAssetAuthor<'s> {
     }
 }
 
-impl<'s> FieldAssetSetters<'s> for OpenVdbAssetAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl FieldAssetSetters for OpenVdbAssetAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
 
 /// Author a `def Field3DAsset` prim at `path`. Returns a chainable
 /// [`Field3dAssetAuthor`] with the shared [`FieldAssetSetters`].
-pub fn define_field3d_asset<'s>(stage: &'s Stage, path: impl Into<Path>) -> Result<Field3dAssetAuthor<'s>> {
+pub fn define_field3d_asset(stage: &Stage, path: impl Into<Path>) -> Result<Field3dAssetAuthor> {
     let prim = stage.define_prim(path)?.set_type_name(T_FIELD3D_ASSET)?;
     Ok(Field3dAssetAuthor { prim })
 }
 
-pub struct Field3dAssetAuthor<'s> {
-    prim: Prim<'s>,
+pub struct Field3dAssetAuthor {
+    prim: Prim,
 }
 
-impl<'s> Field3dAssetAuthor<'s> {
-    pub fn into_prim(self) -> Prim<'s> {
+impl Field3dAssetAuthor {
+    pub fn into_prim(self) -> Prim {
         self.prim
     }
 
@@ -137,8 +137,8 @@ impl<'s> Field3dAssetAuthor<'s> {
     }
 }
 
-impl<'s> FieldAssetSetters<'s> for Field3dAssetAuthor<'s> {
-    fn prim(&self) -> &Prim<'s> {
+impl FieldAssetSetters for Field3dAssetAuthor {
+    fn prim(&self) -> &Prim {
         &self.prim
     }
 }
