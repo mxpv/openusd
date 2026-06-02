@@ -810,6 +810,17 @@ impl Stage {
         self.graph.borrow().layer_identifiers()
     }
 
+    /// Returns the identifiers of the stage's root layer stack — the session
+    /// layers, the root layer, and its sublayers, in strength order. Mirrors
+    /// C++ `UsdStage::GetLayerStack` (with `includeSessionLayers = true`).
+    ///
+    /// Unlike [`layer_identifiers`](Self::layer_identifiers), which lists every
+    /// loaded layer including those reached across reference/payload arcs, this
+    /// is only the local layer stack a top-level prim scans for direct opinions.
+    pub fn layer_stack(&self) -> Vec<String> {
+        self.graph.borrow().root_layer_stack_identifiers()
+    }
+
     /// Returns `true` if the stage has a session layer.
     pub fn has_session_layer(&self) -> bool {
         self.graph.borrow().session_layer_count() > 0
@@ -907,12 +918,31 @@ impl Stage {
         self.try_or_handle(|cache| cache.value_at(&attr_path, time, &interp))
     }
 
+    /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
+    /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
+    /// wrapper; it is returned unconditionally and does not assert that a prim
+    /// is composed at the path (query the handle to find out).
+    pub fn prim_at_path(&self, path: impl Into<sdf::Path>) -> super::Prim<'_> {
+        super::Prim::new(self, path.into().prim_path())
+    }
+
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
         let root = sdf::Path::abs_root();
         let children = self.try_or_handle(|cache| cache.prim_children(&root))?;
         Ok(self.filter_child_names(&root, children))
     }
+
+    // TODO: the path-keyed scene queries below (`prim_children`,
+    // `prim_properties`, `connection_paths`, `relationship_targets`,
+    // `forwarded_relationship_targets`, `has_spec`, `spec_type`, …) belong on
+    // the composed handles to match C++ — child/property names and the prim
+    // stack on `Prim` (`UsdPrim::GetChildren` / `GetPropertyNames` /
+    // `GetPrimStack`), targets/connections on `Relationship` / `Attribute`
+    // (`UsdRelationship::GetTargets`, `UsdAttribute::GetConnections`). They live
+    // on `Stage(path)` for historical reasons; move them onto the handles (with
+    // thin `pub(crate)` plumbing here) and keep only genuinely stage-scoped
+    // queries (`GetLayerStack`, `GetPrimAtPath`) public on `Stage`.
 
     /// Returns the composed list of child prim names for a given prim path.
     ///
@@ -1354,7 +1384,7 @@ impl Stage {
     /// Calls `f` with a mutable reference to the composition cache. If `f`
     /// returns a [`pcp::Error`], the error handler decides whether to skip
     /// (returning a default value) or abort (propagating the error).
-    fn try_or_handle<T: Default>(&self, f: impl FnOnce(&mut pcp::Cache) -> Result<T>) -> Result<T> {
+    pub(crate) fn try_or_handle<T: Default>(&self, f: impl FnOnce(&mut pcp::Cache) -> Result<T>) -> Result<T> {
         let mut cache = self.graph.borrow_mut();
         let result = f(&mut cache);
         // Surface recoverable errors collected while building indices (e.g.

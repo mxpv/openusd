@@ -1,7 +1,11 @@
 //! Composition compliance tests.
 //!
-//! Each test opens a scene via `Stage::open` and validates the composed result
-//! against the `pcp.json` baseline from the vendor test suite.
+//! Each asset is opened via `Stage::open` through both the `.usda` text parser
+//! and the `.usdc` binary parser, and the composed result is validated against
+//! the vendor `pcp.txt` baseline by regenerating that dump byte-for-byte (see
+//! [`run_pcp`] / [`pcp_dump`]). Assets the dump generator cannot reproduce yet
+//! ([`SUPPRESS`]) fall back to the looser `pcp.json` existence checks
+//! ([`run_existence`]); that fallback retires as suppressions clear.
 
 use std::path::Path;
 
@@ -38,6 +42,15 @@ enum Format {
     Binary,
 }
 
+impl std::fmt::Display for Format {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Format::Text => "text",
+            Format::Binary => "binary",
+        })
+    }
+}
+
 /// Variant fallbacks a test relies on. The C++ Pcp test framework registers
 /// variant fallbacks through its plugin registry; our harness has none, so the
 /// few cases that depend on a non-default selection configure it here. `case1`'s
@@ -51,6 +64,22 @@ fn variant_fallbacks_for(name: &str) -> pcp::VariantFallbackMap {
     }
 }
 
+fn open_stage(name: &str, entry: &Path) -> usd::Stage {
+    usd::Stage::builder()
+        .on_error(|_| Ok(()))
+        .variant_fallbacks(variant_fallbacks_for(name))
+        .open(entry.to_str().unwrap())
+        .unwrap()
+}
+
+/// Validates an asset through the parser selected by `format`.
+///
+/// Active assets are checked against the byte-exact `pcp.txt` golden (see
+/// [`run_golden`]); suppressed assets fall back to the looser `pcp.json`
+/// existence checks (see [`run_existence`]). Running this for both
+/// [`Format::Text`] and [`Format::Binary`] exercises both the `.usda` and
+/// `.usdc` parsers against the same baseline. The `pcp.json` path is a
+/// transitional fallback — it retires as suppressions clear.
 fn run(name: &str, format: Format) {
     let test_dir = Path::new(ASSETS).join(name);
     let baseline_path = test_dir.join("pcp.json");
@@ -58,30 +87,30 @@ fn run(name: &str, format: Format) {
         std::fs::read_to_string(&baseline_path).unwrap_or_else(|e| panic!("read {}: {e}", baseline_path.display()));
     let baseline: schema::Baseline = serde_json::from_str(&json).expect("parse pcp.json");
 
-    // Skip error test cases — they test failure modes we don't validate yet.
-    if !baseline.errors.is_empty() {
-        return;
-    }
-
-    // Skip if no composing data.
-    if baseline.composing.is_empty() {
-        return;
-    }
-
     let entry = match format {
         Format::Text => test_dir.join("usda").join(&baseline.entry),
         Format::Binary => test_dir.join(&baseline.entry),
     };
-
     if !entry.exists() {
         return;
     }
 
-    let stage = usd::Stage::builder()
-        .on_error(|_| Ok(()))
-        .variant_fallbacks(variant_fallbacks_for(name))
-        .open(entry.to_str().unwrap())
-        .unwrap();
+    if SUPPRESS.contains(&name) {
+        run_existence(name, format, &baseline, &entry);
+    } else {
+        run_pcp(name, format, &test_dir, &baseline, &entry);
+    }
+}
+
+/// Validates a suppressed asset by checking that every baselined prim, child,
+/// and property merely *exists* in the composed stage — the original, looser
+/// `pcp.json` check. Skips error cases and assets with no composing data.
+fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry: &Path) {
+    if !baseline.errors.is_empty() || baseline.composing.is_empty() {
+        return;
+    }
+
+    let stage = open_stage(name, entry);
 
     // Collect every prim, including inactive/class/over prims, so the PCP
     // baselines can validate composition independent of stage traversal policy.
@@ -120,11 +149,321 @@ fn run(name: &str, format: Format) {
         failures.is_empty(),
         "composition test {name} ({format}) failed:\n  {}",
         failures.join("\n  "),
-        format = match format {
-            Format::Text => "text",
-            Format::Binary => "binary",
-        },
     );
+}
+
+/// Assets whose `pcp.txt` baseline the [`run_pcp`] harness cannot reproduce
+/// yet, so they fall back to the looser `pcp.json` existence checks. Two
+/// reasons:
+///
+/// - The golden carries a Python traceback or a trailing `Errors`/`Warning`
+///   section (the C++ test framework prints these for error cases); our
+///   generated body has no such trailer.
+/// - The golden contains a `Time Offsets`, `Prohibited child names`, or
+///   `Deleted target paths` section. The generator does not emit these yet
+///   (relocate prohibited-children composition and per-prim time-offset dumps
+///   are future work).
+///
+/// Assets outside this list are compared byte-for-byte; a real composition
+/// mismatch there is a bug to fix, not a reason to suppress.
+const SUPPRESS: &[&str] = &[
+    "BasicInherits_root",
+    "BasicPayload_root",
+    "BasicRelocateToAnimInterfaceAsNewRootPrim_root",
+    "BasicRelocateToAnimInterface_root",
+    "BasicTimeOffset_root",
+    "ElidedAncestralRelocates_root",
+    "ErrorArcCycle_root",
+    "ErrorInconsistentProperties_root",
+    "ErrorInvalidAuthoredRelocates_root",
+    "ErrorInvalidConflictingRelocates_root",
+    "ErrorInvalidInstanceTargetPath_root",
+    "ErrorInvalidPayload_root",
+    "ErrorInvalidPreRelocateTargetPath_root",
+    "ErrorInvalidReferenceToRelocationSource_root",
+    "ErrorInvalidTargetPath_root",
+    "ErrorOpinionAtRelocationSource_root",
+    "ErrorRelocateWithVariantSelection_root",
+    "ErrorSublayerCycle_root",
+    "PayloadsAndAncestralArcs2_root",
+    "PayloadsAndAncestralArcs3_root",
+    "ReferenceListOpsWithOffsets_root",
+    "RelocatePrimsWithSameName_root",
+    "RelocateToNone_root",
+    "SubrootReferenceAndVariants_root",
+    "SubrootReferenceNonCycle_root",
+    "TimeCodesPerSecond_root",
+    "TimeCodesPerSecond_root_12fps",
+    "TimeCodesPerSecond_root_24tcps_12fps",
+    "TimeCodesPerSecond_root_48tcps",
+    "TimeCodesPerSecond_session",
+    "TimeCodesPerSecond_session_24fps",
+    "TimeCodesPerSecond_session_48tcps",
+    "TrickyConnectionToRelocatedAttribute_root",
+    "TrickyInheritsAndRelocates2_root",
+    "TrickyInheritsAndRelocates3_root",
+    "TrickyInheritsAndRelocates4_root",
+    "TrickyInheritsAndRelocates5_root",
+    "TrickyInheritsAndRelocatesToNewRootPrim_root",
+    "TrickyInheritsAndRelocates_root",
+    "TrickyListEditedTargetPaths_root",
+    "TrickyLocalClassHierarchyWithRelocates_root",
+    "TrickyMultipleRelocations2_root",
+    "TrickyMultipleRelocations3_root",
+    "TrickyMultipleRelocations4_root",
+    "TrickyMultipleRelocations5_root",
+    "TrickyMultipleRelocationsAndClasses2_root",
+    "TrickyMultipleRelocationsAndClasses_root",
+    "TrickyMultipleRelocations_root",
+    "TrickyRelocatedTargetInVariant_root",
+    "TrickyRelocationOfPrimFromPayload_root",
+    "TrickyRelocationOfPrimFromVariant_root",
+    "TrickyRelocationSquatter_root",
+    "TrickySpecializesAndRelocates_root",
+    "TrickySpookyInheritsInSymmetricArmRig_root",
+    "TrickySpookyInheritsInSymmetricBrowRig_root",
+    "TrickySpookyInherits_root",
+    "TrickySpookyVariantSelectionInClass_root",
+    "TrickySpookyVariantSelection_root",
+    "TrickyVariantOverrideOfRelocatedPrim_root",
+    "TypicalReferenceToChargroupWithRename_root",
+    "bug69932_root",
+    "bug92827_root",
+];
+
+/// The composition-dump separator: 72 dashes, matching the C++
+/// `testPcpCompositionResults` framework.
+fn separator() -> String {
+    "-".repeat(72)
+}
+
+/// Display name for a layer identifier: its path relative to the asset's
+/// `usda/` directory, with `/` separators. For the common case where every
+/// layer lives directly in `usda/` this is the basename (`root.usd`); layers
+/// in subdirectories keep their relative prefix (`sub1/sub1.usd`), matching the
+/// C++ dump. Falls back to the basename when the identifier is not under
+/// `canonical_base` (the already-canonicalized entry directory).
+fn display_name(canonical_base: Option<&Path>, identifier: &str) -> String {
+    if let (Some(base), Ok(id)) = (canonical_base, std::fs::canonicalize(identifier)) {
+        if let Ok(rel) = id.strip_prefix(base) {
+            return rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+        }
+    }
+    Path::new(identifier)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| identifier.to_string())
+}
+
+/// A `Prim Stack` / `Property stacks` site line: four spaces, the layer
+/// display name in a 20-wide field, one space, then the spec path.
+fn site_line(out: &mut String, canonical_base: Option<&Path>, identifier: &str, path: &sdf::Path) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "    {:<20} {}", display_name(canonical_base, identifier), path);
+}
+
+/// Python list-literal of names, e.g. `['a', 'b']` (matching the C++ dump,
+/// which prints the result of `repr(list)`).
+fn name_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+/// Emits a per-property `<header>:` section whose entries are keyed and ordered
+/// by the composed property path (`Property stacks`, `Relationship targets`,
+/// `Attribute connections` all share this shape). Each group prints its path
+/// header then its items via `emit_item`. Nothing is written for an empty
+/// `groups`.
+fn write_grouped<T>(
+    out: &mut String,
+    header: &str,
+    mut groups: Vec<(sdf::Path, Vec<T>)>,
+    mut emit_item: impl FnMut(&mut String, &T),
+) {
+    use std::fmt::Write as _;
+    if groups.is_empty() {
+        return;
+    }
+    groups.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+    let _ = writeln!(out, "{header}:");
+    for (prop_path, items) in &groups {
+        let _ = writeln!(out, "{prop_path}:");
+        for item in items {
+            emit_item(out, item);
+        }
+    }
+    out.push('\n');
+}
+
+/// Regenerates the `pcp.txt` composition dump for a stage in the exact format
+/// of the vendor baselines, so it can be diffed against the baseline
+/// byte-for-byte instead of parsing the baseline into a structure.
+fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String {
+    use std::fmt::Write as _;
+    let sep = separator();
+    let mut out = String::new();
+
+    // The entry directory is canonicalized once; layer identifiers are then
+    // displayed relative to it (see `display_name`).
+    let canonical_base = std::fs::canonicalize(base).ok();
+    let base = canonical_base.as_deref();
+
+    let _ = writeln!(out, "Loading @composition/tests/assets/{name}/usda/{entry}@");
+    out.push('\n');
+
+    let _ = writeln!(out, "{sep}");
+    let _ = writeln!(out, "Layer Stack:");
+    for identifier in stage.layer_stack() {
+        let _ = writeln!(out, "     {}", display_name(base, &identifier));
+    }
+    out.push('\n');
+
+    let mut prims = Vec::new();
+    stage
+        .traverse(usd::PrimPredicate::ALL, |path| prims.push(path.clone()))
+        .unwrap();
+
+    for path in &prims {
+        let prim = stage.prim_at_path(path.clone());
+
+        let _ = writeln!(out, "{sep}");
+        let _ = writeln!(out, "Results for composing <{path}>");
+        out.push('\n');
+
+        let _ = writeln!(out, "Prim Stack:");
+        for (identifier, spec_path) in prim.prim_stack().unwrap() {
+            site_line(&mut out, base, &identifier, &spec_path);
+        }
+        out.push('\n');
+
+        let selections = prim.variant_sets().get_all_variant_selections().unwrap();
+        if !selections.is_empty() {
+            let _ = writeln!(out, "Variant Selections:");
+            for (set, sel) in &selections {
+                let _ = writeln!(out, "    {{{set} = {sel}}}");
+            }
+            out.push('\n');
+        }
+
+        let children = stage.prim_children(path.clone()).unwrap();
+        if !children.is_empty() {
+            let _ = writeln!(out, "Child names:");
+            let _ = writeln!(out, "     {}", name_list(&children));
+            out.push('\n');
+        }
+
+        let properties = stage.prim_properties(path.clone()).unwrap();
+        if !properties.is_empty() {
+            let _ = writeln!(out, "Property names:");
+            let _ = writeln!(out, "     {}", name_list(&properties));
+            out.push('\n');
+        }
+
+        // Property stacks list every property with an authored spec.
+        let mut stacks: Vec<(sdf::Path, Vec<(String, sdf::Path)>)> = Vec::new();
+        for name in &properties {
+            let prop = prim.attribute(name);
+            let stack = prop.property_stack().unwrap();
+            if !stack.is_empty() {
+                stacks.push((prop.path().clone(), stack));
+            }
+        }
+        write_grouped(&mut out, "Property stacks", stacks, |out, (identifier, spec_path)| {
+            site_line(out, base, identifier, spec_path);
+        });
+
+        // Relationship targets and attribute connections, split by spec type.
+        let mut rel_targets: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
+        let mut attr_conns: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
+        for name in &properties {
+            let Some(prop_path) = path.append_property(name).ok() else {
+                continue;
+            };
+            match stage.spec_type(prop_path.clone()).unwrap() {
+                Some(sdf::SpecType::Relationship) => {
+                    let targets = prim.relationship(name).get_targets().unwrap();
+                    if !targets.is_empty() {
+                        rel_targets.push((prop_path, targets));
+                    }
+                }
+                Some(sdf::SpecType::Attribute) => {
+                    let conns = prim.attribute(name).get_connections().unwrap();
+                    if !conns.is_empty() {
+                        attr_conns.push((prop_path, conns));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let emit_target = |out: &mut String, target: &sdf::Path| {
+            let _ = writeln!(out, "    {target}");
+        };
+        write_grouped(&mut out, "Relationship targets", rel_targets, emit_target);
+        write_grouped(&mut out, "Attribute connections", attr_conns, emit_target);
+    }
+
+    out
+}
+
+/// Builds a compact report of the first `limit` differing lines between the
+/// generated dump and the baseline, aligned by line number. A full structural
+/// diff is unnecessary — the dumps share line structure, so the first
+/// divergences point straight at the offending prim/section.
+fn first_diff_lines(actual: &str, expected: &str, limit: usize) -> String {
+    use std::fmt::Write as _;
+    let actual: Vec<&str> = actual.lines().collect();
+    let expected: Vec<&str> = expected.lines().collect();
+    let mut report = String::new();
+    let mut shown = 0;
+    for i in 0..actual.len().max(expected.len()) {
+        let a = actual.get(i).copied().unwrap_or("<eof>");
+        let g = expected.get(i).copied().unwrap_or("<eof>");
+        if a != g {
+            let _ = writeln!(report, "  line {}:\n    actual: {a}\n    golden: {g}", i + 1);
+            shown += 1;
+            if shown >= limit {
+                let _ = writeln!(report, "  …");
+                break;
+            }
+        }
+    }
+    report
+}
+
+/// Regenerates the composition dump from the stage parsed by `format` and
+/// asserts it matches the vendor `pcp.txt` baseline byte-for-byte.
+///
+/// The generated dump is format-independent: the `Loading` header is pinned to
+/// the `usda/` source path the baseline records, and layer display names are
+/// taken relative to the entry layer's directory (`usda/` for text, the asset
+/// root for the `.usdc` copies), so the same baseline validates both parsers.
+fn run_pcp(name: &str, format: Format, test_dir: &Path, baseline: &schema::Baseline, entry: &Path) {
+    let expected = std::fs::read_to_string(test_dir.join("pcp.txt"))
+        .expect("read pcp.txt")
+        .replace("\r\n", "\n");
+
+    let stage = open_stage(name, entry);
+    let base = entry.parent().expect("entry has a parent directory");
+    let actual = pcp_dump(name, &baseline.entry, base, &stage);
+    if actual != expected {
+        // Persist the full generated dump so a failing case can be diffed
+        // against its baseline without re-running; the panic message only shows
+        // the first few differing lines to keep test output readable.
+        let dir = Path::new("target").join("pcp_out");
+        let _ = std::fs::create_dir_all(&dir);
+        let actual_path = dir.join(format!("{name}.{format}.actual.txt"));
+        let _ = std::fs::write(&actual_path, &actual);
+        panic!(
+            "composition pcp mismatch for {name} ({format})\n  wrote {}\n{}",
+            actual_path.display(),
+            first_diff_lines(&actual, &expected, 6),
+        );
+    }
 }
 
 macro_rules! composition_tests {
