@@ -97,6 +97,11 @@ impl Spec {
             (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(incoming),
             (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(incoming),
             (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(incoming),
+            (IntListOp(existing), IntListOp(incoming)) => existing.merge_op(incoming),
+            (Int64ListOp(existing), Int64ListOp(incoming)) => existing.merge_op(incoming),
+            (UIntListOp(existing), UIntListOp(incoming)) => existing.merge_op(incoming),
+            (UInt64ListOp(existing), UInt64ListOp(incoming)) => existing.merge_op(incoming),
+            (UnregisteredValueListOp(existing), UnregisteredValueListOp(incoming)) => existing.merge_op(incoming),
             (slot, value) => *slot = value,
         }
     }

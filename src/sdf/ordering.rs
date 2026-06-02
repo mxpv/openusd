@@ -46,6 +46,12 @@ pub fn apply_ordering<T: Clone + PartialEq>(items: &mut Vec<T>, order: &[T]) {
             result.extend(runs.remove(pos));
         }
     }
+    // Append any runs not claimed by `order` — only possible when a name occurs
+    // more than once in `items` (the usual unique-name lists leave none). This
+    // keeps `apply_ordering` length-preserving regardless of duplicates.
+    for run in runs {
+        result.extend(run);
+    }
     *items = result;
 }
 
@@ -69,6 +75,16 @@ mod tests {
         let mut children = s(&["a", "b", "c"]);
         apply_ordering(&mut children, &s(&["c", "b", "a"]));
         assert_eq!(children, s(&["c", "b", "a"]));
+    }
+
+    #[test]
+    fn duplicate_items_are_preserved() {
+        // A name repeated in `items` keeps every occurrence (length-preserving),
+        // even though the order list claims it once.
+        let mut items = s(&["a", "b", "a", "c"]);
+        apply_ordering(&mut items, &s(&["a"]));
+        assert_eq!(items.len(), 4);
+        assert_eq!(items, s(&["a", "b", "a", "c"]));
     }
 
     #[test]

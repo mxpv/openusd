@@ -1074,20 +1074,27 @@ impl PrimIndex {
         // own root `L` site rescans the root layer stack.
         let mut ancestor_arcs = parent_ctx.ancestor_arcs.clone();
         // Record each non-Root node and which arc it nested under (its tree
-        // parent in this prim's graph). Strength order places a parent before
-        // its child, so a node's parent is already in `node_to_idx` when the
-        // node is reached. A parent that is this prim's Root node (not recorded)
-        // leaves `parent` None — the arc sits directly on the prim. Cross-prim
-        // nesting is not threaded here: an arc inherited from a grandparent
-        // stays flat (its own level already recorded its nesting).
+        // parent in this prim's graph). A node's tree parent need not precede it
+        // in strength order — a specialize parent is moved to the globally-weak
+        // band and can sort after its child — so map every node to its slot
+        // first, then resolve parents against the complete map. A parent that is
+        // this prim's Root node (not recorded) leaves `parent` None — the arc
+        // sits directly on the prim. Cross-prim nesting is not threaded here: an
+        // arc inherited from a grandparent stays flat (its own level already
+        // recorded its nesting).
         let base = ancestor_arcs.len();
         let mut node_to_idx: HashMap<NodeId, usize> = HashMap::new();
         for (id, node) in self.nodes_with_ids() {
+            if node.arc != ArcType::Root {
+                let slot = base + node_to_idx.len();
+                node_to_idx.insert(id, slot);
+            }
+        }
+        for (_, node) in self.nodes_with_ids() {
             if node.arc == ArcType::Root {
                 continue;
             }
             let parent = node.parent().and_then(|p| node_to_idx.get(&p).copied());
-            node_to_idx.insert(id, base + node_to_idx.len());
             ancestor_arcs.push(AncestorArc {
                 map: node.map_to_root.clone(),
                 map_to_parent: node.map_to_parent.clone(),
