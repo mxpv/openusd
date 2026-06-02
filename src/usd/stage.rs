@@ -266,7 +266,7 @@ impl StagePopulationMask {
     ///
     /// Variant selection segments in `path` are stripped before matching so a
     /// mask of `/Prim/Child` still includes opinions authored under
-    /// `/Prim{set=sel}/Child`.
+    /// `/Prim{set=sel}Child`.
     pub fn includes(&self, path: &sdf::Path) -> bool {
         if self.is_all() {
             return true;
@@ -340,7 +340,7 @@ impl EditTarget {
     /// Edit target that routes authoring into a local variant. `var_sel_path`
     /// is the variant-selection prim path (e.g. `/Prim{set=sel}`) on the
     /// target layer; child prim and property opinions authored at the stripped
-    /// scene path (`/Prim/child`) land at `/Prim{set=sel}/child` in the layer.
+    /// scene path (`/Prim/child`) land at `/Prim{set=sel}child` in the layer.
     ///
     /// Mirrors C++ `UsdEditTarget::ForLocalDirectVariant`. Paths outside the
     /// variant prim map to themselves, so authoring elsewhere is unaffected.
@@ -3514,7 +3514,7 @@ def "I2" (
         let target = EditTarget::for_local_direct_variant(0, sdf::path("/Prim{set=sel}")?);
         assert_eq!(
             target.map_to_spec_path(&sdf::path("/Prim/child")?),
-            Some(sdf::path("/Prim{set=sel}/child")?)
+            Some(sdf::path("/Prim{set=sel}child")?)
         );
         assert_eq!(
             target.map_to_spec_path(&sdf::path("/Prim.attr")?),
@@ -3541,7 +3541,7 @@ def "I2" (
             use sdf::AbstractData;
             let mut cache = stage.graph.borrow_mut();
             let layer = cache.layer_mut(root).expect("root layer");
-            layer.spec_type(&sdf::path("/Prim{set=sel}/child")?)
+            layer.spec_type(&sdf::path("/Prim{set=sel}child")?)
         };
         assert_eq!(landed, Some(sdf::SpecType::Prim));
         Ok(())
@@ -3641,7 +3641,7 @@ def "I2" (
         assert_eq!(stage.spec_type("/Prim/child")?, None);
         assert!(stage.is_indexed(&sdf::path("/Prim/child")?));
 
-        // Author the child inside the variant: `/Prim/child` -> `/Prim{set=sel}/child`.
+        // Author the child inside the variant: `/Prim/child` -> `/Prim{set=sel}child`.
         stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
         stage.define_prim("/Prim/child")?;
 

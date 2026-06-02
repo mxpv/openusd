@@ -8,6 +8,12 @@ pub fn path(str: impl AsRef<str>) -> Result<Path> {
     Path::new(path)
 }
 
+/// A character that may appear in a prim name (an alphanumeric or `_`). Used to
+/// detect where a prim child attaches directly to a variant selection.
+fn is_prim_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// `SdfPath` implementation.
 ///
 /// # Syntax
@@ -105,6 +111,10 @@ impl Path {
         // "/" + "foo/bar" => "/foo/bar"
         let combined = if self.path.as_str() == "/" {
             format!("/{}", append.path)
+        } else if self.is_prim_variant_selection_path() {
+            // A prim child attaches directly to a variant selection with no
+            // separator: "/A{v=s}" + "B" => "/A{v=s}B" (C++ SdfPath::AppendChild).
+            format!("{}{}", self.path, append.path)
         } else {
             format!("{}/{}", self.path, append.path)
         };
@@ -276,9 +286,15 @@ impl Path {
         if self.is_property_path() {
             return Some(self.prim_path());
         }
-        match self.path.rsplit_once('/') {
-            Some(("", _)) => Some(Path::abs_root()),
-            Some((before, _)) => Some(Path::from_str_unchecked(before)),
+        // Prim path: drop the final prim name. It is introduced either by a `/`
+        // (a child of another prim) or directly by a `}` (a child of a variant
+        // selection, `/A{v=s}B`), whichever is rightmost.
+        match self.path.rfind(['/', '}']) {
+            // Child of a variant selection: keep up to and including the `}`.
+            Some(i) if self.path.as_bytes()[i] == b'}' => Some(Path::from_str_unchecked(&self.path[..i + 1])),
+            Some(0) => Some(Path::abs_root()),
+            // Child of another prim: drop the `/` and the name.
+            Some(i) => Some(Path::from_str_unchecked(&self.path[..i])),
             None => None,
         }
     }
@@ -295,8 +311,10 @@ impl Path {
         if self.path.is_empty() || self.path == "/" {
             return None;
         }
-        match self.path.rsplit_once('/') {
-            Some((_, after)) => Some(after),
+        // The final prim name begins after the rightmost `/` or `}` (a child of
+        // a variant selection attaches directly, `/A{v=s}B`).
+        match self.path.rfind(['/', '}']) {
+            Some(i) => Some(&self.path[i + 1..]),
             None => Some(&self.path),
         }
     }
@@ -317,13 +335,14 @@ impl Path {
     /// structured prim namespace.
     ///
     /// ```text
-    /// "/A{x=y}/B" -> [Prim("A"), Variant{x, y}, Prim("B")]
-    /// "/A.attr"   -> [Prim("A")]  (remainder ".attr")
+    /// "/A{x=y}B" -> [Prim("A"), Variant{x, y}, Prim("B")]
+    /// "/A.attr"  -> [Prim("A")]  (remainder ".attr")
     /// ```
     pub fn components(&self) -> PathComponents<'_> {
         PathComponents {
             rest: self.path.strip_prefix('/').unwrap_or(&self.path),
-            in_variants: false,
+            expect_slash: false,
+            emitted: false,
         }
     }
 
@@ -335,9 +354,9 @@ impl Path {
     /// the count.
     ///
     /// ```text
-    /// "/A{x=y}/B" -> 2
-    /// "/A/B"      -> 2
-    /// "/"         -> 0
+    /// "/A{x=y}B" -> 2
+    /// "/A/B"     -> 2
+    /// "/"        -> 0
     /// ```
     pub fn prim_element_count(&self) -> usize {
         self.components()
@@ -349,7 +368,7 @@ impl Path {
     ///
     /// Equivalent to C++ `SdfPath::StripAllVariantSelections`. Both trailing
     /// and interior variant segments are stripped, so
-    /// `/A{x=y}/B{p=q}/C` becomes `/A/B/C`.
+    /// `/A{x=y}B{p=q}C` becomes `/A/B/C`.
     pub fn strip_all_variant_selections(&self) -> Path {
         if !self.path.contains('{') {
             return self.clone();
@@ -359,7 +378,16 @@ impl Path {
         while let Some(open) = rest.find('{') {
             out.push_str(&rest[..open]);
             match rest[open..].find('}') {
-                Some(close) => rest = &rest[open + close + 1..],
+                Some(close) => {
+                    rest = &rest[open + close + 1..];
+                    // In canonical form a prim child attaches directly to the
+                    // variant (`/A{v=s}B`); reintroduce the `/` separator when
+                    // the stripped variant is followed by a prim name. A `{`
+                    // (next variant), `.` (property), or end needs no separator.
+                    if rest.starts_with(is_prim_name_char) {
+                        out.push('/');
+                    }
+                }
                 None => {
                     out.push_str(&rest[open..]);
                     rest = "";
@@ -395,7 +423,13 @@ impl Path {
         let Some(suffix) = me.strip_prefix(old) else {
             return false;
         };
-        old == "/" || suffix.starts_with('/') || suffix.starts_with('.') || suffix.starts_with('{')
+        old == "/"
+            || suffix.starts_with('/')
+            || suffix.starts_with('.')
+            || suffix.starts_with('{')
+            // A prim child attaches directly after a variant selection
+            // (`/A{v=s}B`), so a `}`-terminated prefix is a boundary too.
+            || prefix.is_prim_variant_selection_path()
     }
 
     /// Replaces a prefix path with a new prefix, used for namespace remapping
@@ -422,8 +456,15 @@ impl Path {
         // `/Asset.outputs:out` -> `/Instance.outputs:out`.
         let suffix = me.strip_prefix(old)?;
         // The absolute root "/" is a prefix of all absolute paths; after
-        // stripping it the remainder won't start with '/' (e.g. "Foo/Bar").
-        if old != "/" && !suffix.starts_with('/') && !suffix.starts_with('.') && !suffix.starts_with('{') {
+        // stripping it the remainder won't start with '/' (e.g. "Foo/Bar"). A
+        // prim child attaches directly after a variant selection (`/A{v=s}B`),
+        // so a `}`-terminated prefix is a boundary too.
+        if old != "/"
+            && !suffix.starts_with('/')
+            && !suffix.starts_with('.')
+            && !suffix.starts_with('{')
+            && !old_prefix.is_prim_variant_selection_path()
+        {
             return None;
         }
         // Ensure a separator between new prefix and suffix for non-root.
@@ -436,13 +477,26 @@ impl Path {
         }
 
         let new = new_prefix.as_str();
-        if new == "/" && suffix.starts_with('.') {
-            Some(Path::from_str_unchecked(&format!("/{suffix}")))
-        } else if new == "/" {
-            Some(Path::from_str_unchecked(suffix))
+        // Separate the child body from its old-namespace separator. A prim child
+        // carries a leading `/` (child of a non-variant prim) or attaches
+        // directly to a variant selection (a bare name, `/A{v=s}B`); a property
+        // `.` or nested variant `{` attaches directly in any namespace.
+        let (body, is_prim_child) = if let Some(rest) = suffix.strip_prefix('/') {
+            (rest, true)
+        } else if old_prefix.is_prim_variant_selection_path() && suffix.starts_with(is_prim_name_char) {
+            (suffix, true)
         } else {
-            Some(Path::from_str_unchecked(&format!("{new}{suffix}")))
-        }
+            (suffix, false)
+        };
+        // Re-attach with the separator the new namespace needs: a prim child gets
+        // a `/`, unless the new prefix is the root (the `/` is already there) or a
+        // variant selection (the child attaches directly, `/Prim{set=sel}child`).
+        let separator = if is_prim_child && new != "/" && !new_prefix.is_prim_variant_selection_path() {
+            "/"
+        } else {
+            ""
+        };
+        Some(Path::from_str_unchecked(&format!("{new}{separator}{body}")))
     }
 
     /// Appends a variant selection to a prim path, producing a path like
@@ -562,9 +616,13 @@ pub enum PathElement<'a> {
 pub struct PathComponents<'a> {
     /// Unparsed remainder of the path string.
     rest: &'a str,
-    /// `false` when the next component is a prim name; `true` while collecting
-    /// the variant selections that follow a prim name.
-    in_variants: bool,
+    /// `true` once a prim name has been yielded, so the *next* prim child is
+    /// introduced by a `/` separator. Reset to `false` after a variant
+    /// selection, whose following prim child attaches directly (`/A{v=s}B`).
+    expect_slash: bool,
+    /// `true` once any component has been yielded. A variant selection must
+    /// attach to a prim, so a leading `{` (e.g. `/{x=y}`) is malformed.
+    emitted: bool,
 }
 
 impl<'a> PathComponents<'a> {
@@ -580,45 +638,51 @@ impl<'a> Iterator for PathComponents<'a> {
     type Item = PathComponent<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if !self.in_variants {
-                if self.rest.is_empty() {
-                    return None;
-                }
-                // A prim name runs up to the next separator, variant opener, or
-                // property separator.
-                let end = self.rest.find(['/', '{', '.']).unwrap_or(self.rest.len());
-                let name = &self.rest[..end];
-                if name.is_empty() {
-                    return None;
-                }
-                self.rest = &self.rest[end..];
-                self.in_variants = true;
-                return Some(PathComponent::Prim(name));
-            }
+        if self.rest.is_empty() {
+            return None;
+        }
 
-            // Variant selections attach directly to the prim name.
-            if let Some(after_open) = self.rest.strip_prefix('{') {
-                let Some(close) = after_open.find('}') else {
-                    return None; // unterminated; left in `rest`
-                };
-                let Some((set, selection)) = after_open[..close].split_once('=') else {
-                    return None; // missing `=`; left in `rest`
-                };
-                self.rest = &after_open[close + 1..];
-                return Some(PathComponent::Variant { set, selection });
+        // A variant selection attaches directly to the preceding prim or
+        // variant, with no separator. Its following prim child also attaches
+        // directly, so clear `expect_slash`. A leading variant (no prim to
+        // attach to, e.g. `/{x=y}`) is malformed and left in the remainder.
+        if let Some(after_open) = self.rest.strip_prefix('{') {
+            if !self.emitted {
+                return None;
             }
+            let Some(close) = after_open.find('}') else {
+                return None; // unterminated; left in `rest`
+            };
+            let Some((set, selection)) = after_open[..close].split_once('=') else {
+                return None; // missing `=`; left in `rest`
+            };
+            self.rest = &after_open[close + 1..];
+            self.expect_slash = false;
+            return Some(PathComponent::Variant { set, selection });
+        }
 
-            // A single `/` separates the next prim; anything else (trailing or
-            // doubled `/`, a property `.`, junk) ends the prim namespace.
+        // A prim child of another prim is introduced by a single `/`. A prim
+        // child of a variant attaches directly (no separator, `expect_slash`
+        // already cleared). Anything else (a property `.`, trailing or doubled
+        // `/`, junk) ends the prim namespace.
+        if self.expect_slash {
             match self.rest.strip_prefix('/') {
-                Some(next) if !next.is_empty() && !next.starts_with('/') => {
+                Some(next) if !next.is_empty() && !next.starts_with('/') && !next.starts_with('.') => {
                     self.rest = next;
-                    self.in_variants = false;
                 }
                 _ => return None,
             }
         }
+
+        let end = self.rest.find(['/', '{', '.']).unwrap_or(self.rest.len());
+        let name = &self.rest[..end];
+        if name.is_empty() {
+            return None;
+        }
+        self.rest = &self.rest[end..];
+        self.expect_slash = true;
+        self.emitted = true;
+        Some(PathComponent::Prim(name))
     }
 }
 
@@ -647,7 +711,7 @@ mod tests {
     #[test]
     fn prim_element_count() {
         assert_eq!(Path::new("/A/B").unwrap().prim_element_count(), 2);
-        assert_eq!(Path::new("/A{x=y}/B").unwrap().prim_element_count(), 2);
+        assert_eq!(Path::new("/A{x=y}B").unwrap().prim_element_count(), 2);
         assert_eq!(Path::new("/A{x=y}").unwrap().prim_element_count(), 1);
         assert_eq!(Path::abs_root().prim_element_count(), 0);
     }
@@ -731,6 +795,10 @@ mod tests {
             ("/A/B{set=sel}C", "/A/B{set=sel}C"),
             ("/A/B/C{set=sel}", "/A/B/C"),
 
+            // A property authored on a variant-direct child or on the variant.
+            ("/A{x=y}B.attr", "/A{x=y}B"),
+            ("/A{x=y}.attr", "/A{x=y}"),
+
             ("/A/B/C.foo", "/A/B/C"),
             ("/A/B/C.foo:bar:baz", "/A/B/C"),
 
@@ -796,9 +864,9 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             ("/A/B/C", "/A/B/C"),
             ("/A{set=sel}", "/A"),
-            ("/A{set=sel}/B", "/A/B"),
-            ("/A{x=y}/B{p=q}/C", "/A/B/C"),
-            ("/A/B{p=q}/C.attr", "/A/B/C.attr"),
+            ("/A{set=sel}B", "/A/B"),
+            ("/A{x=y}B{p=q}C", "/A/B/C"),
+            ("/A/B{p=q}C.attr", "/A/B/C.attr"),
             ("/", "/"),
         ];
         for (input, expected) in cases {
@@ -886,15 +954,25 @@ mod tests {
         };
         let case = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-        // Prim names and variant selections, in order, fully consumed.
+        // Prim names and variant selections, in order, fully consumed. A prim
+        // child attaches directly to a variant selection (canonical form).
         assert_eq!(parse("/A/B/C"), (case(&["A", "B", "C"]), String::new()));
-        assert_eq!(parse("/A{x=y}/B"), (case(&["A", "{x=y}", "B"]), String::new()));
+        assert_eq!(parse("/A{x=y}B"), (case(&["A", "{x=y}", "B"]), String::new()));
+        assert_eq!(parse("/A{x=y}B/C"), (case(&["A", "{x=y}", "B", "C"]), String::new()));
+        assert_eq!(
+            parse("/A{x=y}{p=q}C"),
+            (case(&["A", "{x=y}", "{p=q}", "C"]), String::new())
+        );
         assert_eq!(parse("/A{x=y}{p=q}"), (case(&["A", "{x=y}", "{p=q}"]), String::new()));
         // An empty selection (variant-set path) is yielded verbatim.
         assert_eq!(parse("/A{x=}"), (case(&["A", "{x=}"]), String::new()));
 
         // A property suffix ends the prim namespace and stays in the remainder.
         assert_eq!(parse("/A.attr"), (case(&["A"]), ".attr".to_owned()));
+        assert_eq!(parse("/A{x=y}B.attr"), (case(&["A", "{x=y}", "B"]), ".attr".to_owned()));
+        // The non-canonical slash-after-variant form is not consumed past the
+        // variant: the stray `/B` is left in the remainder.
+        assert_eq!(parse("/A{x=y}/B"), (case(&["A", "{x=y}"]), "/B".to_owned()));
 
         // Malformed input stops parsing, leaving the bad tail in the remainder.
         assert_eq!(parse("/A{x=y"), (case(&["A"]), "{x=y".to_owned()));
@@ -915,6 +993,9 @@ mod tests {
             ("/A/B/C", "/A/B/D", false),
             ("/Foobar", "/Foo", false),
             ("/A{set=sel}", "/A", true),
+            // A child attaches directly to a variant selection (canonical form).
+            ("/A{set=sel}B", "/A{set=sel}", true),
+            ("/A{set=sel}B", "/A", true),
             ("/A.attr", "/A", true),
             ("/A", "/", true),
             ("/", "/", true),
@@ -962,7 +1043,9 @@ mod tests {
             ("/A{x=y}",      Some("/A")),
             ("/A/B{x=y}",    Some("/A/B")),
             ("/A{x=y}{p=q}",  Some("/A{x=y}")),
-            ("/A{x=y}/B",    Some("/A{x=y}")),
+            // A child attaches directly to a variant selection (canonical form).
+            ("/A{x=y}B",     Some("/A{x=y}")),
+            ("/A{x=y}B/C",   Some("/A{x=y}B")),
             ("/A{x=y}.attr", Some("/A{x=y}")),
             // Relative paths must not self-parent (would loop a parent walk).
             ("Foo.bar",      Some("Foo")),
@@ -986,6 +1069,8 @@ mod tests {
             ("/A/B/C", Some("C")),
             ("/A/B",   Some("B")),
             ("/A",     Some("A")),
+            // A child attaches directly to a variant selection (canonical form).
+            ("/A{x=y}B", Some("B")),
             ("/",      None),
             ("",       None),
             ("Foo",    Some("Foo")),
@@ -1042,6 +1127,28 @@ mod tests {
 
         // Partial name overlap must not match (e.g. /RefExtra should not match /Ref).
         assert!(p("/RefExtra").replace_prefix(&p("/Ref"), &p("/X")).is_none());
+
+        // A variant-direct child (`/A{v=s}B`) remapped off the variant regains a
+        // `/` separator; remapped onto another variant it still attaches directly.
+        assert_eq!(
+            p("/A{v=s}B").replace_prefix(&p("/A{v=s}"), &p("/A")).unwrap().as_str(),
+            "/A/B"
+        );
+        assert_eq!(
+            p("/A{v=s}B")
+                .replace_prefix(&p("/A{v=s}"), &p("/X{w=t}"))
+                .unwrap()
+                .as_str(),
+            "/X{w=t}B"
+        );
+        // A deeper child under the variant-direct prim keeps its own `/`.
+        assert_eq!(
+            p("/A{v=s}B/C")
+                .replace_prefix(&p("/A{v=s}"), &p("/A"))
+                .unwrap()
+                .as_str(),
+            "/A/B/C"
+        );
     }
 
     #[test]

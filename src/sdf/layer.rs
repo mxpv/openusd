@@ -793,7 +793,7 @@ fn require_prim_path(path: &Path) -> Result<(), AuthoringError> {
 ///
 /// Such a path identifies a variant spec, not a prim, so `create_prim` /
 /// `override_prim` cannot author a `PrimSpec` there. (Properties and children
-/// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}/child` — remain
+/// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}child` — remain
 /// valid; only the bare variant selection as the leaf is rejected.)
 fn require_prim_leaf(path: &Path) -> Result<(), AuthoringError> {
     if path.is_prim_variant_selection_path() {
