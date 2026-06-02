@@ -513,10 +513,12 @@ impl PrimIndexGraph {
         // synthetic root is the sole node without an origin; it stands in for
         // itself. Comparing origins recurses only over strictly-older nodes (an
         // origin is always created before the node carrying it), so the
-        // recursion is well-founded.
+        // recursion is well-founded — except when both nodes default to
+        // themselves (no origin authored): recursing on the same `(a, b)` would
+        // not progress, so skip straight to the sibling-number tiebreak.
         let oa = na.origin.unwrap_or(a);
         let ob = nb.origin.unwrap_or(b);
-        if oa != ob {
+        if oa != ob && (oa != a || ob != b) {
             let ord = self.compare_node_strength(oa, ob);
             if ord != Ordering::Equal {
                 return ord;
@@ -774,15 +776,21 @@ impl PrimIndex {
         self.graph.root.is_valid().then_some(self.graph.root)
     }
 
-    /// Marks `root` and its subtree [`PERMISSION_DENIED`](NodeFlags::PERMISSION_DENIED),
-    /// so value resolution skips their opinions while they stay visible
-    /// structurally — the C++ `_InertSubtree` behavior for a direct arc to a
-    /// `permission = private` site (spec 10.3.3).
-    pub(crate) fn mark_permission_denied_subtree(&mut self, root: NodeId) {
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            self.graph.nodes[id.idx()].flags |= NodeFlags::PERMISSION_DENIED;
-            stack.extend_from_slice(&self.graph.nodes[id.idx()].children);
+    /// Marks every node whose path lies under one of `prefixes`
+    /// [`PERMISSION_DENIED`](NodeFlags::PERMISSION_DENIED), so value resolution
+    /// skips their opinions while they stay visible structurally — the C++
+    /// `_InertSubtree` behavior for a direct arc to a `permission = private`
+    /// site (spec 10.3.3). The prefixes are the denied arcs' target paths, so a
+    /// node reached through such an arc (its grafted subtree, an implied-class
+    /// copy, or an arc extended to a descendant prim) is inerted uniformly.
+    pub(crate) fn mark_permission_denied_under(&mut self, prefixes: &[Path]) {
+        if prefixes.is_empty() {
+            return;
+        }
+        for node in &mut self.graph.nodes {
+            if prefixes.iter().any(|prefix| node.path.has_prefix(prefix)) {
+                node.flags |= NodeFlags::PERMISSION_DENIED;
+            }
         }
     }
 
@@ -944,15 +952,31 @@ impl PrimIndex {
     }
 
     /// Splices a just-appended relocate node's handle into the strength
-    /// projection ahead of the first node weaker than `Relocate`.
+    /// projection, keeping the relocate band ordered by node strength.
+    ///
+    /// Relocate nodes sit ahead of the first node weaker than `Relocate`
+    /// (`Reference` / `Payload` / `Specialize`). Within that band the handle is
+    /// placed by [`compare_node_strength`](PrimIndexGraph::compare_node_strength)
+    /// so multiple relocates resolve in strength order rather than the order
+    /// they were grafted (a parent relocate before its children, a stronger
+    /// relocate before a weaker sibling).
     fn splice_relocate(&mut self, id: NodeId) {
-        let nodes = &self.graph.nodes;
-        let pos = self
+        let band_end = self
             .graph
             .strength_order
             .iter()
-            .position(|sid| nodes[sid.idx()].arc > ArcType::Relocate)
+            .position(|sid| self.graph.nodes[sid.idx()].arc > ArcType::Relocate)
             .unwrap_or(self.graph.strength_order.len());
+        let mut pos = band_end;
+        for i in 0..band_end {
+            let sid = self.graph.strength_order[i];
+            if self.graph.nodes[sid.idx()].arc == ArcType::Relocate
+                && self.graph.compare_node_strength(id, sid) == Ordering::Less
+            {
+                pos = i;
+                break;
+            }
+        }
         self.graph.strength_order.insert(pos, id);
     }
 
@@ -1054,6 +1078,8 @@ impl PrimIndex {
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
             within_instance: parent_ctx.within_instance,
+            // Carried forward; the cache appends this prim's own denied targets.
+            denied_prefixes: parent_ctx.denied_prefixes.clone(),
         }
     }
 
@@ -1581,6 +1607,12 @@ pub(crate) struct CompositionContext {
     /// inherited by every deeper prim, so local opinions on the instance
     /// subtree can be discarded during composition.
     pub within_instance: bool,
+    /// Target-namespace paths an ancestor's direct arc to a `permission =
+    /// private` site denied (spec 10.3.3). A node whose path lies under one of
+    /// these prefixes was reached through that denied arc, so the cache marks
+    /// it `PERMISSION_DENIED` even in descendant prims composed separately
+    /// (where the arc is extended, not authored here).
+    pub denied_prefixes: Vec<Path>,
 }
 
 /// Records an ancestor composition arc for descendant namespace remapping.
@@ -2062,6 +2094,51 @@ impl<'a> IndexBuilder<'a> {
     /// references/payloads). Each merged node's internal time composition is
     /// preserved by concatenating `arc_offset` with the target node's own
     /// `map_to_root.time_offset()`.
+    /// Grafts `source`'s composed subtree into `output`, preserving its
+    /// internal parent/child structure. Each node contributes only the
+    /// layer-stack members not already recorded in `seen` at `(layer, path,
+    /// arc)`; a fully-deduped node is skipped, orphaning its children onto the
+    /// root attachment. A grafted child hangs under its grafted parent with its
+    /// own `map_to_parent`; a target root or orphan attaches under `root_parent`
+    /// with `root_map(node)`. `finish` runs on each newly created node (set
+    /// `origin`, mark it implied, …).
+    ///
+    /// The graph and `seen` are taken as split borrows so the caller can keep
+    /// `source` borrowed from a sibling field (`target_indices` / the cached
+    /// index map) while this mutates `output`.
+    #[allow(clippy::too_many_arguments)]
+    fn graft_subtree(
+        output: &mut PrimIndexGraph,
+        seen: &mut HashSet<(usize, Path, ArcType)>,
+        source: &PrimIndex,
+        arc: ArcType,
+        in_specialize: bool,
+        root_parent: NodeId,
+        mut root_map: impl FnMut(&Node) -> MapFunction,
+        mut finish: impl FnMut(&mut PrimIndexGraph, NodeId),
+    ) {
+        let mut remap: Vec<Option<NodeId>> = vec![None; source.arena().len()];
+        for (sid, node) in source.nodes_with_ids() {
+            let members: Vec<(usize, LayerOffset)> = node
+                .layer_stack()
+                .iter()
+                .copied()
+                .filter(|&(li, _)| seen.insert((li, node.path.clone(), arc)))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let grafted_parent = node.parent().and_then(|p| remap[p.idx()]);
+            let (struct_parent, node_map) = match grafted_parent {
+                Some(grafted) => (grafted, node.map_to_parent.clone()),
+                None => (root_parent, root_map(node)),
+            };
+            let new_id = output.add_site_child(struct_parent, members, node.path.clone(), arc, node_map, in_specialize);
+            finish(output, new_id);
+            remap[sid.idx()] = Some(new_id);
+        }
+    }
+
     fn merge_full_index(
         &mut self,
         target: &Path,
@@ -2114,50 +2191,27 @@ impl<'a> IndexBuilder<'a> {
         // parent/child links. A target root re-parents under `parent`, mapping
         // the target namespace onto the inheriting prim with the arc's offset;
         // each internal node keeps its own `map_to_parent` and hangs under its
-        // grafted parent, so `map_to_root` composes down the real chain. Nodes
-        // already contributed elsewhere are skipped (dedup); a node orphaned by
-        // a skipped ancestor falls back to attaching directly under `parent`
-        // with the flattened mapping.
-        let mut remap: Vec<Option<NodeId>> = vec![None; target_index.arena().len()];
-        for (tid, node) in target_index.nodes_with_ids() {
-            // Keep only the site's members not already contributed at this
-            // (path, arc); a fully-deduped node is skipped, orphaning its
-            // children onto `parent` with a flattened mapping.
-            let members: Vec<(usize, LayerOffset)> = node
-                .layer_stack()
-                .iter()
-                .copied()
-                .filter(|&(li, _)| self.seen.insert((li, node.path.clone(), arc)))
-                .collect();
-            if members.is_empty() {
-                continue;
-            }
-            let grafted_parent = node.parent().and_then(|tp| remap[tp.idx()]);
-            let (struct_parent, node_map) = match grafted_parent {
-                Some(grafted) => (grafted, node.map_to_parent.clone()),
-                None => {
-                    // Target root or orphan: map straight to the parent's
-                    // composed path, folding the arc offset over the node's own
-                    // internal time composition.
-                    let composed_offset = arc_offset.concatenate(&node.map_to_root.time_offset());
-                    let flat_map = MapFunction::from_pair_identity(node.path.clone(), parent_path.clone())
-                        .with_time_offset(composed_offset);
-                    (parent, flat_map)
+        // grafted parent. A node orphaned by a deduped ancestor falls back to
+        // attaching directly under `parent` with the flattened mapping; its
+        // origin is `parent` (a directly-introduced arc).
+        Self::graft_subtree(
+            &mut self.output,
+            &mut self.seen,
+            target_index,
+            arc,
+            self.in_specialize,
+            parent,
+            |node| {
+                let composed_offset = arc_offset.concatenate(&node.map_to_root.time_offset());
+                MapFunction::from_pair_identity(node.path.clone(), parent_path.clone())
+                    .with_time_offset(composed_offset)
+            },
+            |output, new_id| {
+                if parent.is_valid() {
+                    output.nodes[new_id.idx()].origin = Some(parent);
                 }
-            };
-            let new_id = self.output.add_site_child(
-                struct_parent,
-                members,
-                node.path.clone(),
-                arc,
-                node_map,
-                self.in_specialize,
-            );
-            if parent.is_valid() {
-                self.output.nodes[new_id.idx()].origin = Some(parent);
-            }
-            remap[tid.idx()] = Some(new_id);
-        }
+            },
+        );
 
         self.in_specialize = prev_in_specialize;
         Ok(())
@@ -2461,36 +2515,19 @@ impl<'a> IndexBuilder<'a> {
             // `self.output` mutations below.
             if outer_is_root {
                 if let Some(cached) = self.cached_indices.get(&implied_path) {
-                    let mut remap: Vec<Option<NodeId>> = vec![None; cached.arena().len()];
-                    for (cid, node) in cached.nodes_with_ids() {
-                        let members: Vec<(usize, LayerOffset)> = node
-                            .layer_stack()
-                            .iter()
-                            .copied()
-                            .filter(|&(li, _)| self.seen.insert((li, node.path.clone(), *arc)))
-                            .collect();
-                        if members.is_empty() {
-                            continue;
-                        }
-                        let grafted_parent = node.parent().and_then(|cp| remap[cp.idx()]);
-                        let (struct_parent, node_map) = match grafted_parent {
-                            Some(grafted) => (grafted, node.map_to_parent.clone()),
-                            None => (
-                                NodeId::INVALID,
-                                MapFunction::from_pair_identity(node.path.clone(), inheriting_prim.clone()),
-                            ),
-                        };
-                        let new_id = self.output.add_site_child(
-                            struct_parent,
-                            members,
-                            node.path.clone(),
-                            *arc,
-                            node_map,
-                            *arc == ArcType::Specialize,
-                        );
-                        self.output.mark_implied(new_id, origin);
-                        remap[cid.idx()] = Some(new_id);
-                    }
+                    // Graft the cached class subtree onto the inheriting prim: a
+                    // root/orphan node maps the class namespace onto
+                    // `inheriting_prim`; every node is tagged implied.
+                    Self::graft_subtree(
+                        &mut self.output,
+                        &mut self.seen,
+                        cached,
+                        *arc,
+                        *arc == ArcType::Specialize,
+                        NodeId::INVALID,
+                        |node| MapFunction::from_pair_identity(node.path.clone(), inheriting_prim.clone()),
+                        |output, new_id| output.mark_implied(new_id, origin),
+                    );
                     continue;
                 }
             }

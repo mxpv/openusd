@@ -1382,23 +1382,26 @@ impl Cache {
                 Some(Value::Bool(true))
             );
 
-        // A direct arc to a private site is denied (spec 10.3.3): report it and
-        // mark the arc's subtree so value resolution skips its opinions while it
-        // stays visible structurally (C++ `_AddArc` + `_InertSubtree`).
-        //
-        // TODO: this inerts the arc's subtree only within this prim's own index.
-        // A private target's children that compose as separate descendant prims
-        // (where the arc is extended, not direct, so `detect_arc_permissions`
-        // does not match) are not inerted. Propagate the denial down the lazy
-        // per-prim builds — e.g. carry it on `CompositionContext` — to cover
-        // them.
+        // Arc permissions (spec 10.3.3, C++ `_AddArc` + `_InertSubtree`). A
+        // direct arc to a `permission = private` site is reported and its target
+        // path recorded; an ancestor's denied targets arrive on `parent_ctx`.
+        // Every node reached through a denied arc — its grafted subtree here, or
+        // the same arc extended to this descendant prim — is then inerted: it
+        // stays visible structurally but contributes no opinions to value
+        // resolution.
+        let mut denied_prefixes = parent_ctx.denied_prefixes.clone();
         for (node_id, error) in self.detect_arc_permissions(path, &index) {
-            index.mark_permission_denied_subtree(node_id);
+            let target = index.node(node_id).path.clone();
+            if !denied_prefixes.contains(&target) {
+                denied_prefixes.push(target);
+            }
             self.pending_errors.push(error);
         }
+        index.mark_permission_denied_under(&denied_prefixes);
 
         let mut child_context = index.context_for_children(&self.stack, &parent_ctx);
         child_context.within_instance = parent_ctx.within_instance || is_instance;
+        child_context.denied_prefixes = denied_prefixes;
         self.deps.add(path, &index, self.stack.len());
         self.indices.insert(path.clone(), index);
         self.contexts.insert(path.clone(), child_context);
@@ -1479,30 +1482,33 @@ impl Cache {
 
         let index = &self.indices[path];
         let mut result: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
 
         // Collect (node path, layer) pairs strongest-first, then fold in
         // reverse so the merge runs weakest-to-strongest across both nodes and,
         // within each node, its layers. `node.layers()` and `index.nodes()` are
-        // not double-ended, so the flattened pairs are reversed together.
-        let sites: Vec<(Path, usize)> = index
+        // not double-ended, so the flattened pairs are reversed together. The
+        // node paths are borrowed (no clone); `seen` dedups names in O(1) while
+        // `result` preserves order.
+        let sites: Vec<(&Path, usize)> = index
             .nodes()
             .filter(|node| !(drop_local && Self::is_local_opinion(node, &local)))
-            .flat_map(|node| node.layers().map(move |(layer, _)| (node.path.clone(), layer)))
+            .flat_map(|node| node.layers().map(move |(layer, _)| (&node.path, layer)))
             .collect();
 
         for (node_path, layer) in sites.into_iter().rev() {
             let layer_data = self.stack.layer(layer);
             if let Ok(Value::TokenVec(names)) = layer_data
-                .get(&node_path, children_field.as_str())
+                .get(node_path, children_field.as_str())
                 .map(|v| v.into_owned())
             {
                 for name in names {
-                    if !result.contains(&name) {
+                    if seen.insert(name.clone()) {
                         result.push(name);
                     }
                 }
             }
-            if let Ok(Value::TokenVec(order)) = layer_data.get(&node_path, order_field.as_str()).map(|v| v.into_owned())
+            if let Ok(Value::TokenVec(order)) = layer_data.get(node_path, order_field.as_str()).map(|v| v.into_owned())
             {
                 sdf::apply_ordering(&mut result, &order);
             }
@@ -1672,6 +1678,38 @@ mod tests {
         assert!(
             cache.has_spec(&sdf::path("/ViaPrivate.attr")?)?,
             "the inherited attr stays structurally present"
+        );
+        Ok(())
+    }
+
+    /// The denial propagates to descendant prims composed separately: a child
+    /// inherited through the private arc (an extended, not direct, arc) is
+    /// inerted too, while the public child's opinion still resolves and the
+    /// child name stays visible.
+    #[test]
+    fn private_inherit_inerts_descendants() -> Result<()> {
+        let root = format!("{}/fixtures/permission_private_inherit/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+
+        // Control: the public inherited child contributes its opinion.
+        assert_eq!(
+            cache.resolve_field(&sdf::path("/ViaPublic/Child.cattr")?, FieldKey::Default.as_str())?,
+            Some(Value::Double(2.0)),
+            "public inherited child opinion must contribute"
+        );
+
+        // The private inherited child is inerted, but stays visible: the child
+        // name is exposed and the property has a spec.
+        assert_eq!(
+            cache.resolve_field(&sdf::path("/ViaPrivate/Child.cattr")?, FieldKey::Default.as_str())?,
+            None,
+            "private inherited child opinion must not contribute"
+        );
+        assert!(
+            cache
+                .prim_children(&sdf::path("/ViaPrivate")?)?
+                .contains(&"Child".to_string()),
+            "the inherited child name stays visible"
         );
         Ok(())
     }

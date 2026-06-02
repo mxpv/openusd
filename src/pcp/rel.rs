@@ -237,8 +237,14 @@ impl Relocates {
         // the source index built from the relocate chain.
         let first = index.nodes().next().map(|n| (n.layer_index(), n.path.clone()));
         if let Some((first_li, first_path)) = first {
-            let mut existing: HashSet<(usize, Path)> =
-                index.nodes().map(|n| (n.layer_index(), n.path.clone())).collect();
+            // Track every contributing (layer, path), not just each node's
+            // representative layer: a per-site node spans several sublayers, so
+            // deduping on the strongest member alone would let an overlapping
+            // node re-add a shared layer and double-apply its list-op edits.
+            let mut existing: HashSet<(usize, Path)> = index
+                .nodes()
+                .flat_map(|n| n.layers().map(move |(layer, _)| (layer, n.path.clone())))
+                .collect();
             // Find ALL cached prims whose index contains a node at the same
             // (layer, path) as the first relocate node, and merge any
             // additional opinions from all of them.
@@ -250,8 +256,16 @@ impl Relocates {
                     continue;
                 }
                 for extra in cached_index.nodes() {
-                    if existing.insert((extra.layer_index(), extra.path.clone())) {
-                        Self::push_relocate_node(index, extra.layer_stack().to_vec(), &extra.path, composed_path);
+                    // Keep only the members not already contributing at this
+                    // path; an empty remainder means the node is fully covered.
+                    let members: Vec<(usize, LayerOffset)> = extra
+                        .layer_stack()
+                        .iter()
+                        .copied()
+                        .filter(|&(layer, _)| existing.insert((layer, extra.path.clone())))
+                        .collect();
+                    if !members.is_empty() {
+                        Self::push_relocate_node(index, members, &extra.path, composed_path);
                     }
                 }
             }
@@ -597,14 +611,17 @@ impl Relocates {
         ));
     }
 
-    /// Collects the layers in the stack that author a spec at `path` as a
-    /// per-site layer stack (strongest first, identity sublayer offsets). The
-    /// scanned layers are the ambient stack's own sublayers, whose offsets are
-    /// already folded into the node's map-to-root, so each member is identity.
+    /// Collects the layers that author a spec at `path` as a per-site layer
+    /// stack (strongest first, identity sublayer offsets). Only the root layer
+    /// stack is scanned — relocates compose there — so a same-path spec in an
+    /// unrelated referenced layer stack is not pulled in. Each member's sublayer
+    /// offset is already folded into the node's map-to-root, hence identity.
     fn site_layer_stack(path: &Path, stack: &LayerStack) -> Vec<(usize, LayerOffset)> {
-        (0..stack.len())
-            .filter(|&li| stack.layer(li).has_spec(path))
-            .map(|li| (li, LayerOffset::IDENTITY))
+        stack
+            .root_layer_stack()
+            .into_iter()
+            .filter(|&(li, _)| stack.layer(li).has_spec(path))
+            .map(|(li, _)| (li, LayerOffset::IDENTITY))
             .collect()
     }
 }
