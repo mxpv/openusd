@@ -91,4 +91,33 @@ mod tests {
         assert_eq!(n, ReadNodeGraphNode::default());
         Ok(())
     }
+
+    #[test]
+    fn nodegraph_node_reads_half() -> Result<()> {
+        use crate::sdf::{Value, Variability};
+        use half::f16;
+
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        apply_nodegraph_node(&stage, sdf::path("/Mat/Shader")?)?;
+
+        // A weaker tool may author the layout with half-precision opinions.
+        let shader = sdf::path("/Mat/Shader")?;
+        stage
+            .create_attribute(shader.append_property(super::tokens::A_NODE_POS)?, "half2")?
+            .set_variability(Variability::Uniform)?
+            .set(Value::Vec2h([f16::from_f32(12.0), f16::from_f32(34.0)]))?;
+        stage
+            .create_attribute(shader.append_property(super::tokens::A_NODE_DISPLAY_COLOR)?, "color3h")?
+            .set_variability(Variability::Uniform)?
+            .set(Value::Vec3h([
+                f16::from_f32(0.25),
+                f16::from_f32(0.5),
+                f16::from_f32(0.75),
+            ]))?;
+
+        let n = read_nodegraph_node(&stage, &shader)?.expect("NodeGraphNodeAPI");
+        assert_eq!(n.pos, Some([12.0, 34.0]));
+        assert_eq!(n.display_color, Some([0.25, 0.5, 0.75]));
+        Ok(())
+    }
 }
