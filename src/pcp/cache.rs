@@ -1152,6 +1152,73 @@ impl Cache {
         self.composed_children(path, ChildrenKey::PropertyChildren, FieldKey::PropertyOrder)
     }
 
+    /// Returns the prim stack: each `(layer identifier, spec path)` site that
+    /// contributes a prim spec, strongest first. Backs C++
+    /// `UsdPrim::GetPrimStack` (each per-site node fans out into one entry per
+    /// contributing layer in its layer stack, since every member authored a
+    /// prim spec).
+    pub fn prim_stack(&mut self, path: &Path) -> Result<Vec<(String, Path)>> {
+        let path = self.effective_path(&path.prim_path())?;
+        self.ensure_index(&path)?;
+        let index = &self.indices[&path];
+        let mut stack = Vec::new();
+        for node in index.nodes() {
+            for (layer, _) in node.layers() {
+                stack.push((self.stack.identifier(layer).to_string(), node.path.clone()));
+            }
+        }
+        Ok(stack)
+    }
+
+    /// Returns the property stack for a property path: each `(layer identifier,
+    /// spec path)` site that authors a property spec, strongest first. Backs
+    /// C++ `UsdProperty::GetPropertyStack`. A non-property path yields an empty
+    /// stack.
+    pub fn property_stack(&mut self, path: &Path) -> Result<Vec<(String, Path)>> {
+        let path = self.effective_path(path)?;
+        if !path.is_property_path() {
+            return Ok(Vec::new());
+        }
+        let prim_path = path.prim_path();
+        self.ensure_index(&prim_path)?;
+        let Some(index) = self.indices.get(&prim_path) else {
+            return Ok(Vec::new());
+        };
+        let mut stack = Vec::new();
+        for node in index.nodes() {
+            let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
+                continue;
+            };
+            for (layer, _) in node.layers() {
+                if self.stack.layer(layer).has_spec(&prop_path) {
+                    stack.push((self.stack.identifier(layer).to_string(), prop_path.clone()));
+                }
+            }
+        }
+        Ok(stack)
+    }
+
+    /// Returns the identifiers of the root layer stack (session layers, root
+    /// layer, and its sublayers) in strength order. Backs C++
+    /// `UsdStage::GetLayerStack`.
+    pub fn root_layer_stack_identifiers(&self) -> Vec<String> {
+        self.stack
+            .root_layer_stack()
+            .into_iter()
+            .map(|(i, _)| self.stack.identifier(i).to_string())
+            .collect()
+    }
+
+    /// Returns the explicitly authored variant selections composed onto a prim,
+    /// as `(set, selection)` pairs sorted by set name. Backs C++
+    /// `UsdVariantSets::GetAllVariantSelections`. Fallback and first-variant
+    /// defaults are not applied — only authored `variantSelection` opinions.
+    pub fn variant_selections(&mut self, path: &Path) -> Result<Vec<(String, String)>> {
+        let path = self.effective_path(&path.prim_path())?;
+        self.ensure_index(&path)?;
+        Ok(self.indices[&path].authored_variant_selections(&self.stack.layers))
+    }
+
     /// Returns the `defaultPrim` metadata from the root layer, if set.
     ///
     /// When session layers are present, `defaultPrim` is read from the

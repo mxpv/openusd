@@ -293,6 +293,43 @@ impl<'s> Prim<'s> {
         self.stage.is_in_prototype(self.path.clone())
     }
 
+    /// Returns the prim stack: each `(layer identifier, spec path)` site that
+    /// contributes a prim spec to this prim, strongest first. Mirrors C++
+    /// `UsdPrim::GetPrimStack`.
+    //
+    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
+    pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
+        self.stage.try_or_handle(|cache| cache.prim_stack(&self.path))
+    }
+
+    /// Returns an [`Attribute`] handle for the property `name` under this prim.
+    /// Mirrors C++ `UsdPrim::GetAttribute`. This is a value-type wrapper; it
+    /// neither authors a spec nor asserts the attribute is composed. An invalid
+    /// property name yields a handle whose path falls back to the prim, which
+    /// resolves as empty.
+    pub fn attribute(&self, name: &str) -> Attribute<'s> {
+        Attribute::new(self.stage, self.property_path(name))
+    }
+
+    /// Returns a [`Relationship`] handle for the property `name` under this
+    /// prim. Mirrors C++ `UsdPrim::GetRelationship`. See [`Self::attribute`]
+    /// for the handle's non-authoring, non-validating contract.
+    pub fn relationship(&self, name: &str) -> Relationship<'s> {
+        Relationship::new(self.stage, self.property_path(name))
+    }
+
+    /// Property path for `name` under this prim, falling back to the prim path
+    /// for an invalid name (the handle then resolves as empty).
+    fn property_path(&self, name: &str) -> sdf::Path {
+        self.path.append_property(name).unwrap_or_else(|_| self.path.clone())
+    }
+
+    /// Returns the variant sets composed onto this prim. Mirrors C++
+    /// `UsdPrim::GetVariantSets`.
+    pub fn variant_sets(&self) -> VariantSets<'s> {
+        VariantSets::new(self.stage, self.path.clone())
+    }
+
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
     /// `f`, and return `self` for chaining. `fields` names the metadata keys
     /// the closure intends to author so the cache invalidator can classify
@@ -637,6 +674,15 @@ impl<'s> Attribute<'s> {
         self.stage.time_samples(&self.path)
     }
 
+    /// Returns the property stack: each `(layer identifier, spec path)` site
+    /// that authors a spec for this attribute, strongest first. Mirrors C++
+    /// `UsdProperty::GetPropertyStack`.
+    //
+    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
+    pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
+        self.stage.try_or_handle(|cache| cache.property_stack(&self.path))
+    }
+
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
     /// apply `f`, and return `self` for chaining. `fields` names the metadata
     /// keys the closure intends to author so the cache invalidator can
@@ -818,6 +864,15 @@ impl<'s> Relationship<'s> {
         self.stage.forwarded_relationship_targets(&self.path)
     }
 
+    /// Returns the property stack: each `(layer identifier, spec path)` site
+    /// that authors a spec for this relationship, strongest first. Mirrors C++
+    /// `UsdProperty::GetPropertyStack`.
+    //
+    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
+    pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
+        self.stage.try_or_handle(|cache| cache.property_stack(&self.path))
+    }
+
     /// Borrow the relationship spec at `self.path` on the edit target's
     /// layer, apply `f`, and return `self` for chaining. `fields` names the
     /// authored metadata keys; `targets_changed` sets the target-list flag
@@ -880,6 +935,36 @@ impl<'s> Relationship<'s> {
             }
         })?;
         Ok(self)
+    }
+}
+
+/// The variant sets composed onto a prim. Mirrors C++ `UsdVariantSets`,
+/// reached through [`Prim::variant_sets`].
+//
+// TODO: grow this to cover the rest of `UsdVariantSets`
+// (`GetNames` / `HasVariantSet` / `GetVariantSet` / `SetSelection`). Until it
+// carries more than `get_all_variant_selections`, the newtype earns its keep
+// only as the C++ API shape; if those methods don't materialize, fold the one
+// query back onto `Prim`.
+#[derive(Clone)]
+pub struct VariantSets<'s> {
+    stage: &'s Stage,
+    prim: sdf::Path,
+}
+
+impl<'s> VariantSets<'s> {
+    pub(super) fn new(stage: &'s Stage, prim: sdf::Path) -> Self {
+        Self { stage, prim }
+    }
+
+    /// Returns the explicitly authored variant selections composed onto the
+    /// prim, as `(set, selection)` pairs sorted by set name. Mirrors C++
+    /// `UsdVariantSets::GetAllVariantSelections`. Fallback and first-variant
+    /// defaults are not applied — only authored `variantSelection` opinions.
+    //
+    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
+    pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
+        self.stage.try_or_handle(|cache| cache.variant_selections(&self.prim))
     }
 }
 

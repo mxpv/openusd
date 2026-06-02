@@ -16,7 +16,7 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
-pub use prim::{Attribute, Prim, Relationship};
+pub use prim::{Attribute, Prim, Relationship, VariantSets};
 pub use stage::{
     CompositionError, EditContext, EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask,
