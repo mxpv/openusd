@@ -305,6 +305,31 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
     }
 
+    /// Folds `incoming` — a freshly parsed single-operator opinion — into this
+    /// list op so successive `prepend`/`append`/`add`/`delete`/`reorder`
+    /// statements for one field on the same spec accumulate instead of
+    /// overwriting (C++ Sdf builds a single `SdfListOp` per field). An explicit
+    /// `incoming` (`field = [...]` with no operator) replaces this op outright;
+    /// otherwise each operator sublist `incoming` populates replaces the
+    /// corresponding sublist here, leaving the others intact.
+    pub fn merge_op(&mut self, incoming: ListOp<T>) {
+        if incoming.explicit {
+            *self = incoming;
+            return;
+        }
+        for (slot, items) in [
+            (&mut self.prepended_items, incoming.prepended_items),
+            (&mut self.appended_items, incoming.appended_items),
+            (&mut self.added_items, incoming.added_items),
+            (&mut self.deleted_items, incoming.deleted_items),
+            (&mut self.ordered_items, incoming.ordered_items),
+        ] {
+            if !items.is_empty() {
+                *slot = items;
+            }
+        }
+    }
+
     /// Flatten this list op into its final item list.
     pub fn flatten(&self) -> Vec<T> {
         let mut result = if self.explicit {
@@ -507,6 +532,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(op.compose_over(&[1, 2, 3]), vec![1, 2, 3, 4]);
+    }
+
+    /// Successive single-operator opinions on one spec accumulate into distinct
+    /// sublists rather than overwriting.
+    #[test]
+    fn merge_op_accumulates_operators() {
+        let mut op = ListOp::prepended(vec![1]);
+        op.merge_op(ListOp::appended(vec![2]));
+        assert_eq!(op.prepended_items, vec![1]);
+        assert_eq!(op.appended_items, vec![2]);
+    }
+
+    /// An explicit opinion replaces any operator opinions merged before it.
+    #[test]
+    fn merge_op_explicit_replaces() {
+        let mut op = ListOp::prepended(vec![1]);
+        op.merge_op(ListOp::explicit(vec![9]));
+        assert!(op.explicit);
+        assert_eq!(op.explicit_items, vec![9]);
+        assert!(op.prepended_items.is_empty());
     }
 
     /// Deleted items are removed from the result regardless of origin.

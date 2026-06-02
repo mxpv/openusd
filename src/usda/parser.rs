@@ -588,7 +588,7 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, targets)
                     .context("Unable to build connection listOp")?;
-                spec.add(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::ConnectionPaths, sdf::Value::PathListOp(list_op));
             }
             return Ok(());
         }
@@ -854,7 +854,7 @@ impl<'a> Parser<'a> {
         let list_op = self
             .apply_list_op(list_op, targets)
             .context("Unable to build relationship targets listOp")?;
-        spec.add(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
+        spec.add_list_op(FieldKey::TargetPaths, sdf::Value::PathListOp(list_op));
 
         if self.is_next(Token::Punctuation('(')) {
             self.parse_property_metadata(&mut spec)
@@ -907,7 +907,7 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build apiSchemas listOp")?;
-                spec.add("apiSchemas", sdf::Value::TokenListOp(list_op));
+                spec.add_list_op("apiSchemas", sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::References.as_str() => {
                 let references = self
@@ -916,7 +916,7 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, references)
                     .context("Unable to build references listOp")?;
-                spec.add(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
+                spec.add_list_op(FieldKey::References, sdf::Value::ReferenceListOp(list_op));
             }
             n if n == FieldKey::Payload.as_str() => {
                 let payloads = self
@@ -925,14 +925,14 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, payloads)
                     .context("Unable to build payload listOp")?;
-                spec.add(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
+                spec.add_list_op(FieldKey::Payload, sdf::Value::PayloadListOp(list_op));
             }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = self.one_or_list(Self::parse_path_reference)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build inherits listOp")?;
-                spec.add(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::InheritPaths, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
@@ -974,14 +974,14 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build variantSets listOp")?;
-                spec.add(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
+                spec.add_list_op(FieldKey::VariantSetNames, sdf::Value::TokenListOp(list_op));
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.one_or_list(Self::parse_path_reference)?;
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build specializes listOp")?;
-                spec.add(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
+                spec.add_list_op(FieldKey::Specializes, sdf::Value::PathListOp(list_op));
             }
             n if n == FieldKey::Instanceable.as_str() => {
                 ensure!(list_op.is_none(), "instanceable metadata does not support list ops");
@@ -1025,7 +1025,7 @@ impl<'a> Parser<'a> {
                 let list_op = self
                     .apply_list_op(list_op, values)
                     .context("Unable to build clipSets listOp")?;
-                spec.add(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
+                spec.add_list_op(FieldKey::ClipSets, sdf::Value::StringListOp(list_op));
             }
             // Unknown prim metadata - e.g. DCC / Omniverse hints like
             // `hide_in_stage_window` or `no_delete`. The Sdf grammar accepts
@@ -2680,6 +2680,35 @@ def Mesh "visual" (
         assert_eq!(reference.prim_path.as_str(), "/visual");
         assert_eq!(reference.layer_offset.offset, 0.0);
         assert_eq!(reference.layer_offset.scale, 1.0);
+    }
+
+    #[test]
+    fn prim_metadata_inherits_merge_operators() {
+        let mut parser = Parser::new(
+            r#"
+#usda 1.0
+
+def "A" (
+    prepend inherits = </Pre>
+    append inherits = </Post>
+)
+{
+}
+            "#,
+        );
+
+        let data = parser.parse().unwrap();
+        let prim = data.get(&sdf::path("/A").unwrap()).unwrap();
+        let inherits = prim
+            .get(FieldKey::InheritPaths.as_str())
+            .unwrap()
+            .to_owned()
+            .try_as_path_list_op()
+            .unwrap();
+
+        // The second operator statement must not overwrite the first.
+        assert_eq!(inherits.prepended_items, vec![sdf::path("/Pre").unwrap()]);
+        assert_eq!(inherits.appended_items, vec![sdf::path("/Post").unwrap()]);
     }
 
     #[test]

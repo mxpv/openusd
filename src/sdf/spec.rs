@@ -79,6 +79,28 @@ impl Spec {
         }
     }
 
+    /// Adds a list-op field value, folding it into any existing list op of the
+    /// same variant already on the spec so multiple operator statements
+    /// (`prepend`/`append`/`add`/`delete`/`reorder`) for one field accumulate
+    /// rather than overwrite (C++ Sdf stores one `SdfListOp` per field). A
+    /// non-list-op `value`, or one of a different variant, replaces as usual.
+    pub fn add_list_op(&mut self, key: impl AsRef<str>, value: sdf::Value) {
+        let key = key.as_ref();
+        let Some(slot) = self.get_mut(key) else {
+            self.add(key, value);
+            return;
+        };
+        use sdf::Value::*;
+        match (slot, value) {
+            (TokenListOp(existing), TokenListOp(incoming)) => existing.merge_op(incoming),
+            (StringListOp(existing), StringListOp(incoming)) => existing.merge_op(incoming),
+            (PathListOp(existing), PathListOp(incoming)) => existing.merge_op(incoming),
+            (ReferenceListOp(existing), ReferenceListOp(incoming)) => existing.merge_op(incoming),
+            (PayloadListOp(existing), PayloadListOp(incoming)) => existing.merge_op(incoming),
+            (slot, value) => *slot = value,
+        }
+    }
+
     /// Look up a field by name.
     pub fn get(&self, key: &str) -> Option<&sdf::Value> {
         self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
