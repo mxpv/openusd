@@ -576,9 +576,15 @@ impl<'a> Parser<'a> {
             push_unique(suffixed_properties, name);
             if self.try_consume(Token::Punctuation('=')) {
                 let list_op = list_op.or(self.try_list_op());
-                let targets = self
+                // Connection targets are anchored to the owning prim, like
+                // relationship targets, so a relative path (`<../sibling>`) is
+                // stored absolute.
+                let targets: Vec<sdf::Path> = self
                     .parse_connection_targets()
-                    .context("Unable to parse connection targets")?;
+                    .context("Unable to parse connection targets")?
+                    .into_iter()
+                    .map(|p| current_path.make_absolute(&p))
+                    .collect();
                 let path = current_path.append_property(name)?;
 
                 let spec = data
