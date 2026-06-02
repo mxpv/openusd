@@ -182,10 +182,10 @@ impl ChildrenKey {
             ChildrenKey::MapperArgChildren => "mapperArgChildren",
             ChildrenKey::MapperChildren => "mapperChildren",
             ChildrenKey::PrimChildren => "primChildren",
-            // The Sdf field token is "properties", not "propertyChildren" (C++
-            // `SdfChildrenKeys->PropertyChildren`). The crate format stores it
-            // under this name, so the binary reader and composition must agree.
-            ChildrenKey::PropertyChildren => "properties",
+            // The internal/text token is "propertyChildren". The crate (binary)
+            // format stores this field under the name "properties"; the usdc
+            // reader and writer translate at that boundary (see `usdc`).
+            ChildrenKey::PropertyChildren => "propertyChildren",
             ChildrenKey::RelationshipTargetChildren => "targetChildren",
             ChildrenKey::VariantChildren => "variantChildren",
             ChildrenKey::VariantSetChildren => "variantSetChildren",

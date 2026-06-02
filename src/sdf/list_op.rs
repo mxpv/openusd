@@ -308,14 +308,21 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
     /// Folds `incoming` — a freshly parsed single-operator opinion — into this
     /// list op so successive `prepend`/`append`/`add`/`delete`/`reorder`
     /// statements for one field on the same spec accumulate instead of
-    /// overwriting (C++ Sdf builds a single `SdfListOp` per field). An explicit
-    /// `incoming` (`field = [...]` with no operator) replaces this op outright;
-    /// otherwise each operator sublist `incoming` populates replaces the
-    /// corresponding sublist here, leaving the others intact.
+    /// overwriting (C++ Sdf builds a single `SdfListOp` per field).
+    ///
+    /// Explicit and composed (operator) forms are mutually exclusive. An
+    /// explicit `incoming` (`field = [...]` or `field = None`) replaces this op
+    /// outright; an operator `incoming` puts the field in composed mode,
+    /// discarding any prior explicit opinion, then sets each operator sublist it
+    /// populates (leaving the other operator sublists intact).
     pub fn merge_op(&mut self, incoming: ListOp<T>) {
         if incoming.explicit {
             *self = incoming;
             return;
+        }
+        if self.explicit {
+            self.explicit = false;
+            self.explicit_items.clear();
         }
         for (slot, items) in [
             (&mut self.prepended_items, incoming.prepended_items),
@@ -552,6 +559,18 @@ mod tests {
         assert!(op.explicit);
         assert_eq!(op.explicit_items, vec![9]);
         assert!(op.prepended_items.is_empty());
+    }
+
+    /// An operator opinion after an explicit one switches the field to composed
+    /// mode, discarding the explicit items (`X = [1, 2]; append X = [3]` → only
+    /// the append survives).
+    #[test]
+    fn merge_op_operator_clears_explicit() {
+        let mut op = ListOp::explicit(vec![1, 2]);
+        op.merge_op(ListOp::appended(vec![3]));
+        assert!(!op.explicit);
+        assert!(op.explicit_items.is_empty());
+        assert_eq!(op.appended_items, vec![3]);
     }
 
     /// Deleted items are removed from the result regardless of origin.
