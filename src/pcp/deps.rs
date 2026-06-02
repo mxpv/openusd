@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sdf::Path;
 
-use super::index::{ArcType, PrimIndex};
+use super::graph::ArcType;
+use super::index::PrimIndex;
 
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
@@ -187,7 +188,7 @@ impl Dependencies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcp::index::Node;
+    use crate::pcp::graph::Node;
     use crate::pcp::mapping::MapFunction;
 
     fn p(s: &str) -> Path {

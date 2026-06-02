@@ -20,7 +20,8 @@ use crate::sdf::{AbstractData, Path, SpecType, Value};
 
 use super::clip::ResolvedClipSet;
 use super::deps::Dependencies;
-use super::index::{AncestorArc, ArcType, CompositionContext, Node, NodeFlags, NodeId, PrimIndex};
+use super::graph::{ArcType, Node, NodeFlags, NodeId};
+use super::index::{AncestorArc, CompositionContext, PrimIndex};
 use super::rel::Relocates;
 use super::{Error, LayerStack, VariantFallbackMap};
 
@@ -1818,7 +1819,7 @@ mod tests {
     /// tree: every stored parent link is mirrored by the parent's child list.
     #[test]
     fn relocate_nodes_form_subtree() -> Result<()> {
-        use super::super::index::NodeFlags;
+        use super::super::graph::NodeFlags;
 
         let root = format!(
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
@@ -1851,7 +1852,7 @@ mod tests {
     /// `/World/Dst`, whose relocate node must carry both layers.
     #[test]
     fn relocate_source_spans_sublayers() -> Result<()> {
-        use super::super::index::NodeFlags;
+        use super::super::graph::NodeFlags;
 
         let root = format!("{}/fixtures/relocate_multilayer/root.usda", manifest_dir());
         let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());

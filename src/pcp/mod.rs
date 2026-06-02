@@ -47,7 +47,9 @@
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
-//! | `index` | `PcpPrimIndex` | Per-prim composition tree: an arena-backed, single-rooted tree of [`Node`]s with parent/child and origin links, plus a strength-order projection. |
+//! | `index` | `PcpPrimIndex` | Per-prim composition driver: builds the composition tree for a prim (the `IndexBuilder` and composition helpers) and hosts the [`PrimIndex`] entry points. |
+//! | `graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection the builder fills in. |
+//! | `resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
 //! | `rel` | — | [`Relocates`](rel::Relocates): isolated relocate state and logic. Owned by `Cache`, receives external data through parameters. |
@@ -232,9 +234,11 @@ pub(crate) mod cache;
 pub(crate) mod change;
 pub(crate) mod clip;
 pub(crate) mod deps;
+pub(crate) mod graph;
 pub(crate) mod index;
 mod mapping;
 mod rel;
+pub(crate) mod resolve;
 
 use std::collections::{HashMap, HashSet};
 
@@ -245,7 +249,8 @@ use crate::sdf::{self, AbstractData, Path, Value};
 pub(crate) use cache::Cache;
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
-pub use index::{ArcType, Node, NodeFlags, NodeId, PrimIndex};
+pub use graph::{ArcType, Node, NodeFlags, NodeId};
+pub use index::PrimIndex;
 pub use mapping::MapFunction;
 
 /// Maps variant set names to ordered lists of fallback selections.

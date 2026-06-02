@@ -13,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
 
-use super::index::{ArcType, CompositionContext, Node, NodeId, PrimIndex};
+use super::graph::{ArcType, Node, NodeId};
+use super::index::{CompositionContext, PrimIndex};
 use super::mapping::MapFunction;
 use super::{Error, LayerStack};
 
