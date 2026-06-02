@@ -2301,8 +2301,19 @@ impl<'a> IndexBuilder<'a> {
             if selections.is_empty() {
                 break;
             }
+            // Graft variant nodes in a deterministic order. `selections` is a
+            // HashMap, whose iteration order is randomized per run and would
+            // otherwise leak into the order of equal-strength variant sibling
+            // nodes (and thus the composed prim stack).
+            //
+            // TODO: order by the prim's authored `variantSetNames` rather than
+            // by set name — C++ ranks variant arcs by a set's position in that
+            // list (e.g. `["v2", "v1"]` makes `v2` stronger). Sorting by name
+            // matches it only when the declared order is alphabetical.
+            let mut selections: Vec<(&String, &String)> = selections.iter().collect();
+            selections.sort_by(|a, b| a.0.cmp(b.0));
             let before = self.output.len();
-            for (set_name, selection) in &selections {
+            for (set_name, selection) in selections {
                 // Try appending variant to every node in this site (not all output —
                 // variant sets belong to this site's paths).
                 let bases: Vec<Path> = self.output[site_start..before].iter().map(|n| n.path.clone()).collect();
@@ -2591,8 +2602,8 @@ fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> V
 /// Expands an internal reference target by inserting variant segments from
 /// the context path.
 ///
-/// If the context is `/Model{vset=with_children}/Foo` and the target is
-/// `/Model/_prototype`, returns `[/Model{vset=with_children}/_prototype]`.
+/// If the context is `/Model{vset=with_children}Foo` and the target is
+/// `/Model/_prototype`, returns `[/Model{vset=with_children}_prototype]`.
 fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
     let ctx = context.as_str();
     if !ctx.contains('{') {
@@ -2613,7 +2624,11 @@ fn variant_expanded_targets(context: &Path, target: &Path) -> Vec<Path> {
 
         if let Some(after_prefix) = tgt.strip_prefix(prim_prefix) {
             if !after_prefix.starts_with('{') {
-                let expanded = format!("{prim_prefix}{variant_segment}{after_prefix}");
+                // The inserted variant segment supplies the namespace boundary,
+                // so the child attaches directly after it (canonical form
+                // `/Prim{v=s}Child`); drop the target's `/` separator.
+                let child = after_prefix.strip_prefix('/').unwrap_or(after_prefix);
+                let expanded = format!("{prim_prefix}{variant_segment}{child}");
                 if let Ok(p) = Path::new(&expanded) {
                     results.push(p);
                 }

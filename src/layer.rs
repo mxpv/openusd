@@ -1266,7 +1266,9 @@ mod tests {
         // set / variant scaffolding), but malformed ones — here an empty
         // selection — must still be rejected.
         assert!(matches!(
-            layer.create_prim("/A{x=}/B", sdf::Specifier::Def, "Xform").unwrap_err(),
+            layer
+                .create_prim("/A{x=}child", sdf::Specifier::Def, "Xform")
+                .unwrap_err(),
             sdf::AuthoringError::InvalidPath { .. }
         ));
     }
@@ -1277,7 +1279,7 @@ mod tests {
     fn variant_authoring() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("variants.usda");
         layer.create_prim("/Prim", sdf::Specifier::Def, "Xform")?;
-        layer.create_prim("/Prim{set=sel}/child", sdf::Specifier::Def, "Scope")?;
+        layer.create_prim("/Prim{set=sel}child", sdf::Specifier::Def, "Scope")?;
 
         assert_eq!(layer.spec_type(&sdf::path("/Prim")?), Some(sdf::SpecType::Prim));
         assert_eq!(
@@ -1289,7 +1291,7 @@ mod tests {
             Some(sdf::SpecType::Variant)
         );
         assert_eq!(
-            layer.spec_type(&sdf::path("/Prim{set=sel}/child")?),
+            layer.spec_type(&sdf::path("/Prim{set=sel}child")?),
             Some(sdf::SpecType::Prim)
         );
 
