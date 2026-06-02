@@ -1073,14 +1073,27 @@ impl PrimIndex {
         // referenced layer's descendants. Root nodes are skipped — the child's
         // own root `L` site rescans the root layer stack.
         let mut ancestor_arcs = parent_ctx.ancestor_arcs.clone();
-        for node in self.nodes() {
+        // Record each non-Root node and which arc it nested under (its tree
+        // parent in this prim's graph). Strength order places a parent before
+        // its child, so a node's parent is already in `node_to_idx` when the
+        // node is reached. A parent that is this prim's Root node (not recorded)
+        // leaves `parent` None — the arc sits directly on the prim. Cross-prim
+        // nesting is not threaded here: an arc inherited from a grandparent
+        // stays flat (its own level already recorded its nesting).
+        let base = ancestor_arcs.len();
+        let mut node_to_idx: HashMap<NodeId, usize> = HashMap::new();
+        for (id, node) in self.nodes_with_ids() {
             if node.arc == ArcType::Root {
                 continue;
             }
+            let parent = node.parent().and_then(|p| node_to_idx.get(&p).copied());
+            node_to_idx.insert(id, base + node_to_idx.len());
             ancestor_arcs.push(AncestorArc {
                 map: node.map_to_root.clone(),
+                map_to_parent: node.map_to_parent.clone(),
                 layer_stack: node.layer_stack().to_vec(),
                 arc: node.arc,
+                parent,
             });
         }
 
@@ -1671,11 +1684,22 @@ pub(crate) struct AncestorArc {
     /// Namespace mapping from this arc's source to the composed namespace.
     /// Convention: source is the arc target's namespace, target is composed.
     pub map: MapFunction,
+    /// The node's mapping to its parent node (relative, not to the root). When
+    /// the arc nests under [`parent`](Self::parent), composing this atop the
+    /// parent's `map_to_root` reproduces `map` exactly, including time offsets
+    /// — whereas inverting `map` would drop them.
+    pub map_to_parent: MapFunction,
     /// Layer stack of the arc target site: each `(layer index, sublayer
     /// offset)` member that a descendant must rescan to find its own site.
     pub layer_stack: Vec<(usize, LayerOffset)>,
     /// Arc type that introduced this mapping.
     pub arc: ArcType,
+    /// Index in the ancestor-arc list of the arc this one nested under in the
+    /// parent prim's graph (e.g. a variant set a reference brought in nests
+    /// under that reference). `None` for an arc directly on the parent prim.
+    /// Lets a child rebuild the parent's node tree instead of flattening it (C++
+    /// `AppendChildNameToAllSites` preserves this nesting).
+    pub parent: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1789,32 +1813,65 @@ impl<'a> IndexBuilder<'a> {
         // prefix equals the parent path, then remap by appending the child name.
         // This mirrors C++ behavior where each level only uses its direct
         // parent's arc mappings for descendant propagation.
+        //
+        // TODO: this reconstructs the parent prim's node tree from a flat arc
+        // list by re-composing each arc with `eval_site`. C++
+        // `AppendChildNameToAllSites` instead copies the parent's already-built
+        // graph and only deepens the site paths (maps untouched). Migrating to
+        // that graph-copy model would retire `AncestorArc`'s `parent` /
+        // `map_to_parent` bookkeeping and the re-composition, and would carry
+        // nesting across all ancestor levels (this step nests only one level).
         let child_name = path.name().unwrap_or("");
         if !child_name.is_empty() {
-            let parent = path.parent();
-            let ancestor_sites: Vec<_> = self
-                .ctx
-                .ancestor_arcs
-                .iter()
-                .filter_map(|a| {
-                    // Map the parent path through this arc. Only arcs whose target
-                    // prefix matches the parent will succeed.
-                    let parent_in_source = a.map.map_target_to_source(parent.as_ref()?)?;
-                    let remapped = parent_in_source.append_path(child_name).ok()?;
-                    Some((remapped, a.layer_stack.clone(), a.arc, a.map.clone()))
-                })
-                .collect();
+            let parent_path = path.parent();
             // A class an ancestral arc brings in (e.g. a referenced prim's
             // inherit) propagates its implied class into this build's ambient
             // stack, so pass it as the outer stack. This reaches a global class
             // the inherited prim references whose implied node sits at the same
             // path but in the ambient (referencing) layer stack.
             let ambient = self.ambient.clone();
-            for (rpath, layer_stack, arc, map) in &ancestor_sites {
+            // `ctx` aliases the external composition context, so iterating its
+            // arcs does not borrow `self` and leaves `self.eval_site` free.
+            let ctx = self.ctx;
+            // The node each ancestral arc composed to, so a nested arc can
+            // attach under its parent (C++ `AppendChildNameToAllSites` keeps the
+            // parent prim's tree). The arc list is parent-before-child.
+            let mut composed: Vec<NodeId> = vec![NodeId::INVALID; ctx.ancestor_arcs.len()];
+            for (i, a) in ctx.ancestor_arcs.iter().enumerate() {
+                // Map the parent path through this arc. Only arcs whose target
+                // prefix matches the parent succeed.
+                let Some(parent_in_source) = parent_path.as_ref().and_then(|p| a.map.map_target_to_source(p)) else {
+                    continue;
+                };
+                let Ok(rpath) = parent_in_source.append_path(child_name) else {
+                    continue;
+                };
+                // Nest under the parent arc's composed node and map relative to
+                // it (`map_to_parent`), so composing atop the parent's
+                // `map_to_root` reproduces this node's `map` — paths and time
+                // offsets alike. A top-level arc (no composed parent) maps to the
+                // root directly, where `map_to_parent` already equals `map`.
+                let parent_node = a.parent.map(|p| composed[p]).unwrap_or(NodeId::INVALID);
+                let map = if parent_node.is_valid() {
+                    a.map_to_parent.clone()
+                } else {
+                    a.map.clone()
+                };
                 // `map` carries the ancestor node's arc offset to the root; the
                 // L-loop composes each member's sublayer offset on top, so the
                 // site's whole layer stack must be rescanned at the child path.
-                self.eval_site(rpath, layer_stack, *arc, 0, NodeId::INVALID, map.clone(), &ambient)?;
+                //
+                // `eval_site` appends the site's own node first (the L node when
+                // the site has a local opinion), so the node at `before` is the
+                // representative a nested child attaches under. A site with no
+                // local opinion at the child path contributes no node here, so a
+                // child arc would fall back to a flat attach — acceptable, since
+                // an arc that authors nothing at the child adds no nesting.
+                let before = self.output.len();
+                self.eval_site(&rpath, &a.layer_stack, a.arc, 0, parent_node, map, &ambient)?;
+                if self.output.len() > before {
+                    composed[i] = NodeId(before as u32);
+                }
             }
         }
 
