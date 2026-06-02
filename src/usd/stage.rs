@@ -2392,7 +2392,7 @@ over "World"
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let schemas = stage.api_schemas(&sdf::Path::new("/World/Geo")?)?;
-        assert_eq!(schemas, vec!["C".to_string(), "B".to_string(), "A".to_string()]);
+        assert_eq!(schemas, vec!["C".to_string(), "A".to_string(), "B".to_string()]);
         Ok(())
     }
 
