@@ -1250,6 +1250,9 @@ impl<'a> Parser<'a> {
     /// - `[` for any array type (scalar arrays like `int[]`,
     ///   `float[]`, `token[]`, as well as arrays of tuples like
     ///   `quatf[]` or `matrix4d[]`).
+    /// - a bare number for a scalar `timecode`, so a sample like
+    ///   `1: 24` resolves to [`sdf::Value::TimeCode`] rather than the
+    ///   type-blind path's `Int64` / `Double`.
     ///
     /// Anything else (scalar literal, `None`, identifier) flows
     /// through the type-blind path so the spec corpus's lenient
@@ -1279,6 +1282,7 @@ impl<'a> Parser<'a> {
         match self.peek_next() {
             Some(Ok(Token::Punctuation('('))) => is_tuple_type,
             Some(Ok(Token::Punctuation('['))) => is_tuple_type || info.is_array,
+            Some(Ok(Token::Number(_))) => info.ty == Type::TimeCode && !info.is_array,
             _ => false,
         }
     }
@@ -3149,6 +3153,31 @@ def "P" {
             data.get(&sdf::path("/P.beats").unwrap()).unwrap().get("default"),
             Some(&sdf::Value::TimeCodeVec(vec![0.0, 12.0, 24.0])),
         );
+    }
+
+    /// Scalar `timecode` time samples resolve to `Value::TimeCode` per
+    /// sample rather than the type-blind path's `Int64` / `Double`.
+    #[test]
+    fn parse_timecode_time_samples() {
+        let mut parser = Parser::new(
+            r#"#usda 1.0
+def "P" {
+    timecode cue.timeSamples = {
+        0: 24,
+        1: 48.5,
+    }
+}
+"#,
+        );
+        let data = parser.parse().unwrap();
+        let cue = data
+            .get(&sdf::path("/P.cue").unwrap())
+            .unwrap()
+            .get(sdf::FieldKey::TimeSamples.as_str())
+            .expect("cue.timeSamples present");
+        let samples = cue.try_as_time_samples_ref().expect("TimeSamples");
+        assert_eq!(samples[0].1, sdf::Value::TimeCode(24.0));
+        assert_eq!(samples[1].1, sdf::Value::TimeCode(48.5));
     }
 
     /// Prim metadata `displayName` should be parsed as a string.

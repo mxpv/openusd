@@ -96,8 +96,8 @@ impl Default for ReadSpatialAudio {
     fn default() -> Self {
         Self {
             file_path: None,
-            aural_mode: AuralMode::Spatial,
-            playback_mode: PlaybackMode::OnceFromStart,
+            aural_mode: AuralMode::default(),
+            playback_mode: PlaybackMode::default(),
             start_time: 0.0,
             end_time: 0.0,
             media_offset: 0.0,

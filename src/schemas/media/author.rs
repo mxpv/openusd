@@ -6,10 +6,12 @@
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value, Variability};
+use crate::sdf::Path;
 use crate::usd::{Prim, Stage};
 
-use crate::schemas::common::author_uniform_token;
+use crate::schemas::common::{
+    author_double, author_uniform_asset, author_uniform_double, author_uniform_timecode, author_uniform_token,
+};
 use crate::schemas::media::tokens::*;
 use crate::schemas::media::types::{AuralMode, PlaybackMode};
 
@@ -31,7 +33,7 @@ impl<'s> SpatialAudioAuthor<'s> {
 
     /// Set `filePath` (`uniform asset`).
     pub fn set_file_path(self, path: impl Into<String>) -> Result<Self> {
-        author_uniform_asset(self.prim.stage(), self.prim.path(), A_FILE_PATH, path.into())?;
+        author_uniform_asset(self.prim.stage(), self.prim.path(), A_FILE_PATH, path)?;
         Ok(self)
     }
 
@@ -67,42 +69,7 @@ impl<'s> SpatialAudioAuthor<'s> {
 
     /// Set `gain` (`double`, varying).
     pub fn set_gain(self, value: f64) -> Result<Self> {
-        let attr_path = self.prim.path().append_property(A_GAIN)?;
-        self.prim
-            .stage()
-            .create_attribute(attr_path, "double")?
-            .set_custom(false)?
-            .set(Value::Double(value))?;
+        author_double(self.prim.stage(), self.prim.path(), A_GAIN, value)?;
         Ok(self)
     }
-}
-
-fn author_uniform_asset(stage: &Stage, prim: &Path, name: &str, value: String) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "asset")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::AssetPath(value))?;
-    Ok(())
-}
-
-fn author_uniform_timecode(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "timecode")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::TimeCode(value))?;
-    Ok(())
-}
-
-fn author_uniform_double(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "double")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Double(value))?;
-    Ok(())
 }

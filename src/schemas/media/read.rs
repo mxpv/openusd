@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 
-use crate::sdf::{FieldKey, Path, Value};
+use crate::sdf::Path;
 use crate::usd::Stage;
+
+use crate::schemas::common::{read_asset, read_f64, read_token};
 
 use super::tokens::*;
 use super::types::*;
@@ -30,33 +32,4 @@ pub fn read_spatial_audio(stage: &Stage, prim: &Path) -> Result<Option<ReadSpati
         media_offset: read_f64(stage, prim, A_MEDIA_OFFSET)?.unwrap_or(d.media_offset),
         gain: read_f64(stage, prim, A_GAIN)?.unwrap_or(d.gain),
     }))
-}
-
-fn attr_value(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    stage.field::<Value>(prim.append_property(name)?, FieldKey::Default)
-}
-
-fn read_asset(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::AssetPath(s) | Value::String(s) | Value::Token(s)) => Some(s),
-        _ => None,
-    })
-}
-
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::Token(s) | Value::String(s)) => Some(s),
-        _ => None,
-    })
-}
-
-fn read_f64(stage: &Stage, prim: &Path, name: &str) -> Result<Option<f64>> {
-    Ok(match attr_value(stage, prim, name)? {
-        Some(Value::TimeCode(d) | Value::Double(d)) => Some(d),
-        Some(Value::Float(f)) => Some(f as f64),
-        Some(Value::Half(h)) => Some(h.to_f32() as f64),
-        Some(Value::Int64(i)) => Some(i as f64),
-        Some(Value::Int(i)) => Some(i as f64),
-        _ => None,
-    })
 }
