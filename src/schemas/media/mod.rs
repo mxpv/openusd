@@ -1,74 +1,207 @@
-//! UsdMedia schema reader + authoring.
+//! UsdMedia schema views.
 //!
-//! Decodes and authors Pixar's `UsdMedia` family. The one concrete schema
-//! is [`tokens::T_SPATIAL_AUDIO`] - a sound source that is also
-//! `Imageable` / `Xformable` (its transform / visibility / purpose come
-//! from the UsdGeom layer; this module covers the media-specific
-//! attributes).
+//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! `UsdMedia` family:
 //!
-//! # Defaults
+//! - [`SpatialAudio`] (C++ `UsdMediaSpatialAudio`) — a sound source. It is a
+//!   [`geom::Xformable`](crate::schemas::geom::Xformable) prim (its transform
+//!   / visibility / purpose come from the UsdGeom layer); this module adds the
+//!   media-specific attributes (`filePath`, `auralMode`, `playbackMode`,
+//!   `startTime` / `endTime`, `mediaOffset`, `gain`).
+//! - [`AssetPreviewsAPI`] (C++ `UsdMediaAssetPreviewsAPI`) — a single-apply API
+//!   schema encoding pre-rendered previews (thumbnails) under a prim's
+//!   `assetInfo` metadata.
 //!
-//! [`ReadSpatialAudio`]'s `Default` matches Pixar's `usdMedia/schema.usda`
-//! fallbacks (`auralMode = spatial`, `playbackMode = onceFromStart`,
-//! `gain = 1.0`), so callers can `unwrap_or_default()` for a spec-correct
-//! fallback.
+//! # Conventions
+//!
+//! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a
+//! `foo_attr()` returns an [`crate::usd::Attribute`] handle whose `get()`
+//! yields the authored value (or `None` — there is no schema registry yet to
+//! supply fallbacks), and `create_foo_attr()` authors the attribute with its
+//! schema-declared type / variability. The `startTime` / `endTime` attributes
+//! are `timecode`, so they read / write as [`sdf::TimeCode`].
+//!
+//! `auralMode` / `playbackMode` decode through the [`AuralMode`] /
+//! [`PlaybackMode`] enums via `from_token` / `as_token`.
+//!
+//! # Example
+//!
+//! ```
+//! use openusd::schemas::media::{AuralMode, SpatialAudio};
+//! use openusd::sdf;
+//! use openusd::usd::Stage;
+//!
+//! let stage = Stage::builder().in_memory("scene.usda")?;
+//!
+//! // Author a non-spatial ambient track that loops from frame 24 to 48.
+//! let audio = SpatialAudio::define(&stage, "/World/Ambient")?;
+//! audio.create_file_path_attr()?.set(sdf::Value::AssetPath("./ambient.wav".into()))?;
+//! audio.create_aural_mode_attr()?.set(sdf::Value::Token(AuralMode::NonSpatial.as_token().into()))?;
+//! audio.create_start_time_attr()?.set(sdf::TimeCode(24.0))?;
+//! audio.create_end_time_attr()?.set(sdf::TimeCode(48.0))?;
+//! audio.create_gain_attr()?.set(0.5_f64)?;
+//!
+//! // Read it back through a typed view.
+//! let audio = SpatialAudio::get(&stage, "/World/Ambient")?.expect("SpatialAudio");
+//! assert_eq!(audio.start_time_attr().get::<sdf::TimeCode>()?, Some(sdf::TimeCode(24.0)));
+//! let mode = audio
+//!     .aural_mode_attr()
+//!     .get::<sdf::Value>()?
+//!     .and_then(|v| v.try_as_token())
+//!     .and_then(|t| AuralMode::from_token(&t));
+//! assert_eq!(mode, Some(AuralMode::NonSpatial));
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
 
 pub mod tokens;
 
-mod author;
-mod previews;
-mod read;
-mod types;
+mod schema;
 
-pub use author::{define_spatial_audio, SpatialAudioAuthor};
-pub use previews::{apply_asset_previews, read_default_thumbnail, set_default_thumbnail};
-pub use read::read_spatial_audio;
-pub use types::{AuralMode, PlaybackMode, ReadSpatialAudio};
+pub use schema::{AssetPreviewsAPI, SpatialAudio};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sdf;
-    use crate::usd::Stage;
-    use anyhow::Result;
+use anyhow::Result;
 
-    #[test]
-    fn spatial_audio_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_spatial_audio(&stage, sdf::path("/World/Audio")?)?
-            .set_file_path("./ambient.wav")?
-            .set_aural_mode(AuralMode::NonSpatial)?
-            .set_playback_mode(PlaybackMode::LoopFromStartToEnd)?
-            .set_start_time(24.0)?
-            .set_end_time(48.0)?
-            .set_media_offset(2.5)?
-            .set_gain(0.5)?;
+use crate::sdf;
+use crate::usd::{Attribute, Prim, Stage};
 
-        let a = read_spatial_audio(&stage, &sdf::path("/World/Audio")?)?.expect("SpatialAudio");
-        assert_eq!(a.file_path.as_deref(), Some("./ambient.wav"));
-        assert_eq!(a.aural_mode, AuralMode::NonSpatial);
-        assert_eq!(a.playback_mode, PlaybackMode::LoopFromStartToEnd);
-        assert_eq!(a.start_time, 24.0);
-        assert_eq!(a.end_time, 48.0);
-        assert_eq!(a.media_offset, 2.5);
-        assert_eq!(a.gain, 0.5);
-        Ok(())
+use tokens::*;
+
+// The typed / applied-API `get` gates, applying an API schema, and the
+// attribute-authoring shorthands the `create_*` accessors build on. Private to
+// the module so the `spatial_audio` / `previews` submodules reach them via
+// `super::`.
+
+/// Resolve `path` to a [`Prim`] handle only when its `typeName` matches
+/// `type_name` — the gate behind `SpatialAudio::get`.
+fn get_typed(stage: &Stage, path: impl Into<sdf::Path>, type_name: &str) -> Result<Option<Prim>> {
+    let path = path.into();
+    if stage.type_name(&path)?.as_deref() != Some(type_name) {
+        return Ok(None);
+    }
+    Ok(Some(stage.prim_at_path(path)))
+}
+
+/// Resolve `path` to a [`Prim`] handle only when it carries `api` in its
+/// composed `apiSchemas` — the gate behind an applied-API view's `get`.
+fn get_with_api(stage: &Stage, path: impl Into<sdf::Path>, api: &str) -> Result<Option<Prim>> {
+    let path = path.into();
+    if stage.api_schemas(&path)?.iter().any(|s| s == api) {
+        Ok(Some(stage.prim_at_path(path)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Open the prim at `path` as `over` and add `api` to its `apiSchemas` — the
+/// body of an applied-API view's `apply`.
+fn apply_api(stage: &Stage, path: impl Into<sdf::Path>, api: &str) -> Result<Prim> {
+    Ok(stage.override_prim(path)?.add_applied_schema(api)?)
+}
+
+/// Author a varying attribute named `name` of `type_name` with
+/// `custom = false`, returning its handle.
+fn create(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
+    Ok(prim.create_attribute(name, type_name)?.set_custom(false)?)
+}
+
+/// Author a `uniform` attribute named `name` of `type_name` with
+/// `custom = false`, returning its handle.
+fn create_uniform(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
+    Ok(create(prim, name, type_name)?.set_variability(sdf::Variability::Uniform)?)
+}
+
+/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` media
+/// newtype. All trait paths are fully qualified, so the call site only needs
+/// the macro in scope.
+///
+/// - `xformable` is a typed [`geom::Xformable`](crate::schemas::geom::Xformable)
+///   prim (`SpatialAudio`).
+/// - `applied_api` is a single-apply API-schema view (`AssetPreviewsAPI`).
+macro_rules! impl_media_schema {
+    (xformable $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
+
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+        impl $crate::schemas::geom::Imageable for $ty {}
+        impl $crate::schemas::geom::Xformable for $ty {}
+    };
+    (applied_api $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::SingleApplyApi;
+
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+    };
+}
+
+pub(crate) use impl_media_schema;
+
+// Token-valued attribute enums. Each decodes one `allowedTokens` attribute via
+// `from_token` / `as_token`, with the Pixar default as its `Default`.
+
+/// `UsdMediaSpatialAudio.auralMode` token values. The spec default is
+/// [`AuralMode::Spatial`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuralMode {
+    #[default]
+    Spatial,
+    NonSpatial,
+}
+
+impl AuralMode {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            AuralMode::Spatial => AURAL_SPATIAL,
+            AuralMode::NonSpatial => AURAL_NON_SPATIAL,
+        }
     }
 
-    #[test]
-    fn spatial_audio_defaults_and_type_gate() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_spatial_audio(&stage, sdf::path("/Audio")?)?;
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            AURAL_SPATIAL => AuralMode::Spatial,
+            AURAL_NON_SPATIAL => AuralMode::NonSpatial,
+            _ => return None,
+        })
+    }
+}
 
-        let a = read_spatial_audio(&stage, &sdf::path("/Audio")?)?.expect("SpatialAudio");
-        assert_eq!(a, ReadSpatialAudio::default());
-        assert_eq!(a.aural_mode, AuralMode::Spatial);
-        assert_eq!(a.playback_mode, PlaybackMode::OnceFromStart);
-        assert_eq!(a.gain, 1.0);
+/// `UsdMediaSpatialAudio.playbackMode` token values. The spec default is
+/// [`PlaybackMode::OnceFromStart`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaybackMode {
+    #[default]
+    OnceFromStart,
+    OnceFromStartToEnd,
+    LoopFromStart,
+    LoopFromStartToEnd,
+    LoopFromStage,
+}
 
-        // A non-SpatialAudio prim reads back as None.
-        stage.define_prim(sdf::path("/NotAudio")?)?.set_type_name("Scope")?;
-        assert!(read_spatial_audio(&stage, &sdf::path("/NotAudio")?)?.is_none());
-        Ok(())
+impl PlaybackMode {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            PlaybackMode::OnceFromStart => PLAYBACK_ONCE_FROM_START,
+            PlaybackMode::OnceFromStartToEnd => PLAYBACK_ONCE_FROM_START_TO_END,
+            PlaybackMode::LoopFromStart => PLAYBACK_LOOP_FROM_START,
+            PlaybackMode::LoopFromStartToEnd => PLAYBACK_LOOP_FROM_START_TO_END,
+            PlaybackMode::LoopFromStage => PLAYBACK_LOOP_FROM_STAGE,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            PLAYBACK_ONCE_FROM_START => PlaybackMode::OnceFromStart,
+            PLAYBACK_ONCE_FROM_START_TO_END => PlaybackMode::OnceFromStartToEnd,
+            PLAYBACK_LOOP_FROM_START => PlaybackMode::LoopFromStart,
+            PLAYBACK_LOOP_FROM_START_TO_END => PlaybackMode::LoopFromStartToEnd,
+            PLAYBACK_LOOP_FROM_STAGE => PlaybackMode::LoopFromStage,
+            _ => return None,
+        })
     }
 }

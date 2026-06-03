@@ -42,10 +42,10 @@
 
 pub mod tokens;
 
-mod lights;
+mod schema;
 mod traits;
 
-pub use lights::{
+pub use schema::{
     CylinderLight, DiskLight, DistantLight, DomeLight, GeometryLight, LightAPI, LightFilter, LightListAPI, PortalLight,
     RectLight, ShadowAPI, ShapingAPI, SphereLight,
 };

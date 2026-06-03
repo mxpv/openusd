@@ -12,8 +12,8 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
-use super::internal::{create, create_uniform_token, get_typed};
 use super::tokens as tok;
+use super::{create, create_uniform_token, get_typed};
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
 
 /// A batch of curves sharing one prim (C++ `UsdGeomCurves`) — a
