@@ -235,11 +235,15 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
     //
-    // TODO(specializes): implement `_EvalImpliedSpecializes` — copy specializes
-    // nodes to the root layer stack. C++ `PcpCompareSiblingNodeStrength` orders
-    // the globally-weak specializes band by distinguishing the implied copy
-    // (site != origin) from the propagated original, which the in-place band
-    // sort cannot reproduce without the copy-to-root.
+    // TODO(specializes): the task-queue indexer now copies specializes nodes to
+    // the local root (`_PropagateNodeToRoot`) and orders the globally-weak band
+    // with the faithful `PcpCompareSiblingNodeStrength`, so the core cases
+    // (including specializes implied across a reference chain) compose
+    // byte-exact. These assets still defer to the recursive builder because they
+    // exercise cases the indexer does not yet reproduce: nested specializes
+    // reached through a reference with local overrides (`BasicSpecializes`'s
+    // `/Model`), specializes combined with inherits/variants/ancestral arcs, and
+    // relocates. Remove an asset once its case lands.
     "BasicSpecializes_root",
     "BasicSpecializesAndInherits_root",
     "BasicSpecializesAndReferences_root",

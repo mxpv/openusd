@@ -42,20 +42,32 @@
 //! the `{set=sel}` site and re-enqueues its own arc and nested-variant tasks,
 //! then retries any pending fallback tasks (C++ `RetryVariantTasks`).
 //!
+//! Specializes compose as globally-weak class-based arcs (C++
+//! `_EvalNodeSpecializes` / `_EvalImpliedSpecializes`). A specializes node is
+//! added as an inert placeholder where it is authored and copied under the local
+//! root (`_PropagateNodeToRoot`); a specializes authored across a reference is
+//! carried to every namespace level by the implied-class mechanism (since
+//! specializes are class-based), and each level's placeholder is copied to the
+//! root too. The copies are ordered among themselves by the faithful
+//! `PcpCompareSiblingNodeStrength`, placing the globally-weak band after every
+//! other opinion (spec 10.4.1).
+//!
 //! The indexer is being ported arc-by-arc. `build_with_cache_in` composes a
 //! prim with the indexer when [`Indexer::build`] reports support and otherwise
 //! falls back to the recursive builder. Ported so far: the root local site;
 //! reference, payload, and inherit arcs to either a root-level or a sub-root
 //! target (with the ancestral sub-index and duplicate-node skipping); internal
 //! references and `defaultPrim` targets; ancestral reference/payload/inherit
-//! propagation through the graph-clone seed; implied classes; and local variant
-//! sets (authored and fallback selections, nested variants). Features that still
-//! abandon the prim ([`Indexer::build`] returns `None`): specializes; relocates
-//! (any prim composing an inherit while `layerRelocates` is present, or whose
-//! ancestor graph carries a specialize/relocate node the seed cannot deepen);
-//! variants reached only inside a recursive sub-build (an ancestral variant a
-//! sub-root arc target carries, which the top-level build does not yet
-//! re-evaluate); and instances. Each deferral point carries its reason inline.
+//! propagation through the graph-clone seed; implied classes; local variant sets
+//! (authored and fallback selections, nested variants); and specializes (direct,
+//! local, and implied across a reference chain, copied to the root). Features
+//! that still abandon the prim ([`Indexer::build`] returns `None`): relocates
+//! (any prim composing an inherit or specialize while `layerRelocates` is
+//! present, or whose ancestor graph carries a specialize/relocate node the seed
+//! cannot deepen); variants reached only inside a recursive sub-build (an
+//! ancestral variant a sub-root arc target carries, which the top-level build
+//! does not yet re-evaluate); and instances. Each deferral point carries its
+//! reason inline.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -65,7 +77,7 @@ use anyhow::Result;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, LayerOffset, Path, Value};
 
-use super::graph::{ArcType, NodeFlags, NodeId, PrimIndexGraph};
+use super::graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::index::{
     collect_payloads_in, compose_arc_list_in, compose_references_in, find_layer, CompositionContext, PrimIndex,
 };
@@ -76,13 +88,6 @@ use super::{Error, LayerStack};
 /// recursive builder (which reports it as a cycle). Matches the builder's
 /// `MAX_COMPOSITION_DEPTH`.
 const MAX_DEPTH: usize = 100;
-
-/// Whether an arc introduces a class hierarchy node — an inherit or a
-/// specializes (C++ `PcpIsClassBasedArc`). Implied-class propagation acts on
-/// these.
-fn is_class_based(arc: ArcType) -> bool {
-    matches!(arc, ArcType::Inherit | ArcType::Specialize)
-}
 
 /// Whether `path` is a root prim (`/Foo`), whose composition needs no ancestral
 /// opinions because its only namespace ancestor is the pseudo-root.
@@ -114,11 +119,6 @@ struct Frame<'f> {
     /// The next parent frame, or `None` at the top-level build.
     previous: Option<&'f Frame<'f>>,
 }
-
-/// Fields whose presence at a composed site means the prim pulls in an arc a
-/// later phase ports. While any is authored the indexer abandons the prim to the
-/// recursive builder rather than composing a half-resolved result.
-const UNSUPPORTED_FIELDS: [FieldKey; 1] = [FieldKey::Specializes];
 
 /// A queued unit of composition work on one node (C++ `Pcp_PrimIndexer::Task`).
 ///
@@ -191,6 +191,13 @@ enum TaskKind {
     EvalNodeVariantSets,
     /// Propagate a node's class-based children one level up toward the root.
     EvalImpliedClasses,
+    /// Copy the specializes nodes in a grafted subtree under the root for
+    /// strength ordering (C++ `EvalImpliedSpecializes`). Weaker than
+    /// `EvalNodeSpecializes` but stronger than the implied-class cascade, so a
+    /// specializes arc is fully composed before its copy is placed.
+    EvalImpliedSpecializes,
+    /// Evaluate the specializes authored at the node's site.
+    EvalNodeSpecializes,
     /// Evaluate the inherits authored at the node's site.
     EvalNodeInherits,
     /// Evaluate the payloads authored at the node's site.
@@ -243,6 +250,9 @@ pub(crate) struct Indexer<'a, 'f> {
     /// `taskUniq`: implied-class propagation re-reaches the same node from
     /// several arcs, so the task is deduplicated to avoid redundant work.
     implied_seen: HashSet<NodeId>,
+    /// Nodes already enqueued for `EvalImpliedSpecializes`, the specializes
+    /// analog of [`implied_seen`](Self::implied_seen).
+    implied_spec_seen: HashSet<NodeId>,
     /// Whether any layer authors `layerRelocates`. Class arcs interact with
     /// relocates (C++ `_EvalImpliedClassTree` routes implied classes across
     /// relocate nodes); that interaction is a later phase, so while relocates
@@ -274,6 +284,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             output: PrimIndexGraph::default(),
             tasks: Vec::new(),
             implied_seen: HashSet::new(),
+            implied_spec_seen: HashSet::new(),
             has_relocates: stack.has_relocates,
             supported: true,
         }
@@ -313,10 +324,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
         while let Some(task) = self.take_best_task() {
             match task.kind {
                 TaskKind::EvalNodeReferences | TaskKind::EvalNodePayloads => self.eval_arcs(task.node, task.kind)?,
-                TaskKind::EvalNodeInherits => self.eval_node_inherits(task.node)?,
+                TaskKind::EvalNodeInherits => {
+                    self.eval_class_arcs(task.node, FieldKey::InheritPaths, ArcType::Inherit)?
+                }
+                TaskKind::EvalNodeSpecializes => {
+                    self.eval_class_arcs(task.node, FieldKey::Specializes, ArcType::Specialize)?
+                }
                 TaskKind::EvalImpliedClasses => {
                     self.implied_seen.remove(&task.node);
                     self.eval_implied_classes(task.node)?;
+                }
+                TaskKind::EvalImpliedSpecializes => {
+                    self.implied_spec_seen.remove(&task.node);
+                    self.eval_implied_specializes(task.node)?;
                 }
                 TaskKind::EvalNodeVariantSets => self.eval_node_variant_sets(task.node)?,
                 TaskKind::EvalNodeVariantAuthored => self.eval_node_authored_variant(task.node, &task.variant)?,
@@ -329,6 +349,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
 
+        // The indexer copies specializes nodes under the local root (C++
+        // `_PropagateNodeToRoot`), so strength ordering uses the faithful
+        // specializes comparator rather than the builder's chain-depth band.
+        self.output.specializes_propagated = true;
         self.output.finalize_strength_order();
         Ok(Some(self.output))
     }
@@ -647,6 +671,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             self.tasks.push(Task::new(TaskKind::EvalNodePayloads, node));
         }
         self.tasks.push(Task::new(TaskKind::EvalNodeInherits, node));
+        self.tasks.push(Task::new(TaskKind::EvalNodeSpecializes, node));
 
         self.add_implied_tasks_for_node(node);
     }
@@ -661,11 +686,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Used directly after grafting an ancestral sub-index, whose nodes already
     /// evaluated their references, payloads, and inherits in the nested build.
     fn add_implied_tasks_for_node(&mut self, node: NodeId) {
-        if is_class_based(self.node(node).arc) {
+        if is_class_based_arc(self.node(node).arc) {
             let start = self.find_starting_node_for_implied_classes(node);
             self.enqueue_implied(start);
         } else if self.has_class_based_child(node) {
             self.enqueue_implied(node);
+        }
+        // A grafted subtree carrying specializes needs them copied to the root.
+        // Only the top-level build does this (C++ `evaluateImpliedSpecializes`);
+        // a nested sub-build defers it until its graph is grafted.
+        if self.frame.is_none() && self.has_specialize_in_subtree(node) {
+            self.enqueue_implied_specializes(node);
         }
         if self.frame.is_none() {
             self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, node));
@@ -727,6 +758,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
     }
 
+    /// Enqueues an `EvalImpliedSpecializes` task, deduplicated per node.
+    fn enqueue_implied_specializes(&mut self, node: NodeId) {
+        if self.implied_spec_seen.insert(node) {
+            self.tasks.push(Task::new(TaskKind::EvalImpliedSpecializes, node));
+        }
+    }
+
     /// Composes the references or payloads authored at `node`'s site and adds an
     /// arc for each (C++ `_EvalNodeReferences` / `_EvalNodePayloads`). Both
     /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
@@ -767,31 +805,35 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(())
     }
 
-    /// Composes the inherits authored at `node`'s site and adds a class-based arc
-    /// for each (C++ `_EvalNodeInherits` → `_AddClassBasedArcs`).
-    fn eval_node_inherits(&mut self, node: NodeId) -> Result<(), Error> {
+    /// Composes the class-based arcs (inherits or specializes) authored at
+    /// `node`'s site, one node per arc (C++ `_EvalNodeInherits` /
+    /// `_EvalNodeSpecializes` → `_AddClassBasedArcs`). `field` selects the arc
+    /// list ([`FieldKey::InheritPaths`] or [`FieldKey::Specializes`]) and `arc`
+    /// the arc type; [`add_class_based_arc`](Self::add_class_based_arc) routes a
+    /// specializes through the inert-placeholder / copy-to-root path.
+    fn eval_class_arcs(&mut self, node: NodeId, field: FieldKey, arc: ArcType) -> Result<(), Error> {
         // An inert node (a non-contributing implied placeholder) authors nothing.
         if self.node(node).is_inert() {
             return Ok(());
         }
-        let inherits = compose_arc_list_in::<Path>(self.node_slice(node), FieldKey::InheritPaths, &self.stack.layers)?;
+        let arcs = compose_arc_list_in::<Path>(self.node_slice(node), field, &self.stack.layers)?;
         // A class arc interacting with relocates is a later phase.
-        if !inherits.is_empty() && self.has_relocates {
+        if !arcs.is_empty() && self.has_relocates {
             self.supported = false;
             return Ok(());
         }
         let node_path = self.node(node).path.clone();
-        for (arc_num, class_path) in inherits.iter().enumerate() {
+        for (arc_num, class_path) in arcs.iter().enumerate() {
             let resolved = node_path.make_absolute(class_path);
-            // A class arc must target a prim, not a variant selection (P2).
+            // A class arc must target a prim, not a variant selection.
             if resolved.is_prim_variant_selection_path() {
                 self.supported = false;
                 return Ok(());
             }
             // The class-arc map sends the class to the instance; every other
             // path (notably root classes) maps through the added root identity.
-            let inherit_map = MapFunction::from_pair(resolved, node_path.clone()).with_root_identity();
-            self.add_class_based_arc(node, node, inherit_map, arc_num as u16, None, ArcType::Inherit)?;
+            let class_map = MapFunction::from_pair(resolved, node_path.clone()).with_root_identity();
+            self.add_class_based_arc(node, node, class_map, arc_num as u16, None, arc)?;
             if !self.supported {
                 return Ok(());
             }
@@ -1005,6 +1047,43 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(Some(existing));
         }
 
+        // Specializes need the inert-placeholder / copy-to-root structure (C++
+        // `_AddClassBasedArc`). Unless the parent is the local root at the top
+        // level — in which case a contributing specialize is added directly
+        // below — add an inert placeholder where the arc is authored; at the top
+        // level copy it under the root immediately (a sub-build defers that to
+        // the `EvalImpliedSpecializes` task run after its graph is grafted).
+        if arc == ArcType::Specialize {
+            let add_placeholder = parent != self.output.local_root() || self.frame.is_some();
+            if add_placeholder {
+                let has_specs = self.stack_has_spec(&parent_layers, &inherit_path);
+                let placeholder =
+                    self.output
+                        .add_site_child(parent, parent_layers, inherit_path, arc, inherit_map, true);
+                {
+                    let n = &mut self.output.nodes[placeholder.idx()];
+                    n.origin = Some(origin);
+                    n.sibling_num_at_origin = arc_num;
+                    n.has_specs = has_specs;
+                    n.flags |= NodeFlags::INERT;
+                }
+                if self.frame.is_none() && !self.is_relocates_placeholder_implied_arc(placeholder) {
+                    let propagated = self.propagate_node_to_root(placeholder)?;
+                    if !self.supported {
+                        return Ok(None);
+                    }
+                    // A pre-existing propagated node (whose origin is not this
+                    // placeholder) still needs the placeholder's classes implied
+                    // upward, which its own propagation would otherwise skip.
+                    if matches!(propagated, Some(p) if self.node(p).origin() != Some(placeholder)) {
+                        self.enqueue_implied(placeholder);
+                    }
+                    return Ok(propagated);
+                }
+                return Ok(Some(placeholder));
+            }
+        }
+
         let same_as_ignore = ignore_if_same_as_site
             .as_ref()
             .is_some_and(|(li, p)| *li == rep && *p == inherit_path);
@@ -1069,6 +1148,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let Some(parent) = self.node(node).parent() else {
             return Ok(());
         };
+        // The local root stands in for C++'s parentless root node (whose
+        // `_EvalImpliedClasses` early-returns). Its only parent is the synthetic
+        // inert tree root, which is not a composition site, so classes must not
+        // be propagated up into it.
+        if parent == self.output.root {
+            return Ok(());
+        }
         if !self.has_class_based_child(node) {
             return Ok(());
         }
@@ -1093,14 +1179,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(());
         }
 
-        let src = self.node(src);
-        let src_is_class = is_class_based(src.arc);
-        let src_depth = src.depth_below_introduction();
-        let src_children = src.children().to_vec();
+        let src_is_class = is_class_based_arc(self.node(src).arc);
+        let src_depth = self.node(src).depth_below_introduction();
+        // A specializes node keeps its children on the copy under the root, so
+        // iterate those (C++ `_EvalImpliedClassTree` reads the propagated node's
+        // children when `srcNode` is a specializes node).
+        let src_owner = self.output.get_propagated_specializes_node(src).unwrap_or(src);
+        let src_children = self.node(src_owner).children().to_vec();
 
         for child in src_children {
             let c = self.node(child);
-            if !is_class_based(c.arc) {
+            if !is_class_based_arc(c.arc) {
                 continue;
             }
             // Skip the arc that continues an ancestral class chain rather than a
@@ -1136,7 +1225,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if let Some(dest_child) = dest_child {
                 if self.has_class_based_child(child) {
                     let child_transfer = dest_class_func.inverse().compose(&transfer.compose(&child_map));
-                    self.eval_implied_class_tree(dest_child, child, &child_transfer, false)?;
+                    // A specializes destination keeps its children on the copy
+                    // under the root, so recurse there (C++ invariant: only
+                    // propagated specializes nodes have children).
+                    let recurse_into = self
+                        .output
+                        .get_propagated_specializes_node(dest_child)
+                        .unwrap_or(dest_child);
+                    self.eval_implied_class_tree(recurse_into, child, &child_transfer, false)?;
                     if !self.supported {
                         return Ok(());
                     }
@@ -1151,10 +1247,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `_FindStartingNodeForImpliedClasses`).
     fn find_starting_node_for_implied_classes(&self, n: NodeId) -> NodeId {
         let mut start = n;
-        while is_class_based(self.node(start).arc) {
-            let (instance, class) = self.find_starting_node_of_class_hierarchy(start);
+        while is_class_based_arc(self.node(start).arc) {
+            let (instance, class) = self.output.starting_node_of_class_hierarchy(start);
             start = instance;
-            if is_class_based(self.node(instance).arc) {
+            if is_class_based_arc(self.node(instance).arc) {
                 let ancestral = self.node(instance).path_at_introduction();
                 if self.node(class).path.has_prefix(&ancestral) {
                     break;
@@ -1162,23 +1258,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
         start
-    }
-
-    /// Walks up the chain of class arcs at the same depth-below-introduction from
-    /// `n`, returning `(instance node, topmost class node)` (C++
-    /// `Pcp_FindStartingNodeOfClassHierarchy`).
-    fn find_starting_node_of_class_hierarchy(&self, n: NodeId) -> (NodeId, NodeId) {
-        let mut instance = n;
-        let mut class = n;
-        let depth = self.node(instance).depth_below_introduction();
-        while is_class_based(self.node(instance).arc) && self.node(instance).depth_below_introduction() == depth {
-            class = instance;
-            match self.node(instance).parent() {
-                Some(p) => instance = p,
-                None => break,
-            }
-        }
-        (instance, class)
     }
 
     /// Returns the child of `parent` whose site matches `(rep_layer, path)` (C++
@@ -1193,22 +1272,153 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Returns the child of `dest` already propagated for the implied class
     /// `src_child`, identified by its origin (C++ `_EvalImpliedClassTree`'s
-    /// origin dedup).
+    /// origin dedup). A propagated specializes node for `src_child` is skipped:
+    /// it is the copy made for strength ordering, not a previously-implied node,
+    /// so treating it as one would drop valid implied opinions.
     fn find_implied_child(&self, dest: NodeId, src_child: NodeId) -> Option<NodeId> {
         self.node(dest)
             .children()
             .iter()
             .copied()
-            .find(|&c| self.node(c).origin() == Some(src_child))
+            .find(|&c| self.node(c).origin() == Some(src_child) && !self.output.is_propagated_specializes(c))
     }
 
     /// Whether `node` has any class-based (inherit/specialize) child (C++
-    /// `_HasClassBasedChild`).
+    /// `_HasClassBasedChild`). A specializes node keeps its children on the copy
+    /// under the root, so that copy is checked instead.
     fn has_class_based_child(&self, node: NodeId) -> bool {
-        self.node(node)
+        let target = self.output.get_propagated_specializes_node(node).unwrap_or(node);
+        self.node(target)
             .children()
             .iter()
-            .any(|&c| is_class_based(self.node(c).arc))
+            .any(|&c| is_class_based_arc(self.node(c).arc))
+    }
+
+    /// Whether `node` or any node in its subtree is a specializes node (C++
+    /// `_HasSpecializesChildInSubtree`).
+    // TODO(perf): re-walks the subtree on every `add_implied_tasks_for_node`; a
+    // node high in the tree is re-scanned as composition grows. Could track a
+    // "has specialize below" flag incrementally instead.
+    fn has_specialize_in_subtree(&self, node: NodeId) -> bool {
+        let mut stack = vec![node];
+        while let Some(id) = stack.pop() {
+            if self.node(id).arc == ArcType::Specialize {
+                return true;
+            }
+            stack.extend(self.node(id).children().iter().copied());
+        }
+        false
+    }
+
+    /// Whether `node` is only a placeholder implied under a relocate node (C++
+    /// `_IsRelocatesPlaceholderImpliedArc`): its parent is a relocate at the same
+    /// site and is not its origin. Such placeholders are not valid opinion
+    /// sources, so specializes propagation skips them. Returns false until
+    /// `TODO(relocates)` composes relocate nodes; the guard mirrors C++ so the
+    /// propagation stays correct once they exist.
+    fn is_relocates_placeholder_implied_arc(&self, node: NodeId) -> bool {
+        let n = self.node(node);
+        let Some(parent) = n.parent() else {
+            return false;
+        };
+        n.origin() != Some(parent)
+            && self.node(parent).arc == ArcType::Relocate
+            && self.node(parent).layer_index() == n.layer_index()
+            && self.node(parent).path == n.path
+    }
+
+    /// Copies a specializes node under the local root for strength ordering (C++
+    /// `_PropagateNodeToRoot`). The copy carries the source's map-to-root,
+    /// site, sibling number, and the source as its origin, so it is recognised
+    /// as a propagated specializes node. A sub-root target is composed with its
+    /// ancestral opinions and grafted; a root-prim target is added directly.
+    /// Returns the existing or new node, or `None` when a duplicate site is
+    /// skipped.
+    fn propagate_node_to_root(&mut self, src: NodeId) -> Result<Option<NodeId>, Error> {
+        let root = self.output.local_root();
+        if !root.is_valid() {
+            return Ok(None);
+        }
+        let map = self.node(src).map_to_root.clone();
+        let src_layers = self.node(src).layer_stack().to_vec();
+        let rep = src_layers[0].0;
+        let src_path = self.node(src).path.clone();
+        let sibling = self.node(src).sibling_num_at_origin;
+
+        if let Some(existing) = self.find_matching_child(root, rep, &src_path) {
+            return Ok(Some(existing));
+        }
+        // C++ `_AddArc` with `skipDuplicateNodes`: a site already reached by
+        // another path is not copied again (the inert placeholder at `src` is
+        // skipped by `node_using_site`, so it is not its own duplicate).
+        if self.find_duplicate(rep, &src_path) {
+            return Ok(None);
+        }
+
+        // A sub-root specialize target needs the opinions above it (C++
+        // `includeAncestralOpinions = !IsRootPrimPath`).
+        if !is_root_prim(&src_path) {
+            let target_is_root = self.ambient_is_root_for(&src_layers);
+            return self.compose_and_graft(
+                &src_path,
+                &src_layers,
+                target_is_root,
+                true,
+                root,
+                ArcType::Specialize,
+                map,
+                src,
+                sibling,
+            );
+        }
+
+        let has_specs = self.stack_has_spec(&src_layers, &src_path);
+        let new_node = self
+            .output
+            .add_site_child(root, src_layers, src_path, ArcType::Specialize, map, true);
+        {
+            let n = &mut self.output.nodes[new_node.idx()];
+            n.origin = Some(src);
+            n.sibling_num_at_origin = sibling;
+            n.has_specs = has_specs;
+        }
+        if self.node_authors_unsupported(new_node)? {
+            self.supported = false;
+            return Ok(None);
+        }
+        self.add_tasks_for_node(new_node);
+        Ok(Some(new_node))
+    }
+
+    /// Copies every specializes node in a grafted subtree under the root (C++
+    /// `_EvalImpliedSpecializes`). A no-op at the root node, which has no parent.
+    fn eval_implied_specializes(&mut self, node: NodeId) -> Result<(), Error> {
+        if self.node(node).parent().is_none() {
+            return Ok(());
+        }
+        self.find_specializes_to_propagate_to_root(node)
+    }
+
+    /// Walks the subtree under `node`, copying each specializes node to the root
+    /// (C++ `_FindSpecializesToPropagateToRoot`).
+    fn find_specializes_to_propagate_to_root(&mut self, node: NodeId) -> Result<(), Error> {
+        if self.is_relocates_placeholder_implied_arc(node) {
+            return Ok(());
+        }
+        if self.node(node).arc == ArcType::Specialize {
+            self.propagate_node_to_root(node)?;
+            if !self.supported {
+                return Ok(());
+            }
+        }
+        let children = self.node(node).children().to_vec();
+        for child in children {
+            self.find_specializes_to_propagate_to_root(child)?;
+            if !self.supported {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     /// Resolves a reference or payload to its target layer stack, adds the target
@@ -1388,8 +1598,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(out)
     }
 
-    /// Returns `true` when `node`'s site authors a field a later phase ports (see
-    /// [`UNSUPPORTED_FIELDS`]), or — inside a recursive sub-build — a variant set.
+    /// Returns `true` when `node`'s site authors a variant set inside a recursive
+    /// sub-build, the one remaining case a later phase ports.
     ///
     /// A sub-build (a `Frame` is present) defers variants to the top-level build
     /// (C++ `evaluateVariantsAndDynamicPayloads == false`), so a variant-authoring
@@ -1397,18 +1607,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// variant re-evaluation that fixes this faithfully is a later phase; until
     /// then such a prim is abandoned to the recursive builder.
     fn node_authors_unsupported(&self, node: NodeId) -> Result<bool, Error> {
+        if self.frame.is_none() {
+            return Ok(false);
+        }
         let n = self.node(node);
         for &(li, _) in n.layer_stack() {
-            let layer = self.stack.layer(li);
-            for field in UNSUPPORTED_FIELDS {
-                if layer.try_get(&n.path, field.as_str())?.is_some() {
-                    return Ok(true);
-                }
-            }
-            if self.frame.is_some()
-                && layer
-                    .try_get(&n.path, ChildrenKey::VariantSetChildren.as_str())?
-                    .is_some()
+            if self
+                .stack
+                .layer(li)
+                .try_get(&n.path, ChildrenKey::VariantSetChildren.as_str())?
+                .is_some()
             {
                 return Ok(true);
             }
@@ -1476,6 +1684,29 @@ mod tests {
                 .iter()
                 .any(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/C" && n.has_specs()),
             "the inherit arc to /C contributes the class opinion"
+        );
+    }
+
+    /// A local specializes arc to a root class composes as a globally-weak
+    /// `Specialize` node copied under the local root (C++ `_PropagateNodeToRoot`),
+    /// after every other opinion in the strength order.
+    #[test]
+    fn local_specialize_composed() {
+        let s =
+            stack("#usda 1.0\nclass \"C\" { custom double x = 1 }\ndef \"World\" (\n    specializes = </C>\n) {\n}\n");
+        let graph = build(&s, "/World").expect("a local specialize to a root class is composed");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Specialize && n.path.as_str() == "/C" && n.has_specs() && !n.is_inert()),
+            "the specialize arc to /C contributes the class opinion"
+        );
+        // The specialize node is globally weak: it sorts last in strength order.
+        let order: Vec<ArcType> = graph.strength_order.iter().map(|&id| graph[id.idx()].arc).collect();
+        assert_eq!(
+            order.last(),
+            Some(&ArcType::Specialize),
+            "the specialize opinion is weakest, got {order:?}"
         );
     }
 
