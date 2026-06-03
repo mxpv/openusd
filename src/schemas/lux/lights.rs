@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(d.angle_attr().get()?, Some(sdf::Value::Float(0.53)));
         // No schema registry yet, so DistantLight's documented 50000 fallback
         // is not synthesized.
-        assert_eq!(d.intensity_attr().get()?, None);
+        assert_eq!(d.intensity_attr().get::<sdf::Value>()?, None);
         Ok(())
     }
 

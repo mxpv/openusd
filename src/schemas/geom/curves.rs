@@ -373,17 +373,16 @@ mod tests {
     fn nurbs_curves_attrs() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let c = NurbsCurves::define(&stage, "/N")?;
-        c.create_order_attr()?.set(sdf::Value::IntVec(vec![4]))?;
+        c.create_order_attr()?.set(vec![4])?;
         c.create_knots_attr()?
             .set(sdf::Value::DoubleVec(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]))?;
-        c.create_point_weights_attr()?
-            .set(sdf::Value::DoubleVec(vec![1.0, 1.0, 1.0, 1.0]))?;
+        c.create_point_weights_attr()?.set(vec![1.0_f64, 1.0, 1.0, 1.0])?;
 
         let c = NurbsCurves::get(&stage, "/N")?.expect("NurbsCurves");
         assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
         assert_eq!(
             c.point_weights_attr()
-                .get()?
+                .get::<sdf::Value>()?
                 .and_then(|v| v.try_as_double_vec())
                 .map(|v| v.len()),
             Some(4)
@@ -404,7 +403,7 @@ mod tests {
         let c = HermiteCurves::get(&stage, "/H")?.expect("HermiteCurves");
         assert_eq!(
             c.tangents_attr()
-                .get()?
+                .get::<sdf::Value>()?
                 .and_then(|v| v.try_as_vec_3f_vec())
                 .map(|v| v.len()),
             Some(2)

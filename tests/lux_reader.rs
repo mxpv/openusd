@@ -40,12 +40,15 @@ fn from_usda(usda: &str) -> Result<Stage> {
 fn distant_light_inputs_and_angle() -> Result<()> {
     let stage = open()?;
     let sun = DistantLight::get(&stage, sdf::path("/World/Sun")?)?.expect("DistantLight");
-    assert_eq!(sun.intensity_attr().get()?, Some(sdf::Value::Float(12000.0)));
-    assert_eq!(sun.exposure_attr().get()?, Some(sdf::Value::Float(1.5)));
-    assert_eq!(sun.color_attr().get()?, Some(sdf::Value::Vec3f([1.0, 0.95, 0.85])));
-    assert_eq!(sun.enable_color_temperature_attr().get()?, Some(sdf::Value::Bool(true)));
-    assert_eq!(sun.color_temperature_attr().get()?, Some(sdf::Value::Float(5500.0)));
-    assert_eq!(sun.angle_attr().get()?, Some(sdf::Value::Float(0.53)));
+    // `get::<T>()` decodes straight to the Rust type instead of matching on
+    // `sdf::Value`.
+    assert_eq!(sun.intensity_attr().get::<f32>()?, Some(12000.0));
+    assert_eq!(sun.exposure_attr().get::<f32>()?, Some(1.5));
+    assert_eq!(sun.color_attr().get::<[f32; 3]>()?, Some([1.0, 0.95, 0.85]));
+    assert_eq!(sun.enable_color_temperature_attr().get::<bool>()?, Some(true));
+    assert_eq!(sun.color_temperature_attr().get::<f32>()?, Some(5500.0));
+    // `get::<sdf::Value>()` still yields the raw value when that's wanted.
+    assert_eq!(sun.angle_attr().get::<sdf::Value>()?, Some(sdf::Value::Float(0.53)));
     Ok(())
 }
 
@@ -55,7 +58,7 @@ fn distant_light_unauthored_intensity_is_none() -> Result<()> {
     // not synthesized — an unauthored input reads back `None`.
     let stage = from_usda("#usda 1.0\ndef DistantLight \"Bare\" {}\n")?;
     let bare = DistantLight::get(&stage, sdf::path("/Bare")?)?.expect("DistantLight");
-    assert_eq!(bare.intensity_attr().get()?, None);
+    assert_eq!(bare.intensity_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -232,7 +235,7 @@ fn animated_intensity_via_get_at() -> Result<()> {
     ))?;
     let light = SphereLight::get(&stage, sdf::path("/Flicker")?)?.expect("SphereLight");
     // Default-time read ignores timeSamples → None (no authored default).
-    assert_eq!(light.intensity_attr().get()?, None);
+    assert_eq!(light.intensity_attr().get::<sdf::Value>()?, None);
     // At-time reads pick / interpolate the samples (stage default is linear).
     // The unsuffixed sample literals parse as `double`.
     assert_eq!(light.intensity_attr().get_at(0.0)?, Some(sdf::Value::Double(100.0)));

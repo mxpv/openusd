@@ -271,7 +271,7 @@ mod tests {
         );
         assert_eq!(
             m.points_attr()
-                .get()?
+                .get::<sdf::Value>()?
                 .and_then(|v| v.try_as_vec_3f_vec())
                 .map(|v| v.len()),
             Some(4)

@@ -648,32 +648,54 @@ impl Attribute {
         self.stage.connection_paths(&self.path)
     }
 
-    /// Composed default value, if any layer authored one.
+    /// Composed default value decoded to `T`, if any layer authored one.
+    /// Mirrors C++ `UsdAttribute::Get`.
+    ///
+    /// `T` is any type implementing `TryFrom<sdf::Value>` — a scalar
+    /// (`get::<f32>()`), an array (`get::<Vec<f32>>()`), or [`sdf::Value`]
+    /// itself (`get::<sdf::Value>()`) for the raw value. A type mismatch
+    /// against the authored value surfaces as an `Err`, not `None`.
     //
     // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
-    pub fn get(&self) -> anyhow::Result<Option<sdf::Value>> {
-        self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Default)
+    pub fn get<T>(&self) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.stage.field::<T>(&self.path, sdf::FieldKey::Default)
     }
 
-    /// Composed value at `time`, applying the stage's interpolation type.
-    /// Mirrors C++ `UsdAttribute::Get(time)`.
+    /// Composed value at `time` decoded to `T`, applying the stage's
+    /// interpolation type. The time-sampled counterpart of [`Attribute::get`];
+    /// mirrors C++ `UsdAttribute::Get(time)`.
     //
     // TODO: drop `anyhow::Result` once `Stage::value_at` returns a typed
     // error.
-    pub fn get_at(&self, time: f64) -> anyhow::Result<Option<sdf::Value>> {
-        self.stage.value_at(&self.path, time)
+    pub fn get_at<T>(&self, time: f64) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        Ok(self.stage.value_at(&self.path, time)?.map(T::try_from).transpose()?)
     }
 
-    /// Composed value of a generic metadata field on the attribute, if any
-    /// layer authored one. Mirrors C++ `UsdObject::GetMetadata(name, &value)`.
+    /// Composed value of a generic metadata field on the attribute decoded to
+    /// `T`, if any layer authored one. Mirrors C++
+    /// `UsdObject::GetMetadata(name, &value)`.
     ///
     /// The read counterpart of [`Attribute::set_metadata`]; used for the
     /// schema-layered fields it authors (UsdGeom's `interpolation` /
-    /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …).
+    /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …). Decode to
+    /// the field's type (`get_metadata::<i32>("elementSize")`) or to
+    /// [`sdf::Value`] for the raw value.
     //
     // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
-    pub fn get_metadata(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
-        self.stage.field::<sdf::Value>(&self.path, key)
+    pub fn get_metadata<T>(&self, key: &str) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.stage.field::<T>(&self.path, key)
     }
 
     /// Composed `timeSamples` map.
@@ -1118,8 +1140,8 @@ mod tests {
             .set(sdf::Value::Double(1.0))?
             .block()?;
         // ValueBlock resolves to None through Stage::field / value_at.
-        assert_eq!(attr.get()?, None);
-        assert_eq!(attr.get_at(0.0)?, None);
+        assert_eq!(attr.get::<sdf::Value>()?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(0.0)?, None);
         Ok(())
     }
 
@@ -1136,9 +1158,9 @@ mod tests {
             .set_at(0.0, sdf::Value::Double(1.0))?
             .set_at(10.0, sdf::Value::Double(3.0))?
             .block()?;
-        assert_eq!(attr.get_at(0.0)?, None);
-        assert_eq!(attr.get_at(5.0)?, None);
-        assert_eq!(attr.get_at(10.0)?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(0.0)?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(5.0)?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(10.0)?, None);
         Ok(())
     }
 

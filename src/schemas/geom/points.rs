@@ -137,7 +137,7 @@ mod tests {
             t.tet_vertex_indices_attr().get()?,
             Some(sdf::Value::Vec4iVec(vec![[0, 1, 2, 3]]))
         );
-        assert!(t.surface_face_vertex_indices_attr().get()?.is_none());
+        assert!(t.surface_face_vertex_indices_attr().get::<sdf::Value>()?.is_none());
         Ok(())
     }
 }
