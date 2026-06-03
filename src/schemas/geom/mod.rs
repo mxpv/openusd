@@ -1,6 +1,6 @@
 //! UsdGeom schema views.
 //!
-//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
 //! `UsdGeom` class hierarchy. Each concrete prim type (`Mesh`, `Sphere`,
 //! `Camera`, …) is a newtype wrapping a [`crate::usd::Prim`] and gains its
 //! property accessors from a chain of schema traits:

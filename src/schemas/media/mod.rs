@@ -1,6 +1,6 @@
 //! UsdMedia schema views.
 //!
-//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
 //! `UsdMedia` family:
 //!
 //! - [`SpatialAudio`] (C++ `UsdMediaSpatialAudio`) — a sound source. It is a

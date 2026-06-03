@@ -92,8 +92,9 @@ pub trait Imageable: SchemaBase {
     }
 }
 
-/// Read a uniform-token attribute's authored default at `prim`, used by the
-/// inheritance walks above to inspect ancestor opinions directly.
+/// Read a token (or string) attribute's authored default at `prim`,
+/// regardless of variability, used by the inheritance walks above to inspect
+/// ancestor opinions directly.
 fn direct_token(stage: &Stage, prim: &sdf::Path, name: &str) -> Result<Option<String>> {
     let attr = prim.append_property(name)?;
     Ok(match stage.field::<sdf::Value>(attr, sdf::FieldKey::Default)? {
