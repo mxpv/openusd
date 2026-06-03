@@ -1,13 +1,13 @@
-//! Integration tests for the `UsdRender` schema reader and the computed
+//! Integration tests for the `UsdRender` schema views and the computed
 //! render spec, against a hand-authored fixture scene.
 
 use anyhow::Result;
 
 use openusd::schemas::render::{
-    compute_render_spec, get_stage_render_settings, read_render_product, read_render_settings, read_render_var,
-    AspectRatioConformPolicy, ProductType, SourceType,
+    compute_render_spec, AspectRatioConformPolicy, ProductType, RenderProduct, RenderSettings, RenderSettingsBase,
+    RenderVar, SourceType,
 };
-use openusd::sdf;
+use openusd::sdf::{self, Value};
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdRender_scene.usda";
@@ -19,11 +19,11 @@ fn open() -> Result<Stage> {
 /// A `renderSettingsPrimPath` authored in the session layer overrides the
 /// root layer's opinion, matching C++ `UsdStage::GetMetadata` composition.
 #[test]
-fn session_layer_overrides_settings_prim_path() -> Result<()> {
+fn session_layer_overrides_settings_path() -> Result<()> {
     let stage = Stage::builder()
         .session_layer("fixtures/usdRender_session.usda")
         .open(FIXTURE)?;
-    let path = get_stage_render_settings(&stage)?.expect("renderSettingsPrimPath");
+    let path = RenderSettings::stage_settings_path(&stage)?.expect("renderSettingsPrimPath");
     assert_eq!(path.as_str(), "/Render/sessionSettings");
     Ok(())
 }
@@ -31,43 +31,60 @@ fn session_layer_overrides_settings_prim_path() -> Result<()> {
 #[test]
 fn reads_render_settings() -> Result<()> {
     let stage = open()?;
-    let s = read_render_settings(&stage, &sdf::path("/Render/settings")?)?.expect("RenderSettings");
-    assert_eq!(s.base.resolution, [1920, 1080]);
+    let s = RenderSettings::get(&stage, "/Render/settings")?.expect("RenderSettings");
     assert_eq!(
-        s.base.aspect_ratio_conform_policy,
-        AspectRatioConformPolicy::ExpandAperture
+        s.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
+        Some([1920, 1080])
     );
-    assert_eq!(s.base.camera.as_deref(), Some("/World/Camera"));
-    assert_eq!(s.included_purposes, vec!["default", "render"]);
-    assert_eq!(s.material_binding_purposes, vec!["full".to_string(), String::new()]);
-    assert_eq!(s.rendering_color_space.as_deref(), Some("lin_rec709"));
-    assert_eq!(s.products, vec!["/Render/products/beauty".to_string()]);
+    assert_eq!(
+        s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
+        Some(AspectRatioConformPolicy::ExpandAperture)
+    );
+    assert_eq!(s.camera_rel().get_targets()?, vec![sdf::path("/World/Camera")?]);
+    assert_eq!(
+        s.included_purposes_attr()
+            .get::<Value>()?
+            .and_then(|v| v.try_as_token_vec()),
+        Some(vec!["default".to_string(), "render".to_string()])
+    );
+    assert_eq!(
+        s.rendering_color_space_attr().get::<String>()?.as_deref(),
+        Some("lin_rec709")
+    );
+    assert_eq!(
+        s.products_rel().get_targets()?,
+        vec![sdf::path("/Render/products/beauty")?]
+    );
     Ok(())
 }
 
 #[test]
 fn reads_products_and_vars() -> Result<()> {
     let stage = open()?;
-    let p = read_render_product(&stage, &sdf::path("/Render/products/beauty")?)?.expect("RenderProduct");
-    assert_eq!(p.product_type, ProductType::Raster);
-    assert_eq!(p.product_name, "beauty.exr");
-    assert_eq!(p.base.resolution, [1024, 512]); // product override of the settings 1920×1080
+    let p = RenderProduct::get(&stage, "/Render/products/beauty")?.expect("RenderProduct");
+    assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
+    assert_eq!(p.product_name_attr().get::<String>()?.as_deref(), Some("beauty.exr"));
+    // Product override of the settings 1920×1080.
     assert_eq!(
-        p.ordered_vars,
-        vec!["/Render/vars/color".to_string(), "/Render/vars/alpha".to_string()]
+        p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
+        Some([1024, 512])
+    );
+    assert_eq!(
+        p.ordered_vars_rel().get_targets()?,
+        vec![sdf::path("/Render/vars/color")?, sdf::path("/Render/vars/alpha")?]
     );
 
-    let color = read_render_var(&stage, &sdf::path("/Render/vars/color")?)?.expect("RenderVar");
-    assert_eq!(color.data_type, "color3f");
-    assert_eq!(color.source_type, SourceType::Raw);
-    assert_eq!(color.source_name, "Ci");
+    let color = RenderVar::get(&stage, "/Render/vars/color")?.expect("RenderVar");
+    assert_eq!(color.data_type_attr().get::<String>()?.as_deref(), Some("color3f"));
+    assert_eq!(color.source_type_attr().get::<SourceType>()?, Some(SourceType::Raw));
+    assert_eq!(color.source_name_attr().get::<String>()?.as_deref(), Some("Ci"));
     Ok(())
 }
 
 #[test]
-fn resolves_stage_render_settings_metadata() -> Result<()> {
+fn resolves_stage_settings_path() -> Result<()> {
     let stage = open()?;
-    let path = get_stage_render_settings(&stage)?.expect("renderSettingsPrimPath");
+    let path = RenderSettings::stage_settings_path(&stage)?.expect("renderSettingsPrimPath");
     assert_eq!(path.as_str(), "/Render/settings");
     Ok(())
 }

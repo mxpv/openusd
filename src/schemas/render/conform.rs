@@ -5,7 +5,7 @@
 //! computation never writes back to the camera; it produces the adjusted
 //! aperture (and possibly `pixelAspectRatio`) stored on the computed spec.
 
-use super::types::AspectRatioConformPolicy;
+use super::AspectRatioConformPolicy;
 
 /// The aperture (and `pixelAspectRatio`) after the conform policy is applied.
 #[derive(Debug, Clone, Copy, PartialEq)]
