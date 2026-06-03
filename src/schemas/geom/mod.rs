@@ -24,6 +24,30 @@
 //!                    └ BasisCurves / NurbsCurves / HermiteCurves
 //! ```
 //!
+//! # Example
+//!
+//! ```
+//! // `Imageable` is brought in so its inherited accessors resolve on the view.
+//! use openusd::schemas::geom::{self, Imageable};
+//! use openusd::usd;
+//!
+//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//!
+//! // Author a Mesh through its typed view. `create_subdivision_scheme_attr` is
+//! // the Mesh's own accessor; `create_visibility_attr` is inherited from
+//! // `Imageable`, further up the trait chain. Token enums convert straight to
+//! // a value via `From`, so they pass to `set` directly.
+//! let mesh = geom::Mesh::define(&stage, "/World/Mesh")?;
+//! mesh.create_subdivision_scheme_attr()?.set(geom::SubdivisionScheme::Loop)?;
+//! mesh.create_visibility_attr()?.set(geom::Visibility::Invisible)?;
+//!
+//! // Read it back through a fresh view; the token decodes straight to its enum.
+//! let mesh = geom::Mesh::get(&stage, "/World/Mesh")?.expect("Mesh");
+//! let scheme = mesh.subdivision_scheme_attr().get::<geom::SubdivisionScheme>()?;
+//! assert_eq!(scheme, Some(geom::SubdivisionScheme::Loop));
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
+//!
 //! # Conventions
 //!
 //! Property accessors mirror the C++ `Get*Attr` / `Create*Attr` pair: a
@@ -624,5 +648,76 @@ impl PatchForm {
             PATCH_FORM_PERIODIC => PatchForm::Periodic,
             _ => return None,
         })
+    }
+}
+
+/// Bidirectional conversion between each token enum and [`crate::sdf::Value`],
+/// both delegating to `as_token` / `from_token`. `From` authors a
+/// [`Value::Token`](crate::sdf::Value::Token) so the enum passes straight to
+/// [`Attribute::set`](crate::usd::Attribute::set) (`attr.set(SubdivisionScheme::Loop)?`),
+/// and `TryFrom` decodes one so [`Attribute::get`](crate::usd::Attribute::get)
+/// extracts it directly (`attr.get::<SubdivisionScheme>()?`).
+macro_rules! impl_token_value {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl From<$ty> for crate::sdf::Value {
+            fn from(value: $ty) -> Self {
+                crate::sdf::Value::Token(value.as_token().to_string())
+            }
+        }
+
+        impl TryFrom<crate::sdf::Value> for $ty {
+            type Error = crate::sdf::ValueConversionError;
+
+            fn try_from(value: crate::sdf::Value) -> Result<Self, Self::Error> {
+                match &value {
+                    crate::sdf::Value::Token(s) | crate::sdf::Value::String(s) => <$ty>::from_token(s),
+                    _ => None,
+                }
+                .ok_or_else(|| crate::sdf::ValueConversionError::new(stringify!($ty), &value))
+            }
+        }
+    )+};
+}
+
+impl_token_value!(
+    Visibility,
+    Purpose,
+    Orientation,
+    Axis,
+    Projection,
+    StereoRole,
+    SubdivisionScheme,
+    InterpolateBoundary,
+    FaceVaryingLinearInterpolation,
+    TriangleSubdivisionRule,
+    Interpolation,
+    ElementType,
+    CurveType,
+    CurveBasis,
+    CurveWrap,
+    PatchForm,
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdf::Value;
+
+    #[test]
+    fn token_value_round_trip() {
+        // `From` authors a token; `TryFrom` decodes it back.
+        let value = Value::from(SubdivisionScheme::Loop);
+        assert_eq!(value, Value::Token(SUBDIV_SCHEME_LOOP.to_string()));
+        assert_eq!(SubdivisionScheme::try_from(value).unwrap(), SubdivisionScheme::Loop);
+
+        // A `string`-typed opinion decodes the same as a `token`.
+        assert_eq!(Axis::try_from(Value::String(AXIS_X.to_string())).unwrap(), Axis::X);
+    }
+
+    #[test]
+    fn token_value_errors() {
+        // A non-token value and an unknown token both fail.
+        assert!(Visibility::try_from(Value::Int(1)).is_err());
+        assert!(Purpose::try_from(Value::Token("bogus".to_string())).is_err());
     }
 }

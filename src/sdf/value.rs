@@ -337,6 +337,11 @@ impl_try_from_value!(ReferenceListOp, try_as_reference_list_op, "ReferenceListOp
 impl_try_from_value!(PayloadListOp, try_as_payload_list_op, "PayloadListOp");
 impl_try_from_value!(PathListOp, try_as_path_list_op, "PathListOp");
 
+// Float array (`[]`) payloads — positions, normals, UVs, tangents, etc.
+impl_try_from_value!(Vec<[f32; 2]>, try_as_vec_2f_vec, "Vec2fVec");
+impl_try_from_value!(Vec<[f32; 3]>, try_as_vec_3f_vec, "Vec3fVec");
+impl_try_from_value!(Vec<[f32; 4]>, try_as_vec_4f_vec, "Vec4fVec");
+
 impl TryFrom<Value> for String {
     type Error = ValueConversionError;
 
