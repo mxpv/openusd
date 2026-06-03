@@ -4,22 +4,22 @@
 //! retyping literals. Mirrors the grouping in Pixar's
 //! `pxr/usd/usdShade/tokens.h`.
 
-// ── Concrete prim type names ────────────────────────────────────────
+// Concrete prim type names
 pub const T_MATERIAL: &str = "Material";
 pub const T_NODE_GRAPH: &str = "NodeGraph";
 pub const T_SHADER: &str = "Shader";
 
-// ── API schemas ─────────────────────────────────────────────────────
+// API schemas
 pub const API_NODE_DEF: &str = "NodeDefAPI";
 pub const API_MATERIAL_BINDING: &str = "MaterialBindingAPI";
 
-// ── Property namespace prefixes ─────────────────────────────────────
+// Property namespace prefixes
 /// Input attributes are authored as `inputs:<base>`.
 pub const NS_INPUTS: &str = "inputs:";
 /// Output attributes are authored as `outputs:<base>`.
 pub const NS_OUTPUTS: &str = "outputs:";
 
-// ── NodeDefAPI (Shader) attribute names ─────────────────────────────
+// NodeDefAPI (Shader) attribute names
 pub const A_INFO_ID: &str = "info:id";
 pub const A_INFO_IMPLEMENTATION_SOURCE: &str = "info:implementationSource";
 pub const A_INFO_SOURCE_ASSET: &str = "info:sourceAsset";
@@ -31,7 +31,7 @@ pub const IMPL_SOURCE_ID: &str = "id";
 pub const IMPL_SOURCE_SOURCE_ASSET: &str = "sourceAsset";
 pub const IMPL_SOURCE_SOURCE_CODE: &str = "sourceCode";
 
-// ── Material / NodeGraph terminal output base names ─────────────────
+// Material / NodeGraph terminal output base names
 pub const TERMINAL_SURFACE: &str = "surface";
 pub const TERMINAL_DISPLACEMENT: &str = "displacement";
 pub const TERMINAL_VOLUME: &str = "volume";
@@ -45,12 +45,16 @@ pub const A_OUTPUTS_SURFACE: &str = "outputs:surface";
 pub const A_OUTPUTS_DISPLACEMENT: &str = "outputs:displacement";
 pub const A_OUTPUTS_VOLUME: &str = "outputs:volume";
 
-// ── Connectability metadata (UsdShadeInput) ─────────────────────────
+// Connectability metadata (UsdShadeInput)
 pub const META_CONNECTABILITY: &str = "connectability";
 pub const CONNECTABILITY_FULL: &str = "full";
 pub const CONNECTABILITY_INTERFACE_ONLY: &str = "interfaceOnly";
 
-// ── MaterialBindingAPI relationship names + binding metadata ────────
+// `renderType` metadata on a connectable input / output — a renderer-specific
+// type hint (C++ `UsdShadeInput`/`UsdShadeOutput::SetRenderType`).
+pub const META_RENDER_TYPE: &str = "renderType";
+
+// MaterialBindingAPI relationship names + binding metadata
 pub const REL_MATERIAL_BINDING: &str = "material:binding";
 pub const REL_MATERIAL_BINDING_COLLECTION: &str = "material:binding:collection";
 /// `bindMaterialAs` metadata on a binding relationship records the
@@ -67,7 +71,7 @@ pub const PURPOSE_ALL: &str = "";
 pub const PURPOSE_FULL: &str = "full";
 pub const PURPOSE_PREVIEW: &str = "preview";
 
-// ── Canonical UsdPreviewSurface shader id + input/output names ──────
+// Canonical UsdPreviewSurface shader id + input/output names
 pub const SHADER_ID_PREVIEW_SURFACE: &str = "UsdPreviewSurface";
 pub const SHADER_ID_UV_TEXTURE: &str = "UsdUVTexture";
 pub const SHADER_ID_PRIMVAR_READER_FLOAT2: &str = "UsdPrimvarReader_float2";
