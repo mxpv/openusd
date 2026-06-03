@@ -22,17 +22,28 @@
 //! `EvalImpliedClasses` task carries a node's class-based children one level up,
 //! repeating until the class reaches the root namespace.
 //!
+//! An arc whose target is not a root prim is composed as its own sub-index,
+//! including the opinions above the target, then grafted under the arc (C++
+//! `_AddArc`'s `includeAncestralOpinions` branch → `InsertChildSubgraph`). A
+//! borrowed [`Frame`] chain threads the parent graphs back through the nested
+//! builds so duplicate-node skipping (C++ `_AddArc`'s `skipDuplicateNodes`)
+//! drops a class reached both directly and through an ancestral reference,
+//! keeping it grafted once. Ancestral inherits ride the graph-clone seed
+//! alongside references and payloads, so a class an ancestor introduces
+//! re-evaluates at the child path.
+//!
 //! The indexer is being ported arc-by-arc. `build_with_cache_in` composes a
 //! prim with the indexer when [`Indexer::build`] reports support and otherwise
-//! falls back to the recursive builder. Ported so far: the root local site,
-//! external reference/payload arcs to a root-level target, ancestral
-//! reference/payload propagation through the graph-clone seed, and inherits of a
-//! root-level class with their implied classes. Features that still abandon the
-//! prim ([`Indexer::build`] returns `None`): specializes, variants, relocates
-//! (any prim composing an inherit while `layerRelocates` is present), internal
-//! references, `defaultPrim` targets, sub-root arc targets (which need the
-//! ancestral sub-index a `PreviousFrame` build provides), and instances. Each
-//! deferral point carries its reason inline.
+//! falls back to the recursive builder. Ported so far: the root local site;
+//! reference, payload, and inherit arcs to either a root-level or a sub-root
+//! target (with the ancestral sub-index and duplicate-node skipping); internal
+//! references and `defaultPrim` targets; ancestral reference/payload/inherit
+//! propagation through the graph-clone seed; and implied classes. Features that
+//! still abandon the prim ([`Indexer::build`] returns `None`): specializes,
+//! variants, relocates (any prim composing an inherit while `layerRelocates` is
+//! present, or whose ancestor graph carries a variant/specialize/relocate node
+//! the seed cannot deepen), and instances. Each deferral point carries its
+//! reason inline.
 
 use std::collections::BinaryHeap;
 use std::collections::{HashMap, HashSet};
@@ -40,7 +51,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{AbstractData, LayerOffset, Path};
+use crate::sdf::{AbstractData, LayerOffset, Path, Value};
 
 use super::graph::{ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::index::{
@@ -59,6 +70,37 @@ const MAX_DEPTH: usize = 100;
 /// these.
 fn is_class_based(arc: ArcType) -> bool {
     matches!(arc, ArcType::Inherit | ArcType::Specialize)
+}
+
+/// Whether `path` is a root prim (`/Foo`), whose composition needs no ancestral
+/// opinions because its only namespace ancestor is the pseudo-root.
+fn is_root_prim(path: &Path) -> bool {
+    path.parent().is_some_and(|p| p == Path::abs_root())
+}
+
+/// A borrowed parent-frame in the recursive sub-index build chain (C++
+/// `PcpPrimIndex_StackFrame`).
+///
+/// When an arc target needs ancestral opinions (`includeAncestralOpinions`),
+/// the target is composed as its own sub-index by a nested [`Indexer`], then
+/// grafted under the arc's parent. The nested indexer carries a `Frame` back to
+/// the graph that introduced the arc, so cross-frame duplicate-node skipping
+/// (C++ `_AddArc`'s `skipDuplicateNodes` search) can reach the parent graph's
+/// already-composed nodes — the mechanism that keeps a class reached both
+/// directly and through an ancestral reference from grafting twice.
+struct Frame<'f> {
+    /// The path the sub-index this frame introduces was requested at (C++
+    /// `PcpPrimIndex_StackFrame::requestedSite.path`), used to deepen a
+    /// cross-frame site lookup by the suffix the request adds.
+    requested_path: Path,
+    /// The path the parent graph is rooted at (its local-root site path), the
+    /// prefix replaced out of a cross-frame lookup.
+    root_path: Path,
+    /// The parent graph, searched for an existing node at the (prefix-replaced)
+    /// site during duplicate-node skipping.
+    graph: &'f PrimIndexGraph,
+    /// The next parent frame, or `None` at the top-level build.
+    previous: Option<&'f Frame<'f>>,
 }
 
 /// Fields whose presence at a composed site means the prim pulls in an arc or
@@ -109,7 +151,7 @@ enum TaskKind {
 /// All borrowed inputs are shared references, so each build is an independent
 /// pure function over the layer stack and incoming context (Rayon-friendly —
 /// see the `TODO(rayon)` on the cross-prim driver in `cache.rs`).
-pub(crate) struct Indexer<'a> {
+pub(crate) struct Indexer<'a, 'f> {
     stack: &'a LayerStack,
     ctx: &'a CompositionContext,
     /// Cached prim indices from the composition cache. The parent prim's index
@@ -122,6 +164,19 @@ pub(crate) struct Indexer<'a> {
     /// Whether [`ambient`](Self::ambient) is the stage's root layer stack, the
     /// only case where the stage-keyed `cached_indices` apply.
     ambient_is_root: bool,
+    /// The path this build composes — the graph's local-root site path. Set at
+    /// the start of [`build`](Self::build) and used as the current-graph root in
+    /// cross-frame duplicate-node lookups.
+    build_path: Path,
+    /// The parent frame for a recursive sub-index build, or `None` at the
+    /// top-level build (C++ `Pcp_PrimIndexer::previousFrame`).
+    frame: Option<&'f Frame<'f>>,
+    /// Whether duplicate-node skipping is in force for this build, inherited
+    /// from the arc that spawned the sub-index (C++ `previousFrame->skipDuplicateNodes`).
+    frame_skip: bool,
+    /// Sub-index nesting depth; a build exceeding [`MAX_DEPTH`] is abandoned,
+    /// bounding true composition cycles.
+    frame_depth: usize,
     /// The graph grown so far.
     output: PrimIndexGraph,
     /// Open composition tasks, highest priority first.
@@ -140,7 +195,7 @@ pub(crate) struct Indexer<'a> {
     supported: bool,
 }
 
-impl<'a> Indexer<'a> {
+impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
         stack: &'a LayerStack,
         ctx: &'a CompositionContext,
@@ -154,6 +209,10 @@ impl<'a> Indexer<'a> {
             cached_indices,
             ambient,
             ambient_is_root,
+            build_path: Path::abs_root(),
+            frame: None,
+            frame_skip: false,
+            frame_depth: 0,
             output: PrimIndexGraph::default(),
             tasks: BinaryHeap::new(),
             implied_seen: HashSet::new(),
@@ -170,6 +229,13 @@ impl<'a> Indexer<'a> {
         if self.ctx.within_instance {
             return Ok(None);
         }
+
+        // A sub-index nested past the depth bound is a true composition cycle;
+        // abandon the whole prim so the recursive builder reports it.
+        if self.frame_depth > MAX_DEPTH {
+            return Ok(None);
+        }
+        self.build_path = path.clone();
 
         // Seed the graph: a root prim starts empty (just its local site); a
         // child prim clones its parent's graph for ancestral opinions.
@@ -223,22 +289,36 @@ impl<'a> Indexer<'a> {
         }
 
         let parent = parent.expect("checked by needs_ancestor");
-        // The stage-keyed cache only applies when this prim is composed in the
-        // stage root layer stack. Ancestral seeding for an arc target (composed
-        // in a referenced sublayer stack) is a later phase.
-        if !self.ambient_is_root {
-            return Ok(false);
-        }
-        let Some(parent_index) = self.cached_indices.get(&parent) else {
-            return Ok(false);
+        // The parent's composed graph seeds this child. At the top-level build
+        // in the stage root layer stack it is read from the stage cache; in a
+        // recursive sub-index build it is composed afresh in the same ambient,
+        // reusing the frame chain so duplicate-node skipping (C++
+        // `_BuildInitialPrimIndexFromAncestor`'s else-branch
+        // `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`) applies.
+        let graph = if self.frame.is_none() && self.ambient_is_root {
+            let Some(parent_index) = self.cached_indices.get(&parent) else {
+                return Ok(false);
+            };
+            parent_index.graph().clone()
+        } else {
+            let Some(graph) = self.compose_ancestral_subindex(&parent)? else {
+                return Ok(false);
+            };
+            graph
         };
 
-        // Clone the parent's graph; only a graph composed entirely of ported
-        // arcs can be deepened structurally. A culled or class/variant/relocate
-        // node means the parent relied on an unported feature.
-        let graph = parent_index.graph().clone();
+        // Only a graph composed entirely of ported arcs can be deepened
+        // structurally. A culled or variant/specialize/relocate node means the
+        // parent relied on an unported feature. Inherit (and the implied-class
+        // placeholders, which are inert) deepen and re-evaluate at the child
+        // path through the queue, carrying ancestral classes to the child.
         if graph.nodes.iter().any(|n| {
-            !n.is_inert() && (n.is_culled() || !matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload))
+            !n.is_inert()
+                && (n.is_culled()
+                    || !matches!(
+                        n.arc,
+                        ArcType::Root | ArcType::Reference | ArcType::Payload | ArcType::Inherit
+                    ))
         }) {
             return Ok(false);
         }
@@ -269,6 +349,202 @@ impl<'a> Indexer<'a> {
             MapFunction::identity(),
             false,
         );
+    }
+
+    /// Builds a nested sub-indexer one frame deeper, sharing this build's layer
+    /// stack, context, and cache. The caller supplies the ambient stack, the
+    /// parent-frame chain, and whether duplicate-node skipping is in force.
+    fn new_sub<'b, 'g>(
+        &self,
+        ambient: &'b [(usize, LayerOffset)],
+        ambient_is_root: bool,
+        frame: Option<&'g Frame<'g>>,
+        frame_skip: bool,
+    ) -> Indexer<'b, 'g>
+    where
+        'a: 'b,
+    {
+        let mut sub = Indexer::new(self.stack, self.ctx, self.cached_indices, ambient, ambient_is_root);
+        sub.frame = frame;
+        sub.frame_skip = frame_skip;
+        sub.frame_depth = self.frame_depth + 1;
+        sub
+    }
+
+    /// Composes the ancestral parent of a sub-index in the same ambient,
+    /// reusing the current frame chain (C++ `_BuildInitialPrimIndexFromAncestor`'s
+    /// else-branch `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`). Returns
+    /// `None` when the parent relies on an unported feature.
+    fn compose_ancestral_subindex(&self, parent: &Path) -> Result<Option<PrimIndexGraph>, Error> {
+        self.new_sub(self.ambient, self.ambient_is_root, self.frame, self.frame_skip)
+            .build(parent)
+    }
+
+    /// Composes an arc target as its own sub-index, including the ancestral
+    /// opinions above the target (C++ `_AddArc`'s `includeAncestralOpinions`
+    /// branch). A fresh [`Frame`] threads this graph back to the nested build so
+    /// duplicate-node skipping can reach the nodes already composed here. Returns
+    /// `None` when the target relies on an unported feature.
+    fn compose_subindex(
+        &self,
+        target: &Path,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+        skip: bool,
+    ) -> Result<Option<PrimIndexGraph>, Error> {
+        let frame = Frame {
+            requested_path: target.clone(),
+            root_path: self.build_path.clone(),
+            graph: &self.output,
+            previous: self.frame,
+        };
+        self.new_sub(ambient, ambient_is_root, Some(&frame), skip).build(target)
+    }
+
+    /// Composes an arc target as its own ancestral sub-index and grafts it under
+    /// `parent` (C++ `_AddArc`'s `includeAncestralOpinions` branch +
+    /// `InsertChildSubgraph`), returning the grafted arc node. The grafted node's
+    /// implied classes still need to cascade up the new arc, so its
+    /// implied-class task is enqueued. Clears `supported` and returns `None` when
+    /// the target or its graft relies on an unported feature.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_and_graft(
+        &mut self,
+        target: &Path,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+        skip: bool,
+        parent: NodeId,
+        arc: ArcType,
+        map: MapFunction,
+        origin: NodeId,
+        sibling: u16,
+    ) -> Result<Option<NodeId>, Error> {
+        let Some(sub) = self.compose_subindex(target, ambient, ambient_is_root, skip)? else {
+            self.supported = false;
+            return Ok(None);
+        };
+        let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
+            self.supported = false;
+            return Ok(None);
+        };
+        self.add_implied_tasks_for_node(grafted);
+        Ok(Some(grafted))
+    }
+
+    /// Whether a node at the arc target site `(rep_layer, site_path)` already
+    /// exists in this graph or a parent frame's graph (C++ `_AddArc`'s
+    /// `skipDuplicateNodes` search). Adding a duplicate would introduce the same
+    /// site twice; class arcs and arcs composed inside a skip sub-build skip it.
+    ///
+    /// The current graph is searched at the target path; each parent frame is
+    /// searched at the path the site takes once deepened by the suffix that
+    /// frame's request adds (C++'s `ReplacePrefix` across the stack frame).
+    fn find_duplicate(&self, rep_layer: usize, site_path: &Path) -> bool {
+        if self.output.node_using_site(rep_layer, site_path).is_some() {
+            return true;
+        }
+        let mut search = site_path.clone();
+        let mut current_root = self.build_path.clone();
+        let mut frame = self.frame;
+        while let Some(f) = frame {
+            search = if current_root == search {
+                f.requested_path.clone()
+            } else {
+                f.requested_path
+                    .replace_prefix(&current_root, &search)
+                    .unwrap_or_else(|| f.requested_path.clone())
+            };
+            if f.graph.node_using_site(rep_layer, &search).is_some() {
+                return true;
+            }
+            current_root = f.root_path.clone();
+            frame = f.previous;
+        }
+        false
+    }
+
+    /// Grafts a composed sub-index under `parent` (C++ `InsertChildSubgraph`).
+    ///
+    /// The source's local root becomes the arc node, carrying `root_map`,
+    /// `origin`, `sibling`, and the parent site's namespace depth; every
+    /// internal node keeps its own arc, map-to-parent, and strength metadata,
+    /// with node handles remapped into this graph. Returns the grafted arc node,
+    /// or `None` when the source has no single local root to graft (an extra
+    /// root-level arc a later phase grafts individually).
+    fn graft_subindex(
+        &mut self,
+        source: &PrimIndexGraph,
+        parent: NodeId,
+        arc: ArcType,
+        root_map: MapFunction,
+        origin: NodeId,
+        sibling: u16,
+    ) -> Option<NodeId> {
+        let local_root = source.local_root();
+        if !local_root.is_valid() {
+            return None;
+        }
+        // The source local root is the lone contributing child of the source's
+        // synthetic root; a second one means extra root-level arcs to graft.
+        let synthetic = source.root;
+        let extra_roots = source[synthetic.idx()]
+            .children()
+            .iter()
+            .any(|&c| c != local_root && !source[c.idx()].is_inert());
+        if extra_roots {
+            return None;
+        }
+
+        let parent_depth = self.node(parent).path.prim_element_count() as u16;
+        let mut remap: Vec<Option<NodeId>> = vec![None; source.nodes.len()];
+        let mut grafted_root = NodeId::INVALID;
+        // The arena is append-only, so a node's parent always precedes it and is
+        // already remapped when its turn comes.
+        for sid in 0..source.nodes.len() {
+            if sid == synthetic.idx() {
+                continue;
+            }
+            let node = &source.nodes[sid];
+            // The local root becomes the arc node, taking the arc's identity and
+            // the parent site's strength metadata; every other node keeps its own
+            // arc and metadata, with its parent and origin remapped into this
+            // graph.
+            let (struct_parent, node_map, node_arc, node_sibling, node_depth, node_origin) = if sid == local_root.idx()
+            {
+                (parent, root_map.clone(), arc, sibling, parent_depth, Some(origin))
+            } else {
+                let grafted_parent = node.parent().and_then(|p| remap[p.idx()]).unwrap_or(parent);
+                let grafted_origin = node.origin().and_then(|o| remap[o.idx()]).or(Some(grafted_parent));
+                (
+                    grafted_parent,
+                    node.map_to_parent.clone(),
+                    node.arc,
+                    node.sibling_num_at_origin,
+                    node.namespace_depth,
+                    grafted_origin,
+                )
+            };
+            let new_id = self.output.add_site_child(
+                struct_parent,
+                node.layer_stack().to_vec(),
+                node.path.clone(),
+                node_arc,
+                node_map,
+                false,
+            );
+            let n = &mut self.output.nodes[new_id.idx()];
+            n.has_specs = node.has_specs;
+            n.flags = node.flags;
+            n.sibling_num_at_origin = node_sibling;
+            n.namespace_depth = node_depth;
+            n.origin = node_origin;
+            remap[sid] = Some(new_id);
+            if sid == local_root.idx() {
+                grafted_root = new_id;
+            }
+        }
+        Some(grafted_root)
     }
 
     /// Computes `has_specs` at each non-inert node's path, abandons the prim
@@ -317,6 +593,16 @@ impl<'a> Indexer<'a> {
             node,
         });
 
+        self.add_implied_tasks_for_node(node);
+    }
+
+    /// Enqueues only the implied-class propagation a node triggers, without its
+    /// expressed-arc tasks (C++ `AddTasksForNode(node, tasks & ~ExpressedArcTasks)`).
+    ///
+    /// Used after grafting an ancestral sub-index: the nested build already
+    /// evaluated the grafted nodes' references, payloads, and inherits, so only
+    /// the implied-class cascade up the new arc remains.
+    fn add_implied_tasks_for_node(&mut self, node: NodeId) {
         if is_class_based(self.node(node).arc) {
             let start = self.find_starting_node_for_implied_classes(node);
             self.enqueue_implied(start);
@@ -414,9 +700,10 @@ impl<'a> Indexer<'a> {
     /// returning the new or existing node. The arc may be a directly-authored
     /// inherit or an implied class propagated from `origin` in another subtree.
     ///
-    /// A sub-root class target needs the recursive ancestral-opinion build
-    /// (`includeAncestralOpinions`, a `PreviousFrame` sub-index) that a later
-    /// phase ports, so it abandons the prim.
+    /// A sub-root class target is composed as its own ancestral sub-index
+    /// (`includeAncestralOpinions`) and grafted under `parent`; a class reached
+    /// both directly and through an ancestral reference grafts once thanks to
+    /// duplicate-node skipping (C++ `skipDuplicateNodes`).
     fn add_class_based_arc(
         &mut self,
         parent: NodeId,
@@ -452,11 +739,29 @@ impl<'a> Indexer<'a> {
             .as_ref()
             .is_some_and(|(li, p)| *li == rep && *p == inherit_path);
         let direct_should = inherit_path != parent_path && !same_as_ignore;
-        let is_root_prim = inherit_path.parent().is_some_and(|p| p == Path::abs_root());
-        if direct_should && !is_root_prim {
-            // A sub-root class needs ancestral opinions (a recursive sub-index).
-            self.supported = false;
+        // A contributing class arc skips a duplicate site; an inert placeholder
+        // (mapping unchanged) is kept to keep propagating. The skip also carries
+        // in from a parent frame (C++ `_AddArc`'s `|= previousFrame->skip`).
+        let skip = direct_should || self.frame_skip;
+        if skip && self.find_duplicate(rep, &inherit_path) {
             return Ok(None);
+        }
+
+        // A sub-root class needs the opinions above it: compose the target as its
+        // own ancestral sub-index and graft it under the parent.
+        if direct_should && !is_root_prim(&inherit_path) {
+            let target_is_root = self.ambient_is_root_for(&parent_layers);
+            return self.compose_and_graft(
+                &inherit_path,
+                &parent_layers,
+                target_is_root,
+                skip,
+                parent,
+                arc,
+                inherit_map,
+                origin,
+                arc_num,
+            );
         }
 
         let has_specs = self.stack_has_spec(&parent_layers, &inherit_path);
@@ -651,44 +956,83 @@ impl<'a> Indexer<'a> {
         arc: ArcType,
         arc_offset: LayerOffset,
     ) -> Result<(), Error> {
-        // Internal references (empty asset path) and `defaultPrim` targets
-        // (empty prim path) are later phases.
-        if asset_path.is_empty() || prim_path.is_empty() {
-            self.supported = false;
-            return Ok(());
-        }
-        // A sub-root target sits under a prim that may carry ancestral arcs; the
-        // recursive-subindex composition it needs is a later phase.
-        if prim_path.parent().is_some_and(|p| p != Path::abs_root()) {
-            self.supported = false;
-            return Ok(());
-        }
-        let Some(layer_index) = find_layer(asset_path, &self.stack.layers, &*self.stack.resolver) else {
-            // The recursive builder raises `UnresolvedLayer`; let it.
-            self.supported = false;
-            return Ok(());
+        let is_internal = asset_path.is_empty();
+        let parent_path = self.node(parent).path.clone();
+
+        // Resolve the target layer stack. An internal reference targets the
+        // referencing node's own layer stack (C++ `node.GetLayerStack()`); an
+        // external one resolves the asset's sublayer stack.
+        let (target_stack, target_is_root) = if is_internal {
+            let stack = self.node(parent).layer_stack().to_vec();
+            let is_root = self.ambient_is_root_for(&stack);
+            (stack, is_root)
+        } else {
+            let Some(layer_index) = find_layer(asset_path, &self.stack.layers, &*self.stack.resolver) else {
+                // The recursive builder raises `UnresolvedLayer`; let it.
+                self.supported = false;
+                return Ok(());
+            };
+            (self.stack.sublayer_stack(layer_index), false)
         };
 
-        if !self.arc_target_in_bounds(parent, layer_index, prim_path) {
+        // Resolve the source prim path, falling back to the target layer's
+        // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
+        let source = if prim_path.is_empty() {
+            let Some(p) = self.resolve_default_prim(&target_stack)? else {
+                self.supported = false;
+                return Ok(());
+            };
+            p
+        } else {
+            prim_path.clone()
+        };
+
+        let rep = target_stack[0].0;
+        // A duplicate site reached inside a skip sub-build is skipped, keeping a
+        // class reached both directly and through this arc from grafting twice.
+        if self.frame_skip && self.find_duplicate(rep, &source) {
+            return Ok(());
+        }
+        if !self.arc_target_in_bounds(parent, rep, &source) {
             // Deep nesting or a cycle the recursive builder reports.
             self.supported = false;
             return Ok(());
         }
 
-        let target_stack = self.stack.sublayer_stack(layer_index);
-        if !self.stack_has_spec(&target_stack, prim_path) {
+        let mut map = MapFunction::from_pair(source.clone(), parent_path).with_time_offset(arc_offset);
+        if is_internal {
+            // Internal references keep full namespace visibility outside the
+            // source and target (C++ `mapExpr.AddRootIdentity()`).
+            map = map.with_root_identity();
+        }
+
+        // A sub-root target needs the opinions above it: compose it as its own
+        // ancestral sub-index and graft it under the parent.
+        if !is_root_prim(&source) {
+            self.compose_and_graft(
+                &source,
+                &target_stack,
+                target_is_root,
+                self.frame_skip,
+                parent,
+                arc,
+                map,
+                parent,
+                0,
+            )?;
+            return Ok(());
+        }
+
+        if !self.stack_has_spec(&target_stack, &source) {
             // The recursive builder keeps an empty arc target as a culled node;
             // the indexer does not reproduce that yet, so defer the whole prim.
             self.supported = false;
             return Ok(());
         }
 
-        let parent_path = self.node(parent).path.clone();
-        let map = MapFunction::from_pair(prim_path.clone(), parent_path).with_time_offset(arc_offset);
         let new_node = self
             .output
-            .add_site_child(parent, target_stack, prim_path.clone(), arc, map, false);
-
+            .add_site_child(parent, target_stack, source, arc, map, false);
         if self.node_authors_unsupported(new_node)? {
             self.supported = false;
             return Ok(());
@@ -697,6 +1041,23 @@ impl<'a> Indexer<'a> {
         // The new node may itself author references, payloads, and inherits.
         self.add_tasks_for_node(new_node);
         Ok(())
+    }
+
+    /// Resolves the `defaultPrim` of a layer stack's root layer to a root-prim
+    /// path (C++ `_GetDefaultPrimPath`), or `None` when it is absent or invalid.
+    fn resolve_default_prim(&self, target_stack: &[(usize, LayerOffset)]) -> Result<Option<Path>, Error> {
+        let root_layer = target_stack[0].0;
+        let Some(value) = self
+            .stack
+            .layer(root_layer)
+            .try_get(&Path::abs_root(), FieldKey::DefaultPrim.as_str())?
+        else {
+            return Ok(None);
+        };
+        match value.into_owned() {
+            Value::Token(name) | Value::String(name) => Ok(Path::new(&format!("/{name}")).ok()),
+            _ => Ok(None),
+        }
     }
 
     /// Returns `true` when an arc to `(root_layer, path)` under `parent` is
@@ -716,6 +1077,13 @@ impl<'a> Indexer<'a> {
             cur = n.parent().unwrap_or(NodeId::INVALID);
         }
         depth <= MAX_DEPTH
+    }
+
+    /// Whether `layers` is the stage root layer stack — the only ambient where
+    /// an arc target is composed at root and the stage-keyed `cached_indices`
+    /// apply. A sub-index composed in this ambient is keyed in the stage cache.
+    fn ambient_is_root_for(&self, layers: &[(usize, LayerOffset)]) -> bool {
+        self.ambient_is_root && layers == self.ambient
     }
 
     /// Whether any layer in `stack` authors a spec at `path`.
@@ -802,14 +1170,18 @@ mod tests {
     }
 
     #[test]
-    fn subroot_inherit_deferred() {
-        // A class nested under another prim needs the ancestral sub-index build.
+    fn subroot_inherit_composed() {
+        // A class nested under another prim composes through the ancestral
+        // sub-index build (C++ `includeAncestralOpinions`).
         let s = stack(
-            "#usda 1.0\ndef \"Scope\" {\n  class \"C\" {}\n}\ndef \"World\" (\n    inherits = </Scope/C>\n) {\n}\n",
+            "#usda 1.0\ndef \"Scope\" {\n  class \"C\" { custom double x = 1 }\n}\ndef \"World\" (\n    inherits = </Scope/C>\n) {\n}\n",
         );
+        let graph = build(&s, "/World").expect("a sub-root class inherit is composed");
         assert!(
-            build(&s, "/World").is_none(),
-            "a sub-root class inherit defers to the recursive builder"
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/Scope/C" && n.has_specs()),
+            "the sub-root inherit arc to /Scope/C contributes the class opinion"
         );
     }
 
@@ -842,11 +1214,16 @@ mod tests {
     }
 
     #[test]
-    fn internal_reference_deferred() {
-        let s = stack("#usda 1.0\ndef \"Base\" {}\ndef \"World\" (\n    references = </Base>\n) {\n}\n");
+    fn internal_reference_composed() {
+        let s = stack(
+            "#usda 1.0\ndef \"Base\" { custom double x = 1 }\ndef \"World\" (\n    references = </Base>\n) {\n}\n",
+        );
+        let graph = build(&s, "/World").expect("an internal reference to a root prim is composed");
         assert!(
-            build(&s, "/World").is_none(),
-            "an internal reference defers to the recursive builder"
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/Base" && n.has_specs()),
+            "the internal reference arc to /Base contributes its opinion"
         );
     }
 
