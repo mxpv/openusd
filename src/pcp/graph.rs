@@ -14,6 +14,12 @@ use crate::sdf::{LayerOffset, Path};
 
 use super::mapping::MapFunction;
 
+/// Whether an arc introduces a class hierarchy node — an inherit or a
+/// specializes (C++ `PcpIsClassBasedArc`).
+pub(crate) fn is_class_based_arc(arc: ArcType) -> bool {
+    matches!(arc, ArcType::Inherit | ArcType::Specialize)
+}
+
 /// The type of composition arc that introduced a [`Node`].
 ///
 /// Variants are ordered by LIVERPS strength (strongest first). The
@@ -375,6 +381,15 @@ pub(crate) struct PrimIndexGraph {
     pub(crate) nodes: Vec<Node>,
     pub(crate) strength_order: Vec<NodeId>,
     pub(crate) root: NodeId,
+    /// Whether specializes nodes were copied under the local root for strength
+    /// ordering (C++ `_PropagateNodeToRoot`). The task-queue indexer sets this;
+    /// the recursive builder leaves it `false` and hangs specializes where they
+    /// compose. The faithful C++ specializes comparator
+    /// (`PcpCompareSiblingNodeStrength`) reads that copy-to-root structure, so
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength)
+    /// uses it only when this is set and otherwise keeps the chain-depth
+    /// approximation the builder's graphs rely on.
+    pub(crate) specializes_propagated: bool,
 }
 
 impl PrimIndexGraph {
@@ -592,11 +607,13 @@ impl PrimIndexGraph {
     /// when `a` is the stronger sibling.
     ///
     /// Keys, in priority order (spec 10.3): arc type (lower discriminant
-    /// stronger); for two specializes, specializes-chain depth (a source is
-    /// weaker than its target); namespace depth (deeper stronger, skipped for
-    /// specializes); origin strength (the node whose origin is reached first in
-    /// a strong-to-weak walk); finally sibling number — the earlier-created
-    /// node (lower [`NodeId`]) is stronger.
+    /// stronger); namespace depth (deeper stronger); origin strength (the
+    /// stronger origin wins); finally the sibling arc number at the origin (C++
+    /// `GetSiblingNumAtOrigin`, lower stronger). Two specializes use the faithful
+    /// specializes comparator ([`compare_specialize_siblings`]) when the graph
+    /// carries the copy-to-root structure it reads (`specializes_propagated`);
+    /// the recursive builder's graphs lack that structure, so they order the
+    /// globally-weak band by specializes-chain depth with an arena-index tiebreak.
     pub(crate) fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         let na = &self.nodes[a.idx()];
         let nb = &self.nodes[b.idx()];
@@ -606,20 +623,32 @@ impl PrimIndexGraph {
             return na.arc.cmp(&nb.arc);
         }
 
-        let both_specialize = na.introduced_by_specialize() && nb.introduced_by_specialize();
-
-        // 2a. Specializes-chain depth: a class is stronger than the class it
-        // specializes (C++ `_OriginsAreNestedArcs`: the source of a specializes
-        // arc is weaker than its target regardless of namespace depth, spec
-        // 10.4.1). Lower depth is stronger.
-        if both_specialize && na.specialize_chain_depth != nb.specialize_chain_depth {
-            return na.specialize_chain_depth.cmp(&nb.specialize_chain_depth);
+        // Two specializes need special handling because of how specializes nodes
+        // are copied to the root (C++ `PcpCompareSiblingNodeStrength`). When the
+        // graph carries that copy-to-root structure use the faithful comparator;
+        // otherwise (the recursive builder's graphs) keep the chain-depth
+        // approximation that orders the globally-weak band.
+        if na.introduced_by_specialize() && nb.introduced_by_specialize() {
+            if self.specializes_propagated {
+                return self.compare_specialize_siblings(a, b);
+            }
+            if na.specialize_chain_depth != nb.specialize_chain_depth {
+                return na.specialize_chain_depth.cmp(&nb.specialize_chain_depth);
+            }
+            let oa = na.origin.unwrap_or(a);
+            let ob = nb.origin.unwrap_or(b);
+            if oa != ob && (oa != a || ob != b) {
+                let ord = self.compare_node_strength(oa, ob);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            return a.0.cmp(&b.0);
         }
 
-        // 2b. Namespace depth: a deeper arc-introduction site is stronger. C++
-        // skips this for specializes whose origins are nested arcs (handled by
-        // the chain-depth key above), so it is skipped for two specializes.
-        if !both_specialize && na.namespace_depth != nb.namespace_depth {
+        // 2. Namespace depth: a deeper arc-introduction site is stronger (C++
+        // uses higher namespace depth).
+        if na.namespace_depth != nb.namespace_depth {
             return nb.namespace_depth.cmp(&na.namespace_depth);
         }
 
@@ -628,11 +657,14 @@ impl PrimIndexGraph {
         // from, or the parent for a directly-authored arc, so two direct
         // siblings share an origin and fall through to the tiebreak below. The
         // synthetic root is the sole node without an origin; it stands in for
-        // itself. Comparing origins recurses only over strictly-older nodes (an
-        // origin is always created before the node carrying it), so the
-        // recursion is well-founded — except when both nodes default to
-        // themselves (no origin authored): recursing on the same `(a, b)` would
-        // not progress, so skip straight to the sibling-number tiebreak.
+        // itself. C++ `_OriginIsStronger` walks the tree in strength order to
+        // find which origin comes first; [`compare_node_strength`] is the
+        // order-independent equivalent, well-defined here because it never reads
+        // the strength projection being computed. It recurses only over
+        // strictly-older nodes (an origin is always created before the node
+        // carrying it), except when both nodes default to themselves (no origin
+        // authored): recursing on the same `(a, b)` would not progress, so skip
+        // straight to the sibling-number tiebreak.
         let oa = na.origin.unwrap_or(a);
         let ob = nb.origin.unwrap_or(b);
         if oa != ob && (oa != a || ob != b) {
@@ -642,9 +674,252 @@ impl PrimIndexGraph {
             }
         }
 
-        // 4. Sibling number: the earlier-created node (lower arena index) was
-        // introduced first and is stronger.
-        a.0.cmp(&b.0)
+        // 4. Origin sibling arc number, then arena index (C++ `GetSiblingNumAtOrigin`,
+        // with the arena index as the deterministic tiebreak where C++ returns equal).
+        self.sibling_then_index(a, b)
+    }
+
+    /// Compares two specializes siblings under the copy-to-root model, porting
+    /// the specializes branch of C++ `PcpCompareSiblingNodeStrength`. Returns
+    /// [`Ordering::Less`] when `a` is stronger. Only called when
+    /// [`specializes_propagated`](Self::specializes_propagated) holds.
+    // TODO(perf): invoked O(n log n) times from `finalize_strength_order`'s sort,
+    // and `origin_root_node` / `origins_are_nested` / `namespace_depth_for_class_hierarchy`
+    // re-walk origin/parent chains while `is_propagated_specializes` re-scans the
+    // root's children (`local_root`) on each call. The per-node chain results
+    // could be precomputed into a side table once before the sort.
+    fn compare_specialize_siblings(&self, a: NodeId, b: NodeId) -> Ordering {
+        let (a_root, a_hops) = self.origin_root_node(a);
+        let (b_root, b_hops) = self.origin_root_node(b);
+
+        // Origin namespace depth (skipped when the origin roots are nested arcs:
+        // a specializes source must stay weaker than its target regardless of
+        // namespace depth, C++ `_OriginsAreNestedArcs`).
+        if !self.origins_are_nested(a_root, b_root) {
+            let da = self.nodes[a.idx()].namespace_depth;
+            let db = self.nodes[b.idx()].namespace_depth;
+            if da != db {
+                return db.cmp(&da);
+            }
+        }
+
+        let oa = self.origin_of(a);
+        let ob = self.origin_of(b);
+        let a_authored = oa == self.parent_of(a);
+        let b_authored = ob == self.parent_of(b);
+
+        if oa == ob {
+            // Same origin: either both authored arcs (fall through to sibling
+            // number) or both copied to the root — the implied node (site differs
+            // from its origin's) is the more local, stronger opinion.
+            if !a_authored && !b_authored {
+                return self
+                    .implied_beats_propagated(a, oa, b, ob)
+                    .unwrap_or_else(|| a.0.cmp(&b.0));
+            }
+        } else if a_root != b_root {
+            // Different authored specialize arcs: order by the strength of the
+            // origin roots. C++ `_OriginIsStronger` walks the tree in strength
+            // order; [`compare_node_strength`] is the order-independent
+            // equivalent, safe to call mid-sort (it never reads the projection).
+            return self.compare_node_strength(a_root, b_root).then(a.0.cmp(&b.0));
+        } else {
+            // Same origin root, different origins: both children of the root.
+            // First the namespace depth of the node that inherits/specializes the
+            // class hierarchy the origin belongs to (accounts for specializes
+            // implied to ancestral hierarchies).
+            let a_depth = if a_authored {
+                0
+            } else {
+                self.namespace_depth_for_class_hierarchy(oa)
+            };
+            let b_depth = if b_authored {
+                0
+            } else {
+                self.namespace_depth_for_class_hierarchy(ob)
+            };
+            if a_depth != b_depth {
+                return a_depth.cmp(&b_depth);
+            }
+            // Then the longer origin chain (implied further up, more local) wins.
+            if a_hops != b_hops {
+                return b_hops.cmp(&a_hops);
+            }
+            // An implied opinion local to the root layer stack beats a propagated
+            // one (C++ `TrickySpecializesAndInherits3`).
+            if !a_authored && !b_authored && self.same_layer_stack_as_root(a) && self.same_layer_stack_as_root(b) {
+                if let Some(ord) = self.implied_beats_propagated(a, oa, b, ob) {
+                    return ord;
+                }
+            }
+            // Finally, order by the strength of the two origins themselves.
+            return self.compare_node_strength(oa, ob).then(a.0.cmp(&b.0));
+        }
+
+        self.sibling_then_index(a, b)
+    }
+
+    /// When exactly one of `a`/`b` is an implied copy — its site differs from
+    /// its origin's — and the other a propagated original, the implied node is
+    /// the more local, stronger opinion (the implied-vs-propagated tiebreak in
+    /// C++ `PcpCompareSiblingNodeStrength`). `None` when both or neither are
+    /// implied.
+    fn implied_beats_propagated(&self, a: NodeId, oa: NodeId, b: NodeId, ob: NodeId) -> Option<Ordering> {
+        match (!self.same_site(a, oa), !self.same_site(b, ob)) {
+            (true, false) => Some(Ordering::Less),
+            (false, true) => Some(Ordering::Greater),
+            _ => None,
+        }
+    }
+
+    /// Sibling arc number at the origin (C++ `GetSiblingNumAtOrigin`, lower
+    /// stronger), with the arena index as the final deterministic tiebreak.
+    fn sibling_then_index(&self, a: NodeId, b: NodeId) -> Ordering {
+        self.nodes[a.idx()]
+            .sibling_num_at_origin
+            .cmp(&self.nodes[b.idx()].sibling_num_at_origin)
+            .then(a.0.cmp(&b.0))
+    }
+
+    /// Arc type of a node.
+    fn arc_of(&self, id: NodeId) -> ArcType {
+        self.nodes[id.idx()].arc
+    }
+
+    /// Structural parent, or [`NodeId::INVALID`] for a root node.
+    fn parent_of(&self, id: NodeId) -> NodeId {
+        self.nodes[id.idx()].parent.unwrap_or(NodeId::INVALID)
+    }
+
+    /// Introducing node (C++ `GetOriginNode`), or [`NodeId::INVALID`].
+    fn origin_of(&self, id: NodeId) -> NodeId {
+        self.nodes[id.idx()].origin.unwrap_or(NodeId::INVALID)
+    }
+
+    /// Whether two nodes carry the same site: same representative layer and path
+    /// (C++ `GetSite() ==`).
+    pub(crate) fn same_site(&self, a: NodeId, b: NodeId) -> bool {
+        a.is_valid()
+            && b.is_valid()
+            && self.nodes[a.idx()].layer_index() == self.nodes[b.idx()].layer_index()
+            && self.nodes[a.idx()].path == self.nodes[b.idx()].path
+    }
+
+    /// Whether `a`'s layer stack is the local root's layer stack (C++
+    /// `GetLayerStack() == GetRootNode().GetLayerStack()`).
+    fn same_layer_stack_as_root(&self, a: NodeId) -> bool {
+        let root = self.local_root();
+        root.is_valid() && self.nodes[a.idx()].layer_stack == self.nodes[root.idx()].layer_stack
+    }
+
+    /// Whether a node is a specializes node copied under the local root for
+    /// strength ordering (C++ `Pcp_IsPropagatedSpecializesNode`): a specialize
+    /// arc whose parent is the local root and whose site equals its origin's.
+    pub(crate) fn is_propagated_specializes(&self, id: NodeId) -> bool {
+        self.arc_of(id) == ArcType::Specialize
+            && self.parent_of(id) == self.local_root()
+            && self.same_site(id, self.origin_of(id))
+    }
+
+    /// Start of a node's origin chain and the number of hops to it (C++
+    /// `PcpNodeRef::GetOriginRootNode`): follows `origin` while it differs from
+    /// `parent` (an authored arc has `origin == parent`).
+    fn origin_root_node(&self, id: NodeId) -> (NodeId, usize) {
+        let mut cur = id;
+        let mut hops = 0;
+        loop {
+            let origin = self.origin_of(cur);
+            if !origin.is_valid() || origin == self.parent_of(cur) {
+                break;
+            }
+            cur = origin;
+            hops += 1;
+        }
+        (cur, hops)
+    }
+
+    /// Whether `a` is a descendant of `b` or vice versa in the mixed
+    /// origin/parent chain (C++ `_OriginsAreNestedArcs`): a propagated
+    /// specializes node walks up via its origin, every other node via its parent.
+    fn origins_are_nested(&self, a: NodeId, b: NodeId) -> bool {
+        self.is_nested_under(a, b) || self.is_nested_under(b, a)
+    }
+
+    fn is_nested_under(&self, x: NodeId, y: NodeId) -> bool {
+        let mut n = x;
+        while n.is_valid() {
+            if n == y {
+                return true;
+            }
+            n = if self.is_propagated_specializes(n) {
+                self.origin_of(n)
+            } else {
+                self.parent_of(n)
+            };
+        }
+        false
+    }
+
+    /// Namespace depth of the node that inherits or specializes the class
+    /// hierarchy `n` belongs to (C++ `_GetNamespaceDepthForClassHierarchy`),
+    /// skipping past relocate placeholders.
+    fn namespace_depth_for_class_hierarchy(&self, n: NodeId) -> u16 {
+        let (mut instance, _class) = self.starting_node_of_class_hierarchy(n);
+        while instance.is_valid() && self.arc_of(instance) == ArcType::Relocate {
+            instance = self.parent_of(instance);
+        }
+        if instance.is_valid() {
+            self.nodes[instance.idx()].namespace_depth
+        } else {
+            0
+        }
+    }
+
+    /// Walks up the chain of class arcs at the same depth-below-introduction from
+    /// `n`, returning `(instance node, topmost class node)` (C++
+    /// `Pcp_FindStartingNodeOfClassHierarchy`), stepping across a propagated
+    /// specializes node via its origin.
+    pub(crate) fn starting_node_of_class_hierarchy(&self, n: NodeId) -> (NodeId, NodeId) {
+        let mut instance = n;
+        if self.is_propagated_specializes(instance) {
+            instance = self.origin_of(instance);
+        }
+        let mut class_node = NodeId::INVALID;
+        let depth = self.nodes[instance.idx()].depth_below_introduction();
+        while instance.is_valid()
+            && is_class_based_arc(self.arc_of(instance))
+            && self.nodes[instance.idx()].depth_below_introduction() == depth
+        {
+            class_node = instance;
+            let parent = self.parent_of(instance);
+            if !parent.is_valid() {
+                break;
+            }
+            instance = parent;
+            if self.is_propagated_specializes(instance) {
+                instance = self.origin_of(instance);
+            }
+        }
+        (instance, class_node)
+    }
+
+    /// The specializes node copied under the local root for `node`, if any (C++
+    /// `_GetPropagatedSpecializesNode`): a local-root child whose origin is
+    /// `node` and which is itself a propagated specializes node. Returns `None`
+    /// for a non-specializes node.
+    pub(crate) fn get_propagated_specializes_node(&self, node: NodeId) -> Option<NodeId> {
+        if self.arc_of(node) != ArcType::Specialize {
+            return None;
+        }
+        let root = self.local_root();
+        if !root.is_valid() {
+            return None;
+        }
+        self.nodes[root.idx()]
+            .children
+            .iter()
+            .copied()
+            .find(|&rc| self.origin_of(rc) == node && self.is_propagated_specializes(rc))
     }
 
     /// Compares two arbitrary nodes in the same tree by strength, porting C++
@@ -729,10 +1004,19 @@ impl PrimIndexGraph {
             }
         }
 
-        // Specializes are globally weaker than every other opinion (spec
-        // 10.4.1). Keep the non-specialize nodes in DFS order, then append the
-        // specialize band ordered among itself by the sibling comparator (which
-        // treats the band as siblings at the root, mirroring copy-to-root).
+        if self.specializes_propagated {
+            // Specializes were copied under the local root (C++
+            // `_PropagateNodeToRoot`). Specialize is the weakest arc, so those
+            // copies and their subtrees sort last among the root's children and
+            // the DFS already places the globally-weak band at the end.
+            self.strength_order = dfs;
+            return;
+        }
+
+        // The recursive builder hangs specializes where they compose, so pull
+        // the globally-weak band (spec 10.4.1) to the end, ordered among itself
+        // by the sibling comparator (which treats the band as siblings at the
+        // root, mirroring copy-to-root).
         let (mut order, mut specials): (Vec<NodeId>, Vec<NodeId>) = dfs
             .into_iter()
             .partition(|id| !self.nodes[id.idx()].introduced_by_specialize());
