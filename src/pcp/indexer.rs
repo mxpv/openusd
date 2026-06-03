@@ -1,25 +1,31 @@
 //! Task-queue prim indexer (C++ `Pcp_PrimIndexer` port).
 //!
-//! [`Indexer`] is the replacement for the recursive `IndexBuilder`: it grows a
-//! [`PrimIndexGraph`] node-by-node, following composition arcs without the
-//! global `(layer, path, arc)` dedup set the recursive builder uses. That
-//! structural model keeps reference/payload diamonds — a shared target reached
-//! by two arc paths contributes a node on each path — which the global set
-//! collapsed to one (the recursive builder's long-standing bug).
+//! [`Indexer`] grows a [`PrimIndexGraph`] node-by-node by draining a
+//! priority-ordered task queue, mirroring C++ `Pcp_BuildPrimIndex`. It is the
+//! replacement for the recursive `IndexBuilder`: rather than the builder's
+//! global `(layer, path, arc)` dedup set, the queue follows each composition arc
+//! structurally, so reference/payload diamonds — a shared target reached by two
+//! arc paths — contribute a node on each path.
+//!
+//! Ancestral opinions enter through the graph-clone seed (C++
+//! `_BuildInitialPrimIndexFromAncestor`): the parent prim's composed graph is
+//! cloned and every site path deepened by the child name
+//! ([`PrimIndexGraph::append_child_name_to_all_sites`]), so the references and
+//! payloads an ancestor introduced are re-evaluated at the deepened path by the
+//! same queue. Each node carries its full site layer stack, so deepening only
+//! needs to recompute which layers author a spec (`has_specs`).
 //!
 //! The indexer is being ported arc-by-arc. `build_with_cache_in` composes a
 //! prim with the indexer when [`Indexer::build`] reports support and otherwise
-//! falls back to the recursive builder, so each phase composes one more arc
-//! type while the byte-exact `pcp.txt` composition goldens validate the result.
-//! Whenever the indexer meets a composition feature a later phase ports, it
-//! abandons the prim ([`Indexer::build`] returns `None`) and the recursive
-//! builder composes it.
-//!
-//! Ported so far: the root local site, external reference/payload arcs (with an
-//! explicit root-level prim target), and propagation of reference/payload
-//! ancestor arcs to a child prim. Any other feature defers to the recursive
-//! builder; each deferral point carries its reason inline.
+//! falls back to the recursive builder. Ported so far: the root local site,
+//! external reference/payload arcs to a root-level target, and ancestral
+//! reference/payload propagation through the graph-clone seed. Any other feature
+//! (inherits, specializes, variants, relocates, internal references,
+//! `defaultPrim` targets, sub-root targets, instances) abandons the prim
+//! ([`Indexer::build`] returns `None`); each deferral point carries its reason
+//! inline.
 
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -47,8 +53,32 @@ const UNSUPPORTED_FIELDS: [FieldKey; 4] = [
     FieldKey::VariantSelection,
 ];
 
-/// Composes a single prim by growing the composition graph node-by-node from
-/// its arcs (C++ `Pcp_PrimIndexer`).
+/// A queued unit of composition work on one node (C++ `Pcp_PrimIndexer::Task`).
+///
+/// `BinaryHeap` pops the greatest `Task`, and the derived order compares
+/// [`kind`](Self::kind) first, so references drain before payloads (C++
+/// `Task::Type` priority). Within a kind the node index gives a consistent,
+/// arbitrary tiebreak — references and payloads compose order-independently, so
+/// only determinism matters.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Task {
+    kind: TaskKind,
+    node: NodeId,
+}
+
+/// The ported task kinds, ordered weakest-priority first so the derived `Ord`
+/// makes the heap pop the highest-priority kind: payloads are evaluated after
+/// references (C++ `Task::Type`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TaskKind {
+    /// Evaluate the payloads authored at the node's site.
+    EvalNodePayloads,
+    /// Evaluate the references authored at the node's site.
+    EvalNodeReferences,
+}
+
+/// Composes a single prim by draining a task queue over a composition graph
+/// grown node-by-node (C++ `Pcp_PrimIndexer`).
 ///
 /// All borrowed inputs are shared references, so each build is an independent
 /// pure function over the layer stack and incoming context (Rayon-friendly —
@@ -56,21 +86,20 @@ const UNSUPPORTED_FIELDS: [FieldKey; 4] = [
 pub(crate) struct Indexer<'a> {
     stack: &'a LayerStack,
     ctx: &'a CompositionContext,
-    /// Cached prim indices from the composition cache, consulted when an arc
-    /// target resolves to an already-composed stage prim. Unused until the
-    /// class-arc phases land.
-    #[allow(dead_code)]
+    /// Cached prim indices from the composition cache. The parent prim's index
+    /// is read from here to seed this child's graph (C++
+    /// `_BuildInitialPrimIndexFromAncestor`).
     cached_indices: &'a HashMap<Path, PrimIndex>,
     /// Layer stack the root `L` site scans (the stage root layer stack for a
     /// stage prim, or a referenced asset's sublayer stack for an arc target).
     ambient: &'a [(usize, LayerOffset)],
     /// Whether [`ambient`](Self::ambient) is the stage's root layer stack, the
-    /// only case where the stage-keyed `cached_indices` apply. Unused until the
-    /// class-arc phases land.
-    #[allow(dead_code)]
+    /// only case where the stage-keyed `cached_indices` apply.
     ambient_is_root: bool,
     /// The graph grown so far.
     output: PrimIndexGraph,
+    /// Open composition tasks, highest priority first.
+    tasks: BinaryHeap<Task>,
     /// Cleared the moment composition meets a feature a later phase ports; the
     /// build is then abandoned and the recursive builder composes the prim.
     supported: bool,
@@ -91,208 +120,203 @@ impl<'a> Indexer<'a> {
             ambient,
             ambient_is_root,
             output: PrimIndexGraph::default(),
+            tasks: BinaryHeap::new(),
             supported: true,
         }
     }
 
-    /// Composes `path`, returning the graph when the prim's composition is
-    /// fully within the ported feature set, or `None` when it relies on a
-    /// feature a later phase ports (the caller then uses the recursive builder).
+    /// Composes `path`, returning the graph when the prim's composition is fully
+    /// within the ported feature set, or `None` when it relies on a feature a
+    /// later phase ports (the caller then uses the recursive builder).
     pub(crate) fn build(mut self, path: &Path) -> Result<Option<PrimIndexGraph>, Error> {
         // Instance composition is a later phase.
         if self.ctx.within_instance {
             return Ok(None);
         }
-        // The indexer can extend reference/payload ancestor arcs to a child; a
-        // class/variant/relocate ancestor arc needs a later phase.
-        if self
-            .ctx
-            .ancestor_arcs
-            .iter()
-            .any(|a| !matches!(a.arc, ArcType::Reference | ArcType::Payload))
-        {
+
+        // Seed the graph: a root prim starts empty (just its local site); a
+        // child prim clones its parent's graph for ancestral opinions.
+        if !self.seed(path)? {
             return Ok(None);
         }
-        self.output.init_root(path.clone());
-        let ambient = self.ambient.to_vec();
-        self.compose(
-            path,
-            &ambient,
-            ArcType::Root,
-            NodeId::INVALID,
-            MapFunction::identity(),
-            0,
-        )?;
-        if self.supported {
-            self.propagate_ancestor_arcs(path)?;
-        }
-        if !self.supported {
+
+        // Recompute `has_specs` at the seeded paths, abandon the prim if any
+        // site authors an unported field, and enqueue the spec-bearing nodes'
+        // reference/payload tasks (the root node and every cloned ancestral one).
+        if !self.scan_and_enqueue()? {
             return Ok(None);
         }
+
+        // Drain the queue. Each handler may append nodes and enqueue further
+        // work; an unported feature clears `supported` and abandons the prim.
+        while let Some(task) = self.tasks.pop() {
+            self.eval_arcs(task.node, task.kind)?;
+            if !self.supported {
+                return Ok(None);
+            }
+        }
+
         self.output.finalize_strength_order();
         Ok(Some(self.output))
     }
 
-    /// Extends the direct parent prim's nodes to this child prim (C++
-    /// `AppendChildNameToAllSites`), the ancestral arcs in the no-dedup model.
+    /// Builds the initial graph for `path` (C++ `_BuildInitialPrimIndexFromAncestor`
+    /// plus the root-node setup). Returns `false` to abandon the prim.
     ///
-    /// Only the parent's own nodes are propagated (`ancestor_arcs[own_arcs_start..]`):
-    /// they already encode everything the inherited grandparent arcs produced,
-    /// so propagating the inherited arcs too would compose a grandparent arc and
-    /// the parent node it produced as two nodes. For each parent node the parent
-    /// path is mapped back into the node's source namespace and the child name
-    /// appended, then that site is composed under the node's already-composed
-    /// child node (so a nested arc keeps the parent prim's tree). Composing
-    /// through [`compose`](Self::compose) — which never dedups — is what keeps a
-    /// target reached by both a local arc and an ancestral one (a payload
-    /// diamond through ancestry) as two nodes.
-    fn propagate_ancestor_arcs(&mut self, path: &Path) -> Result<(), Error> {
-        let Some(child_name) = path.name() else {
-            return Ok(());
-        };
-        let parent_path = path.parent();
-        let ctx = self.ctx;
-        // The node each parent node composed to, keyed by its index in
-        // `ancestor_arcs`, so a nested arc attaches under its parent's child.
-        let mut composed: HashMap<usize, NodeId> = HashMap::new();
-        for i in ctx.own_arcs_start..ctx.ancestor_arcs.len() {
-            if !self.supported {
-                return Ok(());
-            }
-            let a = &ctx.ancestor_arcs[i];
-            // Only nodes whose target prefix matches the parent reach this child.
-            let Some(parent_in_source) = parent_path.as_ref().and_then(|p| a.map.map_target_to_source(p)) else {
-                continue;
-            };
-            let Ok(rpath) = parent_in_source.append_path(child_name) else {
-                continue;
-            };
-            // Nest under the parent node's composed child and map relative to it;
-            // a node directly on the parent prim maps straight to the root.
-            let parent_node = a
-                .parent
-                .and_then(|p| composed.get(&p).copied())
-                .unwrap_or(NodeId::INVALID);
-            let map = if parent_node.is_valid() {
-                a.map_to_parent.clone()
-            } else {
-                a.map.clone()
-            };
-            let before = self.output.len();
-            self.compose(&rpath, &a.layer_stack, a.arc, parent_node, map, 0)?;
-            if self.output.len() > before {
-                let node = NodeId(before as u32);
-                // Inherit the parent node's namespace depth so the parent's
-                // relative strength order survives the deeper child path.
-                self.output.nodes[node.idx()].namespace_depth = a.namespace_depth;
-                composed.insert(i, node);
-            }
+    /// A root prim (parent is the pseudo-root) seeds an empty graph with just its
+    /// local site. A child prim clones its already-composed parent's graph and
+    /// deepens every site path by the child name, so the references and payloads
+    /// an ancestor introduced re-evaluate at this prim's depth.
+    fn seed(&mut self, path: &Path) -> Result<bool, Error> {
+        let parent = path.parent();
+        let needs_ancestor = matches!(&parent, Some(p) if p != &Path::abs_root());
+
+        if !needs_ancestor {
+            // Root prim: synthetic inert root plus a local site scanning ambient.
+            self.output.init_root(path.clone());
+            self.add_local_root(path);
+            return Ok(true);
         }
-        Ok(())
+
+        let parent = parent.expect("checked by needs_ancestor");
+        // The stage-keyed cache only applies when this prim is composed in the
+        // stage root layer stack. Ancestral seeding for an arc target (composed
+        // in a referenced sublayer stack) is a later phase.
+        if !self.ambient_is_root {
+            return Ok(false);
+        }
+        let Some(parent_index) = self.cached_indices.get(&parent) else {
+            return Ok(false);
+        };
+
+        // Clone the parent's graph; only a graph composed entirely of ported
+        // arcs can be deepened structurally. A culled or class/variant/relocate
+        // node means the parent relied on an unported feature.
+        let graph = parent_index.graph().clone();
+        if graph.nodes.iter().any(|n| {
+            !n.is_inert() && (n.is_culled() || !matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload))
+        }) {
+            return Ok(false);
+        }
+        self.output = graph;
+        // Deepening keeps each cloned node's full site layer stack; the set of
+        // layers that author a spec changes at the deeper path, so `has_specs`
+        // is recomputed for every node by `scan_and_enqueue`.
+        self.output.append_child_name_to_all_sites(path);
+
+        // The parent may have had no local opinion, leaving no Root site to
+        // become this child's local root. Ensure one exists so a local opinion
+        // authored only at this child still composes.
+        if !self.output.local_root().is_valid() {
+            self.add_local_root(path);
+        }
+        Ok(true)
     }
 
-    /// Composes the site `(layer_stack, path)` introduced by `arc` under
-    /// `parent`, then follows the reference and payload arcs it authors.
-    ///
-    /// Adds one site node folding every `layer_stack` sublayer that authors a
-    /// spec, strongest first, then recurses into each reference and payload. Any
-    /// feature outside the ported set clears [`supported`](Self::supported),
-    /// which unwinds the recursion and abandons the prim.
-    fn compose(
-        &mut self,
-        path: &Path,
-        layer_stack: &[(usize, LayerOffset)],
-        arc: ArcType,
-        parent: NodeId,
-        map_to_parent: MapFunction,
-        depth: usize,
-    ) -> Result<(), Error> {
-        if !self.supported {
-            return Ok(());
-        }
-        let Some(&(root_layer, _)) = layer_stack.first() else {
-            return Ok(());
-        };
-        // Deep nesting or a site already on the parent chain is a cycle the
-        // recursive builder reports; abandon the prim so it raises the error.
-        if depth > MAX_DEPTH || self.on_parent_chain(parent, root_layer, path) {
-            self.supported = false;
-            return Ok(());
-        }
+    /// Adds the prim's local site: a `Root` node over the full ambient layer
+    /// stack. Its `has_specs` is computed with every other node's in
+    /// `scan_and_enqueue`.
+    fn add_local_root(&mut self, path: &Path) {
+        self.output.add_site_child(
+            NodeId::INVALID,
+            self.ambient.to_vec(),
+            path.clone(),
+            ArcType::Root,
+            MapFunction::identity(),
+            false,
+        );
+    }
 
-        // Local opinions: every sublayer that authors a spec at `path`,
-        // strongest first, paired with its sublayer offset.
-        let members: Vec<(usize, LayerOffset)> = layer_stack
-            .iter()
-            .copied()
-            .filter(|&(li, _)| self.stack.layer(li).has_spec(path))
-            .collect();
-        // No opinion at this site contributes no node; the caller decides
-        // whether that is acceptable (a legitimately empty root or ancestral
-        // site) or a culled arc target that must defer to the recursive builder.
-        if members.is_empty() {
-            return Ok(());
-        }
-        let node = self
-            .output
-            .add_site_child(parent, members, path.clone(), arc, map_to_parent, false);
-
-        // An inherit/specialize/variant field needs a later phase.
-        if self.site_authors_unsupported(path, node)? {
-            self.supported = false;
-            return Ok(());
-        }
-
-        // R — References, then P — Payloads, each composed in authored order.
-        let references = compose_references_in(self.node_slice(node), &self.stack.layers, &*self.stack.resolver)?;
-        for reference in &references {
-            self.compose_arc_target(
-                &reference.asset_path,
-                &reference.prim_path,
-                ArcType::Reference,
-                path,
-                node,
-                reference.layer_offset.sanitized(),
-                depth,
-            )?;
-            if !self.supported {
-                return Ok(());
+    /// Computes `has_specs` at each non-inert node's path, abandons the prim
+    /// (returns `false`) if any node authors an unported field, and enqueues
+    /// reference/payload tasks for the spec-bearing nodes (C++
+    /// `AddTasksForRootNode`, restricted to the ported tasks). A node with no
+    /// spec at its path authors no arc, so it gets no task.
+    fn scan_and_enqueue(&mut self) -> Result<bool, Error> {
+        for i in 0..self.output.nodes.len() {
+            if self.output.nodes[i].is_inert() {
+                continue;
+            }
+            let node = NodeId(i as u32);
+            let has_specs = self.stack_has_spec(self.output.nodes[i].layer_stack(), &self.output.nodes[i].path);
+            self.output.nodes[i].has_specs = has_specs;
+            if self.node_authors_unsupported(node)? {
+                return Ok(false);
+            }
+            if has_specs {
+                self.enqueue_arc_tasks(node);
             }
         }
+        Ok(true)
+    }
+
+    /// Enqueues a node's reference and payload evaluation (C++ `_AddArc`'s
+    /// `AddTasksForNode`, restricted to the ported tasks).
+    fn enqueue_arc_tasks(&mut self, node: NodeId) {
+        self.tasks.push(Task {
+            kind: TaskKind::EvalNodeReferences,
+            node,
+        });
         if self.stack.load_payloads {
-            let payloads = collect_payloads_in(self.node_slice(node), &self.stack.layers, &*self.stack.resolver)?;
-            for payload in &payloads {
-                self.compose_arc_target(
-                    &payload.asset_path,
-                    &payload.prim_path,
-                    ArcType::Payload,
-                    path,
-                    node,
-                    payload.layer_offset.unwrap_or_default().sanitized(),
-                    depth,
-                )?;
-                if !self.supported {
-                    return Ok(());
-                }
+            self.tasks.push(Task {
+                kind: TaskKind::EvalNodePayloads,
+                node,
+            });
+        }
+    }
+
+    /// Composes the references or payloads authored at `node`'s site and adds an
+    /// arc for each (C++ `_EvalNodeReferences` / `_EvalNodePayloads`). Both
+    /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
+    /// loop; an unported target clears `supported` and unwinds.
+    fn eval_arcs(&mut self, node: NodeId, kind: TaskKind) -> Result<(), Error> {
+        let (arc, arcs) = match kind {
+            TaskKind::EvalNodeReferences => {
+                let refs = compose_references_in(self.node_slice(node), &self.stack.layers, &*self.stack.resolver)?;
+                let arcs = refs
+                    .into_iter()
+                    .map(|r| (r.asset_path, r.prim_path, r.layer_offset.sanitized()))
+                    .collect::<Vec<_>>();
+                (ArcType::Reference, arcs)
+            }
+            TaskKind::EvalNodePayloads => {
+                let payloads = collect_payloads_in(self.node_slice(node), &self.stack.layers, &*self.stack.resolver)?;
+                let arcs = payloads
+                    .into_iter()
+                    .map(|p| {
+                        (
+                            p.asset_path,
+                            p.prim_path,
+                            p.layer_offset.unwrap_or_default().sanitized(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (ArcType::Payload, arcs)
+            }
+        };
+        for (asset_path, prim_path, offset) in &arcs {
+            self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
+            if !self.supported {
+                return Ok(());
             }
         }
         Ok(())
     }
 
-    /// Resolves a reference or payload to its target layer stack and composes
-    /// it under `parent`. Targets outside the ported set (internal references,
-    /// `defaultPrim` resolution, sub-root targets, unresolved layers) abandon
+    /// Resolves a reference or payload to its target layer stack, adds the target
+    /// node under `parent`, and enqueues that node's own reference/payload tasks
+    /// (C++ `_AddArc` for an arc without ancestral opinions).
+    ///
+    /// Targets outside the ported set — internal references, `defaultPrim`
+    /// resolution, sub-root targets, unresolved layers, empty targets — abandon
     /// the prim to the recursive builder.
-    #[allow(clippy::too_many_arguments)]
-    fn compose_arc_target(
+    fn add_ref_or_payload_arc(
         &mut self,
+        parent: NodeId,
         asset_path: &str,
         prim_path: &Path,
         arc: ArcType,
-        context_path: &Path,
-        parent: NodeId,
         arc_offset: LayerOffset,
-        depth: usize,
     ) -> Result<(), Error> {
         // Internal references (empty asset path) and `defaultPrim` targets
         // (empty prim path) are later phases.
@@ -300,8 +324,8 @@ impl<'a> Indexer<'a> {
             self.supported = false;
             return Ok(());
         }
-        // A sub-root target sits under a prim that may carry ancestral arcs; its
-        // namespace-parent composition is a later phase.
+        // A sub-root target sits under a prim that may carry ancestral arcs; the
+        // recursive-subindex composition it needs is a later phase.
         if prim_path.parent().is_some_and(|p| p != Path::abs_root()) {
             self.supported = false;
             return Ok(());
@@ -311,40 +335,69 @@ impl<'a> Indexer<'a> {
             self.supported = false;
             return Ok(());
         };
-        let target_stack = self.stack.sublayer_stack(layer_index);
-        let map = MapFunction::from_pair(prim_path.clone(), context_path.clone()).with_time_offset(arc_offset);
-        let before = self.output.len();
-        self.compose(prim_path, &target_stack, arc, parent, map, depth + 1)?;
-        // An arc to an empty target is culled by the recursive builder, which
-        // the indexer does not reproduce yet; defer the whole prim.
-        if self.supported && self.output.len() == before {
+
+        if !self.arc_target_in_bounds(parent, layer_index, prim_path) {
+            // Deep nesting or a cycle the recursive builder reports.
             self.supported = false;
+            return Ok(());
         }
+
+        let target_stack = self.stack.sublayer_stack(layer_index);
+        if !self.stack_has_spec(&target_stack, prim_path) {
+            // The recursive builder keeps an empty arc target as a culled node;
+            // the indexer does not reproduce that yet, so defer the whole prim.
+            self.supported = false;
+            return Ok(());
+        }
+
+        let parent_path = self.output.nodes[parent.idx()].path.clone();
+        let map = MapFunction::from_pair(prim_path.clone(), parent_path).with_time_offset(arc_offset);
+        let new_node = self
+            .output
+            .add_site_child(parent, target_stack, prim_path.clone(), arc, map, false);
+
+        if self.node_authors_unsupported(new_node)? {
+            self.supported = false;
+            return Ok(());
+        }
+
+        // The new node may itself author references and payloads.
+        self.enqueue_arc_tasks(new_node);
         Ok(())
     }
 
-    /// Returns `true` when an ancestor of `node` (walking the parent chain to
-    /// the synthetic root) is the same `(root_layer, path)` site — a
-    /// composition cycle.
-    fn on_parent_chain(&self, node: NodeId, root_layer: usize, path: &Path) -> bool {
-        let mut cur = node;
+    /// Returns `true` when an arc to `(root_layer, path)` under `parent` is
+    /// within the depth bound and is not a cycle. A single walk of the parent
+    /// chain both rejects an ancestor that is the same site (C++ `_CheckForCycle`)
+    /// and counts hops against `MAX_DEPTH`.
+    fn arc_target_in_bounds(&self, parent: NodeId, root_layer: usize, path: &Path) -> bool {
+        // Count the arc target node itself, then each ancestor up to the root.
+        let mut depth = 1;
+        let mut cur = parent;
         while cur.is_valid() {
-            let n = &self.output[cur.idx()];
+            let n = &self.output.nodes[cur.idx()];
             if n.layer_index() == root_layer && &n.path == path {
-                return true;
+                return false;
             }
+            depth += 1;
             cur = n.parent().unwrap_or(NodeId::INVALID);
         }
-        false
+        depth <= MAX_DEPTH
     }
 
-    /// Returns `true` when any member layer of `node` authors an
-    /// inherit/specialize/variant field at `path` (see [`UNSUPPORTED_FIELDS`]).
-    fn site_authors_unsupported(&self, path: &Path, node: NodeId) -> Result<bool, Error> {
-        for &(li, _) in self.output[node.idx()].layer_stack() {
+    /// Whether any layer in `stack` authors a spec at `path`.
+    fn stack_has_spec(&self, stack: &[(usize, LayerOffset)], path: &Path) -> bool {
+        stack.iter().any(|&(li, _)| self.stack.layer(li).has_spec(path))
+    }
+
+    /// Returns `true` when any layer of `node`'s site authors an
+    /// inherit/specialize/variant field at its path (see [`UNSUPPORTED_FIELDS`]).
+    fn node_authors_unsupported(&self, node: NodeId) -> Result<bool, Error> {
+        let n = &self.output.nodes[node.idx()];
+        for &(li, _) in n.layer_stack() {
             let layer = self.stack.layer(li);
             for field in UNSUPPORTED_FIELDS {
-                if layer.try_get(path, field.as_str())?.is_some() {
+                if layer.try_get(&n.path, field.as_str())?.is_some() {
                     return Ok(true);
                 }
             }
@@ -368,6 +421,17 @@ mod tests {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = crate::sdf::Layer::new("root.usd", Box::new(crate::usda::TextReader::from_data(data)));
         LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true)
+    }
+
+    fn multi_stack(layers: &[(&str, &str)]) -> LayerStack {
+        let layers = layers
+            .iter()
+            .map(|(id, text)| {
+                let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+                crate::sdf::Layer::new(*id, Box::new(crate::usda::TextReader::from_data(data)))
+            })
+            .collect();
+        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
     }
 
     fn build(stack: &LayerStack, prim: &str) -> Option<PrimIndexGraph> {
@@ -405,24 +469,56 @@ mod tests {
         );
     }
 
+    /// The task queue composes a reference diamond: `/Root` references `A` and
+    /// `B`, both of which reference `C`. The shared target `C` is reached by two
+    /// arc paths, so it contributes a node on each — the no-dedup behavior that
+    /// distinguishes the queue from the recursive builder's global set.
     #[test]
-    fn class_ancestor_arc_deferred() {
-        let s = stack("#usda 1.0\ndef \"World\" {\n}\n");
-        let ctx = CompositionContext {
-            ancestor_arcs: vec![super::super::index::AncestorArc {
-                map: MapFunction::identity(),
-                map_to_parent: MapFunction::identity(),
-                layer_stack: vec![(0, LayerOffset::IDENTITY)],
-                arc: ArcType::Inherit,
-                namespace_depth: 1,
-                parent: None,
-            }],
-            ..Default::default()
-        };
+    fn reference_diamond_two_targets() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Root\" (\n    references = [@A.usd@</A>, @B.usd@</B>]\n) {}\n",
+            ),
+            ("A.usd", "#usda 1.0\ndef \"A\" (\n    references = @C.usd@</C>\n) {}\n"),
+            ("B.usd", "#usda 1.0\ndef \"B\" (\n    references = @C.usd@</C>\n) {}\n"),
+            ("C.usd", "#usda 1.0\ndef \"C\" { custom double x = 1 }\n"),
+        ]);
+        let graph = build(&s, "/Root").expect("a pure reference diamond is composed by the indexer");
+        let c_nodes = graph.iter().filter(|n| n.path.as_str() == "/C").count();
+        assert_eq!(c_nodes, 2, "the shared reference target appears once per arc path");
+    }
+
+    /// Ancestral references propagate to a child through the graph-clone seed:
+    /// `/Root` references `A`, and `A/Child` is reachable at the deepened site
+    /// `/A/Child` in the referenced layer.
+    #[test]
+    fn ancestral_reference_propagates_to_child() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Root\" (\n    references = @A.usd@</A>\n) {}\n",
+            ),
+            (
+                "A.usd",
+                "#usda 1.0\ndef \"A\" {\n    def \"Child\" { custom double x = 1 }\n}\n",
+            ),
+        ]);
+        let ctx = CompositionContext::default();
         let ambient = s.root_layer_stack();
-        let result = Indexer::new(&s, &ctx, &HashMap::new(), &ambient, true)
-            .build(&Path::from("/World"))
-            .expect("indexer build");
-        assert!(result.is_none(), "a class ancestor arc defers to the recursive builder");
+        // Seed the child build with the parent's composed index, as the cache does.
+        let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
+        let mut cached = HashMap::new();
+        cached.insert(Path::from("/Root"), root_index);
+        let child = Indexer::new(&s, &ctx, &cached, &ambient, true)
+            .build(&Path::from("/Root/Child"))
+            .expect("indexer build")
+            .expect("child composed by indexer");
+        assert!(
+            child
+                .iter()
+                .any(|n| n.path.as_str() == "/A/Child" && n.arc == ArcType::Reference && n.has_specs()),
+            "the ancestral reference contributes the child's opinion at the deepened site"
+        );
     }
 }

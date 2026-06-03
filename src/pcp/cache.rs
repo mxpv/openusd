@@ -1166,8 +1166,12 @@ impl Cache {
         let index = &self.indices[&path];
         let mut stack = Vec::new();
         for node in index.nodes() {
+            // A node may carry its full site layer stack; only the layers that
+            // author a spec at its path belong in the prim stack.
             for (layer, _) in node.layers() {
-                stack.push((self.stack.identifier(layer).to_string(), node.path.clone()));
+                if self.stack.layer(layer).has_spec(&node.path) {
+                    stack.push((self.stack.identifier(layer).to_string(), node.path.clone()));
+                }
             }
         }
         Ok(stack)

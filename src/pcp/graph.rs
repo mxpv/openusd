@@ -45,7 +45,10 @@ pub enum ArcType {
 /// ever appended to, never reordered, so a `NodeId` is safe to store in
 /// another node's `parent`/`children`/`origin`. The sentinel value
 /// [`INVALID`](Self::INVALID) represents the absence of a node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Ord` is by arena index, which the task queue uses for a deterministic
+/// tiebreak among equal-priority tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub(crate) u32);
 
 impl NodeId {
@@ -149,6 +152,16 @@ pub struct Node {
     /// stronger. Set during [`finalize_strength_order`](PrimIndexGraph::finalize_strength_order);
     /// meaningful only for specialize-introduced nodes.
     pub(crate) specialize_chain_depth: u16,
+    /// Whether any layer in [`layer_stack`](Self::layer_stack) authors a spec at
+    /// [`path`](Self::path) (C++ `PcpNode::HasSpecs`). Under the full-site-stack
+    /// model a node may carry its whole layer stack yet author no spec at its
+    /// path — a cloned ancestral site deepened to a child that has no opinion
+    /// there. Such a node is kept for structure (it may still introduce arcs at
+    /// the deepened path) but contributes nothing to value resolution and is not
+    /// counted by [`is_empty`](crate::pcp::PrimIndex::is_empty). Defaults to
+    /// `true`: the recursive builder only ever creates a node when a layer
+    /// authors, so its nodes always have specs.
+    pub(crate) has_specs: bool,
     /// Composition state bits (see [`NodeFlags`]).
     pub(crate) flags: NodeFlags,
 }
@@ -186,6 +199,7 @@ impl Node {
             origin: None,
             namespace_depth: 0,
             specialize_chain_depth: 0,
+            has_specs: true,
             flags,
         }
     }
@@ -262,6 +276,14 @@ impl Node {
     /// Namespace depth at which the introducing arc was authored.
     pub fn namespace_depth(&self) -> u16 {
         self.namespace_depth
+    }
+
+    /// Whether any layer in this node's stack authors a spec at its path (C++
+    /// `PcpNode::HasSpecs`). A node carrying its full site layer stack may
+    /// author nothing at a deepened child path; such a node contributes no
+    /// opinions and is not counted as content.
+    pub fn has_specs(&self) -> bool {
+        self.has_specs
     }
 
     /// Composition state bits.
@@ -459,6 +481,53 @@ impl PrimIndexGraph {
         );
         self.nodes[id.idx()].layer_stack = layer_stack;
         id
+    }
+
+    /// Finds a non-inert, non-culled node already on this graph whose site
+    /// matches `(root_layer, path)` (C++ `PcpPrimIndex_Graph::GetNodeUsingSite`).
+    ///
+    /// The representative layer index is the root sublayer of a node's layer
+    /// stack, which uniquely identifies that stack, so matching it together with
+    /// the path is equivalent to C++'s `layerStack == site.layerStack` test. The
+    /// task-queue indexer uses this for opt-in duplicate-node skipping in place
+    /// of the recursive builder's global `(layer, path, arc)` set.
+    // Reserved for the class-based arc phases (inherits/specializes), which opt
+    // into duplicate-node skipping; reference/payload arcs keep diamonds.
+    #[allow(dead_code)]
+    pub(crate) fn node_using_site(&self, root_layer: usize, path: &Path) -> Option<NodeId> {
+        self.nodes
+            .iter()
+            .position(|node| {
+                !node.flags.intersects(NodeFlags::INERT | NodeFlags::CULLED)
+                    && node.layer_index() == root_layer
+                    && &node.path == path
+            })
+            .map(|i| NodeId(i as u32))
+    }
+
+    /// Deepens every node's site path by one namespace element, from the parent
+    /// prim to a child (C++ `PcpPrimIndex_Graph::AppendChildNameToAllSites`).
+    ///
+    /// A node sitting exactly at the parent path moves to `child_path`; every
+    /// other node has the child name appended to its own (already deeper or
+    /// arc-mapped) path. The namespace mappings are untouched — deepening does
+    /// not change how paths translate across arcs, only the depth — so this does
+    /// not require re-finalizing strength order. Used to adapt a cloned parent
+    /// graph into the seed for its child's index.
+    pub(crate) fn append_child_name_to_all_sites(&mut self, child_path: &Path) {
+        let Some(parent_path) = child_path.parent() else {
+            return;
+        };
+        let Some(child_name) = child_path.name() else {
+            return;
+        };
+        for node in &mut self.nodes {
+            if node.path == parent_path {
+                node.path = child_path.clone();
+            } else if let Ok(deeper) = node.path.append_path(child_name) {
+                node.path = deeper;
+            }
+        }
     }
 
     /// Tags a node as introduced by implied-class propagation, recording the
