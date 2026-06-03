@@ -1,14 +1,11 @@
-//! Integration tests for the [`openusd::schemas::shade`] module:
-//! reading a hand-authored UsdShade fixture, and a full author →
-//! read-back roundtrip on an in-memory stage.
+//! Integration tests for the [`openusd::schemas::shade`] module: reading a
+//! hand-authored UsdShade fixture, and a full author → read-back roundtrip on
+//! an in-memory stage.
 
 use anyhow::Result;
-use openusd::schemas::shade::{
-    self, bind_material, define_material, define_shader, find_shade_prims, read_direct_binding, read_preview_surface,
-    resolve_surface_shader, Channel,
-};
+use openusd::schemas::shade::{self, Channel, Connectable, Material, MaterialBindingAPI, Shader};
 use openusd::sdf;
-use openusd::usd::Stage;
+use openusd::usd::{PrimPredicate, Stage};
 
 const FIXTURE: &str = "fixtures/usdShade_scene.usda";
 
@@ -16,28 +13,51 @@ fn open() -> Result<Stage> {
     Stage::open(FIXTURE)
 }
 
+/// Every `Material` on the stage, found by traversing and gating each prim
+/// through `Material::get` — the C++-style `prim.IsA<UsdShadeMaterial>()` filter.
+fn materials(stage: &Stage) -> Result<Vec<Material>> {
+    typed(stage, Material::get)
+}
+
+/// Every `Shader` on the stage (`prim.IsA<UsdShadeShader>()`).
+fn shaders(stage: &Stage) -> Result<Vec<Shader>> {
+    typed(stage, Shader::get)
+}
+
+/// Traverse `stage` and collect the prims that `get` resolves to a view.
+fn typed<S>(stage: &Stage, get: impl Fn(&Stage, sdf::Path) -> Result<Option<S>>) -> Result<Vec<S>> {
+    let mut paths = Vec::new();
+    stage.traverse(PrimPredicate::DEFAULT_PROXIES, |p| paths.push(p.clone()))?;
+    paths.into_iter().filter_map(|p| get(stage, p).transpose()).collect()
+}
+
 #[test]
 fn finds_every_shade_prim() -> Result<()> {
     let stage = open()?;
-    let prims = find_shade_prims(&stage)?;
-    assert_eq!(prims.materials, vec!["/World/Looks/BrickMat".to_string()]);
-    assert!(prims.shaders.contains(&"/World/Looks/BrickMat/Surface".to_string()));
-    assert!(prims.shaders.contains(&"/World/Looks/BrickMat/DiffuseTex".to_string()));
+    let material_paths: Vec<_> = materials(&stage)?
+        .iter()
+        .map(|m| m.path().as_str().to_string())
+        .collect();
+    let shader_paths: Vec<_> = shaders(&stage)?.iter().map(|s| s.path().as_str().to_string()).collect();
+    assert_eq!(material_paths, vec!["/World/Looks/BrickMat".to_string()]);
+    assert!(shader_paths.contains(&"/World/Looks/BrickMat/Surface".to_string()));
+    assert!(shader_paths.contains(&"/World/Looks/BrickMat/DiffuseTex".to_string()));
     Ok(())
 }
 
 #[test]
 fn resolves_surface_terminal_to_shader() -> Result<()> {
     let stage = open()?;
-    let shader = resolve_surface_shader(&stage, &sdf::path("/World/Looks/BrickMat")?)?.expect("surface shader");
-    assert_eq!(shader.as_str(), "/World/Looks/BrickMat/Surface");
+    let mat = Material::get(&stage, "/World/Looks/BrickMat")?.expect("Material");
+    let shader = mat.compute_surface_source()?.expect("surface shader");
+    assert_eq!(shader.path().as_str(), "/World/Looks/BrickMat/Surface");
     Ok(())
 }
 
 #[test]
 fn reads_preview_surface_channels_from_fixture() -> Result<()> {
     let stage = open()?;
-    let ps = read_preview_surface(&stage, &sdf::path("/World/Looks/BrickMat")?)?.expect("UsdPreviewSurface");
+    let ps = shade::read_preview_surface(&stage, &sdf::path("/World/Looks/BrickMat")?)?.expect("UsdPreviewSurface");
 
     // diffuseColor is driven by a UsdUVTexture.
     assert_eq!(ps.diffuse_color.texture(), Some("./textures/brick_albedo.png"));
@@ -54,13 +74,13 @@ fn reads_preview_surface_channels_from_fixture() -> Result<()> {
 #[test]
 fn reads_material_bindings_from_fixture() -> Result<()> {
     let stage = open()?;
-    let mesh = sdf::path("/World/Brick")?;
+    let binding = MaterialBindingAPI::get(&stage, "/World/Brick")?.expect("MaterialBindingAPI");
 
     // Direct all-purpose binding.
-    let bound = read_direct_binding(&stage, &mesh, "")?.expect("all-purpose binding");
+    let bound = binding.direct_binding("")?.expect("all-purpose binding");
     assert_eq!(bound.as_str(), "/World/Looks/BrickMat");
     // Purpose-restricted preview binding.
-    let preview = read_direct_binding(&stage, &mesh, "preview")?.expect("preview binding");
+    let preview = binding.direct_binding("preview")?.expect("preview binding");
     assert_eq!(preview.as_str(), "/World/Looks/BrickMat");
     Ok(())
 }
@@ -73,12 +93,14 @@ fn author_then_read_back_roundtrip() -> Result<()> {
     stage.define_prim("/World/Geo")?.set_type_name("Mesh")?;
 
     // Texture → diffuseColor; scalar metallic/roughness.
-    let tex = define_shader(&stage, sdf::path("/World/Looks/M/Albedo")?)?.set_id("UsdUVTexture")?;
+    let tex = Shader::define(&stage, "/World/Looks/M/Albedo")?;
+    tex.create_id_attr()?.set("UsdUVTexture".to_string())?;
     tex.create_input("file", "asset")?
         .set(sdf::Value::AssetPath("./wood.png".into()))?;
     tex.create_output("rgb", "float3")?;
 
-    let surface = define_shader(&stage, sdf::path("/World/Looks/M/Surface")?)?.set_id("UsdPreviewSurface")?;
+    let surface = Shader::define(&stage, "/World/Looks/M/Surface")?;
+    surface.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
     surface
         .create_input("diffuseColor", "color3f")?
         .set_connections([sdf::path("/World/Looks/M/Albedo.outputs:rgb")?])?;
@@ -88,24 +110,24 @@ fn author_then_read_back_roundtrip() -> Result<()> {
         .set(sdf::Value::Float(0.3))?;
     surface.create_output("surface", "token")?;
 
-    define_material(&stage, sdf::path("/World/Looks/M")?)?
-        .connect_surface(sdf::path("/World/Looks/M/Surface.outputs:surface")?)?;
+    Material::define(&stage, "/World/Looks/M")?
+        .create_surface_output()?
+        .set_connections([sdf::path("/World/Looks/M/Surface.outputs:surface")?])?;
 
-    bind_material(&stage, sdf::path("/World/Geo")?, sdf::path("/World/Looks/M")?)?;
+    MaterialBindingAPI::apply(&stage, sdf::path("/World/Geo")?)?.bind(sdf::path("/World/Looks/M")?)?;
 
     // Read everything back.
-    let ps = read_preview_surface(&stage, &sdf::path("/World/Looks/M")?)?.expect("UsdPreviewSurface");
+    let ps = shade::read_preview_surface(&stage, &sdf::path("/World/Looks/M")?)?.expect("UsdPreviewSurface");
     assert_eq!(ps.diffuse_color.texture(), Some("./wood.png"));
     assert_eq!(ps.metallic.value(), Some(&1.0));
     assert_eq!(ps.roughness.value(), Some(&0.3));
 
-    let bound = read_direct_binding(&stage, &sdf::path("/World/Geo")?, "")?.expect("binding");
-    assert_eq!(bound.as_str(), "/World/Looks/M");
-    assert!(stage.has_api_schema(&sdf::path("/World/Geo")?, "MaterialBindingAPI")?);
+    let binding = MaterialBindingAPI::get(&stage, "/World/Geo")?.expect("MaterialBindingAPI");
+    assert_eq!(binding.direct_binding("")?.expect("binding").as_str(), "/World/Looks/M");
 
-    // The shade-prim walk sees the authored material + shaders.
-    let prims = shade::find_shade_prims(&stage)?;
-    assert!(prims.materials.contains(&"/World/Looks/M".to_string()));
-    assert_eq!(prims.shaders.len(), 2);
+    // A stage traversal gated through the typed views sees the authored
+    // material + its two shaders.
+    assert!(Material::get(&stage, sdf::path("/World/Looks/M")?)?.is_some());
+    assert_eq!(shaders(&stage)?.len(), 2);
     Ok(())
 }

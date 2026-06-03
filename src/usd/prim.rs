@@ -499,6 +499,17 @@ impl Attribute {
         })
     }
 
+    /// Wire this attribute to a single `source` property, replacing any
+    /// existing connections. The connectable shorthand for
+    /// [`set_connections`](Attribute::set_connections) over one source; mirrors
+    /// C++ `UsdShadeInput` / `UsdShadeOutput::ConnectToSource`. Chains after
+    /// [`create_attribute`](Prim::create_attribute) / a UsdShade
+    /// `create_input` / `create_output`, since the connection is authored on
+    /// this (the consuming) property's spec.
+    pub fn connect_to(self, source: &Attribute) -> Result<Self, StageAuthoringError> {
+        self.set_connections([source.path().clone()])
+    }
+
     /// Add a single connection target at the default USD list position.
     /// No-op if already present (skips cache invalidation in that case).
     /// Joins the prepended-items list op, matching C++

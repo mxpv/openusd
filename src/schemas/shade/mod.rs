@@ -1,52 +1,193 @@
-//! UsdShade schema reader + authoring.
+//! UsdShade schema views.
 //!
-//! UsdShade is the material / shading-network schema family. Unlike the
-//! geometry / lighting families, its substance is **connection
-//! topology** rather than a flat set of typed attributes: a
-//! [`Material`](tokens::T_MATERIAL) contains [`Shader`](tokens::T_SHADER)
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
+//! `UsdShade` family — the material / shading-network schema. Unlike the
+//! geometry / lighting families, its substance is *connection topology* rather
+//! than a flat set of typed attributes: a [`Material`] contains [`Shader`]
 //! prims whose `inputs:` / `outputs:` attributes are wired together by
-//! `.connect` ([`connectionPaths`](crate::sdf::FieldKey::ConnectionPaths)).
+//! connections ([`connectionPaths`](crate::sdf::FieldKey::ConnectionPaths)).
 //!
-//! # Surface
+//! ```text
+//! SchemaBase
+//!  ├ Connectable (interface; inputs: / outputs:)
+//!  │  ├ Shader        (typed; info:id + NodeDefAPI surface)
+//!  │  ├ NodeGraph     (typed; a shading-network container)
+//!  │  └ Material      (typed; surface / displacement / volume terminals)
+//!  └ MaterialBindingAPI (single-apply; direct + collection bindings)
+//! ```
 //!
-//! - [`shader`] — `define_shader`: `Shader` + `NodeDefAPI` (`info:id` /
-//!   implementation source) plus typed `inputs:` / `outputs:`.
-//! - [`material`] — `define_material` / `define_node_graph`: containers
-//!   with `surface` / `displacement` / `volume` terminal outputs,
-//!   connected to a shader's output.
-//! - [`connectable`] — the `inputs:` / `outputs:` namespacing + path
-//!   helpers shared across the above.
-//! - [`binding`] — `MaterialBindingAPI`: direct + collection bindings,
-//!   purpose-namespaced, with `bindMaterialAs` strength.
-//! - [`preview`] — readers for the canonical `UsdPreviewSurface` +
-//!   `UsdUVTexture` shader graph.
-//! - [`read`] — stage walk + `read_material` (resolve a Material's
-//!   surface terminal back through the shader graph).
+//! [`Connectable`] is the shared `inputs:` / `outputs:` surface (C++
+//! `UsdShadeConnectableAPI`); connections are wired with
+//! [`Attribute::connect_to`](crate::usd::Attribute::connect_to) and read back
+//! through [`get_connections`](crate::usd::Attribute::get_connections). The
+//! connection-following computation is kept as
+//! [`Material::compute_surface_source`] (resolve a Material's surface terminal
+//! back to its shader) and [`read_preview_surface`] (decode the canonical
+//! `UsdPreviewSurface` / `UsdUVTexture` graph). To find every shading prim on a
+//! stage, traverse it and gate each prim through the typed `get` (e.g.
+//! [`Material::get`]), mirroring C++ `prim.IsA<UsdShadeMaterial>()`.
 //!
-//! Connections are authored / read through
-//! [`crate::usd::Attribute::set_connections`] /
-//! [`get_connections`](crate::usd::Attribute::get_connections).
+//! # Example
+//!
+//! ```
+//! use openusd::schemas::shade::{self, Connectable};
+//! use openusd::{sdf, usd};
+//!
+//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//!
+//! let surface = shade::Shader::define(&stage, "/Mat/Surface")?;
+//! surface.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
+//! surface.create_input("roughness", "float")?.set(0.4_f32)?;
+//! surface.create_output("surface", "token")?;
+//!
+//! shade::Material::define(&stage, "/Mat")?
+//!     .create_surface_output()?
+//!     .set_connections([sdf::path("/Mat/Surface.outputs:surface")?])?;
+//!
+//! let mat = shade::Material::get(&stage, "/Mat")?.expect("Material");
+//! let resolved = mat.compute_surface_source()?.expect("surface shader");
+//! assert_eq!(resolved.id()?.as_deref(), Some("UsdPreviewSurface"));
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
 
 pub mod tokens;
 
 mod binding;
 mod connectable;
-mod material;
-mod read;
-mod shader;
-mod types;
+mod preview;
+mod schema;
+mod traits;
 
-pub use binding::{
-    bind_material, bind_material_collection, bind_material_for_purpose, compute_bound_material, read_binding_strength,
-    read_collection_binding, read_direct_binding,
-};
-pub use connectable::{create_input, create_output, input_name, input_path, output_name, output_path};
-pub use material::{define_material, define_node_graph, MaterialAuthor, NodeGraphAuthor};
-pub use read::{
-    find_shade_prims, input_names, output_names, read_input_connections, read_input_value, read_output_connections,
-    read_shader_id, resolve_surface_shader, ShadePrims,
-};
-pub use shader::{define_shader, ShaderAuthor};
-pub use types::{
-    read_preview_surface, BindingStrength, Channel, Connectability, ImplementationSource, ReadPreviewSurface,
-};
+pub use binding::MaterialBindingAPI;
+pub use connectable::base_name;
+pub use preview::{read_preview_surface, Channel, ReadPreviewSurface};
+pub use schema::{Material, NodeGraph, Shader};
+pub use traits::Connectable;
+
+use tokens::*;
+
+/// Implement the schema-trait memberships for a concrete UsdShade view. All
+/// trait paths are fully qualified, so the call site only needs the macro in
+/// scope.
+///
+/// - `connectable` is a concrete typed shading prim that carries `inputs:` /
+///   `outputs:` ([`Shader`], [`NodeGraph`], [`Material`]).
+/// - `single_api` is a single-apply API schema ([`MaterialBindingAPI`]).
+macro_rules! impl_shade_schema {
+    (connectable $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
+
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+        impl $crate::schemas::shade::Connectable for $ty {}
+    };
+    (single_api $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::SingleApplyApi;
+
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+    };
+}
+
+pub(crate) use impl_shade_schema;
+
+/// `info:implementationSource` on a Shader — selects which `info:*` attribute
+/// carries the shader's implementation. Pixar's fallback is
+/// [`ImplementationSource::Id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImplementationSource {
+    /// `id` — look the shader up in the Sdr registry by `info:id`.
+    #[default]
+    Id,
+    /// `sourceAsset` — `info:sourceAsset` points at a parsable asset.
+    SourceAsset,
+    /// `sourceCode` — `info:sourceCode` holds inline source.
+    SourceCode,
+}
+
+impl ImplementationSource {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            ImplementationSource::Id => IMPL_SOURCE_ID,
+            ImplementationSource::SourceAsset => IMPL_SOURCE_SOURCE_ASSET,
+            ImplementationSource::SourceCode => IMPL_SOURCE_SOURCE_CODE,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            IMPL_SOURCE_ID => ImplementationSource::Id,
+            IMPL_SOURCE_SOURCE_ASSET => ImplementationSource::SourceAsset,
+            IMPL_SOURCE_SOURCE_CODE => ImplementationSource::SourceCode,
+            _ => return None,
+        })
+    }
+}
+
+/// `connectability` metadata on a UsdShadeInput — restricts what the input may
+/// be connected to. Pixar's fallback is [`Connectability::Full`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Connectability {
+    /// Can connect to any input or output (the default).
+    #[default]
+    Full,
+    /// Can only connect to a NodeGraph interface input (or another
+    /// `interfaceOnly` input) — not a render-time dataflow source.
+    InterfaceOnly,
+}
+
+impl Connectability {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Connectability::Full => CONNECTABILITY_FULL,
+            Connectability::InterfaceOnly => CONNECTABILITY_INTERFACE_ONLY,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            CONNECTABILITY_FULL => Connectability::Full,
+            CONNECTABILITY_INTERFACE_ONLY => Connectability::InterfaceOnly,
+            _ => return None,
+        })
+    }
+}
+
+/// `bindMaterialAs` strength on a material-binding relationship — whether a
+/// binding overrides ones authored lower in namespace. Pixar's fallback (when
+/// `bindMaterialAs` is unauthored) is [`BindingStrength::WeakerThanDescendants`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BindingStrength {
+    /// Bindings on descendant prims win (the spec default).
+    #[default]
+    WeakerThanDescendants,
+    /// This binding wins over any authored on descendant prims.
+    StrongerThanDescendants,
+}
+
+impl BindingStrength {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            BindingStrength::WeakerThanDescendants => STRENGTH_WEAKER_THAN_DESCENDANTS,
+            BindingStrength::StrongerThanDescendants => STRENGTH_STRONGER_THAN_DESCENDANTS,
+        }
+    }
+
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            STRENGTH_WEAKER_THAN_DESCENDANTS => BindingStrength::WeakerThanDescendants,
+            STRENGTH_STRONGER_THAN_DESCENDANTS => BindingStrength::StrongerThanDescendants,
+            _ => return None,
+        })
+    }
+}
+
+// `From`/`TryFrom<Value>` for the token-valued enums, so they pass straight to
+// `Attribute::set` / `get::<Enum>()`.
+crate::schemas::common::impl_token_value!(ImplementationSource, Connectability, BindingStrength);
