@@ -239,13 +239,11 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
     // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
     // implied-across-a-reference specializes (including nested chains, local
-    // overrides, and ancestral arcs reached through the seed-deepened graph)
-    // compose byte-exact. These assets still defer to the recursive builder
-    // because they exercise cases the indexer does not yet reproduce: specializes
-    // combined with variants, and relocates. Remove an asset once its case lands.
-    "BasicSpecializesAndVariants_root",
+    // overrides, ancestral arcs reached through the seed-deepened graph, and a
+    // local variant set on a specialize target) compose byte-exact.
+    // `SpecializesAndVariants4` still defers: its `/_class_/render` band is
+    // ordered one position off, a `compare_specialize_siblings` ordering edge.
     "SpecializesAndVariants4_root",
-    "VariantSpecializesAndReferenceSurprisingBehavior_root",
     // TODO(specializes): `SpecializesAndAncestralArcs5` reaches the same implied
     // specialize at the root layer stack through both an ancestral reference and
     // an ancestral payload. Ranking the reference-implied copy above the
@@ -257,19 +255,24 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // `SpecializesAndAncestralArcs2`, so both the task order and the comparator
     // must be corrected together before this lands.
     "SpecializesAndAncestralArcs5_root",
-    // TODO(variant-strength): the remaining variant cases need the ancestral
-    // variant re-evaluation a sub-root arc target requires (a variant set
-    // carried into a sub-build, which the top-level build does not yet re-expand
-    // — the indexer defers these to the recursive builder), an inherit authored
-    // inside a variant, or a weaker-selection precedence edge the builder gets
-    // wrong too.
+    // TODO(ancestral-variants): the ancestral variant task family
+    // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
+    // faithful cross-frame `_ComposeVariantSelection` are ported, so a local
+    // variant set on a sub-root arc target and a single ancestral variant
+    // selection compose byte-exact. These remaining cases have a residual
+    // strength-ordering or duplicate-node difference in the inherit-inside-variant
+    // interaction: `SubrootInheritsAndVariants` mis-selects between the
+    // referencing-layer and referenced-layer copies of an inherit target inside a
+    // variant; `SubrootReferenceAndVariants2` orders two inherit-band sites one
+    // position off; `TrickyInheritsInVariants2` keeps an extra implied node.
+    "SubrootInheritsAndVariants_root",
+    "SubrootReferenceAndVariants2_root",
+    "TrickyInheritsInVariants2_root",
+    // TODO(variant-strength): a weaker-selection precedence edge the builder gets
+    // wrong too, or an inherit authored inside a variant.
     "TrickyVariantSelectionInVariant_root",
     "TrickyVariantWeakerSelection2_root",
     "TrickyVariantWeakerSelection4_root",
-    "SubrootInheritsAndVariants_root",
-    "SubrootReferenceAndVariants2_root",
-    "TrickyInheritsInVariants_root",
-    "TrickyInheritsInVariants2_root",
     // TODO(variant-arcs): forward attribute connections / relationship targets
     // and references introduced inside a selected variant — the variant's
     // `Attribute connections` block is missing from the composed result.

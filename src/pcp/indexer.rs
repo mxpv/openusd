@@ -40,7 +40,17 @@
 //! so [`take_best_task`](Indexer::take_best_task) selects the next task with a
 //! graph-aware comparator rather than a fixed `Ord`. Selecting a variant grafts
 //! the `{set=sel}` site and re-enqueues its own arc and nested-variant tasks,
-//! then retries any pending fallback tasks (C++ `RetryVariantTasks`).
+//! then retries any pending fallback tasks (C++ `RetryVariantTasks`). A nested
+//! sub-build skips variants (C++ `evaluateVariantsAndDynamicPayloads == false`),
+//! so when its graph is grafted the top-level build re-evaluates every grafted
+//! node's local variant sets and the variant sets authored above it through a
+//! parallel ancestral band (`EvalNodeAncestralVariantSets` and friends, C++
+//! `_EvalNodeAncestralVariantSets` / `_AddAncestralVariantArc`), stronger than
+//! the local variant band but weaker than implied classes. The selection itself
+//! is composed by `_ComposeVariantSelection`: the set path is first translated to
+//! the strongest node it namespace-maps to, then that node's subtree is searched
+//! strong-to-weak, so a stronger frame's selection only wins where the mapping
+//! reaches it.
 //!
 //! Specializes compose as globally-weak class-based arcs (C++
 //! `_EvalNodeSpecializes` / `_EvalImpliedSpecializes`). A specializes node is
@@ -58,18 +68,18 @@
 //! reference, payload, and inherit arcs to either a root-level or a sub-root
 //! target (with the ancestral sub-index and duplicate-node skipping); internal
 //! references and `defaultPrim` targets; ancestral reference/payload/inherit
-//! propagation through the graph-clone seed; implied classes; local variant sets
-//! (authored and fallback selections, nested variants); and specializes (direct,
-//! local, and implied across a reference chain — including nested specializes
-//! chains and a referenced target with local overrides — copied to the root,
-//! plus ancestral specializes a child inherits through the seed-deepened parent
-//! graph, whose propagated copies re-evaluate their arcs at the deepened path).
-//! Features that still abandon the prim ([`Indexer::build`] returns `None`): relocates
-//! (any prim composing an inherit or specialize while `layerRelocates` is
-//! present, or whose ancestor graph carries a relocate node the seed cannot
-//! deepen); variants reached only inside a recursive sub-build (an ancestral
-//! variant a sub-root arc target carries, which the top-level build does not yet
-//! re-evaluate); and instances. Each deferral point carries its reason inline.
+//! propagation through the graph-clone seed; implied classes; local and ancestral
+//! variant sets (authored and fallback selections, nested variants, a variant set
+//! on a sub-root arc target, and the cross-frame selection composition); and
+//! specializes (direct, local, and implied across a reference chain — including
+//! nested specializes chains and a referenced target with local overrides —
+//! copied to the root, plus ancestral specializes a child inherits through the
+//! seed-deepened parent graph, whose propagated copies re-evaluate their arcs at
+//! the deepened path). Features that still abandon the prim ([`Indexer::build`]
+//! returns `None`): relocates (any prim composing an inherit or specialize while
+//! `layerRelocates` is present, or whose ancestor graph carries a relocate node
+//! the seed cannot deepen); and instances. Each deferral point carries its reason
+//! inline.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -191,6 +201,18 @@ enum TaskKind {
     EvalNodeVariantAuthored,
     /// Find the variant sets authored at a node's site.
     EvalNodeVariantSets,
+    /// The ancestral analog of [`EvalNodeVariantNoneFound`](Self::EvalNodeVariantNoneFound):
+    /// a fallback search for a variant set authored above the node came up empty.
+    EvalNodeAncestralVariantNoneFound,
+    /// Evaluate the fallback selection for an ancestral variant set.
+    EvalNodeAncestralVariantFallback,
+    /// Evaluate the authored selection for an ancestral variant set.
+    EvalNodeAncestralVariantAuthored,
+    /// Find the variant sets authored at a node's namespace ancestors, then
+    /// re-expand them at the node's depth (C++ `_EvalNodeAncestralVariantSets`).
+    /// Stronger than the local variant band but weaker than implied classes, so a
+    /// sub-index's ancestral variant selection resolves after its arc structure.
+    EvalNodeAncestralVariantSets,
     /// Propagate a node's class-based children one level up toward the root.
     EvalImpliedClasses,
     /// Copy the specializes nodes in a grafted subtree under the root for
@@ -314,12 +336,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(None);
         }
 
-        // Recompute `has_specs` at the seeded paths, abandon the prim if any
-        // site authors an unported field, and enqueue the spec-bearing nodes'
-        // reference/payload tasks (the root node and every cloned ancestral one).
-        if !self.scan_and_enqueue()? {
-            return Ok(None);
-        }
+        // Recompute `has_specs` at the seeded paths and enqueue the spec-bearing
+        // nodes' expressed-arc tasks (the root node and every cloned ancestral one).
+        self.scan_and_enqueue();
 
         // Drain the queue. Each handler may append nodes and enqueue further
         // work; an unported feature clears `supported` and abandons the prim.
@@ -341,10 +360,21 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     self.eval_implied_specializes(task.node)?;
                 }
                 TaskKind::EvalNodeVariantSets => self.eval_node_variant_sets(task.node)?,
-                TaskKind::EvalNodeVariantAuthored => self.eval_node_authored_variant(task.node, &task.variant)?,
-                TaskKind::EvalNodeVariantFallback => self.eval_node_fallback_variant(task.node, &task.variant)?,
-                // A placeholder kept only for `retry_variant_tasks`; nothing to do.
-                TaskKind::EvalNodeVariantNoneFound => {}
+                TaskKind::EvalNodeAncestralVariantSets => self.eval_node_ancestral_variant_sets(task.node)?,
+                TaskKind::EvalNodeVariantAuthored => {
+                    self.eval_node_authored_variant(task.node, &task.variant, false)?
+                }
+                TaskKind::EvalNodeAncestralVariantAuthored => {
+                    self.eval_node_authored_variant(task.node, &task.variant, true)?
+                }
+                TaskKind::EvalNodeVariantFallback => {
+                    self.eval_node_fallback_variant(task.node, &task.variant, false)?
+                }
+                TaskKind::EvalNodeAncestralVariantFallback => {
+                    self.eval_node_fallback_variant(task.node, &task.variant, true)?
+                }
+                // Placeholders kept only for `retry_variant_tasks`; nothing to do.
+                TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {}
             }
             if !self.supported {
                 return Ok(None);
@@ -501,10 +531,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Composes an arc target as its own ancestral sub-index and grafts it under
     /// `parent` (C++ `_AddArc`'s `includeAncestralOpinions` branch +
-    /// `InsertChildSubgraph`), returning the grafted arc node. The grafted node's
-    /// implied classes still need to cascade up the new arc, so its
-    /// implied-class task is enqueued. Clears `supported` and returns `None` when
-    /// the target or its graft relies on an unported feature.
+    /// `InsertChildSubgraph`), returning the grafted arc node. The grafted
+    /// subtree's implied classes still need to cascade up the new arc, and its
+    /// variants were skipped in the nested build, so
+    /// [`add_grafted_subtree_tasks`](Self::add_grafted_subtree_tasks) enqueues
+    /// both. Clears `supported` and returns `None` when the target or its graft
+    /// relies on an unported feature.
     #[allow(clippy::too_many_arguments)]
     fn compose_and_graft(
         &mut self,
@@ -526,7 +558,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             self.supported = false;
             return Ok(None);
         };
-        self.add_implied_tasks_for_node(grafted);
+        self.add_grafted_subtree_tasks(grafted);
         Ok(Some(grafted))
     }
 
@@ -653,12 +685,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Some(grafted_root)
     }
 
-    /// Computes `has_specs` at each non-inert node's path, abandons the prim
-    /// (returns `false`) if any node authors an unported field, and enqueues
-    /// reference/payload tasks for the spec-bearing nodes (C++
-    /// `AddTasksForRootNode`, restricted to the ported tasks). A node with no
-    /// spec at its path authors no arc, so it gets no task.
-    fn scan_and_enqueue(&mut self) -> Result<bool, Error> {
+    /// Computes `has_specs` at each non-inert node's path and enqueues the
+    /// expressed-arc tasks for the spec-bearing nodes (C++ `AddTasksForRootNode`,
+    /// restricted to the ported tasks). A node with no spec at its path authors
+    /// no arc, so it gets no task.
+    fn scan_and_enqueue(&mut self) {
         for i in 0..self.output.nodes.len() {
             if self.output.nodes[i].is_inert() {
                 continue;
@@ -666,14 +697,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let node = NodeId(i as u32);
             let has_specs = self.stack_has_spec(self.output.nodes[i].layer_stack(), &self.output.nodes[i].path);
             self.output.nodes[i].has_specs = has_specs;
-            if self.node_authors_unsupported(node)? {
-                return Ok(false);
-            }
             if has_specs {
                 self.add_tasks_for_node(node);
             }
         }
-        Ok(true)
     }
 
     /// Enqueues a node's expressed-arc tasks and any implied-class propagation
@@ -692,17 +719,26 @@ impl<'a, 'f> Indexer<'a, 'f> {
         self.tasks.push(Task::new(TaskKind::EvalNodeSpecializes, node));
 
         self.add_implied_tasks_for_node(node);
+        // The node's own (local) variant sets. A recursive sub-build defers
+        // variants to the top-level build (C++ `evaluateVariantsAndDynamicPayloads
+        // == false`), so a node composed inside a frame enqueues no variant work.
+        // Ancestral variant sets are added only when a sub-index is grafted (C++
+        // `_AddArc`'s `includeAncestralOpinions` branch), not here.
+        if self.frame.is_none() {
+            self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, node));
+        }
     }
 
-    /// Enqueues the tasks a node needs after its expressed arcs are already
-    /// composed (C++ `AddTasksForNode(node, tasks & ~ExpressedArcTasks)`): the
-    /// implied-class cascade up any new arc, and — at the top-level build — the
-    /// node's variant sets. A recursive sub-build defers variants to the
-    /// top-level build (C++ `evaluateVariantsAndDynamicPayloads == false`), so a
-    /// node composed inside a frame enqueues no variant work.
+    /// Enqueues the implied-class and implied-specializes propagation a node
+    /// triggers (C++ `AddTasksForNode`'s `EvalImpliedClasses` /
+    /// `EvalImpliedSpecializes` arms).
     ///
-    /// Used directly after grafting an ancestral sub-index, whose nodes already
-    /// evaluated their references, payloads, and inherits in the nested build.
+    /// A class-based node propagates the whole class hierarchy it starts from
+    /// (`_FindStartingNodeForImpliedClasses`); a non-class node that picked up
+    /// class-based children (from a referenced subtree) propagates them from
+    /// itself. A grafted subtree carrying specializes needs them copied to the
+    /// root; only the top-level build does this (C++ `evaluateImpliedSpecializes`),
+    /// a nested sub-build defers it until its graph is grafted.
     fn add_implied_tasks_for_node(&mut self, node: NodeId) {
         if is_class_based_arc(self.node(node).arc) {
             let start = self.find_starting_node_for_implied_classes(node);
@@ -710,14 +746,33 @@ impl<'a, 'f> Indexer<'a, 'f> {
         } else if self.has_class_based_child(node) {
             self.enqueue_implied(node);
         }
-        // A grafted subtree carrying specializes needs them copied to the root.
-        // Only the top-level build does this (C++ `evaluateImpliedSpecializes`);
-        // a nested sub-build defers it until its graph is grafted.
         if self.frame.is_none() && self.has_specialize_in_subtree(node) {
             self.enqueue_implied_specializes(node);
         }
-        if self.frame.is_none() {
-            self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, node));
+    }
+
+    /// Enqueues the tasks a freshly-grafted ancestral sub-index needs (C++
+    /// `_AddArc`'s `AddTasksForNode` with `ExpressedArcTasks` stripped): the
+    /// grafted root's implied-class/specializes propagation, plus — for every
+    /// node in the grafted subtree at the top-level build — its local and
+    /// ancestral variant sets.
+    ///
+    /// The nested build already evaluated references, payloads, inherits, and
+    /// specializes on the subtree, but skipped all variants
+    /// (`evaluateVariantsAndDynamicPayloads == false`); since the arc included
+    /// ancestral opinions, the top-level build must (re-)evaluate both the local
+    /// variant sets and the variant sets authored above each grafted node (C++
+    /// `_EvalNodeAncestralVariantSets`).
+    fn add_grafted_subtree_tasks(&mut self, root: NodeId) {
+        self.add_implied_tasks_for_node(root);
+        if self.frame.is_some() {
+            return;
+        }
+        for id in self.subtree_nodes(root) {
+            if !self.node(id).is_inert() {
+                self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, id));
+                self.tasks.push(Task::new(TaskKind::EvalNodeAncestralVariantSets, id));
+            }
         }
     }
 
@@ -741,7 +796,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return a.kind.cmp(&b.kind);
         }
         match a.kind {
-            TaskKind::EvalNodeVariantAuthored | TaskKind::EvalNodeVariantFallback => {
+            TaskKind::EvalNodeVariantAuthored
+            | TaskKind::EvalNodeVariantFallback
+            | TaskKind::EvalNodeAncestralVariantAuthored
+            | TaskKind::EvalNodeAncestralVariantFallback => {
                 if a.node != b.node {
                     // The stronger node drains first: it is the "greater" task,
                     // so reverse `compare_node_strength` (which returns `Less`
@@ -752,7 +810,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // greater task — order by the descending key.
                 Self::variant_key(b).cmp(&Self::variant_key(a))
             }
-            TaskKind::EvalNodeVariantNoneFound => {
+            TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {
                 // A placeholder; only a consistent, distinct order is needed.
                 (b.node, Self::variant_key(b)).cmp(&(a.node, Self::variant_key(a)))
             }
@@ -859,22 +917,58 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(())
     }
 
-    /// Finds the variant sets authored at `node`'s site and enqueues an
+    /// Finds the variant sets authored at `node`'s own site and enqueues an
     /// authored-selection task for each (C++ `_EvalNodeVariantSets` →
-    /// `_EvalVariantSetsAtSite`). The sets keep their declaration order, so a
-    /// lower `vset_num` is stronger.
+    /// `_EvalVariantSetsAtSite`).
     fn eval_node_variant_sets(&mut self, node: NodeId) -> Result<(), Error> {
         if !self.node_can_contribute_specs(node) {
             return Ok(());
         }
-        let vset_path = self.node(node).path.clone();
-        let sets = self.compose_token_children(node, &vset_path, ChildrenKey::VariantSetChildren)?;
+        let site_path = self.node(node).path.clone();
+        self.eval_variant_sets_at_site(node, &site_path, false)
+    }
+
+    /// Finds the variant sets authored at `node`'s namespace ancestors and
+    /// enqueues an ancestral authored-selection task for each (C++
+    /// `_EvalNodeAncestralVariantSets`). Walks from the node's parent path up to
+    /// the root, stopping at the first variant-selection path — variant sets
+    /// above it were already handled when that selection was made.
+    fn eval_node_ancestral_variant_sets(&mut self, node: NodeId) -> Result<(), Error> {
+        let mut path = self.node(node).path.parent();
+        while let Some(p) = path {
+            if p == Path::abs_root() {
+                break;
+            }
+            self.eval_variant_sets_at_site(node, &p, true)?;
+            if !self.supported {
+                return Ok(());
+            }
+            if p.is_prim_variant_selection_path() {
+                break;
+            }
+            path = p.parent();
+        }
+        Ok(())
+    }
+
+    /// Enqueues an authored-selection task for each variant set composed at
+    /// `site_path` across `node`'s layer stack (C++ `_EvalVariantSetsAtSite`).
+    /// The sets keep their declaration order, so a lower `vset_num` is stronger;
+    /// `is_ancestral` selects the ancestral task band when the set sits above the
+    /// node's own path.
+    fn eval_variant_sets_at_site(&mut self, node: NodeId, site_path: &Path, is_ancestral: bool) -> Result<(), Error> {
+        let sets = self.compose_token_children(node, site_path, ChildrenKey::VariantSetChildren)?;
+        let kind = if is_ancestral {
+            TaskKind::EvalNodeAncestralVariantAuthored
+        } else {
+            TaskKind::EvalNodeVariantAuthored
+        };
         for (vset_num, vset_name) in sets.into_iter().enumerate() {
             self.tasks.push(Task::variant(
-                TaskKind::EvalNodeVariantAuthored,
+                kind,
                 node,
                 VariantTask {
-                    vset_path: vset_path.clone(),
+                    vset_path: site_path.clone(),
                     vset_name,
                     vset_num: vset_num as u16,
                 },
@@ -885,20 +979,31 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Resolves the authored selection for a variant set and adds the variant
     /// arc, deferring to the fallback when none is authored (C++
-    /// `_EvalNodeAuthoredVariant`).
-    fn eval_node_authored_variant(&mut self, node: NodeId, vt: &Option<VariantTask>) -> Result<(), Error> {
+    /// `_EvalNodeAuthoredVariant`). `is_ancestral` routes the selection through
+    /// the ancestral variant arc and the ancestral fallback task.
+    fn eval_node_authored_variant(
+        &mut self,
+        node: NodeId,
+        vt: &Option<VariantTask>,
+        is_ancestral: bool,
+    ) -> Result<(), Error> {
         let Some(vt) = vt else { return Ok(()) };
-        if !self.node_can_contribute_specs(node) {
+        if !self.node_can_contribute_variant(node, is_ancestral) {
             return Ok(());
         }
         match self.compose_variant_selection(node, &vt.vset_path, &vt.vset_name)? {
             // An explicit empty selection chooses no variant, the same as no
             // authored selection — both defer to the fallback (C++ treats an
             // empty `vsel` as unauthored).
-            Some(sel) if !sel.is_empty() => self.add_variant_arc(node, vt, &sel)?,
-            _ => self
-                .tasks
-                .push(Task::variant(TaskKind::EvalNodeVariantFallback, node, vt.clone())),
+            Some(sel) if !sel.is_empty() => self.add_variant_arc(node, vt, &sel, is_ancestral)?,
+            _ => {
+                let kind = if is_ancestral {
+                    TaskKind::EvalNodeAncestralVariantFallback
+                } else {
+                    TaskKind::EvalNodeVariantFallback
+                };
+                self.tasks.push(Task::variant(kind, node, vt.clone()));
+            }
         }
         Ok(())
     }
@@ -906,9 +1011,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Selects the fallback variant for a set with no authored selection (C++
     /// `_EvalNodeFallbackVariant`). Adds the variant arc when a fallback applies,
     /// else enqueues a none-found placeholder for [`retry_variant_tasks`].
-    fn eval_node_fallback_variant(&mut self, node: NodeId, vt: &Option<VariantTask>) -> Result<(), Error> {
+    fn eval_node_fallback_variant(
+        &mut self,
+        node: NodeId,
+        vt: &Option<VariantTask>,
+        is_ancestral: bool,
+    ) -> Result<(), Error> {
         let Some(vt) = vt else { return Ok(()) };
-        if !self.node_can_contribute_specs(node) {
+        if !self.node_can_contribute_variant(node, is_ancestral) {
             return Ok(());
         }
         let options = self.compose_variant_options(node, &vt.vset_path, &vt.vset_name)?;
@@ -925,32 +1035,42 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // them for every set but the few the harness configures explicitly.
             .or_else(|| options.first().cloned());
         match fallback {
-            Some(sel) => self.add_variant_arc(node, vt, &sel)?,
-            None => self
-                .tasks
-                .push(Task::variant(TaskKind::EvalNodeVariantNoneFound, node, vt.clone())),
+            Some(sel) => self.add_variant_arc(node, vt, &sel, is_ancestral)?,
+            None => {
+                let kind = if is_ancestral {
+                    TaskKind::EvalNodeAncestralVariantNoneFound
+                } else {
+                    TaskKind::EvalNodeVariantNoneFound
+                };
+                self.tasks.push(Task::variant(kind, node, vt.clone()));
+            }
         }
         Ok(())
     }
 
-    /// Composes the strongest authored selection for variant set `vset` across
-    /// the prim's nodes (C++ `_ComposeVariantSelection`): a selection authored on
-    /// a stronger site (a referencing layer) overrides the referenced layer's own
-    /// opinion (spec 12.2). Returns the selection, or `None` when none is
-    /// authored.
+    /// Composes the strongest authored selection for variant set `vset` (C++
+    /// `_ComposeVariantSelection`). A selection authored on a stronger site (a
+    /// referencing layer) overrides a weaker one (spec 12.2), but only among the
+    /// sites that namespace-map to `vset_path` — for an ancestral variant set, the
+    /// search is rooted at the strongest node the set path maps to, so an arc
+    /// boundary that blocks the mapping also blocks stronger frames' selections
+    /// from leaking in. Returns the selection, or `None` when none is authored.
     fn compose_variant_selection(&self, origin: NodeId, vset_path: &Path, vset: &str) -> Result<Option<String>, Error> {
-        // The set's site in the composed (root) namespace; each candidate node is
+        // The strongest node the set path maps to, and the path in its namespace
+        // (C++ `Pcp_TranslatePathFromNodeToRootOrClosestNode`).
+        let (start, path_in_start) = self.translate_path_to_root_or_closest(origin, vset_path);
+        // The set's site in the start node's composed namespace; each candidate is
         // searched at the site this maps back to under that node.
-        let Some(composed) = self.node(origin).map_to_root.map_source_to_target(vset_path) else {
+        let Some(composed) = self.node(start).map_to_root.map_source_to_target(&path_in_start) else {
             return Ok(None);
         };
-        // TODO(perf): this rebuilds and re-sorts the whole node list (each
+        // TODO(perf): this rebuilds and re-sorts the subtree node list (each
         // `compare_node_strength` walks parent chains) for every authored-variant
-        // task. A prim with several variant sets re-sorts the graph once per set;
-        // the order is stable between grafts, so it could be computed once per
-        // drain pass and reused.
-        let mut nodes: Vec<NodeId> = (0..self.output.nodes.len() as u32)
-            .map(NodeId)
+        // task. A prim with several variant sets re-sorts once per set; the order
+        // is stable between grafts, so it could be computed once per drain pass.
+        let mut nodes: Vec<NodeId> = self
+            .subtree_nodes(start)
+            .into_iter()
             .filter(|&n| !self.node(n).is_inert())
             .collect();
         nodes.sort_by(|&a, &b| self.output.compare_node_strength(a, b));
@@ -977,6 +1097,54 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(None)
     }
 
+    /// Translates `path` from `node`'s namespace up to the root node, or to the
+    /// closest node where the translation last succeeded (C++
+    /// `Pcp_TranslatePathFromNodeToRootOrClosestNode`). For an ancestral variant
+    /// set, the mapping can fail at an arc boundary, marking the strongest site
+    /// that could carry a relevant selection.
+    fn translate_path_to_root_or_closest(&self, node: NodeId, path: &Path) -> (NodeId, Path) {
+        let local_root = self.output.local_root();
+        // Namespace mappings never include variant selections.
+        let mut cur_path = path.strip_all_variant_selections();
+        let mut cur_node = node;
+        if let Some(in_root) = self.node(node).map_to_root.map_source_to_target(&cur_path) {
+            cur_node = local_root;
+            cur_path = in_root;
+        } else {
+            while cur_node != local_root && cur_node != self.output.root {
+                let Some(in_parent) = self.node(cur_node).map_to_parent.map_source_to_target(&cur_path) else {
+                    break;
+                };
+                let Some(parent) = self.node(cur_node).parent() else {
+                    break;
+                };
+                cur_node = parent;
+                cur_path = in_parent;
+            }
+        }
+        // Re-apply a variant selection the resting node carries at introduction,
+        // so the storage site lookup hits the right `{set=sel}` namespace.
+        let intro = self.node(cur_node).path_at_introduction();
+        let stripped = intro.strip_all_variant_selections();
+        if intro != stripped {
+            if let Some(p) = cur_path.replace_prefix(&stripped, &intro) {
+                cur_path = p;
+            }
+        }
+        (cur_node, cur_path)
+    }
+
+    /// Collects `root` and all its descendants (C++ `Pcp_GetSubtreeRange`).
+    fn subtree_nodes(&self, root: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            out.push(id);
+            stack.extend(self.node(id).children().iter().copied());
+        }
+        out
+    }
+
     /// Composes the variant names available in set `vset` at `vset_path`, across
     /// `node`'s layer stack (C++ `PcpComposeSiteVariantSetOptions`).
     fn compose_variant_options(&self, node: NodeId, vset_path: &Path, vset: &str) -> Result<Vec<String>, Error> {
@@ -984,11 +1152,20 @@ impl<'a, 'f> Indexer<'a, 'f> {
         self.compose_token_children(node, &set_path, ChildrenKey::VariantChildren)
     }
 
-    /// Adds the selected `{vset=vsel}` site as a `Variant` arc node under `node`
-    /// and re-enqueues its arc and nested-variant tasks (C++ `_AddVariantArc`).
-    /// Selecting a variant can surface new authored selections, so pending
-    /// fallback/none-found variant tasks are retried as authored.
-    fn add_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> Result<(), Error> {
+    /// Adds the selected variant `{vset=vsel}` site as a `Variant` arc node under
+    /// `node` and re-enqueues its arc and nested-variant tasks (C++
+    /// `_AddVariantArc` / `_AddAncestralVariantArc`). Selecting a variant can
+    /// surface new authored selections, so pending fallback/none-found variant
+    /// tasks are retried as authored.
+    ///
+    /// A local variant set selects at the node's own path; an ancestral one
+    /// (`is_ancestral`) inserts the selection at `vt.vset_path` above the node,
+    /// keeps the node's deeper path below it, and composes the result as a
+    /// sub-index with ancestral opinions before grafting it.
+    fn add_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str, is_ancestral: bool) -> Result<(), Error> {
+        if is_ancestral {
+            return self.add_ancestral_variant_arc(node, vt, vsel);
+        }
         let n = self.node(node);
         let base = n.path.clone();
         let layers = n.layer_stack().to_vec();
@@ -1003,13 +1180,62 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let n = &mut self.output.nodes[new_node.idx()];
         n.sibling_num_at_origin = vt.vset_num;
         n.has_specs = has_specs;
-        if self.node_authors_unsupported(new_node)? {
-            self.supported = false;
-            return Ok(());
-        }
         self.add_tasks_for_node(new_node);
         self.retry_variant_tasks();
         Ok(())
+    }
+
+    /// Inserts an ancestral variant selection at `vt.vset_path` with the node's
+    /// deeper path below it and grafts it as a sub-index carrying ancestral
+    /// opinions (C++ `_AddAncestralVariantArc`).
+    fn add_ancestral_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> Result<(), Error> {
+        let n = self.node(node);
+        let node_path = n.path.clone();
+        let layers = n.layer_stack().to_vec();
+        let ambient_is_root = self.ambient_is_root_for(&layers);
+        let selected = vt.vset_path.append_variant_selection(&vt.vset_name, vsel);
+        let Some(var_path) = node_path.replace_prefix(&vt.vset_path, &selected) else {
+            return Ok(());
+        };
+        // The variant only strips its `{vset=vsel}` storage segment off the
+        // composed path; the rest of the namespace is identity.
+        let map = MapFunction::from_pair_identity(var_path.clone(), node_path);
+        // Skip duplicate nodes when the variant descends from a class-based arc
+        // introduced at this namespace level, matching the skip the class arc set.
+        let skip = self.variant_arc_skips_duplicates(node);
+        let grafted = self.compose_and_graft(
+            &var_path,
+            &layers,
+            ambient_is_root,
+            skip,
+            node,
+            ArcType::Variant,
+            map,
+            node,
+            vt.vset_num,
+        )?;
+        if grafted.is_some() {
+            self.retry_variant_tasks();
+        }
+        Ok(())
+    }
+
+    /// Whether an ancestral variant arc added under `node` should skip duplicate
+    /// nodes — true when `node` descends from a contributing class-based arc
+    /// introduced at this namespace level (C++ `_AddAncestralVariantArc`'s
+    /// `skipDuplicateNodes` predicate).
+    fn variant_arc_skips_duplicates(&self, node: NodeId) -> bool {
+        let mut cur = node;
+        loop {
+            let n = self.node(cur);
+            if is_class_based_arc(n.arc) && n.depth_below_introduction() == 0 && !n.is_inert() {
+                return true;
+            }
+            match n.parent() {
+                Some(p) if p != self.output.root => cur = p,
+                _ => return false,
+            }
+        }
     }
 
     /// Promotes every pending fallback/none-found variant task back to authored
@@ -1017,12 +1243,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// authored selections that those sets should now see.
     fn retry_variant_tasks(&mut self) {
         for task in &mut self.tasks {
-            if matches!(
-                task.kind,
-                TaskKind::EvalNodeVariantFallback | TaskKind::EvalNodeVariantNoneFound
-            ) {
-                task.kind = TaskKind::EvalNodeVariantAuthored;
-            }
+            task.kind = match task.kind {
+                TaskKind::EvalNodeVariantFallback | TaskKind::EvalNodeVariantNoneFound => {
+                    TaskKind::EvalNodeVariantAuthored
+                }
+                TaskKind::EvalNodeAncestralVariantFallback | TaskKind::EvalNodeAncestralVariantNoneFound => {
+                    TaskKind::EvalNodeAncestralVariantAuthored
+                }
+                other => other,
+            };
         }
     }
 
@@ -1148,11 +1377,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // is kept to propagate but contributes no opinions.
         if !direct_should {
             n.flags |= NodeFlags::INERT;
-        }
-
-        if self.node_authors_unsupported(new_node)? {
-            self.supported = false;
-            return Ok(None);
         }
 
         self.add_tasks_for_node(new_node);
@@ -1400,10 +1624,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             n.sibling_num_at_origin = sibling;
             n.has_specs = has_specs;
         }
-        if self.node_authors_unsupported(new_node)? {
-            self.supported = false;
-            return Ok(None);
-        }
         self.add_tasks_for_node(new_node);
         Ok(Some(new_node))
     }
@@ -1531,10 +1751,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let new_node = self
             .output
             .add_site_child(parent, target_stack, source, arc, map, false);
-        if self.node_authors_unsupported(new_node)? {
-            self.supported = false;
-            return Ok(());
-        }
 
         // The new node may itself author references, payloads, and inherits.
         self.add_tasks_for_node(new_node);
@@ -1596,6 +1812,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
         !n.is_inert() && n.has_specs
     }
 
+    /// Whether `node` may contribute a variant selection. A local variant set
+    /// must be authored at the node's own contributing site; an ancestral set
+    /// sits above the node, so it is gated only on the node being a live
+    /// (non-inert) grafted opinion (C++ `_NodeCanContributeAncestralOpinions`).
+    fn node_can_contribute_variant(&self, node: NodeId, is_ancestral: bool) -> bool {
+        if is_ancestral {
+            !self.node(node).is_inert()
+        } else {
+            self.node_can_contribute_specs(node)
+        }
+    }
+
     /// Unions a node's named children (a `TokenVec` field) at `path` across its
     /// layer stack, keeping declaration order and dropping duplicates. Used to
     /// gather a site's variant set names and a set's variant options.
@@ -1614,32 +1842,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
         Ok(out)
-    }
-
-    /// Returns `true` when `node`'s site authors a variant set inside a recursive
-    /// sub-build, the one remaining case a later phase ports.
-    ///
-    /// A sub-build (a `Frame` is present) defers variants to the top-level build
-    /// (C++ `evaluateVariantsAndDynamicPayloads == false`), so a variant-authoring
-    /// node grafted from it would be missing its selected branch. The ancestral
-    /// variant re-evaluation that fixes this faithfully is a later phase; until
-    /// then such a prim is abandoned to the recursive builder.
-    fn node_authors_unsupported(&self, node: NodeId) -> Result<bool, Error> {
-        if self.frame.is_none() {
-            return Ok(false);
-        }
-        let n = self.node(node);
-        for &(li, _) in n.layer_stack() {
-            if self
-                .stack
-                .layer(li)
-                .try_get(&n.path, ChildrenKey::VariantSetChildren.as_str())?
-                .is_some()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     /// Borrows the node behind a handle in the graph being grown.
