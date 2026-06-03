@@ -61,14 +61,15 @@
 //! propagation through the graph-clone seed; implied classes; local variant sets
 //! (authored and fallback selections, nested variants); and specializes (direct,
 //! local, and implied across a reference chain — including nested specializes
-//! chains and a referenced target with local overrides — copied to the root).
+//! chains and a referenced target with local overrides — copied to the root,
+//! plus ancestral specializes a child inherits through the seed-deepened parent
+//! graph, whose propagated copies re-evaluate their arcs at the deepened path).
 //! Features that still abandon the prim ([`Indexer::build`] returns `None`): relocates
 //! (any prim composing an inherit or specialize while `layerRelocates` is
-//! present, or whose ancestor graph carries a specialize/relocate node the seed
-//! cannot deepen); variants reached only inside a recursive sub-build (an
-//! ancestral variant a sub-root arc target carries, which the top-level build
-//! does not yet re-evaluate); and instances. Each deferral point carries its
-//! reason inline.
+//! present, or whose ancestor graph carries a relocate node the seed cannot
+//! deepen); variants reached only inside a recursive sub-build (an ancestral
+//! variant a sub-root arc target carries, which the top-level build does not yet
+//! re-evaluate); and instances. Each deferral point carries its reason inline.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -396,17 +397,25 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
 
         // Only a graph composed entirely of ported arcs can be deepened
-        // structurally. A culled or specialize/relocate node means the parent
-        // relied on an unported feature. Inherit and variant nodes (and the
+        // structurally. A culled or relocate node means the parent relied on an
+        // unported feature. Inherit, specialize, and variant nodes (and the
         // implied-class placeholders, which are inert) deepen and re-evaluate at
-        // the child path through the queue, carrying ancestral classes and
-        // variant branches to the child.
+        // the child path through the queue, carrying ancestral classes,
+        // specializes, and variant branches to the child. The cloned propagated
+        // specializes copies are kept; their arcs newly authored at the deepened
+        // path (a reference a `{set}/Child` site introduces) re-evaluate through
+        // the queue (C++ `AddTasksForRootNode`'s recursive `_ScanArcs`).
         if graph.nodes.iter().any(|n| {
             !n.is_inert()
                 && (n.is_culled()
                     || !matches!(
                         n.arc,
-                        ArcType::Root | ArcType::Reference | ArcType::Payload | ArcType::Inherit | ArcType::Variant
+                        ArcType::Root
+                            | ArcType::Reference
+                            | ArcType::Payload
+                            | ArcType::Inherit
+                            | ArcType::Specialize
+                            | ArcType::Variant
                     ))
         }) {
             return Ok(false);

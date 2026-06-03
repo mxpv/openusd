@@ -238,23 +238,25 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // TODO(specializes): the task-queue indexer copies specializes nodes to the
     // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
     // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
-    // implied-across-a-reference specializes (including nested chains and local
-    // overrides) compose byte-exact. These assets still defer to the recursive
-    // builder because they exercise cases the indexer does not yet reproduce:
-    // specializes combined with variants or ancestral arcs, the nested-class
-    // strength orderings in `TrickyNestedSpecializes`, and relocates. Remove an
-    // asset once its case lands.
+    // implied-across-a-reference specializes (including nested chains, local
+    // overrides, and ancestral arcs reached through the seed-deepened graph)
+    // compose byte-exact. These assets still defer to the recursive builder
+    // because they exercise cases the indexer does not yet reproduce: specializes
+    // combined with variants, and relocates. Remove an asset once its case lands.
     "BasicSpecializesAndVariants_root",
-    "SpecializesAndAncestralArcs_root",
-    "SpecializesAndAncestralArcs2_root",
-    "SpecializesAndAncestralArcs3_root",
-    "SpecializesAndAncestralArcs4_root",
-    "SpecializesAndAncestralArcs5_root",
     "SpecializesAndVariants4_root",
-    "TrickyNestedSpecializes_root",
-    "TrickyNestedSpecializes2_root",
-    "TrickySpecializesAndInherits2_root",
     "VariantSpecializesAndReferenceSurprisingBehavior_root",
+    // TODO(specializes): `SpecializesAndAncestralArcs5` reaches the same implied
+    // specialize at the root layer stack through both an ancestral reference and
+    // an ancestral payload. Ranking the reference-implied copy above the
+    // payload-implied one requires draining `EvalImpliedClasses` tasks in node
+    // strength order (C++ `Task::PriorityOrder`) so the deduped implied node
+    // keeps the stronger origin. Our task queue still drains them in node-index
+    // order; switching to strength order fixes this asset but exposes a latent
+    // `_GetNamespaceDepthForClassHierarchy` ordering bug on
+    // `SpecializesAndAncestralArcs2`, so both the task order and the comparator
+    // must be corrected together before this lands.
+    "SpecializesAndAncestralArcs5_root",
     // TODO(variant-strength): the remaining variant cases need the ancestral
     // variant re-evaluation a sub-root arc target requires (a variant set
     // carried into a sub-build, which the top-level build does not yet re-expand
@@ -279,11 +281,12 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "BasicInstancingAndNestedInstances_root",
     // TODO(implied-classes): the remaining implied/nested-class cases still
     // differ. Each defers a descendant prim to the recursive builder — its
-    // ancestor graph carries a variant/specialize/relocate node the
-    // ancestral-inherit seed cannot deepen yet (`SubrootReferenceAndClasses`
-    // needs specializes), so the builder composes that prim with the older
-    // ordering. `PayloadsAndAncestralArcs` also exercises a sub-root payload,
-    // but its inherit prims are what still fail.
+    // ancestor graph carries a variant/relocate node the ancestral-inherit seed
+    // cannot deepen yet, so the builder composes that prim with the older
+    // ordering. `PayloadsAndAncestralArcs` also exercises a sub-root payload, but
+    // its inherit prims are what still fail. `SubrootReferenceAndClasses` reaches
+    // the indexer now that specializes seed-deepening lands, but its implied
+    // class ordering still diverges.
     "PayloadsAndAncestralArcs_root",
     "ImpliedAndAncestralInherits_ComplexEvaluation_root",
     "TrickyNestedClasses_root",
