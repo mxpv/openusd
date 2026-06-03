@@ -1,123 +1,112 @@
-//! UsdUI schema reader + authoring.
+//! UsdUI schema views.
 //!
-//! Decodes and authors Pixar's `UsdUI` family - cosmetic metadata that
-//! authoring tools use to label outliners and lay out node-graph editors.
-//! All properties live under the `ui:` namespace.
-//!
-//! - [`tokens::API_SCENE_GRAPH_PRIM`] (applied) - `ui:displayName` /
-//!   `ui:displayGroup` for the outliner.
-//! - [`tokens::API_NODEGRAPH_NODE`] (applied) - a shading node's editor
-//!   layout (position, size, color, icon, expansion state, doc URI).
-//! - [`tokens::T_BACKDROP`] (concrete prim) - a labelled box behind a group
-//!   of nodes; also carries the NodeGraphNode layout attributes.
-//!
-//! UsdUI attributes have no spec defaults, so unauthored fields read as
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
+//! `UsdUI` family — cosmetic metadata that authoring tools use to label
+//! outliners and lay out node-graph editors. All properties live under the
+//! `ui:` namespace, and none have spec defaults, so unauthored fields read as
 //! `None`.
+//!
+//! ```text
+//! SchemaBase
+//!  ├ Backdrop                           (typed; a labelled box behind nodes)
+//!  ├ SceneGraphPrimAPI   (single-apply; outliner label + grouping)
+//!  └ NodeGraphNodeAPI    (single-apply; node-editor layout)
+//! ```
+//!
+//! [`SceneGraphPrimAPI`] adds `ui:displayName` / `ui:displayGroup` for an
+//! outliner. [`NodeGraphNodeAPI`] adds a shading node's editor layout
+//! (position, size, color, icon, expansion state, doc URI). [`Backdrop`] is a
+//! concrete prim carrying only `ui:description`.
+//!
+//! # Example
+//!
+//! ```
+//! use openusd::schemas::ui::{self, ExpansionState};
+//! use openusd::usd::Stage;
+//!
+//! let stage = Stage::builder().in_memory("scene.usda")?;
+//! stage.define_prim("/Mat/Surface")?.set_type_name("Shader")?;
+//!
+//! let node = ui::NodeGraphNodeAPI::apply(&stage, "/Mat/Surface")?;
+//! node.create_pos_attr()?.set([12.0_f32, 34.0])?;
+//! node.create_expansion_state_attr()?.set(ExpansionState::Minimized)?;
+//!
+//! assert_eq!(node.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
+//! assert_eq!(
+//!     node.expansion_state_attr().get::<ExpansionState>()?,
+//!     Some(ExpansionState::Minimized),
+//! );
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
 
 pub mod tokens;
 
-mod author;
-mod read;
-mod types;
+mod schema;
 
-pub use author::{
-    apply_nodegraph_node, apply_scene_graph_prim, define_backdrop, BackdropAuthor, NodeGraphNodeAuthor,
-    SceneGraphPrimAuthor,
-};
-pub use read::{read_backdrop, read_nodegraph_node, read_scene_graph_prim};
-pub use types::{ExpansionState, ReadBackdrop, ReadNodeGraphNode, ReadSceneGraphPrim};
+pub use schema::{Backdrop, NodeGraphNodeAPI, SceneGraphPrimAPI};
 
-#[cfg(test)]
-mod tests {
-    use super::tokens::API_SCENE_GRAPH_PRIM;
-    use super::*;
-    use crate::sdf;
-    use crate::usd::Stage;
-    use anyhow::Result;
+use tokens::*;
 
-    #[test]
-    fn scene_graph_prim_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/World/Mesh")?)?.set_type_name("Mesh")?;
-        apply_scene_graph_prim(&stage, sdf::path("/World/Mesh")?)?
-            .set_display_name("Hero Mesh")?
-            .set_display_group("Characters")?;
+/// Implement the `SchemaBase` membership for a concrete UsdUI view. All trait
+/// paths are fully qualified, so the call site only needs the macro in scope.
+///
+/// - `typed` is a concrete typed prim ([`Backdrop`]).
+/// - `single_api` is a single-apply API schema ([`SceneGraphPrimAPI`],
+///   [`NodeGraphNodeAPI`]).
+macro_rules! impl_ui_schema {
+    (typed $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
 
-        assert!(stage.has_api_schema(&sdf::path("/World/Mesh")?, API_SCENE_GRAPH_PRIM)?);
-        let p = read_scene_graph_prim(&stage, &sdf::path("/World/Mesh")?)?.expect("SceneGraphPrimAPI");
-        assert_eq!(p.display_name.as_deref(), Some("Hero Mesh"));
-        assert_eq!(p.display_group.as_deref(), Some("Characters"));
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+    };
+    (single_api $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::SingleApplyApi;
 
-        // Unapplied prim → None.
-        stage.define_prim(sdf::path("/Bare")?)?.set_type_name("Scope")?;
-        assert!(read_scene_graph_prim(&stage, &sdf::path("/Bare")?)?.is_none());
-        Ok(())
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+    };
+}
+
+pub(crate) use impl_ui_schema;
+
+/// `ui:nodegraph:node:expansionState` — how a node renders in a node-graph
+/// editor. There is no spec default, so an unauthored value reads as `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpansionState {
+    /// Fully expanded, showing all parameters.
+    Open,
+    /// Collapsed to the title bar.
+    Closed,
+    /// Reduced to a minimal icon.
+    Minimized,
+}
+
+impl ExpansionState {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            ExpansionState::Open => EXPANSION_OPEN,
+            ExpansionState::Closed => EXPANSION_CLOSED,
+            ExpansionState::Minimized => EXPANSION_MINIMIZED,
+        }
     }
 
-    #[test]
-    fn nodegraph_node_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        stage.define_prim(sdf::path("/Mat/Shader")?)?.set_type_name("Shader")?;
-        apply_nodegraph_node(&stage, sdf::path("/Mat/Shader")?)?
-            .set_pos([12.0, 34.0])?
-            .set_size([180.0, 90.0])?
-            .set_stacking_order(3)?
-            .set_display_color([0.2, 0.4, 0.8])?
-            .set_icon("./node.png")?
-            .set_expansion_state(ExpansionState::Minimized)?
-            .set_doc_uri("https://example.com/node")?;
-
-        let n = read_nodegraph_node(&stage, &sdf::path("/Mat/Shader")?)?.expect("NodeGraphNodeAPI");
-        assert_eq!(n.pos, Some([12.0, 34.0]));
-        assert_eq!(n.size, Some([180.0, 90.0]));
-        assert_eq!(n.stacking_order, Some(3));
-        assert_eq!(n.display_color, Some([0.2, 0.4, 0.8]));
-        assert_eq!(n.icon.as_deref(), Some("./node.png"));
-        assert_eq!(n.expansion_state, Some(ExpansionState::Minimized));
-        assert_eq!(n.doc_uri.as_deref(), Some("https://example.com/node"));
-        Ok(())
-    }
-
-    #[test]
-    fn backdrop_roundtrip_and_defaults() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_backdrop(&stage, sdf::path("/Mat/Note")?)?.set_description("lighting nodes")?;
-
-        let b = read_backdrop(&stage, &sdf::path("/Mat/Note")?)?.expect("Backdrop");
-        assert_eq!(b.description.as_deref(), Some("lighting nodes"));
-
-        // A backdrop with no layout authored reads default NodeGraphNode fields.
-        let n = read_nodegraph_node(&stage, &sdf::path("/Mat/Note")?)?.expect("Backdrop carries node layout");
-        assert_eq!(n, ReadNodeGraphNode::default());
-        Ok(())
-    }
-
-    #[test]
-    fn nodegraph_node_reads_half() -> Result<()> {
-        use crate::sdf::{Value, Variability};
-        use half::f16;
-
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        apply_nodegraph_node(&stage, sdf::path("/Mat/Shader")?)?;
-
-        // A weaker tool may author the layout with half-precision opinions.
-        let shader = sdf::path("/Mat/Shader")?;
-        stage
-            .create_attribute(shader.append_property(super::tokens::A_NODE_POS)?, "half2")?
-            .set_variability(Variability::Uniform)?
-            .set(Value::Vec2h([f16::from_f32(12.0), f16::from_f32(34.0)]))?;
-        stage
-            .create_attribute(shader.append_property(super::tokens::A_NODE_DISPLAY_COLOR)?, "color3h")?
-            .set_variability(Variability::Uniform)?
-            .set(Value::Vec3h([
-                f16::from_f32(0.25),
-                f16::from_f32(0.5),
-                f16::from_f32(0.75),
-            ]))?;
-
-        let n = read_nodegraph_node(&stage, &shader)?.expect("NodeGraphNodeAPI");
-        assert_eq!(n.pos, Some([12.0, 34.0]));
-        assert_eq!(n.display_color, Some([0.25, 0.5, 0.75]));
-        Ok(())
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            EXPANSION_OPEN => ExpansionState::Open,
+            EXPANSION_CLOSED => ExpansionState::Closed,
+            EXPANSION_MINIMIZED => ExpansionState::Minimized,
+            _ => return None,
+        })
     }
 }
+
+// `From`/`TryFrom<Value>` so the state passes straight to `Attribute::set` and
+// `get::<ExpansionState>()`.
+crate::schemas::common::impl_token_value!(ExpansionState);
