@@ -201,7 +201,7 @@ impl AssetPreviewsAPI {
     /// them into the edit target.
     pub fn set_default_thumbnail(self, image: impl Into<String>) -> Result<Self> {
         let image = image.into();
-        let prim = self.0.stage().override_prim(self.0.path().clone())?.update_metadata(
+        let prim = self.stage().override_prim(self.path().clone())?.update_metadata(
             FieldKey::AssetInfo.as_str(),
             |local| {
                 let mut asset_info = match local {

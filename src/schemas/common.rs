@@ -211,3 +211,35 @@ pub(crate) fn get_with_api(stage: &Stage, path: impl Into<Path>, apis: &[&str]) 
         Ok(None)
     }
 }
+
+/// Bidirectional conversion between a token-valued schema enum and
+/// [`Value`], both delegating to the enum's `as_token` / `from_token`. `From`
+/// authors a [`Value::Token`] so the enum passes straight to
+/// [`Attribute::set`](crate::usd::Attribute::set) (`attr.set(Axis::X)?`), and
+/// `TryFrom` decodes one (accepting `token` or `string`) so
+/// [`Attribute::get`](crate::usd::Attribute::get) extracts it directly
+/// (`attr.get::<Axis>()?`). Each enum must expose
+/// `fn as_token(self) -> &'static str` and `fn from_token(&str) -> Option<Self>`.
+macro_rules! impl_token_value {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl From<$ty> for $crate::sdf::Value {
+            fn from(value: $ty) -> Self {
+                $crate::sdf::Value::Token(value.as_token().to_string())
+            }
+        }
+
+        impl TryFrom<$crate::sdf::Value> for $ty {
+            type Error = $crate::sdf::ValueConversionError;
+
+            fn try_from(value: $crate::sdf::Value) -> Result<Self, Self::Error> {
+                match &value {
+                    $crate::sdf::Value::Token(s) | $crate::sdf::Value::String(s) => <$ty>::from_token(s),
+                    _ => None,
+                }
+                .ok_or_else(|| $crate::sdf::ValueConversionError::new(stringify!($ty), &value))
+            }
+        }
+    )+};
+}
+
+pub(crate) use impl_token_value;

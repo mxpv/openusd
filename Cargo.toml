@@ -25,7 +25,9 @@ render = []
 shade = []
 skel = []
 ui = []
-vol = []
+# UsdVolVolume is a UsdGeomGprim and the field prims are UsdGeomXformable, so
+# the vol views build on the geom schema traits.
+vol = ["geom"]
 serde = ["dep:serde", "half/serde"]
 
 [dependencies]

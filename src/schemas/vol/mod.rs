@@ -1,97 +1,137 @@
-//! UsdVol schema reader + authoring.
+//! UsdVol schema views.
 //!
-//! Decodes and authors Pixar's `UsdVol` family - renderable volumes built
-//! from file-backed fields:
-//! - [`tokens::T_VOLUME`] (a `Gprim`) aggregates named fields via
-//!   `field:<name>` relationships, each targeting a field prim.
-//! - [`tokens::T_OPENVDB_ASSET`] / [`tokens::T_FIELD3D_ASSET`] are the
-//!   concrete field prims (an OpenVDB grid / a Field3D file), sharing the
-//!   `FieldAsset` attributes (filePath / fieldName / fieldIndex /
-//!   fieldDataType / vectorDataRoleHint).
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
+//! `UsdVol` family — renderable volumes built from file-backed fields. The
+//! views build on the [`geom`](crate::schemas::geom) trait chain: a
+//! [`Volume`] is a [`geom::Gprim`](crate::schemas::geom::Gprim) and the field
+//! prims are [`geom::Xformable`](crate::schemas::geom::Xformable).
 //!
-//! The newer `ParticleField*` schemas (Gaussian-splat volumes) are a
-//! separate, larger subsystem and are not covered here.
+//! ```text
+//! geom::Gprim
+//!  └ Volume                          (field:<name> relationships)
+//! geom::Xformable
+//!  └ FieldBase           (abstract; a transformable single field)
+//!     └ FieldAsset       (abstract; file-backed grid attributes)
+//!        └ OpenVDBAsset / Field3DAsset
+//! ```
+//!
+//! A [`Volume`] aggregates any number of named fields via `field:<name>`
+//! relationships, each targeting a field prim. [`FieldAsset`] is the interface
+//! carrying the shared file/grid attributes (`filePath` / `fieldName` /
+//! `fieldIndex` / `fieldDataType` / `vectorDataRoleHint`); the concrete
+//! [`OpenVDBAsset`] (an OpenVDB grid) and [`Field3DAsset`] (a Field3D file) add
+//! their own `fieldClass` / `fieldPurpose`.
+//!
+//! The newer `ParticleField*` schemas (Gaussian-splat volumes) are a separate,
+//! larger subsystem and are not covered here.
+//!
+//! # Example
+//!
+//! ```
+//! use openusd::schemas::vol::{self, FieldAsset};
+//! use openusd::{sdf, usd};
+//!
+//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//!
+//! // A field is a file-backed grid prim; `create_file_path_attr` is inherited
+//! // from the `FieldAsset` interface.
+//! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density")?;
+//! field.create_file_path_attr()?.set(sdf::Value::AssetPath("./smoke.vdb".into()))?;
+//! field.create_field_name_attr()?.set("density".to_string())?;
+//!
+//! // A Volume binds named fields through `field:<name>` relationships.
+//! let volume = vol::Volume::define(&stage, "/Smoke")?
+//!     .create_field_relationship("density", "/Smoke/density")?;
+//!
+//! assert_eq!(
+//!     volume.field_paths()?,
+//!     vec![("density".to_string(), sdf::path("/Smoke/density")?)],
+//! );
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
 
 pub mod tokens;
 
-mod author;
-mod read;
-mod types;
+mod schema;
+mod traits;
 
-pub use author::{
-    define_field3d_asset, define_openvdb_asset, define_volume, Field3dAssetAuthor, FieldAssetSetters,
-    OpenVdbAssetAuthor, VolumeAuthor,
-};
-pub use read::{read_field3d_asset, read_openvdb_asset, read_volume};
-pub use types::{ReadField3dAsset, ReadFieldAsset, ReadOpenVdbAsset, ReadVolume, VectorDataRoleHint};
+pub use schema::{Field3DAsset, OpenVDBAsset, Volume};
+pub use traits::{FieldAsset, FieldBase};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sdf;
-    use crate::usd::Stage;
-    use anyhow::Result;
+use tokens::*;
 
-    #[test]
-    fn volume_with_fields_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_volume(&stage, sdf::path("/V")?)?
-            .add_field("density", sdf::path("/V/density")?)?
-            .add_field("temperature", sdf::path("/V/temperature")?)?;
+/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` vol
+/// newtype. Every arm hand-writes the one `SchemaBase` method (`prim`) and adds
+/// the empty membership impls for the chain it names; all trait paths are fully
+/// qualified, so the call site only needs the macro in scope.
+///
+/// - `gprim` is a [`geom::Gprim`](crate::schemas::geom::Gprim) (`Volume`).
+/// - `field_asset` adds [`FieldBase`] + [`FieldAsset`] on top of
+///   [`geom::Xformable`](crate::schemas::geom::Xformable) (`OpenVDBAsset`,
+///   `Field3DAsset`).
+macro_rules! impl_vol_schema {
+    (@base $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
 
-        let v = read_volume(&stage, &sdf::path("/V")?)?.expect("Volume");
-        assert_eq!(
-            v.fields,
-            vec![
-                ("density".to_string(), "/V/density".to_string()),
-                ("temperature".to_string(), "/V/temperature".to_string()),
-            ],
-        );
-        Ok(())
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+        impl $crate::schemas::geom::Imageable for $ty {}
+        impl $crate::schemas::geom::Xformable for $ty {}
+    };
+    (gprim $ty:ident) => {
+        impl_vol_schema!(@base $ty);
+        impl $crate::schemas::geom::Boundable for $ty {}
+        impl $crate::schemas::geom::Gprim for $ty {}
+    };
+    (field_asset $ty:ident) => {
+        impl_vol_schema!(@base $ty);
+        impl $crate::schemas::vol::FieldBase for $ty {}
+        impl $crate::schemas::vol::FieldAsset for $ty {}
+    };
+}
+
+pub(crate) use impl_vol_schema;
+
+/// The geometric role of a vector-valued field (the `vectorDataRoleHint`
+/// token). Per Pixar's spec the default (unauthored) is
+/// [`VectorDataRoleHint::NoRole`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorDataRoleHint {
+    /// No role (the spec default, authored as the token `None`).
+    #[default]
+    NoRole,
+    Point,
+    Normal,
+    Vector,
+    Color,
+}
+
+impl VectorDataRoleHint {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            VectorDataRoleHint::NoRole => ROLE_NONE,
+            VectorDataRoleHint::Point => ROLE_POINT,
+            VectorDataRoleHint::Normal => ROLE_NORMAL,
+            VectorDataRoleHint::Vector => ROLE_VECTOR,
+            VectorDataRoleHint::Color => ROLE_COLOR,
+        }
     }
 
-    #[test]
-    fn openvdb_asset_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_openvdb_asset(&stage, sdf::path("/V/density")?)?
-            .set_file_path("./smoke.vdb")?
-            .set_field_name("density")?
-            .set_field_index(0)?
-            .set_field_data_type("float")?
-            .set_vector_data_role_hint(VectorDataRoleHint::NoRole)?
-            .set_field_class("fogVolume")?;
-
-        let a = read_openvdb_asset(&stage, &sdf::path("/V/density")?)?.expect("OpenVDBAsset");
-        assert_eq!(a.base.file_path.as_deref(), Some("./smoke.vdb"));
-        assert_eq!(a.base.field_name.as_deref(), Some("density"));
-        assert_eq!(a.base.field_index, Some(0));
-        assert_eq!(a.base.field_data_type.as_deref(), Some("float"));
-        assert_eq!(a.field_class.as_deref(), Some("fogVolume"));
-        Ok(())
-    }
-
-    #[test]
-    fn field3d_asset_and_type_gate() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_field3d_asset(&stage, sdf::path("/V/vel")?)?
-            .set_field_data_type("float3")?
-            .set_vector_data_role_hint(VectorDataRoleHint::Vector)?
-            .set_field_purpose("motion")?;
-
-        let a = read_field3d_asset(&stage, &sdf::path("/V/vel")?)?.expect("Field3DAsset");
-        assert_eq!(a.base.vector_data_role_hint, VectorDataRoleHint::Vector);
-        assert_eq!(a.field_purpose.as_deref(), Some("motion"));
-
-        // Cross-type gating: an OpenVDBAsset reader rejects a Field3DAsset.
-        assert!(read_openvdb_asset(&stage, &sdf::path("/V/vel")?)?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn add_field_rejects_empty() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        let result = define_volume(&stage, sdf::path("/V")?)?.add_field("", sdf::path("/V/density")?);
-        assert!(result.is_err());
-        Ok(())
+    pub fn from_token(s: &str) -> Option<Self> {
+        Some(match s {
+            ROLE_NONE => VectorDataRoleHint::NoRole,
+            ROLE_POINT => VectorDataRoleHint::Point,
+            ROLE_NORMAL => VectorDataRoleHint::Normal,
+            ROLE_VECTOR => VectorDataRoleHint::Vector,
+            ROLE_COLOR => VectorDataRoleHint::Color,
+            _ => return None,
+        })
     }
 }
+
+// `From`/`TryFrom<Value>` so the hint passes straight to `Attribute::set` and
+// `get::<VectorDataRoleHint>()`.
+crate::schemas::common::impl_token_value!(VectorDataRoleHint);

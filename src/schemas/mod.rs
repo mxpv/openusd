@@ -20,7 +20,7 @@
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
 //! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
 //! | `ui`      | `ui`      | `UsdUI` reader + authoring (SceneGraphPrimAPI / NodeGraphNodeAPI / Backdrop). |
-//! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
+//! | `vol`     | `vol`     | `UsdVol` trait-views (`Volume` + `OpenVDBAsset` / `Field3DAsset`); builds on the `geom` trait chain. |
 //! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |
 //! | `proc`    | `proc`    | `UsdProc` trait-view (`GenerativeProcedural`, a `geom::Boundable`); builds on the `geom` trait chain. |
 //!
