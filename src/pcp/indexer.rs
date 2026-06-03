@@ -60,8 +60,9 @@
 //! references and `defaultPrim` targets; ancestral reference/payload/inherit
 //! propagation through the graph-clone seed; implied classes; local variant sets
 //! (authored and fallback selections, nested variants); and specializes (direct,
-//! local, and implied across a reference chain, copied to the root). Features
-//! that still abandon the prim ([`Indexer::build`] returns `None`): relocates
+//! local, and implied across a reference chain — including nested specializes
+//! chains and a referenced target with local overrides — copied to the root).
+//! Features that still abandon the prim ([`Indexer::build`] returns `None`): relocates
 //! (any prim composing an inherit or specialize while `layerRelocates` is
 //! present, or whose ancestor graph carries a specialize/relocate node the seed
 //! cannot deepen); variants reached only inside a recursive sub-build (an
@@ -584,6 +585,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return None;
         }
 
+        // Every node reached through a specializes arc is globally weak (spec
+        // 10.4.1), so a specializes graft marks the whole grafted subtree
+        // `HAS_SPECIALIZES`; the source composed it as an ordinary sub-index, so
+        // its nodes do not carry the flag yet.
+        let weak = arc == ArcType::Specialize;
         let parent_depth = self.node(parent).path.prim_element_count() as u16;
         let mut remap: Vec<Option<NodeId>> = vec![None; source.nodes.len()];
         let mut grafted_root = NodeId::INVALID;
@@ -624,6 +630,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let n = &mut self.output.nodes[new_id.idx()];
             n.has_specs = node.has_specs;
             n.flags = node.flags;
+            if weak {
+                n.flags |= NodeFlags::HAS_SPECIALIZES;
+            }
             n.sibling_num_at_origin = node_sibling;
             n.namespace_depth = node_depth;
             n.origin = node_origin;
