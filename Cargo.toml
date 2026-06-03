@@ -14,7 +14,9 @@ geom = []
 # UsdLux lights are UsdGeom Xformable / Boundable prims, so the lux views
 # build on the geom schema traits.
 lux = ["geom"]
-media = []
+# UsdMediaSpatialAudio is a UsdGeomXformable-derived prim, so the media views
+# build on the geom schema traits.
+media = ["geom"]
 physics = []
 proc = []
 render = []

@@ -92,6 +92,55 @@ pub enum Variability {
     Uniform,
 }
 
+/// A time-coded `double` (C++ `SdfTimeCode`) — the value held by a
+/// `timecode`-typed attribute (e.g. `UsdMediaSpatialAudio.startTime`). Unlike
+/// a plain `double`, a `TimeCode` value is retimed by layer offsets during
+/// composition.
+///
+/// This is the authored *value* type, distinct from a time-query *parameter*
+/// (C++ `UsdTimeCode`, passed to `Attribute::get_at`). Read it with
+/// `Attribute::get::<sdf::TimeCode>()` and author it with
+/// `set(sdf::TimeCode(..))`; it round-trips through [`Value::TimeCode`].
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
+pub struct TimeCode(pub f64);
+
+impl TimeCode {
+    /// The wrapped time value.
+    #[inline]
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl From<f64> for TimeCode {
+    fn from(v: f64) -> Self {
+        TimeCode(v)
+    }
+}
+
+impl From<TimeCode> for f64 {
+    fn from(t: TimeCode) -> Self {
+        t.0
+    }
+}
+
+impl From<TimeCode> for Value {
+    fn from(t: TimeCode) -> Self {
+        Value::TimeCode(t.0)
+    }
+}
+
+impl TryFrom<Value> for TimeCode {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::TimeCode(v) => Ok(TimeCode(v)),
+            other => ValueConversionError::err("TimeCode", &other),
+        }
+    }
+}
+
 /// Represents a time offset and scale between layers.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]

@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, SchemaBase, SchemaKind, Stage};
 
-use super::internal::get_typed;
+use super::get_typed;
 use super::tokens as tok;
 use super::{impl_geom_schema, Boundable, Imageable, Xformable};
 

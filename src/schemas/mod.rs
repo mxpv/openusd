@@ -21,7 +21,7 @@
 //! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
 //! | `ui`      | `ui`      | `UsdUI` reader + authoring (SceneGraphPrimAPI / NodeGraphNodeAPI / Backdrop). |
 //! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
-//! | `media`   | `media`   | `UsdMedia` reader + authoring (`SpatialAudio`). |
+//! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |
 //! | `proc`    | `proc`    | `UsdProc` reader + authoring (`GenerativeProcedural`). |
 //!
 //! See [`registry`] for the eventual schema-registry surface
