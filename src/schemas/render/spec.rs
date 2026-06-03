@@ -11,7 +11,7 @@
 
 use crate::sdf::Value;
 
-use super::types::{AspectRatioConformPolicy, ProductType, SourceType};
+use super::{AspectRatioConformPolicy, ProductType, SourceType};
 
 /// One render product, flattened: the inherited base attributes resolved
 /// and the camera aperture conform-adjusted.

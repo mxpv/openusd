@@ -18,7 +18,7 @@
 //! | `skel`    | `skel`    | `UsdSkel` reader + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS). |
 //! | `lux`     | `lux`     | `UsdLux` trait-views (8 concrete light prims + LightFilter + LightAPI / ShapingAPI / ShadowAPI / LightListAPI); builds on the `geom` trait chain. |
 //! | `shade`   | `shade`   | `UsdShade` reader + authoring (Material / NodeGraph / Shader, connectable inputs / outputs, MaterialBindingAPI, UsdPreviewSurface). |
-//! | `render`  | `render`  | `UsdRender` reader + authoring (RenderSettings / Product / Var / Pass + the computed render spec). |
+//! | `render`  | `render`  | `UsdRender` trait-views (RenderSettings / Product via the `RenderSettingsBase` interface, Var / Pass / DenoisePass) + the computed render spec. |
 //! | `ui`      | `ui`      | `UsdUI` trait-views (typed `Backdrop` + single-apply `SceneGraphPrimAPI` / `NodeGraphNodeAPI`). |
 //! | `vol`     | `vol`     | `UsdVol` trait-views (`Volume` + `OpenVDBAsset` / `Field3DAsset`); builds on the `geom` trait chain. |
 //! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |

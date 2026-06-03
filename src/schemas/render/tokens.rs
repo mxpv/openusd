@@ -4,7 +4,7 @@
 //! retyping literals. Mirrors the grouping in Pixar's
 //! `pxr/usd/usdRender/tokens.h`.
 
-// ── Concrete + abstract prim type names ─────────────────────────────
+// Concrete + abstract prim type names.
 /// Abstract base of both [`T_RENDER_SETTINGS`] and [`T_RENDER_PRODUCT`];
 /// carries the shared camera + framing attributes.
 pub const T_RENDER_SETTINGS_BASE: &str = "RenderSettingsBase";
@@ -15,7 +15,7 @@ pub const T_RENDER_PASS: &str = "RenderPass";
 /// Denoise pass — a `dev`-era schema, not in core `release`.
 pub const T_RENDER_DENOISE_PASS: &str = "RenderDenoisePass";
 
-// ── RenderSettingsBase attributes (shared) ──────────────────────────
+// RenderSettingsBase attributes (shared).
 pub const A_RESOLUTION: &str = "resolution";
 pub const A_PIXEL_ASPECT_RATIO: &str = "pixelAspectRatio";
 pub const A_ASPECT_RATIO_CONFORM_POLICY: &str = "aspectRatioConformPolicy";
@@ -28,24 +28,24 @@ pub const A_DISABLE_DEPTH_OF_FIELD: &str = "disableDepthOfField";
 /// `camera` relationship — targets the primary `UsdGeomCamera`.
 pub const REL_CAMERA: &str = "camera";
 
-// ── RenderSettings attributes ───────────────────────────────────────
+// RenderSettings attributes.
 pub const REL_PRODUCTS: &str = "products";
 pub const A_INCLUDED_PURPOSES: &str = "includedPurposes";
 pub const A_MATERIAL_BINDING_PURPOSES: &str = "materialBindingPurposes";
 pub const A_RENDERING_COLOR_SPACE: &str = "renderingColorSpace";
 
-// ── RenderProduct attributes ────────────────────────────────────────
+// RenderProduct attributes.
 pub const A_PRODUCT_TYPE: &str = "productType";
 /// Note: `productName` is *not* `uniform` (unlike most base attrs).
 pub const A_PRODUCT_NAME: &str = "productName";
 pub const REL_ORDERED_VARS: &str = "orderedVars";
 
-// ── RenderVar attributes ────────────────────────────────────────────
+// RenderVar attributes.
 pub const A_DATA_TYPE: &str = "dataType";
 pub const A_SOURCE_NAME: &str = "sourceName";
 pub const A_SOURCE_TYPE: &str = "sourceType";
 
-// ── RenderPass attributes ───────────────────────────────────────────
+// RenderPass attributes.
 pub const A_PASS_TYPE: &str = "passType";
 pub const A_COMMAND: &str = "command";
 pub const A_FILE_NAME: &str = "fileName";
@@ -63,27 +63,27 @@ pub const COLLECTION_MATTE: &str = "matte";
 pub const A_RENDER_VISIBILITY_INCLUDE_ROOT: &str = "collection:renderVisibility:includeRoot";
 pub const A_CAMERA_VISIBILITY_INCLUDE_ROOT: &str = "collection:cameraVisibility:includeRoot";
 
-// ── RenderDenoisePass attributes (dev) ──────────────────────────────
+// RenderDenoisePass attributes (dev).
 pub const A_DENOISE_ENABLE: &str = "denoiseEnable";
 pub const REL_DENOISE_PASS: &str = "denoisePass";
 
-// ── aspectRatioConformPolicy token values ───────────────────────────
+// `aspectRatioConformPolicy` token values.
 pub const CONFORM_EXPAND_APERTURE: &str = "expandAperture";
 pub const CONFORM_CROP_APERTURE: &str = "cropAperture";
 pub const CONFORM_ADJUST_APERTURE_WIDTH: &str = "adjustApertureWidth";
 pub const CONFORM_ADJUST_APERTURE_HEIGHT: &str = "adjustApertureHeight";
 pub const CONFORM_ADJUST_PIXEL_ASPECT_RATIO: &str = "adjustPixelAspectRatio";
 
-// ── productType token values ────────────────────────────────────────
+// `productType` token values.
 pub const PRODUCT_TYPE_RASTER: &str = "raster";
 pub const PRODUCT_TYPE_DEEP_RASTER: &str = "deepRaster";
 
-// ── sourceType token values ─────────────────────────────────────────
+// `sourceType` token values.
 pub const SOURCE_TYPE_RAW: &str = "raw";
 pub const SOURCE_TYPE_PRIMVAR: &str = "primvar";
 pub const SOURCE_TYPE_LPE: &str = "lpe";
 pub const SOURCE_TYPE_INTRINSIC: &str = "intrinsic";
 
-// ── Stage metadata ──────────────────────────────────────────────────
+// Stage metadata.
 /// Root/session-layer metadata naming the default `RenderSettings` prim.
 pub const META_RENDER_SETTINGS_PRIM_PATH: &str = "renderSettingsPrimPath";
