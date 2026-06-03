@@ -21,7 +21,10 @@ use super::tokens as tok;
 /// light view through [`BoundableLight`] / [`NonboundableLight`], and by the
 /// standalone [`LightAPI`](super::LightAPI) applied-schema view.
 pub trait Light: SchemaBase {
-    /// `inputs:intensity` attribute handle (C++ `GetIntensityAttr`).
+    /// Scalar multiplier on the light's emitted power, scaling its overall
+    /// brightness linearly (luminance in nits). C++ `UsdLuxLightAPI::GetIntensityAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     fn intensity_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_INTENSITY)
     }
@@ -34,7 +37,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:exposure` attribute handle (C++ `GetExposureAttr`).
+    /// Exponential brightness adjustment applied as a power of 2, like a
+    /// camera f-stop: intensity is scaled by `2^exposure`. C++ `UsdLuxLightAPI::GetExposureAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     fn exposure_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_EXPOSURE)
     }
@@ -47,7 +53,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:diffuse` attribute handle (C++ `GetDiffuseAttr`).
+    /// Non-physical multiplier on this light's contribution to material diffuse
+    /// response, for artistic control. C++ `UsdLuxLightAPI::GetDiffuseAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     fn diffuse_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_DIFFUSE)
     }
@@ -60,7 +69,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:specular` attribute handle (C++ `GetSpecularAttr`).
+    /// Non-physical multiplier on this light's contribution to material specular
+    /// response, for artistic control. C++ `UsdLuxLightAPI::GetSpecularAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     fn specular_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_SPECULAR)
     }
@@ -73,7 +85,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:normalize` attribute handle (C++ `GetNormalizeAttr`).
+    /// Whether to normalize emitted power by the light's surface area, so that
+    /// changing the light's size keeps its total illumination constant. C++ `UsdLuxLightAPI::GetNormalizeAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     fn normalize_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_NORMALIZE)
     }
@@ -86,7 +101,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:color` attribute handle (C++ `GetColorAttr`).
+    /// The emitted light color in the rendering color space, multiplied into the
+    /// light's intensity (default `[1, 1, 1]`). C++ `UsdLuxLightAPI::GetColorAttr`.
+    ///
+    /// Type `color3f`. Fetch with `get::<[f32; 3]>()?`.
     fn color_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_COLOR)
     }
@@ -99,8 +117,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:enableColorTemperature` attribute handle
-    /// (C++ `GetEnableColorTemperatureAttr`).
+    /// Whether color-temperature tinting is active; when true, the chromaticity
+    /// from `colorTemperature` multiplies into the light's color. C++ `UsdLuxLightAPI::GetEnableColorTemperatureAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     fn enable_color_temperature_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_ENABLE_COLOR_TEMPERATURE)
     }
@@ -114,8 +134,10 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `inputs:colorTemperature` attribute handle — Kelvin
-    /// (C++ `GetColorTemperatureAttr`).
+    /// Color temperature white point in degrees Kelvin (default 6500K, D65),
+    /// applied only when `enableColorTemperature` is true. C++ `UsdLuxLightAPI::GetColorTemperatureAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     fn color_temperature_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_COLOR_TEMPERATURE)
     }
@@ -129,7 +151,8 @@ pub trait Light: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `light:filters` relationship handle (C++ `GetFiltersRel`).
+    /// Relationship targeting the LightFilter prims that modify this light's
+    /// emission. C++ `UsdLuxLightAPI::GetFiltersRel`.
     fn filters_rel(&self) -> Relationship {
         self.prim().relationship(tok::REL_FILTERS)
     }

@@ -33,8 +33,11 @@ impl Mesh {
         get_typed(stage, path, tok::T_MESH).map(|o| o.map(Self))
     }
 
-    /// `faceVertexCounts` attribute handle — vertices per face, `int[]`
-    /// (C++ `GetFaceVertexCountsAttr`).
+    /// The number of vertices in each face of the mesh; its length is the face
+    /// count and the values index into runs of `faceVertexIndices`.
+    /// C++ `UsdGeomMesh::GetFaceVertexCountsAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn face_vertex_counts_attr(&self) -> Attribute {
         self.attribute(tok::A_FACE_VERTEX_COUNTS)
     }
@@ -46,8 +49,11 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `faceVertexIndices` attribute handle — the index buffer, `int[]`
-    /// (C++ `GetFaceVertexIndicesAttr`).
+    /// The flat list of point indices for every face, grouped by the per-face
+    /// counts in `faceVertexCounts`; each value indexes into the `points`.
+    /// C++ `UsdGeomMesh::GetFaceVertexIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn face_vertex_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_FACE_VERTEX_INDICES)
     }
@@ -60,8 +66,12 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `subdivisionScheme` attribute handle — `catmullClark` / `loop` /
-    /// `bilinear` / `none` (C++ `GetSubdivisionSchemeAttr`).
+    /// The subdivision algorithm applied to the mesh: `catmullClark` (the
+    /// default), `loop`, `bilinear`, or `none` to treat it as a polygonal
+    /// mesh with no subdivision.
+    /// C++ `UsdGeomMesh::GetSubdivisionSchemeAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<SubdivisionScheme>()?`.
     pub fn subdivision_scheme_attr(&self) -> Attribute {
         self.attribute(tok::A_SUBDIVISION_SCHEME)
     }
@@ -75,8 +85,11 @@ impl Mesh {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `interpolateBoundary` attribute handle
-    /// (C++ `GetInterpolateBoundaryAttr`).
+    /// How the subdivision surface behaves at boundary edges and corners:
+    /// `none`, `edgeOnly`, or `edgeAndCorner` (the default).
+    /// C++ `UsdGeomMesh::GetInterpolateBoundaryAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<InterpolateBoundary>()?`.
     pub fn interpolate_boundary_attr(&self) -> Attribute {
         self.attribute(tok::A_INTERPOLATE_BOUNDARY)
     }
@@ -90,8 +103,12 @@ impl Mesh {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `faceVaryingLinearInterpolation` attribute handle
-    /// (C++ `GetFaceVaryingLinearInterpolationAttr`).
+    /// How face-varying primvars (such as UVs) are interpolated and smoothed
+    /// across the surface; one of `all`, `none`, `boundaries`, `cornersOnly`,
+    /// `cornersPlus1` (the default), or `cornersPlus2`.
+    /// C++ `UsdGeomMesh::GetFaceVaryingLinearInterpolationAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<FaceVaryingLinearInterpolation>()?`.
     pub fn face_varying_linear_interpolation_attr(&self) -> Attribute {
         self.attribute(tok::A_FACE_VARYING_LINEAR_INTERPOLATION)
     }
@@ -105,8 +122,11 @@ impl Mesh {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `triangleSubdivisionRule` attribute handle
-    /// (C++ `GetTriangleSubdivisionRuleAttr`).
+    /// The weighting rule used when subdividing triangles under the
+    /// Catmull-Clark scheme: `catmullClark` (the default) or `smooth`.
+    /// C++ `UsdGeomMesh::GetTriangleSubdivisionRuleAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<TriangleSubdivisionRule>()?`.
     pub fn triangle_subdivision_rule_attr(&self) -> Attribute {
         self.attribute(tok::A_TRIANGLE_SUBDIVISION_RULE)
     }
@@ -120,8 +140,11 @@ impl Mesh {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `holeIndices` attribute handle — faces to treat as holes, `int[]`
-    /// (C++ `GetHoleIndicesAttr`).
+    /// The sorted indices of faces that should be made invisible (treated as
+    /// holes) for both display and subdivision.
+    /// C++ `UsdGeomMesh::GetHoleIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn hole_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_HOLE_INDICES)
     }
@@ -131,8 +154,11 @@ impl Mesh {
         Ok(self.create_attribute(tok::A_HOLE_INDICES, "int[]")?.set_custom(false)?)
     }
 
-    /// `cornerIndices` attribute handle — sharpened corner points, `int[]`
-    /// (C++ `GetCornerIndicesAttr`).
+    /// The point indices marked as sharp corners during subdivision; pairs
+    /// element-wise with `cornerSharpnesses`.
+    /// C++ `UsdGeomMesh::GetCornerIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn corner_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_CORNER_INDICES)
     }
@@ -144,8 +170,12 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `cornerSharpnesses` attribute handle — per-corner sharpness, `float[]`
-    /// (C++ `GetCornerSharpnessesAttr`).
+    /// The sharpness assigned to each point in `cornerIndices`; higher values
+    /// pull the surface toward a sharp corner, with the `10` convention
+    /// denoting an infinitely sharp corner.
+    /// C++ `UsdGeomMesh::GetCornerSharpnessesAttr`.
+    ///
+    /// Type `float[]`. Fetch with `get::<Vec<f32>>()?`.
     pub fn corner_sharpnesses_attr(&self) -> Attribute {
         self.attribute(tok::A_CORNER_SHARPNESSES)
     }
@@ -158,8 +188,11 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `creaseIndices` attribute handle — point indices of crease edges,
-    /// `int[]` (C++ `GetCreaseIndicesAttr`).
+    /// The flat list of point indices forming the creased edge chains, grouped
+    /// by the per-crease counts in `creaseLengths`.
+    /// C++ `UsdGeomMesh::GetCreaseIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn crease_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_CREASE_INDICES)
     }
@@ -171,8 +204,11 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `creaseLengths` attribute handle — point count per crease, `int[]`
-    /// (C++ `GetCreaseLengthsAttr`).
+    /// The number of points in each crease, partitioning `creaseIndices` into
+    /// separate edge chains; each length must be at least two.
+    /// C++ `UsdGeomMesh::GetCreaseLengthsAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn crease_lengths_attr(&self) -> Attribute {
         self.attribute(tok::A_CREASE_LENGTHS)
     }
@@ -184,8 +220,11 @@ impl Mesh {
             .set_custom(false)?)
     }
 
-    /// `creaseSharpnesses` attribute handle — per-crease sharpness, `float[]`
-    /// (C++ `GetCreaseSharpnessesAttr`).
+    /// The sharpness of each crease, supplied either once per crease or once
+    /// per crease edge; the `10` convention denotes an infinitely sharp crease.
+    /// C++ `UsdGeomMesh::GetCreaseSharpnessesAttr`.
+    ///
+    /// Type `float[]`. Fetch with `get::<Vec<f32>>()?`.
     pub fn crease_sharpnesses_attr(&self) -> Attribute {
         self.attribute(tok::A_CREASE_SHARPNESSES)
     }
@@ -220,8 +259,11 @@ impl GeomSubset {
         get_typed(stage, path, tok::T_GEOM_SUBSET).map(|o| o.map(Self))
     }
 
-    /// `elementType` attribute handle — `face` / `point` / `edge` /
-    /// `tetrahedron` (C++ `GetElementTypeAttr`).
+    /// The kind of mesh element that `indices` enumerates: `face` (the
+    /// default), `point`, `edge`, or `tetrahedron`.
+    /// C++ `UsdGeomSubset::GetElementTypeAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<ElementType>()?`.
     pub fn element_type_attr(&self) -> Attribute {
         self.attribute(tok::A_ELEMENT_TYPE)
     }
@@ -234,8 +276,12 @@ impl GeomSubset {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `familyName` attribute handle — groups subsets that partition the mesh
-    /// (C++ `GetFamilyNameAttr`).
+    /// The name of the family this subset belongs to; subsets sharing a family
+    /// (e.g. `materialBind`) form a logical grouping whose members can be
+    /// constrained to partition the parent geometry without overlap.
+    /// C++ `UsdGeomSubset::GetFamilyNameAttr`.
+    ///
+    /// Type `uniform token`. Fetch with `get::<String>()?`.
     pub fn family_name_attr(&self) -> Attribute {
         self.attribute(tok::A_FAMILY_NAME)
     }
@@ -248,8 +294,11 @@ impl GeomSubset {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `indices` attribute handle — selected element indices, `int[]`
-    /// (C++ `GetIndicesAttr`).
+    /// The indices of the parent geometry's elements (of kind `elementType`)
+    /// that belong to this subset; may be time-sampled for animated subsets.
+    /// C++ `UsdGeomSubset::GetIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn indices_attr(&self) -> Attribute {
         self.attribute(tok::A_INDICES)
     }

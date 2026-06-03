@@ -32,8 +32,10 @@ impl PointInstancer {
         get_typed(stage, path, tok::T_POINT_INSTANCER).map(|o| o.map(Self))
     }
 
-    /// `prototypes` relationship handle — the root prims to instance
-    /// (C++ `GetPrototypesRel`).
+    /// The relationship targeting the prototype prims to be instanced; its
+    /// ordered targets are the prototypes that `protoIndices` selects per
+    /// instance. Read the targets via `relationship_targets`.
+    /// C++ `UsdGeomPointInstancer::GetPrototypesRel`.
     pub fn prototypes_rel(&self) -> Relationship {
         self.relationship(tok::REL_PROTOTYPES)
     }
@@ -43,8 +45,12 @@ impl PointInstancer {
         Ok(self.create_relationship(tok::REL_PROTOTYPES)?.set_custom(false)?)
     }
 
-    /// `protoIndices` attribute handle — per-instance index into `prototypes`,
-    /// `int[]` (C++ `GetProtoIndicesAttr`).
+    /// For each instance, the index into the `prototypes` relationship's
+    /// targets selecting which prototype to draw; its length defines the
+    /// number of instances.
+    /// C++ `UsdGeomPointInstancer::GetProtoIndicesAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn proto_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_PROTO_INDICES)
     }
@@ -56,8 +62,11 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `positions` attribute handle — per-instance position, `point3f[]`
-    /// (C++ `GetPositionsAttr`).
+    /// The position of each instance in the instancer's local space, forming
+    /// the translation part of every instance transform.
+    /// C++ `UsdGeomPointInstancer::GetPositionsAttr`.
+    ///
+    /// Type `point3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn positions_attr(&self) -> Attribute {
         self.attribute(tok::A_POSITIONS)
     }
@@ -69,8 +78,11 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `orientations` attribute handle — per-instance rotation, `quath[]`
-    /// (C++ `GetOrientationsAttr`).
+    /// The orientation of each instance as a half-precision unit quaternion,
+    /// supplying the rotation part of every instance transform.
+    /// C++ `UsdGeomPointInstancer::GetOrientationsAttr`.
+    ///
+    /// Type `quath[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::QuathVec`).
     pub fn orientations_attr(&self) -> Attribute {
         self.attribute(tok::A_ORIENTATIONS)
     }
@@ -82,9 +94,12 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `orientationsf` attribute handle — float-precision per-instance
-    /// rotation, `quatf[]` (C++ `GetOrientationsfAttr`); overrides
-    /// `orientations` when both are authored.
+    /// The orientation of each instance as a single-precision unit quaternion;
+    /// when authored it takes precedence over the half-precision
+    /// `orientations`.
+    /// C++ `UsdGeomPointInstancer::GetOrientationsfAttr`.
+    ///
+    /// Type `quatf[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::QuatfVec`).
     pub fn orientationsf_attr(&self) -> Attribute {
         self.attribute(tok::A_ORIENTATIONS_F)
     }
@@ -96,8 +111,11 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `scales` attribute handle — per-instance scale, `float3[]`
-    /// (C++ `GetScalesAttr`).
+    /// The per-axis scale of each instance, supplying the scaling part of
+    /// every instance transform.
+    /// C++ `UsdGeomPointInstancer::GetScalesAttr`.
+    ///
+    /// Type `float3[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn scales_attr(&self) -> Attribute {
         self.attribute(tok::A_SCALES)
     }
@@ -107,8 +125,12 @@ impl PointInstancer {
         Ok(self.create_attribute(tok::A_SCALES, "float3[]")?.set_custom(false)?)
     }
 
-    /// `velocities` attribute handle — per-instance linear velocity,
-    /// `vector3f[]` (C++ `GetVelocitiesAttr`).
+    /// The linear velocity of each instance in units per second, used to
+    /// interpolate (motion-blur) positions between time samples instead of
+    /// linearly blending `positions`.
+    /// C++ `UsdGeomPointInstancer::GetVelocitiesAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn velocities_attr(&self) -> Attribute {
         self.attribute(tok::A_VELOCITIES)
     }
@@ -120,8 +142,11 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `accelerations` attribute handle — per-instance acceleration,
-    /// `vector3f[]` (C++ `GetAccelerationsAttr`).
+    /// The linear acceleration of each instance, refining velocity-based
+    /// position interpolation into a quadratic motion model.
+    /// C++ `UsdGeomPointInstancer::GetAccelerationsAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn accelerations_attr(&self) -> Attribute {
         self.attribute(tok::A_ACCELERATIONS)
     }
@@ -133,8 +158,12 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `angularVelocities` attribute handle — per-instance angular velocity,
-    /// `vector3f[]` (C++ `GetAngularVelocitiesAttr`).
+    /// The angular velocity of each instance in degrees per second, used to
+    /// interpolate orientations between time samples for rotational motion
+    /// blur.
+    /// C++ `UsdGeomPointInstancer::GetAngularVelocitiesAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn angular_velocities_attr(&self) -> Attribute {
         self.attribute(tok::A_ANGULAR_VELOCITIES)
     }
@@ -147,8 +176,12 @@ impl PointInstancer {
             .set_custom(false)?)
     }
 
-    /// `ids` attribute handle — stable per-instance identifiers, `int64[]`
-    /// (C++ `GetIdsAttr`).
+    /// An optional stable identifier for each instance, letting `invisibleIds`
+    /// and downstream consumers track instances across time even as array
+    /// order changes.
+    /// C++ `UsdGeomPointInstancer::GetIdsAttr`.
+    ///
+    /// Type `int64[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::Int64Vec`).
     pub fn ids_attr(&self) -> Attribute {
         self.attribute(tok::A_IDS)
     }
@@ -158,8 +191,12 @@ impl PointInstancer {
         Ok(self.create_attribute(tok::A_IDS, "int64[]")?.set_custom(false)?)
     }
 
-    /// `invisibleIds` attribute handle — per-time prune list, `int64[]`
-    /// (C++ `GetInvisibleIdsAttr`).
+    /// The `ids` of instances to hide at a given time; typically time-sampled
+    /// to prune instances on a per-frame basis without resizing the other
+    /// per-instance arrays.
+    /// C++ `UsdGeomPointInstancer::GetInvisibleIdsAttr`.
+    ///
+    /// Type `int64[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::Int64Vec`).
     pub fn invisible_ids_attr(&self) -> Attribute {
         self.attribute(tok::A_INVISIBLE_IDS)
     }

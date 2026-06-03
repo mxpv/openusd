@@ -33,7 +33,12 @@ const NS_XFORM_OP: &str = "xformOp:";
 /// the canonical T·R·S ordering. Setters consume `self` and return it, so
 /// they chain (`xform.set_translate(t)?.set_rotate_y(d)?`).
 pub trait Xformable: Imageable {
-    /// `xformOpOrder` attribute handle (C++ `GetXformOpOrderAttr`).
+    /// The ordered list of `xformOp:*` attribute names that compose this prim's
+    /// local transform, strongest (most local) first; the sentinels `!invert!`
+    /// and a leading `!resetXformStack!` are also honoured. C++
+    /// `UsdGeomXformable::GetXformOpOrderAttr`.
+    ///
+    /// Type `token[]`. Fetch with `get::<sdf::Value>()?` (a `Value::TokenVec`).
     fn xform_op_order_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_XFORM_OP_ORDER)
     }

@@ -33,11 +33,11 @@ impl GenerativeProcedural {
         get_typed(stage, path, tok::T_GENERATIVE_PROCEDURAL).map(|o| o.map(Self))
     }
 
-    /// `proceduralSystem` attribute handle — the system that evaluates the
-    /// procedural (e.g. a Houdini Engine / RenderMan convention)
-    /// (C++ `GetProceduralSystemAttr`).
+    /// Name or convention of the system responsible for evaluating this
+    /// procedural, routing it to the right runtime engine (e.g. Houdini Engine or
+    /// a RenderMan convention). C++ `UsdProcGenerativeProcedural::GetProceduralSystemAttr`.
     ///
-    /// `uniform token`: `get::<sdf::Value>()?` yields the token.
+    /// Type `token`. Fetch with `get::<String>()?`.
     pub fn procedural_system_attr(&self) -> Attribute {
         self.attribute(tok::A_PROCEDURAL_SYSTEM)
     }
