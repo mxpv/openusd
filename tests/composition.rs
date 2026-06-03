@@ -256,16 +256,13 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickySpecializesAndInherits2_root",
     "TrickySpecializesAndInherits3_root",
     "VariantSpecializesAndReferenceSurprisingBehavior_root",
-    // TODO(variant-strength): composed variant-selection strength across nested
-    // and ancestral variant sets, weaker-selection precedence, and inherits
-    // authored inside variants — the variant node ordering / selection winner
-    // differs from C++.
-    "BasicNestedVariants_root",
-    "TrickyNestedVariants_root",
-    "TrickyVariantAncestralSelection_root",
-    "TrickyVariantIndependentSelection_root",
+    // TODO(variant-strength): the remaining variant cases need the ancestral
+    // variant re-evaluation a sub-root arc target requires (a variant set
+    // carried into a sub-build, which the top-level build does not yet re-expand
+    // — the indexer defers these to the recursive builder), an inherit authored
+    // inside a variant, or a weaker-selection precedence edge the builder gets
+    // wrong too.
     "TrickyVariantSelectionInVariant_root",
-    "TrickyVariantWeakerSelection_root",
     "TrickyVariantWeakerSelection2_root",
     "TrickyVariantWeakerSelection4_root",
     "SubrootInheritsAndVariants_root",
