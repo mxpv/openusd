@@ -8,14 +8,6 @@ use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdMedia_scene.usda";
 
-/// Decode a token / string attribute value to its string payload.
-fn token(value: Option<sdf::Value>) -> Option<String> {
-    match value {
-        Some(sdf::Value::Token(s) | sdf::Value::String(s)) => Some(s),
-        _ => None,
-    }
-}
-
 #[test]
 fn spatial_audio_from_fixture() -> Result<()> {
     let stage = Stage::open(FIXTURE)?;
@@ -26,13 +18,15 @@ fn spatial_audio_from_fixture() -> Result<()> {
         Some(sdf::Value::AssetPath("./ambient.wav".into()))
     );
     assert_eq!(
-        token(a.aural_mode_attr().get::<sdf::Value>()?)
+        a.aural_mode_attr()
+            .get::<String>()?
             .as_deref()
             .and_then(AuralMode::from_token),
         Some(AuralMode::NonSpatial)
     );
     assert_eq!(
-        token(a.playback_mode_attr().get::<sdf::Value>()?)
+        a.playback_mode_attr()
+            .get::<String>()?
             .as_deref()
             .and_then(PlaybackMode::from_token),
         Some(PlaybackMode::LoopFromStart)

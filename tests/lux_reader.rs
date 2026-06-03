@@ -17,14 +17,6 @@ fn open() -> Result<Stage> {
     Stage::open(FIXTURE)
 }
 
-/// Decode a token / string attribute value to its string payload.
-fn token(value: Option<sdf::Value>) -> Option<String> {
-    match value {
-        Some(sdf::Value::Token(s) | sdf::Value::String(s)) => Some(s),
-        _ => None,
-    }
-}
-
 /// Open an in-memory stage from `usda` source for the API / animation tests.
 fn from_usda(usda: &str) -> Result<Stage> {
     let dir = tempfile::tempdir()?;
@@ -133,7 +125,8 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
         Some(sdf::Value::AssetPath("./hdri/studio.hdr".into()))
     );
     assert_eq!(
-        token(dome.texture_format_attr().get()?)
+        dome.texture_format_attr()
+            .get::<String>()?
             .as_deref()
             .and_then(TextureFormat::from_token),
         Some(TextureFormat::Latlong)
@@ -178,7 +171,8 @@ fn light_list_api() -> Result<()> {
     let stage = open()?;
     let list = LightListAPI::get(&stage, sdf::path("/World")?)?.expect("LightListAPI");
     assert_eq!(
-        token(list.cache_behavior_attr().get()?)
+        list.cache_behavior_attr()
+            .get::<String>()?
             .as_deref()
             .and_then(LightListCacheBehavior::from_token),
         Some(LightListCacheBehavior::ConsumeAndContinue)
