@@ -4,12 +4,12 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::schemas::common::value_as_asset_str;
+use crate::schemas::common::{get_typed, get_with_api, value_as_asset_str};
 use crate::sdf::{self, FieldKey, Value};
 use crate::usd::{Attribute, Prim, Stage};
 
+use super::impl_media_schema;
 use super::tokens as tok;
-use super::{apply_api, create, create_uniform, get_typed, get_with_api, impl_media_schema};
 
 /// An audio source prim (C++ `UsdMediaSpatialAudio`) — a
 /// [`geom::Xformable`](crate::schemas::geom::Xformable) prim placing audio in
@@ -40,7 +40,10 @@ impl SpatialAudio {
 
     /// Author `filePath` (`uniform asset`) (C++ `CreateFilePathAttr`).
     pub fn create_file_path_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_FILE_PATH, "asset")
+        Ok(self
+            .create_attribute(tok::A_FILE_PATH, "asset")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `auralMode` attribute handle (C++ `GetAuralModeAttr`).
@@ -54,7 +57,10 @@ impl SpatialAudio {
 
     /// Author `auralMode` (`uniform token`) (C++ `CreateAuralModeAttr`).
     pub fn create_aural_mode_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_AURAL_MODE, "token")
+        Ok(self
+            .create_attribute(tok::A_AURAL_MODE, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `playbackMode` attribute handle (C++ `GetPlaybackModeAttr`).
@@ -68,7 +74,10 @@ impl SpatialAudio {
 
     /// Author `playbackMode` (`uniform token`) (C++ `CreatePlaybackModeAttr`).
     pub fn create_playback_mode_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_PLAYBACK_MODE, "token")
+        Ok(self
+            .create_attribute(tok::A_PLAYBACK_MODE, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `startTime` attribute handle — playback start cue
@@ -82,7 +91,10 @@ impl SpatialAudio {
     /// Author `startTime` (`uniform timecode`) (C++ `CreateStartTimeAttr`).
     /// Set its value as an [`sdf::TimeCode`].
     pub fn create_start_time_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_START_TIME, "timecode")
+        Ok(self
+            .create_attribute(tok::A_START_TIME, "timecode")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `endTime` attribute handle — playback end cue (C++ `GetEndTimeAttr`).
@@ -94,7 +106,10 @@ impl SpatialAudio {
 
     /// Author `endTime` (`uniform timecode`) (C++ `CreateEndTimeAttr`).
     pub fn create_end_time_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_END_TIME, "timecode")
+        Ok(self
+            .create_attribute(tok::A_END_TIME, "timecode")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `mediaOffset` attribute handle — offset into the asset, in seconds
@@ -107,7 +122,10 @@ impl SpatialAudio {
 
     /// Author `mediaOffset` (`uniform double`) (C++ `CreateMediaOffsetAttr`).
     pub fn create_media_offset_attr(&self) -> Result<Attribute> {
-        create_uniform(self, tok::A_MEDIA_OFFSET, "double")
+        Ok(self
+            .create_attribute(tok::A_MEDIA_OFFSET, "double")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `gain` attribute handle — linear amplitude multiplier
@@ -120,7 +138,7 @@ impl SpatialAudio {
 
     /// Author `gain` (`double`) (C++ `CreateGainAttr`).
     pub fn create_gain_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_GAIN, "double")
+        Ok(self.create_attribute(tok::A_GAIN, "double")?.set_custom(false)?)
     }
 }
 
@@ -146,14 +164,16 @@ impl AssetPreviewsAPI {
     /// Apply `AssetPreviewsAPI` to the prim at `path`
     /// (C++ `UsdMediaAssetPreviewsAPI::Apply`). The prim is opened as `over`.
     pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
-        Ok(Self(apply_api(stage, path, tok::API_ASSET_PREVIEWS)?))
+        Ok(Self(
+            stage.override_prim(path)?.add_applied_schema(tok::API_ASSET_PREVIEWS)?,
+        ))
     }
 
     /// Wrap `path` as an `AssetPreviewsAPI` if it carries `AssetPreviewsAPI` in
     /// its `apiSchemas` (C++ `UsdMediaAssetPreviewsAPI::Get`); returns `None`
     /// otherwise.
     pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
-        get_with_api(stage, path, tok::API_ASSET_PREVIEWS).map(|o| o.map(Self))
+        get_with_api(stage, path, &[tok::API_ASSET_PREVIEWS]).map(|o| o.map(Self))
     }
 
     /// The default thumbnail image path

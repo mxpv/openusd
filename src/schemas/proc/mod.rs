@@ -1,51 +1,60 @@
-//! UsdProc schema reader + authoring.
+//! UsdProc schema views.
 //!
-//! Decodes and authors Pixar's `UsdProc` family. The one concrete schema
-//! is [`tokens::T_GENERATIVE_PROCEDURAL`] - a prim whose children are
-//! generated at runtime by a named procedural system. It is also
-//! `Boundable` / `Xformable` (transform / extent / visibility come from
-//! the UsdGeom layer); this module covers the procedural-specific
+//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! `UsdProc` family. The one concrete schema is [`GenerativeProcedural`]
+//! (C++ `UsdProcGenerativeProcedural`) — a prim whose children are generated
+//! at runtime by a named procedural system. It is a
+//! [`geom::Boundable`](crate::schemas::geom::Boundable) prim (its transform /
+//! extent / visibility come from the UsdGeom layer, and its input parameters
+//! live in the `primvars:` namespace); this module adds the procedural-specific
 //! `proceduralSystem` attribute.
+//!
+//! # Example
+//!
+//! ```
+//! use openusd::schemas::proc::GenerativeProcedural;
+//! use openusd::sdf;
+//! use openusd::usd::Stage;
+//!
+//! let stage = Stage::builder().in_memory("scene.usda")?;
+//!
+//! let proc = GenerativeProcedural::define(&stage, "/World/Scatter")?;
+//! proc.create_procedural_system_attr()?.set(sdf::Value::Token("Houdini".into()))?;
+//!
+//! // Read it back through a typed view.
+//! let proc = GenerativeProcedural::get(&stage, "/World/Scatter")?.expect("GenerativeProcedural");
+//! assert_eq!(
+//!     proc.procedural_system_attr().get::<sdf::Value>()?,
+//!     Some(sdf::Value::Token("Houdini".into()))
+//! );
+//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! ```
 
 pub mod tokens;
 
-mod author;
-mod read;
-mod types;
+mod schema;
 
-pub use author::{define_generative_procedural, GenerativeProceduralAuthor};
-pub use read::read_generative_procedural;
-pub use types::ReadGenerativeProcedural;
+pub use schema::GenerativeProcedural;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sdf;
-    use crate::usd::Stage;
-    use anyhow::Result;
+/// Implement the schema-trait chain for a concrete `struct $ty(Prim)` proc
+/// newtype. All trait paths are fully qualified, so the call site only needs
+/// the macro in scope.
+///
+/// - `boundable` is a [`geom::Boundable`](crate::schemas::geom::Boundable) prim
+///   (`GenerativeProcedural`).
+macro_rules! impl_proc_schema {
+    (boundable $ty:ident) => {
+        impl $crate::usd::SchemaBase for $ty {
+            const KIND: $crate::usd::SchemaKind = $crate::usd::SchemaKind::ConcreteTyped;
 
-    #[test]
-    fn generative_procedural_roundtrip() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_generative_procedural(&stage, sdf::path("/World/Proc")?)?.set_procedural_system("Houdini")?;
-
-        let p = read_generative_procedural(&stage, &sdf::path("/World/Proc")?)?.expect("GenerativeProcedural");
-        assert_eq!(p.procedural_system.as_deref(), Some("Houdini"));
-        Ok(())
-    }
-
-    #[test]
-    fn defaults_and_type_gate() -> Result<()> {
-        let stage = Stage::builder().in_memory("anon.usda")?;
-        define_generative_procedural(&stage, sdf::path("/Proc")?)?;
-
-        let p = read_generative_procedural(&stage, &sdf::path("/Proc")?)?.expect("GenerativeProcedural");
-        assert_eq!(p, ReadGenerativeProcedural::default());
-        assert_eq!(p.procedural_system, None);
-
-        // A non-GenerativeProcedural prim reads back as None.
-        stage.define_prim(sdf::path("/NotProc")?)?.set_type_name("Scope")?;
-        assert!(read_generative_procedural(&stage, &sdf::path("/NotProc")?)?.is_none());
-        Ok(())
-    }
+            fn prim(&self) -> &$crate::usd::Prim {
+                &self.0
+            }
+        }
+        impl $crate::schemas::geom::Imageable for $ty {}
+        impl $crate::schemas::geom::Xformable for $ty {}
+        impl $crate::schemas::geom::Boundable for $ty {}
+    };
 }
+
+pub(crate) use impl_proc_schema;

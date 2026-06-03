@@ -11,9 +11,9 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, SchemaBase, SchemaKind, Stage};
 
-use super::get_typed;
 use super::tokens as tok;
 use super::{impl_geom_schema, Boundable, Imageable, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A vectorized-instancing prim (C++ `UsdGeomPointInstancer`).
 #[derive(Clone, derive_more::Deref)]

@@ -13,8 +13,8 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
 use super::tokens as tok;
-use super::{create, create_uniform_token, get_typed};
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A batch of curves sharing one prim (C++ `UsdGeomCurves`) — a
 /// [`PointBased`] whose `points` are partitioned into individual curves by
@@ -78,7 +78,10 @@ impl BasisCurves {
 
     /// Author `type` (`uniform token`) (C++ `CreateTypeAttr`).
     pub fn create_type_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_TYPE)
+        Ok(self
+            .create_attribute(tok::A_TYPE, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `basis` attribute handle — `bezier` / `bspline` / `catmullRom` /
@@ -89,7 +92,10 @@ impl BasisCurves {
 
     /// Author `basis` (`uniform token`) (C++ `CreateBasisAttr`).
     pub fn create_basis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_BASIS)
+        Ok(self
+            .create_attribute(tok::A_BASIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `wrap` attribute handle — `nonperiodic` / `periodic` / `pinned`
@@ -100,7 +106,10 @@ impl BasisCurves {
 
     /// Author `wrap` (`uniform token`) (C++ `CreateWrapAttr`).
     pub fn create_wrap_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_WRAP)
+        Ok(self
+            .create_attribute(tok::A_WRAP, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 
@@ -132,7 +141,7 @@ impl NurbsCurves {
 
     /// Author `order` (`int[]`) (C++ `CreateOrderAttr`).
     pub fn create_order_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_ORDER, "int[]")
+        Ok(self.create_attribute(tok::A_ORDER, "int[]")?.set_custom(false)?)
     }
 
     /// `knots` attribute handle — concatenated knot vectors, `double[]`
@@ -143,7 +152,7 @@ impl NurbsCurves {
 
     /// Author `knots` (`double[]`) (C++ `CreateKnotsAttr`).
     pub fn create_knots_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_KNOTS, "double[]")
+        Ok(self.create_attribute(tok::A_KNOTS, "double[]")?.set_custom(false)?)
     }
 
     /// `ranges` attribute handle — per-curve `(uMin, uMax)`, `double2[]`
@@ -154,7 +163,7 @@ impl NurbsCurves {
 
     /// Author `ranges` (`double2[]`) (C++ `CreateRangesAttr`).
     pub fn create_ranges_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RANGES, "double2[]")
+        Ok(self.create_attribute(tok::A_RANGES, "double2[]")?.set_custom(false)?)
     }
 
     /// `pointWeights` attribute handle — rational CV weights, `double[]`
@@ -165,7 +174,9 @@ impl NurbsCurves {
 
     /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
     pub fn create_point_weights_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_POINT_WEIGHTS, "double[]")
+        Ok(self
+            .create_attribute(tok::A_POINT_WEIGHTS, "double[]")?
+            .set_custom(false)?)
     }
 }
 
@@ -231,7 +242,7 @@ impl NurbsPatch {
 
     /// Author `uVertexCount` (`int`) (C++ `CreateUVertexCountAttr`).
     pub fn create_u_vertex_count_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_U_VERTEX_COUNT, "int")
+        Ok(self.create_attribute(tok::A_U_VERTEX_COUNT, "int")?.set_custom(false)?)
     }
 
     /// `vVertexCount` attribute handle (C++ `GetVVertexCountAttr`).
@@ -241,7 +252,7 @@ impl NurbsPatch {
 
     /// Author `vVertexCount` (`int`) (C++ `CreateVVertexCountAttr`).
     pub fn create_v_vertex_count_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_V_VERTEX_COUNT, "int")
+        Ok(self.create_attribute(tok::A_V_VERTEX_COUNT, "int")?.set_custom(false)?)
     }
 
     /// `uOrder` attribute handle (C++ `GetUOrderAttr`).
@@ -251,7 +262,7 @@ impl NurbsPatch {
 
     /// Author `uOrder` (`int`) (C++ `CreateUOrderAttr`).
     pub fn create_u_order_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_U_ORDER, "int")
+        Ok(self.create_attribute(tok::A_U_ORDER, "int")?.set_custom(false)?)
     }
 
     /// `vOrder` attribute handle (C++ `GetVOrderAttr`).
@@ -261,7 +272,7 @@ impl NurbsPatch {
 
     /// Author `vOrder` (`int`) (C++ `CreateVOrderAttr`).
     pub fn create_v_order_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_V_ORDER, "int")
+        Ok(self.create_attribute(tok::A_V_ORDER, "int")?.set_custom(false)?)
     }
 
     /// `uKnots` attribute handle — `double[]` (C++ `GetUKnotsAttr`).
@@ -271,7 +282,7 @@ impl NurbsPatch {
 
     /// Author `uKnots` (`double[]`) (C++ `CreateUKnotsAttr`).
     pub fn create_u_knots_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_U_KNOTS, "double[]")
+        Ok(self.create_attribute(tok::A_U_KNOTS, "double[]")?.set_custom(false)?)
     }
 
     /// `vKnots` attribute handle — `double[]` (C++ `GetVKnotsAttr`).
@@ -281,7 +292,7 @@ impl NurbsPatch {
 
     /// Author `vKnots` (`double[]`) (C++ `CreateVKnotsAttr`).
     pub fn create_v_knots_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_V_KNOTS, "double[]")
+        Ok(self.create_attribute(tok::A_V_KNOTS, "double[]")?.set_custom(false)?)
     }
 
     /// `uForm` attribute handle — `open` / `closed` / `periodic`
@@ -292,7 +303,10 @@ impl NurbsPatch {
 
     /// Author `uForm` (`uniform token`) (C++ `CreateUFormAttr`).
     pub fn create_u_form_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_U_FORM)
+        Ok(self
+            .create_attribute(tok::A_U_FORM, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `vForm` attribute handle — `open` / `closed` / `periodic`
@@ -303,7 +317,10 @@ impl NurbsPatch {
 
     /// Author `vForm` (`uniform token`) (C++ `CreateVFormAttr`).
     pub fn create_v_form_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_V_FORM)
+        Ok(self
+            .create_attribute(tok::A_V_FORM, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `uRange` attribute handle — `(uMin, uMax)`, `double2`
@@ -314,7 +331,7 @@ impl NurbsPatch {
 
     /// Author `uRange` (`double2`) (C++ `CreateURangeAttr`).
     pub fn create_u_range_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_U_RANGE, "double2")
+        Ok(self.create_attribute(tok::A_U_RANGE, "double2")?.set_custom(false)?)
     }
 
     /// `vRange` attribute handle — `(vMin, vMax)`, `double2`
@@ -325,7 +342,7 @@ impl NurbsPatch {
 
     /// Author `vRange` (`double2`) (C++ `CreateVRangeAttr`).
     pub fn create_v_range_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_V_RANGE, "double2")
+        Ok(self.create_attribute(tok::A_V_RANGE, "double2")?.set_custom(false)?)
     }
 
     /// `pointWeights` attribute handle — rational CV weights, `double[]`
@@ -336,7 +353,9 @@ impl NurbsPatch {
 
     /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
     pub fn create_point_weights_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_POINT_WEIGHTS, "double[]")
+        Ok(self
+            .create_attribute(tok::A_POINT_WEIGHTS, "double[]")?
+            .set_custom(false)?)
     }
 }
 

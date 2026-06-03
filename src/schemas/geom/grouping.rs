@@ -5,9 +5,9 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::{Prim, SchemaBase, SchemaKind, Stage};
 
-use super::get_typed;
 use super::tokens as tok;
 use super::{impl_geom_schema, Imageable, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A transformable grouping prim (C++ `UsdGeomXform`) — an [`Xformable`] with
 /// no geometry of its own. Compose a transform with the `set_*` setters
