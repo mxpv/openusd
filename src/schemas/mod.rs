@@ -22,7 +22,7 @@
 //! | `ui`      | `ui`      | `UsdUI` reader + authoring (SceneGraphPrimAPI / NodeGraphNodeAPI / Backdrop). |
 //! | `vol`     | `vol`     | `UsdVol` reader + authoring (Volume + OpenVDBAsset / Field3DAsset). |
 //! | `media`   | `media`   | `UsdMedia` trait-views (`SpatialAudio` + `AssetPreviewsAPI`); builds on the `geom` trait chain. |
-//! | `proc`    | `proc`    | `UsdProc` reader + authoring (`GenerativeProcedural`). |
+//! | `proc`    | `proc`    | `UsdProc` trait-view (`GenerativeProcedural`, a `geom::Boundable`); builds on the `geom` trait chain. |
 //!
 //! See [`registry`] for the eventual schema-registry surface
 //! (currently a stub).

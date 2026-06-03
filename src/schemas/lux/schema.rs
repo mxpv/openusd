@@ -20,7 +20,8 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
 
 use super::tokens as tok;
-use super::{apply_api, create, create_uniform_token, get_typed, get_typed_any, get_with_api, impl_lux_schema, Light};
+use super::{impl_lux_schema, Light};
+use crate::schemas::common::{get_typed, get_typed_any, get_with_api};
 
 /// A spherical / point area light (C++ `UsdLuxSphereLight`).
 #[derive(Clone, derive_more::Deref)]
@@ -46,7 +47,7 @@ impl SphereLight {
 
     /// Author `inputs:radius` (`float`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "float")
+        Ok(self.create_attribute(tok::A_RADIUS, "float")?.set_custom(false)?)
     }
 
     /// `treatAsPoint` attribute handle — a bare `bool` (not `inputs:`-prefixed)
@@ -57,7 +58,9 @@ impl SphereLight {
 
     /// Author `treatAsPoint` (`bool`) (C++ `CreateTreatAsPointAttr`).
     pub fn create_treat_as_point_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_TREAT_AS_POINT, "bool")
+        Ok(self
+            .create_attribute(tok::A_TREAT_AS_POINT, "bool")?
+            .set_custom(false)?)
     }
 }
 
@@ -86,7 +89,7 @@ impl DiskLight {
 
     /// Author `inputs:radius` (`float`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "float")
+        Ok(self.create_attribute(tok::A_RADIUS, "float")?.set_custom(false)?)
     }
 }
 
@@ -116,7 +119,7 @@ impl RectLight {
 
     /// Author `inputs:width` (`float`) (C++ `CreateWidthAttr`).
     pub fn create_width_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_WIDTH, "float")
+        Ok(self.create_attribute(tok::A_WIDTH, "float")?.set_custom(false)?)
     }
 
     /// `inputs:height` attribute handle (C++ `GetHeightAttr`).
@@ -126,7 +129,7 @@ impl RectLight {
 
     /// Author `inputs:height` (`float`) (C++ `CreateHeightAttr`).
     pub fn create_height_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HEIGHT, "float")
+        Ok(self.create_attribute(tok::A_HEIGHT, "float")?.set_custom(false)?)
     }
 
     /// `inputs:texture:file` attribute handle (C++ `GetTextureFileAttr`).
@@ -136,7 +139,7 @@ impl RectLight {
 
     /// Author `inputs:texture:file` (`asset`) (C++ `CreateTextureFileAttr`).
     pub fn create_texture_file_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_TEXTURE_FILE, "asset")
+        Ok(self.create_attribute(tok::A_TEXTURE_FILE, "asset")?.set_custom(false)?)
     }
 }
 
@@ -166,7 +169,7 @@ impl CylinderLight {
 
     /// Author `inputs:length` (`float`) (C++ `CreateLengthAttr`).
     pub fn create_length_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_LENGTH, "float")
+        Ok(self.create_attribute(tok::A_LENGTH, "float")?.set_custom(false)?)
     }
 
     /// `inputs:radius` attribute handle (C++ `GetRadiusAttr`).
@@ -176,7 +179,7 @@ impl CylinderLight {
 
     /// Author `inputs:radius` (`float`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "float")
+        Ok(self.create_attribute(tok::A_RADIUS, "float")?.set_custom(false)?)
     }
 
     /// `treatAsLine` attribute handle — a bare `bool`
@@ -187,7 +190,7 @@ impl CylinderLight {
 
     /// Author `treatAsLine` (`bool`) (C++ `CreateTreatAsLineAttr`).
     pub fn create_treat_as_line_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_TREAT_AS_LINE, "bool")
+        Ok(self.create_attribute(tok::A_TREAT_AS_LINE, "bool")?.set_custom(false)?)
     }
 }
 
@@ -218,7 +221,7 @@ impl PortalLight {
 
     /// Author `inputs:width` (`float`) (C++ `CreateWidthAttr`).
     pub fn create_width_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_WIDTH, "float")
+        Ok(self.create_attribute(tok::A_WIDTH, "float")?.set_custom(false)?)
     }
 
     /// `inputs:height` attribute handle (C++ `GetHeightAttr`).
@@ -228,7 +231,7 @@ impl PortalLight {
 
     /// Author `inputs:height` (`float`) (C++ `CreateHeightAttr`).
     pub fn create_height_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HEIGHT, "float")
+        Ok(self.create_attribute(tok::A_HEIGHT, "float")?.set_custom(false)?)
     }
 }
 
@@ -259,7 +262,7 @@ impl DistantLight {
 
     /// Author `inputs:angle` (`float`) (C++ `CreateAngleAttr`).
     pub fn create_angle_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_ANGLE, "float")
+        Ok(self.create_attribute(tok::A_ANGLE, "float")?.set_custom(false)?)
     }
 }
 
@@ -328,7 +331,7 @@ impl DomeLight {
 
     /// Author `inputs:texture:file` (`asset`) (C++ `CreateTextureFileAttr`).
     pub fn create_texture_file_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_TEXTURE_FILE, "asset")
+        Ok(self.create_attribute(tok::A_TEXTURE_FILE, "asset")?.set_custom(false)?)
     }
 
     /// `inputs:texture:format` attribute handle — `automatic` / `latlong` /
@@ -340,7 +343,9 @@ impl DomeLight {
 
     /// Author `inputs:texture:format` (`token`) (C++ `CreateTextureFormatAttr`).
     pub fn create_texture_format_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_TEXTURE_FORMAT, "token")
+        Ok(self
+            .create_attribute(tok::A_TEXTURE_FORMAT, "token")?
+            .set_custom(false)?)
     }
 
     /// `guideRadius` attribute handle — visualisation gizmo radius, a bare
@@ -351,7 +356,7 @@ impl DomeLight {
 
     /// Author `guideRadius` (`float`) (C++ `CreateGuideRadiusAttr`).
     pub fn create_guide_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_GUIDE_RADIUS, "float")
+        Ok(self.create_attribute(tok::A_GUIDE_RADIUS, "float")?.set_custom(false)?)
     }
 
     /// `poleAxis` attribute handle — `scene` / `Y` / `Z`, only meaningful on
@@ -362,7 +367,10 @@ impl DomeLight {
 
     /// Author `poleAxis` (`uniform token`) (C++ `CreatePoleAxisAttr`).
     pub fn create_pole_axis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_POLE_AXIS)
+        Ok(self
+            .create_attribute(tok::A_POLE_AXIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `portals` relationship handle — `PortalLight` prims focusing this dome
@@ -416,7 +424,7 @@ impl LightAPI {
     /// The prim is opened as `over`; author its typeName separately if it does
     /// not exist yet.
     pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
-        Ok(Self(apply_api(stage, path, tok::API_LIGHT)?))
+        Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_LIGHT)?))
     }
 
     /// Wrap `path` as a `LightAPI` if it carries `LightAPI`, `MeshLightAPI`,
@@ -444,7 +452,7 @@ pub struct ShapingAPI(Prim);
 impl ShapingAPI {
     /// Apply `ShapingAPI` to the prim at `path` (C++ `UsdLuxShapingAPI::Apply`).
     pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
-        Ok(Self(apply_api(stage, path, tok::API_SHAPING)?))
+        Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_SHAPING)?))
     }
 
     /// Wrap `path` as a `ShapingAPI` if it carries `ShapingAPI` in its
@@ -460,7 +468,9 @@ impl ShapingAPI {
 
     /// Author `inputs:shaping:focus` (`float`) (C++ `CreateShapingFocusAttr`).
     pub fn create_focus_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_FOCUS, "float")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_FOCUS, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:focusTint` attribute handle
@@ -472,7 +482,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:focusTint` (`color3f`)
     /// (C++ `CreateShapingFocusTintAttr`).
     pub fn create_focus_tint_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_FOCUS_TINT, "color3f")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_FOCUS_TINT, "color3f")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:cone:angle` attribute handle — degrees
@@ -484,7 +496,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:cone:angle` (`float`)
     /// (C++ `CreateShapingConeAngleAttr`).
     pub fn create_cone_angle_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_CONE_ANGLE, "float")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_CONE_ANGLE, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:cone:softness` attribute handle
@@ -496,7 +510,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:cone:softness` (`float`)
     /// (C++ `CreateShapingConeSoftnessAttr`).
     pub fn create_cone_softness_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_CONE_SOFTNESS, "float")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_CONE_SOFTNESS, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:ies:file` attribute handle
@@ -508,7 +524,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:ies:file` (`asset`)
     /// (C++ `CreateShapingIesFileAttr`).
     pub fn create_ies_file_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_IES_FILE, "asset")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_IES_FILE, "asset")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:ies:angleScale` attribute handle
@@ -520,7 +538,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:ies:angleScale` (`float`)
     /// (C++ `CreateShapingIesAngleScaleAttr`).
     pub fn create_ies_angle_scale_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_IES_ANGLE_SCALE, "float")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_IES_ANGLE_SCALE, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shaping:ies:normalize` attribute handle
@@ -532,7 +552,9 @@ impl ShapingAPI {
     /// Author `inputs:shaping:ies:normalize` (`bool`)
     /// (C++ `CreateShapingIesNormalizeAttr`).
     pub fn create_ies_normalize_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHAPING_IES_NORMALIZE, "bool")
+        Ok(self
+            .create_attribute(tok::A_SHAPING_IES_NORMALIZE, "bool")?
+            .set_custom(false)?)
     }
 }
 
@@ -545,7 +567,7 @@ pub struct ShadowAPI(Prim);
 impl ShadowAPI {
     /// Apply `ShadowAPI` to the prim at `path` (C++ `UsdLuxShadowAPI::Apply`).
     pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
-        Ok(Self(apply_api(stage, path, tok::API_SHADOW)?))
+        Ok(Self(stage.override_prim(path)?.add_applied_schema(tok::API_SHADOW)?))
     }
 
     /// Wrap `path` as a `ShadowAPI` if it carries `ShadowAPI` in its
@@ -561,7 +583,7 @@ impl ShadowAPI {
 
     /// Author `inputs:shadow:enable` (`bool`) (C++ `CreateShadowEnableAttr`).
     pub fn create_enable_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHADOW_ENABLE, "bool")
+        Ok(self.create_attribute(tok::A_SHADOW_ENABLE, "bool")?.set_custom(false)?)
     }
 
     /// `inputs:shadow:color` attribute handle (C++ `GetShadowColorAttr`).
@@ -571,7 +593,9 @@ impl ShadowAPI {
 
     /// Author `inputs:shadow:color` (`color3f`) (C++ `CreateShadowColorAttr`).
     pub fn create_color_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHADOW_COLOR, "color3f")
+        Ok(self
+            .create_attribute(tok::A_SHADOW_COLOR, "color3f")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shadow:distance` attribute handle — max shadow-ray distance,
@@ -583,7 +607,9 @@ impl ShadowAPI {
     /// Author `inputs:shadow:distance` (`float`)
     /// (C++ `CreateShadowDistanceAttr`).
     pub fn create_distance_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHADOW_DISTANCE, "float")
+        Ok(self
+            .create_attribute(tok::A_SHADOW_DISTANCE, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shadow:falloff` attribute handle (C++ `GetShadowFalloffAttr`).
@@ -594,7 +620,9 @@ impl ShadowAPI {
     /// Author `inputs:shadow:falloff` (`float`)
     /// (C++ `CreateShadowFalloffAttr`).
     pub fn create_falloff_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHADOW_FALLOFF, "float")
+        Ok(self
+            .create_attribute(tok::A_SHADOW_FALLOFF, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:shadow:falloffGamma` attribute handle
@@ -606,7 +634,9 @@ impl ShadowAPI {
     /// Author `inputs:shadow:falloffGamma` (`float`)
     /// (C++ `CreateShadowFalloffGammaAttr`).
     pub fn create_falloff_gamma_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SHADOW_FALLOFF_GAMMA, "float")
+        Ok(self
+            .create_attribute(tok::A_SHADOW_FALLOFF_GAMMA, "float")?
+            .set_custom(false)?)
     }
 }
 
@@ -622,7 +652,9 @@ impl LightListAPI {
     /// Apply `LightListAPI` to the prim at `path`
     /// (C++ `UsdLuxLightListAPI::Apply`).
     pub fn apply(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
-        Ok(Self(apply_api(stage, path, tok::API_LIGHT_LIST)?))
+        Ok(Self(
+            stage.override_prim(path)?.add_applied_schema(tok::API_LIGHT_LIST)?,
+        ))
     }
 
     /// Wrap `path` as a `LightListAPI` if it carries `LightListAPI` in its
@@ -651,7 +683,10 @@ impl LightListAPI {
     /// Author `lightList:cacheBehavior` (`uniform token`)
     /// (C++ `CreateLightListCacheBehaviorAttr`).
     pub fn create_cache_behavior_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_LIGHT_LIST_CACHE_BEHAVIOR)
+        Ok(self
+            .create_attribute(tok::A_LIGHT_LIST_CACHE_BEHAVIOR, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 

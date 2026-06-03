@@ -18,7 +18,9 @@ lux = ["geom"]
 # build on the geom schema traits.
 media = ["geom"]
 physics = []
-proc = []
+# UsdProcGenerativeProcedural is a UsdGeomBoundable-derived prim, so the proc
+# views build on the geom schema traits.
+proc = ["geom"]
 render = []
 shade = []
 skel = []

@@ -10,9 +10,9 @@ use anyhow::Result;
 use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
-use super::get_typed;
 use super::tokens as tok;
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A point cloud (C++ `UsdGeomPoints`) — a [`PointBased`] with per-point
 /// `widths` and stable `ids`.

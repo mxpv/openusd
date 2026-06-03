@@ -14,7 +14,6 @@ use anyhow::Result;
 use crate::schemas::geom;
 use crate::usd::{Attribute, Relationship, SchemaBase};
 
-use super::create;
 use super::tokens as tok;
 
 /// The `UsdLuxLightAPI` interface (C++ `UsdLuxLightAPI`) — the light
@@ -29,7 +28,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:intensity` (`float`) (C++ `CreateIntensityAttr`).
     fn create_intensity_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_INTENSITY, "float")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_INTENSITY, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:exposure` attribute handle (C++ `GetExposureAttr`).
@@ -39,7 +41,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:exposure` (`float`) (C++ `CreateExposureAttr`).
     fn create_exposure_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_EXPOSURE, "float")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_EXPOSURE, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:diffuse` attribute handle (C++ `GetDiffuseAttr`).
@@ -49,7 +54,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:diffuse` (`float`) (C++ `CreateDiffuseAttr`).
     fn create_diffuse_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_DIFFUSE, "float")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_DIFFUSE, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:specular` attribute handle (C++ `GetSpecularAttr`).
@@ -59,7 +67,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:specular` (`float`) (C++ `CreateSpecularAttr`).
     fn create_specular_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_SPECULAR, "float")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_SPECULAR, "float")?
+            .set_custom(false)?)
     }
 
     /// `inputs:normalize` attribute handle (C++ `GetNormalizeAttr`).
@@ -69,7 +80,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:normalize` (`bool`) (C++ `CreateNormalizeAttr`).
     fn create_normalize_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_NORMALIZE, "bool")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_NORMALIZE, "bool")?
+            .set_custom(false)?)
     }
 
     /// `inputs:color` attribute handle (C++ `GetColorAttr`).
@@ -79,7 +93,10 @@ pub trait Light: SchemaBase {
 
     /// Author `inputs:color` (`color3f`) (C++ `CreateColorAttr`).
     fn create_color_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_COLOR, "color3f")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_COLOR, "color3f")?
+            .set_custom(false)?)
     }
 
     /// `inputs:enableColorTemperature` attribute handle
@@ -91,7 +108,10 @@ pub trait Light: SchemaBase {
     /// Author `inputs:enableColorTemperature` (`bool`)
     /// (C++ `CreateEnableColorTemperatureAttr`).
     fn create_enable_color_temperature_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_ENABLE_COLOR_TEMPERATURE, "bool")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_ENABLE_COLOR_TEMPERATURE, "bool")?
+            .set_custom(false)?)
     }
 
     /// `inputs:colorTemperature` attribute handle — Kelvin
@@ -103,7 +123,10 @@ pub trait Light: SchemaBase {
     /// Author `inputs:colorTemperature` (`float`)
     /// (C++ `CreateColorTemperatureAttr`).
     fn create_color_temperature_attr(&self) -> Result<Attribute> {
-        create(self.prim(), tok::A_COLOR_TEMPERATURE, "float")
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_COLOR_TEMPERATURE, "float")?
+            .set_custom(false)?)
     }
 
     /// `light:filters` relationship handle (C++ `GetFiltersRel`).

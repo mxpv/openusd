@@ -1,15 +1,16 @@
-//! Low-level authoring building blocks shared across the schema families.
+//! Low-level building blocks shared across the schema families.
 //!
-//! Each helper wraps [`crate::usd::Stage`]'s public authoring entry points
-//! (`create_attribute` / `create_relationship` + the `Attribute` /
-//! `Relationship` fluent setters) with default choices that recur across
-//! `usdGeom`, `usdLux`, `usdPhysics`, and `usdSkel` (`custom = false`,
-//! `variability = Varying` unless overridden).
+//! The authoring helpers wrap [`crate::usd::Stage`]'s public authoring
+//! entry points (`create_attribute` / `create_relationship` + the
+//! `Attribute` / `Relationship` fluent setters) with the default choices
+//! that recur across families (`custom = false`, `variability = Varying`
+//! unless overridden). The view-gate helpers ([`get_typed`],
+//! [`get_typed_any`], [`get_with_api`]) back the typed-view `get` lookups
+//! the migrated families (`geom`, `lux`, `media`, `proc`) share.
 //!
 //! Family-specific authoring (typed-value helpers, primvar metadata,
-//! applied-API tokens) stays in each family's `author/common.rs`; this
-//! module only holds the helpers that would otherwise be duplicated
-//! verbatim across all four.
+//! applied-API tokens) stays in each family's module; this module only
+//! holds the helpers that would otherwise be duplicated verbatim.
 
 // Each helper is used by at least one schema feature, but typically not
 // all four — silence the dead-code warning on per-feature builds.
@@ -27,16 +28,6 @@ pub(crate) fn author_float(stage: &Stage, prim: &Path, name: &str, value: f32) -
         .create_attribute(attr_path, "float")?
         .set_custom(false)?
         .set(Value::Float(value))?;
-    Ok(())
-}
-
-/// Author a `varying double` attribute on `prim` with the given default value.
-pub(crate) fn author_double(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "double")?
-        .set_custom(false)?
-        .set(Value::Double(value))?;
     Ok(())
 }
 
@@ -99,28 +90,6 @@ pub(crate) fn author_uniform_asset(stage: &Stage, prim: &Path, name: &str, value
         .set_variability(Variability::Uniform)?
         .set_custom(false)?
         .set(Value::AssetPath(value.into()))?;
-    Ok(())
-}
-
-/// Author a `uniform double` attribute on `prim` with the given default value.
-pub(crate) fn author_uniform_double(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "double")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::Double(value))?;
-    Ok(())
-}
-
-/// Author a `uniform timecode` attribute on `prim` with the given default value.
-pub(crate) fn author_uniform_timecode(stage: &Stage, prim: &Path, name: &str, value: f64) -> Result<()> {
-    let attr_path = prim.append_property(name)?;
-    stage
-        .create_attribute(attr_path, "timecode")?
-        .set_variability(Variability::Uniform)?
-        .set_custom(false)?
-        .set(Value::TimeCode(value))?;
     Ok(())
 }
 
@@ -208,4 +177,37 @@ pub(crate) fn read_int(stage: &Stage, prim: &Path, name: &str) -> Result<Option<
         Some(Value::Int64(i)) => i32::try_from(i).ok(),
         _ => None,
     })
+}
+
+/// Wrap `path` as a concrete view's `Prim` if its composed `typeName` equals
+/// `type_name` — the type-gate every typed view's `get` performs.
+pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: &str) -> Result<Option<Prim>> {
+    let path = path.into();
+    if stage.type_name(&path)?.as_deref() != Some(type_name) {
+        return Ok(None);
+    }
+    Ok(Some(stage.prim_at_path(path)))
+}
+
+/// Like [`get_typed`], but matches any of `type_names` — for views that share
+/// one Rust type across several concrete schemas.
+pub(crate) fn get_typed_any(stage: &Stage, path: impl Into<Path>, type_names: &[&str]) -> Result<Option<Prim>> {
+    let path = path.into();
+    match stage.type_name(&path)? {
+        Some(t) if type_names.contains(&t.as_str()) => Ok(Some(stage.prim_at_path(path))),
+        _ => Ok(None),
+    }
+}
+
+/// Wrap `path` as an applied-API view's `Prim` if any of `apis` appears in the
+/// prim's composed `apiSchemas` — the gate every single-apply API view's `get`
+/// performs.
+pub(crate) fn get_with_api(stage: &Stage, path: impl Into<Path>, apis: &[&str]) -> Result<Option<Prim>> {
+    let path = path.into();
+    let applied = stage.api_schemas(&path)?;
+    if apis.iter().any(|a| applied.iter().any(|s| s == a)) {
+        Ok(Some(stage.prim_at_path(path)))
+    } else {
+        Ok(None)
+    }
 }

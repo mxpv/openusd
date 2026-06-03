@@ -66,11 +66,6 @@ mod points;
 mod shapes;
 mod xformable;
 
-use anyhow::Result;
-
-use crate::sdf;
-use crate::usd::{Attribute, Prim, Stage};
-
 use tokens::*;
 
 pub use boundable::Boundable;
@@ -140,31 +135,6 @@ macro_rules! impl_geom_schema {
 }
 
 pub(crate) use impl_geom_schema;
-
-// The `get` type-gate and the attribute-authoring shorthands the
-// `create_*_attr` methods build on. Private to the module so the view
-// submodules reach them via `super::`.
-
-/// Resolve `path` to a [`Prim`] handle only when its `typeName` matches
-/// `type_name` — the shared gate behind every concrete view's `get`.
-fn get_typed(stage: &Stage, path: impl Into<sdf::Path>, type_name: &str) -> Result<Option<Prim>> {
-    let path = path.into();
-    if stage.type_name(&path)?.as_deref() != Some(type_name) {
-        return Ok(None);
-    }
-    Ok(Some(stage.prim_at_path(path)))
-}
-
-/// Author a varying attribute named `name` of `type_name` with
-/// `custom = false`, returning its handle.
-fn create(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
-    Ok(prim.create_attribute(name, type_name)?.set_custom(false)?)
-}
-
-/// Author a `uniform token` attribute named `name` with `custom = false`.
-fn create_uniform_token(prim: &Prim, name: &str) -> Result<Attribute> {
-    Ok(create(prim, name, "token")?.set_variability(sdf::Variability::Uniform)?)
-}
 
 // Each enum decodes one `allowedTokens` attribute via `from_token` /
 // `as_token`, with the Pixar default as its `Default`. The view types expose

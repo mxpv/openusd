@@ -14,8 +14,8 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
 use super::tokens as tok;
-use super::{create, create_uniform_token, get_typed};
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A cube centered at the prim origin (C++ `UsdGeomCube`). Its one intrinsic
 /// attribute is `size` — the edge length (default 2.0).
@@ -40,7 +40,7 @@ impl Cube {
 
     /// Author `size` (`double`, default 2.0) (C++ `CreateSizeAttr`).
     pub fn create_size_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_SIZE, "double")
+        Ok(self.create_attribute(tok::A_SIZE, "double")?.set_custom(false)?)
     }
 }
 
@@ -70,7 +70,7 @@ impl Sphere {
 
     /// Author `radius` (`double`, default 1.0) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "double")
+        Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 }
 
@@ -99,7 +99,7 @@ impl Cone {
 
     /// Author `radius` (`double`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "double")
+        Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
     /// `height` attribute handle (C++ `GetHeightAttr`).
@@ -109,7 +109,7 @@ impl Cone {
 
     /// Author `height` (`double`) (C++ `CreateHeightAttr`).
     pub fn create_height_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HEIGHT, "double")
+        Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
     /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
@@ -120,7 +120,10 @@ impl Cone {
 
     /// Author `axis` (`uniform token`, default `Z`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_AXIS)
+        Ok(self
+            .create_attribute(tok::A_AXIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 
@@ -150,7 +153,7 @@ impl Cylinder {
 
     /// Author `radius` (`double`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "double")
+        Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
     /// `height` attribute handle (C++ `GetHeightAttr`).
@@ -160,7 +163,7 @@ impl Cylinder {
 
     /// Author `height` (`double`) (C++ `CreateHeightAttr`).
     pub fn create_height_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HEIGHT, "double")
+        Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
     /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
@@ -171,7 +174,10 @@ impl Cylinder {
 
     /// Author `axis` (`uniform token`, default `Z`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_AXIS)
+        Ok(self
+            .create_attribute(tok::A_AXIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 
@@ -202,7 +208,7 @@ impl Capsule {
 
     /// Author `radius` (`double`) (C++ `CreateRadiusAttr`).
     pub fn create_radius_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_RADIUS, "double")
+        Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
     /// `height` attribute handle (C++ `GetHeightAttr`).
@@ -212,7 +218,7 @@ impl Capsule {
 
     /// Author `height` (`double`) (C++ `CreateHeightAttr`).
     pub fn create_height_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HEIGHT, "double")
+        Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
     /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
@@ -223,7 +229,10 @@ impl Capsule {
 
     /// Author `axis` (`uniform token`, default `Z`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_AXIS)
+        Ok(self
+            .create_attribute(tok::A_AXIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 
@@ -254,7 +263,7 @@ impl Plane {
 
     /// Author `width` (`double`) (C++ `CreateWidthAttr`).
     pub fn create_width_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_WIDTH, "double")
+        Ok(self.create_attribute(tok::A_WIDTH, "double")?.set_custom(false)?)
     }
 
     /// `length` attribute handle (C++ `GetLengthAttr`).
@@ -264,7 +273,7 @@ impl Plane {
 
     /// Author `length` (`double`) (C++ `CreateLengthAttr`).
     pub fn create_length_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_LENGTH, "double")
+        Ok(self.create_attribute(tok::A_LENGTH, "double")?.set_custom(false)?)
     }
 
     /// `axis` attribute handle — the plane's normal `X` / `Y` / `Z`
@@ -275,7 +284,10 @@ impl Plane {
 
     /// Author `axis` (`uniform token`, default `Z`) (C++ `CreateAxisAttr`).
     pub fn create_axis_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_AXIS)
+        Ok(self
+            .create_attribute(tok::A_AXIS, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 }
 

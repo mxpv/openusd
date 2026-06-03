@@ -12,8 +12,8 @@ use crate::sdf;
 use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
 use super::tokens as tok;
-use super::{create, create_uniform_token, get_typed};
 use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
+use crate::schemas::common::get_typed;
 
 /// A polygonal / subdivision-surface mesh (C++ `UsdGeomMesh`) — a
 /// [`PointBased`] whose `faceVertexCounts` / `faceVertexIndices` define the
@@ -41,7 +41,9 @@ impl Mesh {
 
     /// Author `faceVertexCounts` (`int[]`) (C++ `CreateFaceVertexCountsAttr`).
     pub fn create_face_vertex_counts_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_FACE_VERTEX_COUNTS, "int[]")
+        Ok(self
+            .create_attribute(tok::A_FACE_VERTEX_COUNTS, "int[]")?
+            .set_custom(false)?)
     }
 
     /// `faceVertexIndices` attribute handle — the index buffer, `int[]`
@@ -53,7 +55,9 @@ impl Mesh {
     /// Author `faceVertexIndices` (`int[]`)
     /// (C++ `CreateFaceVertexIndicesAttr`).
     pub fn create_face_vertex_indices_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_FACE_VERTEX_INDICES, "int[]")
+        Ok(self
+            .create_attribute(tok::A_FACE_VERTEX_INDICES, "int[]")?
+            .set_custom(false)?)
     }
 
     /// `subdivisionScheme` attribute handle — `catmullClark` / `loop` /
@@ -65,7 +69,10 @@ impl Mesh {
     /// Author `subdivisionScheme` (`uniform token`)
     /// (C++ `CreateSubdivisionSchemeAttr`).
     pub fn create_subdivision_scheme_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_SUBDIVISION_SCHEME)
+        Ok(self
+            .create_attribute(tok::A_SUBDIVISION_SCHEME, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `interpolateBoundary` attribute handle
@@ -77,7 +84,10 @@ impl Mesh {
     /// Author `interpolateBoundary` (`uniform token`)
     /// (C++ `CreateInterpolateBoundaryAttr`).
     pub fn create_interpolate_boundary_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_INTERPOLATE_BOUNDARY)
+        Ok(self
+            .create_attribute(tok::A_INTERPOLATE_BOUNDARY, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `faceVaryingLinearInterpolation` attribute handle
@@ -89,7 +99,10 @@ impl Mesh {
     /// Author `faceVaryingLinearInterpolation` (`uniform token`)
     /// (C++ `CreateFaceVaryingLinearInterpolationAttr`).
     pub fn create_face_varying_linear_interpolation_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_FACE_VARYING_LINEAR_INTERPOLATION)
+        Ok(self
+            .create_attribute(tok::A_FACE_VARYING_LINEAR_INTERPOLATION, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `triangleSubdivisionRule` attribute handle
@@ -101,7 +114,10 @@ impl Mesh {
     /// Author `triangleSubdivisionRule` (`uniform token`)
     /// (C++ `CreateTriangleSubdivisionRuleAttr`).
     pub fn create_triangle_subdivision_rule_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_TRIANGLE_SUBDIVISION_RULE)
+        Ok(self
+            .create_attribute(tok::A_TRIANGLE_SUBDIVISION_RULE, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `holeIndices` attribute handle — faces to treat as holes, `int[]`
@@ -112,7 +128,7 @@ impl Mesh {
 
     /// Author `holeIndices` (`int[]`) (C++ `CreateHoleIndicesAttr`).
     pub fn create_hole_indices_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_HOLE_INDICES, "int[]")
+        Ok(self.create_attribute(tok::A_HOLE_INDICES, "int[]")?.set_custom(false)?)
     }
 
     /// `cornerIndices` attribute handle — sharpened corner points, `int[]`
@@ -123,7 +139,9 @@ impl Mesh {
 
     /// Author `cornerIndices` (`int[]`) (C++ `CreateCornerIndicesAttr`).
     pub fn create_corner_indices_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_CORNER_INDICES, "int[]")
+        Ok(self
+            .create_attribute(tok::A_CORNER_INDICES, "int[]")?
+            .set_custom(false)?)
     }
 
     /// `cornerSharpnesses` attribute handle — per-corner sharpness, `float[]`
@@ -135,7 +153,9 @@ impl Mesh {
     /// Author `cornerSharpnesses` (`float[]`)
     /// (C++ `CreateCornerSharpnessesAttr`).
     pub fn create_corner_sharpnesses_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_CORNER_SHARPNESSES, "float[]")
+        Ok(self
+            .create_attribute(tok::A_CORNER_SHARPNESSES, "float[]")?
+            .set_custom(false)?)
     }
 
     /// `creaseIndices` attribute handle — point indices of crease edges,
@@ -146,7 +166,9 @@ impl Mesh {
 
     /// Author `creaseIndices` (`int[]`) (C++ `CreateCreaseIndicesAttr`).
     pub fn create_crease_indices_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_CREASE_INDICES, "int[]")
+        Ok(self
+            .create_attribute(tok::A_CREASE_INDICES, "int[]")?
+            .set_custom(false)?)
     }
 
     /// `creaseLengths` attribute handle — point count per crease, `int[]`
@@ -157,7 +179,9 @@ impl Mesh {
 
     /// Author `creaseLengths` (`int[]`) (C++ `CreateCreaseLengthsAttr`).
     pub fn create_crease_lengths_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_CREASE_LENGTHS, "int[]")
+        Ok(self
+            .create_attribute(tok::A_CREASE_LENGTHS, "int[]")?
+            .set_custom(false)?)
     }
 
     /// `creaseSharpnesses` attribute handle — per-crease sharpness, `float[]`
@@ -169,7 +193,9 @@ impl Mesh {
     /// Author `creaseSharpnesses` (`float[]`)
     /// (C++ `CreateCreaseSharpnessesAttr`).
     pub fn create_crease_sharpnesses_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_CREASE_SHARPNESSES, "float[]")
+        Ok(self
+            .create_attribute(tok::A_CREASE_SHARPNESSES, "float[]")?
+            .set_custom(false)?)
     }
 }
 
@@ -202,7 +228,10 @@ impl GeomSubset {
 
     /// Author `elementType` (`uniform token`) (C++ `CreateElementTypeAttr`).
     pub fn create_element_type_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_ELEMENT_TYPE)
+        Ok(self
+            .create_attribute(tok::A_ELEMENT_TYPE, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `familyName` attribute handle — groups subsets that partition the mesh
@@ -213,7 +242,10 @@ impl GeomSubset {
 
     /// Author `familyName` (`uniform token`) (C++ `CreateFamilyNameAttr`).
     pub fn create_family_name_attr(&self) -> Result<Attribute> {
-        create_uniform_token(self, tok::A_FAMILY_NAME)
+        Ok(self
+            .create_attribute(tok::A_FAMILY_NAME, "token")?
+            .set_custom(false)?
+            .set_variability(sdf::Variability::Uniform)?)
     }
 
     /// `indices` attribute handle — selected element indices, `int[]`
@@ -224,7 +256,7 @@ impl GeomSubset {
 
     /// Author `indices` (`int[]`) (C++ `CreateIndicesAttr`).
     pub fn create_indices_attr(&self) -> Result<Attribute> {
-        create(self, tok::A_INDICES, "int[]")
+        Ok(self.create_attribute(tok::A_INDICES, "int[]")?.set_custom(false)?)
     }
 }
 

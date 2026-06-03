@@ -51,66 +51,7 @@ pub use schema::{
 };
 pub use traits::{BoundableLight, Light, NonboundableLight};
 
-use anyhow::Result;
-
-use crate::sdf;
-use crate::usd::{Attribute, Prim, Stage};
-
 use tokens::*;
-
-// The typed / applied-API `get` gates, applying an API schema, and the
-// attribute-authoring shorthands the `create_*` accessors build on. Private to
-// the module so the `lights` / `traits` submodules reach them via `super::`.
-
-/// Resolve `path` to a [`Prim`] handle only when its `typeName` matches
-/// `type_name` — the gate behind a concrete light's `get`.
-fn get_typed(stage: &Stage, path: impl Into<sdf::Path>, type_name: &str) -> Result<Option<Prim>> {
-    let path = path.into();
-    if stage.type_name(&path)?.as_deref() != Some(type_name) {
-        return Ok(None);
-    }
-    Ok(Some(stage.prim_at_path(path)))
-}
-
-/// Resolve `path` to a [`Prim`] handle only when its `typeName` is one of
-/// `type_names` — the gate behind a view (like `DomeLight`) that covers more
-/// than one schema typeName.
-fn get_typed_any(stage: &Stage, path: impl Into<sdf::Path>, type_names: &[&str]) -> Result<Option<Prim>> {
-    let path = path.into();
-    match stage.type_name(&path)? {
-        Some(t) if type_names.contains(&t.as_str()) => Ok(Some(stage.prim_at_path(path))),
-        _ => Ok(None),
-    }
-}
-
-/// Resolve `path` to a [`Prim`] handle only when it carries one of `apis` in
-/// its composed `apiSchemas` — the gate behind an applied-API view's `get`.
-fn get_with_api(stage: &Stage, path: impl Into<sdf::Path>, apis: &[&str]) -> Result<Option<Prim>> {
-    let path = path.into();
-    let applied = stage.api_schemas(&path)?;
-    if apis.iter().any(|a| applied.iter().any(|s| s == a)) {
-        Ok(Some(stage.prim_at_path(path)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Open the prim at `path` as `over` and add `api` to its `apiSchemas` — the
-/// shared body of every applied-API view's `apply`.
-fn apply_api(stage: &Stage, path: impl Into<sdf::Path>, api: &str) -> Result<Prim> {
-    Ok(stage.override_prim(path)?.add_applied_schema(api)?)
-}
-
-/// Author a varying attribute named `name` of `type_name` with
-/// `custom = false`, returning its handle.
-fn create(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
-    Ok(prim.create_attribute(name, type_name)?.set_custom(false)?)
-}
-
-/// Author a `uniform token` attribute named `name` with `custom = false`.
-fn create_uniform_token(prim: &Prim, name: &str) -> Result<Attribute> {
-    Ok(create(prim, name, "token")?.set_variability(sdf::Variability::Uniform)?)
-}
 
 /// Implement the schema-trait chain for a concrete `struct $ty(Prim)` light
 /// newtype. Every arm hand-writes the one `SchemaBase` method (`prim`) and

@@ -59,56 +59,7 @@ mod schema;
 
 pub use schema::{AssetPreviewsAPI, SpatialAudio};
 
-use anyhow::Result;
-
-use crate::sdf;
-use crate::usd::{Attribute, Prim, Stage};
-
 use tokens::*;
-
-// The typed / applied-API `get` gates, applying an API schema, and the
-// attribute-authoring shorthands the `create_*` accessors build on. Private to
-// the module so the `spatial_audio` / `previews` submodules reach them via
-// `super::`.
-
-/// Resolve `path` to a [`Prim`] handle only when its `typeName` matches
-/// `type_name` — the gate behind `SpatialAudio::get`.
-fn get_typed(stage: &Stage, path: impl Into<sdf::Path>, type_name: &str) -> Result<Option<Prim>> {
-    let path = path.into();
-    if stage.type_name(&path)?.as_deref() != Some(type_name) {
-        return Ok(None);
-    }
-    Ok(Some(stage.prim_at_path(path)))
-}
-
-/// Resolve `path` to a [`Prim`] handle only when it carries `api` in its
-/// composed `apiSchemas` — the gate behind an applied-API view's `get`.
-fn get_with_api(stage: &Stage, path: impl Into<sdf::Path>, api: &str) -> Result<Option<Prim>> {
-    let path = path.into();
-    if stage.api_schemas(&path)?.iter().any(|s| s == api) {
-        Ok(Some(stage.prim_at_path(path)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Open the prim at `path` as `over` and add `api` to its `apiSchemas` — the
-/// body of an applied-API view's `apply`.
-fn apply_api(stage: &Stage, path: impl Into<sdf::Path>, api: &str) -> Result<Prim> {
-    Ok(stage.override_prim(path)?.add_applied_schema(api)?)
-}
-
-/// Author a varying attribute named `name` of `type_name` with
-/// `custom = false`, returning its handle.
-fn create(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
-    Ok(prim.create_attribute(name, type_name)?.set_custom(false)?)
-}
-
-/// Author a `uniform` attribute named `name` of `type_name` with
-/// `custom = false`, returning its handle.
-fn create_uniform(prim: &Prim, name: &str, type_name: &str) -> Result<Attribute> {
-    Ok(create(prim, name, type_name)?.set_variability(sdf::Variability::Uniform)?)
-}
 
 /// Implement the schema-trait chain for a concrete `struct $ty(Prim)` media
 /// newtype. All trait paths are fully qualified, so the call site only needs
