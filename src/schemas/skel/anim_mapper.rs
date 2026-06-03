@@ -77,7 +77,7 @@ impl AnimMapper {
     /// Source index that lands at target slot `target`, or [`None`]
     /// when the target joint isn't present in the source. Hides the
     /// internal sentinel encoding from callers — prefer this over
-    /// inspecting [`indices`] directly.
+    /// inspecting [`indices`](Self::indices) directly.
     pub fn source_index(&self, target: usize) -> Option<usize> {
         match self.indices.get(target).copied()? {
             MISSING => None,
@@ -86,7 +86,7 @@ impl AnimMapper {
     }
 
     /// `true` when the mapper is a no-op (source order equals target
-    /// order). [`remap`] still works but skipping it entirely is
+    /// order). [`remap`](Self::remap) still works but skipping it entirely is
     /// cheaper.
     pub fn is_identity(&self) -> bool {
         self.identity
@@ -98,7 +98,7 @@ impl AnimMapper {
     }
 
     /// `true` when at least one target joint is missing from the
-    /// source — i.e. [`remap`] will fall back to the caller's
+    /// source — i.e. [`remap`](Self::remap) will fall back to the caller's
     /// `default` for some entries.
     pub fn is_sparse(&self) -> bool {
         !self.full

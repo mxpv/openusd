@@ -15,7 +15,7 @@
 //! |---------|--------|--------|
 //! | `geom`    | `geom`    | `UsdGeom` reader (cross-cutting Imageable / Boundable today; full surface incoming). |
 //! | `physics` | `physics` | `UsdPhysics` reader (8 prim types, 7 single-apply APIs, multi-apply `LimitAPI` / `DriveAPI`). |
-//! | `skel`    | `skel`    | `UsdSkel` reader + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS). |
+//! | `skel`    | `skel`    | `UsdSkel` trait-views (SkelRoot / Skeleton as geom `Boundable`, SkelAnimation / BlendShape typed, SkelBindingAPI single-apply) + skinning toolkit (Topology, AnimMapper, SkeletonResolver, SkinningResolver, pure-math LBS); builds on the `geom` trait chain. |
 //! | `lux`     | `lux`     | `UsdLux` trait-views (8 concrete light prims + LightFilter + LightAPI / ShapingAPI / ShadowAPI / LightListAPI); builds on the `geom` trait chain. |
 //! | `shade`   | `shade`   | `UsdShade` trait-views (Shader / NodeGraph / Material via the `Connectable` interface, MaterialBindingAPI, UsdPreviewSurface reader). |
 //! | `render`  | `render`  | `UsdRender` trait-views (RenderSettings / Product via the `RenderSettingsBase` interface, Var / Pass / DenoisePass) + the computed render spec. |

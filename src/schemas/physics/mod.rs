@@ -32,23 +32,22 @@
 //! use openusd::schemas::physics::{self, JointBase};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
 //!
-//! let scene = physics::Scene::define(&stage, "/World/Scene")?;
-//! scene.create_gravity_magnitude_attr()?.set(981.0_f32)?;
+//! let scene = physics::Scene::define(&stage, "/World/Scene").unwrap();
+//! scene.create_gravity_magnitude_attr().unwrap().set(981.0_f32).unwrap();
 //!
 //! // A hinge: a RevoluteJoint adds `axis`/limits; `breakForce` is inherited
 //! // from the shared JointBase interface.
-//! let hinge = physics::RevoluteJoint::define(&stage, "/World/Hinge")?;
-//! hinge.create_axis_attr()?.set(physics::JointAxis::Z)?;
-//! hinge.create_break_force_attr()?.set(500.0_f32)?;
+//! let hinge = physics::RevoluteJoint::define(&stage, "/World/Hinge").unwrap();
+//! hinge.create_axis_attr().unwrap().set(physics::JointAxis::Z).unwrap();
+//! hinge.create_break_force_attr().unwrap().set(500.0_f32).unwrap();
 //!
 //! // A rigid body is a single-apply API applied onto an existing prim.
-//! let body = physics::RigidBodyAPI::apply(&stage, "/World/Box")?;
-//! body.create_rigid_body_enabled_attr()?.set(true)?;
+//! let body = physics::RigidBodyAPI::apply(&stage, "/World/Box").unwrap();
+//! body.create_rigid_body_enabled_attr().unwrap().set(true).unwrap();
 //!
-//! assert_eq!(hinge.axis_attr().get::<physics::JointAxis>()?, Some(physics::JointAxis::Z));
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! assert_eq!(hinge.axis_attr().get::<physics::JointAxis>().unwrap(), Some(physics::JointAxis::Z));
 //! ```
 
 pub mod tokens;

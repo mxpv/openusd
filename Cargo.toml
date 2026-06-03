@@ -23,7 +23,9 @@ physics = []
 proc = ["geom"]
 render = []
 shade = []
-skel = []
+# UsdSkelRoot and UsdSkelSkeleton are UsdGeomBoundable-derived prims, so the
+# skel views build on the geom schema traits.
+skel = ["geom"]
 ui = []
 # UsdVolVolume is a UsdGeomGprim and the field prims are UsdGeomXformable, so
 # the vol views build on the geom schema traits.
