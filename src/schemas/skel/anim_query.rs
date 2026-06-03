@@ -14,11 +14,10 @@
 use anyhow::Result;
 
 use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::usd::{SchemaBase, Stage};
 
-use super::tokens::{
-    A_BLEND_SHAPES, A_BLEND_SHAPE_WEIGHTS, A_JOINTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS, T_SKEL_ANIMATION,
-};
+use super::schema::SkelAnimation;
+use super::tokens::{A_BLEND_SHAPE_WEIGHTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS};
 use crate::math::{mat4_from_quat, mat4_mul, mat4_scale, mat4_translation};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
@@ -48,14 +47,15 @@ impl SkelAnimQuery {
     /// the prim isn't typed `SkelAnimation`, or when neither joints
     /// nor blend shapes are authored on it.
     pub fn new(stage: &Stage, prim: Path) -> Result<Option<Self>> {
-        if stage.type_name(&prim)?.as_deref() != Some(T_SKEL_ANIMATION) {
+        let Some(anim) = SkelAnimation::get(stage, prim)? else {
             return Ok(None);
-        }
-        let joints = read_token_vec(stage, &prim, A_JOINTS)?;
-        let blend_shapes = read_token_vec(stage, &prim, A_BLEND_SHAPES)?;
+        };
+        let joints = anim.joints()?;
+        let blend_shapes = anim.blend_shapes()?;
         if joints.is_empty() && blend_shapes.is_empty() {
             return Ok(None);
         }
+        let prim = anim.path().clone();
         Ok(Some(Self {
             has_translations: attr_authored(stage, &prim, A_TRANSLATIONS)?,
             has_rotations: attr_authored(stage, &prim, A_ROTATIONS)?,
@@ -128,8 +128,9 @@ impl SkelAnimQuery {
             .collect())
     }
 
-    /// Blend-shape weight per entry in [`blend_shape_order`] at
-    /// `time`. Unauthored weights default to zero (no contribution).
+    /// Blend-shape weight per entry in
+    /// [`blend_shape_order`](Self::blend_shape_order) at `time`. Unauthored
+    /// weights default to zero (no contribution).
     pub fn compute_blend_shape_weights(&self, stage: &Stage, time: f64) -> Result<Vec<f32>> {
         let n = self.blend_shapes.len();
         if n == 0 {
@@ -191,14 +192,6 @@ impl SkelAnimQuery {
             _ => vec![default; n],
         })
     }
-}
-
-fn read_token_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Vec<String>> {
-    let attr = prim.append_property(name)?;
-    Ok(match stage.field::<Value>(attr, "default")? {
-        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
-        _ => Vec::new(),
-    })
 }
 
 fn attr_authored(stage: &Stage, prim: &Path, name: &str) -> Result<bool> {

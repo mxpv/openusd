@@ -14,95 +14,95 @@
 //!   caller doesn't have to re-read them per frame.
 //! - Driving the [`super::skinning`] math against the right inputs.
 
+use anyhow::Result;
+
 use crate::math::IDENTITY_MAT4;
+use crate::usd::SchemaBase;
 
 use super::anim_mapper::AnimMapper;
+use super::schema::SkelBindingAPI;
 use super::skinning::{rigid_skinning_transform, skin_normals_lbs, skin_points_lbs};
-use super::types::{InfluenceInterpolation, ReadSkelBinding, SkinningMethod};
+use super::{InfluenceInterpolation, SkinningMethod};
 
 /// Resolver bundle for one skinnable prim.
 ///
-/// Build with [`SkinningResolver::new`], passing the bound skeleton's
+/// Build with [`SkinningResolver::from_binding`], passing the bound skeleton's
 /// joint order so the joint-subset remapping ([`AnimMapper`]) can be
-/// pre-computed. After construction the resolver is read-only and
-/// can be reused across frames.
+/// pre-computed. After construction the resolver is read-only and can be reused
+/// across frames.
 #[derive(Debug, Clone)]
 pub struct SkinningResolver {
-    binding: ReadSkelBinding,
-    /// Mapper from the bound skeleton's joint order into the mesh's
-    /// effective joint order. Identity (with `is_identity() == true`)
-    /// when `skel:joints` isn't authored.
+    prim: String,
+    joint_indices: Vec<i32>,
+    joint_weights: Vec<f32>,
+    interpolation: InfluenceInterpolation,
+    skinning_method: SkinningMethod,
+    elements_per_element: i32,
+    /// Mapper from the bound skeleton's joint order into the mesh's effective
+    /// joint order. Identity (with `is_identity() == true`) when `skel:joints`
+    /// isn't authored. Its `target_len()` is the effective mesh-side joint
+    /// count (`skel:joints.len()` when a subset was authored, else the
+    /// skeleton's joint count).
     mapper: AnimMapper,
-    /// Effective mesh-side joint count — `binding.joint_subset.len()`
-    /// when a subset was authored, otherwise the skeleton's joint
-    /// count.
-    num_mesh_joints: usize,
     /// Cached `geomBindTransform`. Spec default = identity.
     geom_bind_transform: [f64; 16],
 }
 
 impl SkinningResolver {
-    /// Build a resolver for `binding`. `skeleton_joint_order` is the
-    /// bound `Skeleton.joints` array, used to derive the
-    /// skeleton→mesh joint remap when `skel:joints` is authored.
-    pub fn new(binding: ReadSkelBinding, skeleton_joint_order: &[String]) -> Self {
-        let mapper = if binding.joint_subset.is_empty() {
-            // No subset authored — skinning transforms feed straight
-            // through. Pre-build an identity mapper so callers always
-            // hit the same code path.
+    /// Build a resolver from `binding`. `skeleton_joint_order` is the bound
+    /// `Skeleton.joints` array, used to derive the skeleton→mesh joint remap
+    /// when `skel:joints` is authored.
+    pub fn from_binding(binding: &SkelBindingAPI, skeleton_joint_order: &[String]) -> Result<Self> {
+        let joint_subset = binding.joint_subset()?;
+        // No subset authored → skinning transforms feed straight through; an
+        // identity mapper keeps callers on one code path.
+        let mapper = if joint_subset.is_empty() {
             AnimMapper::new(skeleton_joint_order, skeleton_joint_order)
         } else {
-            AnimMapper::new(skeleton_joint_order, &binding.joint_subset)
+            AnimMapper::new(skeleton_joint_order, &joint_subset)
         };
-        let num_mesh_joints = if binding.joint_subset.is_empty() {
-            skeleton_joint_order.len()
-        } else {
-            binding.joint_subset.len()
-        };
-        let geom_bind_transform = binding.geom_bind_transform.unwrap_or(IDENTITY_MAT4);
-        Self {
-            binding,
+        Ok(Self {
+            prim: binding.path().as_str().to_string(),
+            joint_indices: binding.joint_indices()?,
+            joint_weights: binding.joint_weights()?,
+            interpolation: binding.interpolation()?,
+            skinning_method: binding.skinning_method()?,
+            elements_per_element: binding.elements_per_element()?,
             mapper,
-            num_mesh_joints,
-            geom_bind_transform,
-        }
-    }
-
-    /// Borrow the underlying `SkelBindingAPI` data.
-    pub fn binding(&self) -> &ReadSkelBinding {
-        &self.binding
+            geom_bind_transform: binding.geom_bind_transform()?.unwrap_or(IDENTITY_MAT4),
+        })
     }
 
     /// Borrow the prim path the binding came from.
     pub fn prim(&self) -> &str {
-        &self.binding.path
+        &self.prim
     }
 
-    /// `true` when this prim is authored with `constant` interpolation
-    /// — every vertex shares the same joint influences and the mesh
-    /// can be skinned by a single 4×4 (see [`compute_rigid_transform`]).
+    /// `true` when this prim is authored with `constant` interpolation — every
+    /// vertex shares the same joint influences and the mesh can be skinned by a
+    /// single 4×4 (see [`compute_rigid_transform`](Self::compute_rigid_transform)).
     pub fn is_rigidly_deformed(&self) -> bool {
-        self.binding.interpolation == InfluenceInterpolation::Constant
+        self.interpolation == InfluenceInterpolation::Constant
     }
 
-    /// Number of `(joint, weight)` pairs per skinned element. For
-    /// per-vertex bindings, "element" is a vertex; for rigid bindings,
-    /// the count applies to the mesh as a whole.
+    /// Number of `(joint, weight)` pairs per skinned element. For per-vertex
+    /// bindings, "element" is a vertex; for rigid bindings, the count applies
+    /// to the mesh as a whole.
     pub fn num_influences_per_component(&self) -> usize {
-        self.binding.elements_per_element.max(1) as usize
+        self.elements_per_element.max(1) as usize
     }
 
-    /// `true` if joint influences and weights were authored (i.e.
-    /// skinning is actually meaningful for this prim).
+    /// `true` if joint influences and weights were authored (i.e. skinning is
+    /// actually meaningful for this prim).
     pub fn has_joint_influences(&self) -> bool {
-        !self.binding.joint_indices.is_empty() && !self.binding.joint_weights.is_empty()
+        !self.joint_indices.is_empty() && !self.joint_weights.is_empty()
     }
 
-    /// Effective joint order on the mesh side. Equal to the bound
-    /// `Skeleton.joints` when `skel:joints` isn't authored; otherwise
-    /// equal to `skel:joints`.
+    /// Effective joint order length on the mesh side. Equal to the bound
+    /// `Skeleton.joints` count when `skel:joints` isn't authored; otherwise the
+    /// `skel:joints` length.
     pub fn joint_order_len(&self) -> usize {
-        self.num_mesh_joints
+        self.mapper.target_len()
     }
 
     /// Cached `geomBindTransform` — identity when unauthored.
@@ -111,21 +111,19 @@ impl SkinningResolver {
     }
 
     /// Authored skinning method. Spec default is
-    /// [`SkinningMethod::ClassicLinear`]; consumers without dual-
-    /// quaternion support typically fall back to classic LBS even
-    /// when the prim authors `dualQuaternion`.
+    /// [`SkinningMethod::ClassicLinear`]; consumers without dual-quaternion
+    /// support typically fall back to classic LBS even when the prim authors
+    /// `dualQuaternion`.
     pub fn skinning_method(&self) -> SkinningMethod {
-        self.binding.skinning_method
+        self.skinning_method
     }
 
-    /// Remap skinning transforms from the bound skeleton's joint
-    /// order into the mesh's effective order. No-op when no
-    /// `skel:joints` subset was authored.
+    /// Remap skinning transforms from the bound skeleton's joint order into the
+    /// mesh's effective order. No-op when no `skel:joints` subset was authored.
     ///
-    /// Walks the pre-computed mapper indices once with no
-    /// intermediate buffers, so this is cheap to call per frame.
-    /// Missing joints (a target joint that isn't in the bound
-    /// skeleton — rare but legal) get [`IDENTITY_MAT4`].
+    /// Walks the pre-computed mapper indices once with no intermediate buffers,
+    /// so this is cheap to call per frame. Missing joints (a target joint that
+    /// isn't in the bound skeleton — rare but legal) get [`IDENTITY_MAT4`].
     pub fn remap_skinning_xforms(&self, skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f64; 16]> {
         if self.mapper.is_identity() {
             return skel_skinning_xforms.to_vec();
@@ -138,12 +136,12 @@ impl SkinningResolver {
             .collect()
     }
 
-    /// Skin `points` through this binding's per-vertex influences,
-    /// using `skel_skinning_xforms` (in the bound skeleton's joint
-    /// order; this method handles the remap to mesh order).
+    /// Skin `points` through this binding's per-vertex influences, using
+    /// `skel_skinning_xforms` (in the bound skeleton's joint order; this method
+    /// handles the remap to mesh order).
     ///
     /// Panics when called on a rigidly-deformed binding — use
-    /// [`compute_rigid_transform`] for that case.
+    /// [`compute_rigid_transform`](Self::compute_rigid_transform) for that case.
     pub fn compute_skinned_points(&self, points: &[[f32; 3]], skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f32; 3]> {
         assert!(
             !self.is_rigidly_deformed(),
@@ -152,8 +150,8 @@ impl SkinningResolver {
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         skin_points_lbs(
             points,
-            &self.binding.joint_indices,
-            &self.binding.joint_weights,
+            &self.joint_indices,
+            &self.joint_weights,
             self.num_influences_per_component(),
             &self.geom_bind_transform,
             &mesh_xforms,
@@ -161,8 +159,8 @@ impl SkinningResolver {
     }
 
     /// Skin normals through the same per-vertex influences as
-    /// [`compute_skinned_points`]. Normalises each result; see
-    /// [`super::skinning::skin_normals_lbs`] for the caveat about
+    /// [`compute_skinned_points`](Self::compute_skinned_points). Normalises each
+    /// result; see [`super::skinning::skin_normals_lbs`] for the caveat about
     /// inverse-transpose under non-uniform scale.
     pub fn compute_skinned_normals(&self, normals: &[[f32; 3]], skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f32; 3]> {
         assert!(
@@ -172,19 +170,20 @@ impl SkinningResolver {
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         skin_normals_lbs(
             normals,
-            &self.binding.joint_indices,
-            &self.binding.joint_weights,
+            &self.joint_indices,
+            &self.joint_weights,
             self.num_influences_per_component(),
             &self.geom_bind_transform,
             &mesh_xforms,
         )
     }
 
-    /// Compute the single 4×4 that should be applied to a
-    /// rigidly-deformed mesh's local-to-world transform.
+    /// Compute the single 4×4 that should be applied to a rigidly-deformed
+    /// mesh's local-to-world transform.
     ///
     /// Panics when called on a per-vertex binding — use
-    /// [`compute_skinned_points`] / [`compute_skinned_normals`] there.
+    /// [`compute_skinned_points`](Self::compute_skinned_points) /
+    /// [`compute_skinned_normals`](Self::compute_skinned_normals) there.
     pub fn compute_rigid_transform(&self, skel_skinning_xforms: &[[f64; 16]]) -> [f64; 16] {
         assert!(
             self.is_rigidly_deformed(),
@@ -192,8 +191,8 @@ impl SkinningResolver {
         );
         let mesh_xforms = self.remap_skinning_xforms(skel_skinning_xforms);
         rigid_skinning_transform(
-            &self.binding.joint_indices,
-            &self.binding.joint_weights,
+            &self.joint_indices,
+            &self.joint_weights,
             self.num_influences_per_component(),
             &self.geom_bind_transform,
             &mesh_xforms,

@@ -24,19 +24,18 @@
 //! use openusd::schemas::ui::{self, ExpansionState};
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda")?;
-//! stage.define_prim("/Mat/Surface")?.set_type_name("Shader")?;
+//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
+//! stage.define_prim("/Mat/Surface").unwrap().set_type_name("Shader").unwrap();
 //!
-//! let node = ui::NodeGraphNodeAPI::apply(&stage, "/Mat/Surface")?;
-//! node.create_pos_attr()?.set([12.0_f32, 34.0])?;
-//! node.create_expansion_state_attr()?.set(ExpansionState::Minimized)?;
+//! let node = ui::NodeGraphNodeAPI::apply(&stage, "/Mat/Surface").unwrap();
+//! node.create_pos_attr().unwrap().set([12.0_f32, 34.0]).unwrap();
+//! node.create_expansion_state_attr().unwrap().set(ExpansionState::Minimized).unwrap();
 //!
-//! assert_eq!(node.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
+//! assert_eq!(node.pos_attr().get::<[f32; 2]>().unwrap(), Some([12.0, 34.0]));
 //! assert_eq!(
-//!     node.expansion_state_attr().get::<ExpansionState>()?,
+//!     node.expansion_state_attr().get::<ExpansionState>().unwrap(),
 //!     Some(ExpansionState::Minimized),
 //! );
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 
 pub mod tokens;

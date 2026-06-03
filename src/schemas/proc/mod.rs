@@ -16,18 +16,17 @@
 //! use openusd::sdf;
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda")?;
+//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
 //!
-//! let proc = GenerativeProcedural::define(&stage, "/World/Scatter")?;
-//! proc.create_procedural_system_attr()?.set(sdf::Value::Token("Houdini".into()))?;
+//! let proc = GenerativeProcedural::define(&stage, "/World/Scatter").unwrap();
+//! proc.create_procedural_system_attr().unwrap().set(sdf::Value::Token("Houdini".into())).unwrap();
 //!
 //! // Read it back through a typed view.
-//! let proc = GenerativeProcedural::get(&stage, "/World/Scatter")?.expect("GenerativeProcedural");
+//! let proc = GenerativeProcedural::get(&stage, "/World/Scatter").unwrap().expect("GenerativeProcedural");
 //! assert_eq!(
-//!     proc.procedural_system_attr().get::<sdf::Value>()?,
+//!     proc.procedural_system_attr().get::<sdf::Value>().unwrap(),
 //!     Some(sdf::Value::Token("Houdini".into()))
 //! );
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 
 pub mod tokens;

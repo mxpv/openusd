@@ -31,23 +31,22 @@
 //! use openusd::schemas::vol::{self, FieldAsset};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
 //!
 //! // A field is a file-backed grid prim; `create_file_path_attr` is inherited
 //! // from the `FieldAsset` interface.
-//! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density")?;
-//! field.create_file_path_attr()?.set(sdf::Value::AssetPath("./smoke.vdb".into()))?;
-//! field.create_field_name_attr()?.set("density".to_string())?;
+//! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density").unwrap();
+//! field.create_file_path_attr().unwrap().set(sdf::Value::AssetPath("./smoke.vdb".into())).unwrap();
+//! field.create_field_name_attr().unwrap().set("density".to_string()).unwrap();
 //!
 //! // A Volume binds named fields through `field:<name>` relationships.
-//! let volume = vol::Volume::define(&stage, "/Smoke")?
-//!     .create_field_relationship("density", "/Smoke/density")?;
+//! let volume = vol::Volume::define(&stage, "/Smoke").unwrap()
+//!     .create_field_relationship("density", "/Smoke/density").unwrap();
 //!
 //! assert_eq!(
-//!     volume.field_paths()?,
-//!     vec![("density".to_string(), sdf::path("/Smoke/density")?)],
+//!     volume.field_paths().unwrap(),
+//!     vec![("density".to_string(), sdf::path("/Smoke/density").unwrap())],
 //! );
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 
 pub mod tokens;

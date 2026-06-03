@@ -29,20 +29,19 @@
 //! use openusd::schemas::render::{self, RenderSettingsBase};
 //! use openusd::usd::Stage;
 //!
-//! let stage = Stage::builder().in_memory("scene.usda")?;
+//! let stage = Stage::builder().in_memory("scene.usda").unwrap();
 //!
-//! let settings = render::RenderSettings::define(&stage, "/Render/Settings")?;
-//! settings.create_resolution_attr()?.set([1920, 1080])?;
-//! settings.create_products_rel()?.add_target("/Render/Products/beauty".parse()?)?;
+//! let settings = render::RenderSettings::define(&stage, "/Render/Settings").unwrap();
+//! settings.create_resolution_attr().unwrap().set([1920, 1080]).unwrap();
+//! settings.create_products_rel().unwrap().add_target("/Render/Products/beauty".parse().unwrap()).unwrap();
 //!
-//! render::RenderProduct::define(&stage, "/Render/Products/beauty")?
-//!     .create_product_name_attr()?
-//!     .set("beauty.exr".to_string())?;
+//! render::RenderProduct::define(&stage, "/Render/Products/beauty").unwrap()
+//!     .create_product_name_attr().unwrap()
+//!     .set("beauty.exr".to_string()).unwrap();
 //!
-//! let spec = render::compute_render_spec(&stage, &"/Render/Settings".parse()?, &[])?
+//! let spec = render::compute_render_spec(&stage, &"/Render/Settings".parse().unwrap(), &[]).unwrap()
 //!     .expect("RenderSpec");
 //! assert_eq!(spec.products.len(), 1);
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 
 pub mod spec;

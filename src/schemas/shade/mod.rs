@@ -33,21 +33,20 @@
 //! use openusd::schemas::shade::{self, Connectable};
 //! use openusd::{sdf, usd};
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
 //!
-//! let surface = shade::Shader::define(&stage, "/Mat/Surface")?;
-//! surface.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
-//! surface.create_input("roughness", "float")?.set(0.4_f32)?;
-//! surface.create_output("surface", "token")?;
+//! let surface = shade::Shader::define(&stage, "/Mat/Surface").unwrap();
+//! surface.create_id_attr().unwrap().set("UsdPreviewSurface".to_string()).unwrap();
+//! surface.create_input("roughness", "float").unwrap().set(0.4_f32).unwrap();
+//! surface.create_output("surface", "token").unwrap();
 //!
-//! shade::Material::define(&stage, "/Mat")?
-//!     .create_surface_output()?
-//!     .set_connections([sdf::path("/Mat/Surface.outputs:surface")?])?;
+//! shade::Material::define(&stage, "/Mat").unwrap()
+//!     .create_surface_output().unwrap()
+//!     .set_connections([sdf::path("/Mat/Surface.outputs:surface").unwrap()]).unwrap();
 //!
-//! let mat = shade::Material::get(&stage, "/Mat")?.expect("Material");
-//! let resolved = mat.compute_surface_source()?.expect("surface shader");
-//! assert_eq!(resolved.id()?.as_deref(), Some("UsdPreviewSurface"));
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+//! let mat = shade::Material::get(&stage, "/Mat").unwrap().expect("Material");
+//! let resolved = mat.compute_surface_source().unwrap().expect("surface shader");
+//! assert_eq!(resolved.id().unwrap().as_deref(), Some("UsdPreviewSurface"));
 //! ```
 
 pub mod tokens;

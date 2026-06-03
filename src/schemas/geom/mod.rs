@@ -31,21 +31,20 @@
 //! use openusd::schemas::geom::{self, Imageable};
 //! use openusd::usd;
 //!
-//! let stage = usd::Stage::builder().in_memory("scene.usda")?;
+//! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
 //!
 //! // Author a Mesh through its typed view. `create_subdivision_scheme_attr` is
 //! // the Mesh's own accessor; `create_visibility_attr` is inherited from
 //! // `Imageable`, further up the trait chain. Token enums convert straight to
 //! // a value via `From`, so they pass to `set` directly.
-//! let mesh = geom::Mesh::define(&stage, "/World/Mesh")?;
-//! mesh.create_subdivision_scheme_attr()?.set(geom::SubdivisionScheme::Loop)?;
-//! mesh.create_visibility_attr()?.set(geom::Visibility::Invisible)?;
+//! let mesh = geom::Mesh::define(&stage, "/World/Mesh").unwrap();
+//! mesh.create_subdivision_scheme_attr().unwrap().set(geom::SubdivisionScheme::Loop).unwrap();
+//! mesh.create_visibility_attr().unwrap().set(geom::Visibility::Invisible).unwrap();
 //!
 //! // Read it back through a fresh view; the token decodes straight to its enum.
-//! let mesh = geom::Mesh::get(&stage, "/World/Mesh")?.expect("Mesh");
-//! let scheme = mesh.subdivision_scheme_attr().get::<geom::SubdivisionScheme>()?;
+//! let mesh = geom::Mesh::get(&stage, "/World/Mesh").unwrap().expect("Mesh");
+//! let scheme = mesh.subdivision_scheme_attr().get::<geom::SubdivisionScheme>().unwrap();
 //! assert_eq!(scheme, Some(geom::SubdivisionScheme::Loop));
-//! # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 //! ```
 //!
 //! # Conventions
