@@ -60,7 +60,17 @@
 //! specializes are class-based), and each level's placeholder is copied to the
 //! root too. The copies are ordered among themselves by the faithful
 //! `PcpCompareSiblingNodeStrength`, placing the globally-weak band after every
-//! other opinion (spec 10.4.1).
+//! other opinion (spec 10.4.1). Propagation is add-if-absent on site, so when a
+//! root site is reached by both a weak and a strong specializes placeholder, the
+//! first to arrive claims the copy; a post-build pass
+//! ([`Indexer::prefer_strongest_specializes_origins`]) then rebinds each copy to
+//! the strongest-origin placeholder at its site (C++ `_AddArc`'s specializes
+//! strength-preference), so the strongest origin wins regardless of arrival
+//! order.
+//!
+//! Implied-class tasks drain descendant-before-ancestor and otherwise
+//! strongest-first (C++ `Task::PriorityOrder`'s `EvalImpliedClasses` case), so
+//! the strongest implied arc reaches a shared site first.
 //!
 //! The indexer is being ported arc-by-arc. `build_with_cache_in` composes a
 //! prim with the indexer when [`Indexer::build`] reports support and otherwise
@@ -380,6 +390,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 return Ok(None);
             }
         }
+
+        // Resolve, per root site, which propagated specializes copy's origin is
+        // strongest (C++ `_AddArc`'s specializes strength-preference). Propagation
+        // is add-if-absent on site, so the first placeholder to reach a root site
+        // claims it regardless of origin strength; this pass rebinds each copy to
+        // the strongest same-site origin once the graph is complete, so a stronger
+        // origin arriving after the site was claimed still wins.
+        self.prefer_strongest_specializes_origins();
 
         // The indexer copies specializes nodes under the local root (C++
         // `_PropagateNodeToRoot`), so strength ordering uses the faithful
@@ -813,6 +831,23 @@ impl<'a, 'f> Indexer<'a, 'f> {
             TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {
                 // A placeholder; only a consistent, distinct order is needed.
                 (b.node, Self::variant_key(b)).cmp(&(a.node, Self::variant_key(a)))
+            }
+            TaskKind::EvalImpliedClasses => {
+                // Ancestors drain after their descendants (C++
+                // `Task::PriorityOrder`'s `EvalImpliedClasses` case): the
+                // descendant is the greater task.
+                if b.node > a.node && self.output.is_ancestor_of(a.node, b.node) {
+                    return Ordering::Less;
+                }
+                if a.node > b.node && self.output.is_ancestor_of(b.node, a.node) {
+                    return Ordering::Greater;
+                }
+                // Otherwise the strongest implied arc drains first, so its
+                // implied node keeps the stronger origin (C++ keeps these tasks
+                // in strong-to-weak order). `compare_node_strength` returns
+                // `Less` for the stronger node, so reverse it to make the
+                // stronger node the greater task.
+                self.output.compare_node_strength(b.node, a.node)
             }
             _ => a.node.cmp(&b.node),
         }
@@ -1842,6 +1877,82 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
         Ok(out)
+    }
+
+    /// Rebinds each propagated specializes root copy to the strongest-origin
+    /// placeholder at its site (C++ `_AddArc`'s specializes strength-preference).
+    ///
+    /// `propagate_node_to_root` is add-if-absent on site, so the first specializes
+    /// placeholder to reach a given root site claims the copy and fixes its
+    /// origin, even when a stronger-origin placeholder is composed later. C++
+    /// keeps the stronger origin (`PcpCompareNodeStrength(origin,
+    /// child.GetOriginNode())` + `_InertSubtree`); reproducing its exact creation
+    /// order would require matching the task heap's interleaving for deep
+    /// ancestral-specializes graphs. Instead, once the graph is complete, this
+    /// pass picks the strongest origin per root copy. It iterates to a fixpoint
+    /// because a copy's strength can depend on another copy's origin; rebinding
+    /// only ever strengthens an origin, so the iteration converges.
+    // TODO(perf): scans the whole arena once per root copy to gather candidates
+    // and re-runs `compare_node_strength` (which walks parent chains) on each
+    // fixpoint pass. A site-keyed index of specializes placeholders, built once,
+    // would replace the O(copies × nodes) candidate scan.
+    fn prefer_strongest_specializes_origins(&mut self) {
+        let root = self.output.local_root();
+        if !root.is_valid() {
+            return;
+        }
+        // The propagated root copies and, per copy, the candidate placeholders at
+        // the same site (every specializes node not itself a root copy).
+        let copies: Vec<NodeId> = self.output.nodes[root.idx()]
+            .children()
+            .iter()
+            .copied()
+            .filter(|&c| self.output.is_propagated_specializes(c))
+            .collect();
+        let candidates: Vec<Vec<NodeId>> = copies
+            .iter()
+            .map(|&c| {
+                let rep = self.node(c).layer_index();
+                let path = &self.node(c).path;
+                (0..self.output.nodes.len())
+                    .map(|i| NodeId(i as u32))
+                    .filter(|&p| {
+                        p != c
+                            && self.node(p).arc == ArcType::Specialize
+                            && self.node(p).layer_index() == rep
+                            && &self.node(p).path == path
+                            && root != self.node(p).parent().unwrap_or(NodeId::INVALID)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        loop {
+            let mut changed = false;
+            for (copy, cands) in copies.iter().zip(&candidates) {
+                let cur_origin = self.node(*copy).origin().unwrap_or(*copy);
+                // Start from the current origin and keep any strictly-stronger
+                // candidate (`compare_node_strength` returns `Less` for the
+                // stronger node); a self-comparison is `Equal`, so it never wins.
+                let best = cands.iter().copied().fold(cur_origin, |best, cand| {
+                    if self.output.compare_node_strength(cand, best) == Ordering::Less {
+                        cand
+                    } else {
+                        best
+                    }
+                });
+                if best != cur_origin {
+                    let sibling = self.node(best).sibling_num_at_origin;
+                    let n = &mut self.output.nodes[copy.idx()];
+                    n.origin = Some(best);
+                    n.sibling_num_at_origin = sibling;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     /// Borrows the node behind a handle in the graph being grown.

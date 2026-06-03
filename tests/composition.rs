@@ -241,20 +241,11 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // implied-across-a-reference specializes (including nested chains, local
     // overrides, ancestral arcs reached through the seed-deepened graph, and a
     // local variant set on a specialize target) compose byte-exact.
-    // `SpecializesAndVariants4` still defers: its `/_class_/render` band is
-    // ordered one position off, a `compare_specialize_siblings` ordering edge.
+    // `SpecializesAndVariants4` still defers: its `/_class_/render` band orders
+    // the selected variant node stronger than the prim's own opinions — a
+    // Root-vs-Variant strength edge inside a specialized class, not the
+    // specializes-propagation order this cluster otherwise covers.
     "SpecializesAndVariants4_root",
-    // TODO(specializes): `SpecializesAndAncestralArcs5` reaches the same implied
-    // specialize at the root layer stack through both an ancestral reference and
-    // an ancestral payload. Ranking the reference-implied copy above the
-    // payload-implied one requires draining `EvalImpliedClasses` tasks in node
-    // strength order (C++ `Task::PriorityOrder`) so the deduped implied node
-    // keeps the stronger origin. Our task queue still drains them in node-index
-    // order; switching to strength order fixes this asset but exposes a latent
-    // `_GetNamespaceDepthForClassHierarchy` ordering bug on
-    // `SpecializesAndAncestralArcs2`, so both the task order and the comparator
-    // must be corrected together before this lands.
-    "SpecializesAndAncestralArcs5_root",
     // TODO(ancestral-variants): the ancestral variant task family
     // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
     // faithful cross-frame `_ComposeVariantSelection` are ported, so a local

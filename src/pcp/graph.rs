@@ -590,6 +590,22 @@ impl PrimIndexGraph {
         }
     }
 
+    /// Whether `x` is a namespace ancestor of `y` in the composition tree,
+    /// walking `y` up its parent chain and stopping before the local root (C++
+    /// `Task::PriorityOrder`'s `isAncestorAndDescendant`). The local root and the
+    /// synthetic tree root are never reported as ancestors.
+    pub(crate) fn is_ancestor_of(&self, x: NodeId, y: NodeId) -> bool {
+        let root = self.local_root();
+        let mut cur = y;
+        while cur.is_valid() && cur != root && cur != self.root {
+            if cur == x {
+                return true;
+            }
+            cur = self.nodes[cur.idx()].parent.unwrap_or(NodeId::INVALID);
+        }
+        false
+    }
+
     /// Collects the chain of nodes from `id` up to its tree root, node first
     /// and root last.
     fn chain_to_root(&self, id: NodeId) -> Vec<NodeId> {
