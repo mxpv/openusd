@@ -2,7 +2,7 @@
 //!
 //! Decodes and authors Pixar's `UsdRender` schema family — the
 //! description of *what* to render and *how* the output is framed and
-//! split into channels — on top of a composed [`crate::Stage`].
+//! split into channels — on top of a composed [`crate::usd::Stage`].
 //!
 //! Schema types (`pxr/usd/usdRender`):
 //! - [`tokens::T_RENDER_SETTINGS_BASE`] — abstract base carrying the

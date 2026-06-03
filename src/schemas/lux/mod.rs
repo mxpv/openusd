@@ -1,6 +1,6 @@
 //! UsdLux schema views.
 //!
-//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
 //! `UsdLux` class hierarchy. UsdLux lights are UsdGeom prims, so these views
 //! build on the [`geom`](crate::schemas::geom) trait chain: every light is a
 //! [`geom::Imageable`](crate::schemas::geom::Imageable) /

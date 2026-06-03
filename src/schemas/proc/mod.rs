@@ -1,6 +1,6 @@
 //! UsdProc schema views.
 //!
-//! Typed value-views over a composed [`crate::Stage`], mirroring Pixar's
+//! Typed value-views over a composed [`crate::usd::Stage`], mirroring Pixar's
 //! `UsdProc` family. The one concrete schema is [`GenerativeProcedural`]
 //! (C++ `UsdProcGenerativeProcedural`) — a prim whose children are generated
 //! at runtime by a named procedural system. It is a
