@@ -113,7 +113,7 @@ openusd = { version = "0.4", features = ["geom", "lux"] }
 ## Example
 
 ```rust,no_run
-use openusd::{ar, sdf, usd};
+use openusd::{ar, usd};
 
 // Open a stage with default settings (DefaultResolver, strict errors, all payloads loaded).
 let stage = usd::Stage::open("scene.usda")?;
@@ -143,26 +143,32 @@ let active = stage.is_active("/World/Hero")?;
 let is_model = stage.is_model("/World/Hero")?;
 let type_name = stage.type_name("/World/Hero")?;
 
-// Read a typed field value.
-let visible: Option<bool> = stage.field("/World/Hero", sdf::FieldKey::Active)?;
-
 // Access children composed across layers, references, and payloads.
 let children = stage.prim_children("/World/Hero")?;
 let properties = stage.prim_properties("/World/Hero")?;
+```
 
-// Author into an in-memory stage.
-let stage = usd::Stage::builder().in_memory("anon.usda")?;
-let mesh = stage
-    .define_prim("/World/Mesh")?
-    .set_type_name("Mesh")?
-    .set_kind("component")?;
-let radius = mesh
-    .create_attribute("radius", "double")?
-    .set_variability(sdf::Variability::Uniform)?
-    .set(sdf::Value::Double(1.0))?;
-let binding = mesh
-    .create_relationship("material:binding")?
-    .add_target(sdf::Path::new("/World/Material")?)?;
+With the `geom` feature, read typed schema views over the composed stage — here a
+`Mesh` and its point positions and normals:
+
+```rust,no_run
+// `PointBased` is brought in so its inherited accessors resolve on the view.
+use openusd::schemas::geom::{self, PointBased};
+use openusd::usd;
+
+let stage = usd::Stage::open("scene.usda")?;
+
+if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
+    // `points_attr` / `normals_attr` are inherited from the `PointBased` trait
+    // up the chain. `point3f[]` and `normal3f[]` both decode to `Vec<[f32; 3]>`,
+    // so `get` extracts them directly.
+    let points = mesh.points_attr().get::<Vec<[f32; 3]>>()?;
+    let normals = mesh.normals_attr().get::<Vec<[f32; 3]>>()?;
+
+    if let Some(points) = points {
+        println!("{} points, normals authored: {}", points.len(), normals.is_some());
+    }
+}
 ```
 
 More runnable examples live in the [`examples/`](examples) directory:
