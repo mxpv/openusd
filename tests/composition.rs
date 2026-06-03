@@ -281,16 +281,17 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
-    // TODO(implied-classes): implied/nested class (inherit) propagation across
-    // references and local+global class combinations — the implied class node
-    // set or ordering differs from `_EvalImpliedClassTree`. `PayloadsAndAncestralArcs`
-    // also exercises a sub-root payload, but its inherit prims are what still fail.
+    // TODO(implied-classes): the remaining implied/nested-class cases still
+    // differ. Each defers a descendant prim to the recursive builder — its
+    // ancestor graph carries a variant/specialize/relocate node the
+    // ancestral-inherit seed cannot deepen yet (`SubrootReferenceAndClasses`
+    // needs specializes), so the builder composes that prim with the older
+    // ordering. `PayloadsAndAncestralArcs` also exercises a sub-root payload,
+    // but its inherit prims are what still fail.
     "PayloadsAndAncestralArcs_root",
-    "BasicLocalAndGlobalClassCombination_root",
     "ImpliedAndAncestralInherits_ComplexEvaluation_root",
     "TrickyNestedClasses_root",
     "TrickyNestedClasses2_root",
-    "TrickyNestedClasses3_root",
     "TrickyNestedClasses4_root",
     "SubrootReferenceAndClasses_root",
     // TODO(subroot-relocates): a sub-root reference whose target carries
