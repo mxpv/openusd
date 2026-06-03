@@ -36,19 +36,24 @@ impl PrimIndex {
     ///
     /// A prim with no opinions still owns the synthetic, inert tree root, and
     /// may own culled arc nodes kept only for structure, so emptiness is the
-    /// absence of any node that contributes to value resolution.
+    /// absence of any node that contributes to value resolution. A node carrying
+    /// its full site stack but authoring no spec at its path (an ancestral site
+    /// cloned to a child with no local opinion) likewise contributes nothing.
     pub fn is_empty(&self) -> bool {
-        !self.graph.iter().any(|node| !node.is_inert() && !node.is_culled())
+        !self
+            .graph
+            .iter()
+            .any(|node| !node.is_inert() && !node.is_culled() && node.has_specs())
     }
 
     /// Returns `true` if any node that contributes opinions was introduced by a
-    /// composition arc. Culled arc nodes (empty targets) do not count: they add
-    /// no shared content, so a prim that only references an empty target is not
-    /// treated as composed for instancing.
+    /// composition arc. Culled arc nodes (empty targets) and spec-less full-stack
+    /// nodes do not count: they add no shared content, so a prim that only
+    /// references an empty target is not treated as composed for instancing.
     pub(crate) fn has_composition_arc(&self) -> bool {
         self.arena()
             .iter()
-            .any(|node| node.arc != ArcType::Root && !node.is_culled())
+            .any(|node| node.arc != ArcType::Root && !node.is_culled() && node.has_specs())
     }
 
     /// Iterates the nodes in strength order (strongest first).
@@ -93,6 +98,13 @@ impl PrimIndex {
     /// [`NodeId`]. Use [`nodes`](Self::nodes) for strength-ordered resolution.
     pub(crate) fn arena(&self) -> &[Node] {
         &self.graph.nodes
+    }
+
+    /// Returns the underlying composition graph. The task-queue indexer clones a
+    /// parent prim's graph as the seed for its child's index (C++
+    /// `_BuildInitialPrimIndexFromAncestor`).
+    pub(crate) fn graph(&self) -> &PrimIndexGraph {
+        &self.graph
     }
 
     /// Returns the root of the composition tree, or `None` when empty.
@@ -443,7 +455,6 @@ impl PrimIndex {
                 map_to_parent: node.map_to_parent.clone(),
                 layer_stack: node.layer_stack().to_vec(),
                 arc: node.arc,
-                namespace_depth: node.namespace_depth(),
                 parent,
             });
         }
@@ -457,9 +468,6 @@ impl PrimIndex {
         CompositionContext {
             selections: merged_selections,
             ancestor_arcs,
-            // This prim's own nodes were appended after the inherited arcs, so
-            // they begin at `base` (see `own_arcs_start`).
-            own_arcs_start: base,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
@@ -513,16 +521,6 @@ pub(crate) struct CompositionContext {
     /// Ancestor composition arcs with namespace mappings.
     /// Used for descendant namespace remapping and implied inherit propagation.
     pub ancestor_arcs: Vec<AncestorArc>,
-    /// Index in [`ancestor_arcs`](Self::ancestor_arcs) where the direct parent
-    /// prim's own nodes begin; entries before it are arcs inherited from further
-    /// ancestors. The direct parent's nodes already encode everything those
-    /// inherited arcs produced (each was composed into the parent), so the
-    /// task-queue indexer propagates only `ancestor_arcs[own_arcs_start..]` —
-    /// the C++ `AppendChildNameToAllSites` model — to avoid composing a
-    /// grandparent arc and the parent node it produced as two nodes. The
-    /// recursive builder instead propagates the whole list and dedups the
-    /// overlap with its global `seen`.
-    pub own_arcs_start: usize,
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
@@ -560,12 +558,6 @@ pub(crate) struct AncestorArc {
     pub layer_stack: Vec<(usize, LayerOffset)>,
     /// Arc type that introduced this mapping.
     pub arc: ArcType,
-    /// The node's namespace depth in the parent prim's graph. A child prim that
-    /// extends this arc gives the propagated node the same depth rather than
-    /// recomputing it from the (deeper) child path, so the parent's relative
-    /// strength order is preserved (C++ `AppendChildNameToAllSites` inherits it
-    /// by copying the node).
-    pub namespace_depth: u16,
     /// Index in the ancestor-arc list of the arc this one nested under in the
     /// parent prim's graph (e.g. a variant set a reference brought in nests
     /// under that reference). `None` for an arc directly on the parent prim.
