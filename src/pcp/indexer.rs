@@ -15,26 +15,37 @@
 //! same queue. Each node carries its full site layer stack, so deepening only
 //! needs to recompute which layers author a spec (`has_specs`).
 //!
+//! Inherits compose as class-based arcs (C++ `_EvalNodeInherits` →
+//! `_AddClassBasedArc`), and a class brought in through a reference is mirrored
+//! into the referencing namespace by implied-class propagation (C++
+//! `_EvalImpliedClasses` → `_EvalImpliedClassTree`) driven by the queue: an
+//! `EvalImpliedClasses` task carries a node's class-based children one level up,
+//! repeating until the class reaches the root namespace.
+//!
 //! The indexer is being ported arc-by-arc. `build_with_cache_in` composes a
 //! prim with the indexer when [`Indexer::build`] reports support and otherwise
 //! falls back to the recursive builder. Ported so far: the root local site,
-//! external reference/payload arcs to a root-level target, and ancestral
-//! reference/payload propagation through the graph-clone seed. Any other feature
-//! (inherits, specializes, variants, relocates, internal references,
-//! `defaultPrim` targets, sub-root targets, instances) abandons the prim
-//! ([`Indexer::build`] returns `None`); each deferral point carries its reason
-//! inline.
+//! external reference/payload arcs to a root-level target, ancestral
+//! reference/payload propagation through the graph-clone seed, and inherits of a
+//! root-level class with their implied classes. Features that still abandon the
+//! prim ([`Indexer::build`] returns `None`): specializes, variants, relocates
+//! (any prim composing an inherit while `layerRelocates` is present), internal
+//! references, `defaultPrim` targets, sub-root arc targets (which need the
+//! ancestral sub-index a `PreviousFrame` build provides), and instances. Each
+//! deferral point carries its reason inline.
 
 use std::collections::BinaryHeap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{AbstractData, LayerOffset, Path};
 
-use super::graph::{ArcType, NodeId, PrimIndexGraph};
-use super::index::{collect_payloads_in, compose_references_in, find_layer, CompositionContext, PrimIndex};
+use super::graph::{ArcType, NodeFlags, NodeId, PrimIndexGraph};
+use super::index::{
+    collect_payloads_in, compose_arc_list_in, compose_references_in, find_layer, CompositionContext, PrimIndex,
+};
 use super::mapping::MapFunction;
 use super::{Error, LayerStack};
 
@@ -43,11 +54,17 @@ use super::{Error, LayerStack};
 /// `MAX_COMPOSITION_DEPTH`.
 const MAX_DEPTH: usize = 100;
 
+/// Whether an arc introduces a class hierarchy node — an inherit or a
+/// specializes (C++ `PcpIsClassBasedArc`). Implied-class propagation acts on
+/// these.
+fn is_class_based(arc: ArcType) -> bool {
+    matches!(arc, ArcType::Inherit | ArcType::Specialize)
+}
+
 /// Fields whose presence at a composed site means the prim pulls in an arc or
 /// variant a later phase ports. While any is authored the indexer abandons the
 /// prim to the recursive builder rather than composing a half-resolved result.
-const UNSUPPORTED_FIELDS: [FieldKey; 4] = [
-    FieldKey::InheritPaths,
+const UNSUPPORTED_FIELDS: [FieldKey; 3] = [
     FieldKey::Specializes,
     FieldKey::VariantSetNames,
     FieldKey::VariantSelection,
@@ -56,10 +73,12 @@ const UNSUPPORTED_FIELDS: [FieldKey; 4] = [
 /// A queued unit of composition work on one node (C++ `Pcp_PrimIndexer::Task`).
 ///
 /// `BinaryHeap` pops the greatest `Task`, and the derived order compares
-/// [`kind`](Self::kind) first, so references drain before payloads (C++
-/// `Task::Type` priority). Within a kind the node index gives a consistent,
-/// arbitrary tiebreak — references and payloads compose order-independently, so
-/// only determinism matters.
+/// [`kind`](Self::kind) first (highest priority drains first, C++ `Task::Type`),
+/// then the node index. For `EvalImpliedClasses` the higher node index — a more
+/// recently added, deeper node — drains first, so a class is propagated up from
+/// its descendants before its ancestors (C++ `Task::PriorityOrder`). For the
+/// order-independent reference/payload/inherit tasks the node order is just a
+/// deterministic tiebreak.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Task {
     kind: TaskKind,
@@ -67,10 +86,17 @@ struct Task {
 }
 
 /// The ported task kinds, ordered weakest-priority first so the derived `Ord`
-/// makes the heap pop the highest-priority kind: payloads are evaluated after
-/// references (C++ `Task::Type`).
+/// makes the heap pop the highest-priority kind first (C++ `Task::Type`, whose
+/// numeric order runs strongest-to-weakest: references, payloads, inherits, then
+/// implied classes).
+// The `Eval` prefix mirrors the C++ `Task::Type` names.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TaskKind {
+    /// Propagate a node's class-based children one level up toward the root.
+    EvalImpliedClasses,
+    /// Evaluate the inherits authored at the node's site.
+    EvalNodeInherits,
     /// Evaluate the payloads authored at the node's site.
     EvalNodePayloads,
     /// Evaluate the references authored at the node's site.
@@ -100,6 +126,15 @@ pub(crate) struct Indexer<'a> {
     output: PrimIndexGraph,
     /// Open composition tasks, highest priority first.
     tasks: BinaryHeap<Task>,
+    /// Nodes already enqueued for `EvalImpliedClasses`, mirroring C++
+    /// `taskUniq`: implied-class propagation re-reaches the same node from
+    /// several arcs, so the task is deduplicated to avoid redundant work.
+    implied_seen: HashSet<NodeId>,
+    /// Whether any layer authors `layerRelocates`. Class arcs interact with
+    /// relocates (C++ `_EvalImpliedClassTree` routes implied classes across
+    /// relocate nodes); that interaction is a later phase, so while relocates
+    /// are present the indexer defers any prim that composes an inherit.
+    has_relocates: bool,
     /// Cleared the moment composition meets a feature a later phase ports; the
     /// build is then abandoned and the recursive builder composes the prim.
     supported: bool,
@@ -121,6 +156,8 @@ impl<'a> Indexer<'a> {
             ambient_is_root,
             output: PrimIndexGraph::default(),
             tasks: BinaryHeap::new(),
+            implied_seen: HashSet::new(),
+            has_relocates: stack.has_relocates,
             supported: true,
         }
     }
@@ -150,7 +187,14 @@ impl<'a> Indexer<'a> {
         // Drain the queue. Each handler may append nodes and enqueue further
         // work; an unported feature clears `supported` and abandons the prim.
         while let Some(task) = self.tasks.pop() {
-            self.eval_arcs(task.node, task.kind)?;
+            match task.kind {
+                TaskKind::EvalNodeReferences | TaskKind::EvalNodePayloads => self.eval_arcs(task.node, task.kind)?,
+                TaskKind::EvalNodeInherits => self.eval_node_inherits(task.node)?,
+                TaskKind::EvalImpliedClasses => {
+                    self.implied_seen.remove(&task.node);
+                    self.eval_implied_classes(task.node)?;
+                }
+            }
             if !self.supported {
                 return Ok(None);
             }
@@ -244,15 +288,20 @@ impl<'a> Indexer<'a> {
                 return Ok(false);
             }
             if has_specs {
-                self.enqueue_arc_tasks(node);
+                self.add_tasks_for_node(node);
             }
         }
         Ok(true)
     }
 
-    /// Enqueues a node's reference and payload evaluation (C++ `_AddArc`'s
-    /// `AddTasksForNode`, restricted to the ported tasks).
-    fn enqueue_arc_tasks(&mut self, node: NodeId) {
+    /// Enqueues a node's expressed-arc tasks and any implied-class propagation
+    /// it triggers (C++ `AddTasksForNode`, restricted to the ported tasks).
+    ///
+    /// A class-based node propagates the whole class hierarchy it starts from
+    /// (`_FindStartingNodeForImpliedClasses`); a non-class node that picked up
+    /// class-based children (from a referenced subtree) propagates them from
+    /// itself.
+    fn add_tasks_for_node(&mut self, node: NodeId) {
         self.tasks.push(Task {
             kind: TaskKind::EvalNodeReferences,
             node,
@@ -260,6 +309,28 @@ impl<'a> Indexer<'a> {
         if self.stack.load_payloads {
             self.tasks.push(Task {
                 kind: TaskKind::EvalNodePayloads,
+                node,
+            });
+        }
+        self.tasks.push(Task {
+            kind: TaskKind::EvalNodeInherits,
+            node,
+        });
+
+        if is_class_based(self.node(node).arc) {
+            let start = self.find_starting_node_for_implied_classes(node);
+            self.enqueue_implied(start);
+        } else if self.has_class_based_child(node) {
+            self.enqueue_implied(node);
+        }
+    }
+
+    /// Enqueues an `EvalImpliedClasses` task, deduplicated per node (C++
+    /// `taskUniq`).
+    fn enqueue_implied(&mut self, node: NodeId) {
+        if self.implied_seen.insert(node) {
+            self.tasks.push(Task {
+                kind: TaskKind::EvalImpliedClasses,
                 node,
             });
         }
@@ -293,6 +364,10 @@ impl<'a> Indexer<'a> {
                     .collect::<Vec<_>>();
                 (ArcType::Payload, arcs)
             }
+            // `eval_arcs` is dispatched only for reference and payload tasks.
+            TaskKind::EvalNodeInherits | TaskKind::EvalImpliedClasses => {
+                unreachable!("eval_arcs handles only reference and payload tasks")
+            }
         };
         for (asset_path, prim_path, offset) in &arcs {
             self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
@@ -301,6 +376,264 @@ impl<'a> Indexer<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Composes the inherits authored at `node`'s site and adds a class-based arc
+    /// for each (C++ `_EvalNodeInherits` → `_AddClassBasedArcs`).
+    fn eval_node_inherits(&mut self, node: NodeId) -> Result<(), Error> {
+        // An inert node (a non-contributing implied placeholder) authors nothing.
+        if self.node(node).is_inert() {
+            return Ok(());
+        }
+        let inherits = compose_arc_list_in::<Path>(self.node_slice(node), FieldKey::InheritPaths, &self.stack.layers)?;
+        // A class arc interacting with relocates is a later phase.
+        if !inherits.is_empty() && self.has_relocates {
+            self.supported = false;
+            return Ok(());
+        }
+        let node_path = self.node(node).path.clone();
+        for (arc_num, class_path) in inherits.iter().enumerate() {
+            let resolved = node_path.make_absolute(class_path);
+            // A class arc must target a prim, not a variant selection (P2).
+            if resolved.is_prim_variant_selection_path() {
+                self.supported = false;
+                return Ok(());
+            }
+            // The class-arc map sends the class to the instance; every other
+            // path (notably root classes) maps through the added root identity.
+            let inherit_map = MapFunction::from_pair(resolved, node_path.clone()).with_root_identity();
+            self.add_class_based_arc(node, node, inherit_map, arc_num as u16, None, ArcType::Inherit)?;
+            if !self.supported {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a single class-based arc under `parent` (C++ `_AddClassBasedArc`),
+    /// returning the new or existing node. The arc may be a directly-authored
+    /// inherit or an implied class propagated from `origin` in another subtree.
+    ///
+    /// A sub-root class target needs the recursive ancestral-opinion build
+    /// (`includeAncestralOpinions`, a `PreviousFrame` sub-index) that a later
+    /// phase ports, so it abandons the prim.
+    fn add_class_based_arc(
+        &mut self,
+        parent: NodeId,
+        origin: NodeId,
+        inherit_map: MapFunction,
+        arc_num: u16,
+        ignore_if_same_as_site: Option<(usize, Path)>,
+        arc: ArcType,
+    ) -> Result<Option<NodeId>, Error> {
+        let parent_path = self.node(parent).path.clone();
+        // Class arcs added to a variant-selection site need the strip/re-add
+        // handling a later phase ports.
+        if parent_path.is_prim_variant_selection_path() {
+            self.supported = false;
+            return Ok(None);
+        }
+        // Map the parent site back across the arc to find the site to inherit.
+        // An empty result means there is no appropriate site (the parent is
+        // outside the arc's co-domain); that is not an error, just no node.
+        let Some(inherit_path) = inherit_map.map_target_to_source(&parent_path) else {
+            return Ok(None);
+        };
+
+        let parent_layers = self.node(parent).layer_stack().to_vec();
+        let rep = parent_layers[0].0;
+
+        // Dedup: a matching child already inherits this site.
+        if let Some(existing) = self.find_matching_child(parent, rep, &inherit_path) {
+            return Ok(Some(existing));
+        }
+
+        let same_as_ignore = ignore_if_same_as_site
+            .as_ref()
+            .is_some_and(|(li, p)| *li == rep && *p == inherit_path);
+        let direct_should = inherit_path != parent_path && !same_as_ignore;
+        let is_root_prim = inherit_path.parent().is_some_and(|p| p == Path::abs_root());
+        if direct_should && !is_root_prim {
+            // A sub-root class needs ancestral opinions (a recursive sub-index).
+            self.supported = false;
+            return Ok(None);
+        }
+
+        let has_specs = self.stack_has_spec(&parent_layers, &inherit_path);
+        let new_node = self.output.add_site_child(
+            parent,
+            parent_layers,
+            inherit_path,
+            arc,
+            inherit_map,
+            arc == ArcType::Specialize,
+        );
+        let n = &mut self.output.nodes[new_node.idx()];
+        n.origin = Some(origin);
+        n.sibling_num_at_origin = arc_num;
+        n.has_specs = has_specs;
+        // A redundant arc (mapping the site unchanged, or onto the ignored site)
+        // is kept to propagate but contributes no opinions.
+        if !direct_should {
+            n.flags |= NodeFlags::INERT;
+        }
+
+        if self.node_authors_unsupported(new_node)? {
+            self.supported = false;
+            return Ok(None);
+        }
+
+        self.add_tasks_for_node(new_node);
+        Ok(Some(new_node))
+    }
+
+    /// Propagates `node`'s class-based children one level up to its parent (C++
+    /// `_EvalImpliedClasses`): the queue repeats this, carrying a class brought
+    /// in through a reference up the arc chain into the referencing namespace.
+    fn eval_implied_classes(&mut self, node: NodeId) -> Result<(), Error> {
+        let Some(parent) = self.node(node).parent() else {
+            return Ok(());
+        };
+        if !self.has_class_based_child(node) {
+            return Ok(());
+        }
+        // The map to the parent gets the root identity so a root class still
+        // maps across a restricted (reference) arc domain.
+        let transfer = self.node(node).map_to_parent.with_root_identity();
+        self.eval_implied_class_tree(parent, node, &transfer, true)
+    }
+
+    /// Propagates the class hierarchy under `src` to `dest`, conjugating each
+    /// class arc through `transfer` (C++ `_EvalImpliedClassTree`).
+    fn eval_implied_class_tree(
+        &mut self,
+        dest: NodeId,
+        src: NodeId,
+        transfer: &MapFunction,
+        start_of_tree: bool,
+    ) -> Result<(), Error> {
+        // Implied classes across relocate nodes need special routing (P4).
+        if self.node(dest).arc == ArcType::Relocate {
+            self.supported = false;
+            return Ok(());
+        }
+
+        let src = self.node(src);
+        let src_is_class = is_class_based(src.arc);
+        let src_depth = src.depth_below_introduction();
+        let src_children = src.children().to_vec();
+
+        for child in src_children {
+            let c = self.node(child);
+            if !is_class_based(c.arc) {
+                continue;
+            }
+            // Skip the arc that continues an ancestral class chain rather than a
+            // true namespace child: it must not be implied directly to dest.
+            if start_of_tree && src_is_class && src_depth == c.depth_below_introduction() {
+                continue;
+            }
+
+            let child_arc = c.arc;
+            let child_map = c.map_to_parent.clone();
+            let child_site = (c.layer_index(), c.path.clone());
+            let sibling = c.sibling_num_at_origin;
+            let dest_class_func = transfer.implied_class(&child_map);
+
+            // Reuse the implied node already propagated for this child, else add
+            // it; either may be absent (no appropriate site to inherit).
+            let dest_child = match self.find_implied_child(dest, child) {
+                Some(existing) => Some(existing),
+                None => self.add_class_based_arc(
+                    dest,
+                    child,
+                    dest_class_func.clone(),
+                    sibling,
+                    Some(child_site),
+                    child_arc,
+                )?,
+            };
+            if !self.supported {
+                return Ok(());
+            }
+
+            // Recurse into nested classes under the child.
+            if let Some(dest_child) = dest_child {
+                if self.has_class_based_child(child) {
+                    let child_transfer = dest_class_func.inverse().compose(&transfer.compose(&child_map));
+                    self.eval_implied_class_tree(dest_child, child, &child_transfer, false)?;
+                    if !self.supported {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Finds the node where implied-class propagation for class-based node `n`
+    /// should start, so the whole class hierarchy propagates as a unit (C++
+    /// `_FindStartingNodeForImpliedClasses`).
+    fn find_starting_node_for_implied_classes(&self, n: NodeId) -> NodeId {
+        let mut start = n;
+        while is_class_based(self.node(start).arc) {
+            let (instance, class) = self.find_starting_node_of_class_hierarchy(start);
+            start = instance;
+            if is_class_based(self.node(instance).arc) {
+                let ancestral = self.node(instance).path_at_introduction();
+                if self.node(class).path.has_prefix(&ancestral) {
+                    break;
+                }
+            }
+        }
+        start
+    }
+
+    /// Walks up the chain of class arcs at the same depth-below-introduction from
+    /// `n`, returning `(instance node, topmost class node)` (C++
+    /// `Pcp_FindStartingNodeOfClassHierarchy`).
+    fn find_starting_node_of_class_hierarchy(&self, n: NodeId) -> (NodeId, NodeId) {
+        let mut instance = n;
+        let mut class = n;
+        let depth = self.node(instance).depth_below_introduction();
+        while is_class_based(self.node(instance).arc) && self.node(instance).depth_below_introduction() == depth {
+            class = instance;
+            match self.node(instance).parent() {
+                Some(p) => instance = p,
+                None => break,
+            }
+        }
+        (instance, class)
+    }
+
+    /// Returns the child of `parent` whose site matches `(rep_layer, path)` (C++
+    /// `_FindMatchingChild`, the non-relocate case).
+    fn find_matching_child(&self, parent: NodeId, rep_layer: usize, path: &Path) -> Option<NodeId> {
+        self.node(parent)
+            .children()
+            .iter()
+            .copied()
+            .find(|&c| self.node(c).layer_index() == rep_layer && &self.node(c).path == path)
+    }
+
+    /// Returns the child of `dest` already propagated for the implied class
+    /// `src_child`, identified by its origin (C++ `_EvalImpliedClassTree`'s
+    /// origin dedup).
+    fn find_implied_child(&self, dest: NodeId, src_child: NodeId) -> Option<NodeId> {
+        self.node(dest)
+            .children()
+            .iter()
+            .copied()
+            .find(|&c| self.node(c).origin() == Some(src_child))
+    }
+
+    /// Whether `node` has any class-based (inherit/specialize) child (C++
+    /// `_HasClassBasedChild`).
+    fn has_class_based_child(&self, node: NodeId) -> bool {
+        self.node(node)
+            .children()
+            .iter()
+            .any(|&c| is_class_based(self.node(c).arc))
     }
 
     /// Resolves a reference or payload to its target layer stack, adds the target
@@ -350,7 +683,7 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
 
-        let parent_path = self.output.nodes[parent.idx()].path.clone();
+        let parent_path = self.node(parent).path.clone();
         let map = MapFunction::from_pair(prim_path.clone(), parent_path).with_time_offset(arc_offset);
         let new_node = self
             .output
@@ -361,8 +694,8 @@ impl<'a> Indexer<'a> {
             return Ok(());
         }
 
-        // The new node may itself author references and payloads.
-        self.enqueue_arc_tasks(new_node);
+        // The new node may itself author references, payloads, and inherits.
+        self.add_tasks_for_node(new_node);
         Ok(())
     }
 
@@ -375,7 +708,7 @@ impl<'a> Indexer<'a> {
         let mut depth = 1;
         let mut cur = parent;
         while cur.is_valid() {
-            let n = &self.output.nodes[cur.idx()];
+            let n = self.node(cur);
             if n.layer_index() == root_layer && &n.path == path {
                 return false;
             }
@@ -393,7 +726,7 @@ impl<'a> Indexer<'a> {
     /// Returns `true` when any layer of `node`'s site authors an
     /// inherit/specialize/variant field at its path (see [`UNSUPPORTED_FIELDS`]).
     fn node_authors_unsupported(&self, node: NodeId) -> Result<bool, Error> {
-        let n = &self.output.nodes[node.idx()];
+        let n = self.node(node);
         for &(li, _) in n.layer_stack() {
             let layer = self.stack.layer(li);
             for field in UNSUPPORTED_FIELDS {
@@ -403,6 +736,11 @@ impl<'a> Indexer<'a> {
             }
         }
         Ok(false)
+    }
+
+    /// Borrows the node behind a handle in the graph being grown.
+    fn node(&self, id: NodeId) -> &super::graph::Node {
+        &self.output[id.idx()]
     }
 
     /// A one-element slice over `node`, for the `compose_*_in` helpers that read
@@ -452,11 +790,54 @@ mod tests {
     }
 
     #[test]
-    fn inherit_prim_deferred() {
-        let s = stack("#usda 1.0\nclass \"C\" {}\ndef \"World\" (\n    inherits = </C>\n) {\n}\n");
+    fn local_inherit_composed() {
+        let s = stack("#usda 1.0\nclass \"C\" { custom double x = 1 }\ndef \"World\" (\n    inherits = </C>\n) {\n}\n");
+        let graph = build(&s, "/World").expect("a local inherit to a root class is composed");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/C" && n.has_specs()),
+            "the inherit arc to /C contributes the class opinion"
+        );
+    }
+
+    #[test]
+    fn subroot_inherit_deferred() {
+        // A class nested under another prim needs the ancestral sub-index build.
+        let s = stack(
+            "#usda 1.0\ndef \"Scope\" {\n  class \"C\" {}\n}\ndef \"World\" (\n    inherits = </Scope/C>\n) {\n}\n",
+        );
         assert!(
             build(&s, "/World").is_none(),
-            "a prim authoring an inherit defers to the recursive builder"
+            "a sub-root class inherit defers to the recursive builder"
+        );
+    }
+
+    /// A class brought in through a reference is mirrored into the referencing
+    /// namespace as an implied class node, so an outer opinion on the class
+    /// contributes (C++ `_EvalImpliedClassTree`).
+    #[test]
+    fn implied_class_from_reference() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Model\" (\n    references = @ref.usd@</Model>\n) {}\nclass \"Class\" { custom double x = 1 }\n",
+            ),
+            (
+                "ref.usd",
+                "#usda 1.0\ndef \"Model\" (\n    inherits = </Class>\n) {}\nclass \"Class\" {}\n",
+            ),
+        ]);
+        let graph = build(&s, "/Model").expect("reference + class is composed by the indexer");
+        // The referenced class node, plus the implied class node in root.usd.
+        let class_layers: Vec<usize> = graph
+            .iter()
+            .filter(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/Class")
+            .map(|n| n.layer_index())
+            .collect();
+        assert!(
+            class_layers.contains(&0) && class_layers.contains(&1),
+            "the class is composed in both the referenced (1) and referencing (0) layers, got {class_layers:?}"
         );
     }
 

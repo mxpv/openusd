@@ -68,8 +68,9 @@ impl PrimIndex {
     }
 
     /// Iterates every retained node in strength order, including culled arc
-    /// nodes (an arc whose target authors no spec). Skips only the inert
-    /// synthetic root. Used for composition introspection and change tracking,
+    /// nodes (an arc whose target authors no spec). Skips inert nodes — the
+    /// synthetic root and the non-contributing class placeholders implied-class
+    /// propagation adds. Used for composition introspection and change tracking,
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
     pub fn all_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
@@ -1767,7 +1768,7 @@ where
 
 /// Composes an offset-free list-op field (inherits, specializes) by decoding
 /// each opinion through `TryInto` and combining across the layer stack.
-fn compose_arc_list_in<T: Default + Clone + PartialEq>(
+pub(super) fn compose_arc_list_in<T: Default + Clone + PartialEq>(
     nodes: &[Node],
     field: FieldKey,
     layers: &[sdf::Layer],

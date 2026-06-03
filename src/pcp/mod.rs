@@ -326,6 +326,11 @@ pub(crate) struct LayerStack {
     pub session_layer_count: usize,
     /// Whether payload arcs should be expanded during prim index construction.
     pub load_payloads: bool,
+    /// Whether any layer authors `layerRelocates`, precomputed once for the
+    /// stack. The indexer reads this to defer class-arc composition while
+    /// relocates are present (their interaction is a later phase) without
+    /// rescanning every layer per prim.
+    pub(crate) has_relocates: bool,
     /// Resolver used to anchor relative asset paths when locating layers.
     pub(crate) resolver: Box<dyn Resolver>,
 }
@@ -341,13 +346,24 @@ impl LayerStack {
         let sublayer_stacks: SublayerStacks = (0..layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &*resolver)))
             .collect();
+        let has_relocates = Self::compute_has_relocates(&layers);
         Self {
             layers,
             sublayer_stacks,
             session_layer_count,
             load_payloads,
+            has_relocates,
             resolver,
         }
+    }
+
+    /// Whether any layer authors `layerRelocates` at its pseudo-root.
+    fn compute_has_relocates(layers: &[sdf::Layer]) -> bool {
+        let root = sdf::Path::abs_root();
+        layers.iter().any(|l| {
+            l.data()
+                .has_field(&root, sdf::schema::FieldKey::LayerRelocates.as_str())
+        })
     }
 
     /// Returns the number of layers.
@@ -383,6 +399,7 @@ impl LayerStack {
         self.sublayer_stacks = (0..self.layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
             .collect();
+        self.has_relocates = Self::compute_has_relocates(&self.layers);
     }
 
     /// Returns the root layer (the first non-session layer), if any.

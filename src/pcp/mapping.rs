@@ -92,6 +92,9 @@ impl MapFunction {
     /// longest-prefix matching is a simple linear scan.
     pub fn new(pairs: impl Into<Vec<(Path, Path)>>) -> Self {
         let mut pairs: Vec<(Path, Path)> = pairs.into();
+        if pairs.len() > 1 {
+            pairs = Self::canonicalize(pairs);
+        }
         match pairs.len() {
             0 => Self::null(),
             1 => Self {
@@ -107,6 +110,51 @@ impl MapFunction {
                 }
             }
         }
+    }
+
+    /// Drops redundant pairs — those a shorter-prefix entry already implies (C++
+    /// `PcpMapFunction::Create` canonicalization). For example `(/A, /A)` is
+    /// redundant once `(/, /)` is present, and an entry equal to what its parent
+    /// prefix maps it to carries no information.
+    ///
+    /// Removing them does not change any mapping result, but it keeps
+    /// [`map_target_to_source`](Self::map_target_to_source) unambiguous: two
+    /// pairs sharing a target (one of them a spurious identity) would otherwise
+    /// make the reverse lookup order-dependent, which conjugations like the
+    /// implied-class map produce.
+    fn canonicalize(mut pairs: Vec<(Path, Path)>) -> Vec<(Path, Path)> {
+        // Process shorter sources first so each pair is tested against the more
+        // general pairs already kept. A pair is redundant when those already map
+        // its source to its target — which also subsumes exact duplicates.
+        pairs.sort_by(|a, b| a.0.as_str().len().cmp(&b.0.as_str().len()));
+
+        // TODO(perf): `map_via` makes this O(n²); fine for the 2-3 pair maps
+        // composition produces today, revisit if larger maps ever arise.
+        let mut kept: Vec<(Path, Path)> = Vec::new();
+        for (source, target) in pairs {
+            if Self::map_via(&kept, &source).as_ref() != Some(&target) {
+                kept.push((source, target));
+            }
+        }
+        kept
+    }
+
+    /// Maps `path` through `pairs` by longest source-prefix match (the bare
+    /// path-translation [`map_source_to_target`](Self::map_source_to_target)
+    /// performs, over an arbitrary pair slice).
+    fn map_via(pairs: &[(Path, Path)], path: &Path) -> Option<Path> {
+        let mut best: Option<Path> = None;
+        let mut best_len = 0;
+        for (source, target) in pairs {
+            let len = source.as_str().len();
+            if len >= best_len {
+                if let Some(mapped) = path.replace_prefix(source, target) {
+                    best = Some(mapped);
+                    best_len = len;
+                }
+            }
+        }
+        best
     }
 
     /// Creates a single-pair mapping without the `(/, /)` identity catch-all.
@@ -492,11 +540,27 @@ mod tests {
     }
 
     #[test]
-    fn from_pair_identity_noop_when_same_source_target() {
-        // When source == target, the explicit pair is a no-op but the
-        // mapping still carries the identity catch-all.
+    fn canonicalize_drops_redundant_identity_pair() {
+        // A conjugation can yield a map with a spurious identity pair
+        // (`/B → /B`) alongside a real one (`/A → /B`), both implied by `/ → /`.
+        // Canonicalization drops the redundant pair so the reverse lookup is
+        // unambiguous — `/B` maps back to `/A`, not to itself.
+        let m = MapFunction::new(vec![
+            (p("/A"), p("/B")),
+            (p("/B"), p("/B")),
+            (Path::abs_root(), Path::abs_root()),
+        ]);
+        assert_eq!(m.map_target_to_source(&p("/B")), Some(p("/A")));
+        assert_eq!(m.path_pairs().len(), 2, "the redundant /B -> /B pair is removed");
+    }
+
+    #[test]
+    fn from_pair_identity_collapses_when_same_source_target() {
+        // When source == target, the explicit pair is redundant with the
+        // identity catch-all, so canonicalization drops it and the mapping
+        // collapses to the identity (matching C++ `PcpMapFunction::Create`).
         let m = MapFunction::from_pair_identity(p("/A"), p("/A"));
-        assert!(!m.is_identity());
+        assert!(m.is_identity());
         assert!(m.is_noop());
         assert_eq!(m.map_source_to_target(&p("/A")), Some(p("/A")));
         assert_eq!(m.map_source_to_target(&p("/Other")), Some(p("/Other")));

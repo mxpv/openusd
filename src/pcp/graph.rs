@@ -143,9 +143,17 @@ pub struct Node {
     /// the propagated-from node for an implied class or graft. `None` only for
     /// the synthetic root, which has no parent.
     pub(crate) origin: Option<NodeId>,
-    /// Namespace depth at which the introducing arc was authored. Used by
-    /// implied inherits/specializes that propagate toward the root.
+    /// Namespace depth at which the introducing arc was authored (C++
+    /// `PcpNode::GetNamespaceDepth`): the prim-element count of the parent
+    /// site's path when this node was added. Used by implied inherits/specializes
+    /// that propagate toward the root, and by
+    /// [`depth_below_introduction`](Self::depth_below_introduction).
     pub(crate) namespace_depth: u16,
+    /// This node's index among the same-arc-type siblings at its origin (C++
+    /// `GetSiblingNumAtOrigin`): the arc number a class-based arc was authored
+    /// with. Carried onto implied copies so their relative strength is preserved;
+    /// reference/payload arcs leave it 0.
+    pub(crate) sibling_num_at_origin: u16,
     /// Position of this node's prim in its specializes chain: 0 for a directly
     /// specialized class, 1 for the class it specializes, and so on. A specialize
     /// source is weaker than its target (spec 10.4.1), so a lower depth is
@@ -198,6 +206,7 @@ impl Node {
             children: Vec::new(),
             origin: None,
             namespace_depth: 0,
+            sibling_num_at_origin: 0,
             specialize_chain_depth: 0,
             has_specs: true,
             flags,
@@ -278,6 +287,31 @@ impl Node {
         self.namespace_depth
     }
 
+    /// Number of namespace levels this node's site sits below the level at which
+    /// its arc was introduced (C++ `PcpNode::GetDepthBelowIntroduction`): the
+    /// node path's prim-element count minus its namespace depth. A direct arc
+    /// node has depth 0; a node reached by extending that arc to a child has 1,
+    /// and so on. Implied-class propagation uses this to tell a class's true
+    /// namespace descendants from the arc that continues an ancestral chain.
+    pub(crate) fn depth_below_introduction(&self) -> u16 {
+        (self.path.prim_element_count() as u16).saturating_sub(self.namespace_depth)
+    }
+
+    /// This node's path at the level where its arc was introduced (C++
+    /// `PcpNode::GetPathAtIntroduction`): the node path with its
+    /// [`depth_below_introduction`](Self::depth_below_introduction) trailing
+    /// elements stripped.
+    pub(crate) fn path_at_introduction(&self) -> Path {
+        let mut path = self.path.clone();
+        for _ in 0..self.depth_below_introduction() {
+            match path.parent() {
+                Some(parent) => path = parent,
+                None => break,
+            }
+        }
+        path
+    }
+
     /// Whether any layer in this node's stack authors a spec at its path (C++
     /// `PcpNode::HasSpecs`). A node carrying its full site layer stack may
     /// author nothing at a deepened child path; such a node contributes no
@@ -291,8 +325,9 @@ impl Node {
         self.flags
     }
 
-    /// True when this node contributes no opinions and exists only to give the
-    /// composition graph structure (the synthetic tree root).
+    /// True when this node contributes no opinions and is kept only for graph
+    /// structure: the synthetic tree root, or a non-contributing class
+    /// placeholder added by implied-class propagation (C++ `SetInert`).
     pub fn is_inert(&self) -> bool {
         self.flags.contains(NodeFlags::INERT)
     }
@@ -750,5 +785,37 @@ impl std::ops::Deref for PrimIndexGraph {
     type Target = [Node];
     fn deref(&self) -> &[Node] {
         &self.nodes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(path: &str, namespace_depth: u16) -> Node {
+        let mut n = Node::new(
+            0,
+            Path::from(path),
+            ArcType::Inherit,
+            MapFunction::identity(),
+            MapFunction::identity(),
+            false,
+        );
+        n.namespace_depth = namespace_depth;
+        n
+    }
+
+    #[test]
+    fn introduction_depth_and_path() {
+        // An arc introduced at the prim's own level: depth 0, path unchanged.
+        let direct = node("/Model", 1);
+        assert_eq!(direct.depth_below_introduction(), 0);
+        assert_eq!(direct.path_at_introduction(), Path::from("/Model"));
+
+        // The same arc extended two levels into a child: depth 2, and the
+        // introduction path strips the two trailing elements.
+        let extended = node("/Model/Rig/Anim", 1);
+        assert_eq!(extended.depth_below_introduction(), 2);
+        assert_eq!(extended.path_at_introduction(), Path::from("/Model"));
     }
 }
