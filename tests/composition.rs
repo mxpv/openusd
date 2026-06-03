@@ -235,18 +235,15 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
     //
-    // TODO(specializes): the task-queue indexer now copies specializes nodes to
-    // the local root (`_PropagateNodeToRoot`) and orders the globally-weak band
-    // with the faithful `PcpCompareSiblingNodeStrength`, so the core cases
-    // (including specializes implied across a reference chain) compose
-    // byte-exact. These assets still defer to the recursive builder because they
-    // exercise cases the indexer does not yet reproduce: nested specializes
-    // reached through a reference with local overrides (`BasicSpecializes`'s
-    // `/Model`), specializes combined with inherits/variants/ancestral arcs, and
-    // relocates. Remove an asset once its case lands.
-    "BasicSpecializes_root",
-    "BasicSpecializesAndInherits_root",
-    "BasicSpecializesAndReferences_root",
+    // TODO(specializes): the task-queue indexer copies specializes nodes to the
+    // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
+    // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
+    // implied-across-a-reference specializes (including nested chains and local
+    // overrides) compose byte-exact. These assets still defer to the recursive
+    // builder because they exercise cases the indexer does not yet reproduce:
+    // specializes combined with variants or ancestral arcs, the nested-class
+    // strength orderings in `TrickyNestedSpecializes`, and relocates. Remove an
+    // asset once its case lands.
     "BasicSpecializesAndVariants_root",
     "SpecializesAndAncestralArcs_root",
     "SpecializesAndAncestralArcs2_root",
@@ -256,9 +253,7 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "SpecializesAndVariants4_root",
     "TrickyNestedSpecializes_root",
     "TrickyNestedSpecializes2_root",
-    "TrickySpecializesAndInherits_root",
     "TrickySpecializesAndInherits2_root",
-    "TrickySpecializesAndInherits3_root",
     "VariantSpecializesAndReferenceSurprisingBehavior_root",
     // TODO(variant-strength): the remaining variant cases need the ancestral
     // variant re-evaluation a sub-root arc target requires (a variant set
