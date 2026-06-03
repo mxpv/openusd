@@ -1,131 +1,209 @@
-//! `UsdGeomPointInstancer` reader.
+//! `UsdGeomPointInstancer` — vectorized instancing.
 //!
-//! Decodes the vectorized-instancing prim: a `prototypes`
-//! relationship plus per-instance `proto_indices`, `positions`,
-//! optional `orientations` / `scales`, motion data, and prune lists.
+//! A [`PointInstancer`] instances the prims targeted by its `prototypes`
+//! relationship once per entry of the per-instance arrays (`protoIndices`
+//! selects the prototype, `positions` / `orientations` / `scales` place it).
+//! It is a [`Boundable`] (it has an `extent` and a transform) but not a
+//! [`Gprim`], mirroring the C++ `UsdGeomPointInstancer : UsdGeomBoundable`.
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::sdf;
+use crate::usd::{Attribute, Prim, Relationship, SchemaBase, SchemaKind, Stage};
 
-use super::tokens::*;
-use super::types::*;
+use super::internal::get_typed;
+use super::tokens as tok;
+use super::{impl_geom_schema, Boundable, Imageable, Xformable};
 
-/// Read a `PointInstancer` prim. Returns `None` when the prim isn't
-/// typed `PointInstancer` or has no `protoIndices` / `positions`
-/// authored.
-pub fn read_point_instancer(stage: &Stage, prim: &Path) -> Result<Option<ReadPointInstancer>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_POINT_INSTANCER) {
-        return Ok(None);
+/// A vectorized-instancing prim (C++ `UsdGeomPointInstancer`).
+#[derive(Clone, derive_more::Deref)]
+pub struct PointInstancer(Prim);
+
+impl PointInstancer {
+    /// Author a `def PointInstancer` prim at `path`
+    /// (C++ `UsdGeomPointInstancer::Define`).
+    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+        Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_POINT_INSTANCER)?))
     }
-    let Some(proto_indices) = read_int_vec(stage, prim, A_PROTO_INDICES)? else {
-        return Ok(None);
-    };
-    let Some(positions) = read_vec3f_vec_opt(stage, prim, A_POSITIONS)? else {
-        return Ok(None);
-    };
-    Ok(Some(ReadPointInstancer {
-        path: prim.as_str().to_string(),
-        prototypes: read_rel_targets(stage, prim, REL_PROTOTYPES)?,
-        proto_indices,
-        positions,
-        // Per Pixar's PointInstancer spec, when both attributes are
-        // authored `orientationsf` (`quatf[]`) wins over the legacy
-        // `orientations` (`quath[]`) — the float-precision attribute
-        // exists specifically to override the half-precision one.
-        orientations: read_quat_vec(stage, prim, A_ORIENTATIONS_F)?
-            .or(read_quat_vec(stage, prim, A_ORIENTATIONS)?)
-            .unwrap_or_default(),
-        scales: read_vec3f_vec(stage, prim, A_SCALES)?,
-        velocities: read_vec3f_vec(stage, prim, A_VELOCITIES)?,
-        accelerations: read_vec3f_vec(stage, prim, A_ACCELERATIONS)?,
-        angular_velocities: read_vec3f_vec(stage, prim, A_ANGULAR_VELOCITIES)?,
-        ids: read_int64_vec(stage, prim, A_IDS)?.unwrap_or_default(),
-        invisible_ids: read_int64_vec(stage, prim, A_INVISIBLE_IDS)?.unwrap_or_default(),
-        inactive_ids: read_inactive_ids_metadata(stage, prim)?,
-    }))
+
+    /// Wrap `path` as a `PointInstancer` if it is typed `PointInstancer`
+    /// (C++ `UsdGeomPointInstancer::Get`).
+    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+        get_typed(stage, path, tok::T_POINT_INSTANCER).map(|o| o.map(Self))
+    }
+
+    /// `prototypes` relationship handle — the root prims to instance
+    /// (C++ `GetPrototypesRel`).
+    pub fn prototypes_rel(&self) -> Relationship {
+        self.relationship(tok::REL_PROTOTYPES)
+    }
+
+    /// Author the `prototypes` relationship (C++ `CreatePrototypesRel`).
+    pub fn create_prototypes_rel(&self) -> Result<Relationship> {
+        Ok(self.create_relationship(tok::REL_PROTOTYPES)?.set_custom(false)?)
+    }
+
+    /// `protoIndices` attribute handle — per-instance index into `prototypes`,
+    /// `int[]` (C++ `GetProtoIndicesAttr`).
+    pub fn proto_indices_attr(&self) -> Attribute {
+        self.attribute(tok::A_PROTO_INDICES)
+    }
+
+    /// Author `protoIndices` (`int[]`) (C++ `CreateProtoIndicesAttr`).
+    pub fn create_proto_indices_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_PROTO_INDICES, "int[]")?
+            .set_custom(false)?)
+    }
+
+    /// `positions` attribute handle — per-instance position, `point3f[]`
+    /// (C++ `GetPositionsAttr`).
+    pub fn positions_attr(&self) -> Attribute {
+        self.attribute(tok::A_POSITIONS)
+    }
+
+    /// Author `positions` (`point3f[]`) (C++ `CreatePositionsAttr`).
+    pub fn create_positions_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_POSITIONS, "point3f[]")?
+            .set_custom(false)?)
+    }
+
+    /// `orientations` attribute handle — per-instance rotation, `quath[]`
+    /// (C++ `GetOrientationsAttr`).
+    pub fn orientations_attr(&self) -> Attribute {
+        self.attribute(tok::A_ORIENTATIONS)
+    }
+
+    /// Author `orientations` (`quath[]`) (C++ `CreateOrientationsAttr`).
+    pub fn create_orientations_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_ORIENTATIONS, "quath[]")?
+            .set_custom(false)?)
+    }
+
+    /// `orientationsf` attribute handle — float-precision per-instance
+    /// rotation, `quatf[]` (C++ `GetOrientationsfAttr`); overrides
+    /// `orientations` when both are authored.
+    pub fn orientationsf_attr(&self) -> Attribute {
+        self.attribute(tok::A_ORIENTATIONS_F)
+    }
+
+    /// Author `orientationsf` (`quatf[]`) (C++ `CreateOrientationsfAttr`).
+    pub fn create_orientationsf_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_ORIENTATIONS_F, "quatf[]")?
+            .set_custom(false)?)
+    }
+
+    /// `scales` attribute handle — per-instance scale, `float3[]`
+    /// (C++ `GetScalesAttr`).
+    pub fn scales_attr(&self) -> Attribute {
+        self.attribute(tok::A_SCALES)
+    }
+
+    /// Author `scales` (`float3[]`) (C++ `CreateScalesAttr`).
+    pub fn create_scales_attr(&self) -> Result<Attribute> {
+        Ok(self.create_attribute(tok::A_SCALES, "float3[]")?.set_custom(false)?)
+    }
+
+    /// `velocities` attribute handle — per-instance linear velocity,
+    /// `vector3f[]` (C++ `GetVelocitiesAttr`).
+    pub fn velocities_attr(&self) -> Attribute {
+        self.attribute(tok::A_VELOCITIES)
+    }
+
+    /// Author `velocities` (`vector3f[]`) (C++ `CreateVelocitiesAttr`).
+    pub fn create_velocities_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_VELOCITIES, "vector3f[]")?
+            .set_custom(false)?)
+    }
+
+    /// `accelerations` attribute handle — per-instance acceleration,
+    /// `vector3f[]` (C++ `GetAccelerationsAttr`).
+    pub fn accelerations_attr(&self) -> Attribute {
+        self.attribute(tok::A_ACCELERATIONS)
+    }
+
+    /// Author `accelerations` (`vector3f[]`) (C++ `CreateAccelerationsAttr`).
+    pub fn create_accelerations_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_ACCELERATIONS, "vector3f[]")?
+            .set_custom(false)?)
+    }
+
+    /// `angularVelocities` attribute handle — per-instance angular velocity,
+    /// `vector3f[]` (C++ `GetAngularVelocitiesAttr`).
+    pub fn angular_velocities_attr(&self) -> Attribute {
+        self.attribute(tok::A_ANGULAR_VELOCITIES)
+    }
+
+    /// Author `angularVelocities` (`vector3f[]`)
+    /// (C++ `CreateAngularVelocitiesAttr`).
+    pub fn create_angular_velocities_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_ANGULAR_VELOCITIES, "vector3f[]")?
+            .set_custom(false)?)
+    }
+
+    /// `ids` attribute handle — stable per-instance identifiers, `int64[]`
+    /// (C++ `GetIdsAttr`).
+    pub fn ids_attr(&self) -> Attribute {
+        self.attribute(tok::A_IDS)
+    }
+
+    /// Author `ids` (`int64[]`) (C++ `CreateIdsAttr`).
+    pub fn create_ids_attr(&self) -> Result<Attribute> {
+        Ok(self.create_attribute(tok::A_IDS, "int64[]")?.set_custom(false)?)
+    }
+
+    /// `invisibleIds` attribute handle — per-time prune list, `int64[]`
+    /// (C++ `GetInvisibleIdsAttr`).
+    pub fn invisible_ids_attr(&self) -> Attribute {
+        self.attribute(tok::A_INVISIBLE_IDS)
+    }
+
+    /// Author `invisibleIds` (`int64[]`) (C++ `CreateInvisibleIdsAttr`).
+    pub fn create_invisible_ids_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_INVISIBLE_IDS, "int64[]")?
+            .set_custom(false)?)
+    }
 }
 
-// ────────────────────────────────────────────────────────────────────────
-// internal helpers
-// ────────────────────────────────────────────────────────────────────────
+impl_geom_schema!(boundable PointInstancer);
 
-fn attr_default(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    let attr = prim.append_property(name)?;
-    stage.field::<Value>(attr, "default")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schemas::geom::Cube;
 
-fn read_int_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<i32>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::IntVec(v)) => Some(v),
-        _ => None,
-    })
-}
+    #[test]
+    fn point_instancer_roundtrip() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        Cube::define(&stage, "/Proto/Marker")?
+            .create_size_attr()?
+            .set(0.1_f64)?;
 
-fn read_int64_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<i64>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Int64Vec(v)) => Some(v),
-        Some(Value::IntVec(v)) => Some(v.into_iter().map(|i| i as i64).collect()),
-        _ => None,
-    })
-}
+        let pi = PointInstancer::define(&stage, "/Instances")?;
+        pi.create_prototypes_rel()?.set_targets([sdf::path("/Proto/Marker")?])?;
+        pi.create_proto_indices_attr()?.set(sdf::Value::IntVec(vec![0, 0, 0]))?;
+        pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ]))?;
+        pi.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![100, 200, 300]))?;
+        pi.create_invisible_ids_attr()?.set(sdf::Value::Int64Vec(vec![200]))?;
 
-fn read_vec3f_vec_opt(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<[f32; 3]>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Vec3fVec(v)) => Some(v),
-        Some(Value::Vec3dVec(v)) => Some(v.into_iter().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32]).collect()),
-        Some(Value::Vec3hVec(v)) => Some(
-            v.into_iter()
-                .map(|a| [a[0].to_f32(), a[1].to_f32(), a[2].to_f32()])
-                .collect(),
-        ),
-        _ => None,
-    })
-}
-
-fn read_vec3f_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Vec<[f32; 3]>> {
-    Ok(read_vec3f_vec_opt(stage, prim, name)?.unwrap_or_default())
-}
-
-fn read_quat_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<[f32; 4]>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::QuatfVec(v)) => Some(v),
-        Some(Value::QuatdVec(v)) => Some(
-            v.into_iter()
-                .map(|q| [q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32])
-                .collect(),
-        ),
-        Some(Value::QuathVec(v)) => Some(
-            v.into_iter()
-                .map(|q| [q[0].to_f32(), q[1].to_f32(), q[2].to_f32(), q[3].to_f32()])
-                .collect(),
-        ),
-        _ => None,
-    })
-}
-
-fn read_rel_targets(stage: &Stage, prim: &Path, rel_name: &str) -> Result<Vec<String>> {
-    let rel_path = prim.append_property(rel_name)?;
-    let raw = stage.field::<Value>(rel_path, "targetPaths")?;
-    let paths = match raw {
-        Some(Value::PathListOp(op)) => op.flatten(),
-        Some(Value::PathVec(v)) => v,
-        _ => Vec::new(),
-    };
-    Ok(paths.into_iter().map(|p| p.as_str().to_string()).collect())
-}
-
-/// `inactiveIds` lives on the prim's metadata, not as an attribute.
-/// Pixar's schema declares it as `int64listop`, so authored opinions
-/// surface as a list-op (the `prepend`/`append`/`delete` syntax).
-/// Plain `Int64Vec` / `IntVec` are accepted as legacy fallbacks.
-fn read_inactive_ids_metadata(stage: &Stage, prim: &Path) -> Result<Vec<i64>> {
-    Ok(match stage.field::<Value>(prim.clone(), META_INACTIVE_IDS)? {
-        Some(Value::Int64ListOp(op)) => op.flatten(),
-        Some(Value::IntListOp(op)) => op.flatten().into_iter().map(|i| i as i64).collect(),
-        Some(Value::Int64Vec(v)) => v,
-        Some(Value::IntVec(v)) => v.into_iter().map(|i| i as i64).collect(),
-        _ => Vec::new(),
-    })
+        let pi = PointInstancer::get(&stage, "/Instances")?.expect("PointInstancer");
+        assert_eq!(pi.proto_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 0, 0])));
+        assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![200])));
+        assert_eq!(pi.prototypes_rel().get_targets()?, vec![sdf::path("/Proto/Marker")?]);
+        // Inherited Boundable / Xformable accessors are available.
+        assert_eq!(pi.extent_attr().get()?, None);
+        assert!(PointInstancer::get(&stage, "/Proto/Marker")?.is_none());
+        Ok(())
+    }
 }

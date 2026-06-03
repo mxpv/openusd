@@ -1,364 +1,428 @@
-//! Curve / patch / point / tet-mesh readers.
+//! Curve and NURBS-patch views — `BasisCurves`, `NurbsCurves`,
+//! `HermiteCurves`, and `NurbsPatch`.
 //!
-//! Covers `UsdGeomBasisCurves`, `UsdGeomNurbsCurves`,
-//! `UsdGeomNurbsPatch`, `UsdGeomHermiteCurves`, `UsdGeomPoints`,
-//! and `UsdGeomTetMesh`. Each reader returns `None` when the prim's
-//! `typeName` doesn't match. Required geometry attributes (`points`,
-//! `curveVertexCounts` / `tetVertexIndices`) must be authored.
+//! The first three are [`Curves`] (a batch of curves sharing one prim, sized
+//! by `curveVertexCounts`); `NurbsPatch` is a [`PointBased`] surface. Each is
+//! a concrete view over a [`Prim`] mirroring the matching C++ `UsdGeom`
+//! class. Attribute getters return a handle whose `get()` yields the authored
+//! value (or `None`).
 
 use anyhow::Result;
 
-use crate::sdf::{Path, Value};
-use crate::usd::Stage;
+use crate::sdf;
+use crate::usd::{Attribute, Prim, SchemaBase, SchemaKind, Stage};
 
-use super::mesh::read_primvar_vec3f;
-use super::tokens::*;
-use super::types::*;
+use super::internal::{create, create_uniform_token, get_typed};
+use super::tokens as tok;
+use super::{impl_geom_schema, Boundable, Gprim, Imageable, PointBased, Xformable};
 
-/// Read a `BasisCurves` prim. Returns `None` when the prim isn't
-/// typed `BasisCurves` or has no `points`/`curveVertexCounts`
-/// authored.
-pub fn read_basis_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadBasisCurves>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_BASIS_CURVES) {
-        return Ok(None);
+/// A batch of curves sharing one prim (C++ `UsdGeomCurves`) — a
+/// [`PointBased`] whose `points` are partitioned into individual curves by
+/// `curveVertexCounts`. Adds the shared `curveVertexCounts` / `widths`
+/// attributes; the basis / knot data lives on the concrete subclasses.
+pub trait Curves: PointBased {
+    /// `curveVertexCounts` attribute handle — CV count per curve, `int[]`
+    /// (C++ `GetCurveVertexCountsAttr`).
+    fn curve_vertex_counts_attr(&self) -> Attribute {
+        self.prim().attribute(tok::A_CURVE_VERTEX_COUNTS)
     }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    let Some(curve_vertex_counts) = read_int_vec(stage, prim, A_CURVE_VERTEX_COUNTS)? else {
-        return Ok(None);
-    };
-    Ok(Some(ReadBasisCurves {
-        path: prim.as_str().to_string(),
-        points,
-        curve_vertex_counts,
-        curve_type: read_token(stage, prim, A_TYPE)?
-            .as_deref()
-            .and_then(CurveType::from_token)
-            .unwrap_or_default(),
-        basis: read_token(stage, prim, A_BASIS)?
-            .as_deref()
-            .and_then(CurveBasis::from_token)
-            .unwrap_or_default(),
-        wrap: read_token(stage, prim, A_WRAP)?
-            .as_deref()
-            .and_then(CurveWrap::from_token)
-            .unwrap_or_default(),
-        widths: read_float_vec(stage, prim, A_WIDTHS)?.unwrap_or_default(),
-        normals: read_primvar_vec3f(stage, prim, A_NORMALS)?,
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-        extent: read_extent(stage, prim)?,
-    }))
-}
 
-/// Read a `NurbsCurves` prim. Returns `None` when the prim isn't
-/// typed `NurbsCurves` or lacks the required `points` /
-/// `curveVertexCounts`.
-pub fn read_nurbs_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsCurves>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_NURBS_CURVES) {
-        return Ok(None);
+    /// Author `curveVertexCounts` (`int[]`), returning its handle
+    /// (C++ `CreateCurveVertexCountsAttr`).
+    fn create_curve_vertex_counts_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_CURVE_VERTEX_COUNTS, "int[]")?
+            .set_custom(false)?)
     }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    let Some(curve_vertex_counts) = read_int_vec(stage, prim, A_CURVE_VERTEX_COUNTS)? else {
-        return Ok(None);
-    };
-    // Unauthored order defaults to 4 (cubic) for every curve.
-    let order = read_int_vec(stage, prim, A_ORDER)?.unwrap_or_else(|| curve_vertex_counts.iter().map(|_| 4).collect());
-    let knots = read_double_vec(stage, prim, A_KNOTS)?.unwrap_or_default();
-    let ranges = read_vec2d_vec(stage, prim, A_RANGES)?.unwrap_or_else(|| {
-        // Synthesise per-curve ranges from the clamped inner knot span.
-        let mut out = Vec::with_capacity(curve_vertex_counts.len());
-        let mut k_cursor = 0usize;
-        for (i, count) in curve_vertex_counts.iter().enumerate() {
-            let n = (*count).max(0) as usize;
-            let p = order.get(i).copied().unwrap_or(4).max(0) as usize;
-            let nk = n.saturating_add(p);
-            let end = k_cursor.saturating_add(nk);
-            if end <= knots.len() && p > 0 && n > 0 {
-                out.push([knots[k_cursor + p - 1], knots[k_cursor + n]]);
-            } else {
-                out.push([0.0, 1.0]);
-            }
-            k_cursor = end;
-        }
-        out
-    });
-    Ok(Some(ReadNurbsCurves {
-        path: prim.as_str().to_string(),
-        points,
-        curve_vertex_counts,
-        order,
-        knots,
-        ranges,
-        point_weights: read_double_vec(stage, prim, A_POINT_WEIGHTS)?.unwrap_or_default(),
-        widths: read_float_vec(stage, prim, A_WIDTHS)?.unwrap_or_default(),
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-    }))
-}
 
-/// Read a `NurbsPatch` prim. Returns `None` when the prim isn't
-/// typed `NurbsPatch` or has no `points` authored.
-pub fn read_nurbs_patch(stage: &Stage, prim: &Path) -> Result<Option<ReadNurbsPatch>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_NURBS_PATCH) {
-        return Ok(None);
+    /// `widths` attribute handle — per-CV width, `float[]`
+    /// (C++ `GetWidthsAttr`). Set its `interpolation` metadata (`vertex` /
+    /// `varying` / `constant`) to describe how the values map to the curve.
+    fn widths_attr(&self) -> Attribute {
+        self.prim().attribute(tok::A_WIDTHS)
     }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    let u_vertex_count = read_int_scalar(stage, prim, A_U_VERTEX_COUNT)?.unwrap_or(0);
-    let v_vertex_count = read_int_scalar(stage, prim, A_V_VERTEX_COUNT)?.unwrap_or(0);
-    let u_order = read_int_scalar(stage, prim, A_U_ORDER)?.unwrap_or(4);
-    let v_order = read_int_scalar(stage, prim, A_V_ORDER)?.unwrap_or(4);
-    let u_knots = read_double_vec(stage, prim, A_U_KNOTS)?.unwrap_or_default();
-    let v_knots = read_double_vec(stage, prim, A_V_KNOTS)?.unwrap_or_default();
-    let u_range = read_vec2d_scalar(stage, prim, A_U_RANGE)?
-        .unwrap_or_else(|| clamped_inner_span(&u_knots, u_vertex_count.max(0) as usize, u_order.max(0) as usize));
-    let v_range = read_vec2d_scalar(stage, prim, A_V_RANGE)?
-        .unwrap_or_else(|| clamped_inner_span(&v_knots, v_vertex_count.max(0) as usize, v_order.max(0) as usize));
-    let u_form = read_token(stage, prim, A_U_FORM)?
-        .as_deref()
-        .and_then(PatchForm::from_token)
-        .unwrap_or_default();
-    let v_form = read_token(stage, prim, A_V_FORM)?
-        .as_deref()
-        .and_then(PatchForm::from_token)
-        .unwrap_or_default();
-    Ok(Some(ReadNurbsPatch {
-        path: prim.as_str().to_string(),
-        points,
-        u_vertex_count,
-        v_vertex_count,
-        u_order,
-        v_order,
-        u_knots,
-        v_knots,
-        u_range,
-        v_range,
-        u_form,
-        v_form,
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-    }))
-}
 
-/// Read a `HermiteCurves` prim. Returns `None` when the prim isn't
-/// typed `HermiteCurves` or lacks `points` / `curveVertexCounts`.
-pub fn read_hermite_curves(stage: &Stage, prim: &Path) -> Result<Option<ReadHermiteCurves>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_HERMITE_CURVES) {
-        return Ok(None);
-    }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    let Some(curve_vertex_counts) = read_int_vec(stage, prim, A_CURVE_VERTEX_COUNTS)? else {
-        return Ok(None);
-    };
-    // Tangents are spec-required but some authoring tools omit them;
-    // fall back to per-curve forward differences so the curve still
-    // renders.
-    let tangents = read_vec3f_vec_opt(stage, prim, A_TANGENTS)?
-        .unwrap_or_else(|| synth_hermite_tangents(&points, &curve_vertex_counts));
-    Ok(Some(ReadHermiteCurves {
-        path: prim.as_str().to_string(),
-        points,
-        tangents,
-        curve_vertex_counts,
-        widths: read_float_vec(stage, prim, A_WIDTHS)?.unwrap_or_default(),
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-    }))
-}
-
-/// Read a `Points` prim. Returns `None` when the prim isn't typed
-/// `Points` or has no `points` authored.
-pub fn read_points(stage: &Stage, prim: &Path) -> Result<Option<ReadPoints>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_POINTS) {
-        return Ok(None);
-    }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    Ok(Some(ReadPoints {
-        path: prim.as_str().to_string(),
-        points,
-        widths: read_float_vec(stage, prim, A_WIDTHS)?.unwrap_or_default(),
-        ids: read_int64_vec(stage, prim, A_IDS)?.unwrap_or_default(),
-        normals: read_primvar_vec3f(stage, prim, A_NORMALS)?,
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-    }))
-}
-
-/// Read a `TetMesh` prim. Returns `None` when the prim isn't typed
-/// `TetMesh` or has no `points`/`tetVertexIndices` authored.
-pub fn read_tet_mesh(stage: &Stage, prim: &Path) -> Result<Option<ReadTetMesh>> {
-    if stage.type_name(prim)?.as_deref() != Some(T_TET_MESH) {
-        return Ok(None);
-    }
-    let Some(points) = read_vec3f_vec_opt(stage, prim, A_POINTS)? else {
-        return Ok(None);
-    };
-    let Some(tet_vertex_indices) = read_int_vec(stage, prim, A_TET_VERTEX_INDICES)? else {
-        return Ok(None);
-    };
-    Ok(Some(ReadTetMesh {
-        path: prim.as_str().to_string(),
-        points,
-        tet_vertex_indices,
-        surface_face_vertex_indices: read_int_vec(stage, prim, A_SURFACE_FACE_VERTEX_INDICES)?.unwrap_or_default(),
-        display_color: read_primvar_vec3f(stage, prim, "primvars:displayColor")?,
-    }))
-}
-
-// ────────────────────────────────────────────────────────────────────────
-// internal helpers
-// ────────────────────────────────────────────────────────────────────────
-
-fn clamped_inner_span(knots: &[f64], n: usize, p: usize) -> [f64; 2] {
-    if !knots.is_empty() && n > 0 && p > 0 && n.checked_add(p).is_some_and(|sum| knots.len() >= sum) {
-        [knots[p - 1], knots[n]]
-    } else {
-        [0.0, 1.0]
+    /// Author `widths` (`float[]`), returning its handle
+    /// (C++ `CreateWidthsAttr`).
+    fn create_widths_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .prim()
+            .create_attribute(tok::A_WIDTHS, "float[]")?
+            .set_custom(false)?)
     }
 }
 
-fn attr_default(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Value>> {
-    let attr = prim.append_property(name)?;
-    stage.field::<Value>(attr, "default")
-}
+/// Piecewise-polynomial curves with a shared basis (C++ `UsdGeomBasisCurves`).
+/// Intrinsic attributes: `type` (`linear` / `cubic`), `basis`, `wrap`.
+#[derive(Clone, derive_more::Deref)]
+pub struct BasisCurves(Prim);
 
-fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Option<String>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Token(s) | Value::String(s)) => Some(s),
-        _ => None,
-    })
-}
-
-fn read_int_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<i32>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::IntVec(v)) => Some(v),
-        _ => None,
-    })
-}
-
-fn read_int64_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<i64>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Int64Vec(v)) => Some(v),
-        Some(Value::IntVec(v)) => Some(v.into_iter().map(|i| i as i64).collect()),
-        _ => None,
-    })
-}
-
-fn read_int_scalar(stage: &Stage, prim: &Path, name: &str) -> Result<Option<i32>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Int(v)) => Some(v),
-        _ => None,
-    })
-}
-
-fn read_float_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<f32>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::FloatVec(v)) => Some(v),
-        Some(Value::DoubleVec(v)) => Some(v.into_iter().map(|d| d as f32).collect()),
-        Some(Value::HalfVec(v)) => Some(v.into_iter().map(f32::from).collect()),
-        _ => None,
-    })
-}
-
-fn read_double_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<f64>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::DoubleVec(v)) => Some(v),
-        Some(Value::FloatVec(v)) => Some(v.into_iter().map(|f| f as f64).collect()),
-        _ => None,
-    })
-}
-
-fn read_vec3f_vec_opt(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<[f32; 3]>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Vec3fVec(v)) => Some(v),
-        Some(Value::Vec3dVec(v)) => Some(v.into_iter().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32]).collect()),
-        Some(Value::Vec3hVec(v)) => Some(
-            v.into_iter()
-                .map(|a| [a[0].to_f32(), a[1].to_f32(), a[2].to_f32()])
-                .collect(),
-        ),
-        _ => None,
-    })
-}
-
-fn read_vec2d_vec(stage: &Stage, prim: &Path, name: &str) -> Result<Option<Vec<[f64; 2]>>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Vec2dVec(v)) => Some(v),
-        Some(Value::Vec2fVec(v)) => Some(v.into_iter().map(|a| [a[0] as f64, a[1] as f64]).collect()),
-        _ => None,
-    })
-}
-
-fn read_vec2d_scalar(stage: &Stage, prim: &Path, name: &str) -> Result<Option<[f64; 2]>> {
-    Ok(match attr_default(stage, prim, name)? {
-        Some(Value::Vec2d(v)) => Some(v),
-        Some(Value::Vec2f(v)) => Some([v[0] as f64, v[1] as f64]),
-        _ => None,
-    })
-}
-
-fn read_extent(stage: &Stage, prim: &Path) -> Result<Option<[[f32; 3]; 2]>> {
-    let arr = read_vec3f_vec_opt(stage, prim, A_EXTENT)?.unwrap_or_default();
-    Ok(if arr.len() >= 2 { Some([arr[0], arr[1]]) } else { None })
-}
-
-/// Synthesise per-curve tangents by forward differences inside each
-/// curve segment defined by `curve_vertex_counts`. Walking the flat
-/// points array directly would cross curve boundaries — the last
-/// vertex of curve N would otherwise point toward the first vertex
-/// of curve N+1. The last vertex of each multi-vertex curve reuses
-/// the direction of the previous segment.
-fn synth_hermite_tangents(points: &[[f32; 3]], curve_vertex_counts: &[i32]) -> Vec<[f32; 3]> {
-    let mut out = Vec::with_capacity(points.len());
-    let mut cursor = 0usize;
-    for &raw_count in curve_vertex_counts {
-        let count = raw_count.max(0) as usize;
-        let end = cursor.saturating_add(count).min(points.len());
-        for i in cursor..end {
-            let a = points[i];
-            let b = if i + 1 < end {
-                points[i + 1]
-            } else if i > cursor {
-                let prev = points[i - 1];
-                [
-                    a[0] + (a[0] - prev[0]),
-                    a[1] + (a[1] - prev[1]),
-                    a[2] + (a[2] - prev[2]),
-                ]
-            } else {
-                a
-            };
-            out.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
-        }
-        cursor = end;
+impl BasisCurves {
+    /// Author a `def BasisCurves` prim at `path`
+    /// (C++ `UsdGeomBasisCurves::Define`).
+    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+        Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_BASIS_CURVES)?))
     }
-    out
+
+    /// Wrap `path` as a `BasisCurves` if it is typed `BasisCurves`
+    /// (C++ `UsdGeomBasisCurves::Get`).
+    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+        get_typed(stage, path, tok::T_BASIS_CURVES).map(|o| o.map(Self))
+    }
+
+    /// `type` attribute handle — `linear` / `cubic` (C++ `GetTypeAttr`).
+    pub fn type_attr(&self) -> Attribute {
+        self.attribute(tok::A_TYPE)
+    }
+
+    /// Author `type` (`uniform token`) (C++ `CreateTypeAttr`).
+    pub fn create_type_attr(&self) -> Result<Attribute> {
+        create_uniform_token(self, tok::A_TYPE)
+    }
+
+    /// `basis` attribute handle — `bezier` / `bspline` / `catmullRom` /
+    /// `hermite` (C++ `GetBasisAttr`).
+    pub fn basis_attr(&self) -> Attribute {
+        self.attribute(tok::A_BASIS)
+    }
+
+    /// Author `basis` (`uniform token`) (C++ `CreateBasisAttr`).
+    pub fn create_basis_attr(&self) -> Result<Attribute> {
+        create_uniform_token(self, tok::A_BASIS)
+    }
+
+    /// `wrap` attribute handle — `nonperiodic` / `periodic` / `pinned`
+    /// (C++ `GetWrapAttr`).
+    pub fn wrap_attr(&self) -> Attribute {
+        self.attribute(tok::A_WRAP)
+    }
+
+    /// Author `wrap` (`uniform token`) (C++ `CreateWrapAttr`).
+    pub fn create_wrap_attr(&self) -> Result<Attribute> {
+        create_uniform_token(self, tok::A_WRAP)
+    }
 }
+
+impl_geom_schema!(curves BasisCurves);
+
+/// NURBS curves (C++ `UsdGeomNurbsCurves`). Adds per-curve `order`, the
+/// concatenated `knots`, parameter `ranges`, and rational `pointWeights`.
+#[derive(Clone, derive_more::Deref)]
+pub struct NurbsCurves(Prim);
+
+impl NurbsCurves {
+    /// Author a `def NurbsCurves` prim at `path`
+    /// (C++ `UsdGeomNurbsCurves::Define`).
+    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+        Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_NURBS_CURVES)?))
+    }
+
+    /// Wrap `path` as a `NurbsCurves` if it is typed `NurbsCurves`
+    /// (C++ `UsdGeomNurbsCurves::Get`).
+    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+        get_typed(stage, path, tok::T_NURBS_CURVES).map(|o| o.map(Self))
+    }
+
+    /// `order` attribute handle — per-curve order (degree + 1), `int[]`
+    /// (C++ `GetOrderAttr`).
+    pub fn order_attr(&self) -> Attribute {
+        self.attribute(tok::A_ORDER)
+    }
+
+    /// Author `order` (`int[]`) (C++ `CreateOrderAttr`).
+    pub fn create_order_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_ORDER, "int[]")
+    }
+
+    /// `knots` attribute handle — concatenated knot vectors, `double[]`
+    /// (C++ `GetKnotsAttr`).
+    pub fn knots_attr(&self) -> Attribute {
+        self.attribute(tok::A_KNOTS)
+    }
+
+    /// Author `knots` (`double[]`) (C++ `CreateKnotsAttr`).
+    pub fn create_knots_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_KNOTS, "double[]")
+    }
+
+    /// `ranges` attribute handle — per-curve `(uMin, uMax)`, `double2[]`
+    /// (C++ `GetRangesAttr`).
+    pub fn ranges_attr(&self) -> Attribute {
+        self.attribute(tok::A_RANGES)
+    }
+
+    /// Author `ranges` (`double2[]`) (C++ `CreateRangesAttr`).
+    pub fn create_ranges_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_RANGES, "double2[]")
+    }
+
+    /// `pointWeights` attribute handle — rational CV weights, `double[]`
+    /// (C++ `GetPointWeightsAttr`).
+    pub fn point_weights_attr(&self) -> Attribute {
+        self.attribute(tok::A_POINT_WEIGHTS)
+    }
+
+    /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
+    pub fn create_point_weights_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_POINT_WEIGHTS, "double[]")
+    }
+}
+
+impl_geom_schema!(curves NurbsCurves);
+
+/// Cubic-Hermite curves (C++ `UsdGeomHermiteCurves`). Each CV carries both a
+/// position (`points`, from [`PointBased`]) and a `tangents` vector.
+#[derive(Clone, derive_more::Deref)]
+pub struct HermiteCurves(Prim);
+
+impl HermiteCurves {
+    /// Author a `def HermiteCurves` prim at `path`
+    /// (C++ `UsdGeomHermiteCurves::Define`).
+    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+        Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_HERMITE_CURVES)?))
+    }
+
+    /// Wrap `path` as a `HermiteCurves` if it is typed `HermiteCurves`
+    /// (C++ `UsdGeomHermiteCurves::Get`).
+    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+        get_typed(stage, path, tok::T_HERMITE_CURVES).map(|o| o.map(Self))
+    }
+
+    /// `tangents` attribute handle — per-CV tangent, `vector3f[]`
+    /// (C++ `GetTangentsAttr`).
+    pub fn tangents_attr(&self) -> Attribute {
+        self.attribute(tok::A_TANGENTS)
+    }
+
+    /// Author `tangents` (`vector3f[]`) (C++ `CreateTangentsAttr`).
+    pub fn create_tangents_attr(&self) -> Result<Attribute> {
+        Ok(self
+            .create_attribute(tok::A_TANGENTS, "vector3f[]")?
+            .set_custom(false)?)
+    }
+}
+
+impl_geom_schema!(curves HermiteCurves);
+
+/// A NURBS surface patch (C++ `UsdGeomNurbsPatch`). A [`PointBased`] control
+/// net laid out row-major (`P[i, j] = points[i * vVertexCount + j]`) with
+/// independent U / V order, knot vectors, parameter ranges, and forms.
+#[derive(Clone, derive_more::Deref)]
+pub struct NurbsPatch(Prim);
+
+impl NurbsPatch {
+    /// Author a `def NurbsPatch` prim at `path`
+    /// (C++ `UsdGeomNurbsPatch::Define`).
+    pub fn define(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Self> {
+        Ok(Self(stage.define_prim(path)?.set_type_name(tok::T_NURBS_PATCH)?))
+    }
+
+    /// Wrap `path` as a `NurbsPatch` if it is typed `NurbsPatch`
+    /// (C++ `UsdGeomNurbsPatch::Get`).
+    pub fn get(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Option<Self>> {
+        get_typed(stage, path, tok::T_NURBS_PATCH).map(|o| o.map(Self))
+    }
+
+    /// `uVertexCount` attribute handle (C++ `GetUVertexCountAttr`).
+    pub fn u_vertex_count_attr(&self) -> Attribute {
+        self.attribute(tok::A_U_VERTEX_COUNT)
+    }
+
+    /// Author `uVertexCount` (`int`) (C++ `CreateUVertexCountAttr`).
+    pub fn create_u_vertex_count_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_U_VERTEX_COUNT, "int")
+    }
+
+    /// `vVertexCount` attribute handle (C++ `GetVVertexCountAttr`).
+    pub fn v_vertex_count_attr(&self) -> Attribute {
+        self.attribute(tok::A_V_VERTEX_COUNT)
+    }
+
+    /// Author `vVertexCount` (`int`) (C++ `CreateVVertexCountAttr`).
+    pub fn create_v_vertex_count_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_V_VERTEX_COUNT, "int")
+    }
+
+    /// `uOrder` attribute handle (C++ `GetUOrderAttr`).
+    pub fn u_order_attr(&self) -> Attribute {
+        self.attribute(tok::A_U_ORDER)
+    }
+
+    /// Author `uOrder` (`int`) (C++ `CreateUOrderAttr`).
+    pub fn create_u_order_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_U_ORDER, "int")
+    }
+
+    /// `vOrder` attribute handle (C++ `GetVOrderAttr`).
+    pub fn v_order_attr(&self) -> Attribute {
+        self.attribute(tok::A_V_ORDER)
+    }
+
+    /// Author `vOrder` (`int`) (C++ `CreateVOrderAttr`).
+    pub fn create_v_order_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_V_ORDER, "int")
+    }
+
+    /// `uKnots` attribute handle — `double[]` (C++ `GetUKnotsAttr`).
+    pub fn u_knots_attr(&self) -> Attribute {
+        self.attribute(tok::A_U_KNOTS)
+    }
+
+    /// Author `uKnots` (`double[]`) (C++ `CreateUKnotsAttr`).
+    pub fn create_u_knots_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_U_KNOTS, "double[]")
+    }
+
+    /// `vKnots` attribute handle — `double[]` (C++ `GetVKnotsAttr`).
+    pub fn v_knots_attr(&self) -> Attribute {
+        self.attribute(tok::A_V_KNOTS)
+    }
+
+    /// Author `vKnots` (`double[]`) (C++ `CreateVKnotsAttr`).
+    pub fn create_v_knots_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_V_KNOTS, "double[]")
+    }
+
+    /// `uForm` attribute handle — `open` / `closed` / `periodic`
+    /// (C++ `GetUFormAttr`).
+    pub fn u_form_attr(&self) -> Attribute {
+        self.attribute(tok::A_U_FORM)
+    }
+
+    /// Author `uForm` (`uniform token`) (C++ `CreateUFormAttr`).
+    pub fn create_u_form_attr(&self) -> Result<Attribute> {
+        create_uniform_token(self, tok::A_U_FORM)
+    }
+
+    /// `vForm` attribute handle — `open` / `closed` / `periodic`
+    /// (C++ `GetVFormAttr`).
+    pub fn v_form_attr(&self) -> Attribute {
+        self.attribute(tok::A_V_FORM)
+    }
+
+    /// Author `vForm` (`uniform token`) (C++ `CreateVFormAttr`).
+    pub fn create_v_form_attr(&self) -> Result<Attribute> {
+        create_uniform_token(self, tok::A_V_FORM)
+    }
+
+    /// `uRange` attribute handle — `(uMin, uMax)`, `double2`
+    /// (C++ `GetURangeAttr`).
+    pub fn u_range_attr(&self) -> Attribute {
+        self.attribute(tok::A_U_RANGE)
+    }
+
+    /// Author `uRange` (`double2`) (C++ `CreateURangeAttr`).
+    pub fn create_u_range_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_U_RANGE, "double2")
+    }
+
+    /// `vRange` attribute handle — `(vMin, vMax)`, `double2`
+    /// (C++ `GetVRangeAttr`).
+    pub fn v_range_attr(&self) -> Attribute {
+        self.attribute(tok::A_V_RANGE)
+    }
+
+    /// Author `vRange` (`double2`) (C++ `CreateVRangeAttr`).
+    pub fn create_v_range_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_V_RANGE, "double2")
+    }
+
+    /// `pointWeights` attribute handle — rational CV weights, `double[]`
+    /// (C++ `GetPointWeightsAttr`).
+    pub fn point_weights_attr(&self) -> Attribute {
+        self.attribute(tok::A_POINT_WEIGHTS)
+    }
+
+    /// Author `pointWeights` (`double[]`) (C++ `CreatePointWeightsAttr`).
+    pub fn create_point_weights_attr(&self) -> Result<Attribute> {
+        create(self, tok::A_POINT_WEIGHTS, "double[]")
+    }
+}
+
+impl_geom_schema!(pointbased NurbsPatch);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn hermite_tangents_respect_curve_boundaries() {
-        let points = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [10.0, 5.0, 0.0], [11.0, 5.0, 0.0]];
-        let counts = vec![2, 2];
-        let t = synth_hermite_tangents(&points, &counts);
-        assert_eq!(t.len(), 4);
-        assert_eq!(t[0], [1.0, 0.0, 0.0]);
-        assert_eq!(t[1], [1.0, 0.0, 0.0]);
-        assert_eq!(t[2], [1.0, 0.0, 0.0]);
-        assert_eq!(t[3], [1.0, 0.0, 0.0]);
+    fn basis_curves_roundtrip() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let c = BasisCurves::define(&stage, "/C")?;
+        c.create_points_attr()?
+            .set(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
+        c.create_type_attr()?.set(sdf::Value::Token("linear".into()))?;
+        c.create_widths_attr()?
+            .set_metadata(tok::META_INTERPOLATION, sdf::Value::Token("vertex".into()))?
+            .set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
+
+        let c = BasisCurves::get(&stage, "/C")?.expect("BasisCurves");
+        assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![2])));
+        assert_eq!(c.type_attr().get()?, Some(sdf::Value::Token("linear".into())));
+        assert_eq!(
+            c.widths_attr().get_metadata(tok::META_INTERPOLATION)?,
+            Some(sdf::Value::Token("vertex".into()))
+        );
+        assert!(BasisCurves::get(&stage, "/Missing")?.is_none());
+        Ok(())
     }
 
     #[test]
-    fn hermite_tangents_single_vertex_curve_is_zero() {
-        let points = vec![[2.0, 3.0, 4.0]];
-        let t = synth_hermite_tangents(&points, &[1]);
-        assert_eq!(t, vec![[0.0, 0.0, 0.0]]);
+    fn nurbs_curves_attrs() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let c = NurbsCurves::define(&stage, "/N")?;
+        c.create_order_attr()?.set(sdf::Value::IntVec(vec![4]))?;
+        c.create_knots_attr()?
+            .set(sdf::Value::DoubleVec(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]))?;
+        c.create_point_weights_attr()?
+            .set(sdf::Value::DoubleVec(vec![1.0, 1.0, 1.0, 1.0]))?;
+
+        let c = NurbsCurves::get(&stage, "/N")?.expect("NurbsCurves");
+        assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+        assert_eq!(
+            c.point_weights_attr()
+                .get()?
+                .and_then(|v| v.try_as_double_vec())
+                .map(|v| v.len()),
+            Some(4)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hermite_curves_tangents() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let c = HermiteCurves::define(&stage, "/H")?;
+        c.create_points_attr()?
+            .set(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
+        c.create_tangents_attr()?
+            .set(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+
+        let c = HermiteCurves::get(&stage, "/H")?.expect("HermiteCurves");
+        assert_eq!(
+            c.tangents_attr()
+                .get()?
+                .and_then(|v| v.try_as_vec_3f_vec())
+                .map(|v| v.len()),
+            Some(2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nurbs_patch_grid() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let p = NurbsPatch::define(&stage, "/P")?;
+        p.create_u_vertex_count_attr()?.set(4_i32)?;
+        p.create_v_vertex_count_attr()?.set(4_i32)?;
+        p.create_u_form_attr()?.set(sdf::Value::Token("periodic".into()))?;
+
+        let p = NurbsPatch::get(&stage, "/P")?.expect("NurbsPatch");
+        assert_eq!(p.u_vertex_count_attr().get()?, Some(sdf::Value::Int(4)));
+        assert_eq!(p.u_form_attr().get()?, Some(sdf::Value::Token("periodic".into())));
+        Ok(())
     }
 }

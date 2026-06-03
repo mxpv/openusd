@@ -1,20 +1,17 @@
-//! Integration tests for the UsdGeom module. This file grows as
-//! more shape readers land in follow-up commits; today it covers the
-//! cross-cutting Imageable / Boundable surface and the
-//! `find_geom_prims` walker.
+//! Integration tests for the UsdGeom schema views, exercised against the
+//! `usdGeom_scene.usda` fixture: the cross-cutting Imageable / Boundable
+//! surface, the `Xformable` transform stack, and every concrete prim view.
 
 use anyhow::Result;
 use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
 use openusd::schemas::geom::{
-    self, compute_local_to_parent_transform, compute_purpose, compute_visibility, find_geom_prims, read_basis_curves,
-    read_camera, read_capsule, read_cone, read_cube, read_cylinder, read_extent, read_hermite_curves, read_kind,
-    read_mesh, read_nurbs_curves, read_nurbs_patch, read_plane, read_point_instancer, read_points, read_proxy_prim,
-    read_purpose, read_sphere, read_subset, read_tet_mesh, read_visibility, read_xform_op_order, resets_xform_stack,
-    Axis, CurveBasis, CurveType, CurveWrap, ElementType, InterpolateBoundary, Interpolation,
-    Orientation as GeomOrientation, PatchForm, Projection, Purpose, StereoRole, SubdivisionScheme, Visibility,
+    self, Axis, BasisCurves, Boundable, Camera, Capsule, Cone, Cube, Curves, Cylinder, ElementType, GeomSubset, Gprim,
+    HermiteCurves, Imageable, InterpolateBoundary, Interpolation, Mesh, NurbsCurves, NurbsPatch, PatchForm, Plane,
+    PointBased, PointInstancer, Points, Projection, Purpose, Sphere, StereoRole, SubdivisionScheme, TetMesh,
+    Visibility, Xform, Xformable,
 };
 use openusd::sdf;
-use openusd::usd::Stage;
+use openusd::usd::{Attribute, Stage};
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
 
@@ -22,23 +19,59 @@ fn open() -> Result<Stage> {
     Stage::open(FIXTURE)
 }
 
+fn xform(stage: &Stage, path: &str) -> Result<Xform> {
+    Ok(Xform::get(stage, sdf::path(path)?)?.expect("Xform"))
+}
+
+/// Decode a token / string attribute value to its string payload.
+fn token(value: Option<sdf::Value>) -> Option<String> {
+    match value {
+        Some(sdf::Value::Token(s) | sdf::Value::String(s)) => Some(s),
+        _ => None,
+    }
+}
+
+/// The directly-authored `visibility` opinion, defaulting to `Inherited`
+/// (mirrors the old `read_visibility` over a typed view).
+fn direct_visibility(view: &impl Imageable) -> Result<Visibility> {
+    Ok(token(view.visibility_attr().get()?)
+        .as_deref()
+        .and_then(Visibility::from_token)
+        .unwrap_or_default())
+}
+
+/// The directly-authored `purpose` opinion, defaulting to `Default`.
+fn direct_purpose(view: &impl Imageable) -> Result<Purpose> {
+    Ok(token(view.purpose_attr().get()?)
+        .as_deref()
+        .and_then(Purpose::from_token)
+        .unwrap_or_default())
+}
+
+/// Length of an authored array attribute, or 0 when unauthored.
+fn array_len(attr: &Attribute, kind: impl Fn(sdf::Value) -> usize) -> Result<usize> {
+    Ok(attr.get()?.map(kind).unwrap_or(0))
+}
+
+fn vec3f_len(v: sdf::Value) -> usize {
+    v.try_as_vec_3f_vec().map(|a| a.len()).unwrap_or(0)
+}
+
+// ── Imageable: visibility / purpose / proxyPrim ───────────────────
+
 #[test]
 fn defaults_when_visibility_unauthored() -> Result<()> {
     let stage = open()?;
-    assert_eq!(
-        read_visibility(&stage, &sdf::path("/World/Geometry/Hero")?)?,
-        Visibility::Inherited
-    );
+    let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
+    assert_eq!(direct_visibility(&hero)?, Visibility::Inherited);
     Ok(())
 }
 
 #[test]
 fn reads_authored_visibility() -> Result<()> {
     let stage = open()?;
-    assert_eq!(
-        read_visibility(&stage, &sdf::path("/World/Geometry/InvisibleBall")?)?,
-        Visibility::Invisible
-    );
+    let ball = Sphere::get(&stage, sdf::path("/World/Geometry/InvisibleBall")?)?.expect("Sphere");
+    assert_eq!(direct_visibility(&ball)?, Visibility::Invisible);
     Ok(())
 }
 
@@ -47,40 +80,31 @@ fn compute_visibility_inherits_invisible_from_ancestor() -> Result<()> {
     let stage = open()?;
     // HiddenChild has no authored visibility, but /World/Hidden is
     // invisible — so the composed visibility should be Invisible.
-    assert_eq!(
-        compute_visibility(&stage, &sdf::path("/World/Hidden/HiddenChild")?)?,
-        Visibility::Invisible
-    );
+    let child = Sphere::get(&stage, sdf::path("/World/Hidden/HiddenChild")?)?.expect("Sphere");
+    assert_eq!(child.compute_visibility()?, Visibility::Invisible);
     // Hero is not under any invisible ancestor.
-    assert_eq!(
-        compute_visibility(&stage, &sdf::path("/World/Geometry/Hero")?)?,
-        Visibility::Inherited
-    );
+    let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
+    assert_eq!(hero.compute_visibility()?, Visibility::Inherited);
     Ok(())
 }
 
 #[test]
 fn reads_authored_purpose() -> Result<()> {
     let stage = open()?;
-    assert_eq!(
-        read_purpose(&stage, &sdf::path("/World/Geometry/Hero")?)?,
-        Purpose::Render
-    );
-    assert_eq!(
-        read_purpose(&stage, &sdf::path("/World/Geometry/HeroProxy")?)?,
-        Purpose::Proxy
-    );
-    assert_eq!(
-        read_purpose(&stage, &sdf::path("/World/Geometry/GuideCube")?)?,
-        Purpose::Guide
-    );
+    let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
+    assert_eq!(direct_purpose(&hero)?, Purpose::Render);
+    let proxy = Mesh::get(&stage, sdf::path("/World/Geometry/HeroProxy")?)?.expect("Mesh");
+    assert_eq!(direct_purpose(&proxy)?, Purpose::Proxy);
+    let guide = Cube::get(&stage, sdf::path("/World/Geometry/GuideCube")?)?.expect("Cube");
+    assert_eq!(direct_purpose(&guide)?, Purpose::Guide);
     Ok(())
 }
 
 #[test]
 fn default_purpose_is_default() -> Result<()> {
     let stage = open()?;
-    assert_eq!(read_purpose(&stage, &sdf::path("/World/Cam")?)?, Purpose::Default);
+    let cam = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
+    assert_eq!(direct_purpose(&cam)?, Purpose::Default);
     Ok(())
 }
 
@@ -88,110 +112,52 @@ fn default_purpose_is_default() -> Result<()> {
 fn compute_purpose_walks_ancestors() -> Result<()> {
     let stage = open()?;
     // HeroProxy authors its own purpose — no inheritance needed.
-    assert_eq!(
-        compute_purpose(&stage, &sdf::path("/World/Geometry/HeroProxy")?)?,
-        Purpose::Proxy
-    );
+    let proxy = Mesh::get(&stage, sdf::path("/World/Geometry/HeroProxy")?)?.expect("Mesh");
+    assert_eq!(proxy.compute_purpose()?, Purpose::Proxy);
     // Cam authors nothing → default fallback.
-    assert_eq!(compute_purpose(&stage, &sdf::path("/World/Cam")?)?, Purpose::Default);
-    Ok(())
-}
-
-#[test]
-fn reads_extent_when_authored() -> Result<()> {
-    let stage = open()?;
-    let extent = read_extent(&stage, &sdf::path("/World/Geometry/Hero")?)?.expect("extent authored");
-    assert_eq!(extent, [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]);
-    Ok(())
-}
-
-#[test]
-fn extent_unauthored_returns_none() -> Result<()> {
-    let stage = open()?;
-    assert!(read_extent(&stage, &sdf::path("/World/Cam")?)?.is_none());
+    let cam = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
+    assert_eq!(cam.compute_purpose()?, Purpose::Default);
     Ok(())
 }
 
 #[test]
 fn reads_proxy_prim_rel() -> Result<()> {
     let stage = open()?;
+    let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
+    let targets = hero.proxy_prim_rel().get_targets()?;
+    assert_eq!(targets.first().map(|p| p.as_str()), Some("/World/Geometry/HeroProxy"));
+    Ok(())
+}
+
+// ── Boundable: extent ─────────────────────────────────────────────
+
+#[test]
+fn reads_extent_when_authored() -> Result<()> {
+    let stage = open()?;
+    let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
     assert_eq!(
-        read_proxy_prim(&stage, &sdf::path("/World/Geometry/Hero")?)?.as_deref(),
-        Some("/World/Geometry/HeroProxy")
+        hero.extent_attr().get()?,
+        Some(sdf::Value::Vec3fVec(vec![[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]))
     );
     Ok(())
 }
 
 #[test]
-fn reads_kind_metadata() -> Result<()> {
+fn extent_unauthored_returns_none() -> Result<()> {
     let stage = open()?;
-    assert_eq!(read_kind(&stage, &sdf::path("/World")?)?.as_deref(), Some("assembly"));
-    assert_eq!(
-        read_kind(&stage, &sdf::path("/World/Geometry/Hero")?)?.as_deref(),
-        Some("component")
-    );
-    assert!(read_kind(&stage, &sdf::path("/World/Cam")?)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn find_geom_prims_buckets_by_type() -> Result<()> {
-    let stage = open()?;
-    let prims = find_geom_prims(&stage)?;
-
-    assert!(prims.xforms.contains(&"/World".to_string()));
-    assert!(prims.xforms.contains(&"/World/Hidden".to_string()));
-    assert!(prims.scopes.contains(&"/World/Geometry".to_string()));
-    assert!(prims.scopes.contains(&"/World/Shapes".to_string()));
-    assert!(prims.cameras.contains(&"/World/Cam".to_string()));
-    assert!(prims.cameras.contains(&"/World/AuthoredCam".to_string()));
-    assert!(prims.cameras.contains(&"/World/OrthoCam".to_string()));
-    assert!(prims.meshes.contains(&"/World/Geometry/Hero".to_string()));
-    assert!(prims.meshes.contains(&"/World/Geometry/HeroProxy".to_string()));
-    assert!(prims.cubes.contains(&"/World/Geometry/GuideCube".to_string()));
-    assert!(prims.cubes.contains(&"/World/Shapes/AuthoredCube".to_string()));
-    assert!(prims.spheres.contains(&"/World/Geometry/InvisibleBall".to_string()));
-    assert!(prims.spheres.contains(&"/World/Hidden/HiddenChild".to_string()));
-    assert!(prims.spheres.contains(&"/World/Shapes/Ball".to_string()));
-    assert!(prims.cylinders.contains(&"/World/Shapes/Pipe".to_string()));
-    assert!(prims.capsules.contains(&"/World/Shapes/Pill".to_string()));
-    assert!(prims.cones.contains(&"/World/Shapes/Pyramid".to_string()));
-    assert!(prims.planes.contains(&"/World/Shapes/Ground".to_string()));
-
-    // Imageables is the superset — every typed prim above lands there.
-    for p in [
-        "/World",
-        "/World/Geometry",
-        "/World/Geometry/Hero",
-        "/World/Geometry/HeroProxy",
-        "/World/Geometry/GuideCube",
-        "/World/Geometry/InvisibleBall",
-        "/World/Cam",
-        "/World/Hidden",
-        "/World/Hidden/HiddenChild",
-    ] {
-        assert!(prims.imageables.iter().any(|q| q == p), "missing {p} in imageables");
-    }
-    Ok(())
-}
-
-#[test]
-fn find_geom_prims_includes_untyped_prims_with_imageable_opinions() -> Result<()> {
-    let stage = open()?;
-    let prims = find_geom_prims(&stage)?;
-    assert!(
-        prims.imageables.iter().any(|p| p == "/World/CustomImageable"),
-        "untyped prim with authored visibility/purpose should land in imageables"
-    );
+    let cam = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
+    // Camera is Xformable but not Boundable, so it has no `extent`; the
+    // /World/Cam prim authors none either way.
+    assert!(cam.attribute("extent").get()?.is_none());
     Ok(())
 }
 
 // ── Xformable / xformOpOrder ──────────────────────────────────────
 
 #[test]
-fn read_xform_op_order_returns_authored_stack() -> Result<()> {
+fn xform_op_order_returns_authored_stack() -> Result<()> {
     let stage = open()?;
-    let order = read_xform_op_order(&stage, &sdf::path("/World/TRS")?)?.expect("authored");
+    let order = xform(&stage, "/World/TRS")?.xform_op_order()?.expect("authored");
     assert_eq!(order, vec!["xformOp:translate", "xformOp:rotateY", "xformOp:scale"]);
     Ok(())
 }
@@ -199,22 +165,23 @@ fn read_xform_op_order_returns_authored_stack() -> Result<()> {
 #[test]
 fn xform_op_order_none_when_unauthored() -> Result<()> {
     let stage = open()?;
-    assert!(read_xform_op_order(&stage, &sdf::path("/World/Cam")?)?.is_none());
+    // `/World` is an Xform with no authored stack.
+    assert!(xform(&stage, "/World")?.xform_op_order()?.is_none());
     Ok(())
 }
 
 #[test]
 fn resets_xform_stack_detects_sentinel() -> Result<()> {
     let stage = open()?;
-    assert!(resets_xform_stack(&stage, &sdf::path("/World/Detached")?)?);
-    assert!(!resets_xform_stack(&stage, &sdf::path("/World/TRS")?)?);
+    assert!(xform(&stage, "/World/Detached")?.resets_xform_stack()?);
+    assert!(!xform(&stage, "/World/TRS")?.resets_xform_stack()?);
     Ok(())
 }
 
 #[test]
 fn unauthored_xform_is_identity() -> Result<()> {
     let stage = open()?;
-    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/Cam")?, 0.0)?;
+    let m = xform(&stage, "/World")?.local_to_parent_transform(0.0)?;
     assert_eq!(m, IDENTITY_MAT4);
     Ok(())
 }
@@ -222,7 +189,7 @@ fn unauthored_xform_is_identity() -> Result<()> {
 #[test]
 fn matrix_op_round_trips_to_authored_matrix() -> Result<()> {
     let stage = open()?;
-    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/MatrixOp")?, 0.0)?;
+    let m = xform(&stage, "/World/MatrixOp")?.local_to_parent_transform(0.0)?;
     assert_eq!(&m[12..15], &[5.0, 6.0, 7.0]);
     Ok(())
 }
@@ -231,7 +198,7 @@ fn matrix_op_round_trips_to_authored_matrix() -> Result<()> {
 fn invert_prefix_inverts_the_op() -> Result<()> {
     let stage = open()?;
     // Authored translate (4, 0, 0), then !invert! it → translation row (-4, 0, 0).
-    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/Inverted")?, 0.0)?;
+    let m = xform(&stage, "/World/Inverted")?.local_to_parent_transform(0.0)?;
     assert_eq!(&m[12..15], &[-4.0, 0.0, 0.0]);
     Ok(())
 }
@@ -243,7 +210,7 @@ fn rotate_xyz_matches_pixar_composition() -> Result<()> {
     // first to v). Test rotateXYZ(0, 90°, 0) on +X: Ry(90°) takes
     // +X to -Z.
     let stage = open()?;
-    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/EulerXYZ")?, 0.0)?;
+    let m = xform(&stage, "/World/EulerXYZ")?.local_to_parent_transform(0.0)?;
     let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
     assert!(p[0].abs() < 1e-5, "x: {}", p[0]);
     assert!(p[1].abs() < 1e-5, "y: {}", p[1]);
@@ -261,7 +228,7 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
     //   2. rotate by 90° about Y around the origin (not the
     //      translated point): (1, 2, 3) → (3, 2, -1)
     //   3. scale by 2: → (6, 4, -2)
-    let m = compute_local_to_parent_transform(&stage, &sdf::path("/World/TRS")?, 0.0)?;
+    let m = xform(&stage, "/World/TRS")?.local_to_parent_transform(0.0)?;
     let p = mat4_transform_point(&m, [0.0, 0.0, 0.0]);
     assert!((p[0] - 6.0).abs() < 1e-4, "x: {}", p[0]);
     assert!((p[1] - 4.0).abs() < 1e-4, "y: {}", p[1]);
@@ -273,17 +240,17 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
 fn xform_double_precision() -> Result<()> {
     let stage = open()?;
 
-    let translate = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleTranslate")?, 0.0)?;
+    let translate = xform(&stage, "/World/DoubleTranslate")?.local_to_parent_transform(0.0)?;
     assert_eq!(translate[12], 16_777_217.0);
 
-    let scale = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleScale")?, 0.0)?;
+    let scale = xform(&stage, "/World/DoubleScale")?.local_to_parent_transform(0.0)?;
     assert_eq!(scale[0], 16_777_217.0);
 
-    let scalar = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleScalarOps")?, 0.0)?;
+    let scalar = xform(&stage, "/World/DoubleScalarOps")?.local_to_parent_transform(0.0)?;
     assert_eq!(scalar[12], 16_777_217.0);
     assert_eq!(scalar[5], 16_777_217.0);
 
-    let orient = compute_local_to_parent_transform(&stage, &sdf::path("/World/DoubleOrient")?, 0.0)?;
+    let orient = xform(&stage, "/World/DoubleOrient")?.local_to_parent_transform(0.0)?;
     assert!(orient[0].abs() < 1e-12, "x axis scale term: {}", orient[0]);
 
     Ok(())
@@ -292,75 +259,76 @@ fn xform_double_precision() -> Result<()> {
 // ── Intrinsic shapes ──────────────────────────────────────────────
 
 #[test]
-fn read_cube_returns_authored_size() -> Result<()> {
+fn cube_authored_size() -> Result<()> {
     let stage = open()?;
-    let cube = read_cube(&stage, &sdf::path("/World/Shapes/AuthoredCube")?)?.expect("Cube");
-    assert_eq!(cube.size, 3.0);
+    let cube = Cube::get(&stage, sdf::path("/World/Shapes/AuthoredCube")?)?.expect("Cube");
+    assert_eq!(cube.size_attr().get()?, Some(sdf::Value::Double(3.0)));
     Ok(())
 }
 
 #[test]
-fn unauthored_cube_falls_back_to_spec_default() -> Result<()> {
+fn unauthored_cube_size_is_none() -> Result<()> {
+    // No schema registry yet, so an unauthored attribute reads back as `None`
+    // rather than the spec fallback.
     let stage = open()?;
-    let cube = read_cube(&stage, &sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
-    assert_eq!(cube.size, 2.0);
+    let cube = Cube::get(&stage, sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
+    assert_eq!(cube.size_attr().get()?, None);
     Ok(())
 }
 
 #[test]
-fn read_cube_returns_none_for_non_cube() -> Result<()> {
+fn cube_get_rejects_non_cube() -> Result<()> {
     let stage = open()?;
-    assert!(read_cube(&stage, &sdf::path("/World/Shapes/Ball")?)?.is_none());
+    assert!(Cube::get(&stage, sdf::path("/World/Shapes/Ball")?)?.is_none());
     Ok(())
 }
 
 #[test]
-fn read_sphere_returns_authored_radius() -> Result<()> {
+fn sphere_authored_radius() -> Result<()> {
     let stage = open()?;
-    let s = read_sphere(&stage, &sdf::path("/World/Shapes/Ball")?)?.expect("Sphere");
-    assert_eq!(s.radius, 4.5);
+    let s = Sphere::get(&stage, sdf::path("/World/Shapes/Ball")?)?.expect("Sphere");
+    assert_eq!(s.radius_attr().get()?, Some(sdf::Value::Double(4.5)));
     Ok(())
 }
 
 #[test]
-fn read_cylinder_with_y_axis() -> Result<()> {
+fn cylinder_with_y_axis() -> Result<()> {
     let stage = open()?;
-    let c = read_cylinder(&stage, &sdf::path("/World/Shapes/Pipe")?)?.expect("Cylinder");
-    assert_eq!(c.radius, 0.25);
-    assert_eq!(c.height, 2.0);
-    assert_eq!(c.axis, Axis::Y);
+    let c = Cylinder::get(&stage, sdf::path("/World/Shapes/Pipe")?)?.expect("Cylinder");
+    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.25)));
+    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(2.0)));
+    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::String("Y".into())));
     Ok(())
 }
 
 #[test]
-fn read_capsule_with_x_axis() -> Result<()> {
+fn capsule_with_x_axis() -> Result<()> {
     let stage = open()?;
-    let c = read_capsule(&stage, &sdf::path("/World/Shapes/Pill")?)?.expect("Capsule");
-    assert_eq!(c.radius, 0.1);
-    assert_eq!(c.height, 0.5);
-    assert_eq!(c.axis, Axis::X);
+    let c = Capsule::get(&stage, sdf::path("/World/Shapes/Pill")?)?.expect("Capsule");
+    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.1)));
+    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(0.5)));
+    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::String("X".into())));
     Ok(())
 }
 
 #[test]
-fn read_cone_defaults_to_z_axis() -> Result<()> {
+fn cone_unauthored_axis_is_none() -> Result<()> {
     let stage = open()?;
-    let c = read_cone(&stage, &sdf::path("/World/Shapes/Pyramid")?)?.expect("Cone");
-    assert_eq!(c.radius, 1.5);
-    assert_eq!(c.height, 4.0);
-    assert_eq!(c.axis, Axis::Z); // unauthored → spec default
+    let c = Cone::get(&stage, sdf::path("/World/Shapes/Pyramid")?)?.expect("Cone");
+    assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(1.5)));
+    assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(4.0)));
+    assert_eq!(c.axis_attr().get()?, None);
     Ok(())
 }
 
 #[test]
-fn read_plane_picks_up_dimensions_and_axis() -> Result<()> {
+fn plane_dimensions_and_axis() -> Result<()> {
     let stage = open()?;
-    let p = read_plane(&stage, &sdf::path("/World/Shapes/Ground")?)?.expect("Plane");
-    assert_eq!(p.width, 10.0);
-    assert_eq!(p.length, 8.0);
-    assert_eq!(p.axis, Axis::Y);
-    // Plane flips the inherited Gprim default; unauthored = true.
-    assert!(p.double_sided);
+    let p = Plane::get(&stage, sdf::path("/World/Shapes/Ground")?)?.expect("Plane");
+    assert_eq!(p.width_attr().get()?, Some(sdf::Value::Double(10.0)));
+    assert_eq!(p.length_attr().get()?, Some(sdf::Value::Double(8.0)));
+    assert_eq!(p.axis_attr().get()?, Some(sdf::Value::String("Y".into())));
+    assert_eq!(p.double_sided_attr().get()?, None);
     Ok(())
 }
 
@@ -378,68 +346,46 @@ fn axis_token_round_trip() {
 // ── Camera ────────────────────────────────────────────────────────
 
 #[test]
-fn read_camera_returns_authored_attrs() -> Result<()> {
+fn camera_authored_attrs() -> Result<()> {
     let stage = open()?;
-    let c = read_camera(&stage, &sdf::path("/World/AuthoredCam")?)?.expect("Camera");
-    assert_eq!(c.focal_length, 35.0);
-    assert_eq!(c.horizontal_aperture, 36.0);
-    assert_eq!(c.vertical_aperture, 24.0);
-    assert_eq!(c.f_stop, 2.8);
-    assert_eq!(c.focus_distance, 10.0);
-    assert_eq!(c.projection, Projection::Perspective);
-    assert_eq!(c.clipping_range, [0.1, 5000.0]);
-    assert_eq!(c.shutter_open, -0.25);
-    assert_eq!(c.shutter_close, 0.25);
-    assert_eq!(c.exposure, 1.5);
-    assert_eq!(c.stereo_role, StereoRole::Left);
+    let c = Camera::get(&stage, sdf::path("/World/AuthoredCam")?)?.expect("Camera");
+    assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(35.0)));
+    assert_eq!(c.f_stop_attr().get()?, Some(sdf::Value::Float(2.8)));
+    assert_eq!(
+        c.projection_attr().get()?,
+        Some(sdf::Value::String("perspective".into()))
+    );
+    assert_eq!(c.stereo_role_attr().get()?, Some(sdf::Value::String("left".into())));
     Ok(())
 }
 
 #[test]
-fn unauthored_camera_falls_back_to_spec_defaults() -> Result<()> {
+fn camera_unauthored_attrs_are_none() -> Result<()> {
     let stage = open()?;
-    // /World/Cam only authors focalLength.
-    let c = read_camera(&stage, &sdf::path("/World/Cam")?)?.expect("Camera");
-    assert_eq!(c.focal_length, 50.0);
-    // Unauthored aperture / projection / stereoRole get Pixar's defaults.
-    assert_eq!(c.horizontal_aperture, 20.955);
-    assert_eq!(c.vertical_aperture, 15.2908);
-    assert_eq!(c.projection, Projection::Perspective);
-    assert_eq!(c.clipping_range, [1.0, 1_000_000.0]);
-    assert_eq!(c.stereo_role, StereoRole::Mono);
-    // Pixar's fStop default is 0.0 (DOF off); focusDistance also 0.0.
-    assert_eq!(c.f_stop, 0.0);
-    assert_eq!(c.focus_distance, 0.0);
-    // Exposure model sub-attrs land at their photographic defaults.
-    assert_eq!(c.exposure_iso, 100.0);
-    assert_eq!(c.exposure_time, 1.0);
-    assert_eq!(c.exposure_f_stop, 1.0);
-    assert_eq!(c.exposure_responsivity, 1.0);
+    // /World/Cam authors only focalLength; the rest read back as `None`
+    // (no schema registry to supply fallbacks).
+    let c = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
+    assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
+    assert_eq!(c.horizontal_aperture_attr().get()?, None);
+    assert_eq!(c.projection_attr().get()?, None);
     Ok(())
 }
 
 #[test]
 fn orthographic_projection_token() -> Result<()> {
     let stage = open()?;
-    let c = read_camera(&stage, &sdf::path("/World/OrthoCam")?)?.expect("Camera");
-    assert_eq!(c.projection, Projection::Orthographic);
+    let c = Camera::get(&stage, sdf::path("/World/OrthoCam")?)?.expect("Camera");
+    assert_eq!(
+        c.projection_attr().get()?,
+        Some(sdf::Value::String("orthographic".into()))
+    );
+    // `Projection` decodes the authored token.
+    let tok = token(c.projection_attr().get()?);
+    assert_eq!(
+        tok.as_deref().and_then(Projection::from_token),
+        Some(Projection::Orthographic)
+    );
     Ok(())
-}
-
-#[test]
-fn camera_fov_derives_from_aperture_and_focal_length() {
-    // 35 mm focal length, 36 mm horizontal aperture → ~54.4° h-FOV.
-    let c = openusd::schemas::geom::ReadCamera {
-        focal_length: 35.0,
-        horizontal_aperture: 36.0,
-        vertical_aperture: 24.0,
-        ..Default::default()
-    };
-    let h = c.horizontal_fov_rad().to_degrees();
-    let v = c.vertical_fov_rad().to_degrees();
-    assert!((h - 54.43).abs() < 0.05, "horizontal fov: {h}");
-    assert!((v - 37.85).abs() < 0.05, "vertical fov: {v}");
-    assert!((c.aspect_ratio() - 1.5).abs() < 1e-5);
 }
 
 #[test]
@@ -452,125 +398,121 @@ fn camera_projection_and_stereo_token_round_trip() {
 }
 
 #[test]
-fn read_camera_returns_none_for_non_camera() -> Result<()> {
+fn camera_get_returns_none_for_non_camera() -> Result<()> {
     let stage = open()?;
-    assert!(read_camera(&stage, &sdf::path("/World/Shapes/Ball")?)?.is_none());
+    assert!(Camera::get(&stage, sdf::path("/World/Shapes/Ball")?)?.is_none());
     Ok(())
 }
 
-// ── Mesh + GeomSubset + Primvars ──────────────────────────────────
+// ── Mesh + GeomSubset ─────────────────────────────────────────────
 
 #[test]
-fn read_mesh_returns_topology() -> Result<()> {
+fn mesh_returns_topology() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.expect("Mesh");
-    assert_eq!(m.points.len(), 4);
-    assert_eq!(m.face_vertex_counts, vec![4]);
-    assert_eq!(m.face_vertex_indices, vec![0, 1, 2, 3]);
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(array_len(&m.points_attr(), vec3f_len)?, 4);
+    assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(
+        m.face_vertex_indices_attr().get()?,
+        Some(sdf::Value::IntVec(vec![0, 1, 2, 3]))
+    );
     Ok(())
 }
 
 #[test]
 fn mesh_gprim_attrs_round_trip() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    assert!(m.double_sided);
-    assert_eq!(m.orientation, GeomOrientation::LeftHanded);
-    assert_eq!(m.extent, Some([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]));
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(m.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
+    assert_eq!(token(m.orientation_attr().get()?).as_deref(), Some("leftHanded"));
+    assert_eq!(
+        m.extent_attr().get()?,
+        Some(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]))
+    );
     Ok(())
 }
 
 #[test]
 fn mesh_subdivision_attrs() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    assert_eq!(m.subdivision_scheme, SubdivisionScheme::None);
-    assert!(!m.subdivision_scheme.is_subdivision());
-    assert_eq!(m.interpolate_boundary, InterpolateBoundary::EdgeAndCorner);
-    assert_eq!(m.corner_indices, vec![0, 2]);
-    assert_eq!(m.corner_sharpnesses, vec![10.0, 5.0]);
-    assert_eq!(m.crease_indices, vec![0, 1, 1, 2]);
-    assert_eq!(m.crease_lengths, vec![2, 2]);
-    assert_eq!(m.crease_sharpnesses, vec![3.0, 4.0]);
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(token(m.subdivision_scheme_attr().get()?).as_deref(), Some("none"));
+    assert_eq!(
+        token(m.interpolate_boundary_attr().get()?).as_deref(),
+        Some("edgeAndCorner")
+    );
+    assert_eq!(m.corner_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 2])));
+    assert_eq!(
+        m.corner_sharpnesses_attr().get()?,
+        Some(sdf::Value::FloatVec(vec![10.0, 5.0]))
+    );
+    assert_eq!(
+        m.crease_indices_attr().get()?,
+        Some(sdf::Value::IntVec(vec![0, 1, 1, 2]))
+    );
+    assert_eq!(m.crease_lengths_attr().get()?, Some(sdf::Value::IntVec(vec![2, 2])));
+    assert_eq!(
+        m.crease_sharpnesses_attr().get()?,
+        Some(sdf::Value::FloatVec(vec![3.0, 4.0]))
+    );
     Ok(())
 }
 
 #[test]
-fn mesh_normals_primvar_carries_interpolation() -> Result<()> {
+fn mesh_normals_carry_interpolation() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    let n = m.normals.expect("normals authored");
-    assert_eq!(n.values.len(), 4);
-    assert_eq!(n.interpolation, Interpolation::Vertex);
-    assert!(n.indices.is_empty());
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(array_len(&m.normals_attr(), vec3f_len)?, 4);
+    assert_eq!(
+        token(m.normals_attr().get_metadata("interpolation")?).as_deref(),
+        Some("vertex")
+    );
     Ok(())
 }
 
 #[test]
 fn mesh_uvs_face_varying() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    let uvs = m.uvs.expect("primvars:st authored");
-    assert_eq!(uvs.values, vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-    assert_eq!(uvs.interpolation, Interpolation::FaceVarying);
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    // `primvars:st` has no dedicated accessor — it is reached through the
+    // generic primvar namespace (UsdGeomPrimvarsAPI is not yet modeled).
+    let st = m.attribute("primvars:st");
+    assert_eq!(st.get()?.and_then(|v| v.try_as_vec_2f_vec()).map(|v| v.len()), Some(4));
+    assert_eq!(token(st.get_metadata("interpolation")?).as_deref(), Some("faceVarying"));
     Ok(())
 }
 
 #[test]
-fn mesh_double_sided_fallback() -> Result<()> {
+fn mesh_display_color() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FallbackMesh")?)?.unwrap();
-    assert!(m.double_sided);
-    Ok(())
-}
-
-#[test]
-fn mesh_vec2_fallback() -> Result<()> {
-    let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FallbackMesh")?)?.unwrap();
-    let uvs = m.uvs.expect("primvars:st authored");
-    assert_eq!(uvs.values, vec![[0.5, 0.25]]);
-    assert_eq!(uvs.interpolation, Interpolation::Constant);
-    Ok(())
-}
-
-#[test]
-fn mesh_display_color_constant_interp() -> Result<()> {
-    let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    let dc = m.display_color.expect("displayColor authored");
-    assert_eq!(dc.values, vec![[1.0, 0.0, 0.0]]);
-    assert_eq!(dc.interpolation, Interpolation::Constant);
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(
+        m.display_color_attr().get()?,
+        Some(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]))
+    );
+    assert_eq!(
+        token(m.display_color_attr().get_metadata("interpolation")?).as_deref(),
+        Some("constant")
+    );
     Ok(())
 }
 
 #[test]
 fn mesh_velocities_pass_through() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    assert_eq!(m.velocities.len(), 4);
-    assert!(m.accelerations.is_empty());
+    let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
+    assert_eq!(array_len(&m.velocities_attr(), vec3f_len)?, 4);
+    assert!(m.accelerations_attr().get()?.is_none());
     Ok(())
 }
 
 #[test]
-fn mesh_collects_material_bind_subsets() -> Result<()> {
+fn geom_subset_round_trip() -> Result<()> {
     let stage = open()?;
-    let m = read_mesh(&stage, &sdf::path("/World/FancyMesh")?)?.unwrap();
-    assert_eq!(m.subsets.len(), 1);
-    let s = &m.subsets[0];
-    assert_eq!(s.path, "/World/FancyMesh/Front");
-    assert_eq!(s.family_name.as_deref(), Some("materialBind"));
-    assert_eq!(s.element_type, ElementType::Face);
-    assert_eq!(s.indices, vec![0]);
-    Ok(())
-}
-
-#[test]
-fn read_subset_directly() -> Result<()> {
-    let stage = open()?;
-    let s = read_subset(&stage, &sdf::path("/World/FancyMesh/Front")?)?.expect("GeomSubset");
-    assert_eq!(s.element_type, ElementType::Face);
+    let s = GeomSubset::get(&stage, sdf::path("/World/FancyMesh/Front")?)?.expect("GeomSubset");
+    assert_eq!(token(s.element_type_attr().get()?).as_deref(), Some("face"));
+    assert_eq!(token(s.family_name_attr().get()?).as_deref(), Some("materialBind"));
+    assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
     Ok(())
 }
 
@@ -581,19 +523,20 @@ fn mesh_subdivision_scheme_token_round_trip() {
     assert!(!SubdivisionScheme::None.is_subdivision());
     assert_eq!(SubdivisionScheme::from_token("loop"), Some(SubdivisionScheme::Loop));
     assert_eq!(SubdivisionScheme::from_token("bogus"), None);
+    assert_eq!(InterpolateBoundary::default(), InterpolateBoundary::EdgeAndCorner);
 }
 
 #[test]
 fn primvar_interpolation_token_round_trip() {
-    for &(token, mode) in &[
+    for &(tok, mode) in &[
         ("constant", Interpolation::Constant),
         ("uniform", Interpolation::Uniform),
         ("varying", Interpolation::Varying),
         ("vertex", Interpolation::Vertex),
         ("faceVarying", Interpolation::FaceVarying),
     ] {
-        assert_eq!(Interpolation::from_token(token), Some(mode));
-        assert_eq!(mode.as_token(), token);
+        assert_eq!(Interpolation::from_token(tok), Some(mode));
+        assert_eq!(mode.as_token(), tok);
     }
 }
 
@@ -607,45 +550,58 @@ fn element_type_token_round_trip() {
 // ── Curves / Patch / Points / TetMesh ─────────────────────────────
 
 #[test]
-fn read_basis_curves_returns_topology_and_type() -> Result<()> {
+fn basis_curves_topology_and_type() -> Result<()> {
     let stage = open()?;
-    let c = read_basis_curves(&stage, &sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
-    assert_eq!(c.points.len(), 4);
-    assert_eq!(c.curve_vertex_counts, vec![4]);
-    assert_eq!(c.curve_type, CurveType::Linear);
-    assert_eq!(c.wrap, CurveWrap::Nonperiodic);
-    assert_eq!(c.widths.len(), 4);
-    // basis defaults to bezier even on linear curves (Pixar default).
-    assert_eq!(c.basis, CurveBasis::Bezier);
+    let c = BasisCurves::get(&stage, sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
+    assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
+    assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(token(c.type_attr().get()?).as_deref(), Some("linear"));
+    assert_eq!(token(c.wrap_attr().get()?).as_deref(), Some("nonperiodic"));
+    assert_eq!(
+        c.widths_attr()
+            .get()?
+            .and_then(|v| v.try_as_float_vec())
+            .map(|v| v.len()),
+        Some(4)
+    );
+    // `basis` is unauthored — no registry fallback, so it reads back `None`.
+    assert_eq!(c.basis_attr().get()?, None);
     Ok(())
 }
 
 #[test]
-fn read_nurbs_curves_falls_back_to_cubic_order() -> Result<()> {
+fn nurbs_curves_order_and_weights() -> Result<()> {
     let stage = open()?;
-    let c = read_nurbs_curves(&stage, &sdf::path("/World/Curves/Smooth")?)?.expect("NurbsCurves");
-    assert_eq!(c.order, vec![4]);
-    assert_eq!(c.knots.len(), 8);
-    // Range synthesised from the inner knot span (knots[3..=4] = [0, 1]).
-    assert_eq!(c.ranges.first().copied(), Some([0.0, 1.0]));
-    // pointWeights round-trips and identifies the curve as rational.
-    assert_eq!(c.point_weights.len(), 4);
-    assert_eq!(c.point_weights[0], 1.0);
+    let c = NurbsCurves::get(&stage, sdf::path("/World/Curves/Smooth")?)?.expect("NurbsCurves");
+    assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
+    assert_eq!(
+        c.knots_attr()
+            .get()?
+            .and_then(|v| v.try_as_double_vec())
+            .map(|v| v.len()),
+        Some(8)
+    );
+    assert_eq!(
+        c.point_weights_attr()
+            .get()?
+            .and_then(|v| v.try_as_double_vec())
+            .map(|v| v.len()),
+        Some(4)
+    );
     Ok(())
 }
 
 #[test]
-fn read_nurbs_patch_row_major_grid() -> Result<()> {
+fn nurbs_patch_grid() -> Result<()> {
     let stage = open()?;
-    let p = read_nurbs_patch(&stage, &sdf::path("/World/Curves/Sheet")?)?.expect("NurbsPatch");
-    assert_eq!(p.u_vertex_count, 4);
-    assert_eq!(p.v_vertex_count, 4);
-    assert_eq!(p.points.len(), 16);
-    assert_eq!(p.u_order, 4);
-    assert_eq!(p.v_order, 4);
-    // uForm authored; vForm unauthored → defaults to Open per Pixar.
-    assert_eq!(p.u_form, PatchForm::Periodic);
-    assert_eq!(p.v_form, PatchForm::Open);
+    let p = NurbsPatch::get(&stage, sdf::path("/World/Curves/Sheet")?)?.expect("NurbsPatch");
+    assert_eq!(p.u_vertex_count_attr().get()?, Some(sdf::Value::Int(4)));
+    assert_eq!(p.v_vertex_count_attr().get()?, Some(sdf::Value::Int(4)));
+    assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 16);
+    assert_eq!(p.u_order_attr().get()?, Some(sdf::Value::Int(4)));
+    // uForm authored; vForm unauthored → reads back `None` (no fallback).
+    assert_eq!(token(p.u_form_attr().get()?).as_deref(), Some("periodic"));
+    assert_eq!(p.v_form_attr().get()?, None);
     Ok(())
 }
 
@@ -660,38 +616,51 @@ fn patch_form_token_round_trip() {
 }
 
 #[test]
-fn read_hermite_curves_carries_tangents() -> Result<()> {
+fn hermite_curves_carry_tangents() -> Result<()> {
     let stage = open()?;
-    let c = read_hermite_curves(&stage, &sdf::path("/World/Curves/Hairs")?)?.expect("HermiteCurves");
-    assert_eq!(c.points.len(), 4);
-    assert_eq!(c.tangents.len(), 4);
-    assert_eq!(c.curve_vertex_counts, vec![2, 2]);
+    let c = HermiteCurves::get(&stage, sdf::path("/World/Curves/Hairs")?)?.expect("HermiteCurves");
+    assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
+    assert_eq!(array_len(&c.tangents_attr(), vec3f_len)?, 4);
+    assert_eq!(
+        c.curve_vertex_counts_attr().get()?,
+        Some(sdf::Value::IntVec(vec![2, 2]))
+    );
     Ok(())
 }
 
 #[test]
-fn read_points_with_ids_and_widths() -> Result<()> {
+fn points_with_ids_and_widths() -> Result<()> {
     let stage = open()?;
-    let p = read_points(&stage, &sdf::path("/World/Curves/Cloud")?)?.expect("Points");
-    assert_eq!(p.points.len(), 3);
-    assert_eq!(p.widths, vec![0.05, 0.05, 0.05]);
-    assert_eq!(p.ids, vec![10, 20, 30]);
+    let p = Points::get(&stage, sdf::path("/World/Curves/Cloud")?)?.expect("Points");
+    assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 3);
+    assert_eq!(
+        p.widths_attr().get()?,
+        Some(sdf::Value::FloatVec(vec![0.05, 0.05, 0.05]))
+    );
+    assert_eq!(p.ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![10, 20, 30])));
     Ok(())
 }
 
 #[test]
-fn read_tet_mesh_flat_indices() -> Result<()> {
+fn tet_mesh_indices() -> Result<()> {
     let stage = open()?;
-    let t = read_tet_mesh(&stage, &sdf::path("/World/Curves/Soft")?)?.expect("TetMesh");
-    assert_eq!(t.points.len(), 5);
-    // Two tets, each 4 verts → 8 indices total.
-    assert_eq!(t.tet_vertex_indices.len(), 8);
-    assert!(t.surface_face_vertex_indices.is_empty());
+    let t = TetMesh::get(&stage, sdf::path("/World/Curves/Soft")?)?.expect("TetMesh");
+    assert_eq!(array_len(&t.points_attr(), vec3f_len)?, 5);
+    // The fixture authors the flat `int[]` form; eight indices = two tets.
+    assert_eq!(
+        t.tet_vertex_indices_attr()
+            .get()?
+            .and_then(|v| v.try_as_int_vec())
+            .map(|v| v.len()),
+        Some(8)
+    );
+    assert!(t.surface_face_vertex_indices_attr().get()?.is_none());
     Ok(())
 }
 
 #[test]
 fn curve_type_basis_wrap_token_round_trip() {
+    use geom::{CurveBasis, CurveType, CurveWrap};
     assert_eq!(CurveType::default(), CurveType::Cubic);
     assert_eq!(CurveType::from_token("linear"), Some(CurveType::Linear));
     assert_eq!(CurveBasis::default(), CurveBasis::Bezier);
@@ -703,43 +672,46 @@ fn curve_type_basis_wrap_token_round_trip() {
 // ── PointInstancer ────────────────────────────────────────────────
 
 #[test]
-fn read_point_instancer_returns_prototypes_and_per_instance_arrays() -> Result<()> {
+fn point_instancer_prototypes_and_arrays() -> Result<()> {
     let stage = open()?;
-    let pi = read_point_instancer(&stage, &sdf::path("/World/InstancerScope/Stars")?)?.expect("PointInstancer");
-    assert_eq!(pi.prototypes, vec!["/World/InstancerScope/Proto".to_string()]);
-    assert_eq!(pi.proto_indices, vec![0, 0, 0, 0]);
-    assert_eq!(pi.positions.len(), 4);
-    assert_eq!(pi.scales.len(), 4);
-    assert_eq!(pi.scales[1], [2.0, 2.0, 2.0]);
-    assert_eq!(pi.ids, vec![100, 200, 300, 400]);
-    assert_eq!(pi.invisible_ids, vec![300]);
-    assert_eq!(pi.velocities.len(), 4);
-    // Unauthored attributes default to empty.
-    assert!(pi.orientations.is_empty());
-    assert!(pi.angular_velocities.is_empty());
-    assert!(pi.inactive_ids.is_empty());
+    let pi = PointInstancer::get(&stage, sdf::path("/World/InstancerScope/Stars")?)?.expect("PointInstancer");
+    assert_eq!(
+        pi.prototypes_rel().get_targets()?,
+        vec![sdf::path("/World/InstancerScope/Proto")?]
+    );
+    assert_eq!(
+        pi.proto_indices_attr().get()?,
+        Some(sdf::Value::IntVec(vec![0, 0, 0, 0]))
+    );
+    assert_eq!(array_len(&pi.positions_attr(), vec3f_len)?, 4);
+    let scales = pi
+        .scales_attr()
+        .get()?
+        .and_then(|v| v.try_as_vec_3f_vec())
+        .expect("scales");
+    assert_eq!(scales.len(), 4);
+    assert_eq!(scales[1], [2.0, 2.0, 2.0]);
+    assert_eq!(
+        pi.ids_attr().get()?,
+        Some(sdf::Value::Int64Vec(vec![100, 200, 300, 400]))
+    );
+    assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![300])));
+    assert_eq!(array_len(&pi.velocities_attr(), vec3f_len)?, 4);
+    // Unauthored attributes read back `None`.
+    assert!(pi.orientations_attr().get()?.is_none());
+    assert!(pi.angular_velocities_attr().get()?.is_none());
     Ok(())
 }
 
 #[test]
-fn read_point_instancer_returns_none_for_non_instancer() -> Result<()> {
+fn point_instancer_get_returns_none_for_non_instancer() -> Result<()> {
     let stage = open()?;
-    assert!(read_point_instancer(&stage, &sdf::path("/World/Cam")?)?.is_none());
+    assert!(PointInstancer::get(&stage, sdf::path("/World/Cam")?)?.is_none());
     Ok(())
 }
 
 #[test]
-fn find_geom_prims_includes_point_instancer() -> Result<()> {
-    let stage = open()?;
-    let prims = find_geom_prims(&stage)?;
-    assert!(prims
-        .point_instancers
-        .contains(&"/World/InstancerScope/Stars".to_string()));
-    Ok(())
-}
-
-#[test]
-fn token_round_trip() {
+fn imageable_token_round_trip() {
     assert_eq!(Visibility::Inherited.as_token(), "inherited");
     assert_eq!(Visibility::Invisible.as_token(), "invisible");
     assert_eq!(Visibility::from_token("invisible"), Some(Visibility::Invisible));
