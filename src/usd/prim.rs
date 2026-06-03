@@ -664,6 +664,18 @@ impl Attribute {
         self.stage.value_at(&self.path, time)
     }
 
+    /// Composed value of a generic metadata field on the attribute, if any
+    /// layer authored one. Mirrors C++ `UsdObject::GetMetadata(name, &value)`.
+    ///
+    /// The read counterpart of [`Attribute::set_metadata`]; used for the
+    /// schema-layered fields it authors (UsdGeom's `interpolation` /
+    /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …).
+    //
+    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
+    pub fn get_metadata(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
+        self.stage.field::<sdf::Value>(&self.path, key)
+    }
+
     /// Composed `timeSamples` map.
     //
     // TODO: drop `anyhow::Result` once `Stage::time_samples` returns a typed

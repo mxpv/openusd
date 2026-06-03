@@ -451,6 +451,32 @@ impl<'a> From<&'a str> for Value {
     }
 }
 
+/// Wrap a scalar in its `Value` variant, so `impl Into<Value>` sinks (such as
+/// [`AttributeMut::set`](crate::sdf::AttributeSpecMut) and the composed
+/// `Attribute::set`) accept bare scalars. An unsuffixed float literal needs a
+/// type suffix (`2.5_f64`) to pick between [`Value::Float`] and
+/// [`Value::Double`].
+macro_rules! impl_from_scalar {
+    ($t:ty, $variant:ident) => {
+        impl From<$t> for Value {
+            fn from(v: $t) -> Self {
+                Value::$variant(v)
+            }
+        }
+    };
+}
+
+impl_from_scalar!(bool, Bool);
+impl_from_scalar!(u8, Uchar);
+impl_from_scalar!(i32, Int);
+impl_from_scalar!(u32, Uint);
+impl_from_scalar!(i64, Int64);
+impl_from_scalar!(u64, Uint64);
+impl_from_scalar!(f16, Half);
+impl_from_scalar!(f32, Float);
+impl_from_scalar!(f64, Double);
+impl_from_scalar!(String, String);
+
 #[cfg(test)]
 mod tests {
     use super::*;

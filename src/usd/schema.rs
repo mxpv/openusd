@@ -42,10 +42,10 @@ pub enum SchemaKind {
 /// classification — so intermediate schema traits and concrete schemas can
 /// build their accessors on one foundation.
 ///
-/// Wrapping is unchecked, mirroring the C++ `UsdSchemaBase(prim)` constructor:
-/// [`from_prim`](Self::from_prim) does not verify that the prim conforms to
-/// the schema. A type-gated constructor (the analog of C++ `UsdSchema::Get`)
-/// belongs on each concrete schema.
+/// A schema is constructed by wrapping a [`Prim`] (each concrete schema is a
+/// `struct Foo(Prim)` newtype). Wrapping is unchecked, mirroring the C++
+/// `UsdSchemaBase(prim)` constructor; a type-gated constructor (the analog of
+/// C++ `UsdSchema::Get`) belongs on each concrete schema.
 ///
 /// The registry-backed members of C++ `UsdSchemaBase`
 /// (`GetSchemaClassPrimDefinition`, `GetSchemaAttributeNames`) are omitted
@@ -58,18 +58,9 @@ pub trait SchemaBase {
     /// `AbstractBase`, so every schema declares its own.
     const KIND: SchemaKind;
 
-    /// Wrap `prim` as this schema without validating its type.
-    fn from_prim(prim: Prim) -> Self
-    where
-        Self: Sized;
-
-    /// The prim this schema is a view of (C++ `UsdSchemaBase::GetPrim`).
+    /// The prim this schema is a view of (C++ `UsdSchemaBase::GetPrim`). The
+    /// one method each schema implements; everything else derives from it.
     fn prim(&self) -> &Prim;
-
-    /// Consume the schema and return the underlying prim.
-    fn into_prim(self) -> Prim
-    where
-        Self: Sized;
 
     /// Composed namespace path of the prim (C++ `UsdSchemaBase::GetPath`).
     fn path(&self) -> &sdf::Path {
@@ -112,11 +103,11 @@ pub trait SchemaBase {
 }
 
 /// Every schema unwraps to its underlying [`Prim`], so `Prim::from(schema)`
-/// and `let prim: Prim = schema.into()` work uniformly. Delegates to
-/// [`SchemaBase::into_prim`].
+/// and `let prim: Prim = schema.into()` work uniformly. The prim is cloned
+/// out — a cheap `Rc` bump on the stage plus a path clone.
 impl<T: SchemaBase> From<T> for Prim {
     fn from(schema: T) -> Self {
-        schema.into_prim()
+        schema.prim().clone()
     }
 }
 
@@ -131,16 +122,8 @@ mod tests {
     impl SchemaBase for Marker {
         const KIND: SchemaKind = SchemaKind::ConcreteTyped;
 
-        fn from_prim(prim: Prim) -> Self {
-            Self(prim)
-        }
-
         fn prim(&self) -> &Prim {
             &self.0
-        }
-
-        fn into_prim(self) -> Prim {
-            self.0
         }
     }
 
@@ -149,20 +132,17 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let prim = stage.define_prim("/World")?;
 
-        let schema = Marker::from_prim(prim);
+        let schema = Marker(prim);
         assert_eq!(schema.path().as_str(), "/World");
         // `stage()` resolves through the prim's own shared handle.
         assert_eq!(schema.stage().type_name(schema.path())?, None);
-
-        let prim = schema.into_prim();
-        assert_eq!(prim.path().as_str(), "/World");
         Ok(())
     }
 
     #[test]
     fn into_prim_via_from() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let schema = Marker::from_prim(stage.define_prim("/World")?);
+        let schema = Marker(stage.define_prim("/World")?);
 
         let prim: Prim = schema.into();
         assert_eq!(prim.path().as_str(), "/World");
@@ -173,7 +153,7 @@ mod tests {
     fn classification() {
         assert_eq!(Marker::KIND, SchemaKind::ConcreteTyped);
         let stage = Stage::builder().in_memory("anon.usda").unwrap();
-        let schema = Marker::from_prim(stage.define_prim("/World").unwrap());
+        let schema = Marker(stage.define_prim("/World").unwrap());
         assert!(schema.is_concrete());
         assert!(schema.is_typed());
         assert!(!schema.is_api_schema());

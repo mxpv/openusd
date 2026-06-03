@@ -39,12 +39,17 @@ pub const PURPOSE_RENDER: &str = "render";
 pub const PURPOSE_PROXY: &str = "proxy";
 pub const PURPOSE_GUIDE: &str = "guide";
 
+// ── Xformable attribute names ───────────────────────────────────────────
+pub const A_XFORM_OP_ORDER: &str = "xformOpOrder";
+
 // ── Boundable attribute names ───────────────────────────────────────────
 pub const A_EXTENT: &str = "extent";
 
 // ── Gprim shared attributes ─────────────────────────────────────────────
 pub const A_DOUBLE_SIDED: &str = "doubleSided";
 pub const A_ORIENTATION: &str = "orientation";
+pub const A_DISPLAY_COLOR: &str = "primvars:displayColor";
+pub const A_DISPLAY_OPACITY: &str = "primvars:displayOpacity";
 
 // ── Intrinsic-shape attributes ──────────────────────────────────────────
 pub const A_SIZE: &str = "size";

@@ -426,8 +426,8 @@ pub fn read_light_list(stage: &Stage, prim: &Path) -> Result<Option<ReadLightLis
 /// UsdLux applied APIs.
 ///
 /// Uses the default traversal predicate (active + defined + loaded +
-/// non-abstract), matching the convention shared with `find_geom_prims`
-/// and `find_physics_prims`. Consumers that need to see inactive or
+/// non-abstract), matching the convention shared with `find_physics_prims`.
+/// Consumers that need to see inactive or
 /// class prims should iterate with [`PrimPredicate::ALL`] themselves and
 /// dispatch via [`read_light`] / [`read_shaping`] / etc.
 pub fn find_lux_prims(stage: &Stage) -> Result<LuxPrims> {
