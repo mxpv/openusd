@@ -651,33 +651,9 @@ impl PatchForm {
     }
 }
 
-/// Bidirectional conversion between each token enum and [`crate::sdf::Value`],
-/// both delegating to `as_token` / `from_token`. `From` authors a
-/// [`Value::Token`](crate::sdf::Value::Token) so the enum passes straight to
-/// [`Attribute::set`](crate::usd::Attribute::set) (`attr.set(SubdivisionScheme::Loop)?`),
-/// and `TryFrom` decodes one so [`Attribute::get`](crate::usd::Attribute::get)
-/// extracts it directly (`attr.get::<SubdivisionScheme>()?`).
-macro_rules! impl_token_value {
-    ($($ty:ty),+ $(,)?) => {$(
-        impl From<$ty> for crate::sdf::Value {
-            fn from(value: $ty) -> Self {
-                crate::sdf::Value::Token(value.as_token().to_string())
-            }
-        }
-
-        impl TryFrom<crate::sdf::Value> for $ty {
-            type Error = crate::sdf::ValueConversionError;
-
-            fn try_from(value: crate::sdf::Value) -> Result<Self, Self::Error> {
-                match &value {
-                    crate::sdf::Value::Token(s) | crate::sdf::Value::String(s) => <$ty>::from_token(s),
-                    _ => None,
-                }
-                .ok_or_else(|| crate::sdf::ValueConversionError::new(stringify!($ty), &value))
-            }
-        }
-    )+};
-}
+// Bidirectional `From`/`TryFrom<Value>` for each token enum, so they pass
+// straight to `Attribute::set` / `get::<Enum>()`. See the macro's own docs.
+use crate::schemas::common::impl_token_value;
 
 impl_token_value!(
     Visibility,
