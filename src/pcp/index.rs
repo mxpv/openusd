@@ -349,9 +349,44 @@ impl PrimIndex {
                 return Ok(cached.clone());
             }
         }
+        // The task-queue indexer composes the prim when its composition is
+        // within the ported feature set; otherwise the recursive builder takes
+        // over. As the indexer ports more arcs this fallback narrows, until it is
+        // authoritative and the builder is removed.
+        if let Some(index) = Self::build_via_indexer(path, stack, ctx, cached_indices, ambient, ambient_is_root)? {
+            return Ok(index);
+        }
+        Self::build_via_builder(path, stack, ctx, cached_indices, ambient, ambient_is_root)
+    }
+
+    /// Composes a prim index with the recursive [`IndexBuilder`].
+    fn build_via_builder(
+        path: &Path,
+        stack: &LayerStack,
+        ctx: &CompositionContext,
+        cached_indices: &HashMap<Path, PrimIndex>,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+    ) -> Result<Self, Error> {
         let mut builder = IndexBuilder::new(stack, ctx, cached_indices, ambient.to_vec(), ambient_is_root);
         builder.build(path)?;
         Ok(PrimIndex { graph: builder.output })
+    }
+
+    /// Composes a prim index with the task-queue
+    /// [`Indexer`](super::indexer::Indexer), or `None` when the indexer defers
+    /// the prim to the recursive builder (a composition feature a later phase
+    /// ports).
+    fn build_via_indexer(
+        path: &Path,
+        stack: &LayerStack,
+        ctx: &CompositionContext,
+        cached_indices: &HashMap<Path, PrimIndex>,
+        ambient: &[(usize, LayerOffset)],
+        ambient_is_root: bool,
+    ) -> Result<Option<Self>, Error> {
+        let indexer = super::indexer::Indexer::new(stack, ctx, cached_indices, ambient, ambient_is_root);
+        Ok(indexer.build(path)?.map(|graph| PrimIndex { graph }))
     }
 
     /// Returns the composition context derived from this prim's index.
@@ -408,6 +443,7 @@ impl PrimIndex {
                 map_to_parent: node.map_to_parent.clone(),
                 layer_stack: node.layer_stack().to_vec(),
                 arc: node.arc,
+                namespace_depth: node.namespace_depth(),
                 parent,
             });
         }
@@ -421,6 +457,9 @@ impl PrimIndex {
         CompositionContext {
             selections: merged_selections,
             ancestor_arcs,
+            // This prim's own nodes were appended after the inherited arcs, so
+            // they begin at `base` (see `own_arcs_start`).
+            own_arcs_start: base,
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
@@ -474,6 +513,16 @@ pub(crate) struct CompositionContext {
     /// Ancestor composition arcs with namespace mappings.
     /// Used for descendant namespace remapping and implied inherit propagation.
     pub ancestor_arcs: Vec<AncestorArc>,
+    /// Index in [`ancestor_arcs`](Self::ancestor_arcs) where the direct parent
+    /// prim's own nodes begin; entries before it are arcs inherited from further
+    /// ancestors. The direct parent's nodes already encode everything those
+    /// inherited arcs produced (each was composed into the parent), so the
+    /// task-queue indexer propagates only `ancestor_arcs[own_arcs_start..]` —
+    /// the C++ `AppendChildNameToAllSites` model — to avoid composing a
+    /// grandparent arc and the parent node it produced as two nodes. The
+    /// recursive builder instead propagates the whole list and dedups the
+    /// overlap with its global `seen`.
+    pub own_arcs_start: usize,
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
@@ -511,6 +560,12 @@ pub(crate) struct AncestorArc {
     pub layer_stack: Vec<(usize, LayerOffset)>,
     /// Arc type that introduced this mapping.
     pub arc: ArcType,
+    /// The node's namespace depth in the parent prim's graph. A child prim that
+    /// extends this arc gives the propagated node the same depth rather than
+    /// recomputing it from the (deeper) child path, so the parent's relative
+    /// strength order is preserved (C++ `AppendChildNameToAllSites` inherits it
+    /// by copying the node).
+    pub namespace_depth: u16,
     /// Index in the ancestor-arc list of the arc this one nested under in the
     /// parent prim's graph (e.g. a variant set a reference brought in nests
     /// under that reference). `None` for an arc directly on the parent prim.
@@ -970,14 +1025,6 @@ impl<'a> IndexBuilder<'a> {
         Ok(())
     }
 
-    fn get_sublayer_stack(&self, root_layer: usize) -> Vec<(usize, LayerOffset)> {
-        self.stack
-            .sublayer_stacks
-            .get(&root_layer)
-            .cloned()
-            .unwrap_or_else(|| LayerStack::build_sublayer_stack(root_layer, &self.stack.layers, &*self.stack.resolver))
-    }
-
     /// Seed context for building an arc target whose own namespace parent
     /// contributes no context (a top-level class/base prim). The target
     /// inherits the referencing prim's variant selections — resolved from the
@@ -1337,7 +1384,7 @@ impl<'a> IndexBuilder<'a> {
             } else {
                 prim_path.clone()
             };
-            let target_stack = self.get_sublayer_stack(layer_index);
+            let target_stack = self.stack.sublayer_stack(layer_index);
             let arc_map = MapFunction::from_pair(source.clone(), context_path.clone()).with_time_offset(arc_offset);
             // Evaluate directly — arc-type-aware dedup allows the same
             // (layer, path) to appear under different arc types. Pass the
@@ -1777,7 +1824,11 @@ fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, reso
 /// target by that offset, which the per-site node otherwise carries only per
 /// member. Each reference's asset path is anchored to its authoring layer so
 /// relative paths in distinct sublayers stay distinct.
-fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer], resolver: &dyn Resolver) -> Result<Vec<Reference>> {
+pub(super) fn compose_references_in(
+    nodes: &[Node],
+    layers: &[sdf::Layer],
+    resolver: &dyn Resolver,
+) -> Result<Vec<Reference>> {
     compose_list_op_in(
         nodes,
         FieldKey::References.as_str(),
@@ -1792,7 +1843,11 @@ fn compose_references_in(nodes: &[Node], layers: &[sdf::Layer], resolver: &dyn R
 /// `PayloadListOp`. Each authoring sublayer's offset is folded into its
 /// payloads' layer offsets, mirroring [`compose_references_in`]; each payload's
 /// asset path is anchored to its authoring layer.
-fn collect_payloads_in(nodes: &[Node], layers: &[sdf::Layer], resolver: &dyn Resolver) -> Result<Vec<Payload>> {
+pub(super) fn collect_payloads_in(
+    nodes: &[Node],
+    layers: &[sdf::Layer],
+    resolver: &dyn Resolver,
+) -> Result<Vec<Payload>> {
     compose_list_op_in(
         nodes,
         FieldKey::Payload.as_str(),

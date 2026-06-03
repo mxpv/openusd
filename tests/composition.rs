@@ -277,20 +277,15 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // `Attribute connections` block is missing from the composed result.
     "BasicVariantWithConnections_root",
     "BasicVariantWithReference_root",
-    // TODO(arc-diamond): deduplicate a reference/payload reached by two paths (a
-    // diamond) and order the extra ancestral payload, so a shared target
-    // contributes one node at the correct strength.
-    "BasicReferenceDiamond_root",
-    "BasicPayloadDiamond_root",
-    "BasicNestedPayload_root",
-    "PayloadsAndAncestralArcs_root",
     // TODO(instancing): route instance prims through shared prototypes so the
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
     // TODO(implied-classes): implied/nested class (inherit) propagation across
     // references and local+global class combinations — the implied class node
-    // set or ordering differs from `_EvalImpliedClassTree`.
+    // set or ordering differs from `_EvalImpliedClassTree`. `PayloadsAndAncestralArcs`
+    // also exercises a sub-root payload, but its inherit prims are what still fail.
+    "PayloadsAndAncestralArcs_root",
     "BasicLocalAndGlobalClassCombination_root",
     "ImpliedAndAncestralInherits_ComplexEvaluation_root",
     "TrickyNestedClasses_root",

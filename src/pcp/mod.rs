@@ -236,6 +236,7 @@ pub(crate) mod clip;
 pub(crate) mod deps;
 pub(crate) mod graph;
 pub(crate) mod index;
+pub(crate) mod indexer;
 mod mapping;
 mod rel;
 pub(crate) mod resolve;
@@ -425,6 +426,16 @@ impl LayerStack {
     /// once (a diamond of sublayers); only a layer that sublayers itself,
     /// directly or transitively, is a cycle and is skipped. Cycle detection is
     /// therefore over the current ancestor chain, not every layer seen.
+    /// The sublayer stack for `root_layer`: the stack's precomputed one when
+    /// present, else freshly built. TODO(perf): the cache hit clones the stored
+    /// `Vec`; returning a `Cow` would let callers borrow it.
+    pub(crate) fn sublayer_stack(&self, root_layer: usize) -> Vec<(usize, sdf::LayerOffset)> {
+        self.sublayer_stacks
+            .get(&root_layer)
+            .cloned()
+            .unwrap_or_else(|| Self::build_sublayer_stack(root_layer, &self.layers, &*self.resolver))
+    }
+
     pub(crate) fn build_sublayer_stack(
         root_layer: usize,
         layers: &[sdf::Layer],
