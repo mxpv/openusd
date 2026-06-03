@@ -451,12 +451,21 @@ impl<'a> From<&'a str> for Value {
     }
 }
 
-/// Wrap a scalar in its `Value` variant, so `impl Into<Value>` sinks (such as
+/// Wrap a value in its `Value` variant, so `impl Into<Value>` sinks (such as
 /// [`AttributeMut::set`](crate::sdf::AttributeSpecMut) and the composed
-/// `Attribute::set`) accept bare scalars. An unsuffixed float literal needs a
-/// type suffix (`2.5_f64`) to pick between [`Value::Float`] and
-/// [`Value::Double`].
-macro_rules! impl_from_scalar {
+/// `Attribute::set`) accept the bare Rust value: `set(2.5_f64)`,
+/// `set(vec![4])`, `set(vec![[0.0, 0.0, 0.0]])`.
+///
+/// Only types whose Rust representation maps to exactly one variant get a
+/// `From`. The ambiguous ones are omitted so the wrong variant is never picked
+/// silently — construct those explicitly:
+/// - `[f32; 4]` / `[f64; 4]` / `[f16; 4]` ([`Value::Vec4f`] vs
+///   [`Value::Quatf`], plus [`Value::Matrix2d`] for `[f64; 4]`),
+/// - `Vec<String>` ([`Value::StringVec`] vs [`Value::TokenVec`]).
+///
+/// An unsuffixed float literal needs a type suffix (`2.5_f64`) to pick between
+/// [`Value::Float`] and [`Value::Double`].
+macro_rules! impl_from {
     ($t:ty, $variant:ident) => {
         impl From<$t> for Value {
             fn from(v: $t) -> Self {
@@ -466,16 +475,48 @@ macro_rules! impl_from_scalar {
     };
 }
 
-impl_from_scalar!(bool, Bool);
-impl_from_scalar!(u8, Uchar);
-impl_from_scalar!(i32, Int);
-impl_from_scalar!(u32, Uint);
-impl_from_scalar!(i64, Int64);
-impl_from_scalar!(u64, Uint64);
-impl_from_scalar!(f16, Half);
-impl_from_scalar!(f32, Float);
-impl_from_scalar!(f64, Double);
-impl_from_scalar!(String, String);
+// Scalars.
+impl_from!(bool, Bool);
+impl_from!(u8, Uchar);
+impl_from!(i32, Int);
+impl_from!(u32, Uint);
+impl_from!(i64, Int64);
+impl_from!(u64, Uint64);
+impl_from!(f16, Half);
+impl_from!(f32, Float);
+impl_from!(f64, Double);
+impl_from!(String, String);
+
+// Fixed-size vectors and matrices.
+impl_from!([f32; 2], Vec2f);
+impl_from!([f32; 3], Vec3f);
+impl_from!([f64; 2], Vec2d);
+impl_from!([f64; 3], Vec3d);
+impl_from!([i32; 2], Vec2i);
+impl_from!([i32; 3], Vec3i);
+impl_from!([i32; 4], Vec4i);
+impl_from!([f64; 9], Matrix3d);
+impl_from!([f64; 16], Matrix4d);
+
+// Flat scalar arrays.
+impl_from!(Vec<bool>, BoolVec);
+impl_from!(Vec<u8>, UcharVec);
+impl_from!(Vec<i32>, IntVec);
+impl_from!(Vec<u32>, UintVec);
+impl_from!(Vec<i64>, Int64Vec);
+impl_from!(Vec<u64>, Uint64Vec);
+impl_from!(Vec<f16>, HalfVec);
+impl_from!(Vec<f32>, FloatVec);
+impl_from!(Vec<f64>, DoubleVec);
+
+// Arrays of fixed-size vectors.
+impl_from!(Vec<[f32; 2]>, Vec2fVec);
+impl_from!(Vec<[f32; 3]>, Vec3fVec);
+impl_from!(Vec<[f64; 2]>, Vec2dVec);
+impl_from!(Vec<[f64; 3]>, Vec3dVec);
+impl_from!(Vec<[i32; 2]>, Vec2iVec);
+impl_from!(Vec<[i32; 3]>, Vec3iVec);
+impl_from!(Vec<[i32; 4]>, Vec4iVec);
 
 #[cfg(test)]
 mod tests {

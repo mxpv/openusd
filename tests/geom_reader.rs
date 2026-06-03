@@ -148,7 +148,7 @@ fn extent_unauthored_returns_none() -> Result<()> {
     let cam = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
     // Camera is Xformable but not Boundable, so it has no `extent`; the
     // /World/Cam prim authors none either way.
-    assert!(cam.attribute("extent").get()?.is_none());
+    assert!(cam.attribute("extent").get::<sdf::Value>()?.is_none());
     Ok(())
 }
 
@@ -272,7 +272,7 @@ fn unauthored_cube_size_is_none() -> Result<()> {
     // rather than the spec fallback.
     let stage = open()?;
     let cube = Cube::get(&stage, sdf::path("/World/Shapes/DefaultCube")?)?.expect("Cube");
-    assert_eq!(cube.size_attr().get()?, None);
+    assert_eq!(cube.size_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -317,7 +317,7 @@ fn cone_unauthored_axis_is_none() -> Result<()> {
     let c = Cone::get(&stage, sdf::path("/World/Shapes/Pyramid")?)?.expect("Cone");
     assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(1.5)));
     assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(4.0)));
-    assert_eq!(c.axis_attr().get()?, None);
+    assert_eq!(c.axis_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -328,7 +328,7 @@ fn plane_dimensions_and_axis() -> Result<()> {
     assert_eq!(p.width_attr().get()?, Some(sdf::Value::Double(10.0)));
     assert_eq!(p.length_attr().get()?, Some(sdf::Value::Double(8.0)));
     assert_eq!(p.axis_attr().get()?, Some(sdf::Value::String("Y".into())));
-    assert_eq!(p.double_sided_attr().get()?, None);
+    assert_eq!(p.double_sided_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -366,8 +366,8 @@ fn camera_unauthored_attrs_are_none() -> Result<()> {
     // (no schema registry to supply fallbacks).
     let c = Camera::get(&stage, sdf::path("/World/Cam")?)?.expect("Camera");
     assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
-    assert_eq!(c.horizontal_aperture_attr().get()?, None);
-    assert_eq!(c.projection_attr().get()?, None);
+    assert_eq!(c.horizontal_aperture_attr().get::<sdf::Value>()?, None);
+    assert_eq!(c.projection_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -477,7 +477,12 @@ fn mesh_uvs_face_varying() -> Result<()> {
     // `primvars:st` has no dedicated accessor — it is reached through the
     // generic primvar namespace (UsdGeomPrimvarsAPI is not yet modeled).
     let st = m.attribute("primvars:st");
-    assert_eq!(st.get()?.and_then(|v| v.try_as_vec_2f_vec()).map(|v| v.len()), Some(4));
+    assert_eq!(
+        st.get::<sdf::Value>()?
+            .and_then(|v| v.try_as_vec_2f_vec())
+            .map(|v| v.len()),
+        Some(4)
+    );
     assert_eq!(token(st.get_metadata("interpolation")?).as_deref(), Some("faceVarying"));
     Ok(())
 }
@@ -502,7 +507,7 @@ fn mesh_velocities_pass_through() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.velocities_attr(), vec3f_len)?, 4);
-    assert!(m.accelerations_attr().get()?.is_none());
+    assert!(m.accelerations_attr().get::<sdf::Value>()?.is_none());
     Ok(())
 }
 
@@ -559,13 +564,13 @@ fn basis_curves_topology_and_type() -> Result<()> {
     assert_eq!(token(c.wrap_attr().get()?).as_deref(), Some("nonperiodic"));
     assert_eq!(
         c.widths_attr()
-            .get()?
+            .get::<sdf::Value>()?
             .and_then(|v| v.try_as_float_vec())
             .map(|v| v.len()),
         Some(4)
     );
     // `basis` is unauthored — no registry fallback, so it reads back `None`.
-    assert_eq!(c.basis_attr().get()?, None);
+    assert_eq!(c.basis_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -576,14 +581,14 @@ fn nurbs_curves_order_and_weights() -> Result<()> {
     assert_eq!(c.order_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
     assert_eq!(
         c.knots_attr()
-            .get()?
+            .get::<sdf::Value>()?
             .and_then(|v| v.try_as_double_vec())
             .map(|v| v.len()),
         Some(8)
     );
     assert_eq!(
         c.point_weights_attr()
-            .get()?
+            .get::<sdf::Value>()?
             .and_then(|v| v.try_as_double_vec())
             .map(|v| v.len()),
         Some(4)
@@ -601,7 +606,7 @@ fn nurbs_patch_grid() -> Result<()> {
     assert_eq!(p.u_order_attr().get()?, Some(sdf::Value::Int(4)));
     // uForm authored; vForm unauthored → reads back `None` (no fallback).
     assert_eq!(token(p.u_form_attr().get()?).as_deref(), Some("periodic"));
-    assert_eq!(p.v_form_attr().get()?, None);
+    assert_eq!(p.v_form_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
 
@@ -649,12 +654,12 @@ fn tet_mesh_indices() -> Result<()> {
     // The fixture authors the flat `int[]` form; eight indices = two tets.
     assert_eq!(
         t.tet_vertex_indices_attr()
-            .get()?
+            .get::<sdf::Value>()?
             .and_then(|v| v.try_as_int_vec())
             .map(|v| v.len()),
         Some(8)
     );
-    assert!(t.surface_face_vertex_indices_attr().get()?.is_none());
+    assert!(t.surface_face_vertex_indices_attr().get::<sdf::Value>()?.is_none());
     Ok(())
 }
 
@@ -686,7 +691,7 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     assert_eq!(array_len(&pi.positions_attr(), vec3f_len)?, 4);
     let scales = pi
         .scales_attr()
-        .get()?
+        .get::<sdf::Value>()?
         .and_then(|v| v.try_as_vec_3f_vec())
         .expect("scales");
     assert_eq!(scales.len(), 4);
@@ -698,8 +703,8 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![300])));
     assert_eq!(array_len(&pi.velocities_attr(), vec3f_len)?, 4);
     // Unauthored attributes read back `None`.
-    assert!(pi.orientations_attr().get()?.is_none());
-    assert!(pi.angular_velocities_attr().get()?.is_none());
+    assert!(pi.orientations_attr().get::<sdf::Value>()?.is_none());
+    assert!(pi.angular_velocities_attr().get::<sdf::Value>()?.is_none());
     Ok(())
 }
 

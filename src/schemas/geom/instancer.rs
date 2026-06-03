@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(pi.invisible_ids_attr().get()?, Some(sdf::Value::Int64Vec(vec![200])));
         assert_eq!(pi.prototypes_rel().get_targets()?, vec![sdf::path("/Proto/Marker")?]);
         // Inherited Boundable / Xformable accessors are available.
-        assert_eq!(pi.extent_attr().get()?, None);
+        assert_eq!(pi.extent_attr().get::<sdf::Value>()?, None);
         assert!(PointInstancer::get(&stage, "/Proto/Marker")?.is_none());
         Ok(())
     }
