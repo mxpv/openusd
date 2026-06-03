@@ -31,9 +31,10 @@ impl SpatialAudio {
         get_typed(stage, path, tok::T_SPATIAL_AUDIO).map(|o| o.map(Self))
     }
 
-    /// `filePath` attribute handle — the audio asset (C++ `GetFilePathAttr`).
+    /// Path to the audio file to play (M4A, MP3, or WAV in USDZ, by preference).
+    /// C++ `UsdMediaSpatialAudio::GetFilePathAttr`.
     ///
-    /// `uniform asset`: `get::<sdf::Value>()?` yields a [`sdf::Value::AssetPath`].
+    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::AssetPath`]).
     pub fn file_path_attr(&self) -> Attribute {
         self.attribute(tok::A_FILE_PATH)
     }
@@ -46,10 +47,11 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `auralMode` attribute handle (C++ `GetAuralModeAttr`).
+    /// How the audio is spatialized: `spatial` renders it positioned in 3D space,
+    /// `nonSpatial` plays it independent of the prim's location (ambient or music).
+    /// C++ `UsdMediaSpatialAudio::GetAuralModeAttr`.
     ///
-    /// `uniform token`: `get::<sdf::Value>()?` yields the token (`spatial` /
-    /// `nonSpatial`); decode it with
+    /// Type `token`. Fetch with `get::<String>()?` and decode with
     /// [`AuralMode::from_token`](super::AuralMode::from_token).
     pub fn aural_mode_attr(&self) -> Attribute {
         self.attribute(tok::A_AURAL_MODE)
@@ -63,10 +65,11 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `playbackMode` attribute handle (C++ `GetPlaybackModeAttr`).
+    /// When the audio plays and whether it loops, e.g. `onceFromStart`,
+    /// `onceFromStartToEnd`, `loopFromStart`, `loopFromStartToEnd`, `loopFromStage`.
+    /// C++ `UsdMediaSpatialAudio::GetPlaybackModeAttr`.
     ///
-    /// `uniform token`: `get::<sdf::Value>()?` yields the token (`onceFromStart`
-    /// / `loopFromStage` / …); decode it with
+    /// Type `token`. Fetch with `get::<String>()?` and decode with
     /// [`PlaybackMode::from_token`](super::PlaybackMode::from_token).
     pub fn playback_mode_attr(&self) -> Attribute {
         self.attribute(tok::A_PLAYBACK_MODE)
@@ -80,10 +83,10 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `startTime` attribute handle — playback start cue
-    /// (C++ `GetStartTimeAttr`).
+    /// Stage time at which playback begins, in the stage's timeCodesPerSecond.
+    /// C++ `UsdMediaSpatialAudio::GetStartTimeAttr`.
     ///
-    /// `uniform timecode`: read with `get::<sdf::TimeCode>()?`.
+    /// Type `timecode`. Fetch with `get::<sdf::TimeCode>()?`.
     pub fn start_time_attr(&self) -> Attribute {
         self.attribute(tok::A_START_TIME)
     }
@@ -97,9 +100,10 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `endTime` attribute handle — playback end cue (C++ `GetEndTimeAttr`).
+    /// Stage time at which playback ends for the `*FromStartToEnd` modes; if it
+    /// precedes `startTime`, the audio plays in reverse. C++ `UsdMediaSpatialAudio::GetEndTimeAttr`.
     ///
-    /// `uniform timecode`: read with `get::<sdf::TimeCode>()?`.
+    /// Type `timecode`. Fetch with `get::<sdf::TimeCode>()?`.
     pub fn end_time_attr(&self) -> Attribute {
         self.attribute(tok::A_END_TIME)
     }
@@ -112,10 +116,10 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `mediaOffset` attribute handle — offset into the asset, in seconds
-    /// (C++ `GetMediaOffsetAttr`).
+    /// Offset in seconds into the audio file at which playback starts (applied to
+    /// the first iteration only when looping). C++ `UsdMediaSpatialAudio::GetMediaOffsetAttr`.
     ///
-    /// `uniform double`: read with `get::<f64>()?`.
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn media_offset_attr(&self) -> Attribute {
         self.attribute(tok::A_MEDIA_OFFSET)
     }
@@ -128,10 +132,10 @@ impl SpatialAudio {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `gain` attribute handle — linear amplitude multiplier
-    /// (C++ `GetGainAttr`).
+    /// Volume multiplier on the audio signal (default 1.0; 0 mutes, negative
+    /// values clamp to 0). C++ `UsdMediaSpatialAudio::GetGainAttr`.
     ///
-    /// `double`: read with `get::<f64>()?`.
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn gain_attr(&self) -> Attribute {
         self.attribute(tok::A_GAIN)
     }
@@ -176,9 +180,9 @@ impl AssetPreviewsAPI {
         get_with_api(stage, path, &[tok::API_ASSET_PREVIEWS]).map(|o| o.map(Self))
     }
 
-    /// The default thumbnail image path
-    /// (`assetInfo.previews.thumbnails.default.defaultImage`), or `None` when
-    /// no preview is authored (C++ `GetDefaultThumbnails`).
+    /// The asset's default preview thumbnail image path, read from
+    /// `assetInfo.previews.thumbnails.default.defaultImage`, or `None` when no
+    /// preview is authored. C++ `UsdMediaAssetPreviewsAPI::GetDefaultThumbnails`.
     pub fn default_thumbnail(&self) -> Result<Option<String>> {
         let Some(Value::Dictionary(asset_info)) =
             self.stage().field::<Value>(self.path().clone(), FieldKey::AssetInfo)?

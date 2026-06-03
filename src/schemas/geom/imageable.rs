@@ -16,7 +16,12 @@ use super::{Purpose, Visibility};
 /// `Imageable → Xformable → Boundable → Gprim` chain, so its accessors are
 /// available on each shape.
 pub trait Imageable: SchemaBase {
-    /// `visibility` attribute handle (C++ `GetVisibilityAttr`).
+    /// Whether the prim and its subtree are rendered: `inherited` defers to the
+    /// nearest ancestor, while `invisible` prunes this prim and everything below
+    /// it. The opinion is inherited down namespace. C++
+    /// `UsdGeomImageable::GetVisibilityAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Visibility>()?`.
     fn visibility_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_VISIBILITY)
     }
@@ -30,7 +35,12 @@ pub trait Imageable: SchemaBase {
             .set_custom(false)?)
     }
 
-    /// `purpose` attribute handle (C++ `GetPurposeAttr`).
+    /// The prim's render purpose — `default`, `render`, `proxy`, or `guide` —
+    /// classifying it for purpose-based visibility (e.g. show `proxy` in the
+    /// viewport, `render` at final quality). The opinion is inherited down
+    /// namespace. C++ `UsdGeomImageable::GetPurposeAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Purpose>()?`.
     fn purpose_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_PURPOSE)
     }

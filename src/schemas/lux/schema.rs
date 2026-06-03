@@ -40,7 +40,10 @@ impl SphereLight {
         get_typed(stage, path, tok::T_SPHERE_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the spherical light, in scene units; larger radii give
+    /// softer shadows. C++ `UsdLuxSphereLight::GetRadiusAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -50,8 +53,11 @@ impl SphereLight {
         Ok(self.create_attribute(tok::A_RADIUS, "float")?.set_custom(false)?)
     }
 
-    /// `treatAsPoint` attribute handle — a bare `bool` (not `inputs:`-prefixed)
-    /// (C++ `GetTreatAsPointAttr`).
+    /// Whether the light is treated as an ideal point source of zero radius for
+    /// the purpose of energy and shadow computation, ignoring `radius`.
+    /// C++ `UsdLuxSphereLight::GetTreatAsPointAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     pub fn treat_as_point_attr(&self) -> Attribute {
         self.attribute(tok::A_TREAT_AS_POINT)
     }
@@ -82,7 +88,10 @@ impl DiskLight {
         get_typed(stage, path, tok::T_DISK_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the disk, in scene units, measured in its local XY plane.
+    /// C++ `UsdLuxDiskLight::GetRadiusAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -112,7 +121,10 @@ impl RectLight {
         get_typed(stage, path, tok::T_RECT_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:width` attribute handle (C++ `GetWidthAttr`).
+    /// The width of the rectangle, in scene units, along its local X axis.
+    /// C++ `UsdLuxRectLight::GetWidthAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn width_attr(&self) -> Attribute {
         self.attribute(tok::A_WIDTH)
     }
@@ -122,7 +134,10 @@ impl RectLight {
         Ok(self.create_attribute(tok::A_WIDTH, "float")?.set_custom(false)?)
     }
 
-    /// `inputs:height` attribute handle (C++ `GetHeightAttr`).
+    /// The height of the rectangle, in scene units, along its local Y axis.
+    /// C++ `UsdLuxRectLight::GetHeightAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn height_attr(&self) -> Attribute {
         self.attribute(tok::A_HEIGHT)
     }
@@ -132,7 +147,10 @@ impl RectLight {
         Ok(self.create_attribute(tok::A_HEIGHT, "float")?.set_custom(false)?)
     }
 
-    /// `inputs:texture:file` attribute handle (C++ `GetTextureFileAttr`).
+    /// A color texture image mapped across the rectangle to modulate the
+    /// emitted light, e.g. a softbox or gobo. C++ `UsdLuxRectLight::GetTextureFileAttr`.
+    ///
+    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
     pub fn texture_file_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FILE)
     }
@@ -162,7 +180,10 @@ impl CylinderLight {
         get_typed(stage, path, tok::T_CYLINDER_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:length` attribute handle (C++ `GetLengthAttr`).
+    /// The length of the cylinder, in scene units, along its local X axis.
+    /// C++ `UsdLuxCylinderLight::GetLengthAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn length_attr(&self) -> Attribute {
         self.attribute(tok::A_LENGTH)
     }
@@ -172,7 +193,9 @@ impl CylinderLight {
         Ok(self.create_attribute(tok::A_LENGTH, "float")?.set_custom(false)?)
     }
 
-    /// `inputs:radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the cylinder, in scene units. C++ `UsdLuxCylinderLight::GetRadiusAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -182,8 +205,11 @@ impl CylinderLight {
         Ok(self.create_attribute(tok::A_RADIUS, "float")?.set_custom(false)?)
     }
 
-    /// `treatAsLine` attribute handle — a bare `bool`
-    /// (C++ `GetTreatAsLineAttr`).
+    /// Whether the cylinder is treated as an ideal line source of zero radius
+    /// for energy and shadow computation, ignoring `radius`.
+    /// C++ `UsdLuxCylinderLight::GetTreatAsLineAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     pub fn treat_as_line_attr(&self) -> Attribute {
         self.attribute(tok::A_TREAT_AS_LINE)
     }
@@ -214,7 +240,10 @@ impl PortalLight {
         get_typed(stage, path, tok::T_PORTAL_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:width` attribute handle (C++ `GetWidthAttr`).
+    /// The width of the portal aperture, in scene units, along its local X
+    /// axis. C++ `UsdLuxPortalLight::GetWidthAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn width_attr(&self) -> Attribute {
         self.attribute(tok::A_WIDTH)
     }
@@ -224,7 +253,10 @@ impl PortalLight {
         Ok(self.create_attribute(tok::A_WIDTH, "float")?.set_custom(false)?)
     }
 
-    /// `inputs:height` attribute handle (C++ `GetHeightAttr`).
+    /// The height of the portal aperture, in scene units, along its local Y
+    /// axis. C++ `UsdLuxPortalLight::GetHeightAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn height_attr(&self) -> Attribute {
         self.attribute(tok::A_HEIGHT)
     }
@@ -254,8 +286,11 @@ impl DistantLight {
         get_typed(stage, path, tok::T_DISTANT_LIGHT).map(|o| o.map(Self))
     }
 
-    /// `inputs:angle` attribute handle — angular diameter in degrees
-    /// (C++ `GetAngleAttr`).
+    /// The angular size of the light on the sky, in degrees; the apparent
+    /// diameter of the sun is about 0.53. Larger values give softer shadow
+    /// penumbrae. C++ `UsdLuxDistantLight::GetAngleAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn angle_attr(&self) -> Attribute {
         self.attribute(tok::A_ANGLE)
     }
@@ -324,7 +359,10 @@ impl DomeLight {
         get_typed_any(stage, path, &[tok::T_DOME_LIGHT, tok::T_DOME_LIGHT_1]).map(|o| o.map(Self))
     }
 
-    /// `inputs:texture:file` attribute handle (C++ `GetTextureFileAttr`).
+    /// The environment image lighting the scene from the surrounding sphere,
+    /// typically a high-dynamic-range lat-long map. C++ `UsdLuxDomeLight::GetTextureFileAttr`.
+    ///
+    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
     pub fn texture_file_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FILE)
     }
@@ -334,9 +372,12 @@ impl DomeLight {
         Ok(self.create_attribute(tok::A_TEXTURE_FILE, "asset")?.set_custom(false)?)
     }
 
-    /// `inputs:texture:format` attribute handle — `automatic` / `latlong` /
-    /// `mirroredBall` / `angular` / `cubeMapVerticalCross`
-    /// (C++ `GetTextureFormatAttr`).
+    /// How the texture image is projected onto the dome: `automatic`,
+    /// `latlong`, `mirroredBall`, `angular`, or `cubeMapVerticalCross`.
+    /// C++ `UsdLuxDomeLight::GetTextureFormatAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// [`TextureFormat::from_token`](super::TextureFormat::from_token).
     pub fn texture_format_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FORMAT)
     }
@@ -348,8 +389,11 @@ impl DomeLight {
             .set_custom(false)?)
     }
 
-    /// `guideRadius` attribute handle — visualisation gizmo radius, a bare
-    /// `float` (C++ `GetGuideRadiusAttr`).
+    /// The radius, in scene units, of the guide geometry drawn to visualize the
+    /// dome in a viewport; it has no effect on rendered light.
+    /// C++ `UsdLuxDomeLight::GetGuideRadiusAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn guide_radius_attr(&self) -> Attribute {
         self.attribute(tok::A_GUIDE_RADIUS)
     }
@@ -359,8 +403,12 @@ impl DomeLight {
         Ok(self.create_attribute(tok::A_GUIDE_RADIUS, "float")?.set_custom(false)?)
     }
 
-    /// `poleAxis` attribute handle — `scene` / `Y` / `Z`, only meaningful on
-    /// `DomeLight_1` (C++ `UsdLuxDomeLight_1::GetPoleAxisAttr`).
+    /// Which axis the latitude-longitude texture's poles align to — `scene`
+    /// (the stage up-axis), `Y`, or `Z`; only meaningful on `DomeLight_1`.
+    /// C++ `UsdLuxDomeLight_1::GetPoleAxisAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// [`PoleAxis::from_token`](super::PoleAxis::from_token).
     pub fn pole_axis_attr(&self) -> Attribute {
         self.attribute(tok::A_POLE_AXIS)
     }
@@ -461,7 +509,11 @@ impl ShapingAPI {
         get_with_api(stage, path, &[tok::API_SHAPING]).map(|o| o.map(Self))
     }
 
-    /// `inputs:shaping:focus` attribute handle (C++ `GetShapingFocusAttr`).
+    /// A focusing exponent that concentrates emission toward the light's center
+    /// of illumination; higher values give a tighter falloff, `0` is uniform.
+    /// C++ `UsdLuxShapingAPI::GetShapingFocusAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn focus_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_FOCUS)
     }
@@ -473,8 +525,11 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:focusTint` attribute handle
-    /// (C++ `GetShapingFocusTintAttr`).
+    /// A color tint mixed into the off-axis region as `focus` narrows the beam,
+    /// letting the edges of the cone shade differently from the center.
+    /// C++ `UsdLuxShapingAPI::GetShapingFocusTintAttr`.
+    ///
+    /// Type `color3f`. Fetch with `get::<[f32; 3]>()?`.
     pub fn focus_tint_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_FOCUS_TINT)
     }
@@ -487,8 +542,11 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:cone:angle` attribute handle — degrees
-    /// (C++ `GetShapingConeAngleAttr`).
+    /// The half-angle of the spotlight cone, in degrees, measured from the
+    /// light's primary axis; emission outside the cone is cut off.
+    /// C++ `UsdLuxShapingAPI::GetShapingConeAngleAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn cone_angle_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_CONE_ANGLE)
     }
@@ -501,8 +559,11 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:cone:softness` attribute handle
-    /// (C++ `GetShapingConeSoftnessAttr`).
+    /// How gradually emission falls off at the edge of the spotlight cone, as a
+    /// fraction of the cone angle; `0` is a hard edge, `1` fades across the
+    /// whole cone. C++ `UsdLuxShapingAPI::GetShapingConeSoftnessAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn cone_softness_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_CONE_SOFTNESS)
     }
@@ -515,8 +576,10 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:ies:file` attribute handle
-    /// (C++ `GetShapingIesFileAttr`).
+    /// An IES photometric profile (`.ies`) describing the light's real-world
+    /// angular intensity distribution. C++ `UsdLuxShapingAPI::GetShapingIesFileAttr`.
+    ///
+    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
     pub fn ies_file_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_IES_FILE)
     }
@@ -529,8 +592,11 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:ies:angleScale` attribute handle
-    /// (C++ `GetShapingIesAngleScaleAttr`).
+    /// A scale factor that rescales the angular extent of the IES profile,
+    /// widening or narrowing the emitted distribution.
+    /// C++ `UsdLuxShapingAPI::GetShapingIesAngleScaleAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn ies_angle_scale_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_IES_ANGLE_SCALE)
     }
@@ -543,8 +609,11 @@ impl ShapingAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shaping:ies:normalize` attribute handle
-    /// (C++ `GetShapingIesNormalizeAttr`).
+    /// Whether to normalize the IES profile so its overall power matches the
+    /// light's other intensity controls rather than the absolute values baked
+    /// into the file. C++ `UsdLuxShapingAPI::GetShapingIesNormalizeAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     pub fn ies_normalize_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_IES_NORMALIZE)
     }
@@ -576,7 +645,10 @@ impl ShadowAPI {
         get_with_api(stage, path, &[tok::API_SHADOW]).map(|o| o.map(Self))
     }
 
-    /// `inputs:shadow:enable` attribute handle (C++ `GetShadowEnableAttr`).
+    /// Whether the light casts shadows; set to `false` to let the light pass
+    /// through occluders. C++ `UsdLuxShadowAPI::GetShadowEnableAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     pub fn enable_attr(&self) -> Attribute {
         self.attribute(tok::A_SHADOW_ENABLE)
     }
@@ -586,7 +658,10 @@ impl ShadowAPI {
         Ok(self.create_attribute(tok::A_SHADOW_ENABLE, "bool")?.set_custom(false)?)
     }
 
-    /// `inputs:shadow:color` attribute handle (C++ `GetShadowColorAttr`).
+    /// The color of the cast shadow, allowing artistically tinted (rather than
+    /// physically black) shadows. C++ `UsdLuxShadowAPI::GetShadowColorAttr`.
+    ///
+    /// Type `color3f`. Fetch with `get::<[f32; 3]>()?`.
     pub fn color_attr(&self) -> Attribute {
         self.attribute(tok::A_SHADOW_COLOR)
     }
@@ -598,8 +673,10 @@ impl ShadowAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shadow:distance` attribute handle — max shadow-ray distance,
-    /// `-1` for unlimited (C++ `GetShadowDistanceAttr`).
+    /// The maximum distance, in scene units, that shadows are cast from the
+    /// light; `-1` means unlimited. C++ `UsdLuxShadowAPI::GetShadowDistanceAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn distance_attr(&self) -> Attribute {
         self.attribute(tok::A_SHADOW_DISTANCE)
     }
@@ -612,7 +689,11 @@ impl ShadowAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shadow:falloff` attribute handle (C++ `GetShadowFalloffAttr`).
+    /// The distance, in scene units, over which the shadow fades out as it
+    /// approaches `distance`; `-1` disables the falloff.
+    /// C++ `UsdLuxShadowAPI::GetShadowFalloffAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn falloff_attr(&self) -> Attribute {
         self.attribute(tok::A_SHADOW_FALLOFF)
     }
@@ -625,8 +706,11 @@ impl ShadowAPI {
             .set_custom(false)?)
     }
 
-    /// `inputs:shadow:falloffGamma` attribute handle
-    /// (C++ `GetShadowFalloffGammaAttr`).
+    /// A gamma exponent shaping the curve of the shadow falloff, controlling how
+    /// quickly the shadow fades across the falloff region.
+    /// C++ `UsdLuxShadowAPI::GetShadowFalloffGammaAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn falloff_gamma_attr(&self) -> Attribute {
         self.attribute(tok::A_SHADOW_FALLOFF_GAMMA)
     }
@@ -674,8 +758,13 @@ impl LightListAPI {
         Ok(self.create_relationship(tok::REL_LIGHT_LIST)?.set_custom(false)?)
     }
 
-    /// `lightList:cacheBehavior` attribute handle — `consumeAndContinue` /
-    /// `consumeAndHalt` / `ignore` (C++ `GetLightListCacheBehaviorAttr`).
+    /// How a consumer should treat the cached `lightList` relationship while
+    /// traversing: `consumeAndContinue` (use it, then keep descending),
+    /// `consumeAndHalt` (use it and stop descending), or `ignore` (always
+    /// traverse for lights). C++ `UsdLuxLightListAPI::GetLightListCacheBehaviorAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// [`LightListCacheBehavior::from_token`](super::LightListCacheBehavior::from_token).
     pub fn cache_behavior_attr(&self) -> Attribute {
         self.attribute(tok::A_LIGHT_LIST_CACHE_BEHAVIOR)
     }

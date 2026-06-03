@@ -31,8 +31,11 @@ impl Points {
         get_typed(stage, path, tok::T_POINTS).map(|o| o.map(Self))
     }
 
-    /// `widths` attribute handle — per-point radius, `float[]`
-    /// (C++ `GetWidthsAttr`).
+    /// The diameter of each point in local space, sized so the cloud renders as
+    /// disks or spheres; its `interpolation` metadata says whether one width
+    /// covers all points or one is given per point. C++ `UsdGeomPoints::GetWidthsAttr`.
+    ///
+    /// Type `float[]`. Fetch with `get::<Vec<f32>>()?`.
     pub fn widths_attr(&self) -> Attribute {
         self.attribute(tok::A_WIDTHS)
     }
@@ -42,8 +45,11 @@ impl Points {
         Ok(self.create_attribute(tok::A_WIDTHS, "float[]")?.set_custom(false)?)
     }
 
-    /// `ids` attribute handle — stable per-point identifiers, `int64[]`
-    /// (C++ `GetIdsAttr`).
+    /// Optional persistent identifiers that track each point across time samples
+    /// even as points are added or removed, letting renderers maintain motion
+    /// correspondence. C++ `UsdGeomPoints::GetIdsAttr`.
+    ///
+    /// Type `int64[]`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::Int64Vec`]).
     pub fn ids_attr(&self) -> Attribute {
         self.attribute(tok::A_IDS)
     }
@@ -75,8 +81,11 @@ impl TetMesh {
         get_typed(stage, path, tok::T_TET_MESH).map(|o| o.map(Self))
     }
 
-    /// `tetVertexIndices` attribute handle — per-tet CV indices, `int4[]`
-    /// (C++ `GetTetVertexIndicesAttr`).
+    /// The four [`points`](PointBased::points_attr) indices forming each
+    /// tetrahedron, ordered so the first three wind counter-clockwise as seen
+    /// from the fourth. C++ `UsdGeomTetMesh::GetTetVertexIndicesAttr`.
+    ///
+    /// Type `int4[]`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::Vec4iVec`]).
     pub fn tet_vertex_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_TET_VERTEX_INDICES)
     }
@@ -89,8 +98,11 @@ impl TetMesh {
             .set_custom(false)?)
     }
 
-    /// `surfaceFaceVertexIndices` attribute handle — boundary triangles,
-    /// `int3[]` (C++ `GetSurfaceFaceVertexIndicesAttr`).
+    /// An optional precomputed triangulation of the mesh's exterior boundary,
+    /// each triple indexing [`points`](PointBased::points_attr) and wound so its
+    /// normal points outward. C++ `UsdGeomTetMesh::GetSurfaceFaceVertexIndicesAttr`.
+    ///
+    /// Type `int3[]`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::Vec3iVec`]).
     pub fn surface_face_vertex_indices_attr(&self) -> Attribute {
         self.attribute(tok::A_SURFACE_FACE_VERTEX_INDICES)
     }

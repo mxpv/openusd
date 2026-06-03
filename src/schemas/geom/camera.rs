@@ -29,7 +29,11 @@ impl Camera {
         get_typed(stage, path, tok::T_CAMERA).map(|o| o.map(Self))
     }
 
-    /// `focalLength` attribute handle (C++ `GetFocalLengthAttr`).
+    /// The perspective lens focal length, in tenths of a scene unit (the USD
+    /// camera convention) — e.g. 50 for a 50 mm lens when the scene unit is
+    /// millimetres. C++ `UsdGeomCamera::GetFocalLengthAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn focal_length_attr(&self) -> Attribute {
         self.attribute(tok::A_FOCAL_LENGTH)
     }
@@ -39,7 +43,11 @@ impl Camera {
         Ok(self.create_attribute(tok::A_FOCAL_LENGTH, "float")?.set_custom(false)?)
     }
 
-    /// `horizontalAperture` attribute handle (C++ `GetHorizontalApertureAttr`).
+    /// The width of the camera's film gate (aperture), in tenths of a scene
+    /// unit, which together with the focal length sets the horizontal field of
+    /// view. C++ `UsdGeomCamera::GetHorizontalApertureAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn horizontal_aperture_attr(&self) -> Attribute {
         self.attribute(tok::A_HORIZONTAL_APERTURE)
     }
@@ -51,7 +59,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `verticalAperture` attribute handle (C++ `GetVerticalApertureAttr`).
+    /// The height of the camera's film gate (aperture), in tenths of a scene
+    /// unit, which together with the focal length sets the vertical field of
+    /// view. C++ `UsdGeomCamera::GetVerticalApertureAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn vertical_aperture_attr(&self) -> Attribute {
         self.attribute(tok::A_VERTICAL_APERTURE)
     }
@@ -63,7 +75,12 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `horizontalApertureOffset` attribute handle.
+    /// The horizontal offset of the film gate from the lens axis, in the same
+    /// tenths-of-a-scene-unit units as `horizontalAperture`, producing an
+    /// off-centre (lens-shift) projection. C++
+    /// `UsdGeomCamera::GetHorizontalApertureOffsetAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn horizontal_aperture_offset_attr(&self) -> Attribute {
         self.attribute(tok::A_HORIZONTAL_APERTURE_OFFSET)
     }
@@ -75,7 +92,12 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `verticalApertureOffset` attribute handle.
+    /// The vertical offset of the film gate from the lens axis, in the same
+    /// tenths-of-a-scene-unit units as `verticalAperture`, producing an
+    /// off-centre (lens-shift) projection. C++
+    /// `UsdGeomCamera::GetVerticalApertureOffsetAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn vertical_aperture_offset_attr(&self) -> Attribute {
         self.attribute(tok::A_VERTICAL_APERTURE_OFFSET)
     }
@@ -87,7 +109,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `fStop` attribute handle (C++ `GetFStopAttr`).
+    /// The lens aperture as an f-number, controlling depth of field: smaller
+    /// values open the aperture and shrink the in-focus range. Distinct from
+    /// the exposure f-stop. C++ `UsdGeomCamera::GetFStopAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn f_stop_attr(&self) -> Attribute {
         self.attribute(tok::A_F_STOP)
     }
@@ -97,7 +123,11 @@ impl Camera {
         Ok(self.create_attribute(tok::A_F_STOP, "float")?.set_custom(false)?)
     }
 
-    /// `focusDistance` attribute handle (C++ `GetFocusDistanceAttr`).
+    /// The distance from the camera to the focus plane, in scene units, around
+    /// which the depth-of-field blur is centred. C++
+    /// `UsdGeomCamera::GetFocusDistanceAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn focus_distance_attr(&self) -> Attribute {
         self.attribute(tok::A_FOCUS_DISTANCE)
     }
@@ -109,7 +139,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `exposure` attribute handle (C++ `GetExposureAttr`).
+    /// Exposure compensation as a log base-2 stop value applied on top of the
+    /// physical exposure terms — each whole unit doubles or halves image
+    /// brightness. C++ `UsdGeomCamera::GetExposureAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn exposure_attr(&self) -> Attribute {
         self.attribute(tok::A_EXPOSURE)
     }
@@ -119,7 +153,11 @@ impl Camera {
         Ok(self.create_attribute(tok::A_EXPOSURE, "float")?.set_custom(false)?)
     }
 
-    /// `exposure:iso` attribute handle.
+    /// The ISO speed rating of the sensor or film used in the physical exposure
+    /// computation — higher values brighten the image. C++
+    /// `UsdGeomCamera::GetExposureIsoAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn exposure_iso_attr(&self) -> Attribute {
         self.attribute(tok::A_EXPOSURE_ISO)
     }
@@ -129,7 +167,11 @@ impl Camera {
         Ok(self.create_attribute(tok::A_EXPOSURE_ISO, "float")?.set_custom(false)?)
     }
 
-    /// `exposure:time` attribute handle.
+    /// The sensor exposure time in seconds used in the physical exposure
+    /// computation — longer times brighten the image. C++
+    /// `UsdGeomCamera::GetExposureTimeAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn exposure_time_attr(&self) -> Attribute {
         self.attribute(tok::A_EXPOSURE_TIME)
     }
@@ -141,7 +183,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `exposure:fStop` attribute handle.
+    /// The aperture f-number used in the physical exposure computation — a
+    /// smaller f-stop brightens the image. Separate from the depth-of-field
+    /// `fStop`. C++ `UsdGeomCamera::GetExposureFStopAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn exposure_f_stop_attr(&self) -> Attribute {
         self.attribute(tok::A_EXPOSURE_F_STOP)
     }
@@ -153,7 +199,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `exposure:responsivity` attribute handle.
+    /// A scalar multiplier for the overall responsivity of the sensor system
+    /// to light in the physical exposure computation. C++
+    /// `UsdGeomCamera::GetExposureResponsivityAttr`.
+    ///
+    /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn exposure_responsivity_attr(&self) -> Attribute {
         self.attribute(tok::A_EXPOSURE_RESPONSIVITY)
     }
@@ -165,7 +215,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `shutter:open` attribute handle.
+    /// The frame-relative time the shutter opens, in `UsdTimeCode` units
+    /// (typically negative, i.e. before the frame), defining the start of the
+    /// motion-blur interval. C++ `UsdGeomCamera::GetShutterOpenAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn shutter_open_attr(&self) -> Attribute {
         self.attribute(tok::A_SHUTTER_OPEN)
     }
@@ -177,7 +231,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `shutter:close` attribute handle.
+    /// The frame-relative time the shutter closes, in `UsdTimeCode` units,
+    /// defining the end of the motion-blur interval. C++
+    /// `UsdGeomCamera::GetShutterCloseAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn shutter_close_attr(&self) -> Attribute {
         self.attribute(tok::A_SHUTTER_CLOSE)
     }
@@ -189,8 +247,10 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `projection` attribute handle — `perspective` / `orthographic`
-    /// (C++ `GetProjectionAttr`).
+    /// Whether the camera projects in `perspective` or `orthographic` mode.
+    /// C++ `UsdGeomCamera::GetProjectionAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Projection>()?`.
     pub fn projection_attr(&self) -> Attribute {
         self.attribute(tok::A_PROJECTION)
     }
@@ -203,7 +263,11 @@ impl Camera {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `stereoRole` attribute handle — `mono` / `left` / `right`.
+    /// The camera's role in a stereo rig — `mono`, `left`, or `right`; a value
+    /// other than `mono` marks it as one eye of a stereo pair. C++
+    /// `UsdGeomCamera::GetStereoRoleAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<StereoRole>()?`.
     pub fn stereo_role_attr(&self) -> Attribute {
         self.attribute(tok::A_STEREO_ROLE)
     }
@@ -216,7 +280,11 @@ impl Camera {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `clippingRange` attribute handle — `(near, far)` (`float2`).
+    /// The near and far clipping distances `(near, far)`, in scene units,
+    /// bounding the depth range the camera renders. C++
+    /// `UsdGeomCamera::GetClippingRangeAttr`.
+    ///
+    /// Type `float2`. Fetch with `get::<[f32; 2]>()?`.
     pub fn clipping_range_attr(&self) -> Attribute {
         self.attribute(tok::A_CLIPPING_RANGE)
     }
@@ -228,7 +296,11 @@ impl Camera {
             .set_custom(false)?)
     }
 
-    /// `clippingPlanes` attribute handle — plane equations (`float4[]`).
+    /// Additional, arbitrarily oriented clipping planes, each a `(a, b, c, d)`
+    /// plane equation that clips geometry on its negative side. C++
+    /// `UsdGeomCamera::GetClippingPlanesAttr`.
+    ///
+    /// Type `float4[]`. Fetch with `get::<Vec<[f32; 4]>>()?`.
     pub fn clipping_planes_attr(&self) -> Attribute {
         self.attribute(tok::A_CLIPPING_PLANES)
     }

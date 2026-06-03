@@ -21,8 +21,11 @@ use crate::schemas::common::get_typed;
 /// `curveVertexCounts`. Adds the shared `curveVertexCounts` / `widths`
 /// attributes; the basis / knot data lives on the concrete subclasses.
 pub trait Curves: PointBased {
-    /// `curveVertexCounts` attribute handle — CV count per curve, `int[]`
-    /// (C++ `GetCurveVertexCountsAttr`).
+    /// The number of vertices in each curve in the batch; its length is the curve count and its
+    /// sum is the total number of control points partitioning `points`.
+    /// C++ `UsdGeomCurves::GetCurveVertexCountsAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     fn curve_vertex_counts_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_CURVE_VERTEX_COUNTS)
     }
@@ -36,9 +39,11 @@ pub trait Curves: PointBased {
             .set_custom(false)?)
     }
 
-    /// `widths` attribute handle — per-CV width, `float[]`
-    /// (C++ `GetWidthsAttr`). Set its `interpolation` metadata (`vertex` /
-    /// `varying` / `constant`) to describe how the values map to the curve.
+    /// The width (diameter) of the curves, in object space; set its `interpolation` metadata
+    /// (`constant` / `varying` / `vertex`) to describe how the values map to the curve.
+    /// C++ `UsdGeomCurves::GetWidthsAttr`.
+    ///
+    /// Type `float[]`. Fetch with `get::<Vec<f32>>()?`.
     fn widths_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_WIDTHS)
     }
@@ -71,7 +76,11 @@ impl BasisCurves {
         get_typed(stage, path, tok::T_BASIS_CURVES).map(|o| o.map(Self))
     }
 
-    /// `type` attribute handle — `linear` / `cubic` (C++ `GetTypeAttr`).
+    /// Whether the curves are `linear` (joining vertices with straight segments) or `cubic`
+    /// (interpolated by the chosen `basis`).
+    /// C++ `UsdGeomBasisCurves::GetTypeAttr`.
+    ///
+    /// Type `token` (see [`CurveType`](super::CurveType)). Fetch with `get::<String>()?`.
     pub fn type_attr(&self) -> Attribute {
         self.attribute(tok::A_TYPE)
     }
@@ -84,8 +93,11 @@ impl BasisCurves {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `basis` attribute handle — `bezier` / `bspline` / `catmullRom` /
-    /// `hermite` (C++ `GetBasisAttr`).
+    /// The basis matrix that interpolates the control points of `cubic` curves: `bezier`,
+    /// `bspline`, `catmullRom`, or `hermite` (ignored when `type` is `linear`).
+    /// C++ `UsdGeomBasisCurves::GetBasisAttr`.
+    ///
+    /// Type `token` (see [`CurveBasis`](super::CurveBasis)). Fetch with `get::<String>()?`.
     pub fn basis_attr(&self) -> Attribute {
         self.attribute(tok::A_BASIS)
     }
@@ -98,8 +110,12 @@ impl BasisCurves {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `wrap` attribute handle — `nonperiodic` / `periodic` / `pinned`
-    /// (C++ `GetWrapAttr`).
+    /// How the curve's endpoints are treated: `nonperiodic` (open), `periodic` (the last vertices
+    /// connect back to the first to close the loop), or `pinned` (the curve passes through its
+    /// first and last control points).
+    /// C++ `UsdGeomBasisCurves::GetWrapAttr`.
+    ///
+    /// Type `token` (see [`CurveWrap`](super::CurveWrap)). Fetch with `get::<String>()?`.
     pub fn wrap_attr(&self) -> Attribute {
         self.attribute(tok::A_WRAP)
     }
@@ -133,8 +149,11 @@ impl NurbsCurves {
         get_typed(stage, path, tok::T_NURBS_CURVES).map(|o| o.map(Self))
     }
 
-    /// `order` attribute handle — per-curve order (degree + 1), `int[]`
-    /// (C++ `GetOrderAttr`).
+    /// The order of each curve, where order equals degree plus one (e.g. 4 for a cubic curve); one
+    /// value per curve in the batch.
+    /// C++ `UsdGeomNurbsCurves::GetOrderAttr`.
+    ///
+    /// Type `int[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::IntVec`).
     pub fn order_attr(&self) -> Attribute {
         self.attribute(tok::A_ORDER)
     }
@@ -144,8 +163,11 @@ impl NurbsCurves {
         Ok(self.create_attribute(tok::A_ORDER, "int[]")?.set_custom(false)?)
     }
 
-    /// `knots` attribute handle — concatenated knot vectors, `double[]`
-    /// (C++ `GetKnotsAttr`).
+    /// The knot vectors for all curves concatenated end to end; each curve contributes
+    /// `curveVertexCount + order` knots in non-decreasing order.
+    /// C++ `UsdGeomNurbsCurves::GetKnotsAttr`.
+    ///
+    /// Type `double[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn knots_attr(&self) -> Attribute {
         self.attribute(tok::A_KNOTS)
     }
@@ -155,8 +177,11 @@ impl NurbsCurves {
         Ok(self.create_attribute(tok::A_KNOTS, "double[]")?.set_custom(false)?)
     }
 
-    /// `ranges` attribute handle — per-curve `(uMin, uMax)`, `double2[]`
-    /// (C++ `GetRangesAttr`).
+    /// The parametric range `(uMin, uMax)` over which each curve is evaluated, one pair per curve;
+    /// the curve is only valid over this subset of its knot range.
+    /// C++ `UsdGeomNurbsCurves::GetRangesAttr`.
+    ///
+    /// Type `double2[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn ranges_attr(&self) -> Attribute {
         self.attribute(tok::A_RANGES)
     }
@@ -166,8 +191,11 @@ impl NurbsCurves {
         Ok(self.create_attribute(tok::A_RANGES, "double2[]")?.set_custom(false)?)
     }
 
-    /// `pointWeights` attribute handle — rational CV weights, `double[]`
-    /// (C++ `GetPointWeightsAttr`).
+    /// The rational weight of each control point, making the geometry a rational NURBS; one value
+    /// per point and parallel to `points`. Omit (or leave all 1.0) for a non-rational curve.
+    /// C++ `UsdGeomNurbsCurves::GetPointWeightsAttr`.
+    ///
+    /// Type `double[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn point_weights_attr(&self) -> Attribute {
         self.attribute(tok::A_POINT_WEIGHTS)
     }
@@ -200,8 +228,11 @@ impl HermiteCurves {
         get_typed(stage, path, tok::T_HERMITE_CURVES).map(|o| o.map(Self))
     }
 
-    /// `tangents` attribute handle — per-CV tangent, `vector3f[]`
-    /// (C++ `GetTangentsAttr`).
+    /// The outgoing tangent vector at each control point, parallel to `points`; together a point
+    /// and its tangent define the cubic-Hermite segment leaving that vertex.
+    /// C++ `UsdGeomHermiteCurves::GetTangentsAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     pub fn tangents_attr(&self) -> Attribute {
         self.attribute(tok::A_TANGENTS)
     }
@@ -235,7 +266,11 @@ impl NurbsPatch {
         get_typed(stage, path, tok::T_NURBS_PATCH).map(|o| o.map(Self))
     }
 
-    /// `uVertexCount` attribute handle (C++ `GetUVertexCountAttr`).
+    /// The number of control points along the U (row) direction of the control net; `points` is
+    /// laid out row-major as `P[i, j] = points[i * vVertexCount + j]`.
+    /// C++ `UsdGeomNurbsPatch::GetUVertexCountAttr`.
+    ///
+    /// Type `int`. Fetch with `get::<i32>()?`.
     pub fn u_vertex_count_attr(&self) -> Attribute {
         self.attribute(tok::A_U_VERTEX_COUNT)
     }
@@ -245,7 +280,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_U_VERTEX_COUNT, "int")?.set_custom(false)?)
     }
 
-    /// `vVertexCount` attribute handle (C++ `GetVVertexCountAttr`).
+    /// The number of control points along the V (column) direction of the control net; the inner
+    /// stride of the row-major `points` layout.
+    /// C++ `UsdGeomNurbsPatch::GetVVertexCountAttr`.
+    ///
+    /// Type `int`. Fetch with `get::<i32>()?`.
     pub fn v_vertex_count_attr(&self) -> Attribute {
         self.attribute(tok::A_V_VERTEX_COUNT)
     }
@@ -255,7 +294,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_V_VERTEX_COUNT, "int")?.set_custom(false)?)
     }
 
-    /// `uOrder` attribute handle (C++ `GetUOrderAttr`).
+    /// The order of the surface in the U direction, equal to degree plus one (e.g. 4 for bicubic
+    /// in U).
+    /// C++ `UsdGeomNurbsPatch::GetUOrderAttr`.
+    ///
+    /// Type `int`. Fetch with `get::<i32>()?`.
     pub fn u_order_attr(&self) -> Attribute {
         self.attribute(tok::A_U_ORDER)
     }
@@ -265,7 +308,10 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_U_ORDER, "int")?.set_custom(false)?)
     }
 
-    /// `vOrder` attribute handle (C++ `GetVOrderAttr`).
+    /// The order of the surface in the V direction, equal to degree plus one.
+    /// C++ `UsdGeomNurbsPatch::GetVOrderAttr`.
+    ///
+    /// Type `int`. Fetch with `get::<i32>()?`.
     pub fn v_order_attr(&self) -> Attribute {
         self.attribute(tok::A_V_ORDER)
     }
@@ -275,7 +321,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_V_ORDER, "int")?.set_custom(false)?)
     }
 
-    /// `uKnots` attribute handle — `double[]` (C++ `GetUKnotsAttr`).
+    /// The knot vector along the U direction; its length must be `uVertexCount + uOrder` and its
+    /// values must be non-decreasing.
+    /// C++ `UsdGeomNurbsPatch::GetUKnotsAttr`.
+    ///
+    /// Type `double[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn u_knots_attr(&self) -> Attribute {
         self.attribute(tok::A_U_KNOTS)
     }
@@ -285,7 +335,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_U_KNOTS, "double[]")?.set_custom(false)?)
     }
 
-    /// `vKnots` attribute handle — `double[]` (C++ `GetVKnotsAttr`).
+    /// The knot vector along the V direction; its length must be `vVertexCount + vOrder` and its
+    /// values must be non-decreasing.
+    /// C++ `UsdGeomNurbsPatch::GetVKnotsAttr`.
+    ///
+    /// Type `double[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn v_knots_attr(&self) -> Attribute {
         self.attribute(tok::A_V_KNOTS)
     }
@@ -295,8 +349,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_V_KNOTS, "double[]")?.set_custom(false)?)
     }
 
-    /// `uForm` attribute handle — `open` / `closed` / `periodic`
-    /// (C++ `GetUFormAttr`).
+    /// The topological form of the surface in the U direction: `open`, `closed` (the surface
+    /// meets itself), or `periodic` (it wraps around smoothly).
+    /// C++ `UsdGeomNurbsPatch::GetUFormAttr`.
+    ///
+    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<String>()?`.
     pub fn u_form_attr(&self) -> Attribute {
         self.attribute(tok::A_U_FORM)
     }
@@ -309,8 +366,10 @@ impl NurbsPatch {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `vForm` attribute handle — `open` / `closed` / `periodic`
-    /// (C++ `GetVFormAttr`).
+    /// The topological form of the surface in the V direction: `open`, `closed`, or `periodic`.
+    /// C++ `UsdGeomNurbsPatch::GetVFormAttr`.
+    ///
+    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<String>()?`.
     pub fn v_form_attr(&self) -> Attribute {
         self.attribute(tok::A_V_FORM)
     }
@@ -323,8 +382,11 @@ impl NurbsPatch {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `uRange` attribute handle — `(uMin, uMax)`, `double2`
-    /// (C++ `GetURangeAttr`).
+    /// The parametric range `(uMin, uMax)` over which the surface is evaluated in U; the patch is
+    /// only valid over this subset of the `uKnots` range.
+    /// C++ `UsdGeomNurbsPatch::GetURangeAttr`.
+    ///
+    /// Type `double2`. Fetch with `get::<Vec<f64>>()?`.
     pub fn u_range_attr(&self) -> Attribute {
         self.attribute(tok::A_U_RANGE)
     }
@@ -334,8 +396,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_U_RANGE, "double2")?.set_custom(false)?)
     }
 
-    /// `vRange` attribute handle — `(vMin, vMax)`, `double2`
-    /// (C++ `GetVRangeAttr`).
+    /// The parametric range `(vMin, vMax)` over which the surface is evaluated in V; the patch is
+    /// only valid over this subset of the `vKnots` range.
+    /// C++ `UsdGeomNurbsPatch::GetVRangeAttr`.
+    ///
+    /// Type `double2`. Fetch with `get::<Vec<f64>>()?`.
     pub fn v_range_attr(&self) -> Attribute {
         self.attribute(tok::A_V_RANGE)
     }
@@ -345,8 +410,11 @@ impl NurbsPatch {
         Ok(self.create_attribute(tok::A_V_RANGE, "double2")?.set_custom(false)?)
     }
 
-    /// `pointWeights` attribute handle — rational CV weights, `double[]`
-    /// (C++ `GetPointWeightsAttr`).
+    /// The rational weight of each control point, making the surface a rational NURBS; one value
+    /// per point and parallel to `points`. Omit (or leave all 1.0) for a non-rational patch.
+    /// C++ `UsdGeomNurbsPatch::GetPointWeightsAttr`.
+    ///
+    /// Type `double[]`. Fetch with `get::<Vec<f64>>()?`.
     pub fn point_weights_attr(&self) -> Attribute {
         self.attribute(tok::A_POINT_WEIGHTS)
     }

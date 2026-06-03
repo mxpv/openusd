@@ -10,8 +10,11 @@ use super::Xformable;
 /// A prim with a bounding extent (C++ `UsdGeomBoundable`). Inherits
 /// [`Xformable`].
 pub trait Boundable: Xformable {
-    /// `extent` attribute handle — local-space `[min, max]` corners stored as
-    /// `float3[2]` (C++ `GetExtentAttr`).
+    /// The local-space axis-aligned bounding box as the two corners
+    /// `[min, max]`, used as a fast, authored bound for the prim's geometry.
+    /// C++ `UsdGeomBoundable::GetExtentAttr`.
+    ///
+    /// Type `float3[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn extent_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_EXTENT)
     }

@@ -33,7 +33,11 @@ impl Cube {
         get_typed(stage, path, tok::T_CUBE).map(|o| o.map(Self))
     }
 
-    /// `size` attribute handle (C++ `GetSizeAttr`).
+    /// The cube's edge length in local space (default 2.0), so the cube spans
+    /// from `-size/2` to `+size/2` on each axis before the prim's transform.
+    /// C++ `UsdGeomCube::GetSizeAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn size_attr(&self) -> Attribute {
         self.attribute(tok::A_SIZE)
     }
@@ -63,7 +67,10 @@ impl Sphere {
         get_typed(stage, path, tok::T_SPHERE).map(|o| o.map(Self))
     }
 
-    /// `radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The sphere's radius in local space (default 1.0); the prim's transform
+    /// then scales it. C++ `UsdGeomSphere::GetRadiusAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -92,7 +99,10 @@ impl Cone {
         get_typed(stage, path, tok::T_CONE).map(|o| o.map(Self))
     }
 
-    /// `radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the cone's circular base, measured perpendicular to its
+    /// [`axis`](Self::axis_attr) in local space. C++ `UsdGeomCone::GetRadiusAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -102,7 +112,10 @@ impl Cone {
         Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
-    /// `height` attribute handle (C++ `GetHeightAttr`).
+    /// The cone's extent along its [`axis`](Self::axis_attr), centered on the
+    /// prim origin. C++ `UsdGeomCone::GetHeightAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn height_attr(&self) -> Attribute {
         self.attribute(tok::A_HEIGHT)
     }
@@ -112,8 +125,10 @@ impl Cone {
         Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
-    /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
-    /// (C++ `GetAxisAttr`).
+    /// The local-space axis the cone's spine runs along: `X`, `Y`, or `Z`
+    /// (default `Z`). C++ `UsdGeomCone::GetAxisAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Axis>()?`.
     pub fn axis_attr(&self) -> Attribute {
         self.attribute(tok::A_AXIS)
     }
@@ -146,7 +161,11 @@ impl Cylinder {
         get_typed(stage, path, tok::T_CYLINDER).map(|o| o.map(Self))
     }
 
-    /// `radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the cylinder's circular cross-section, measured
+    /// perpendicular to its [`axis`](Self::axis_attr) in local space.
+    /// C++ `UsdGeomCylinder::GetRadiusAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -156,7 +175,10 @@ impl Cylinder {
         Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
-    /// `height` attribute handle (C++ `GetHeightAttr`).
+    /// The cylinder's extent along its [`axis`](Self::axis_attr), centered on
+    /// the prim origin. C++ `UsdGeomCylinder::GetHeightAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn height_attr(&self) -> Attribute {
         self.attribute(tok::A_HEIGHT)
     }
@@ -166,8 +188,10 @@ impl Cylinder {
         Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
-    /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
-    /// (C++ `GetAxisAttr`).
+    /// The local-space axis the cylinder's spine runs along: `X`, `Y`, or `Z`
+    /// (default `Z`). C++ `UsdGeomCylinder::GetAxisAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Axis>()?`.
     pub fn axis_attr(&self) -> Attribute {
         self.attribute(tok::A_AXIS)
     }
@@ -201,7 +225,11 @@ impl Capsule {
         get_typed(stage, path, tok::T_CAPSULE).map(|o| o.map(Self))
     }
 
-    /// `radius` attribute handle (C++ `GetRadiusAttr`).
+    /// The radius of the capsule's cylindrical body and its hemispherical caps,
+    /// measured perpendicular to the [`axis`](Self::axis_attr) in local space.
+    /// C++ `UsdGeomCapsule::GetRadiusAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn radius_attr(&self) -> Attribute {
         self.attribute(tok::A_RADIUS)
     }
@@ -211,7 +239,11 @@ impl Capsule {
         Ok(self.create_attribute(tok::A_RADIUS, "double")?.set_custom(false)?)
     }
 
-    /// `height` attribute handle (C++ `GetHeightAttr`).
+    /// The length of the capsule's cylindrical section along its
+    /// [`axis`](Self::axis_attr), excluding the two hemispherical caps, centered
+    /// on the prim origin. C++ `UsdGeomCapsule::GetHeightAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn height_attr(&self) -> Attribute {
         self.attribute(tok::A_HEIGHT)
     }
@@ -221,8 +253,10 @@ impl Capsule {
         Ok(self.create_attribute(tok::A_HEIGHT, "double")?.set_custom(false)?)
     }
 
-    /// `axis` attribute handle — spine axis `X` / `Y` / `Z`
-    /// (C++ `GetAxisAttr`).
+    /// The local-space axis the capsule's spine runs along: `X`, `Y`, or `Z`
+    /// (default `Z`). C++ `UsdGeomCapsule::GetAxisAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Axis>()?`.
     pub fn axis_attr(&self) -> Attribute {
         self.attribute(tok::A_AXIS)
     }
@@ -256,7 +290,11 @@ impl Plane {
         get_typed(stage, path, tok::T_PLANE).map(|o| o.map(Self))
     }
 
-    /// `width` attribute handle (C++ `GetWidthAttr`).
+    /// The plane's extent along the first of the two in-plane axes orthogonal to
+    /// its [`axis`](Self::axis_attr) normal, in local space.
+    /// C++ `UsdGeomPlane::GetWidthAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn width_attr(&self) -> Attribute {
         self.attribute(tok::A_WIDTH)
     }
@@ -266,7 +304,11 @@ impl Plane {
         Ok(self.create_attribute(tok::A_WIDTH, "double")?.set_custom(false)?)
     }
 
-    /// `length` attribute handle (C++ `GetLengthAttr`).
+    /// The plane's extent along the second of the two in-plane axes orthogonal
+    /// to its [`axis`](Self::axis_attr) normal, in local space.
+    /// C++ `UsdGeomPlane::GetLengthAttr`.
+    ///
+    /// Type `double`. Fetch with `get::<f64>()?`.
     pub fn length_attr(&self) -> Attribute {
         self.attribute(tok::A_LENGTH)
     }
@@ -276,8 +318,11 @@ impl Plane {
         Ok(self.create_attribute(tok::A_LENGTH, "double")?.set_custom(false)?)
     }
 
-    /// `axis` attribute handle — the plane's normal `X` / `Y` / `Z`
-    /// (C++ `GetAxisAttr`).
+    /// The local-space axis the plane's normal points along: `X`, `Y`, or `Z`
+    /// (default `Z`); the plane itself lies in the other two axes.
+    /// C++ `UsdGeomPlane::GetAxisAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Axis>()?`.
     pub fn axis_attr(&self) -> Attribute {
         self.attribute(tok::A_AXIS)
     }

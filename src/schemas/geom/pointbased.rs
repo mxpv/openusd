@@ -17,8 +17,11 @@ use super::Gprim;
 /// [`tok::META_INTERPOLATION`](super::tokens::META_INTERPOLATION)) to describe
 /// whether the values are per-point, per-face, or face-varying.
 pub trait PointBased: Gprim {
-    /// `points` attribute handle — vertex positions, `point3f[]`
-    /// (C++ `GetPointsAttr`).
+    /// The local-space positions of the gprim's vertices; all other point-based
+    /// topology (faces, curves, tets) indexes into this array.
+    /// C++ `UsdGeomPointBased::GetPointsAttr`.
+    ///
+    /// Type `point3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn points_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_POINTS)
     }
@@ -32,7 +35,11 @@ pub trait PointBased: Gprim {
             .set_custom(false)?)
     }
 
-    /// `normals` attribute handle — `normal3f[]` (C++ `GetNormalsAttr`).
+    /// Surface normals used for shading, whose `interpolation` metadata says
+    /// whether they are per-point, per-face, or face-varying; a mesh's
+    /// `subdivisionScheme` may override them. C++ `UsdGeomPointBased::GetNormalsAttr`.
+    ///
+    /// Type `normal3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn normals_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_NORMALS)
     }
@@ -46,8 +53,11 @@ pub trait PointBased: Gprim {
             .set_custom(false)?)
     }
 
-    /// `velocities` attribute handle — per-point linear velocity, `vector3f[]`
-    /// (C++ `GetVelocitiesAttr`).
+    /// Per-point linear velocities in local units per second, used to motion-blur
+    /// and interpolate [`points`](Self::points_attr) between samples instead of
+    /// relying on neighboring time samples. C++ `UsdGeomPointBased::GetVelocitiesAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn velocities_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_VELOCITIES)
     }
@@ -61,8 +71,11 @@ pub trait PointBased: Gprim {
             .set_custom(false)?)
     }
 
-    /// `accelerations` attribute handle — per-point acceleration, `vector3f[]`
-    /// (C++ `GetAccelerationsAttr`).
+    /// Per-point accelerations in local units per second squared, refining the
+    /// [`velocities`](Self::velocities_attr)-based motion model to a quadratic
+    /// position estimate within a frame. C++ `UsdGeomPointBased::GetAccelerationsAttr`.
+    ///
+    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn accelerations_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_ACCELERATIONS)
     }

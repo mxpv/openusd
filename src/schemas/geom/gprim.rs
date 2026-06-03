@@ -12,7 +12,11 @@ use super::Boundable;
 /// curves (C++ `UsdGeomGprim`). Inherits [`Boundable`] and adds the
 /// orientation/sidedness attributes shared by all gprims.
 pub trait Gprim: Boundable {
-    /// `doubleSided` attribute handle (C++ `GetDoubleSidedAttr`).
+    /// Whether the gprim's surfaces should be shaded and rendered from both
+    /// sides rather than back-face culled to its [`orientation`](Self::orientation_attr).
+    /// C++ `UsdGeomGprim::GetDoubleSidedAttr`.
+    ///
+    /// Type `bool`. Fetch with `get::<bool>()?`.
     fn double_sided_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_DOUBLE_SIDED)
     }
@@ -27,8 +31,11 @@ pub trait Gprim: Boundable {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `orientation` attribute handle — `rightHanded` / `leftHanded`
-    /// (C++ `GetOrientationAttr`).
+    /// The winding order that decides which side of each face is the front:
+    /// `rightHanded` (counter-clockwise) or `leftHanded` (clockwise).
+    /// C++ `UsdGeomGprim::GetOrientationAttr`.
+    ///
+    /// Type `token`. Fetch with `get::<Orientation>()?`.
     fn orientation_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_ORIENTATION)
     }
@@ -43,8 +50,11 @@ pub trait Gprim: Boundable {
             .set_variability(sdf::Variability::Uniform)?)
     }
 
-    /// `primvars:displayColor` attribute handle — the fallback display color
-    /// primvar every gprim carries (C++ `GetDisplayColorAttr`).
+    /// The fallback per-vertex/per-element color primvar used to display the
+    /// gprim when no bound material provides one (RGB in linear space).
+    /// C++ `UsdGeomGprim::GetDisplayColorAttr`.
+    ///
+    /// Type `color3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
     fn display_color_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_DISPLAY_COLOR)
     }
@@ -59,7 +69,11 @@ pub trait Gprim: Boundable {
             .set_custom(false)?)
     }
 
-    /// `primvars:displayOpacity` attribute handle (C++ `GetDisplayOpacityAttr`).
+    /// The fallback display opacity primvar paired with
+    /// [`displayColor`](Self::display_color_attr): 1.0 is fully opaque, 0.0
+    /// fully transparent. C++ `UsdGeomGprim::GetDisplayOpacityAttr`.
+    ///
+    /// Type `float[]`. Fetch with `get::<Vec<f32>>()?`.
     fn display_opacity_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_DISPLAY_OPACITY)
     }
