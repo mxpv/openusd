@@ -161,15 +161,14 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///   generated body has no such trailer.
 /// - The golden contains a `Time Offsets` section whose values depend on
 ///   `timeCodesPerSecond`-derived scaling the engine does not fold in yet.
-/// - A known composition gap: the golden is a genuine mismatch we have not
-///   fixed yet. Most relocate assets fall here — the dump sections they need
-///   (`Time Offsets`, `Prohibited child names`) are now emitted, but the
-///   relocate composition (deferred to the recursive builder plus the cache
-///   relocate post-pass) still diverges in two ways: it does not elide
-///   "salted earth" opinions authored at a relocation source in the
-///   relocate-authoring layer stack, and the post-pass grafts duplicate nodes.
-///   The clusters at the end of the list are each tagged with a `TODO` naming
-///   the missing mechanism; remove an asset once its cluster lands.
+/// - A known composition gap: the golden is a genuine mismatch the task-queue
+///   indexer (the sole composition engine) does not yet reproduce. The deeper
+///   relocate cases remaining are relocates interacting with classes, variants,
+///   payloads, or connections (the relocation source's class/variant children
+///   and cross-arc implied relocations), plus a class arc authored inside a
+///   selected variant. The clusters at the end of the list are each tagged with
+///   a `TODO` naming the missing mechanism; remove an asset once its cluster
+///   lands.
 ///
 /// Assets outside this list are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
@@ -191,8 +190,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "ErrorOpinionAtRelocationSource_root",
     "ErrorRelocateWithVariantSelection_root",
     "ErrorSublayerCycle_root",
-    "PayloadsAndAncestralArcs2_root",
-    "PayloadsAndAncestralArcs3_root",
     "ReferenceListOpsWithOffsets_root",
     "RelocatePrimsWithSameName_root",
     "RelocateToNone_root",
@@ -206,30 +203,22 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TimeCodesPerSecond_session_24fps",
     "TimeCodesPerSecond_session_48tcps",
     "TrickyConnectionToRelocatedAttribute_root",
-    "TrickyInheritsAndRelocates2_root",
-    "TrickyInheritsAndRelocates3_root",
     "TrickyInheritsAndRelocates4_root",
     "TrickyInheritsAndRelocates5_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
-    "TrickyLocalClassHierarchyWithRelocates_root",
     "TrickyMultipleRelocations2_root",
     "TrickyMultipleRelocations4_root",
     "TrickyMultipleRelocationsAndClasses2_root",
     "TrickyMultipleRelocationsAndClasses_root",
     "TrickyMultipleRelocations_root",
     "TrickyRelocatedTargetInVariant_root",
-    "TrickyRelocationOfPrimFromPayload_root",
     "TrickyRelocationOfPrimFromVariant_root",
-    "TrickyRelocationSquatter_root",
     "TrickySpecializesAndRelocates_root",
     "TrickySpookyInheritsInSymmetricArmRig_root",
     "TrickySpookyInheritsInSymmetricBrowRig_root",
     "TrickySpookyInherits_root",
-    "TrickySpookyVariantSelectionInClass_root",
     "TrickySpookyVariantSelection_root",
-    "TrickyVariantOverrideOfRelocatedPrim_root",
-    "TypicalReferenceToChargroupWithRename_root",
     "bug69932_root",
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
@@ -245,6 +234,12 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // Root-vs-Variant strength edge inside a specialized class, not the
     // specializes-propagation order this cluster otherwise covers.
     "SpecializesAndVariants4_root",
+    // TODO(specializes-in-variant): a specializes/inherit authored inside a
+    // selected variant needs C++ `_DetermineInheritPath`'s variant-selection
+    // strip/re-add plus the specializes+variant+reference strength interaction
+    // (VariantSpecializesAndReferenceSurprisingBehavior); `add_class_based_arc`
+    // currently leaves the class arc uncomposed at a variant-selection site.
+    "SpecializesAndVariants_root",
     // TODO(ancestral-variants): the ancestral variant task family
     // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
     // faithful cross-frame `_ComposeVariantSelection` are ported, so a local
@@ -288,7 +283,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "SubrootReferenceAndClasses_root",
     // TODO(subroot-relocates): a sub-root reference whose target carries
     // relocates — the relocated child set / prim stack differs.
-    "SubrootReferenceAndRelocates_root",
     // TODO(expr-arcs): evaluate variable expressions in reference/payload asset
     // paths so the composed arc target resolves.
     "ExpressionsInPayloads_root",

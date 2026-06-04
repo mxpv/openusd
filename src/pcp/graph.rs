@@ -236,31 +236,6 @@ impl Node {
         }
     }
 
-    /// Builds a standalone node spanning a whole sublayer stack: `layer_stack`
-    /// lists every contributing `(layer index, sublayer offset)` member,
-    /// strongest first. Like [`new`](Self::new) but for a per-site node not
-    /// appended through [`PrimIndexGraph::add_site_child`] (the relocate
-    /// inserts). Panics on an empty `layer_stack`.
-    pub(crate) fn new_site(
-        layer_stack: Vec<(usize, LayerOffset)>,
-        path: Path,
-        arc: ArcType,
-        map_to_parent: MapFunction,
-        map_to_root: MapFunction,
-        introduced_by_specialize: bool,
-    ) -> Self {
-        let mut node = Self::new(
-            layer_stack[0].0,
-            path,
-            arc,
-            map_to_parent,
-            map_to_root,
-            introduced_by_specialize,
-        );
-        node.layer_stack = layer_stack;
-        node
-    }
-
     /// Index of the strongest layer contributing at this site. A representative
     /// for callers that key on a single layer (dependencies, dumps); value
     /// resolution iterates [`layers`](Self::layers) instead.
@@ -552,11 +527,9 @@ impl PrimIndexGraph {
     /// The representative layer index is the root sublayer of a node's layer
     /// stack, which uniquely identifies that stack, so matching it together with
     /// the path is equivalent to C++'s `layerStack == site.layerStack` test. The
-    /// task-queue indexer uses this for opt-in duplicate-node skipping in place
-    /// of the recursive builder's global `(layer, path, arc)` set.
-    // Reserved for the class-based arc phases (inherits/specializes), which opt
-    // into duplicate-node skipping; reference/payload arcs keep diamonds.
-    #[allow(dead_code)]
+    /// task-queue indexer uses this for opt-in duplicate-node skipping by the
+    /// class-based arcs (inherits/specializes); reference/payload arcs keep
+    /// diamonds.
     pub(crate) fn node_using_site(&self, root_layer: usize, path: &Path) -> Option<NodeId> {
         self.nodes
             .iter()
