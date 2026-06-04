@@ -1236,13 +1236,10 @@ mod tests {
     }
 
     /// Variant that introduces a specializes arc should propagate the
-    /// specialized prim's variant opinions to the composing prim.
-    // TODO(specializes-in-variant): a class arc authored inside a selected
-    // variant needs C++ `_DetermineInheritPath`'s variant-selection strip/re-add
-    // plus the specializes+variant+reference strength interaction; until that
-    // lands `add_class_based_arc` leaves the arc uncomposed at a variant site.
+    /// specialized prim's variant opinions to the composing prim (C++
+    /// `_DetermineInheritPath` strips the parent's variant selections before
+    /// mapping the class arc and re-adds the nearest containing one).
     #[test]
-    #[ignore = "specializes/inherit inside a variant selection not yet composed"]
     fn specializes_from_variant() -> Result<()> {
         let path = format!(
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/SpecializesAndVariants_root/usda/root.usd",

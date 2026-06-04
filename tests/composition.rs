@@ -172,6 +172,16 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///
 /// Assets outside this list are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
+///
+/// `TrickyConnectionToRelocatedAttribute` and
+/// `TrickyMultipleRelocationsAndClasses2` are byte-exact red for the same
+/// reason: the spooky implied-inherit-across-relocate mechanism, where a local
+/// opinion authored on a class under a relocate must propagate as an implied
+/// inherit to the relocated prim's final location. That needs relocate-source
+/// nodes to use identity maps with the relocation folded into the
+/// reference/inherit arc maps (C++ `_CreateMapExpressionForArc`'s
+/// `GetExpressionForRelocatesAtPath`), the relocate-representation rewrite
+/// tracked in the `pcp-relocate-port-blueprint` notes.
 const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "BasicInherits_root",
     "BasicPayload_root",
@@ -207,15 +217,10 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickyInheritsAndRelocates5_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
-    "TrickyMultipleRelocations2_root",
     "TrickyMultipleRelocations4_root",
     "TrickyMultipleRelocationsAndClasses2_root",
     "TrickyMultipleRelocationsAndClasses_root",
-    "TrickyMultipleRelocations_root",
-    "TrickyRelocatedTargetInVariant_root",
-    "TrickyRelocationOfPrimFromVariant_root",
     "TrickySpecializesAndRelocates_root",
-    "TrickySpookyInheritsInSymmetricArmRig_root",
     "TrickySpookyInheritsInSymmetricBrowRig_root",
     "TrickySpookyInherits_root",
     "TrickySpookyVariantSelection_root",
@@ -227,19 +232,15 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
     // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
     // implied-across-a-reference specializes (including nested chains, local
-    // overrides, ancestral arcs reached through the seed-deepened graph, and a
-    // local variant set on a specialize target) compose byte-exact.
-    // `SpecializesAndVariants4` still defers: its `/_class_/render` band orders
-    // the selected variant node stronger than the prim's own opinions — a
-    // Root-vs-Variant strength edge inside a specialized class, not the
-    // specializes-propagation order this cluster otherwise covers.
+    // overrides, ancestral arcs reached through the seed-deepened graph, a local
+    // variant set on a specialize target, and a specializes/inherit authored
+    // inside a selected variant via `_DetermineInheritPath`) compose byte-exact.
+    // `SpecializesAndVariants4` still defers: a specializes authored inside a
+    // selected variant must also imply itself across an *outer* specializes arc
+    // (`/A` specializes `/_class_`), adding the implied specializes node
+    // `/A/defaultImplementation` — implied specializes through a specializes
+    // chain, not yet ported.
     "SpecializesAndVariants4_root",
-    // TODO(specializes-in-variant): a specializes/inherit authored inside a
-    // selected variant needs C++ `_DetermineInheritPath`'s variant-selection
-    // strip/re-add plus the specializes+variant+reference strength interaction
-    // (VariantSpecializesAndReferenceSurprisingBehavior); `add_class_based_arc`
-    // currently leaves the class arc uncomposed at a variant-selection site.
-    "SpecializesAndVariants_root",
     // TODO(ancestral-variants): the ancestral variant task family
     // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
     // faithful cross-frame `_ComposeVariantSelection` are ported, so a local
@@ -255,7 +256,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickyInheritsInVariants2_root",
     // TODO(variant-strength): a weaker-selection precedence edge the builder gets
     // wrong too, or an inherit authored inside a variant.
-    "TrickyVariantSelectionInVariant_root",
     "TrickyVariantWeakerSelection2_root",
     "TrickyVariantWeakerSelection4_root",
     // TODO(variant-arcs): forward attribute connections / relationship targets
@@ -267,19 +267,11 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
-    // TODO(implied-classes): the remaining implied/nested-class cases still
-    // differ. Each defers a descendant prim to the recursive builder — its
-    // ancestor graph carries a variant/relocate node the ancestral-inherit seed
-    // cannot deepen yet, so the builder composes that prim with the older
-    // ordering. `PayloadsAndAncestralArcs` also exercises a sub-root payload, but
-    // its inherit prims are what still fail. `SubrootReferenceAndClasses` reaches
-    // the indexer now that specializes seed-deepening lands, but its implied
-    // class ordering still diverges.
-    "PayloadsAndAncestralArcs_root",
+    // TODO(implied-classes): two implied/nested-class cases still diverge in
+    // strength ordering. `ImpliedAndAncestralInherits_ComplexEvaluation` orders
+    // an implied-inherit band differently; `SubrootReferenceAndClasses` reaches
+    // the indexer but its implied class ordering still differs.
     "ImpliedAndAncestralInherits_ComplexEvaluation_root",
-    "TrickyNestedClasses_root",
-    "TrickyNestedClasses2_root",
-    "TrickyNestedClasses4_root",
     "SubrootReferenceAndClasses_root",
     // TODO(subroot-relocates): a sub-root reference whose target carries
     // relocates — the relocated child set / prim stack differs.

@@ -1122,6 +1122,20 @@ impl Cache {
             index.resolve_path_list_op(field, &self.stack, Some(&prop_suffix))?
         };
 
+        // A target naming a pre-relocation source resolves to the prim's
+        // post-relocation location (C++ `ComputeRelationshipTargetPaths` /
+        // `ComputeAttributeConnectionPaths` apply the layer stack's relocates to
+        // composed targets). Targets are in the resolved prim's namespace, so the
+        // relocates are computed there too, before the instance-anchor remap.
+        // Chaining follows a multi-step move (`/A/C -> /B/C`, `/B/C -> /D`) to its
+        // final target, matching C++'s source-origin-keyed combined relocates map.
+        if !self.relocates.is_empty() {
+            let relocates = self.relocates.effective_relocates(&resolved_prim, &self.indices);
+            for target in &mut targets {
+                *target = super::rel::chain_through_relocates(target, &relocates, None);
+            }
+        }
+
         if let Some((origin, canonical)) = &anchor {
             for target in &mut targets {
                 if let Some(remapped) = target.replace_prefix(canonical, origin) {

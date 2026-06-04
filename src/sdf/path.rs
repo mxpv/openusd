@@ -147,6 +147,17 @@ impl Path {
         self.path.ends_with('}')
     }
 
+    /// Returns `true` if any component of this path is a variant selection,
+    /// e.g. both `/Prim{set=sel}` and `/Prim{set=sel}/Child`.
+    ///
+    /// Mirrors C++ `SdfPath::ContainsPrimVariantSelection`. Unlike
+    /// [`is_prim_variant_selection_path`](Self::is_prim_variant_selection_path),
+    /// which only inspects the final component, this finds a selection embedded
+    /// anywhere in the prim namespace.
+    pub fn contains_prim_variant_selection(&self) -> bool {
+        self.path.contains('{')
+    }
+
     pub fn prim_path(&self) -> Path {
         // Split at last slash.
         // "/A/B/C.foo[target].bar:baz" will become "/A/B" and "C.foo[target].bar:baz"
@@ -368,6 +379,16 @@ impl Path {
         self.components()
             .filter(|c| matches!(c, PathComponent::Prim(_)))
             .count()
+    }
+
+    /// Counts every prim-namespace component of this path, including `{set=sel}`
+    /// variant selections (C++ `SdfPath::GetPathElementCount`).
+    ///
+    /// Unlike [`prim_element_count`](Self::prim_element_count), which counts only
+    /// prim names, a variant selection counts as its own element here, so
+    /// `/A{x=y}B` is 3.
+    pub fn element_count(&self) -> usize {
+        self.components().count()
     }
 
     /// Returns this path with every `{set=sel}` variant segment removed.

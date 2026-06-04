@@ -187,6 +187,28 @@ impl MapFunction {
         Self::new(vec![(source, target), (Path::abs_root(), Path::abs_root())])
     }
 
+    /// Returns this mapping with any pair whose source is exactly `source`
+    /// removed.
+    ///
+    /// Post-composing a relocate onto a class arc pulls the relocation's own
+    /// `source -> target` pair into the result, where it is not a
+    /// class-to-instance mapping and would alias the instance, making the
+    /// reverse inherit-path lookup ambiguous. Dropping it keeps that lookup
+    /// unambiguous.
+    pub fn dropping_source(&self, source: &Path) -> MapFunction {
+        if !self.path_map.as_slice().iter().any(|(s, _)| s == source) {
+            return self.clone();
+        }
+        let pairs: Vec<(Path, Path)> = self
+            .path_map
+            .as_slice()
+            .iter()
+            .filter(|(s, _)| s != source)
+            .cloned()
+            .collect();
+        MapFunction::new(pairs).with_time_offset(self.time_offset)
+    }
+
     /// Returns `true` if this is an identity mapping (identity paths *and*
     /// identity time offset).
     pub fn is_identity(&self) -> bool {
