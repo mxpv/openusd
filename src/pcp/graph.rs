@@ -44,6 +44,23 @@ pub enum ArcType {
     Specialize,
 }
 
+impl ArcType {
+    /// Lowercase display name matching C++ `PcpArcType`'s `displayName`, used by
+    /// the composition dump (`root`, `inherit`, `variant`, `relocate`,
+    /// `reference`, `payload`, `specialize`).
+    pub fn dump_name(self) -> &'static str {
+        match self {
+            ArcType::Root => "root",
+            ArcType::Inherit => "inherit",
+            ArcType::Variant => "variant",
+            ArcType::Relocate => "relocate",
+            ArcType::Reference => "reference",
+            ArcType::Payload => "payload",
+            ArcType::Specialize => "specialize",
+        }
+    }
+}
+
 /// Stable handle to a [`Node`] within a [`PrimIndex`](crate::pcp::PrimIndex)'s
 /// composition graph (C++ `PcpNodeRef`).
 ///
@@ -393,10 +410,6 @@ pub(crate) struct PrimIndexGraph {
 }
 
 impl PrimIndexGraph {
-    pub(crate) fn len(&self) -> usize {
-        self.nodes.len()
-    }
-
     /// Returns the prim's local root node — the `Root`-arc child of the
     /// synthetic inert root, carrying the prim's own (sublayer) opinions. An
     /// implied class anchors here so it ranks among the prim's direct arcs (C++
@@ -577,16 +590,6 @@ impl PrimIndexGraph {
             } else if let Ok(deeper) = node.path.append_path(child_name) {
                 node.path = deeper;
             }
-        }
-    }
-
-    /// Tags a node as introduced by implied-class propagation, recording the
-    /// originating arc node. Pure metadata: it does not affect resolution.
-    pub(crate) fn mark_implied(&mut self, id: NodeId, origin: NodeId) {
-        let node = &mut self.nodes[id.idx()];
-        node.flags |= NodeFlags::IMPLIED_CLASS;
-        if origin.is_valid() {
-            node.origin = Some(origin);
         }
     }
 

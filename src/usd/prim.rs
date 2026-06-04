@@ -32,7 +32,7 @@
 //! indices observably affected by the write are dropped.
 
 use super::{Attribute, Relationship, Stage, StageAuthoringError};
-use crate::sdf;
+use crate::{pcp, sdf};
 
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
 #[derive(Clone)]
@@ -297,6 +297,21 @@ impl Prim {
     // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
         self.stage.try_or_handle(|cache| cache.prim_stack(&self.path))
+    }
+
+    /// Returns the `Time Offsets` composition-dump rows for this prim: one row
+    /// per composition node carrying its cumulative time offset, plus a row for
+    /// each non-identity sublayer member. Empty unless some node carries a
+    /// non-identity offset. Used by the composition-results dump.
+    pub fn time_offsets(&self) -> anyhow::Result<Vec<pcp::TimeOffset>> {
+        self.stage.try_or_handle(|cache| cache.time_offsets(&self.path))
+    }
+
+    /// Returns the prohibited child names for this prim: names of children
+    /// relocated away (renamed or deleted), sorted. Mirrors the prohibited-names
+    /// out-param of C++ `PcpPrimIndex::ComputePrimChildNames`.
+    pub fn prohibited_children(&self) -> anyhow::Result<Vec<String>> {
+        self.stage.try_or_handle(|cache| cache.prohibited_children(&self.path))
     }
 
     /// Returns an [`Attribute`] handle for the property `name` under this prim.

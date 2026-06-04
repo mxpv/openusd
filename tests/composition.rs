@@ -159,14 +159,17 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 /// - The golden carries a Python traceback or a trailing `Errors`/`Warning`
 ///   section (the C++ test framework prints these for error cases); our
 ///   generated body has no such trailer.
-/// - The golden contains a `Time Offsets`, `Prohibited child names`, or
-///   `Deleted target paths` section. The generator does not emit these yet
-///   (relocate prohibited-children composition and per-prim time-offset dumps
-///   are future work).
+/// - The golden contains a `Time Offsets` section whose values depend on
+///   `timeCodesPerSecond`-derived scaling the engine does not fold in yet.
 /// - A known composition gap: the golden is a genuine mismatch we have not
-///   fixed yet. These are grouped at the end of the list, each cluster tagged
-///   with a `TODO` naming the missing mechanism; remove an asset once its
-///   cluster lands.
+///   fixed yet. Most relocate assets fall here — the dump sections they need
+///   (`Time Offsets`, `Prohibited child names`) are now emitted, but the
+///   relocate composition (deferred to the recursive builder plus the cache
+///   relocate post-pass) still diverges in two ways: it does not elide
+///   "salted earth" opinions authored at a relocation source in the
+///   relocate-authoring layer stack, and the post-pass grafts duplicate nodes.
+///   The clusters at the end of the list are each tagged with a `TODO` naming
+///   the missing mechanism; remove an asset once its cluster lands.
 ///
 /// Assets outside this list are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
@@ -175,7 +178,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "BasicPayload_root",
     "BasicRelocateToAnimInterfaceAsNewRootPrim_root",
     "BasicRelocateToAnimInterface_root",
-    "BasicTimeOffset_root",
     "ElidedAncestralRelocates_root",
     "ErrorArcCycle_root",
     "ErrorInconsistentProperties_root",
@@ -210,12 +212,9 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickyInheritsAndRelocates5_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
-    "TrickyListEditedTargetPaths_root",
     "TrickyLocalClassHierarchyWithRelocates_root",
     "TrickyMultipleRelocations2_root",
-    "TrickyMultipleRelocations3_root",
     "TrickyMultipleRelocations4_root",
-    "TrickyMultipleRelocations5_root",
     "TrickyMultipleRelocationsAndClasses2_root",
     "TrickyMultipleRelocationsAndClasses_root",
     "TrickyMultipleRelocations_root",
@@ -331,6 +330,33 @@ fn site_line(out: &mut String, canonical_base: Option<&Path>, identifier: &str, 
     let _ = writeln!(out, "    {:<20} {}", display_name(canonical_base, identifier), path);
 }
 
+/// A `Time Offsets` row. A node row (`row.path` is `Some`) prints the layer in
+/// a 20-wide field, the path in a 15-wide field, then the arc and offset; a
+/// sublayer row prints the layer in a 32-wide field (keeping the arc column
+/// aligned with node rows), then `sublayer` and the offset.
+fn time_offset_line(out: &mut String, canonical_base: Option<&Path>, row: &pcp::TimeOffset) {
+    use std::fmt::Write as _;
+    let layer = display_name(canonical_base, &row.layer);
+    let (offset, scale) = (row.offset.offset, row.offset.scale);
+    match &row.path {
+        Some(path) => {
+            let _ = writeln!(
+                out,
+                "    {layer:<20} {:<15} {:<10} (offset={offset:.2}, scale={scale:.2})",
+                path.to_string(),
+                row.arc,
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "        {layer:<32} {:<10} (offset={offset:.2}, scale={scale:.2})",
+                row.arc,
+            );
+        }
+    }
+}
+
 /// Python list-literal of names, e.g. `['a', 'b']` (matching the C++ dump,
 /// which prints the result of `repr(list)`).
 fn name_list(names: &[String]) -> String {
@@ -405,6 +431,15 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         }
         out.push('\n');
 
+        let offsets = prim.time_offsets().unwrap();
+        if !offsets.is_empty() {
+            let _ = writeln!(out, "Time Offsets:");
+            for row in &offsets {
+                time_offset_line(&mut out, base, row);
+            }
+            out.push('\n');
+        }
+
         let selections = prim.variant_sets().get_all_variant_selections().unwrap();
         if !selections.is_empty() {
             let _ = writeln!(out, "Variant Selections:");
@@ -418,6 +453,13 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         if !children.is_empty() {
             let _ = writeln!(out, "Child names:");
             let _ = writeln!(out, "     {}", name_list(&children));
+            out.push('\n');
+        }
+
+        let prohibited = prim.prohibited_children().unwrap();
+        if !prohibited.is_empty() {
+            let _ = writeln!(out, "Prohibited child names:");
+            let _ = writeln!(out, "     {}", name_list(&prohibited));
             out.push('\n');
         }
 
@@ -442,23 +484,35 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         });
 
         // Relationship targets and attribute connections, split by spec type.
+        // Deleted target paths from both kinds merge into one map, printed last.
         let mut rel_targets: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
         let mut attr_conns: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
+        let mut deleted: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
         for name in &properties {
             let Some(prop_path) = path.append_property(name).ok() else {
                 continue;
             };
             match stage.spec_type(prop_path.clone()).unwrap() {
                 Some(sdf::SpecType::Relationship) => {
-                    let targets = prim.relationship(name).get_targets().unwrap();
+                    let rel = prim.relationship(name);
+                    let targets = rel.get_targets().unwrap();
                     if !targets.is_empty() {
-                        rel_targets.push((prop_path, targets));
+                        rel_targets.push((prop_path.clone(), targets));
+                    }
+                    let del = rel.deleted_targets().unwrap();
+                    if !del.is_empty() {
+                        deleted.push((prop_path, del));
                     }
                 }
                 Some(sdf::SpecType::Attribute) => {
-                    let conns = prim.attribute(name).get_connections().unwrap();
+                    let attr = prim.attribute(name);
+                    let conns = attr.get_connections().unwrap();
                     if !conns.is_empty() {
-                        attr_conns.push((prop_path, conns));
+                        attr_conns.push((prop_path.clone(), conns));
+                    }
+                    let del = attr.deleted_connections().unwrap();
+                    if !del.is_empty() {
+                        deleted.push((prop_path, del));
                     }
                 }
                 _ => {}
@@ -470,6 +524,7 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         };
         write_grouped(&mut out, "Relationship targets", rel_targets, emit_target);
         write_grouped(&mut out, "Attribute connections", attr_conns, emit_target);
+        write_grouped(&mut out, "Deleted target paths", deleted, emit_target);
     }
 
     out

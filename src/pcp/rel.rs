@@ -31,22 +31,31 @@ pub(super) struct Relocates {
 /// Hard limit on relocate chaining depth to avoid stack overflow on malformed inputs.
 const MAX_RELOCATE_CHAIN: usize = 128;
 
+/// Extracts each layer's authored `layerRelocates` pairs `(source, target)`,
+/// keyed by layer index; layers without relocates are omitted. Shared by
+/// [`Relocates::new`] and [`LayerStack`](super::LayerStack).
+pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> HashMap<usize, Vec<(Path, Path)>> {
+    let root = Path::abs_root();
+    let mut out = HashMap::new();
+    for (i, layer) in layers.iter().enumerate() {
+        if let Ok(val) = layer.get(&root, FieldKey::LayerRelocates.as_str()) {
+            if let Value::Relocates(pairs) = val.into_owned() {
+                if !pairs.is_empty() {
+                    out.insert(i, pairs);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl Relocates {
     /// Creates a new `Relocates` by extracting `layerRelocates` from every
     /// layer's pseudoroot.
     pub fn new(layers: &[sdf::Layer]) -> Self {
-        let root = Path::abs_root();
-        let mut layer_relocates = HashMap::new();
-        for (i, layer) in layers.iter().enumerate() {
-            if let Ok(val) = layer.get(&root, FieldKey::LayerRelocates.as_str()) {
-                if let Value::Relocates(pairs) = val.into_owned() {
-                    if !pairs.is_empty() {
-                        layer_relocates.insert(i, pairs);
-                    }
-                }
-            }
+        Self {
+            layer_relocates: extract_layer_relocates(layers),
         }
-        Self { layer_relocates }
     }
 
     /// Returns `true` if no layer has any relocates.
@@ -248,8 +257,13 @@ impl Relocates {
                 .collect();
             // Find ALL cached prims whose index contains a node at the same
             // (layer, path) as the first relocate node, and merge any
-            // additional opinions from all of them.
-            for cached_index in indices.values() {
+            // additional opinions from all of them. Iterate in sorted path
+            // order: a `HashMap` walk would make the merged opinion set (and so
+            // the composed prim stack) depend on hash iteration order.
+            let mut cached_paths: Vec<&Path> = indices.keys().collect();
+            cached_paths.sort();
+            for cached_path in cached_paths {
+                let cached_index = &indices[cached_path];
                 let matched = cached_index
                     .nodes()
                     .any(|cn| cn.layer_index() == first_li && cn.path == first_path);
@@ -533,7 +547,12 @@ impl Relocates {
         let relocate_layers: Vec<usize> = self.layer_relocates.keys().copied().collect();
         let root_name = path.as_str().split('/').nth(1).unwrap_or("");
 
-        for (cached_path, cached_index) in indices {
+        // Sorted iteration: a `HashMap` walk would make the collected layer-map
+        // order (and so downstream relocate composition) hash-order-dependent.
+        let mut cached_paths: Vec<&Path> = indices.keys().collect();
+        cached_paths.sort();
+        for cached_path in cached_paths {
+            let cached_index = &indices[cached_path];
             let cached_root = cached_path.as_str().split('/').nth(1).unwrap_or("");
             if cached_root != root_name {
                 continue;

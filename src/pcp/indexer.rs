@@ -238,6 +238,12 @@ enum TaskKind {
     EvalNodePayloads,
     /// Evaluate the references authored at the node's site.
     EvalNodeReferences,
+    /// Propagate a relocate arc up to the grandparent (C++ `EvalImpliedRelocations`,
+    /// task bit `1<<1`).
+    EvalImpliedRelocations,
+    /// Add a relocate arc back to the source for a node at a relocation target
+    /// (C++ `EvalRelocations`, task bit `1<<0`, the strongest task).
+    EvalNodeRelocations,
 }
 
 /// Composes a single prim by draining a task queue over a composition graph
@@ -287,11 +293,22 @@ pub(crate) struct Indexer<'a, 'f> {
     /// Nodes already enqueued for `EvalImpliedSpecializes`, the specializes
     /// analog of [`implied_seen`](Self::implied_seen).
     implied_spec_seen: HashSet<NodeId>,
-    /// Whether any layer authors `layerRelocates`. Class arcs interact with
-    /// relocates (C++ `_EvalImpliedClassTree` routes implied classes across
-    /// relocate nodes); that interaction is a later phase, so while relocates
-    /// are present the indexer defers any prim that composes an inherit.
+    /// Whether any layer authors `layerRelocates`, precomputed on the stack. When
+    /// set, the build computes [`reloc_target_to_source`](Self::reloc_target_to_source)
+    /// and enqueues relocate-evaluation tasks; otherwise the relocate passes are
+    /// skipped entirely.
     has_relocates: bool,
+    /// This build's incremental relocates keyed by target path (C++
+    /// `GetIncrementalRelocatesTargetToSource`), computed once per build from
+    /// [`ambient`](Self::ambient) when [`has_relocates`](Self::has_relocates) —
+    /// `eval_node_relocations` consults it per node, so it is not rebuilt per
+    /// task. Empty when the stack has no relocates.
+    reloc_target_to_source: HashMap<Path, Path>,
+    /// Whether this build's root (local) node may contribute its own specs (C++
+    /// `rootNodeShouldContributeSpecs`). A relocation source is composed as a
+    /// sub-index with this `false`, so its direct site is inert (salted earth)
+    /// while its ancestral arc children still contribute (spooky ancestors).
+    root_contributes: bool,
     /// Cleared the moment composition meets a feature a later phase ports; the
     /// build is then abandoned and the recursive builder composes the prim.
     supported: bool,
@@ -320,30 +337,49 @@ impl<'a, 'f> Indexer<'a, 'f> {
             implied_seen: HashSet::new(),
             implied_spec_seen: HashSet::new(),
             has_relocates: stack.has_relocates,
+            reloc_target_to_source: HashMap::new(),
+            root_contributes: true,
             supported: true,
         }
     }
 
-    /// Composes `path`, returning the graph when the prim's composition is fully
-    /// within the ported feature set, or `None` when it relies on a feature a
-    /// later phase ports (the caller then uses the recursive builder).
+    /// Composes `path` into a prim index graph. The task-queue indexer is the
+    /// sole composition path; `None` is returned only for a genuine composition
+    /// cycle (depth bound exceeded) or when the seed cannot be established, which
+    /// the cache treats as an empty prim index.
     pub(crate) fn build(mut self, path: &Path) -> Result<Option<PrimIndexGraph>, Error> {
-        // Instance composition is a later phase.
-        if self.ctx.within_instance {
-            return Ok(None);
-        }
-
-        // A sub-index nested past the depth bound is a true composition cycle;
-        // abandon the whole prim so the recursive builder reports it.
+        // A sub-index nested past the depth bound is a true composition cycle.
         if self.frame_depth > MAX_DEPTH {
             return Ok(None);
         }
         self.build_path = path.clone();
+        if self.has_relocates {
+            self.reloc_target_to_source = self.stack.incremental_relocates(self.ambient, true);
+        }
 
         // Seed the graph: a root prim starts empty (just its local site); a
         // child prim clones its parent's graph for ancestral opinions.
         if !self.seed(path)? {
             return Ok(None);
+        }
+
+        // A relocation source composed as a sub-index has its direct (root) node
+        // inert: salted earth drops the source's own opinion while its ancestral
+        // arc children still contribute (C++ `rootNodeShouldContributeSpecs`).
+        if !self.root_contributes {
+            let local_root = self.output.local_root();
+            if local_root.is_valid() {
+                self.output.nodes[local_root.idx()].flags |= NodeFlags::INERT;
+            }
+        }
+
+        // Salted-earth prohibition (C++ `_ElidePrimIndexIfProhibited`): if a
+        // non-inert node sits at a relocation source in its layer stack, this
+        // prim is a prohibited namespace child and contributes nothing.
+        if self.elide_if_prohibited() {
+            self.output.specializes_propagated = true;
+            self.output.finalize_strength_order();
+            return Ok(Some(self.output));
         }
 
         // Recompute `has_specs` at the seeded paths and enqueue the spec-bearing
@@ -354,6 +390,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // work; an unported feature clears `supported` and abandons the prim.
         while let Some(task) = self.take_best_task() {
             match task.kind {
+                TaskKind::EvalNodeRelocations => self.eval_node_relocations(task.node)?,
+                TaskKind::EvalImpliedRelocations => self.eval_implied_relocations(task.node)?,
                 TaskKind::EvalNodeReferences | TaskKind::EvalNodePayloads => self.eval_arcs(task.node, task.kind)?,
                 TaskKind::EvalNodeInherits => {
                     self.eval_class_arcs(task.node, FieldKey::InheritPaths, ArcType::Inherit)?
@@ -385,9 +423,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 }
                 // Placeholders kept only for `retry_variant_tasks`; nothing to do.
                 TaskKind::EvalNodeVariantNoneFound | TaskKind::EvalNodeAncestralVariantNoneFound => {}
-            }
-            if !self.supported {
-                return Ok(None);
             }
         }
 
@@ -437,26 +472,25 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
 
         // Only a graph composed entirely of ported arcs can be deepened
-        // structurally. A culled or relocate node means the parent relied on an
-        // unported feature. Inherit, specialize, and variant nodes (and the
-        // implied-class placeholders, which are inert) deepen and re-evaluate at
-        // the child path through the queue, carrying ancestral classes,
-        // specializes, and variant branches to the child. The cloned propagated
-        // specializes copies are kept; their arcs newly authored at the deepened
-        // path (a reference a `{set}/Child` site introduces) re-evaluate through
-        // the queue (C++ `AddTasksForRootNode`'s recursive `_ScanArcs`).
+        // structurally. Relocate nodes (and the culled subtrees relocation
+        // elision produces) deepen like any other site: the deepened relocate
+        // node re-evaluates through the queue, carrying the relocation source's
+        // ancestral opinions to the child. Inherit, specialize, and variant
+        // nodes (and the inert implied-class placeholders) likewise deepen and
+        // re-evaluate (C++ `AddTasksForRootNode`'s recursive `_ScanArcs`).
         if graph.nodes.iter().any(|n| {
             !n.is_inert()
-                && (n.is_culled()
-                    || !matches!(
-                        n.arc,
-                        ArcType::Root
-                            | ArcType::Reference
-                            | ArcType::Payload
-                            | ArcType::Inherit
-                            | ArcType::Specialize
-                            | ArcType::Variant
-                    ))
+                && !n.is_culled()
+                && !matches!(
+                    n.arc,
+                    ArcType::Root
+                        | ArcType::Reference
+                        | ArcType::Payload
+                        | ArcType::Inherit
+                        | ArcType::Specialize
+                        | ArcType::Variant
+                        | ArcType::Relocate
+                )
         }) {
             return Ok(false);
         }
@@ -498,6 +532,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         ambient_is_root: bool,
         frame: Option<&'g Frame<'g>>,
         frame_skip: bool,
+        root_contributes: bool,
     ) -> Indexer<'b, 'g>
     where
         'a: 'b,
@@ -506,6 +541,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         sub.frame = frame;
         sub.frame_skip = frame_skip;
         sub.frame_depth = self.frame_depth + 1;
+        sub.root_contributes = root_contributes;
         sub
     }
 
@@ -514,7 +550,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// else-branch `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`). Returns
     /// `None` when the parent relies on an unported feature.
     fn compose_ancestral_subindex(&self, parent: &Path) -> Result<Option<PrimIndexGraph>, Error> {
-        self.new_sub(self.ambient, self.ambient_is_root, self.frame, self.frame_skip)
+        self.new_sub(self.ambient, self.ambient_is_root, self.frame, self.frame_skip, true)
             .build(parent)
     }
 
@@ -529,6 +565,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         ambient: &[(usize, LayerOffset)],
         ambient_is_root: bool,
         skip: bool,
+        root_contributes: bool,
     ) -> Result<Option<PrimIndexGraph>, Error> {
         let frame = Frame {
             requested_path: target.clone(),
@@ -536,7 +573,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
             graph: &self.output,
             previous: self.frame,
         };
-        self.new_sub(ambient, ambient_is_root, Some(&frame), skip).build(target)
+        self.new_sub(ambient, ambient_is_root, Some(&frame), skip, root_contributes)
+            .build(target)
     }
 
     /// Composes an arc target as its own ancestral sub-index and grafts it under
@@ -560,7 +598,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         origin: NodeId,
         sibling: u16,
     ) -> Result<Option<NodeId>, Error> {
-        let Some(sub) = self.compose_subindex(target, ambient, ambient_is_root, skip)? else {
+        let Some(sub) = self.compose_subindex(target, ambient, ambient_is_root, skip, true)? else {
             self.supported = false;
             return Ok(None);
         };
@@ -717,6 +755,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if has_specs {
                 self.add_expressed_arc_tasks(node);
             }
+            // Relocations are evaluated regardless of whether the node authors a
+            // spec (C++ `CanContributeSpecs` does not require `HasSpecs`).
+            self.enqueue_relocations(node);
         }
     }
 
@@ -750,6 +791,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn add_tasks_for_node(&mut self, node: NodeId) {
         self.add_implied_tasks_for_node(node);
         self.add_expressed_arc_tasks(node);
+        self.enqueue_relocations(node);
     }
 
     /// Enqueues the implied-class and implied-specializes propagation a node
@@ -788,6 +830,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `_EvalNodeAncestralVariantSets`).
     fn add_grafted_subtree_tasks(&mut self, root: NodeId) {
         self.add_implied_tasks_for_node(root);
+        // Relocations are evaluated on every grafted node, including in a nested
+        // sub-build (unlike variants, which the top-level build defers).
+        for id in self.subtree_nodes(root) {
+            self.enqueue_relocations(id);
+        }
         if self.frame.is_some() {
             return;
         }
@@ -881,6 +928,162 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
     }
 
+    /// Enqueues an `EvalNodeRelocations` task for a node when the stack has any
+    /// relocates (C++ `AddTasksForNode`'s `EvalRelocations` arm). The handler
+    /// itself decides whether the node sits at a relocation target.
+    fn enqueue_relocations(&mut self, node: NodeId) {
+        if self.has_relocates && !self.node(node).is_inert() {
+            self.tasks.push(Task::new(TaskKind::EvalNodeRelocations, node));
+        }
+    }
+
+    /// Adds a relocate arc back to the source for a node sitting at a relocation
+    /// target (C++ `_EvalNodeRelocations`). The source is composed as a
+    /// sub-index with ancestral opinions, its direct site inert (salted earth),
+    /// and grafted as a `Relocate` arc with an identity-stripping source→target
+    /// map. Ancestral child subtrees the relocation supersedes are elided first.
+    fn eval_node_relocations(&mut self, node: NodeId) -> Result<(), Error> {
+        {
+            let n = self.node(node);
+            // C++ `CanContributeSpecs`: not inert/culled/permission-denied. A
+            // spec-less node still relocates, so `has_specs` is not required.
+            if n.is_inert() || n.is_culled() || n.is_permission_denied() {
+                return Ok(());
+            }
+        }
+        let node_path = self.node(node).path.clone();
+        let Some(source) = self.reloc_target_to_source.get(&node_path).cloned() else {
+            return Ok(());
+        };
+
+        // Ancestral arcs superseded by this relocation contribute nothing; a
+        // variant may still override a relocated prim, so keep variant children
+        // (C++ `_EvalNodeRelocations`'s per-child-arc-type switch).
+        for child in self.node(node).children().to_vec() {
+            if self.node(child).arc != ArcType::Variant {
+                self.elide_subtree(child);
+            }
+        }
+
+        let map = MapFunction::from_pair_identity(source.clone(), node_path);
+        let Some(sub) = self.compose_subindex(&source, self.ambient, self.ambient_is_root, self.frame_skip, false)?
+        else {
+            self.supported = false;
+            return Ok(());
+        };
+        let Some(grafted) = self.graft_subindex(&sub, node, ArcType::Relocate, map, node, 0) else {
+            self.supported = false;
+            return Ok(());
+        };
+        self.output.nodes[grafted.idx()].flags |= NodeFlags::RELOCATE_SOURCE;
+        self.add_grafted_subtree_tasks(grafted);
+        self.tasks.push(Task::new(TaskKind::EvalImpliedRelocations, grafted));
+        self.elide_relocated_subtrees(grafted);
+        Ok(())
+    }
+
+    /// Carries a non-ancestral relocate up to the grandparent (C++
+    /// `_EvalImpliedRelocations`). The relocate source is mapped through the
+    /// parent's map; when it has no implied site in the grandparent's namespace
+    /// (the common stage-level case) there is nothing to do. A genuine
+    /// cross-arc implied relocation is deferred to the recursive builder.
+    fn eval_implied_relocations(&mut self, node: NodeId) -> Result<(), Error> {
+        if self.node(node).arc != ArcType::Relocate {
+            return Ok(());
+        }
+        let Some(parent) = self.node(node).parent() else {
+            return Ok(());
+        };
+        let Some(gp) = self.node(parent).parent() else {
+            return Ok(());
+        };
+        if gp == self.output.root {
+            return Ok(());
+        }
+        let node_path = self.node(node).path.clone();
+        let parent_map = self.node(parent).map_to_parent.clone();
+        let Some(gp_reloc_source) = parent_map.map_source_to_target(&node_path) else {
+            // No implied site for the relocation source — nothing to propagate.
+            return Ok(());
+        };
+        let already = self
+            .node(gp)
+            .children()
+            .iter()
+            .any(|&c| self.node(c).arc == ArcType::Relocate && self.node(c).path == gp_reloc_source);
+        if already {
+            return Ok(());
+        }
+        // TODO(relocates): a genuine cross-arc implied relocation reaches here
+        // (the relocation source maps into the grandparent's namespace). Porting
+        // C++ `_EvalImpliedRelocations`'s graft is future work; until then it is
+        // left uncomposed (e.g. SubrootReferenceAndRelocates).
+        Ok(())
+    }
+
+    /// Marks `root` and its whole subtree culled so they contribute no opinions
+    /// (C++ `_ElideSubtree`).
+    fn elide_subtree(&mut self, root: NodeId) {
+        for id in self.subtree_nodes(root) {
+            self.output.nodes[id.idx()].flags |= NodeFlags::CULLED;
+        }
+    }
+
+    /// Elides any subtree in a freshly-grafted relocation source whose own site
+    /// is a relocation source moved elsewhere, so its opinions are not also
+    /// attributed here (C++ `_ElideRelocatedSubtrees`).
+    fn elide_relocated_subtrees(&mut self, root: NodeId) {
+        let source_to_target = self.stack.incremental_relocates(self.ambient, false);
+        if source_to_target.is_empty() {
+            return;
+        }
+        let mut stack: Vec<NodeId> = self.node(root).children().to_vec();
+        while let Some(id) = stack.pop() {
+            let n = self.node(id);
+            // A relocate child already elided its own relocated subtrees.
+            if n.arc == ArcType::Relocate {
+                continue;
+            }
+            if !n.is_inert() && !n.is_culled() && source_to_target.contains_key(&n.path) {
+                self.elide_subtree(id);
+                continue;
+            }
+            stack.extend(self.node(id).children().iter().copied());
+        }
+    }
+
+    /// Returns true and elides the whole index when a non-inert node sits at a
+    /// relocation source in its layer stack — the prim is a prohibited namespace
+    /// child under the salted-earth policy (C++ `_ElidePrimIndexIfProhibited` /
+    /// `_ComposeIsProhibitedPrimChild`). The synthetic root stays as an inert
+    /// placeholder; every other node is force-culled.
+    fn elide_if_prohibited(&mut self) -> bool {
+        if !self.has_relocates {
+            return false;
+        }
+        let source_to_target = self.stack.incremental_relocates(self.ambient, false);
+        if source_to_target.is_empty() {
+            return false;
+        }
+        let prohibited = self
+            .output
+            .nodes
+            .iter()
+            .any(|n| !n.is_inert() && !n.is_culled() && source_to_target.contains_key(&n.path));
+        if !prohibited {
+            return false;
+        }
+        let root = self.output.root;
+        for (i, n) in self.output.nodes.iter_mut().enumerate() {
+            if NodeId(i as u32) == root {
+                n.flags |= NodeFlags::INERT;
+            } else {
+                n.flags |= NodeFlags::CULLED;
+            }
+        }
+        true
+    }
+
     /// Composes the references or payloads authored at `node`'s site and adds an
     /// arc for each (C++ `_EvalNodeReferences` / `_EvalNodePayloads`). Both
     /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
@@ -933,11 +1136,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(());
         }
         let arcs = compose_arc_list_in::<Path>(self.node_slice(node), field, &self.stack.layers)?;
-        // A class arc interacting with relocates is a later phase.
-        if !arcs.is_empty() && self.has_relocates {
-            self.supported = false;
-            return Ok(());
-        }
         let node_path = self.node(node).path.clone();
         for (arc_num, class_path) in arcs.iter().enumerate() {
             let resolved = node_path.make_absolute(class_path);
@@ -1726,9 +1924,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             (stack, is_root)
         } else {
             let Some(layer_index) = find_layer(asset_path, &self.stack.layers, &*self.stack.resolver) else {
-                // The recursive builder raises `UnresolvedLayer`; let it.
-                self.supported = false;
-                return Ok(());
+                return Err(Error::UnresolvedLayer {
+                    asset_path: asset_path.to_string(),
+                    arc,
+                    site_path: parent_path,
+                });
             };
             (self.stack.sublayer_stack(layer_index), false)
         };
@@ -1737,8 +1937,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
         let source = if prim_path.is_empty() {
             let Some(p) = self.resolve_default_prim(&target_stack)? else {
-                self.supported = false;
-                return Ok(());
+                return Err(Error::MissingDefaultPrim {
+                    layer_id: self.stack.layer(target_stack[0].0).identifier.clone(),
+                    arc,
+                    site_path: parent_path,
+                });
             };
             p
         } else {
@@ -1752,9 +1955,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(());
         }
         if !self.arc_target_in_bounds(parent, rep, &source) {
-            // Deep nesting or a cycle the recursive builder reports.
-            self.supported = false;
-            return Ok(());
+            return Err(Error::ArcCycle {
+                path: self.build_path.clone(),
+                depth: self.frame_depth,
+            });
         }
 
         let mut map = MapFunction::from_pair(source.clone(), parent_path).with_time_offset(arc_offset);
@@ -1781,16 +1985,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(());
         }
 
-        if !self.stack_has_spec(&target_stack, &source) {
-            // The recursive builder keeps an empty arc target as a culled node;
-            // the indexer does not reproduce that yet, so defer the whole prim.
-            self.supported = false;
-            return Ok(());
-        }
-
+        // An arc target authoring no spec is kept as a culled node (C++
+        // culling): visible to change tracking and dependency registration, but
+        // contributing no opinions to value resolution.
+        let empty = !self.stack_has_spec(&target_stack, &source);
         let new_node = self
             .output
             .add_site_child(parent, target_stack, source, arc, map, false);
+        if empty {
+            self.output.nodes[new_node.idx()].flags |= NodeFlags::CULLED;
+            return Ok(());
+        }
 
         // The new node may itself author references, payloads, and inherits.
         self.add_tasks_for_node(new_node);

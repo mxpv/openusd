@@ -157,6 +157,13 @@ impl Relationship {
         self.stage.relationship_targets(&self.path)
     }
 
+    /// Deleted target paths: targets named in a `delete` list-op, mapped to
+    /// stage namespace. Mirrors the deleted-paths out-param of C++
+    /// `UsdRelationship`'s target composition.
+    pub fn deleted_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage.deleted_relationship_targets(&self.path)
+    }
+
     /// Composed forwarded targets. See [`Stage::forwarded_relationship_targets`]
     /// for the forwarding, cycle, and mask contract. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.

@@ -289,6 +289,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
 pub(crate) use cache::Cache;
+pub use cache::TimeOffset;
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
 pub use graph::{ArcType, Node, NodeFlags, NodeId};
@@ -372,6 +373,11 @@ pub(crate) struct LayerStack {
     /// relocates are present (their interaction is a later phase) without
     /// rescanning every layer per prim.
     pub(crate) has_relocates: bool,
+    /// Per-layer authored `layerRelocates` pairs `(source, target)` in that
+    /// layer's own namespace, keyed by layer index; empty when no layer
+    /// relocates. The task-queue indexer reads these to compose relocate arcs in
+    /// a node's layer stack (C++ `PcpLayerStack::GetIncrementalRelocates*`).
+    pub(crate) layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
     /// Resolver used to anchor relative asset paths when locating layers.
     pub(crate) resolver: Box<dyn Resolver>,
 }
@@ -388,20 +394,62 @@ impl LayerStack {
             .map(|i| (i, Self::build_sublayer_stack(i, &layers, &*resolver)))
             .collect();
         let has_relocates = Self::compute_has_relocates(&layers);
+        let layer_relocates = rel::extract_layer_relocates(&layers);
         Self {
             layers,
             sublayer_stacks,
             session_layer_count,
             load_payloads,
             has_relocates,
+            layer_relocates,
             resolver,
         }
+    }
+
+    /// Builds the incremental relocates map for the layers in `ambient`,
+    /// combining each layer's authored `(source, target)` pairs without chaining
+    /// (C++ `PcpLayerStack::GetIncrementalRelocatesTargetToSource` /
+    /// `...SourceToTarget`). Keyed by target when `target_to_source`, else by
+    /// source. Layers are visited strongest first (the order in `ambient`), so a
+    /// stronger layer wins a key collision.
+    ///
+    /// A deletion relocate (`</Src>: <>`, empty target) is dropped from the
+    /// target→source map — an empty target cannot key a lookup — but kept in the
+    /// source→target map: its source is still a prohibited relocation source
+    /// under the salted-earth policy, which keys on the source alone.
+    ///
+    /// "Incremental" means the pairs as authored, so a prim relocated through
+    /// nested levels keeps an entry per level — `_EvalNodeRelocations` relies on
+    /// this to visit every intermediate source.
+    pub(crate) fn incremental_relocates(
+        &self,
+        ambient: &[(usize, sdf::LayerOffset)],
+        target_to_source: bool,
+    ) -> HashMap<Path, Path> {
+        let mut map = HashMap::new();
+        for &(layer, _) in ambient {
+            let Some(pairs) = self.layer_relocates.get(&layer) else {
+                continue;
+            };
+            for (source, target) in pairs {
+                let (key, value) = if target_to_source {
+                    if target.is_empty() {
+                        continue;
+                    }
+                    (target.clone(), source.clone())
+                } else {
+                    (source.clone(), target.clone())
+                };
+                map.entry(key).or_insert(value);
+            }
+        }
+        map
     }
 
     /// Re-derives [`has_relocates`](Self::has_relocates) from the current
     /// layers. Called after a `layerRelocates` edit that does not rebuild the
     /// sublayer precomputation (which would refresh the flag itself); keeping it
-    /// in sync is what re-gates the task-queue indexer's class-arc deferral.
+    /// in sync is what re-enables the indexer's relocate passes.
     pub(crate) fn recompute_has_relocates(&mut self) {
         self.has_relocates = Self::compute_has_relocates(&self.layers);
     }
@@ -449,6 +497,7 @@ impl LayerStack {
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
             .collect();
         self.recompute_has_relocates();
+        self.layer_relocates = rel::extract_layer_relocates(&self.layers);
     }
 
     /// Returns the root layer (the first non-session layer), if any.

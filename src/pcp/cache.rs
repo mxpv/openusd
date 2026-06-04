@@ -25,6 +25,42 @@ use super::index::{AncestorArc, CompositionContext, PrimIndex};
 use super::rel::Relocates;
 use super::{Error, LayerStack, VariantFallbackMap};
 
+/// One row of the `Time Offsets` composition dump (C++
+/// `testPcpCompositionResults`'s per-node and per-sublayer offset lines).
+///
+/// A node row carries the node's composed `path` and its arc display name; a
+/// sublayer row (a contributing sublayer member of a node's layer stack) has no
+/// `path` and an `arc` of `"sublayer"`. The `offset` shown is a node's
+/// cumulative `map_to_root` time offset for a node row, or the member's own
+/// stored sublayer offset for a sublayer row.
+#[derive(Debug, Clone)]
+pub struct TimeOffset {
+    /// Layer identifier of the row's representative layer.
+    pub layer: String,
+    /// Composed path for a node row; `None` for a sublayer row.
+    pub path: Option<Path>,
+    /// Arc display name for a node row, or `"sublayer"` for a sublayer row.
+    pub arc: &'static str,
+    /// The time offset shown for this row.
+    pub offset: sdf::LayerOffset,
+}
+
+/// Collects a prim index's nodes in tree pre-order (C++ `WalkNodes` over the
+/// root node), excluding the synthetic inert tree root that has no C++ analog.
+/// Children are visited in their stored strength order.
+fn walk_nodes(index: &PrimIndex) -> Vec<NodeId> {
+    let Some(root) = index.root() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeId> = index.children(root).iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        out.push(id);
+        stack.extend(index.children(id).iter().rev().copied());
+    }
+    out
+}
+
 /// Lazily-built composition graph.
 ///
 /// Caches per-prim composition indices and contexts. When a prim is queried
@@ -1058,6 +1094,15 @@ impl Cache {
     /// and mapping targets through composition arcs into the stage namespace.
     /// Both fields follow generic list-op value resolution (spec 12.2.6).
     fn property_targets(&mut self, path: &Path, field: FieldKey) -> Result<Vec<Path>> {
+        self.compose_property_paths(path, field, false)
+    }
+
+    /// Composes a path-list-op property field into stage namespace. With
+    /// `deleted` it returns the field's deleted entries (the `delete`-op paths);
+    /// otherwise the resolved targets/connections. Both resolve against the
+    /// canonical instance's subtree when shared and map prototype-namespace
+    /// results back to the queried instance (spec 11.3.4 under 11.3.3).
+    fn compose_property_paths(&mut self, path: &Path, field: FieldKey, deleted: bool) -> Result<Vec<Path>> {
         if !path.is_property_path() {
             return Ok(Vec::new());
         }
@@ -1065,18 +1110,18 @@ impl Cache {
         let prop_suffix = path.property_suffix().to_owned();
         let anchor = self.redirect_anchor(&prim)?;
 
-        // Resolve against the canonical instance's subtree when shared.
         let resolved_prim = match &anchor {
             Some((origin, canonical)) => prim.replace_prefix(origin, canonical).unwrap_or_else(|| prim.clone()),
             None => prim,
         };
         self.ensure_index(&resolved_prim)?;
-        let mut targets = self.indices[&resolved_prim].resolve_path_list_op(field, &self.stack, Some(&prop_suffix))?;
+        let index = &self.indices[&resolved_prim];
+        let mut targets = if deleted {
+            index.resolve_path_list_op_deleted(field, &self.stack, Some(&prop_suffix))?
+        } else {
+            index.resolve_path_list_op(field, &self.stack, Some(&prop_suffix))?
+        };
 
-        // Targets that land inside the prototype resolve into the canonical
-        // instance's namespace; map them back to the queried instance (spec
-        // 11.3.4 connections / relationship targets under spec 11.3.3
-        // instancing).
         if let Some((origin, canonical)) = &anchor {
             for target in &mut targets {
                 if let Some(remapped) = target.replace_prefix(canonical, origin) {
@@ -1085,6 +1130,22 @@ impl Cache {
             }
         }
         Ok(targets)
+    }
+
+    /// Returns the deleted target paths of a relationship's `targetPaths`
+    /// list-op: targets named in a `delete` operation, mapped into stage
+    /// namespace (C++ `ComputeRelationshipTargetPaths`'s deleted-paths
+    /// out-param). Non-property paths return an empty list.
+    pub fn deleted_relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
+        self.compose_property_paths(path, FieldKey::TargetPaths, true)
+    }
+
+    /// Returns the deleted connection paths of an attribute's `connectionPaths`
+    /// list-op: connections named in a `delete` operation, mapped into stage
+    /// namespace (C++ `ComputeAttributeConnectionPaths`'s deleted-paths
+    /// out-param). Non-property paths return an empty list.
+    pub fn deleted_connection_paths(&mut self, path: &Path) -> Result<Vec<Path>> {
+        self.compose_property_paths(path, FieldKey::ConnectionPaths, true)
     }
 
     /// Returns pseudo-root stage metadata, composing session-layer opinions
@@ -1148,6 +1209,27 @@ impl Cache {
         Ok(children)
     }
 
+    /// Returns the prohibited child names for a prim: the names of children that
+    /// have been relocated away from this prim (a relocation source, whether
+    /// renamed or deleted), sorted. These names cannot be re-introduced here
+    /// (C++ `PcpPrimIndex::ComputePrimChildNames`'s prohibited-names out-param).
+    pub fn prohibited_children(&mut self, path: &Path) -> Result<Vec<String>> {
+        let path = self.effective_path(path)?;
+        if self.relocates.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_index(&path)?;
+        let effective = self.relocates.effective_relocates(&path, &self.indices);
+        let mut names: Vec<String> = effective
+            .iter()
+            .filter(|(src, _)| src.parent().as_ref() == Some(&path))
+            .filter_map(|(src, _)| src.name().map(str::to_string))
+            .collect();
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
     /// Returns the composed list of property names for a prim path.
     ///
     /// Merges `propertyChildren` weakest-to-strongest. `propertyOrder` is not
@@ -1179,6 +1261,53 @@ impl Cache {
             }
         }
         Ok(stack)
+    }
+
+    /// Returns the `Time Offsets` dump rows for a prim (C++
+    /// `testPcpCompositionResults`). Each composition node yields a row carrying
+    /// its cumulative `map_to_root` offset, followed by a row for each
+    /// non-identity sublayer member of its layer stack (the member's own stored
+    /// offset). Nodes are walked in tree pre-order from the root node, matching
+    /// the harness's `WalkNodes`.
+    ///
+    /// Returns an empty vector unless some node carries a non-identity arc offset
+    /// or layer-stack member offset — the harness emits the section only then.
+    pub fn time_offsets(&mut self, path: &Path) -> Result<Vec<TimeOffset>> {
+        let path = self.effective_path(&path.prim_path())?;
+        self.ensure_index(&path)?;
+        let index = &self.indices[&path];
+
+        let walk = walk_nodes(index);
+        let has_offsets = walk.iter().any(|&id| {
+            let node = index.node(id);
+            !node.map_to_parent.time_offset().is_identity()
+                || node.layer_stack().iter().any(|(_, off)| !off.is_identity())
+        });
+        if !has_offsets {
+            return Ok(Vec::new());
+        }
+
+        let mut rows = Vec::new();
+        for id in walk {
+            let node = index.node(id);
+            rows.push(TimeOffset {
+                layer: self.stack.identifier(node.layer_index()).to_string(),
+                path: Some(node.path.clone()),
+                arc: node.arc.dump_name(),
+                offset: node.map_to_root.time_offset(),
+            });
+            for &(layer, off) in node.layer_stack() {
+                if !off.is_identity() {
+                    rows.push(TimeOffset {
+                        layer: self.stack.identifier(layer).to_string(),
+                        path: None,
+                        arc: "sublayer",
+                        offset: off,
+                    });
+                }
+            }
+        }
+        Ok(rows)
     }
 
     /// Returns the property stack for a property path: each `(layer identifier,
@@ -1434,8 +1563,11 @@ impl Cache {
             Err(e) => return Err(e.into()),
         };
 
-        // For relocated prims, merge source path opinions.
-        if !self.relocates.is_empty() {
+        // For relocated prims composed by the recursive builder, merge source
+        // path opinions as a post-pass. The task-queue indexer composes relocate
+        // arcs itself (it sets `specializes_propagated`), so its graphs skip the
+        // post-pass to avoid double-applying.
+        if !self.relocates.is_empty() && !index.graph().specializes_propagated {
             if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices)? {
                 self.precache_path(&source);
             }
