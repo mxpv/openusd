@@ -85,8 +85,8 @@
 //! [`StageBuilder::variant_fallbacks`](crate::usd::StageBuilder::variant_fallbacks).
 //! When a prim has a variant set but no authored selection, the engine tries
 //! each fallback in order. The first fallback matching an existing variant in
-//! the set is used; if none match, the first variant in the set is the default.
-//! Authored selections always take priority over fallbacks.
+//! the set is used; if none match, the set stays unselected. Authored
+//! selections always take priority over fallbacks.
 //!
 //! The [`Cache`](cache::Cache) stores both the [`PrimIndex`](index::PrimIndex)
 //! and the [`CompositionContext`](index::CompositionContext) for each composed
@@ -164,8 +164,7 @@
 //!   (`eval_implied_relocations`'s `TODO(relocates)`).
 //! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), variable
 //!   expressions in reference/payload asset paths, residual implied/nested-class
-//!   ordering, variant-strength edges, and prototype-redirection in the
-//!   instancing dump.
+//!   ordering, and prototype-redirection in the instancing dump.
 //!
 //! ## Permissions (`permission = private`)
 //!
@@ -253,8 +252,8 @@ pub use mapping::MapFunction;
 /// Maps variant set names to ordered lists of fallback selections.
 ///
 /// When a prim has a variant set but no authored selection, the composition
-/// engine tries each fallback in order before falling back to the first
-/// variant defined in the set.
+/// engine tries each fallback in order; a set with no applicable fallback stays
+/// unselected.
 ///
 /// This is the Rust equivalent of C++ `PcpVariantFallbackMap`.
 ///

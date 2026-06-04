@@ -51,23 +51,22 @@ impl std::fmt::Display for Format {
     }
 }
 
-/// Variant fallbacks a test relies on. The C++ Pcp test framework registers
-/// variant fallbacks through its plugin registry; our harness has none, so the
-/// few cases that depend on a non-default selection configure it here. `case1`'s
-/// `standin` set must select `render` (its `anim`/`layout`/`sim` variants
-/// reference intentionally-absent files); without the fallback the first
-/// variant, `anim`, is selected and its reference is unresolved.
-fn variant_fallbacks_for(name: &str) -> pcp::VariantFallbackMap {
-    match name {
-        "case1_root" => pcp::VariantFallbackMap::new().add("standin", ["render"]),
-        _ => pcp::VariantFallbackMap::new(),
-    }
+/// Global variant fallbacks for the museum assets.
+///
+/// The C++ Pcp test framework registers these through its plugin registry; we
+/// have no plugin system, so this function compensates for that gap. The
+/// registration is global, not per-asset: a `standin` variant set with no
+/// authored selection resolves to `render` (e.g. `case1`,
+/// `TypicalReferenceToRiggedModel`), while an asset that authors a `standin`
+/// selection overrides it (e.g. `BasicNestedVariants` selects `anim`).
+fn variant_fallbacks() -> pcp::VariantFallbackMap {
+    pcp::VariantFallbackMap::new().add("standin", ["render"])
 }
 
-fn open_stage(name: &str, entry: &Path) -> usd::Stage {
+fn open_stage(entry: &Path) -> usd::Stage {
     usd::Stage::builder()
         .on_error(|_| Ok(()))
-        .variant_fallbacks(variant_fallbacks_for(name))
+        .variant_fallbacks(variant_fallbacks())
         .open(entry.to_str().unwrap())
         .unwrap()
 }
@@ -110,7 +109,7 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
         return;
     }
 
-    let stage = open_stage(name, entry);
+    let stage = open_stage(entry);
 
     // Collect every prim, including inactive/class/over prims, so the PCP
     // baselines can validate composition independent of stage traversal policy.
@@ -172,21 +171,10 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///
 /// Assets outside this list are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
-///
-/// `TrickyConnectionToRelocatedAttribute` and
-/// `TrickyMultipleRelocationsAndClasses2` are byte-exact red for the same
-/// reason: the spooky implied-inherit-across-relocate mechanism, where a local
-/// opinion authored on a class under a relocate must propagate as an implied
-/// inherit to the relocated prim's final location. That needs relocate-source
-/// nodes to use identity maps with the relocation folded into the
-/// reference/inherit arc maps (C++ `_CreateMapExpressionForArc`'s
-/// `GetExpressionForRelocatesAtPath`), the relocate-representation rewrite
-/// tracked in the `pcp-relocate-port-blueprint` notes.
 const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "BasicInherits_root",
     "BasicPayload_root",
     "BasicRelocateToAnimInterfaceAsNewRootPrim_root",
-    "BasicRelocateToAnimInterface_root",
     "ElidedAncestralRelocates_root",
     "ErrorArcCycle_root",
     "ErrorInconsistentProperties_root",
@@ -212,17 +200,12 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TimeCodesPerSecond_session",
     "TimeCodesPerSecond_session_24fps",
     "TimeCodesPerSecond_session_48tcps",
-    "TrickyConnectionToRelocatedAttribute_root",
-    "TrickyInheritsAndRelocates4_root",
-    "TrickyInheritsAndRelocates5_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
     "TrickyMultipleRelocations4_root",
-    "TrickyMultipleRelocationsAndClasses2_root",
     "TrickyMultipleRelocationsAndClasses_root",
     "TrickySpecializesAndRelocates_root",
     "TrickySpookyInheritsInSymmetricBrowRig_root",
-    "TrickySpookyInherits_root",
     "TrickySpookyVariantSelection_root",
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
@@ -243,20 +226,18 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // TODO(ancestral-variants): the ancestral variant task family
     // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
     // faithful cross-frame `_ComposeVariantSelection` are ported, so a local
-    // variant set on a sub-root arc target and a single ancestral variant
-    // selection compose byte-exact. These remaining cases have a residual
-    // strength-ordering or duplicate-node difference in the inherit-inside-variant
-    // interaction: `SubrootInheritsAndVariants` mis-selects between the
-    // referencing-layer and referenced-layer copies of an inherit target inside a
-    // variant; `SubrootReferenceAndVariants2` orders two inherit-band sites one
-    // position off; `TrickyInheritsInVariants2` keeps an extra implied node.
+    // variant set on a sub-root arc target and an ancestral variant selection
+    // (including one that a weaker variant set provides for a stronger one, and a
+    // sub-root reference to a prim that exists only inside a variant) compose
+    // byte-exact. These remaining cases have a residual strength-ordering or
+    // duplicate-node difference: `SubrootInheritsAndVariants` mis-selects between
+    // the referencing-layer and referenced-layer copies of an inherit target
+    // inside a variant; `SubrootReferenceAndVariants2` orders two inherit-band
+    // sites one position off; `TrickyInheritsInVariants2` keeps an extra implied
+    // node.
     "SubrootInheritsAndVariants_root",
     "SubrootReferenceAndVariants2_root",
     "TrickyInheritsInVariants2_root",
-    // TODO(variant-strength): a weaker-selection precedence edge the builder gets
-    // wrong too, or an inherit authored inside a variant.
-    "TrickyVariantWeakerSelection2_root",
-    "TrickyVariantWeakerSelection4_root",
     // TODO(variant-arcs): forward attribute connections / relationship targets
     // and references introduced inside a selected variant — the variant's
     // `Attribute connections` block is missing from the composed result.
@@ -266,11 +247,8 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
-    // TODO(implied-classes): two implied/nested-class cases still diverge in
-    // strength ordering. `ImpliedAndAncestralInherits_ComplexEvaluation` orders
-    // an implied-inherit band differently; `SubrootReferenceAndClasses` reaches
-    // the builder but its implied class ordering still differs.
-    "ImpliedAndAncestralInherits_ComplexEvaluation_root",
+    // TODO(implied-classes): `SubrootReferenceAndClasses` reaches the builder but
+    // its implied class ordering still differs.
     "SubrootReferenceAndClasses_root",
     // TODO(expr-arcs): evaluate variable expressions in reference/payload asset
     // paths so the composed arc target resolves.
@@ -550,7 +528,7 @@ fn run_pcp(name: &str, format: Format, test_dir: &Path, baseline: &schema::Basel
         .expect("read pcp.txt")
         .replace("\r\n", "\n");
 
-    let stage = open_stage(name, entry);
+    let stage = open_stage(entry);
     let base = entry.parent().expect("entry has a parent directory");
     let actual = pcp_dump(name, &baseline.entry, base, &stage);
     if actual != expected {
