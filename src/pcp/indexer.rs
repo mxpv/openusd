@@ -60,13 +60,13 @@
 //! specializes are class-based), and each level's placeholder is copied to the
 //! root too. The copies are ordered among themselves by the faithful
 //! `PcpCompareSiblingNodeStrength`, placing the globally-weak band after every
-//! other opinion (spec 10.4.1). Propagation is add-if-absent on site, so when a
-//! root site is reached by both a weak and a strong specializes placeholder, the
-//! first to arrive claims the copy; a post-build pass
-//! ([`Indexer::prefer_strongest_specializes_origins`]) then rebinds each copy to
-//! the strongest-origin placeholder at its site (C++ `_AddArc`'s specializes
-//! strength-preference), so the strongest origin wins regardless of arrival
-//! order.
+//! other opinion (spec 10.4.1). Propagation is add-if-absent on site, so the
+//! first placeholder to reach a root site claims the copy and fixes its origin;
+//! the copy carries the strongest origin because the seed scan
+//! ([`scan_and_enqueue`](Indexer::scan_and_enqueue)) enqueues only expressed-arc
+//! tasks for the cloned ancestor graph (C++ `AddTasksForRootNode`), so the
+//! seed's propagated specializes are inherited from the clone rather than
+//! re-implied in a different order.
 //!
 //! Implied-class tasks drain descendant-before-ancestor and otherwise
 //! strongest-first (C++ `Task::PriorityOrder`'s `EvalImpliedClasses` case), so
@@ -391,14 +391,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
 
-        // Resolve, per root site, which propagated specializes copy's origin is
-        // strongest (C++ `_AddArc`'s specializes strength-preference). Propagation
-        // is add-if-absent on site, so the first placeholder to reach a root site
-        // claims it regardless of origin strength; this pass rebinds each copy to
-        // the strongest same-site origin once the graph is complete, so a stronger
-        // origin arriving after the site was claimed still wins.
-        self.prefer_strongest_specializes_origins();
-
         // The indexer copies specializes nodes under the local root (C++
         // `_PropagateNodeToRoot`), so strength ordering uses the faithful
         // specializes comparator rather than the builder's chain-depth band.
@@ -704,9 +696,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
     }
 
     /// Computes `has_specs` at each non-inert node's path and enqueues the
-    /// expressed-arc tasks for the spec-bearing nodes (C++ `AddTasksForRootNode`,
-    /// restricted to the ported tasks). A node with no spec at its path authors
-    /// no arc, so it gets no task.
+    /// expressed-arc tasks for the spec-bearing nodes (C++ `AddTasksForRootNode`
+    /// → `_AddTasksForNodeRecursively`, restricted to the ported tasks). A node
+    /// with no spec at its path authors no arc, so it gets no task.
+    ///
+    /// Only the expressed-arc tasks are enqueued, not implied-class/specializes
+    /// propagation: the seed is the cloned, already-composed ancestor graph
+    /// (C++ `_BuildInitialPrimIndexFromAncestor`), whose implied classes and
+    /// propagated specializes copies are inherited from the clone. The implied
+    /// tasks are added per-arc by [`add_tasks_for_node`](Self::add_tasks_for_node)
+    /// as arcs are newly composed (C++ keeps them off the root-node task list).
     fn scan_and_enqueue(&mut self) {
         for i in 0..self.output.nodes.len() {
             if self.output.nodes[i].is_inert() {
@@ -716,27 +715,23 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let has_specs = self.stack_has_spec(self.output.nodes[i].layer_stack(), &self.output.nodes[i].path);
             self.output.nodes[i].has_specs = has_specs;
             if has_specs {
-                self.add_tasks_for_node(node);
+                self.add_expressed_arc_tasks(node);
             }
         }
     }
 
-    /// Enqueues a node's expressed-arc tasks and any implied-class propagation
-    /// it triggers (C++ `AddTasksForNode`, restricted to the ported tasks).
-    ///
-    /// A class-based node propagates the whole class hierarchy it starts from
-    /// (`_FindStartingNodeForImpliedClasses`); a non-class node that picked up
-    /// class-based children (from a referenced subtree) propagates them from
-    /// itself.
-    fn add_tasks_for_node(&mut self, node: NodeId) {
+    /// Enqueues a node's expressed-arc tasks (C++ `_AddTasksForNodeRecursively`'s
+    /// task loop, restricted to the ported tasks): references, payloads,
+    /// inherits, specializes, and — at the top level — the node's own variant
+    /// sets. The implied-class/specializes tasks are added separately by
+    /// [`add_tasks_for_node`](Self::add_tasks_for_node) when an arc is composed.
+    fn add_expressed_arc_tasks(&mut self, node: NodeId) {
         self.tasks.push(Task::new(TaskKind::EvalNodeReferences, node));
         if self.stack.load_payloads {
             self.tasks.push(Task::new(TaskKind::EvalNodePayloads, node));
         }
         self.tasks.push(Task::new(TaskKind::EvalNodeInherits, node));
         self.tasks.push(Task::new(TaskKind::EvalNodeSpecializes, node));
-
-        self.add_implied_tasks_for_node(node);
         // The node's own (local) variant sets. A recursive sub-build defers
         // variants to the top-level build (C++ `evaluateVariantsAndDynamicPayloads
         // == false`), so a node composed inside a frame enqueues no variant work.
@@ -745,6 +740,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if self.frame.is_none() {
             self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, node));
         }
+    }
+
+    /// Enqueues a newly-composed node's implied-class/specializes propagation
+    /// ([`add_implied_tasks_for_node`](Self::add_implied_tasks_for_node)) and its
+    /// expressed-arc tasks ([`add_expressed_arc_tasks`](Self::add_expressed_arc_tasks)),
+    /// the full task set for an arc node (C++ `AddTasksForNode`, restricted to
+    /// the ported tasks).
+    fn add_tasks_for_node(&mut self, node: NodeId) {
+        self.add_implied_tasks_for_node(node);
+        self.add_expressed_arc_tasks(node);
     }
 
     /// Enqueues the implied-class and implied-specializes propagation a node
@@ -1877,82 +1882,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
         Ok(out)
-    }
-
-    /// Rebinds each propagated specializes root copy to the strongest-origin
-    /// placeholder at its site (C++ `_AddArc`'s specializes strength-preference).
-    ///
-    /// `propagate_node_to_root` is add-if-absent on site, so the first specializes
-    /// placeholder to reach a given root site claims the copy and fixes its
-    /// origin, even when a stronger-origin placeholder is composed later. C++
-    /// keeps the stronger origin (`PcpCompareNodeStrength(origin,
-    /// child.GetOriginNode())` + `_InertSubtree`); reproducing its exact creation
-    /// order would require matching the task heap's interleaving for deep
-    /// ancestral-specializes graphs. Instead, once the graph is complete, this
-    /// pass picks the strongest origin per root copy. It iterates to a fixpoint
-    /// because a copy's strength can depend on another copy's origin; rebinding
-    /// only ever strengthens an origin, so the iteration converges.
-    // TODO(perf): scans the whole arena once per root copy to gather candidates
-    // and re-runs `compare_node_strength` (which walks parent chains) on each
-    // fixpoint pass. A site-keyed index of specializes placeholders, built once,
-    // would replace the O(copies × nodes) candidate scan.
-    fn prefer_strongest_specializes_origins(&mut self) {
-        let root = self.output.local_root();
-        if !root.is_valid() {
-            return;
-        }
-        // The propagated root copies and, per copy, the candidate placeholders at
-        // the same site (every specializes node not itself a root copy).
-        let copies: Vec<NodeId> = self.output.nodes[root.idx()]
-            .children()
-            .iter()
-            .copied()
-            .filter(|&c| self.output.is_propagated_specializes(c))
-            .collect();
-        let candidates: Vec<Vec<NodeId>> = copies
-            .iter()
-            .map(|&c| {
-                let rep = self.node(c).layer_index();
-                let path = &self.node(c).path;
-                (0..self.output.nodes.len())
-                    .map(|i| NodeId(i as u32))
-                    .filter(|&p| {
-                        p != c
-                            && self.node(p).arc == ArcType::Specialize
-                            && self.node(p).layer_index() == rep
-                            && &self.node(p).path == path
-                            && root != self.node(p).parent().unwrap_or(NodeId::INVALID)
-                    })
-                    .collect()
-            })
-            .collect();
-
-        loop {
-            let mut changed = false;
-            for (copy, cands) in copies.iter().zip(&candidates) {
-                let cur_origin = self.node(*copy).origin().unwrap_or(*copy);
-                // Start from the current origin and keep any strictly-stronger
-                // candidate (`compare_node_strength` returns `Less` for the
-                // stronger node); a self-comparison is `Equal`, so it never wins.
-                let best = cands.iter().copied().fold(cur_origin, |best, cand| {
-                    if self.output.compare_node_strength(cand, best) == Ordering::Less {
-                        cand
-                    } else {
-                        best
-                    }
-                });
-                if best != cur_origin {
-                    let sibling = self.node(best).sibling_num_at_origin;
-                    let n = &mut self.output.nodes[copy.idx()];
-                    n.origin = Some(best);
-                    n.sibling_num_at_origin = sibling;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
     }
 
     /// Borrows the node behind a handle in the graph being grown.
