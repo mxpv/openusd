@@ -70,7 +70,8 @@ fn walk_nodes(index: &PrimIndex) -> Vec<NodeId> {
 ///
 /// An optional [`VariantFallbackMap`] provides fallback selections for variant
 /// sets that have no authored opinion. Authored selections always take priority;
-/// fallbacks are tried in order before the default (first variant in the set).
+/// fallbacks are tried in order, and a set with no applicable fallback stays
+/// unselected.
 ///
 /// All public methods return `Result` — a [`pcp::Error`](super::Error) is
 /// returned when composition fails. The caller ([`Stage`](crate::usd::Stage))

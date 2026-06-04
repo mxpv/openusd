@@ -128,6 +128,25 @@ fn find_containing_variant_selection(path: &Path) -> Option<Path> {
     }
 }
 
+/// The variant-bearing ancestor of `node_path` (a path that carries `{set=sel}`
+/// selections) whose stripped form equals `stripped`, i.e. the storage site for
+/// an opinion at the namespace path `stripped` within this variant node.
+///
+/// A variant node's selection is authored under its `{set=sel}` segment, so a
+/// selection read at an ancestor namespace level (`/Ref` while the node is
+/// `/Ref{v1=a}Model`) lives at the variant-deepened site (`/Ref{v1=a}`). Walks
+/// `node_path` up, dropping a component each step, until the variant selections
+/// strip away to `stripped`.
+fn variant_storage_site(node_path: &Path, stripped: &Path) -> Option<Path> {
+    let mut p = node_path.clone();
+    loop {
+        if p.strip_all_variant_selections() == *stripped {
+            return Some(p);
+        }
+        p = p.parent()?;
+    }
+}
+
 /// Maps a class-arc parent site back across the arc to the site to inherit (C++
 /// `_DetermineInheritPath`), returning `None` when the parent is outside the
 /// arc's co-domain.
@@ -1143,6 +1162,13 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
     /// loop.
     fn eval_arcs(&mut self, node: NodeId, kind: TaskKind) -> Result<(), Error> {
+        // An inert node (an implied-class placeholder) contributes no opinions
+        // and must not re-express the arcs its origin site already composed; an
+        // implied inherit at the referencing prim's own path would otherwise
+        // duplicate that prim's references (C++ keeps the placeholder inert).
+        if self.node(node).is_inert() {
+            return Ok(());
+        }
         let (arc, arcs) = match kind {
             TaskKind::EvalNodeReferences => {
                 let refs = compose_references_in(
@@ -1327,6 +1353,11 @@ impl<'a, 'f> Builder<'a, 'f> {
             return Ok(());
         }
         let options = self.compose_variant_options(node, &vt.vset_path, &vt.vset_name)?;
+        // A configured fallback selects the first of its ordered options that
+        // exists in the set. With no authored selection and no applicable
+        // fallback the set stays unselected (C++ `_EvalNodeFallbackVariant`
+        // enqueues a none-found placeholder); there is no implicit first-variant
+        // default.
         let fallback = self
             .inputs
             .ctx
@@ -1334,12 +1365,7 @@ impl<'a, 'f> Builder<'a, 'f> {
             .get(&vt.vset_name)
             .iter()
             .find(|fb| options.iter().any(|o| o == *fb))
-            .cloned()
-            // No configured fallback applies: default to the set's first variant.
-            // The C++ test goldens were generated with variant fallbacks our
-            // harness does not register; defaulting to the first option matches
-            // them for every set but the few the harness configures explicitly.
-            .or_else(|| options.first().cloned());
+            .cloned();
         match fallback {
             Some(sel) => self.add_variant_arc(node, vt, &sel, is_ancestral)?,
             None => {
@@ -1384,6 +1410,21 @@ impl<'a, 'f> Builder<'a, 'f> {
             let node = self.node(n);
             let Some(site) = node.map_to_root.map_target_to_source(&composed) else {
                 continue;
+            };
+            // `map_target_to_source` yields a namespace path that may carry an
+            // enclosing variant's `{set=sel}` qualifier; the storage site is
+            // computed from the variant-free path (C++
+            // `_ComposeVariantSelectionAcrossNodes`'s `info.sitePath`). A class or
+            // reference node reads its selection at that plain path. A variant
+            // node re-inserts its own selection, so a selection authored inside
+            // one variant (`/Ref{v1=a}` authoring `v2`) is read at the `{set=sel}`
+            // site: walk the node's variant-bearing path up to the ancestor whose
+            // stripped form is `path_in_node`.
+            let path_in_node = site.strip_all_variant_selections();
+            let site = if node.arc == ArcType::Variant {
+                variant_storage_site(&node.path, &path_in_node).unwrap_or(path_in_node)
+            } else {
+                path_in_node
             };
             for &(layer, _) in node.layer_stack() {
                 let Some(value) = self
@@ -2401,19 +2442,18 @@ mod tests {
         );
     }
 
-    /// With no authored selection and no configured fallback, the first variant
-    /// in the set is selected (matching the recursive builder's default).
+    /// With no authored selection and no configured fallback, the set stays
+    /// unselected — no variant arc is added (C++ `_EvalNodeFallbackVariant`).
     #[test]
-    fn variant_defaults_to_first() {
+    fn variant_no_selection_unselected() {
         let s = stack(
             "#usda 1.0\ndef \"World\" (\n    variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom double x = 1 }\n    \"b\" { custom double x = 2 }\n  }\n}\n",
         );
         let graph = build(&s, "/World").expect("a prim with an unselected variant set is composed");
         assert!(
-            graph
-                .iter()
-                .any(|n| n.arc == ArcType::Variant && n.path.as_str() == "/World{v=a}"),
-            "the first variant {{v=a}} is the default selection"
+            graph.iter().all(|n| n.arc != ArcType::Variant),
+            "no variant arc is added without a selection, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
         );
     }
 

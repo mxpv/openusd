@@ -472,8 +472,10 @@ fn resolve_variant_selections_in<'a>(
         }
     }
 
-    // For variant sets without an explicit selection, try the fallback map
-    // first, then fall back to the first variant name in the set.
+    // For variant sets without an explicit selection, apply a configured
+    // fallback if one names an existing variant. With no applicable fallback the
+    // set stays unselected (C++ `_EvalNodeFallbackVariant`); there is no implicit
+    // first-variant default, matching the builder.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
             let data = &layers[layer];
@@ -494,16 +496,10 @@ fn resolve_variant_selections_in<'a>(
                 let Value::TokenVec(variants) = val.into_owned() else {
                     continue;
                 };
-                // Try fallback selections in order — use the first one that
-                // exists in this variant set.
+                // Use the first configured fallback that exists in this set.
                 let fallbacks = variant_fallbacks.get(entry.key());
                 if let Some(fb) = fallbacks.iter().find(|fb| variants.contains(fb)) {
                     entry.insert(fb.clone());
-                    continue;
-                }
-                // No fallback matched — default to the first variant.
-                if let Some(first) = variants.into_iter().next() {
-                    entry.insert(first);
                 }
             }
         }
@@ -1413,16 +1409,17 @@ def "Prim" (
             .collect()
     }
 
-    /// When no fallback is provided and no authored selection exists, the first
-    /// variant in the set should be selected by default.
+    /// With no fallback and no authored selection, the set stays unselected — no
+    /// variant arc is added (C++ `_EvalNodeFallbackVariant`; no implicit
+    /// first-variant default).
     #[test]
-    fn variant_default_without_fallback() -> Result<()> {
+    fn variant_no_selection_unselected() -> Result<()> {
         let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let index = build(&stack, "/NoSelection");
         let paths = variant_paths(&index);
         assert!(
-            paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
-            "default should be 'full' (first variant): got {paths:?}"
+            paths.is_empty(),
+            "no variant should be selected without an authored selection or fallback: got {paths:?}"
         );
         Ok(())
     }
@@ -1475,16 +1472,17 @@ def "Prim" (
         Ok(())
     }
 
-    /// When all fallback names are invalid, the first variant in the set is used.
+    /// When every configured fallback names a variant that does not exist in the
+    /// set, the set stays unselected — no variant arc is added.
     #[test]
-    fn variant_fallback_all_invalid_uses_first() -> Result<()> {
+    fn variant_fallback_all_invalid_unselected() -> Result<()> {
         let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let fb = VariantFallbackMap::new().add("shadingComplexity", ["ultra", "mega"]);
         let index = build_with_fallbacks(&stack, "/NoSelection", fb);
         let paths = variant_paths(&index);
         assert!(
-            paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
-            "all fallbacks invalid — should use first variant 'full': got {paths:?}"
+            paths.is_empty(),
+            "no variant should be selected when every fallback is invalid: got {paths:?}"
         );
         Ok(())
     }
