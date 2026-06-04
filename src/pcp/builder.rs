@@ -1,6 +1,6 @@
-//! Task-queue prim indexer (C++ `Pcp_PrimIndexer` port).
+//! Task-queue prim builder (C++ `Pcp_PrimIndexer` port).
 //!
-//! [`Indexer`] grows a [`PrimIndexGraph`] node-by-node by draining a
+//! [`Builder`] grows a [`PrimIndexGraph`] node-by-node by draining a
 //! priority-ordered task queue, mirroring C++ `Pcp_BuildPrimIndex`. The queue
 //! follows each composition arc structurally, so reference/payload diamonds — a
 //! shared target reached by two arc paths — contribute a node on each path.
@@ -35,7 +35,7 @@
 //! → `EvalNodeVariantNoneFound`), weaker than every arc task so the strongest
 //! variant selection is known before a variant grafts (C++ `_EvalNodeVariantSets`
 //! and friends). The authored/fallback tasks break ties by live node strength,
-//! so [`take_best_task`](Indexer::take_best_task) selects the next task with a
+//! so [`take_best_task`](Builder::take_best_task) selects the next task with a
 //! graph-aware comparator rather than a fixed `Ord`. Selecting a variant grafts
 //! the `{set=sel}` site and re-enqueues its own arc and nested-variant tasks,
 //! then retries any pending fallback tasks (C++ `RetryVariantTasks`). A nested
@@ -61,7 +61,7 @@
 //! other opinion (spec 10.4.1). Propagation is add-if-absent on site, so the
 //! first placeholder to reach a root site claims the copy and fixes its origin;
 //! the copy carries the strongest origin because the seed scan
-//! ([`scan_and_enqueue`](Indexer::scan_and_enqueue)) enqueues only expressed-arc
+//! ([`scan_and_enqueue`](Builder::scan_and_enqueue)) enqueues only expressed-arc
 //! tasks for the cloned ancestor graph (C++ `AddTasksForRootNode`), so the
 //! seed's propagated specializes are inherited from the clone rather than
 //! re-implied in a different order.
@@ -70,7 +70,7 @@
 //! strongest-first (C++ `Task::PriorityOrder`'s `EvalImpliedClasses` case), so
 //! the strongest implied arc reaches a shared site first.
 //!
-//! The indexer is the sole composition path ([`Indexer::build`] returns `None`
+//! The builder is the sole composition path ([`Builder::build`] returns `None`
 //! only for a genuine cycle or an unestablished seed, which compose to an empty
 //! prim index). It composes the root local site; reference, payload, and inherit
 //! arcs to either a root-level or a sub-root target (with the ancestral sub-index
@@ -154,8 +154,8 @@ fn determine_inherit_path(parent_path: &Path, inherit_map: &MapFunction) -> Opti
 /// `PcpPrimIndex_StackFrame`).
 ///
 /// When an arc target needs ancestral opinions (`includeAncestralOpinions`),
-/// the target is composed as its own sub-index by a nested [`Indexer`], then
-/// grafted under the arc's parent. The nested indexer carries a `Frame` back to
+/// the target is composed as its own sub-index by a nested [`Builder`], then
+/// grafted under the arc's parent. The nested builder carries a `Frame` back to
 /// the graph that introduced the arc, so cross-frame duplicate-node skipping
 /// (C++ `_AddArc`'s `skipDuplicateNodes` search) can reach the parent graph's
 /// already-composed nodes — the mechanism that keeps a class reached both
@@ -181,7 +181,7 @@ struct Frame<'f> {
 
 /// A queued unit of composition work on one node (C++ `Pcp_PrimIndexer::Task`).
 ///
-/// [`take_best_task`](Indexer::take_best_task) drains the highest-priority task:
+/// [`take_best_task`](Builder::take_best_task) drains the highest-priority task:
 /// stronger [`kind`](Self::kind) first (C++ `Task::Type`), then a per-kind
 /// tiebreak. The order-independent reference/payload/inherit tasks tiebreak on
 /// node index; the variant tasks carry a [`variant`](Self::variant) set and
@@ -239,7 +239,7 @@ struct VariantTask {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum TaskKind {
     /// A variant set whose fallback search also came up empty; a placeholder
-    /// kept only so [`retry_variant_tasks`](Indexer::retry_variant_tasks) can
+    /// kept only so [`retry_variant_tasks`](Builder::retry_variant_tasks) can
     /// re-promote it once a newly selected variant introduces opinions.
     EvalNodeVariantNoneFound,
     /// Evaluate the fallback selection for a variant set with no authored one.
@@ -309,7 +309,7 @@ struct Site<'a> {
     /// only case where the stage-keyed `cached_indices` apply.
     is_root: bool,
     /// The path this build composes — the graph's local-root site path. Set at
-    /// the start of [`build`](Indexer::build) and used as the current-graph root
+    /// the start of [`build`](Builder::build) and used as the current-graph root
     /// in cross-frame duplicate-node lookups.
     path: Path,
 }
@@ -320,7 +320,7 @@ struct Site<'a> {
 /// All borrowed inputs are shared references, so each build is an independent
 /// pure function over the layer stack and incoming context (Rayon-friendly —
 /// see the `TODO(rayon)` on the cross-prim driver in `cache.rs`).
-pub(crate) struct Indexer<'a, 'f> {
+pub(crate) struct Builder<'a, 'f> {
     /// Shared read-only inputs (layer stack, context, cached indices).
     inputs: Inputs<'a>,
     /// The site (ambient layer stack + path) this build composes.
@@ -351,7 +351,7 @@ pub(crate) struct Indexer<'a, 'f> {
     root_contributes: bool,
 }
 
-impl<'a, 'f> Indexer<'a, 'f> {
+impl<'a, 'f> Builder<'a, 'f> {
     pub(crate) fn new(
         stack: &'a LayerStack,
         ctx: &'a CompositionContext,
@@ -379,7 +379,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
     }
 
-    /// Composes `path` into a prim index graph. The task-queue indexer is the
+    /// Composes `path` into a prim index graph. The task-queue builder is the
     /// sole composition path; `None` is returned only for a genuine composition
     /// cycle (depth bound exceeded) or when the seed cannot be established, which
     /// the cache treats as an empty prim index.
@@ -474,7 +474,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
 
-        // The indexer copies specializes nodes under the local root (C++
+        // The builder copies specializes nodes under the local root (C++
         // `_PropagateNodeToRoot`), so strength ordering uses the faithful
         // specializes comparator rather than the builder's chain-depth band.
         self.output.specializes_propagated = true;
@@ -578,7 +578,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         self.frame.is_some_and(|f| f.skip)
     }
 
-    /// Builds a nested sub-indexer one frame deeper, sharing this build's layer
+    /// Builds a nested sub-builder one frame deeper, sharing this build's layer
     /// stack, context, and cache. The caller supplies the ambient stack and the
     /// parent-frame chain (which carries the duplicate-node skip flag).
     fn new_sub<'b, 'g>(
@@ -587,11 +587,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         ambient_is_root: bool,
         frame: Option<&'g Frame<'g>>,
         root_contributes: bool,
-    ) -> Indexer<'b, 'g>
+    ) -> Builder<'b, 'g>
     where
         'a: 'b,
     {
-        let mut sub = Indexer::new(
+        let mut sub = Builder::new(
             self.inputs.stack,
             self.inputs.ctx,
             self.inputs.cached_indices,
@@ -2297,9 +2297,9 @@ mod tests {
     fn build(stack: &LayerStack, prim: &str) -> Option<PrimIndexGraph> {
         let ctx = CompositionContext::default();
         let ambient = stack.root_layer_stack();
-        Indexer::new(stack, &ctx, &HashMap::new(), &ambient, true)
+        Builder::new(stack, &ctx, &HashMap::new(), &ambient, true)
             .build(&Path::from(prim))
-            .expect("indexer build")
+            .expect("builder build")
     }
 
     /// Builds a layer stack whose first `session` layers are session layers.
@@ -2448,7 +2448,7 @@ mod tests {
                 "#usda 1.0\ndef \"Model\" (\n    inherits = </Class>\n) {}\nclass \"Class\" {}\n",
             ),
         ]);
-        let graph = build(&s, "/Model").expect("reference + class is composed by the indexer");
+        let graph = build(&s, "/Model").expect("reference + class is composed by the builder");
         // The referenced class node, plus the implied class node in root.usd.
         let class_layers: Vec<usize> = graph
             .iter()
@@ -2490,7 +2490,7 @@ mod tests {
             ("B.usd", "#usda 1.0\ndef \"B\" (\n    references = @C.usd@</C>\n) {}\n"),
             ("C.usd", "#usda 1.0\ndef \"C\" { custom double x = 1 }\n"),
         ]);
-        let graph = build(&s, "/Root").expect("a pure reference diamond is composed by the indexer");
+        let graph = build(&s, "/Root").expect("a pure reference diamond is composed by the builder");
         let c_nodes = graph.iter().filter(|n| n.path.as_str() == "/C").count();
         assert_eq!(c_nodes, 2, "the shared reference target appears once per arc path");
     }
@@ -2516,10 +2516,10 @@ mod tests {
         let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
         let mut cached = HashMap::new();
         cached.insert(Path::from("/Root"), root_index);
-        let child = Indexer::new(&s, &ctx, &cached, &ambient, true)
+        let child = Builder::new(&s, &ctx, &cached, &ambient, true)
             .build(&Path::from("/Root/Child"))
-            .expect("indexer build")
-            .expect("child composed by indexer");
+            .expect("builder build")
+            .expect("child composed by builder");
         assert!(
             child
                 .iter()

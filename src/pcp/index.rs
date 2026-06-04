@@ -100,7 +100,7 @@ impl PrimIndex {
         &self.graph.nodes
     }
 
-    /// Returns the underlying composition graph. The task-queue indexer clones a
+    /// Returns the underlying composition graph. The task-queue builder clones a
     /// parent prim's graph as the seed for its child's index (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
     pub(crate) fn graph(&self) -> &PrimIndexGraph {
@@ -228,7 +228,7 @@ impl PrimIndex {
     /// Builds a prim index for a root prim with no cached ancestors (a test
     /// convenience over [`build_with_cache`](Self::build_with_cache)). A child
     /// prim must instead be built through a cache holding its ancestors, since
-    /// the indexer seeds a child from its cached parent.
+    /// the builder seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerStack, ctx: &CompositionContext) -> Result<Self, Error> {
         Self::build_with_cache(path, stack, ctx, &HashMap::new())
@@ -268,11 +268,11 @@ impl PrimIndex {
                 return Ok(cached.clone());
             }
         }
-        // The task-queue indexer is the sole composition path. It returns `None`
+        // The task-queue builder is the sole composition path. It returns `None`
         // only for a genuine cycle or an unestablished seed, which compose to an
         // empty prim index.
-        let indexer = super::indexer::Indexer::new(stack, ctx, cached_indices, ambient, ambient_is_root);
-        let graph = indexer.build(path)?.unwrap_or_default();
+        let builder = super::builder::Builder::new(stack, ctx, cached_indices, ambient, ambient_is_root);
+        let graph = builder.build(path)?.unwrap_or_default();
         Ok(PrimIndex { graph })
     }
 
@@ -406,7 +406,7 @@ pub(crate) struct AncestorArc {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers (used by IndexBuilder and Stage)
+// Shared helpers (used by the `Builder` and Stage)
 // ---------------------------------------------------------------------------
 
 /// Resolves variant selections across a prim's composition nodes.
@@ -731,7 +731,7 @@ mod tests {
 
     /// Builds a prim index with variant fallbacks applied.
     ///
-    /// The task-queue indexer seeds a child prim from its cached parent, so the
+    /// The task-queue builder seeds a child prim from its cached parent, so the
     /// ancestors are composed top-down into a cache first (mirroring the cache's
     /// `ensure_index`), threading each prim's child context to the next.
     fn build_with_fallbacks(stack: &LayerStack, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
