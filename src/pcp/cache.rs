@@ -663,12 +663,12 @@ impl Cache {
 
     /// Recompute the cached `Relocates` from the current layer data. Called
     /// when `layerRelocates` opinions or the layer stack itself change. Also
-    /// refreshes `LayerStack::has_relocates`: a `layerRelocates`-only edit does
-    /// not rebuild the sublayer precomputation, so the flag the indexer reads to
-    /// defer class-arc composition would otherwise stay stale.
+    /// refreshes the stack's `has_relocates` flag and `layer_relocates` pairs: a
+    /// `layerRelocates`-only edit does not rebuild the sublayer precomputation,
+    /// so the relocate state the indexer reads would otherwise stay stale.
     pub(super) fn recompute_relocates(&mut self) {
         self.relocates = Relocates::new(&self.stack.layers);
-        self.stack.recompute_has_relocates();
+        self.stack.recompute_relocate_data();
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -1563,25 +1563,12 @@ impl Cache {
             Err(e) => return Err(e.into()),
         };
 
-        // For relocated prims composed by the recursive builder, merge source
-        // path opinions as a post-pass. The task-queue indexer composes relocate
-        // arcs itself (it sets `specializes_propagated`), so its graphs skip the
-        // post-pass to avoid double-applying.
-        if !self.relocates.is_empty() && !index.graph().specializes_propagated {
-            if let Some(source) = self.relocates.find_source_path(path, &self.stack, &self.indices)? {
-                self.precache_path(&source);
-            }
-            self.relocates
-                .add_relocate_nodes(path, &mut index, &self.stack, &self.indices, &self.contexts)?;
-        }
-
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
-        // instance brings in. This is enforced at composition time — the index
-        // builder skips the local root site for any prim whose parent context
-        // is `within_instance`, so the local arcs are never followed — rather
-        // than pruned afterwards, which would leave the nodes those local arcs
-        // spawned.
+        // instance brings in. This is enforced at composition time — the indexer
+        // marks the local root site inert for any prim whose parent context is
+        // `within_instance`, so the local arcs are never followed — rather than
+        // pruned afterwards, which would leave the nodes those local arcs spawned.
 
         // Arc permissions (spec 10.3.3, C++ `_AddArc` + `_InertSubtree`). A
         // direct arc to a `permission = private` site is reported and its target
@@ -1971,9 +1958,16 @@ mod tests {
         cache.ensure_index(&path)?;
         let index = &cache.indices[&path];
 
+        // The relocate source node is composed inert (salted earth, C++
+        // `rootNodeShouldContributeSpecs == false`): its own site contributes
+        // nothing — its ancestral children carry the relocated opinions — so it
+        // is retained in the arena but skipped by `nodes`/`all_nodes`.
         assert!(
-            index.nodes().any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
-            "relocated prim has relocate nodes"
+            index
+                .arena()
+                .iter()
+                .any(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE)),
+            "relocated prim has a relocate source node"
         );
         for (id, node) in index.nodes_with_ids() {
             if let Some(parent) = node.parent() {
@@ -2000,10 +1994,13 @@ mod tests {
         cache.ensure_index(&path)?;
         let index = &cache.indices[&path];
 
+        // The relocate source node is composed inert (salted earth), so it is
+        // retained in the arena but skipped by `nodes`/`all_nodes`.
         let relocate = index
-            .nodes()
+            .arena()
+            .iter()
             .find(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE))
-            .expect("relocated prim has a relocate node");
+            .expect("relocated prim has a relocate source node");
         let layers: Vec<usize> = relocate.layers().map(|(li, _)| li).collect();
         assert_eq!(
             layers,

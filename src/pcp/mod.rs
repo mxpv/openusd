@@ -47,9 +47,9 @@
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
-//! | `index` | `PcpPrimIndex` | Per-prim composition driver: the recursive `IndexBuilder` and composition helpers, hosting the [`PrimIndex`] entry points and routing each prim to an engine (see [Composition engines](#composition-engines-indexer-and-builder)). |
-//! | `indexer` | `Pcp_PrimIndexer` | Task-queue composition engine: grows the graph node-by-node by draining a priority task queue. Composes supported prims; unsupported ones fall back to `IndexBuilder`. |
-//! | `graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection the builder fills in. |
+//! | `index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build/relocate entry points, the [`CompositionContext`](index::CompositionContext) that flows parent-to-child, and the value-resolution helpers the `indexer` drives. |
+//! | `indexer` | `Pcp_PrimIndexer` | Task-queue composition engine: grows the graph node-by-node by draining a priority task queue. The sole composition path. |
+//! | `graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
 //! | `resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
@@ -141,49 +141,35 @@
 //!
 //! # Remaining work
 //!
-//! The engine covers LIVRPS, value resolution, relocates, variants,
-//! instancing, value clips, and surgical invalidation. The sections below
-//! document the known gaps and current limits.
+//! The task-queue [`Indexer`](indexer) (C++ `Pcp_PrimIndexer`) is the sole
+//! composition engine: it composes LIVRPS, value resolution, relocates,
+//! variants, instancing, value clips, and surgical invalidation. The recursive
+//! builder and the cache relocate post-pass have been removed. The remaining
+//! gaps are tracked asset-by-asset in `SKIP_PCP_COMPLIANCE`
+//! (`tests/composition.rs`).
 //!
-//! ## Composition engines: indexer and builder
+//! ## Composition gaps (suppressed compliance assets)
 //!
-//! Two composition engines coexist. The task-queue [`Indexer`](indexer) (C++
-//! `Pcp_PrimIndexer`) is the target design; the recursive `IndexBuilder` is the
-//! fallback for the features the indexer has not ported yet (relocates,
-//! instancing). `PrimIndex::build_with_cache` runs a prim through the indexer
-//! and uses its result when it reports support, otherwise composes with the
-//! builder. The byte-exact `pcp.txt` goldens validate that both engines agree
-//! on every supported prim.
-//!
-//! The two engines do not produce identical graphs, only equivalent composed
-//! results, and the seam between them is the source of the remaining hazards:
-//!
-//! - Per-node state must survive a cross-engine graft. The builder grafts an
-//!   indexer-produced target index (for inherit/specialize/internal references);
-//!   the indexer keeps nodes with `has_specs == false` (a seed-deepened
-//!   ancestral site authoring no spec at the child path) that the builder's own
-//!   nodes never have. `graft_subtree` copies `has_specs` and the culled /
-//!   permission flags from the source so such a node stays non-contributing,
-//!   rather than the `add_site_child` default that would make it contribute.
-//! - Seeding a child from a builder-built parent is lossy. The indexer seeds a
-//!   child by cloning the cached parent graph; a parent the builder composed
-//!   carries authoring-only layer stacks (every member authors a spec) and
-//!   hangs specializes where composed rather than copied-to-root. Deepening such
-//!   a seed can drop a child opinion on a sublayer the parent does not author,
-//!   and `build()` still asserts `specializes_propagated` over the
-//!   builder-shaped specializes structure. These cases need the seed to detect
-//!   the parent's provenance (or the engines to share one node model); they are
-//!   reachable only on a stack that forces the parent to the builder (e.g.
-//!   `layerRelocates` present).
-//!
-//! The end state removes the seam entirely: once the indexer ports relocates and
-//! instancing, the `IndexBuilder` is replaced and deleted — the "flip." That
-//! retires the two-engine boundary along with the coexistence-only scaffolding
-//! it requires: the authoring-only layer-stack subset, the
-//! `PrimIndexGraph::specializes_propagated` fork between the faithful comparator
-//! and the builder's chain-depth approximation, and the `supported`-flag
-//! deferral path. Until then, any change to one engine's node shape, flags, or
-//! strength ordering must be mirrored across the graft and seed seams above.
+//! - Specializes/inherit authored inside a selected variant. A class arc whose
+//!   parent site carries a variant selection is left uncomposed
+//!   (`add_class_based_arc`'s `TODO(specializes-in-variant)`); it needs C++
+//!   `_DetermineInheritPath`'s strip/re-add of the selection together
+//!   with the specializes-copy-to-root and reference strength interaction
+//!   (`SpecializesAndVariants`).
+//! - "Spooky" relocated opinions. When a relocation source is reached through a
+//!   variant, a symmetric rig, or a multi-relocation chain, its deeper opinions
+//!   must still contribute through the relocate arc; `eval_node_relocations`
+//!   composes the source as a nested sub-index where variants are deferred, so a
+//!   variant-gated source opinion is missed. Cross-arc implied relocations (C++
+//!   `_EvalImpliedRelocations`'s graft) are likewise unported
+//!   (`eval_implied_relocations`'s `TODO(relocates)`).
+//! - Relationship / connection target paths are not yet remapped through
+//!   relocates (C++ `ComputeRelationshipTargetPaths` applies relocates to the
+//!   composed targets); see `Cache::compose_property_paths`.
+//! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), variable
+//!   expressions in reference/payload asset paths, residual implied/nested-class
+//!   ordering, variant-strength edges, and prototype-redirection in the
+//!   instancing dump.
 //!
 //! ## Permissions (`permission = private`)
 //!
@@ -206,51 +192,23 @@
 //! ## Ordered prim children — relocates during the fold
 //!
 //! Child names fold weakest-to-strongest with `primOrder` reapplied per layer
-//! (mirroring C++ `PcpComposeSiteChildNames`). Relocates are still applied once
-//! *after* the fold rather than per layer stack *during* it, so a scene that
-//! combines multi-sublayer `primOrder` with relocates can order children
-//! differently from C++. Folding relocates into the per-node merge is the
-//! remaining piece, intertwined with the relocates-in-build work below.
-//!
-//! ## Relocates composed during the build
-//!
-//! Relocate nodes are grafted *after* the build and spliced into the finalized
-//! strength projection (`Cache` → `Relocates`, `splice_relocate`); the splice
-//! orders the relocate band by the strength comparator, but the nodes still
-//! bypass the DFS that places every other arc. A unified model would compose
-//! relocates *during* the build so the DFS orders them like any other arc and
-//! the splice can be deleted. This is intertwined with relocate
-//! source-resolution in the `rel` module and is a multi-commit effort; the
-//! relocate compliance tests are the guard. No observable change is intended.
+//! (mirroring C++ `PcpComposeSiteChildNames`). Composed *opinions* now apply
+//! relocates during the build (the indexer's relocate arcs), but the child-name
+//! list still applies them once *after* the fold (`Cache::prim_children` →
+//! `Relocates::apply_relocates_to_children`) rather than per layer stack during
+//! it, so a scene combining multi-sublayer `primOrder` with relocates can order
+//! children differently from C++. Folding relocates into the per-node child-name
+//! merge is the remaining piece.
 //!
 //! ## Structural specializes
 //!
-//! Specializes global weakness (spec 10.4.1) is realized in the *projection*:
-//! `finalize_strength_order` appends specialize-flagged nodes as a globally-weak
-//! band, and `compute_specialize_chain_depths` recovers each node's chain
-//! position with a per-path-maximum heuristic. The *tree* still nests specialize
-//! subtrees where they were composed; C++ `_EvalImpliedSpecializes` physically
-//! copies them to be children of the root. Re-parenting specialize subtree roots
-//! to the synthetic root on the final index would let the plain DFS place them
-//! at the weak end (dropping the projection's specialize partition) and let the
-//! chain depth be read straight from the parent chain (dropping the heuristic).
-//! The catch: the cache hands out a stored index as a graft source, so
-//! re-parenting it in place would flatten nesting downstream — this needs care
-//! to apply only to indices that will not be grafted. No observable change is
-//! intended.
-//!
-//! ## Compliance coverage against the reference `pcp.txt` dumps
-//!
-//! The vendor composition suite ships a `pcp.txt` baseline per asset
-//! (`vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/*/`)
-//! that records the fully composed result — prim stack, property stacks, child
-//! names, variant selections, and reported errors. Today the integration suite
-//! checks prim/property/child *existence* through the `Stage`, and only a
-//! handful of `pcp::index` tests assert exact node order against these dumps.
-//! A harness that parses every `pcp.txt` and diffs the composed prim stack /
-//! property stack / child-name order / variant selections against it would turn
-//! these baselines into a systematic compliance gate, catching ordering,
-//! permission, and strength regressions the existence checks miss.
+//! Specializes global weakness (spec 10.4.1) is realized by copying specializes
+//! nodes under the local root (C++ `_PropagateNodeToRoot`, the indexer's
+//! `propagate_node_to_root`): the graph is flagged `specializes_propagated`, so
+//! `finalize_strength_order`'s plain DFS already
+//! places the globally-weak band last and orders it with the faithful
+//! `PcpCompareSiblingNodeStrength`. `compute_specialize_chain_depths` remains a
+//! fallback for any graph that did not propagate.
 //!
 //! ## Lower-priority / opportunistic
 //!
@@ -369,8 +327,8 @@ pub(crate) struct LayerStack {
     /// Whether payload arcs should be expanded during prim index construction.
     pub load_payloads: bool,
     /// Whether any layer authors `layerRelocates`, precomputed once for the
-    /// stack. The indexer reads this to defer class-arc composition while
-    /// relocates are present (their interaction is a later phase) without
+    /// stack. The indexer reads this to gate its relocate passes
+    /// (`eval_node_relocations` and the prohibited-prim elision) without
     /// rescanning every layer per prim.
     pub(crate) has_relocates: bool,
     /// Per-layer authored `layerRelocates` pairs `(source, target)` in that
@@ -406,52 +364,46 @@ impl LayerStack {
         }
     }
 
-    /// Builds the incremental relocates map for the layers in `ambient`,
-    /// combining each layer's authored `(source, target)` pairs without chaining
-    /// (C++ `PcpLayerStack::GetIncrementalRelocatesTargetToSource` /
-    /// `...SourceToTarget`). Keyed by target when `target_to_source`, else by
-    /// source. Layers are visited strongest first (the order in `ambient`), so a
-    /// stronger layer wins a key collision.
-    ///
-    /// A deletion relocate (`</Src>: <>`, empty target) is dropped from the
-    /// target→source map — an empty target cannot key a lookup — but kept in the
-    /// source→target map: its source is still a prohibited relocation source
-    /// under the salted-earth policy, which keys on the source alone.
-    ///
-    /// "Incremental" means the pairs as authored, so a prim relocated through
-    /// nested levels keeps an entry per level — `_EvalNodeRelocations` relies on
-    /// this to visit every intermediate source.
-    pub(crate) fn incremental_relocates(
-        &self,
-        ambient: &[(usize, sdf::LayerOffset)],
-        target_to_source: bool,
-    ) -> HashMap<Path, Path> {
-        let mut map = HashMap::new();
+    /// Returns the relocation source for `target` if a layer in `ambient`
+    /// relocates a prim onto it (C++ `GetIncrementalRelocatesTargetToSource`,
+    /// the as-authored pairs without chaining). The strongest layer (earliest in
+    /// `ambient`) wins a collision; a deletion (`</Src>: <>`, empty target)
+    /// relocate has no target to key on and is skipped. The C++ memoized map is
+    /// not materialized — the layers are scanned per query.
+    // TODO(perf): memoize the incremental relocates per layer stack (C++
+    // `PcpLayerStack`) instead of rescanning per query.
+    pub(crate) fn relocation_source(&self, ambient: &[(usize, sdf::LayerOffset)], target: &Path) -> Option<Path> {
         for &(layer, _) in ambient {
             let Some(pairs) = self.layer_relocates.get(&layer) else {
                 continue;
             };
-            for (source, target) in pairs {
-                let (key, value) = if target_to_source {
-                    if target.is_empty() {
-                        continue;
-                    }
-                    (target.clone(), source.clone())
-                } else {
-                    (source.clone(), target.clone())
-                };
-                map.entry(key).or_insert(value);
+            if let Some((source, _)) = pairs.iter().find(|(_, t)| !t.is_empty() && t == target) {
+                return Some(source.clone());
             }
         }
-        map
+        None
     }
 
-    /// Re-derives [`has_relocates`](Self::has_relocates) from the current
-    /// layers. Called after a `layerRelocates` edit that does not rebuild the
-    /// sublayer precomputation (which would refresh the flag itself); keeping it
-    /// in sync is what re-enables the indexer's relocate passes.
-    pub(crate) fn recompute_has_relocates(&mut self) {
+    /// Whether a layer in `ambient` authors a relocate whose SOURCE is `source`
+    /// (the incremental source→target direction's key test, used for the
+    /// salted-earth prohibition). Includes deletion (empty-target) relocates:
+    /// their source is still a prohibited relocation source.
+    pub(crate) fn is_relocation_source(&self, ambient: &[(usize, sdf::LayerOffset)], source: &Path) -> bool {
+        ambient.iter().any(|&(layer, _)| {
+            self.layer_relocates
+                .get(&layer)
+                .is_some_and(|pairs| pairs.iter().any(|(s, _)| s == source))
+        })
+    }
+
+    /// Re-derives the cached relocate state — [`has_relocates`](Self::has_relocates)
+    /// and [`layer_relocates`](Self::layer_relocates) — from the current layers.
+    /// Called after a `layerRelocates` edit that does not rebuild the sublayer
+    /// precomputation (which would refresh both itself); keeping them in sync is
+    /// what re-enables and re-targets the indexer's relocate passes.
+    pub(crate) fn recompute_relocate_data(&mut self) {
         self.has_relocates = Self::compute_has_relocates(&self.layers);
+        self.layer_relocates = rel::extract_layer_relocates(&self.layers);
     }
 
     /// Whether any layer authors `layerRelocates` at its pseudo-root.
@@ -496,8 +448,7 @@ impl LayerStack {
         self.sublayer_stacks = (0..self.layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
             .collect();
-        self.recompute_has_relocates();
-        self.layer_relocates = rel::extract_layer_relocates(&self.layers);
+        self.recompute_relocate_data();
     }
 
     /// Returns the root layer (the first non-session layer), if any.
@@ -701,27 +652,33 @@ mod tests {
         sdf::Layer::new(id, Box::new(crate::usda::TextReader::from_data(data)))
     }
 
-    /// `recompute_has_relocates` re-derives the cached flag from the current
-    /// layers. A `layerRelocates` edit reaches the stack through
-    /// `Cache::recompute_relocates`, which does not rebuild the sublayer
-    /// precomputation, so the flag must be refreshed there or the indexer keeps
-    /// composing class arcs instead of deferring to the relocate-aware builder.
+    /// `recompute_relocate_data` re-derives both the cached flag and the
+    /// per-layer relocate pairs from the current layers. A `layerRelocates` edit
+    /// reaches the stack through `Cache::recompute_relocates`, which does not
+    /// rebuild the sublayer precomputation, so both must be refreshed there or
+    /// the indexer keeps reading stale relocate state.
     #[test]
-    fn recompute_has_relocates_syncs() {
+    fn recompute_relocate_data_syncs() {
         let plain = layer("root.usd", "#usda 1.0\ndef \"A\" {}\n");
         let mut stack = LayerStack::new(vec![plain], 0, Box::new(DefaultResolver::new()), true);
         assert!(!stack.has_relocates, "a stack with no layerRelocates starts clear");
+        assert!(stack.layer_relocates.is_empty(), "no relocate pairs to start");
 
         // Author layerRelocates onto the layer (as an in-place edit would) and
-        // refresh the flag the way `recompute_relocates` now does.
+        // refresh the state the way `recompute_relocates` now does.
         stack.layers[0] = layer(
             "root.usd",
             "#usda 1.0\n(\n    relocates = { </A>: </B> }\n)\ndef \"A\" {}\n",
         );
-        stack.recompute_has_relocates();
+        stack.recompute_relocate_data();
         assert!(
             stack.has_relocates,
             "recompute picks up the newly authored layerRelocates"
+        );
+        assert_eq!(
+            stack.relocation_source(&[(0, sdf::LayerOffset::default())], &Path::new("/B").unwrap()),
+            Some(Path::new("/A").unwrap()),
+            "recompute re-extracts the per-layer relocate pairs the indexer reads"
         );
     }
 }
