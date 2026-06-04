@@ -28,7 +28,10 @@ use super::LayerStack;
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
-    /// Index of the contributing layer within the node's layer stack.
+    /// Global index of the contributing layer, as yielded by
+    /// [`Node::layers`](super::graph::Node::layers) and used with
+    /// [`LayerStack::layer`](super::LayerStack::layer) — not a position within
+    /// the node's layer stack.
     layer: usize,
     /// The path queried in the contributing layer (the node path with the
     /// property suffix applied).
@@ -201,14 +204,19 @@ impl PrimIndex {
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
         // Each node fans out into one opinion per contributing layer in its
         // layer stack, strongest sublayer first, so a per-site node surfaces
-        // every sublayer that authored the field. Permission-denied nodes (a
-        // direct arc to a private site, spec 10.3.3) stay in `nodes` for
-        // structural queries but contribute no opinions here.
+        // every sublayer that authored the field. Two kinds of node stay in
+        // `nodes` for structural queries but contribute no opinions here: a
+        // permission-denied node (a direct arc to a private site, spec 10.3.3),
+        // and a node authoring no spec at its path (`has_specs == false`, a
+        // full-stack ancestral site deepened to a child with no local opinion).
+        // Skipping the spec-less node avoids a `try_get` per field on a site
+        // that cannot author one, and guards against a backend that would return
+        // a field where no spec exists.
         //
         // TODO(perf): collecting per node allocates a small Vec; a custom
         // iterator over (node, layer) pairs would avoid it on the hot path.
         self.nodes()
-            .filter(|node| !node.is_permission_denied())
+            .filter(|node| node.has_specs() && !node.is_permission_denied())
             .flat_map(move |node| {
                 let query_path = match Self::query_path(node, prop_suffix) {
                     Ok(path) => path,

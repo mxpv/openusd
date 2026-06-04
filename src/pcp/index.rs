@@ -1134,6 +1134,17 @@ impl<'a> IndexBuilder<'a> {
                 None => (root_parent, root_map(node)),
             };
             let new_id = output.add_site_child(struct_parent, members, node.path.clone(), arc, node_map, in_specialize);
+            {
+                // Preserve the source node's contribution state. A node the
+                // task-queue indexer kept with `has_specs == false` (an arc
+                // target authoring no spec) must stay non-contributing once
+                // grafted, and its culled/permission flags carry over; the
+                // `add_site_child` default would otherwise mark it contributing
+                // and turn `has_composition_arc` true for an empty arc.
+                let copied = &mut output.nodes[new_id.idx()];
+                copied.has_specs = node.has_specs();
+                copied.flags |= node.flags();
+            }
             finish(output, new_id);
             remap[sid.idx()] = Some(new_id);
         }
@@ -2043,6 +2054,71 @@ mod tests {
             "an empty reference does not compose the prim"
         );
         assert!(!index.is_empty(), "the prim's own opinions remain");
+        Ok(())
+    }
+
+    /// When the recursive builder grafts a target index the task-queue indexer
+    /// produced, a node the indexer kept with `has_specs == false` (a seed
+    /// deepened ancestral site authoring no spec at the child path) must stay
+    /// non-contributing once copied, so the empty arc does not turn
+    /// `has_composition_arc` true (e.g. an instanceable prim reading as an
+    /// instance). The unit `build` helper seeds children with an empty cache and
+    /// falls back to the builder, which never keeps spec-less nodes, so the
+    /// indexer source is built through the threaded cache and grafted directly.
+    #[test]
+    fn builder_graft_preserves_spec_less() -> Result<()> {
+        // `/A` references an empty `Base`, so `/A/Child` is reached only through
+        // the deepened ancestral arcs, which author no spec there: the indexer
+        // keeps it with `has_specs == false`.
+        let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</Base> ) {}\n");
+        let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
+        let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+
+        let ctx = CompositionContext::default();
+        let ambient = stack.root_layer_stack();
+        let a_index = PrimIndex::build_with_context(&Path::from("/A"), &stack, &ctx)?;
+        let mut cached = HashMap::new();
+        cached.insert(Path::from("/A"), a_index);
+        let child_index = PrimIndex::build_via_indexer(&Path::from("/A/Child"), &stack, &ctx, &cached, &ambient, true)?
+            .expect("the indexer composes the spec-less child");
+        assert!(
+            child_index.all_nodes().any(|n| !n.has_specs()),
+            "the seed-deepened child carries a spec-less node"
+        );
+        assert!(
+            !child_index.has_composition_arc(),
+            "the spec-less child composes no arc"
+        );
+
+        // Graft that indexer index through the builder's `graft_subtree`; the
+        // copies must keep `has_specs == false` so the graft introduces no arc.
+        let mut output = PrimIndexGraph::default();
+        output.init_root(Path::from("/P"));
+        let root_node = output.add_site_child(
+            NodeId::INVALID,
+            ambient.clone(),
+            Path::from("/P"),
+            ArcType::Root,
+            MapFunction::identity(),
+            false,
+        );
+        let mut seen = HashSet::new();
+        IndexBuilder::graft_subtree(
+            &mut output,
+            &mut seen,
+            &child_index,
+            ArcType::Inherit,
+            false,
+            root_node,
+            |node| MapFunction::from_pair_identity(node.path.clone(), Path::from("/P")),
+            |_, _| {},
+        );
+        let grafted = PrimIndex { graph: output };
+        assert!(
+            !grafted.has_composition_arc(),
+            "grafting a spec-less indexer index must not introduce a contributing arc"
+        );
         Ok(())
     }
 
