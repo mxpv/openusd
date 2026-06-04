@@ -115,6 +115,41 @@ fn is_root_prim(path: &Path) -> bool {
     path.parent().is_some_and(|p| p == Path::abs_root())
 }
 
+/// The nearest namespace ancestor of `path` (inclusive) whose final component is
+/// a variant selection, or `None` if there is none (C++
+/// `_FindContainingVariantSelection`).
+fn find_containing_variant_selection(path: &Path) -> Option<Path> {
+    let mut p = path.clone();
+    loop {
+        if p.is_prim_variant_selection_path() {
+            return Some(p);
+        }
+        p = p.parent()?;
+    }
+}
+
+/// Maps a class-arc parent site back across the arc to the site to inherit (C++
+/// `_DetermineInheritPath`), returning `None` when the parent is outside the
+/// arc's co-domain.
+///
+/// Variant selections address opinion storage in a layer but are not part of
+/// composed namespace, so they must never appear in mapping-function paths. To
+/// add a class arc at a variant-selection site we strip the selections before
+/// mapping and re-add the nearest containing selection afterwards.
+fn determine_inherit_path(parent_path: &Path, inherit_map: &MapFunction) -> Option<Path> {
+    if !parent_path.contains_prim_variant_selection() {
+        return inherit_map.map_target_to_source(parent_path);
+    }
+    let var_path = find_containing_variant_selection(parent_path)?;
+    let stripped = parent_path.strip_all_variant_selections();
+    let mapped = inherit_map.map_target_to_source(&stripped)?;
+    Some(
+        mapped
+            .replace_prefix(&var_path.strip_all_variant_selections(), &var_path)
+            .unwrap_or(mapped),
+    )
+}
+
 /// A borrowed parent-frame in the recursive sub-index build chain (C++
 /// `PcpPrimIndex_StackFrame`).
 ///
@@ -373,6 +408,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let local_root = self.output.local_root();
             if local_root.is_valid() {
                 self.output.nodes[local_root.idx()].flags |= NodeFlags::INERT;
+                // A relocate source / salted-earth root is restricted at its own
+                // depth so its ancestral opinions still contribute (the spooky
+                // ancestors a relocation pulls through, C++
+                // `rootNodeShouldContributeSpecs == false` → restriction depth =
+                // the source path's element count). An instance descendant is
+                // fully suppressed instead, so it keeps the depth-0 inert default.
+                if !self.root_contributes {
+                    self.output.nodes[local_root.idx()].restriction_depth = path.element_count() as u16;
+                }
             }
         }
 
@@ -733,6 +777,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let n = &mut self.output.nodes[new_id.idx()];
             n.has_specs = node.has_specs;
             n.flags = node.flags;
+            n.restriction_depth = node.restriction_depth;
             if weak {
                 n.flags |= NodeFlags::HAS_SPECIALIZES;
             }
@@ -852,11 +897,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if self.frame.is_some() {
             return;
         }
+        // C++ `_AddTasksForNodeRecursively` visits every node in the grafted
+        // subtree, inert ones included: a relocate source is inert at its own
+        // site yet still feeds the ancestral variant sets above it. The handlers
+        // gate per node (local sets need a contributing site, ancestral sets a
+        // permissive restriction depth), so enqueuing unconditionally is safe.
         for id in self.subtree_nodes(root) {
-            if !self.node(id).is_inert() {
-                self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, id));
-                self.tasks.push(Task::new(TaskKind::EvalNodeAncestralVariantSets, id));
-            }
+            self.tasks.push(Task::new(TaskKind::EvalNodeVariantSets, id));
+            self.tasks.push(Task::new(TaskKind::EvalNodeAncestralVariantSets, id));
         }
     }
 
@@ -985,6 +1033,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
         }
 
+        // The relocate node maps its source to the relocation target: opinions
+        // and implied classes carried up across it translate the source namespace
+        // to the target. The source sub-index excludes this same relocate from its
+        // internal arc folds (see `fold_relocates_into`), so the shift is applied
+        // once, here.
         let map = MapFunction::from_pair_identity(source.clone(), node_path);
         let ambient_is_root = self.ambient_is_root_for(&node_ambient);
         let Some(sub) = self.compose_subindex(&source, &node_ambient, ambient_is_root, self.frame_skip(), false)?
@@ -1008,9 +1061,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// relocation. Currently a no-op: the common stage-level case maps to nothing,
     /// and the cross-arc graft is not yet ported.
     ///
-    // TODO(relocates): port the grandparent graft. Until then a cross-arc implied
-    // relocation (the source maps up across the arc) is left uncomposed (e.g.
-    // SubrootReferenceAndRelocates).
+    // TODO(relocates): port the grandparent graft together with the spooky
+    // implied-inherit-across-relocate machinery it feeds (C++ `_AddArc` for the
+    // gp relocate, `_EvalImpliedClassTree`'s relocate branch, and
+    // `_FindMatchingChild`'s relocate-arc comparison). The graft alone composes
+    // no new opinion, so it lands with that cluster (TrickySpookyInherits*,
+    // TrickyConnectionToRelocatedAttribute, TrickyMultipleRelocationsAndClasses2).
     fn eval_implied_relocations(&mut self, _node: NodeId) -> Result<(), Error> {
         Ok(())
     }
@@ -1150,7 +1206,15 @@ impl<'a, 'f> Indexer<'a, 'f> {
             }
             // The class-arc map sends the class to the instance; every other
             // path (notably root classes) maps through the added root identity.
-            let class_map = MapFunction::from_pair(resolved, node_path.clone()).with_root_identity();
+            // The target strips variant selections (C++
+            // `_CreateMapExpressionForArc`) so they never enter mapping
+            // functions; the node's site path keeps them for opinion storage.
+            let class_map = self
+                .fold_relocates_into(
+                    MapFunction::from_pair(resolved, node_path.strip_all_variant_selections()),
+                    node,
+                )
+                .with_root_identity();
             self.add_class_based_arc(node, node, class_map, arc_num as u16, None, arc, false)?;
         }
         Ok(())
@@ -1178,7 +1242,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
             if p == Path::abs_root() {
                 break;
             }
-            self.eval_variant_sets_at_site(node, &p, true)?;
+            // A node restricted below this depth (a relocate source past its own
+            // site) contributes no opinions here, so skip the set scan (C++
+            // `_NodeCanContributeAncestralOpinions`).
+            if self.node_can_contribute_ancestral(node, &p) {
+                self.eval_variant_sets_at_site(node, &p, true)?;
+            }
             if p.is_prim_variant_selection_path() {
                 break;
             }
@@ -1224,7 +1293,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         is_ancestral: bool,
     ) -> Result<(), Error> {
         let Some(vt) = vt else { return Ok(()) };
-        if !self.node_can_contribute_variant(node, is_ancestral) {
+        if !self.node_can_contribute_variant(node, &vt.vset_path, is_ancestral) {
             return Ok(());
         }
         match self.compose_variant_selection(node, &vt.vset_path, &vt.vset_name)? {
@@ -1254,7 +1323,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         is_ancestral: bool,
     ) -> Result<(), Error> {
         let Some(vt) = vt else { return Ok(()) };
-        if !self.node_can_contribute_variant(node, is_ancestral) {
+        if !self.node_can_contribute_variant(node, &vt.vset_path, is_ancestral) {
             return Ok(());
         }
         let options = self.compose_variant_options(node, &vt.vset_path, &vt.vset_name)?;
@@ -1513,18 +1582,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
         implied: bool,
     ) -> Result<Option<NodeId>, Error> {
         let parent_path = self.node(parent).path.clone();
-        // TODO(specializes-in-variant): a class arc whose parent site carries a
-        // variant selection needs C++ `_DetermineInheritPath`'s strip/re-add of
-        // the selection plus the specializes-with-variant strength interaction
-        // (VariantSpecializesAndReferenceSurprisingBehavior). Until that lands as
-        // a unit the arc is left uncomposed rather than half-composed.
-        if parent_path.is_prim_variant_selection_path() {
-            return Ok(None);
-        }
         // Map the parent site back across the arc to find the site to inherit.
         // An empty result means there is no appropriate site (the parent is
         // outside the arc's co-domain); that is not an error, just no node.
-        let Some(inherit_path) = inherit_map.map_target_to_source(&parent_path) else {
+        let Some(inherit_path) = determine_inherit_path(&parent_path, &inherit_map) else {
             return Ok(None);
         };
 
@@ -1532,7 +1593,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let rep = parent_layers[0].0;
 
         // Dedup: a matching child already inherits this site.
-        if let Some(existing) = self.find_matching_child(parent, rep, &inherit_path) {
+        if let Some(existing) = self.find_matching_child(parent, rep, &inherit_path, arc, &inherit_map, origin) {
             return Ok(Some(existing));
         }
 
@@ -1709,7 +1770,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
             let child_map = c.map_to_parent.clone();
             let child_site = (c.layer_index(), c.path.clone());
             let sibling = c.sibling_num_at_origin;
-            let dest_class_func = transfer.implied_class(&child_map);
+            // A reference or inherit moves both the class and its instance, so the
+            // class arc conjugates through the transfer. A relocate moves only the
+            // instance — the class keeps its pre-relocation path — so the transfer
+            // post-composes onto the class arc's target instead, preserving a
+            // relocated leaf (e.g. `Seg2 -> Knee`) on the instance while the class
+            // stays `Seg2`. The relocation's own `source -> target` pair is not a
+            // class-to-instance mapping, so it is dropped (it would otherwise alias
+            // the instance and make the inherit-path lookup ambiguous).
+            let dest_class_func = if self.node(src).arc == ArcType::Relocate {
+                transfer.compose(&child_map).dropping_source(&self.node(src).path)
+            } else {
+                transfer.implied_class(&child_map)
+            };
 
             // Reuse the implied node already propagated for this child, else add
             // it; either may be absent (no appropriate site to inherit).
@@ -1762,14 +1835,40 @@ impl<'a, 'f> Indexer<'a, 'f> {
         start
     }
 
-    /// Returns the child of `parent` whose site matches `(rep_layer, path)` (C++
-    /// `_FindMatchingChild`, the non-relocate case).
-    fn find_matching_child(&self, parent: NodeId, rep_layer: usize, path: &Path) -> Option<NodeId> {
-        self.node(parent)
-            .children()
-            .iter()
-            .copied()
-            .find(|&c| self.node(c).layer_index() == rep_layer && &self.node(c).path == path)
+    /// Returns an existing child of `parent` that already represents the arc
+    /// being added (C++ `_FindMatchingChild`).
+    ///
+    /// Normally a child matches by site `(rep_layer, path)`. Under a relocate
+    /// parent the site is not meaningful (implied classes beneath a relocate
+    /// source map identically), so a child matches by arc type, map-to-parent,
+    /// and its origin's depth below introduction instead — keeping two classes
+    /// inherited by the same relocated prim from collapsing into one.
+    ///
+    /// A relocate-source sub-index's own local root counts as a relocate parent:
+    /// once grafted it becomes the relocate node, and the relocation folded into
+    /// its arcs makes two distinct classes map to the same site there.
+    fn find_matching_child(
+        &self,
+        parent: NodeId,
+        rep_layer: usize,
+        path: &Path,
+        arc: ArcType,
+        map: &MapFunction,
+        origin: NodeId,
+    ) -> Option<NodeId> {
+        let parent_is_relocate = self.node(parent).arc == ArcType::Relocate
+            || (!self.root_contributes && parent == self.output.local_root());
+        let origin_depth = self.node(origin).depth_below_introduction();
+        self.node(parent).children().iter().copied().find(|&c| {
+            let cn = self.node(c);
+            if parent_is_relocate {
+                cn.arc == arc
+                    && cn.map_to_parent == *map
+                    && cn.origin().map(|o| self.node(o).depth_below_introduction()) == Some(origin_depth)
+            } else {
+                cn.layer_index() == rep_layer && &cn.path == path
+            }
+        })
     }
 
     /// Returns the child of `dest` already propagated for the implied class
@@ -1847,7 +1946,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let src_path = self.node(src).path.clone();
         let sibling = self.node(src).sibling_num_at_origin;
 
-        if let Some(existing) = self.find_matching_child(root, rep, &src_path) {
+        if let Some(existing) = self.find_matching_child(root, rep, &src_path, ArcType::Specialize, &map, src) {
             return Ok(Some(existing));
         }
         // C++ `_AddArc` with `skipDuplicateNodes`: a site already reached by
@@ -1978,7 +2077,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
             });
         }
 
-        let mut map = MapFunction::from_pair(source.clone(), parent_path).with_time_offset(arc_offset);
+        // Variant selections address opinion storage but are not part of
+        // composed namespace, so the arc map's target strips them (C++
+        // `_CreateMapExpressionForArc`). The variant node's own map already
+        // folds the strip into `map_to_root`; keeping it out of `map_to_parent`
+        // stops it leaking into implied-class transfer functions.
+        let mut map = MapFunction::from_pair(source.clone(), parent_path.strip_all_variant_selections())
+            .with_time_offset(arc_offset);
+        // Opinions reached across this arc land at their post-relocation paths
+        // (folded before the root identity, matching C++ `_CreateMapExpressionForArc`).
+        map = self.fold_relocates_into(map, parent);
         if is_internal {
             // Internal references keep full namespace visibility outside the
             // source and target (C++ `mapExpr.AddRootIdentity()`).
@@ -2085,13 +2193,55 @@ impl<'a, 'f> Indexer<'a, 'f> {
         !n.is_inert() && n.has_specs
     }
 
+    /// Folds the relocations affecting `parent`'s site into an arc map whose
+    /// target is `parent`'s namespace (C++ `_CreateMapExpressionForArc`'s
+    /// `reloMapExpr.Compose(arcExpr)`).
+    ///
+    /// An arc anchored at a site with relocations at or below it carries opinions
+    /// from across the arc to their post-relocation paths. A relocate-source
+    /// sub-index excludes the relocate that moves its own root: that one is
+    /// applied by the relocate arc node's own map at graft time, so folding it
+    /// here too would rename the source's class arcs onto the relocated path.
+    fn fold_relocates_into(&self, map: MapFunction, parent: NodeId) -> MapFunction {
+        if !self.inputs.stack.has_relocates {
+            return map;
+        }
+        let layers = self.node(parent).layer_stack();
+        let site = self.node(parent).path.strip_all_variant_selections();
+        // A relocate-source sub-index must not fold the relocate that moves its
+        // own root: that shift is applied by the relocate arc at graft time, and
+        // folding it here would rename the source's class arcs onto the relocated
+        // path. Other relocations (descendants, ancestors) still apply.
+        let exclude = (!self.root_contributes).then_some(&self.site.path);
+        match self.inputs.stack.relocates_expression_at(layers, &site, exclude) {
+            Some(reloc) => reloc.compose(&map),
+            None => map,
+        }
+    }
+
+    /// Whether `node` may contribute opinions to the ancestral site `path` (C++
+    /// `_NodeCanContributeAncestralOpinions`).
+    ///
+    /// A node restricted at depth `d` contributes only at paths shallower than
+    /// `d`, so a relocate source (restricted at its own depth) still feeds the
+    /// spooky-ancestor opinions above it while suppressing its own site. An inert
+    /// node carrying no explicit restriction depth (an implied placeholder, an
+    /// elided subtree, the synthetic root) is treated as fully restricted.
+    fn node_can_contribute_ancestral(&self, node: NodeId, path: &Path) -> bool {
+        let n = self.node(node);
+        if n.restriction_depth == 0 {
+            return !n.is_inert();
+        }
+        n.restriction_depth as usize > path.element_count()
+    }
+
     /// Whether `node` may contribute a variant selection. A local variant set
     /// must be authored at the node's own contributing site; an ancestral set
-    /// sits above the node, so it is gated only on the node being a live
-    /// (non-inert) grafted opinion (C++ `_NodeCanContributeAncestralOpinions`).
-    fn node_can_contribute_variant(&self, node: NodeId, is_ancestral: bool) -> bool {
+    /// sits above the node at `vset_path`, gated by
+    /// [`node_can_contribute_ancestral`](Self::node_can_contribute_ancestral).
+    fn node_can_contribute_variant(&self, node: NodeId, vset_path: &Path, is_ancestral: bool) -> bool {
         if is_ancestral {
-            !self.node(node).is_inert()
+            self.node_can_contribute_ancestral(node, vset_path)
         } else {
             self.node_can_contribute_specs(node)
         }

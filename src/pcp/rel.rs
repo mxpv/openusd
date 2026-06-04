@@ -27,6 +27,34 @@ pub(super) struct Relocates {
     layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
 }
 
+/// Follows `path` to its final location through a set of relocates, applying the
+/// longest matching source prefix at each step until it reaches a fixed point.
+///
+/// This is the chaining a relocate undergoes when an ancestor (or the relocated
+/// prim itself) is in turn relocated — e.g. `/A` maps onward to `/C` given both
+/// `/A -> /B` and `/B -> /C`, and `…/SubRig/Anim` becomes `…/SubRig2/Anim` once
+/// `/…/SubRig -> /…/SubRig2`. The pair whose source equals `skip_source` is
+/// ignored so a relocate's own endpoints chain only through *other* renames, not
+/// themselves. Choosing the longest source prefix at each step makes the result
+/// independent of the relocate list's order; the step count is bounded by the
+/// number of relocates, so a cyclic (invalid) set cannot loop forever.
+pub(crate) fn chain_through_relocates(path: &Path, relocates: &[(Path, Path)], skip_source: Option<&Path>) -> Path {
+    let mut current = path.clone();
+    for _ in 0..relocates.len() {
+        let next = relocates
+            .iter()
+            .filter(|(s, t)| !t.is_empty() && Some(s) != skip_source)
+            .filter_map(|(s, t)| current.replace_prefix(s, t).map(|p| (s.as_str().len(), p)))
+            .filter(|(_, p)| *p != current)
+            .max_by_key(|(len, _)| *len);
+        match next {
+            Some((_, p)) => current = p,
+            None => break,
+        }
+    }
+    current
+}
+
 /// Extracts each layer's authored `layerRelocates` pairs `(source, target)`,
 /// keyed by layer index; layers without relocates are omitted. Shared by
 /// [`Relocates::new`] and [`LayerStack`](super::LayerStack).
@@ -111,20 +139,31 @@ impl Relocates {
     pub fn effective_relocates(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(Path, Path)> {
         let mut result = self.raw_effective_relocates(path, indices);
 
-        // Chain: if a target falls under another source, compose to final target.
+        // Shift each endpoint through a single ancestor rename: when an ancestor
+        // prim is relocated, a relocate authored below it sits under the renamed
+        // parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
+        // `…/Rig2/SubRig/Anim` once `Rig` is relocated to `Rig2`). Faithful to
+        // C++ USD relocates, sources are not transitively re-chained: a
+        // relocate's authored source keeps its as-authored depth (C++
+        // `_ConformLegacyRelocates` is a no-op in USD mode), so only the nearest
+        // applicable ancestor rename is folded in. The snapshot is sorted by
+        // target length, making the fold order deterministic.
         let snapshot = result.clone();
         for entry in &mut result {
-            if entry.1.is_empty() {
-                continue;
-            }
             for (other_src, other_tgt) in &snapshot {
                 if other_tgt.is_empty() {
                     continue;
                 }
-                if let Some(remapped) = entry.1.replace_prefix(other_src, other_tgt) {
-                    if remapped != entry.1 {
+                // Only ancestor (strict prefix) renames shift an endpoint, never
+                // the entry's own relocation.
+                if *other_src != entry.0 {
+                    if let Some(remapped) = entry.0.replace_prefix(other_src, other_tgt) {
+                        entry.0 = remapped;
+                    }
+                }
+                if !entry.1.is_empty() && *other_src != entry.1 {
+                    if let Some(remapped) = entry.1.replace_prefix(other_src, other_tgt) {
                         entry.1 = remapped;
-                        break;
                     }
                 }
             }
@@ -265,7 +304,7 @@ impl Relocates {
             if cached_root != root_name {
                 continue;
             }
-            for node in cached_index.nodes() {
+            for node in cached_index.all_nodes() {
                 if node.arc == ArcType::Relocate {
                     continue;
                 }

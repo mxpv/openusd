@@ -384,6 +384,71 @@ impl LayerStack {
         None
     }
 
+    /// Builds the relocation [`MapFunction`] applying at `path` in the layer
+    /// stack `ambient` (C++ `PcpLayerStack::GetExpressionForRelocatesAtPath` and
+    /// `_FilterRelocationsForPath`): every relocate whose source lies at or below
+    /// `path`, chained so a relocated prim that is itself relocated reaches its
+    /// final target, plus the `(/, /)` identity catch-all. Returns `None` when no
+    /// relocate affects `path`.
+    ///
+    /// Composition arcs fold this onto their map (C++ `_CreateMapExpressionForArc`)
+    /// so opinions brought in across the arc land at their post-relocation paths.
+    ///
+    /// `exclude_source` drops the relocate whose source is exactly that path. A
+    /// relocate-source sub-index passes its own root: the relocation that moves
+    /// the source is applied by the relocate arc node's own map when the
+    /// sub-index is grafted, not by the source's own internal arcs.
+    ///
+    // TODO(perf): the relocate chain is recomputed per arc here (via
+    // `combined_relocates`) and per query in `rel::Relocates`. C++ memoizes the
+    // combined/incremental relocates on `PcpLayerStack`; cache them per layer
+    // stack instead of rescanning on every fold.
+    pub(crate) fn relocates_expression_at(
+        &self,
+        ambient: &[(usize, sdf::LayerOffset)],
+        path: &Path,
+        exclude_source: Option<&Path>,
+    ) -> Option<MapFunction> {
+        let mut pairs: Vec<(Path, Path)> = self
+            .combined_relocates(ambient)
+            .into_iter()
+            .filter(|(source, target)| !target.is_empty() && source.has_prefix(path) && Some(source) != exclude_source)
+            .collect();
+        if pairs.is_empty() {
+            return None;
+        }
+        pairs.push((Path::abs_root(), Path::abs_root()));
+        Some(MapFunction::new(pairs))
+    }
+
+    /// Chains the per-layer authored relocates of `ambient` into a single
+    /// source→target map (C++ `PcpLayerStack::GetRelocatesSourceToTarget`): the
+    /// strongest layer wins a duplicate source, and a target that is itself a
+    /// relocation source is followed to the final target.
+    fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
+        let mut pairs: Vec<(Path, Path)> = Vec::new();
+        for &(layer, _) in ambient {
+            let Some(layer_pairs) = self.layer_relocates.get(&layer) else {
+                continue;
+            };
+            for (source, target) in layer_pairs {
+                if !pairs.iter().any(|(s, _)| s == source) {
+                    pairs.push((source.clone(), target.clone()));
+                }
+            }
+        }
+        // Follow chains: a target that is itself relocated (at or below another
+        // relocate's source) maps onward to its final location.
+        let snapshot = pairs.clone();
+        for (source, target) in pairs.iter_mut() {
+            if target.is_empty() {
+                continue;
+            }
+            *target = rel::chain_through_relocates(target, &snapshot, Some(source));
+        }
+        pairs
+    }
+
     /// Whether a layer in `ambient` authors a relocate whose SOURCE is `source`
     /// (the incremental source→target direction's key test, used for the
     /// salted-earth prohibition). Includes deletion (empty-target) relocates:

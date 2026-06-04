@@ -193,6 +193,17 @@ pub struct Node {
     /// `true`: the recursive builder only ever creates a node when a layer
     /// authors, so its nodes always have specs.
     pub(crate) has_specs: bool,
+    /// Namespace depth at which this node's spec contribution was restricted (C++
+    /// `PcpNode::GetSpecContributionRestrictedDepth`), or 0 when unrestricted.
+    ///
+    /// A relocate source / salted-earth root is restricted at its own depth
+    /// (`path.element_count()`): its direct site contributes nothing, but the
+    /// ancestral opinions above it — the "spooky ancestors" a relocation pulls
+    /// through — still do. A non-zero depth allows ancestral opinions only at
+    /// paths shallower than it (see
+    /// [`node_can_contribute_ancestral`](crate::pcp::indexer)). An inert node
+    /// left at depth 0 is treated as fully restricted.
+    pub(crate) restriction_depth: u16,
     /// Composition state bits (see [`NodeFlags`]).
     pub(crate) flags: NodeFlags,
 }
@@ -232,6 +243,7 @@ impl Node {
             sibling_num_at_origin: 0,
             specialize_chain_depth: 0,
             has_specs: true,
+            restriction_depth: 0,
             flags,
         }
     }
