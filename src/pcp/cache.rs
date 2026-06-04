@@ -626,9 +626,13 @@ impl Cache {
     }
 
     /// Recompute the cached `Relocates` from the current layer data. Called
-    /// when `layerRelocates` opinions or the layer stack itself change.
+    /// when `layerRelocates` opinions or the layer stack itself change. Also
+    /// refreshes `LayerStack::has_relocates`: a `layerRelocates`-only edit does
+    /// not rebuild the sublayer precomputation, so the flag the indexer reads to
+    /// defer class-arc composition would otherwise stay stale.
     pub(super) fn recompute_relocates(&mut self) {
         self.relocates = Relocates::new(&self.stack.layers);
+        self.stack.recompute_has_relocates();
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.

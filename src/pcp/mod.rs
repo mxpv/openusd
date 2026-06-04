@@ -47,7 +47,8 @@
 //! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
 //! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
-//! | `index` | `PcpPrimIndex` | Per-prim composition driver: builds the composition tree for a prim (the `IndexBuilder` and composition helpers) and hosts the [`PrimIndex`] entry points. |
+//! | `index` | `PcpPrimIndex` | Per-prim composition driver: the recursive `IndexBuilder` and composition helpers, hosting the [`PrimIndex`] entry points and routing each prim to an engine (see [Composition engines](#composition-engines-indexer-and-builder)). |
+//! | `indexer` | `Pcp_PrimIndexer` | Task-queue composition engine: grows the graph node-by-node by draining a priority task queue. Composes supported prims; unsupported ones fall back to `IndexBuilder`. |
 //! | `graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection the builder fills in. |
 //! | `resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
@@ -143,6 +144,46 @@
 //! The engine covers LIVRPS, value resolution, relocates, variants,
 //! instancing, value clips, and surgical invalidation. The sections below
 //! document the known gaps and current limits.
+//!
+//! ## Composition engines: indexer and builder
+//!
+//! Two composition engines coexist. The task-queue [`Indexer`](indexer) (C++
+//! `Pcp_PrimIndexer`) is the target design; the recursive `IndexBuilder` is the
+//! fallback for the features the indexer has not ported yet (relocates,
+//! instancing). `PrimIndex::build_with_cache` runs a prim through the indexer
+//! and uses its result when it reports support, otherwise composes with the
+//! builder. The byte-exact `pcp.txt` goldens validate that both engines agree
+//! on every supported prim.
+//!
+//! The two engines do not produce identical graphs, only equivalent composed
+//! results, and the seam between them is the source of the remaining hazards:
+//!
+//! - Per-node state must survive a cross-engine graft. The builder grafts an
+//!   indexer-produced target index (for inherit/specialize/internal references);
+//!   the indexer keeps nodes with `has_specs == false` (a seed-deepened
+//!   ancestral site authoring no spec at the child path) that the builder's own
+//!   nodes never have. `graft_subtree` copies `has_specs` and the culled /
+//!   permission flags from the source so such a node stays non-contributing,
+//!   rather than the `add_site_child` default that would make it contribute.
+//! - Seeding a child from a builder-built parent is lossy. The indexer seeds a
+//!   child by cloning the cached parent graph; a parent the builder composed
+//!   carries authoring-only layer stacks (every member authors a spec) and
+//!   hangs specializes where composed rather than copied-to-root. Deepening such
+//!   a seed can drop a child opinion on a sublayer the parent does not author,
+//!   and `build()` still asserts `specializes_propagated` over the
+//!   builder-shaped specializes structure. These cases need the seed to detect
+//!   the parent's provenance (or the engines to share one node model); they are
+//!   reachable only on a stack that forces the parent to the builder (e.g.
+//!   `layerRelocates` present).
+//!
+//! The end state removes the seam entirely: once the indexer ports relocates and
+//! instancing, the `IndexBuilder` is replaced and deleted — the "flip." That
+//! retires the two-engine boundary along with the coexistence-only scaffolding
+//! it requires: the authoring-only layer-stack subset, the
+//! `PrimIndexGraph::specializes_propagated` fork between the faithful comparator
+//! and the builder's chain-depth approximation, and the `supported`-flag
+//! deferral path. Until then, any change to one engine's node shape, flags, or
+//! strength ordering must be mirrored across the graft and seed seams above.
 //!
 //! ## Permissions (`permission = private`)
 //!
@@ -357,6 +398,14 @@ impl LayerStack {
         }
     }
 
+    /// Re-derives [`has_relocates`](Self::has_relocates) from the current
+    /// layers. Called after a `layerRelocates` edit that does not rebuild the
+    /// sublayer precomputation (which would refresh the flag itself); keeping it
+    /// in sync is what re-gates the task-queue indexer's class-arc deferral.
+    pub(crate) fn recompute_has_relocates(&mut self) {
+        self.has_relocates = Self::compute_has_relocates(&self.layers);
+    }
+
     /// Whether any layer authors `layerRelocates` at its pseudo-root.
     fn compute_has_relocates(layers: &[sdf::Layer]) -> bool {
         let root = sdf::Path::abs_root();
@@ -399,7 +448,7 @@ impl LayerStack {
         self.sublayer_stacks = (0..self.layers.len())
             .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
             .collect();
-        self.has_relocates = Self::compute_has_relocates(&self.layers);
+        self.recompute_has_relocates();
     }
 
     /// Returns the root layer (the first non-session layer), if any.
@@ -591,4 +640,39 @@ pub enum Error {
     /// or value-decoding errors from the underlying layer data).
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ar::DefaultResolver;
+
+    fn layer(id: &str, text: &str) -> sdf::Layer {
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        sdf::Layer::new(id, Box::new(crate::usda::TextReader::from_data(data)))
+    }
+
+    /// `recompute_has_relocates` re-derives the cached flag from the current
+    /// layers. A `layerRelocates` edit reaches the stack through
+    /// `Cache::recompute_relocates`, which does not rebuild the sublayer
+    /// precomputation, so the flag must be refreshed there or the indexer keeps
+    /// composing class arcs instead of deferring to the relocate-aware builder.
+    #[test]
+    fn recompute_has_relocates_syncs() {
+        let plain = layer("root.usd", "#usda 1.0\ndef \"A\" {}\n");
+        let mut stack = LayerStack::new(vec![plain], 0, Box::new(DefaultResolver::new()), true);
+        assert!(!stack.has_relocates, "a stack with no layerRelocates starts clear");
+
+        // Author layerRelocates onto the layer (as an in-place edit would) and
+        // refresh the flag the way `recompute_relocates` now does.
+        stack.layers[0] = layer(
+            "root.usd",
+            "#usda 1.0\n(\n    relocates = { </A>: </B> }\n)\ndef \"A\" {}\n",
+        );
+        stack.recompute_has_relocates();
+        assert!(
+            stack.has_relocates,
+            "recompute picks up the newly authored layerRelocates"
+        );
+    }
 }

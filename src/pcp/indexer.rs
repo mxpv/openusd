@@ -1799,8 +1799,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Resolves the `defaultPrim` of a layer stack's root layer to a root-prim
     /// path (C++ `_GetDefaultPrimPath`), or `None` when it is absent or invalid.
+    ///
+    /// `defaultPrim` is root-layer metadata (spec 12.2.7) and does not compose
+    /// with sublayers or session layers. The stage root layer stack carries its
+    /// session layers ahead of the root layer, so the lookup uses the strongest
+    /// non-session member rather than `target_stack[0]` — which for an internal
+    /// reference on a stage with a session layer would be the session.
     fn resolve_default_prim(&self, target_stack: &[(usize, LayerOffset)]) -> Result<Option<Path>, Error> {
-        let root_layer = target_stack[0].0;
+        let root_layer = target_stack
+            .iter()
+            .map(|&(li, _)| li)
+            .find(|&li| li >= self.stack.session_layer_count)
+            .unwrap_or(target_stack[0].0);
         let Some(value) = self
             .stack
             .layer(root_layer)
@@ -1908,14 +1918,7 @@ mod tests {
     }
 
     fn multi_stack(layers: &[(&str, &str)]) -> LayerStack {
-        let layers = layers
-            .iter()
-            .map(|(id, text)| {
-                let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-                crate::sdf::Layer::new(*id, Box::new(crate::usda::TextReader::from_data(data)))
-            })
-            .collect();
-        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+        session_stack(layers, 0)
     }
 
     fn build(stack: &LayerStack, prim: &str) -> Option<PrimIndexGraph> {
@@ -1924,6 +1927,44 @@ mod tests {
         Indexer::new(stack, &ctx, &HashMap::new(), &ambient, true)
             .build(&Path::from(prim))
             .expect("indexer build")
+    }
+
+    /// Builds a layer stack whose first `session` layers are session layers.
+    fn session_stack(layers: &[(&str, &str)], session: usize) -> LayerStack {
+        let layers = layers
+            .iter()
+            .map(|(id, text)| {
+                let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+                crate::sdf::Layer::new(*id, Box::new(crate::usda::TextReader::from_data(data)))
+            })
+            .collect();
+        LayerStack::new(layers, session, Box::new(DefaultResolver::new()), true)
+    }
+
+    /// An internal default reference (`references = <>`) resolves `defaultPrim`
+    /// from the root layer, not the stronger session layer that authors none
+    /// (spec 12.2.7). With the session at `target_stack[0]`, reading the session
+    /// would find no `defaultPrim` and drop the reference.
+    #[test]
+    fn internal_default_ref_skips_session() {
+        let s = session_stack(
+            &[
+                ("session.usd", "#usda 1.0\n"),
+                (
+                    "root.usd",
+                    "#usda 1.0\n(\n    defaultPrim = \"Target\"\n)\ndef \"Target\" { custom double x = 1 }\ndef \"P\" (\n    references = <>\n) {}\n",
+                ),
+            ],
+            1,
+        );
+        let graph = build(&s, "/P").expect("an internal default reference resolves via the root layer");
+        assert!(
+            graph
+                .iter()
+                .any(|n| n.arc == ArcType::Reference && n.path.as_str() == "/Target" && n.has_specs()),
+            "the internal default reference targets the root layer's defaultPrim, got {:?}",
+            graph.iter().map(|n| n.path.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
