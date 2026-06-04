@@ -167,10 +167,9 @@ impl Changes {
         //   2. An inert add at a path whose node was previously culled
         //      from a dependent prim's graph — that dependent needs a
         //      tier-2 prim rebuild so the now-needed node re-enters.
-        //      Blocked on culled-node tracking; the current
-        //      `IndexBuilder` dedupes via `seen` so culled nodes never
-        //      enter the arena, and we have no `culled_dependencies`
-        //      snapshot to consult.
+        //      Blocked on culled-node tracking: the `Builder` culls
+        //      weaker nodes during composition, and we keep no
+        //      `culled_dependencies` snapshot to consult.
     }
 
     fn classify_root_entry(&mut self, _cache: &Cache, _layer: usize, entry: &ChangeEntry) {

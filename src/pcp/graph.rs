@@ -201,7 +201,7 @@ pub struct Node {
     /// ancestral opinions above it — the "spooky ancestors" a relocation pulls
     /// through — still do. A non-zero depth allows ancestral opinions only at
     /// paths shallower than it (see
-    /// [`node_can_contribute_ancestral`](crate::pcp::indexer)). An inert node
+    /// [`node_can_contribute_ancestral`](crate::pcp::builder)). An inert node
     /// left at depth 0 is treated as fully restricted.
     pub(crate) restriction_depth: u16,
     /// Composition state bits (see [`NodeFlags`]).
@@ -386,7 +386,7 @@ pub(crate) struct PrimIndexGraph {
     pub(crate) strength_order: Vec<NodeId>,
     pub(crate) root: NodeId,
     /// Whether specializes nodes were copied under the local root for strength
-    /// ordering (C++ `_PropagateNodeToRoot`). The task-queue indexer sets this;
+    /// ordering (C++ `_PropagateNodeToRoot`). The task-queue builder sets this;
     /// the recursive builder leaves it `false` and hangs specializes where they
     /// compose. The faithful C++ specializes comparator
     /// (`PcpCompareSiblingNodeStrength`) reads that copy-to-root structure, so
@@ -539,7 +539,7 @@ impl PrimIndexGraph {
     /// The representative layer index is the root sublayer of a node's layer
     /// stack, which uniquely identifies that stack, so matching it together with
     /// the path is equivalent to C++'s `layerStack == site.layerStack` test. The
-    /// task-queue indexer uses this for opt-in duplicate-node skipping by the
+    /// task-queue builder uses this for opt-in duplicate-node skipping by the
     /// class-based arcs (inherits/specializes); reference/payload arcs keep
     /// diamonds.
     pub(crate) fn node_using_site(&self, root_layer: usize, path: &Path) -> Option<NodeId> {

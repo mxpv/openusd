@@ -162,13 +162,13 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 /// - The golden contains a `Time Offsets` section whose values depend on
 ///   `timeCodesPerSecond`-derived scaling the engine does not fold in yet.
 /// - A known composition gap: the golden is a genuine mismatch the task-queue
-///   indexer (the sole composition engine) does not yet reproduce. The deeper
-///   relocate cases remaining are relocates interacting with classes, variants,
-///   payloads, or connections (the relocation source's class/variant children
-///   and cross-arc implied relocations), plus a class arc authored inside a
-///   selected variant. The clusters at the end of the list are each tagged with
-///   a `TODO` naming the missing mechanism; remove an asset once its cluster
-///   lands.
+///   builder (the sole composition engine) does not yet reproduce. The deeper
+///   relocate cases remaining are relocates interacting with classes and
+///   variants (the relocation source's class/variant children, the spooky
+///   implied-inherit-across-relocate, and cross-arc implied relocations), plus a
+///   class arc authored inside a selected variant. The clusters at the end of
+///   the list are each tagged with a `TODO` naming the missing mechanism; remove
+///   an asset once its cluster lands.
 ///
 /// Assets outside this list are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
@@ -224,11 +224,10 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickySpookyInheritsInSymmetricBrowRig_root",
     "TrickySpookyInherits_root",
     "TrickySpookyVariantSelection_root",
-    "bug69932_root",
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
     //
-    // TODO(specializes): the task-queue indexer copies specializes nodes to the
+    // TODO(specializes): the task-queue builder copies specializes nodes to the
     // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
     // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
     // implied-across-a-reference specializes (including nested chains, local
@@ -270,11 +269,9 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // TODO(implied-classes): two implied/nested-class cases still diverge in
     // strength ordering. `ImpliedAndAncestralInherits_ComplexEvaluation` orders
     // an implied-inherit band differently; `SubrootReferenceAndClasses` reaches
-    // the indexer but its implied class ordering still differs.
+    // the builder but its implied class ordering still differs.
     "ImpliedAndAncestralInherits_ComplexEvaluation_root",
     "SubrootReferenceAndClasses_root",
-    // TODO(subroot-relocates): a sub-root reference whose target carries
-    // relocates — the relocated child set / prim stack differs.
     // TODO(expr-arcs): evaluate variable expressions in reference/payload asset
     // paths so the composed arc target resolves.
     "ExpressionsInPayloads_root",

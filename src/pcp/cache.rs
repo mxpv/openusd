@@ -665,7 +665,7 @@ impl Cache {
     /// when `layerRelocates` opinions or the layer stack itself change. Also
     /// refreshes the stack's `has_relocates` flag and `layer_relocates` pairs: a
     /// `layerRelocates`-only edit does not rebuild the sublayer precomputation,
-    /// so the relocate state the indexer reads would otherwise stay stale.
+    /// so the relocate state the builder reads would otherwise stay stale.
     pub(super) fn recompute_relocates(&mut self) {
         self.relocates = Relocates::new(&self.stack.layers);
         self.stack.recompute_relocate_data();
@@ -827,7 +827,7 @@ impl Cache {
     //
     // TODO(rayon): distinct prototypes (distinct instancing keys) compose
     // independent subtrees, so the canonical instances can be composed in
-    // parallel. `IndexBuilder` already takes only `&` references; this needs
+    // parallel. The `Builder` already takes only `&` references; this needs
     // the cache to build indices off the `&mut self` path first (e.g. compose
     // into per-prototype results, then insert), and the shared `LayerStack`
     // handed to workers as `&`/`Arc`.
@@ -1579,7 +1579,7 @@ impl Cache {
 
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
-        // instance brings in. This is enforced at composition time — the indexer
+        // instance brings in. This is enforced at composition time — the builder
         // marks the local root site inert for any prim whose parent context is
         // `within_instance`, so the local arcs are never followed — rather than
         // pruned afterwards, which would leave the nodes those local arcs spawned.

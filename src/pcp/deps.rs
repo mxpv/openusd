@@ -162,10 +162,10 @@ impl Dependencies {
     // this becomes an `O(log n + k)` subtree range query. Same primitive
     // needed by `Cache::drop_index_subtree`.
     //
-    // TODO: snapshot a `culled_dependencies` set per prim index when
-    // `IndexBuilder` starts culling weaker nodes. Without it, an inert
-    // spec added at a culled site fails to un-cull the node on next
-    // composition.
+    // TODO: snapshot a `culled_dependencies` set per prim index. The
+    // `Builder` culls weaker nodes during composition; without a snapshot,
+    // an inert spec added at a culled site fails to un-cull the node on
+    // next composition.
     pub(super) fn subtree_lookup(&self, layer_index: usize, prefix: &Path) -> Vec<Path> {
         let Some(map) = self.per_layer.get(layer_index) else {
             return Vec::new();
