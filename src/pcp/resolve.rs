@@ -125,9 +125,27 @@ impl PrimIndex {
         stack: &LayerStack,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<Path>> {
+        Ok(compose_list_ops(&self.collect_path_list_ops(
+            field,
+            stack,
+            prop_suffix,
+        )?))
+    }
+
+    /// Collects the field's path-list-op opinions across the composition graph,
+    /// strongest first, each translated into the stage root namespace. A bare
+    /// `PathVec` (no list-op envelope) is treated as an explicit replacement of
+    /// weaker opinions; a `ValueBlock` stops the walk. Shared by
+    /// [`resolve_path_list_op`](Self::resolve_path_list_op) and
+    /// [`resolve_path_list_op_deleted`](Self::resolve_path_list_op_deleted).
+    fn collect_path_list_ops(
+        &self,
+        field: FieldKey,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+    ) -> Result<Vec<sdf::PathListOp>> {
         let field = field.as_str();
         let mut ops = Vec::new();
-
         for opinion in self.opinions(field, stack, prop_suffix) {
             let Opinion {
                 node,
@@ -135,9 +153,6 @@ impl PrimIndex {
                 value,
                 ..
             } = opinion?;
-            // A bare `PathVec` (no list-op envelope) is treated as an explicit
-            // replacement of weaker opinions — the natural interpretation for
-            // a non-list-op-typed value when the field is declared list-op.
             let list_op = match value.into_owned() {
                 Value::ValueBlock => break,
                 Value::PathListOp(op) => op,
@@ -146,8 +161,33 @@ impl PrimIndex {
             };
             ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
         }
+        Ok(ops)
+    }
 
-        Ok(compose_list_ops(&ops))
+    /// Resolves the deleted target/connection paths of a path-list-op field:
+    /// every mappable, non-empty path named in a `delete` operation across the
+    /// property stack, in weak-to-strong application order (C++
+    /// `PcpBuildFilteredTargetIndex`'s `deletedPaths` out-param). An explicit
+    /// opinion overwrites the composed result, so it clears the accumulated
+    /// deletions, matching the C++ `IsExplicit()` clear.
+    pub(crate) fn resolve_path_list_op_deleted(
+        &self,
+        field: FieldKey,
+        stack: &LayerStack,
+        prop_suffix: Option<&str>,
+    ) -> Result<Vec<Path>> {
+        // `collect_path_list_ops` yields strongest first; deletions accumulate as
+        // the C++ applies them, weakest to strongest, and an explicit opinion
+        // clears the accumulated deletions.
+        let ops = self.collect_path_list_ops(field, stack, prop_suffix)?;
+        let mut deleted = Vec::new();
+        for op in ops.iter().rev() {
+            if op.explicit {
+                deleted.clear();
+            }
+            deleted.extend(op.deleted_items.iter().cloned());
+        }
+        Ok(deleted)
     }
 
     /// Translate a path-list-op opinion from one contributing node into the

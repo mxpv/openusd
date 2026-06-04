@@ -1095,6 +1095,22 @@ impl Stage {
         self.masked_property_targets(rel, |cache| cache.relationship_targets(rel))
     }
 
+    /// Returns the deleted target paths of a relationship's `targetPaths`
+    /// list-op (targets named in a `delete` operation, mapped to stage
+    /// namespace). Mirrors the deleted-paths out-param of C++
+    /// `PcpCache::ComputeRelationshipTargetPaths`.
+    pub fn deleted_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        self.masked_property_targets(rel, |cache| cache.deleted_relationship_targets(rel))
+    }
+
+    /// Returns the deleted connection paths of an attribute's `connectionPaths`
+    /// list-op (connections named in a `delete` operation, mapped to stage
+    /// namespace). Mirrors the deleted-paths out-param of C++
+    /// `PcpCache::ComputeAttributeConnectionPaths`.
+    pub fn deleted_connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        self.masked_property_targets(attr, |cache| cache.deleted_connection_paths(attr))
+    }
+
     /// Returns the forwarded `targetPaths` for a relationship. A target that
     /// resolves to another relationship is replaced, recursively, by that
     /// relationship's forwarded targets; every other target is kept as-is,

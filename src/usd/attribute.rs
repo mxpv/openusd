@@ -308,6 +308,13 @@ impl Attribute {
         self.stage.connection_paths(&self.path)
     }
 
+    /// Deleted connection paths: connections named in a `delete` list-op,
+    /// mapped to stage namespace. Mirrors the deleted-paths out-param of C++
+    /// `UsdAttribute`'s connection composition.
+    pub fn deleted_connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage.deleted_connection_paths(&self.path)
+    }
+
     /// Composed default value decoded to `T`, if any layer authored one.
     /// Mirrors C++ `UsdAttribute::Get`.
     ///
