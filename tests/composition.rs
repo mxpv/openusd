@@ -208,12 +208,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickySpookyInheritsInSymmetricBrowRig_root",
     "TrickySpookyVariantSelection_root",
     "bug92827_root",
-    // --- Known composition gaps below: each `TODO` names the missing mechanism.
-    //
-    // TODO(instancing): route instance prims through shared prototypes so the
-    // prim stack and child names match the prototype-composed result.
-    "BasicInstancing_root",
-    "BasicInstancingAndNestedInstances_root",
 ];
 
 /// The composition-dump separator: 72 dashes, matching the C++
