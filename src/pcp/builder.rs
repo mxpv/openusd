@@ -1523,11 +1523,6 @@ impl<'a, 'f> Builder<'a, 'f> {
         // The strongest node the set path maps to, and the path in its namespace
         // (C++ `Pcp_TranslatePathFromNodeToRootOrClosestNode`).
         let (start, path_in_start) = self.translate_path_to_root_or_closest(origin, vset_path);
-        // The set's site in the start node's composed namespace; each candidate is
-        // searched at the site this maps back to under that node.
-        let Some(composed) = self.node(start).map_to_root.map_source_to_target(&path_in_start) else {
-            return Ok(None);
-        };
         // TODO(perf): this rebuilds and re-sorts the subtree node list (each
         // `compare_node_strength` walks parent chains) for every authored-variant
         // task. A prim with several variant sets re-sorts once per set; the order
@@ -1540,11 +1535,18 @@ impl<'a, 'f> Builder<'a, 'f> {
         nodes.sort_by(|&a, &b| self.output.compare_node_strength(a, b));
         for n in nodes {
             let node = self.node(n);
-            let Some(site) = node.map_to_root.map_target_to_source(&composed) else {
+            // Each candidate's site is the set path mapped from `start` down the
+            // arc chain to that candidate (C++ `_ComposeVariantSelectionAcrossNodes`).
+            // The per-arc walk drops a path that leaves any arc's co-domain, so a
+            // stronger frame's ancestral selection cannot leak across a reference
+            // boundary the way a shortcut through the composed `map_to_root`
+            // catch-all would (the reason `translate_path_to_root_or_closest`
+            // likewise walks arc-by-arc).
+            let Some(site) = self.map_path_down(start, n, &path_in_start) else {
                 continue;
             };
-            // `map_target_to_source` yields a namespace path that may carry an
-            // enclosing variant's `{set=sel}` qualifier; the storage site is
+            // The mapped path may carry an enclosing variant's `{set=sel}`
+            // qualifier; the storage site is
             // computed from the variant-free path (C++
             // `_ComposeVariantSelectionAcrossNodes`'s `info.sitePath`). A class or
             // reference node reads its selection at that plain path. A variant
@@ -1587,20 +1589,21 @@ impl<'a, 'f> Builder<'a, 'f> {
         // Namespace mappings never include variant selections.
         let mut cur_path = path.strip_all_variant_selections();
         let mut cur_node = node;
-        if let Some(in_root) = self.node(node).map_to_root.map_source_to_target(&cur_path) {
-            cur_node = local_root;
-            cur_path = in_root;
-        } else {
-            while cur_node != local_root && cur_node != self.output.root {
-                let Some(in_parent) = self.node(cur_node).map_to_parent.map_source_to_target(&cur_path) else {
-                    break;
-                };
-                let Some(parent) = self.node(cur_node).parent() else {
-                    break;
-                };
-                cur_node = parent;
-                cur_path = in_parent;
-            }
+        // Walk up one arc at a time via `map_to_parent`, resting at the first arc
+        // whose domain does not contain the path (C++ walks the node chain rather
+        // than jumping through the composed `map_to_root`). A shortcut through
+        // `map_to_root` would follow its `(/, /)` catch-all straight to the root
+        // and let a stronger frame's ancestral selection leak across a reference
+        // boundary the per-arc maps actually block.
+        while cur_node != local_root && cur_node != self.output.root {
+            let Some(in_parent) = self.node(cur_node).map_to_parent.map_source_to_target(&cur_path) else {
+                break;
+            };
+            let Some(parent) = self.node(cur_node).parent() else {
+                break;
+            };
+            cur_node = parent;
+            cur_path = in_parent;
         }
         // Re-apply a variant selection the resting node carries at introduction,
         // so the storage site lookup hits the right `{set=sel}` namespace.
@@ -1612,6 +1615,26 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
         }
         (cur_node, cur_path)
+    }
+
+    /// Maps `path` (in `ancestor`'s namespace) down into `descendant`'s namespace
+    /// by applying each arc's reverse map (`map_target_to_source`) along the
+    /// chain from `ancestor` to `descendant`. Returns `None` if the path leaves
+    /// any arc's co-domain. Scopes a variant-set search to the start node's frame:
+    /// the per-arc walk blocks a path a reference/payload boundary excludes, which
+    /// a shortcut through the composed `map_to_root` catch-all would let through.
+    fn map_path_down(&self, ancestor: NodeId, descendant: NodeId, path: &Path) -> Option<Path> {
+        let mut chain = Vec::new();
+        let mut cur = descendant;
+        while cur != ancestor {
+            chain.push(cur);
+            cur = self.node(cur).parent()?;
+        }
+        let mut p = path.clone();
+        for &node in chain.iter().rev() {
+            p = self.node(node).map_to_parent.map_target_to_source(&p)?;
+        }
+        Some(p)
     }
 
     /// Collects `root` and all its descendants (C++ `Pcp_GetSubtreeRange`).
@@ -1802,6 +1825,15 @@ impl<'a, 'f> Builder<'a, 'f> {
                         n.flags |= NodeFlags::IMPLIED_CLASS;
                     }
                 }
+                // An implied placeholder still seeds the implied-class/specializes
+                // propagation its own arc triggers, the same way the contributing
+                // path below does through `add_tasks_for_node`. Without it the
+                // chain stops here: a specializes authored in a variant under an
+                // outer `/A specializes /_class_` would never imply
+                // `/A/defaultImplementation` across that outer arc.
+                if implied {
+                    self.add_implied_tasks_for_node(placeholder);
+                }
                 if self.frame.is_none() && !self.is_relocates_placeholder_implied_arc(placeholder) {
                     let propagated = self.propagate_node_to_root(placeholder)?;
                     // A pre-existing propagated node (whose origin is not this
@@ -1931,6 +1963,20 @@ impl<'a, 'f> Builder<'a, 'f> {
 
         let src_is_class = is_class_based_arc(self.node(src).arc);
         let src_depth = self.node(src).depth_below_introduction();
+        // Crossing a sub-root arc (a reference/payload to a non-root prim)
+        // collapses depth: the transfer maps the deep target (`/Set/Model`) to
+        // the referencing prim, but a class the seed deepened keeps its map at the
+        // introduction level (`/Inherit → /Set`). For such an arc, align each
+        // class child's map to its node's true depth (`/Inherit/Model →
+        // /Set/Model`) so the conjugation lands the implied node at the deepened
+        // class site instead of the arc's own prim (see `MapFunction::deepen_to`).
+        // A depth-preserving root reference (`/CharRig → /Char`) needs no
+        // deepening — and deepening there would shrink the implied class map's
+        // domain and break ancestral variant-selection lookups. Only a
+        // reference/payload collapses depth this way; crossing an inherit or
+        // specialize keeps the class at its namespace level.
+        let crosses_subroot_ref =
+            matches!(self.node(src).arc, ArcType::Reference | ArcType::Payload) && !is_root_prim(&self.node(src).path);
         // A specializes node keeps its children on the copy under the root, so
         // iterate those (C++ `_EvalImpliedClassTree` reads the propagated node's
         // children when `srcNode` is a specializes node).
@@ -1949,7 +1995,11 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
 
             let child_arc = c.arc;
-            let child_map = c.map_to_parent.clone();
+            let child_map = if crosses_subroot_ref {
+                c.map_to_parent.deepen_to(&c.path)
+            } else {
+                c.map_to_parent.clone()
+            };
             let child_site = (c.layer_index(), c.path.clone());
             let sibling = c.sibling_num_at_origin;
             // A reference or inherit moves both the class and its instance, so the

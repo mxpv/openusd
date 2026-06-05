@@ -210,37 +210,10 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "bug92827_root",
     // --- Known composition gaps below: each `TODO` names the missing mechanism.
     //
-    // TODO(specializes): the task-queue builder copies specializes nodes to the
-    // local root (`_PropagateNodeToRoot`) and orders the globally-weak band with
-    // the faithful `PcpCompareSiblingNodeStrength`, so direct, local, and
-    // implied-across-a-reference specializes (including nested chains, local
-    // overrides, ancestral arcs reached through the seed-deepened graph, a local
-    // variant set on a specialize target, and a specializes/inherit authored
-    // inside a selected variant via `_DetermineInheritPath`) compose byte-exact.
-    // `SpecializesAndVariants4` still defers: a specializes authored inside a
-    // selected variant must also imply itself across an *outer* specializes arc
-    // (`/A` specializes `/_class_`), adding the implied specializes node
-    // `/A/defaultImplementation` — implied specializes through a specializes
-    // chain, not yet ported.
-    "SpecializesAndVariants4_root",
-    // TODO(ancestral-variants): both drop an implied-class node a sub-root arc
-    // target carries through an ancestral variant — `SubrootInheritsAndVariants`
-    // omits the `/Group{v=y}Model` inherit site, `SubrootReferenceAndVariants2`
-    // the `/CHARGROUP{v=x}CHARACTER` band — the same seed map-deepening gap as
-    // `SubrootReferenceAndClasses`, surfacing through a variant rather than a
-    // plain reference.
-    "SubrootInheritsAndVariants_root",
-    "SubrootReferenceAndVariants2_root",
     // TODO(instancing): route instance prims through shared prototypes so the
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
-    // TODO(implied-classes): an implied class propagated across a sub-root arc
-    // loses the namespace depth its target site carries — the seed deepens node
-    // paths but not map functions, so the conjugation lands the implied node at
-    // the arc's own prim (`/SubrootRef`) instead of the deepened class site
-    // (`/Inherit/Model`). Needs the full `_EvalImpliedClassTree` deepening.
-    "SubrootReferenceAndClasses_root",
 ];
 
 /// The composition-dump separator: 72 dashes, matching the C++
