@@ -73,12 +73,24 @@ impl PrimIndex {
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
     pub fn all_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+        self.ordered_nodes().filter(|node| !node.is_inert())
+    }
+
+    /// Iterates the nodes whose sites must be tracked as dependencies of this
+    /// prim. Like [`all_nodes`](Self::all_nodes) but also surfaces inert
+    /// relocation-source nodes: their source site contributes no opinions yet an
+    /// edit there must recompose the relocated prim, so change tracking needs the
+    /// reverse-map entry.
+    pub(crate) fn dependency_nodes(&self) -> impl Iterator<Item = &Node> + '_ {
+        self.ordered_nodes()
+            .filter(|node| !node.is_inert() || node.is_relocate_source())
+    }
+
+    /// Iterates every node in strength order, unfiltered — the shared projection
+    /// the filtered public node iterators build on.
+    fn ordered_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
         let nodes = &self.graph.nodes;
-        self.graph
-            .strength_order
-            .iter()
-            .map(move |id| &nodes[id.idx()])
-            .filter(|node| !node.is_inert())
+        self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
     }
 
     /// Iterates `(handle, node)` pairs in strength order. Used by the subtree
@@ -231,7 +243,7 @@ impl PrimIndex {
     /// the builder seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerStack, ctx: &CompositionContext) -> Result<Self, Error> {
-        Self::build_with_cache(path, stack, ctx, &HashMap::new())
+        Self::build_with_cache(path, stack, ctx, &HashMap::new()).map(|(index, _errors)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
@@ -243,7 +255,7 @@ impl PrimIndex {
         stack: &LayerStack,
         ctx: &CompositionContext,
         cached_indices: &HashMap<Path, PrimIndex>,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, Vec<Error>), Error> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, &stack.root_layer_stack(), true)
     }
 
@@ -262,18 +274,24 @@ impl PrimIndex {
         cached_indices: &HashMap<Path, PrimIndex>,
         ambient: &[(usize, LayerOffset)],
         ambient_is_root: bool,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, Vec<Error>), Error> {
         if ambient_is_root {
             if let Some(cached) = cached_indices.get(path) {
-                return Ok(cached.clone());
+                return Ok((cached.clone(), Vec::new()));
             }
         }
-        // The task-queue builder is the sole composition path. It returns `None`
-        // only for a genuine cycle or an unestablished seed, which compose to an
-        // empty prim index.
+        // The task-queue builder is the sole composition path. A genuine cycle
+        // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
+        // returned errors and skipped. A `None` graph means an unestablished seed
+        // or the runaway nesting backstop, which composes to an empty prim index.
         let builder = super::builder::Builder::new(stack, ctx, cached_indices, ambient, ambient_is_root);
-        let graph = builder.build(path)?.unwrap_or_default();
-        Ok(PrimIndex { graph })
+        let super::builder::BuildOutput { graph, errors } = builder.build(path)?;
+        Ok((
+            PrimIndex {
+                graph: graph.unwrap_or_default(),
+            },
+            errors,
+        ))
     }
 
     /// Returns the composition context derived from this prim's index.
@@ -752,7 +770,8 @@ mod tests {
         };
         let mut last = None;
         for ancestor in &chain {
-            let index = PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
+            let (index, _errors) =
+                PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
             parent_ctx = index.context_for_children(stack, &parent_ctx);
             cache.insert(ancestor.clone(), index.clone());
             last = Some(index);
@@ -1347,39 +1366,95 @@ def "Root" (
         Ok(())
     }
 
-    /// Referencing a layer not in the collected set returns `Error::UnresolvedLayer`.
+    /// A cycle realized across stack frames — `/Root` references a sub-root prim
+    /// in another layer that references back into `/Root` — is reported as
+    /// `ArcCycle`, not silently composed to an empty prim index. The sub-root
+    /// target composes an ancestral sub-index in its own frame, so the
+    /// back-reference is only caught by the cross-frame walk in
+    /// `arc_target_in_bounds`.
     #[test]
-    fn unresolved_layer_returns_error() -> Result<()> {
+    fn subroot_arc_cycle_returns_error() -> Result<()> {
+        let a = parse_usda(
+            r#"#usda 1.0
+(
+    defaultPrim = "Root"
+)
+def "Root" (
+    references = @b.usd@</Outer/Inner>
+)
+{
+}
+"#,
+        );
+        let b = parse_usda(
+            r#"#usda 1.0
+def "Outer"
+{
+    def "Inner" (
+        references = @a.usd@
+    )
+    {
+    }
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
+        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+
+        let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
+        assert!(
+            matches!(result, Err(Error::ArcCycle { .. })),
+            "expected ArcCycle error for a cross-frame cycle, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// An unresolvable referenced layer is recorded as a recoverable
+    /// `UnresolvedLayer` error and the arc is skipped, so the prim still composes
+    /// its own local opinions instead of aborting.
+    #[test]
+    fn unresolved_layer_recorded() -> Result<()> {
         let layer = parse_usda(
             r#"#usda 1.0
 def "Prim" (
     references = @nonexistent.usd@
 )
 {
+    custom string marker = "ok"
 }
 "#,
         );
         let layers = vec![sdf::Layer::new("test.usda", layer)];
         let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
-        let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
+        let (index, errors) = PrimIndex::build_with_cache(
+            &Path::from("/Prim"),
+            &stack,
+            &CompositionContext::default(),
+            &HashMap::new(),
+        )?;
         assert!(
-            matches!(result, Err(Error::UnresolvedLayer { .. })),
-            "expected UnresolvedLayer error, got {result:?}"
+            errors.iter().any(|e| matches!(e, Error::UnresolvedLayer { .. })),
+            "expected a recorded UnresolvedLayer error, got {errors:?}"
+        );
+        assert!(
+            !index.is_empty(),
+            "the prim's local opinion must survive the skipped arc"
         );
         Ok(())
     }
 
-    /// Referencing a layer without defaultPrim (and no explicit prim path)
-    /// returns `Error::MissingDefaultPrim`.
+    /// A reference to a layer without `defaultPrim` (and no explicit prim path)
+    /// is recorded as a recoverable `MissingDefaultPrim` error and skipped.
     #[test]
-    fn missing_default_prim_returns_error() -> Result<()> {
+    fn missing_default_prim_recorded() -> Result<()> {
         let root = parse_usda(
             r#"#usda 1.0
 def "Prim" (
     references = @target.usda@
 )
 {
+    custom string marker = "ok"
 }
 "#,
         );
@@ -1390,10 +1465,19 @@ def "Prim" (
         ];
         let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
-        let result = PrimIndex::build_with_context(&Path::from("/Prim"), &stack, &CompositionContext::default());
+        let (index, errors) = PrimIndex::build_with_cache(
+            &Path::from("/Prim"),
+            &stack,
+            &CompositionContext::default(),
+            &HashMap::new(),
+        )?;
         assert!(
-            matches!(result, Err(Error::MissingDefaultPrim { .. })),
-            "expected MissingDefaultPrim error, got {result:?}"
+            errors.iter().any(|e| matches!(e, Error::MissingDefaultPrim { .. })),
+            "expected a recorded MissingDefaultPrim error, got {errors:?}"
+        );
+        assert!(
+            !index.is_empty(),
+            "the prim's local opinion must survive the skipped arc"
         );
         Ok(())
     }

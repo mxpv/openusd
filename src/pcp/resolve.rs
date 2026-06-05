@@ -182,8 +182,12 @@ impl PrimIndex {
         let ops = self.collect_path_list_ops(field, stack, prop_suffix)?;
         let mut deleted = Vec::new();
         for op in ops.iter().rev() {
+            // An explicit opinion fully replaces the composed result and carries
+            // no residual deletions (C++ `IsExplicit()`; see `ListOp::combined_with`),
+            // so it discards weaker deletions and contributes none of its own.
             if op.explicit {
                 deleted.clear();
+                continue;
             }
             deleted.extend(op.deleted_items.iter().cloned());
         }

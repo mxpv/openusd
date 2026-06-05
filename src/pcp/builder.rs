@@ -198,6 +198,36 @@ struct Frame<'f> {
     previous: Option<&'f Frame<'f>>,
 }
 
+/// Walks the parent frame chain (C++ `PcpPrimIndex_StackFrameIterator`), yielding
+/// each frame paired with a target path deepened into that frame's namespace: a
+/// site at the current build's root maps to the frame's requested path, a deeper
+/// site has its current-root prefix replaced (C++ `ReplacePrefix` across the
+/// stack frame). The cross-frame duplicate-node search and cycle check share this
+/// deepening and apply their own predicate to each pair.
+struct FrameSites<'f> {
+    search: Path,
+    current_root: Path,
+    frame: Option<&'f Frame<'f>>,
+}
+
+impl<'f> Iterator for FrameSites<'f> {
+    type Item = (&'f Frame<'f>, Path);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let f = self.frame?;
+        self.search = if self.current_root == self.search {
+            f.requested_path.clone()
+        } else {
+            f.requested_path
+                .replace_prefix(&self.current_root, &self.search)
+                .unwrap_or_else(|| f.requested_path.clone())
+        };
+        self.current_root = f.root_path.clone();
+        self.frame = f.previous;
+        Some((f, self.search.clone()))
+    }
+}
+
 /// A queued unit of composition work on one node (C++ `Pcp_PrimIndexer::Task`).
 ///
 /// [`take_best_task`](Builder::take_best_task) drains the highest-priority task:
@@ -302,6 +332,20 @@ enum TaskKind {
     EvalNodeRelocations,
 }
 
+/// The result of composing one prim: the graph and the recoverable composition
+/// errors recorded along the way (C++ `Pcp_PrimIndexer`'s `allErrors`).
+///
+/// The graph is `None` only for an unestablished seed or the runaway-depth
+/// backstop, which the cache treats as an empty prim index. An arc whose target
+/// cannot be resolved is recorded in `errors` and skipped, so the prim still
+/// composes — the errors travel alongside a real graph, not in place of it. A
+/// nested sub-build returns its own [`BuildOutput`]; the caller merges its
+/// `errors` into its own before using the `graph`.
+pub(crate) struct BuildOutput {
+    pub(crate) graph: Option<PrimIndexGraph>,
+    pub(crate) errors: Vec<Error>,
+}
+
 /// The shared, read-only inputs to a prim build — the same across every nested
 /// sub-build (C++ `PcpPrimIndexInputs` plus the `PcpCache` it reads). All
 /// borrows, so it is `Copy` and threads into a sub-build unchanged.
@@ -368,6 +412,12 @@ pub(crate) struct Builder<'a, 'f> {
     /// sub-index with this `false`, so its direct site is inert (salted earth)
     /// while its ancestral arc children still contribute (spooky ancestors).
     root_contributes: bool,
+    /// Recoverable composition errors collected during the build (C++
+    /// `Pcp_PrimIndexer`'s `allErrors`). An arc whose target cannot be resolved
+    /// records its error here and contributes nothing, so the rest of the prim
+    /// still composes; the cache routes these to the stage error handler. Errors
+    /// from nested sub-builds are merged in at their call sites.
+    errors: Vec<Error>,
 }
 
 impl<'a, 'f> Builder<'a, 'f> {
@@ -395,24 +445,35 @@ impl<'a, 'f> Builder<'a, 'f> {
             tasks: Vec::new(),
             implied_seen: HashSet::new(),
             root_contributes: true,
+            errors: Vec::new(),
         }
     }
 
-    /// Composes `path` into a prim index graph. The task-queue builder is the
-    /// sole composition path; `None` is returned only for a genuine composition
-    /// cycle (depth bound exceeded) or when the seed cannot be established, which
-    /// the cache treats as an empty prim index.
-    pub(crate) fn build(mut self, path: &Path) -> Result<Option<PrimIndexGraph>, Error> {
-        // A sub-index nested past the depth bound is a true composition cycle.
+    /// Composes `path` into a prim index graph, returning the graph and the
+    /// recoverable composition errors collected along the way (an arc whose
+    /// target cannot be resolved is recorded and skipped, so the rest of the prim
+    /// still composes). The graph is `None` when the seed cannot be established or
+    /// the runaway nesting backstop trips, which the cache treats as an empty prim
+    /// index. A genuine composition cycle aborts the build as
+    /// [`Error::ArcCycle`] by [`arc_target_in_bounds`](Self::arc_target_in_bounds).
+    pub(crate) fn build(mut self, path: &Path) -> Result<BuildOutput, Error> {
+        // Backstop pathological growth that site-identity cycle detection cannot
+        // catch — an unbounded chain of ever-deeper sites that never repeats.
         if self.frame_depth > MAX_DEPTH {
-            return Ok(None);
+            return Ok(BuildOutput {
+                graph: None,
+                errors: self.errors,
+            });
         }
         self.site.path = path.clone();
 
         // Seed the graph: a root prim starts empty (just its local site); a
         // child prim clones its parent's graph for ancestral opinions.
         if !self.seed(path)? {
-            return Ok(None);
+            return Ok(BuildOutput {
+                graph: None,
+                errors: self.errors,
+            });
         }
 
         // The local (root) site is made inert — neither contributing opinions
@@ -443,9 +504,11 @@ impl<'a, 'f> Builder<'a, 'f> {
         // non-inert node sits at a relocation source in its layer stack, this
         // prim is a prohibited namespace child and contributes nothing.
         if self.elide_if_prohibited() {
-            self.output.specializes_propagated = true;
             self.output.finalize_strength_order();
-            return Ok(Some(self.output));
+            return Ok(BuildOutput {
+                graph: Some(self.output),
+                errors: self.errors,
+            });
         }
 
         // Recompute `has_specs` at the seeded paths and enqueue the spec-bearing
@@ -493,12 +556,14 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
         }
 
-        // The builder copies specializes nodes under the local root (C++
-        // `_PropagateNodeToRoot`), so strength ordering uses the faithful
-        // specializes comparator rather than the builder's chain-depth band.
-        self.output.specializes_propagated = true;
+        // Specializes nodes were copied under the local root (C++
+        // `_PropagateNodeToRoot`), so the strength-order DFS places that
+        // globally-weak band (spec 10.4.1) last.
         self.output.finalize_strength_order();
-        Ok(Some(self.output))
+        Ok(BuildOutput {
+            graph: Some(self.output),
+            errors: self.errors,
+        })
     }
 
     /// Builds the initial graph for `path` (C++ `_BuildInitialPrimIndexFromAncestor`
@@ -532,7 +597,7 @@ impl<'a, 'f> Builder<'a, 'f> {
             };
             parent_index.graph().clone()
         } else {
-            let Some(graph) = self.compose_ancestral_subindex(&parent)? else {
+            let Some(graph) = self.merge_subindex(self.compose_ancestral_subindex(&parent)?) else {
                 return Ok(false);
             };
             graph
@@ -626,8 +691,10 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// Composes the ancestral parent of a sub-index in the same ambient,
     /// reusing the current frame chain (C++ `_BuildInitialPrimIndexFromAncestor`'s
     /// else-branch `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`). Returns
-    /// `None` when the parent cannot be composed (a cycle / unestablished seed).
-    fn compose_ancestral_subindex(&self, parent: &Path) -> Result<Option<PrimIndexGraph>, Error> {
+    /// the composed graph (`None` when the parent cannot be composed — a cycle /
+    /// unestablished seed) and the sub-build's recoverable errors, which the
+    /// caller merges into its own.
+    fn compose_ancestral_subindex(&self, parent: &Path) -> Result<BuildOutput, Error> {
         self.new_sub(self.site.ambient, self.site.is_root, self.frame, true)
             .build(parent)
     }
@@ -636,7 +703,9 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// opinions above the target (C++ `_AddArc`'s `includeAncestralOpinions`
     /// branch). A fresh [`Frame`] threads this graph back to the nested build so
     /// duplicate-node skipping can reach the nodes already composed here. Returns
-    /// `None` when the target cannot be composed (a cycle / unestablished seed).
+    /// the composed graph (`None` when the target cannot be composed — a cycle /
+    /// unestablished seed) and the sub-build's recoverable errors, which the
+    /// caller merges into its own.
     fn compose_subindex(
         &self,
         target: &Path,
@@ -644,7 +713,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         ambient_is_root: bool,
         skip: bool,
         root_contributes: bool,
-    ) -> Result<Option<PrimIndexGraph>, Error> {
+    ) -> Result<BuildOutput, Error> {
         let frame = Frame {
             requested_path: target.clone(),
             root_path: self.site.path.clone(),
@@ -654,6 +723,13 @@ impl<'a, 'f> Builder<'a, 'f> {
         };
         self.new_sub(ambient, ambient_is_root, Some(&frame), root_contributes)
             .build(target)
+    }
+
+    /// Merges a completed sub-build's recoverable errors into this build and
+    /// returns its graph, so each call site handles only the `Option<graph>`.
+    fn merge_subindex(&mut self, out: BuildOutput) -> Option<PrimIndexGraph> {
+        self.errors.extend(out.errors);
+        out.graph
     }
 
     /// Composes an arc target as its own ancestral sub-index and grafts it under
@@ -677,7 +753,8 @@ impl<'a, 'f> Builder<'a, 'f> {
         origin: NodeId,
         sibling: u16,
     ) -> Result<Option<NodeId>, Error> {
-        let Some(sub) = self.compose_subindex(target, ambient, ambient_is_root, skip, true)? else {
+        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, ambient_is_root, skip, true)?)
+        else {
             return Ok(None);
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
@@ -699,24 +776,18 @@ impl<'a, 'f> Builder<'a, 'f> {
         if self.output.node_using_site(rep_layer, site_path).is_some() {
             return true;
         }
-        let mut search = site_path.clone();
-        let mut current_root = self.site.path.clone();
-        let mut frame = self.frame;
-        while let Some(f) = frame {
-            search = if current_root == search {
-                f.requested_path.clone()
-            } else {
-                f.requested_path
-                    .replace_prefix(&current_root, &search)
-                    .unwrap_or_else(|| f.requested_path.clone())
-            };
-            if f.graph.node_using_site(rep_layer, &search).is_some() {
-                return true;
-            }
-            current_root = f.root_path.clone();
-            frame = f.previous;
+        self.frame_sites(site_path)
+            .any(|(f, search)| f.graph.node_using_site(rep_layer, &search).is_some())
+    }
+
+    /// Iterates the parent frame chain, deepening `target` into each frame's
+    /// namespace (C++ `PcpPrimIndex_StackFrameIterator`). See [`FrameSites`].
+    fn frame_sites(&self, target: &Path) -> FrameSites<'f> {
+        FrameSites {
+            search: target.clone(),
+            current_root: self.site.path.clone(),
+            frame: self.frame,
         }
-        false
     }
 
     /// Grafts a composed sub-index under `parent` (C++ `InsertChildSubgraph`).
@@ -1059,8 +1130,13 @@ impl<'a, 'f> Builder<'a, 'f> {
         // once, here.
         let map = MapFunction::from_pair_identity(source.clone(), node_path);
         let ambient_is_root = self.ambient_is_root_for(&node_ambient);
-        let Some(sub) = self.compose_subindex(&source, &node_ambient, ambient_is_root, self.frame_skip(), false)?
-        else {
+        let Some(sub) = self.merge_subindex(self.compose_subindex(
+            &source,
+            &node_ambient,
+            ambient_is_root,
+            self.frame_skip(),
+            false,
+        )?) else {
             return Ok(());
         };
         let Some(grafted) = self.graft_subindex(&sub, node, ArcType::Relocate, map, node, 0) else {
@@ -2081,11 +2157,15 @@ impl<'a, 'f> Builder<'a, 'f> {
         } else {
             let Some(layer_index) = find_layer(asset_path, &self.inputs.stack.layers, &*self.inputs.stack.resolver)
             else {
-                return Err(Error::UnresolvedLayer {
+                // An unresolvable asset is a recoverable error (C++
+                // `PcpErrorUnresolvedPrimPath`): record it and skip the arc so the
+                // rest of the prim — including its own local opinions — still composes.
+                self.errors.push(Error::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
                     site_path: parent_path,
                 });
+                return Ok(());
             };
             (self.inputs.stack.sublayer_stack(layer_index), false)
         };
@@ -2094,11 +2174,14 @@ impl<'a, 'f> Builder<'a, 'f> {
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
         let source = if prim_path.is_empty() {
             let Some(p) = self.resolve_default_prim(&target_stack)? else {
-                return Err(Error::MissingDefaultPrim {
+                // Missing target `defaultPrim` is likewise recoverable: record it
+                // and skip the arc; the prim's other opinions still compose.
+                self.errors.push(Error::MissingDefaultPrim {
                     layer_id: self.inputs.stack.layer(target_stack[0].0).identifier.clone(),
                     arc,
                     site_path: parent_path,
                 });
+                return Ok(());
             };
             p
         } else {
@@ -2197,9 +2280,10 @@ impl<'a, 'f> Builder<'a, 'f> {
     }
 
     /// Returns `true` when an arc to `(root_layer, path)` under `parent` is
-    /// within the depth bound and is not a cycle. A single walk of the parent
-    /// chain both rejects an ancestor that is the same site (C++ `_CheckForCycle`)
-    /// and counts hops against `MAX_DEPTH`.
+    /// within the depth bound and is not a composition cycle (C++
+    /// `_CheckForCycle`). The walk crosses stack frames: it visits the target's
+    /// ancestor sites in this graph, then each parent frame still under
+    /// composition, rejecting an arc that lands back on an active ancestor site.
     fn arc_target_in_bounds(&self, parent: NodeId, root_layer: usize, path: &Path) -> bool {
         // Count the arc target node itself, then each ancestor up to the root.
         let mut depth = 1;
@@ -2211,6 +2295,15 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
             depth += 1;
             cur = n.parent().unwrap_or(NodeId::INVALID);
+        }
+        // Continue across parent frames (C++ `PcpPrimIndex_StackFrameIterator`):
+        // each frame is a sub-build still in progress, so an arc landing back on
+        // a frame's build root targets an ancestor under composition — a cycle.
+        for (f, search) in self.frame_sites(path) {
+            if search == f.root_path && f.graph.node_using_site(root_layer, &search).is_some() {
+                return false;
+            }
+            depth += 1;
         }
         depth <= MAX_DEPTH
     }
@@ -2341,6 +2434,7 @@ mod tests {
         Builder::new(stack, &ctx, &HashMap::new(), &ambient, true)
             .build(&Path::from(prim))
             .expect("builder build")
+            .graph
     }
 
     /// Builds a layer stack whose first `session` layers are session layers.
@@ -2559,6 +2653,7 @@ mod tests {
         let child = Builder::new(&s, &ctx, &cached, &ambient, true)
             .build(&Path::from("/Root/Child"))
             .expect("builder build")
+            .graph
             .expect("child composed by builder");
         assert!(
             child

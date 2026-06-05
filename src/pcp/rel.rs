@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, Path, Value};
+use crate::sdf::{self, AbstractData, Path, PathComponent, Value};
 
 use super::graph::ArcType;
 use super::index::PrimIndex;
@@ -53,6 +53,35 @@ pub(crate) fn chain_through_relocates(path: &Path, relocates: &[(Path, Path)], s
         }
     }
     current
+}
+
+/// The name of a path's topmost prim (its root prim), or `None` for the
+/// absolute root. Groups cached prims by the root subtree they live under.
+fn root_prim_name(path: &Path) -> Option<&str> {
+    match path.components().next() {
+        Some(PathComponent::Prim(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// Shifts an endpoint through the single nearest ancestor rename in `renames`.
+///
+/// When an ancestor prim is relocated, a relocate authored below it sits under
+/// the renamed parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
+/// `…/Rig2/SubRig/Anim` once `Rig -> Rig2`). Only the nearest applicable
+/// ancestor — the longest matching source prefix other than `endpoint` itself —
+/// is applied, and it is applied once against the original `endpoint`: faithful
+/// to C++ USD relocates, a relocate's authored source keeps its as-authored
+/// depth and is never transitively re-chained (`_ConformLegacyRelocates` is a
+/// no-op in USD mode). Returns `endpoint` unchanged when no ancestor matches.
+fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> Path {
+    renames
+        .iter()
+        .filter(|(src, tgt)| !tgt.is_empty() && src != endpoint)
+        .filter_map(|(src, tgt)| endpoint.replace_prefix(src, tgt).map(|p| (src.as_str().len(), p)))
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, p)| p)
+        .unwrap_or_else(|| endpoint.clone())
 }
 
 /// Extracts each layer's authored `layerRelocates` pairs `(source, target)`,
@@ -150,22 +179,9 @@ impl Relocates {
         // target length, making the fold order deterministic.
         let snapshot = result.clone();
         for entry in &mut result {
-            for (other_src, other_tgt) in &snapshot {
-                if other_tgt.is_empty() {
-                    continue;
-                }
-                // Only ancestor (strict prefix) renames shift an endpoint, never
-                // the entry's own relocation.
-                if *other_src != entry.0 {
-                    if let Some(remapped) = entry.0.replace_prefix(other_src, other_tgt) {
-                        entry.0 = remapped;
-                    }
-                }
-                if !entry.1.is_empty() && *other_src != entry.1 {
-                    if let Some(remapped) = entry.1.replace_prefix(other_src, other_tgt) {
-                        entry.1 = remapped;
-                    }
-                }
+            entry.0 = shift_through_nearest_ancestor(&entry.0, &snapshot);
+            if !entry.1.is_empty() {
+                entry.1 = shift_through_nearest_ancestor(&entry.1, &snapshot);
             }
         }
 
@@ -292,7 +308,7 @@ impl Relocates {
         // relocates that weren't found in the ancestor walk (e.g. referenced
         // layers only reachable from a sibling branch).
         let relocate_layers: Vec<usize> = self.layer_relocates.keys().copied().collect();
-        let root_name = path.as_str().split('/').nth(1).unwrap_or("");
+        let root_name = root_prim_name(path);
 
         // Sorted iteration: a `HashMap` walk would make the collected layer-map
         // order (and so downstream relocate composition) hash-order-dependent.
@@ -300,8 +316,7 @@ impl Relocates {
         cached_paths.sort();
         for cached_path in cached_paths {
             let cached_index = &indices[cached_path];
-            let cached_root = cached_path.as_str().split('/').nth(1).unwrap_or("");
-            if cached_root != root_name {
+            if root_prim_name(cached_path) != root_name {
                 continue;
             }
             for node in cached_index.all_nodes() {
@@ -319,5 +334,42 @@ impl Relocates {
         }
 
         maps
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the nearest ancestor rename shifts an endpoint; a relocate's source
+    /// is not transitively re-chained through a rename applied to an already-
+    /// shifted path (C++ `_ConformLegacyRelocates` is a no-op in USD mode).
+    #[test]
+    fn nearest_ancestor_only() {
+        let renames = vec![
+            (Path::from("/Rig"), Path::from("/Rig2")),
+            (Path::from("/Rig2/Sub"), Path::from("/Rig2/SubX")),
+        ];
+        // `/Rig` is the only ancestor rename that prefixes the as-authored
+        // endpoint, so the shift applies it once and stops: `/Rig/Sub/Anim`
+        // becomes `/Rig2/Sub/Anim`, and the deeper `/Rig2/Sub` rename — which
+        // matches only the shifted path — is not re-applied.
+        let shifted = shift_through_nearest_ancestor(&Path::from("/Rig/Sub/Anim"), &renames);
+        assert_eq!(shifted, Path::from("/Rig2/Sub/Anim"));
+    }
+
+    /// An endpoint with no ancestor rename is returned unchanged, and a rename
+    /// whose source equals the endpoint itself never applies.
+    #[test]
+    fn no_ancestor_match_unchanged() {
+        let renames = vec![(Path::from("/A"), Path::from("/B"))];
+        assert_eq!(
+            shift_through_nearest_ancestor(&Path::from("/A"), &renames),
+            Path::from("/A")
+        );
+        assert_eq!(
+            shift_through_nearest_ancestor(&Path::from("/X/Y"), &renames),
+            Path::from("/X/Y")
+        );
     }
 }

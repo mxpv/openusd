@@ -6,7 +6,6 @@
 //! [`PrimIndex`](crate::pcp::PrimIndex) for value resolution over the graph.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 use bitflags::bitflags;
 
@@ -160,12 +159,6 @@ pub struct Node {
     /// with. Carried onto implied copies so their relative strength is preserved;
     /// reference/payload arcs leave it 0.
     pub(crate) sibling_num_at_origin: u16,
-    /// Position of this node's prim in its specializes chain: 0 for a directly
-    /// specialized class, 1 for the class it specializes, and so on. A specialize
-    /// source is weaker than its target (spec 10.4.1), so a lower depth is
-    /// stronger. Set during [`finalize_strength_order`](PrimIndexGraph::finalize_strength_order);
-    /// meaningful only for specialize-introduced nodes.
-    pub(crate) specialize_chain_depth: u16,
     /// Whether any layer in [`layer_stack`](Self::layer_stack) authors a spec at
     /// [`path`](Self::path) (C++ `PcpNode::HasSpecs`). Under the full-site-stack
     /// model a node may carry its whole layer stack yet author no spec at its
@@ -224,7 +217,6 @@ impl Node {
             origin: None,
             namespace_depth: 0,
             sibling_num_at_origin: 0,
-            specialize_chain_depth: 0,
             has_specs: true,
             restriction_depth: 0,
             flags,
@@ -341,6 +333,14 @@ impl Node {
         self.flags.contains(NodeFlags::HAS_SPECIALIZES)
     }
 
+    /// True when this node carries a relocation source site (C++
+    /// `PcpNodeRef::IsRestricted` relocate placeholder). It is inert for value
+    /// resolution, but its source site must still be tracked as a dependency so
+    /// an edit there recomposes the relocated prim.
+    pub(crate) fn is_relocate_source(&self) -> bool {
+        self.flags.contains(NodeFlags::RELOCATE_SOURCE)
+    }
+
     /// True when this node is a direct arc to a `permission = private` site, or
     /// lies in such an arc's subtree (spec 10.3.3). It stays visible
     /// structurally (`nodes`, `has_spec`, child names) but contributes no
@@ -370,15 +370,6 @@ pub(crate) struct PrimIndexGraph {
     pub(crate) nodes: Vec<Node>,
     pub(crate) strength_order: Vec<NodeId>,
     pub(crate) root: NodeId,
-    /// Whether specializes nodes were copied under the local root for strength
-    /// ordering (C++ `_PropagateNodeToRoot`). The task-queue builder sets this;
-    /// the recursive builder leaves it `false` and hangs specializes where they
-    /// compose. The faithful C++ specializes comparator
-    /// (`PcpCompareSiblingNodeStrength`) reads that copy-to-root structure, so
-    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength)
-    /// uses it only when this is set and otherwise keeps the chain-depth
-    /// approximation the builder's graphs rely on.
-    pub(crate) specializes_propagated: bool,
 }
 
 impl PrimIndexGraph {
@@ -599,10 +590,9 @@ impl PrimIndexGraph {
     /// stronger); namespace depth (deeper stronger); origin strength (the
     /// stronger origin wins); finally the sibling arc number at the origin (C++
     /// `GetSiblingNumAtOrigin`, lower stronger). Two specializes use the faithful
-    /// specializes comparator ([`compare_specialize_siblings`]) when the graph
-    /// carries the copy-to-root structure it reads (`specializes_propagated`);
-    /// the recursive builder's graphs lack that structure, so they order the
-    /// globally-weak band by specializes-chain depth with an arena-index tiebreak.
+    /// specializes comparator ([`compare_specialize_siblings`]), which reads the
+    /// copy-to-root structure [`propagate_node_to_root`](crate::pcp::builder)
+    /// produces.
     pub(crate) fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         let na = &self.nodes[a.idx()];
         let nb = &self.nodes[b.idx()];
@@ -612,27 +602,12 @@ impl PrimIndexGraph {
             return na.arc.cmp(&nb.arc);
         }
 
-        // Two specializes need special handling because of how specializes nodes
-        // are copied to the root (C++ `PcpCompareSiblingNodeStrength`). When the
-        // graph carries that copy-to-root structure use the faithful comparator;
-        // otherwise (the recursive builder's graphs) keep the chain-depth
-        // approximation that orders the globally-weak band.
+        // Two specializes are copied under the local root (C++
+        // `_PropagateNodeToRoot`), so they sort by the faithful specializes
+        // branch of C++ `PcpCompareSiblingNodeStrength`, which reads that
+        // copy-to-root structure.
         if na.introduced_by_specialize() && nb.introduced_by_specialize() {
-            if self.specializes_propagated {
-                return self.compare_specialize_siblings(a, b);
-            }
-            if na.specialize_chain_depth != nb.specialize_chain_depth {
-                return na.specialize_chain_depth.cmp(&nb.specialize_chain_depth);
-            }
-            let oa = na.origin.unwrap_or(a);
-            let ob = nb.origin.unwrap_or(b);
-            if oa != ob && (oa != a || ob != b) {
-                let ord = self.compare_node_strength(oa, ob);
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-            return a.0.cmp(&b.0);
+            return self.compare_specialize_siblings(a, b);
         }
 
         // 2. Namespace depth: a deeper arc-introduction site is stronger (C++
@@ -670,8 +645,7 @@ impl PrimIndexGraph {
 
     /// Compares two specializes siblings under the copy-to-root model, porting
     /// the specializes branch of C++ `PcpCompareSiblingNodeStrength`. Returns
-    /// [`Ordering::Less`] when `a` is stronger. Only called when
-    /// [`specializes_propagated`](Self::specializes_propagated) holds.
+    /// [`Ordering::Less`] when `a` is stronger.
     // TODO(perf): invoked O(n log n) times from `finalize_strength_order`'s sort,
     // and `origin_root_node` / `origins_are_nested` / `namespace_depth_for_class_hierarchy`
     // re-walk origin/parent chains while `is_propagated_specializes` re-scans the
@@ -949,29 +923,23 @@ impl PrimIndexGraph {
         }
     }
 
-    /// Rebuilds the strength-order projection: a pre-order DFS of the tree for
-    /// non-specialize nodes, followed by the globally-weak specialize band
-    /// (spec 10.4.1). The result runs strongest to weakest; reversing it gives
-    /// weak-to-strong.
+    /// Rebuilds the strength-order projection as a pre-order DFS of the tree.
+    /// The result runs strongest to weakest; reversing it gives weak-to-strong.
     ///
     /// Each node's `children` are first sorted by
-    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength),
-    /// so the DFS yields strength order among siblings. The specialize band is
-    /// then ordered by the same comparator over the whole band: in C++ the
-    /// specializes nodes are copied to the root and ordered there as siblings
-    /// (`_EvalImpliedSpecializes`); ordering them directly with the sibling
-    /// comparator reproduces that without mutating the tree, so the nested
-    /// structure the grafts depend on is preserved.
+    /// [`compare_sibling_node_strength`](Self::compare_sibling_node_strength), so
+    /// the DFS yields strength order among siblings. Specializes are copied under
+    /// the local root (C++ `_PropagateNodeToRoot` / `_EvalImpliedSpecializes`)
+    /// and specialize is the weakest arc, so the DFS already trails the
+    /// globally-weak band (spec 10.4.1) at the end.
     ///
-    /// The comparator reads only arc type, specializes-chain depth, namespace
-    /// depth, origin chains, and arena order — never the projection being
-    /// computed — so it is well-defined here.
+    /// The comparator reads only arc type, namespace depth, origin chains, and
+    /// arena order — never the projection being computed — so it is well-defined
+    /// here.
     pub(crate) fn finalize_strength_order(&mut self) {
         if !self.root.is_valid() {
             return;
         }
-
-        self.compute_specialize_chain_depths();
 
         // Order every node's children by sibling strength. `children` is taken
         // out so the comparator can borrow the arena immutably during the sort.
@@ -983,7 +951,10 @@ impl PrimIndexGraph {
 
         // Pre-order DFS from the root: visit a node, then its children in
         // strength order. Pushing children reversed makes the strongest pop
-        // first.
+        // first. Specializes were copied under the local root (C++
+        // `_PropagateNodeToRoot`); specialize is the weakest arc, so those copies
+        // and their subtrees sort last among the root's children and the DFS
+        // already places the globally-weak band (spec 10.4.1) at the end.
         let mut dfs = Vec::with_capacity(self.nodes.len());
         let mut stack = vec![self.root];
         while let Some(id) = stack.pop() {
@@ -992,62 +963,7 @@ impl PrimIndexGraph {
                 stack.push(child);
             }
         }
-
-        if self.specializes_propagated {
-            // Specializes were copied under the local root (C++
-            // `_PropagateNodeToRoot`). Specialize is the weakest arc, so those
-            // copies and their subtrees sort last among the root's children and
-            // the DFS already places the globally-weak band at the end.
-            self.strength_order = dfs;
-            return;
-        }
-
-        // The recursive builder hangs specializes where they compose, so pull
-        // the globally-weak band (spec 10.4.1) to the end, ordered among itself
-        // by the sibling comparator (which treats the band as siblings at the
-        // root, mirroring copy-to-root).
-        let (mut order, mut specials): (Vec<NodeId>, Vec<NodeId>) = dfs
-            .into_iter()
-            .partition(|id| !self.nodes[id.idx()].introduced_by_specialize());
-        specials.sort_by(|&a, &b| self.compare_sibling_node_strength(a, b));
-        order.append(&mut specials);
-        self.strength_order = order;
-    }
-
-    /// Records, on every specialize-introduced node, the depth of its prim in
-    /// the specializes chain: the number of specialize ancestors of the deepest
-    /// node at that prim's path. A directly specialized class is depth 0, the
-    /// class it specializes is depth 1, and so on, so a lower depth sorts
-    /// stronger (a specializes source is weaker than its target, spec 10.4.1).
-    ///
-    /// The per-path maximum recovers the chain position even for the implied
-    /// copies a class brings in across references, which hang flat rather than
-    /// nested under the class they specialize.
-    fn compute_specialize_chain_depths(&mut self) {
-        let mut depth_by_path: HashMap<Path, u16> = HashMap::new();
-        for node in &self.nodes {
-            if !node.introduced_by_specialize() {
-                continue;
-            }
-            let mut depth = 0u16;
-            let mut parent = node.parent;
-            while let Some(pid) = parent {
-                let pnode = &self.nodes[pid.idx()];
-                if pnode.introduced_by_specialize() {
-                    depth += 1;
-                }
-                parent = pnode.parent;
-            }
-            depth_by_path
-                .entry(node.path.clone())
-                .and_modify(|d| *d = (*d).max(depth))
-                .or_insert(depth);
-        }
-        for node in &mut self.nodes {
-            if node.introduced_by_specialize() {
-                node.specialize_chain_depth = depth_by_path.get(&node.path).copied().unwrap_or(0);
-            }
-        }
+        self.strength_order = dfs;
     }
 }
 

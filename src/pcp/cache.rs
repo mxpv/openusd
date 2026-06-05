@@ -1519,10 +1519,14 @@ impl Cache {
         // The blocker is the shared `self.indices` map that inherit/specialize
         // targets read mid-build — parallelizing the driver needs a concurrent
         // map or a topological (targets-first) build order.
-        let mut index = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
-            Ok(idx) => idx,
+        let (mut index, build_errors) = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices)
+        {
+            Ok(result) => result,
             Err(e) => return Err(e.into()),
         };
+        // Surface recoverable composition errors recorded during the build (e.g.
+        // an unresolvable arc) to the stage error handler.
+        self.pending_errors.extend(build_errors);
 
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
@@ -1967,6 +1971,64 @@ mod tests {
             layers,
             vec![0, 1],
             "relocate node folds both authoring sublayers, strongest first"
+        );
+        Ok(())
+    }
+
+    /// A cross-hierarchy relocation source is registered as a dependency of the
+    /// relocated prim even though its node is inert. `/Source/Inner` relocates to
+    /// `/Dest/Moved`; the source's ancestors (`/Source`) are not ancestors of the
+    /// target, so only the source-site registration lets an edit at `/Source/Inner`
+    /// invalidate `/Dest/Moved`.
+    #[test]
+    fn relocate_source_registers_dependency() -> Result<()> {
+        let root = format!("{}/fixtures/relocate_cross_hierarchy/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let dst = sdf::path("/Dest/Moved")?;
+        cache.ensure_index(&dst)?;
+
+        let src = sdf::path("/Source/Inner")?;
+        assert!(
+            cache.dependencies().lookup_with_ancestors(0, &src).contains(&dst),
+            "an edit at relocation source /Source/Inner must invalidate /Dest/Moved"
+        );
+        Ok(())
+    }
+
+    /// A recoverable composition error on an ancestor must not erase a
+    /// descendant's own opinions. `/A` references a missing layer — an error the
+    /// cache records and continues past — yet `/A/B`'s local opinion still
+    /// composes, rather than the child caching an empty index.
+    #[test]
+    fn ancestor_error_keeps_child_opinions() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    references = @nonexistent.usd@
+)
+{
+    def "B"
+    {
+        custom string marker = "ok"
+    }
+}
+"#;
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        let stack = LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true);
+        let mut cache = Cache::new(stack, VariantFallbackMap::new());
+
+        let child = sdf::path("/A/B")?;
+        cache.ensure_index(&child)?;
+        assert!(
+            !cache.indices[&child].is_empty(),
+            "child local opinion must survive the ancestor's unresolved reference"
+        );
+        assert!(
+            cache
+                .take_pending_errors()
+                .iter()
+                .any(|e| matches!(e, Error::UnresolvedLayer { .. })),
+            "the ancestor's unresolved reference is recorded"
         );
         Ok(())
     }
