@@ -308,11 +308,13 @@ impl Attribute {
         self.stage.connection_paths(&self.path)
     }
 
-    /// Deleted connection paths: connections named in a `delete` list-op,
-    /// mapped to stage namespace. Mirrors the deleted-paths out-param of C++
-    /// `UsdAttribute`'s connection composition.
-    pub fn deleted_connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.deleted_connection_paths(&self.path)
+    /// Composes this attribute's connection paths together with the paths its
+    /// list-op deletes, returned as `(connections, deleted)` (C++
+    /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
+    /// empty when the owning prim is outside the population mask.
+    pub fn compute_connections(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        self.stage
+            .masked_property(&self.path, |cache| cache.compute_attribute_connection_paths(&self.path))
     }
 
     /// Composed default value decoded to `T`, if any layer authored one.

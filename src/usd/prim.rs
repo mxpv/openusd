@@ -299,19 +299,12 @@ impl Prim {
         self.stage.try_or_handle(|cache| cache.prim_stack(&self.path))
     }
 
-    /// Returns the `Time Offsets` composition-dump rows for this prim: one row
-    /// per composition node carrying its cumulative time offset, plus a row for
-    /// each non-identity sublayer member. Empty unless some node carries a
-    /// non-identity offset. Used by the composition-results dump.
-    pub fn time_offsets(&self) -> anyhow::Result<Vec<pcp::TimeOffset>> {
-        self.stage.try_or_handle(|cache| cache.time_offsets(&self.path))
-    }
-
-    /// Returns the prohibited child names for this prim: names of children
-    /// relocated away (renamed or deleted), sorted. Mirrors the prohibited-names
-    /// out-param of C++ `PcpPrimIndex::ComputePrimChildNames`.
-    pub fn prohibited_children(&self) -> anyhow::Result<Vec<String>> {
-        self.stage.try_or_handle(|cache| cache.prohibited_children(&self.path))
+    /// Returns a handle to this prim's composition index (C++
+    /// `UsdPrim::GetPrimIndex`), through which the composition graph and composed
+    /// child names + prohibited names are reachable. See
+    /// [`PrimIndexRef`](crate::usd::PrimIndexRef).
+    pub fn prim_index(&self) -> PrimIndexRef {
+        PrimIndexRef::new(&self.stage, self.path.clone())
     }
 
     /// Returns an [`Attribute`] handle for the property `name` under this prim.
@@ -374,6 +367,46 @@ impl Prim {
             }
         })?;
         Ok(self)
+    }
+}
+
+/// A handle to a single prim's composition index, the analog of C++
+/// `PcpPrimIndex` reached via `UsdPrim::GetPrimIndex`.
+///
+/// Our [`pcp::PrimIndex`] is only the composition graph (its nodes hold layer
+/// *indices*, not the layers); the cache owns the layer data. This handle pairs
+/// the stage with the prim's path so the introspection that needs both — the
+/// composed child names — is reachable here, alongside the raw graph via
+/// [`graph`](Self::graph). Like [`Prim`], it is a cheap value handle: each query
+/// borrows the cache briefly and routes composition errors through the stage's
+/// error handler.
+#[derive(Clone)]
+pub struct PrimIndexRef {
+    stage: Stage,
+    path: sdf::Path,
+}
+
+impl PrimIndexRef {
+    pub(super) fn new(stage: &Stage, path: sdf::Path) -> Self {
+        Self {
+            stage: stage.clone(),
+            path,
+        }
+    }
+
+    /// Returns this prim's composition graph (C++ `UsdPrim::GetPrimIndex`),
+    /// building it if needed. A clone, since the cache owns the cached index.
+    pub fn graph(&self) -> anyhow::Result<pcp::PrimIndex> {
+        self.stage.try_or_handle(|cache| Ok(cache.index(&self.path)?.clone()))
+    }
+
+    /// Composes this prim's child names together with the names prohibited at it
+    /// — children relocated away (renamed or deleted) that cannot be
+    /// re-introduced — returned as `(children, prohibited)` (C++
+    /// `PcpPrimIndex::ComputePrimChildNames`).
+    pub fn child_names(&self) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+        self.stage
+            .try_or_handle(|cache| cache.compute_prim_child_names(&self.path))
     }
 }
 
