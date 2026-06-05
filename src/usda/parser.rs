@@ -678,6 +678,8 @@ impl<'a> Parser<'a> {
             let tgt = this.fetch_path_ref().context("Expected relocate target path")?;
             let src_path = sdf::Path::new(src)?;
             let tgt_path = sdf::Path::from(tgt);
+            reject_variant_selection_in_path(&src_path, "Relocates")?;
+            reject_variant_selection_in_path(&tgt_path, "Relocates")?;
             pairs.push((src_path, tgt_path));
             Ok(())
         })?;
@@ -935,6 +937,12 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::InheritPaths.as_str() => {
                 let paths = self.one_or_list(Self::parse_path_reference)?;
+                // Validated here, not in `parse_path_reference`, which is shared
+                // with relationship-target and connection paths where a variant
+                // selection is allowed.
+                for p in &paths {
+                    reject_variant_selection_in_path(p, "Inherit")?;
+                }
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build inherits listOp")?;
@@ -984,6 +992,9 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::Specializes.as_str() => {
                 let paths = self.one_or_list(Self::parse_path_reference)?;
+                for p in &paths {
+                    reject_variant_selection_in_path(p, "Specializes")?;
+                }
                 let list_op = self
                     .apply_list_op(list_op, paths)
                     .context("Unable to build specializes listOp")?;
@@ -1321,6 +1332,7 @@ impl<'a> Parser<'a> {
             reference.custom_data = custom_data;
         }
 
+        reject_variant_selection_in_path(&reference.prim_path, "Reference")?;
         Ok(reference)
     }
 
@@ -1385,6 +1397,7 @@ impl<'a> Parser<'a> {
             payload.layer_offset = Some(offset);
         }
 
+        reject_variant_selection_in_path(&payload.prim_path, "Payload")?;
         Ok(payload)
     }
 
@@ -1802,6 +1815,19 @@ fn push_unique(vec: &mut Vec<String>, name: &str) {
     if !vec.iter().any(|s| s == name) {
         vec.push(name.to_owned());
     }
+}
+
+/// Rejects a composition-arc target path that contains a variant selection.
+/// Inherit, specialize, reference, payload, and relocate paths address prims,
+/// not variant selections, so a `{set=sel}` element anywhere in the path is a
+/// parse error (C++ `Sdf_TextFileFormatParser` raises the same error, e.g.
+/// "Inherit paths cannot contain variant selections"). `arc` names the field.
+fn reject_variant_selection_in_path(path: &sdf::Path, arc: &str) -> Result<()> {
+    ensure!(
+        !path.contains_prim_variant_selection(),
+        "{arc} paths cannot contain variant selections: <{path}>"
+    );
+    Ok(())
 }
 
 /// Result of parsing a type declaration, holding the parsed base type,
@@ -3055,6 +3081,40 @@ def Xform "X"
     fn parse_reference_invalid_token() {
         let mut parser = Parser::new("123");
         assert!(parser.parse_reference().is_err());
+    }
+
+    /// A composition-arc target path containing a variant selection is rejected
+    /// at parse time, mirroring C++ `Sdf_TextFileFormatParser`. The selection
+    /// may sit anywhere in the path, not only as the final element.
+    #[test]
+    fn arc_path_variant_selection_rejected() {
+        let arc = |meta: &str| {
+            let text = format!("#usda 1.0\ndef \"A\" (\n{meta}\n)\n{{\n}}\n");
+            Parser::new(&text).parse()
+        };
+        assert!(arc("    inherits = </Class{vset=sel}_class>").is_err(), "inherit");
+        assert!(arc("    specializes = </Base{vset=sel}Sub>").is_err(), "specializes");
+        assert!(
+            arc("    references = @./r.usd@</Group{v=x}Model>").is_err(),
+            "reference"
+        );
+        assert!(arc("    payload = @./p.usd@</Group{v=x}Model>").is_err(), "payload");
+        assert!(
+            arc("    relocates = { </A{v=x}B>: </A/C> }").is_err(),
+            "relocate source"
+        );
+        assert!(
+            arc("    relocates = { </A/B>: </A{v=x}C> }").is_err(),
+            "relocate target"
+        );
+    }
+
+    /// Valid arc paths without variant selections still parse, and a variant
+    /// selection in a `variants` opinion (which is not a path) is unaffected.
+    #[test]
+    fn arc_path_without_variant_selection_ok() {
+        let text = "#usda 1.0\ndef \"A\" (\n    inherits = </Class>\n    references = @./r.usd@</Model>\n    variants = { string v = \"x\" }\n)\n{\n}\n";
+        assert!(Parser::new(text).parse().is_ok());
     }
 
     #[test]
