@@ -624,7 +624,21 @@ where
     let mut combined: Option<ListOp<T>> = None;
 
     for node in nodes {
+        // A layer that is sublayered from more than one place (a sublayer
+        // diamond) appears multiple times in the node's layer stack, strongest
+        // occurrence first. Its authored opinion at this path is identical at
+        // every occurrence — only the composed offset differs — so it is read
+        // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
+        // single-valued per layer). Reading every occurrence would otherwise
+        // fold a different offset into each copy of an offset-bearing item
+        // (a reference/payload), defeating the list-op dedup and leaving one
+        // arc node per occupied sublayer slot.
+        let mut seen_layers: Vec<usize> = Vec::new();
         for &(layer, sub) in node.layer_stack() {
+            if seen_layers.contains(&layer) {
+                continue;
+            }
+            seen_layers.push(layer);
             let Some(value) = layers[layer].try_get(&node.path, field)? else {
                 continue;
             };
@@ -685,6 +699,27 @@ fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, resolver: &dyn Re
     resolver.create_identifier(asset_path, Some(&anchor))
 }
 
+/// The retiming scale a reference or payload arc folds into its layer offset
+/// when the introducing (authoring) layer and the referenced layer have
+/// different time-codes-per-second rates (spec 12.3.2): `introducing / target`.
+/// An internal arc (empty asset path) or an unresolved target retimes by 1.0.
+/// `asset_path` must already be anchored to its authoring layer.
+//
+// TODO(perf): this `find_layer` re-resolves the target that
+// `builder::add_ref_or_payload_arc` resolves again moments later for the same
+// anchored path. The duplicate can't be hoisted trivially — the ratio's
+// numerator is the per-member authoring rate, knowable only here inside the
+// in-place list-op fold, while the target stack is needed there — so it waits on
+// the asset-path resolution cache the `resolve_against_layer` TODO(perf) calls for.
+fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> f64 {
+    if asset_path.is_empty() {
+        return 1.0;
+    }
+    find_layer(asset_path, layers, resolver).map_or(1.0, |target| {
+        super::effective_time_codes_per_second(introducing) / super::effective_time_codes_per_second(&layers[target])
+    })
+}
+
 /// Anchors a non-empty, non-absolute asset path to the layer that authored it,
 /// so the same relative path in different layers resolves to distinct targets
 /// (C++ resolves a reference's asset path against its authoring layer when the
@@ -717,6 +752,8 @@ pub(super) fn compose_references_in(
         |r: &mut Reference, layer| {
             r.asset_path = expr::evaluate_asset_path(&r.asset_path, expr_vars)?;
             anchor_asset_path(&mut r.asset_path, &layers[layer], resolver);
+            let scale = arc_tcps_scale(&layers[layer], &r.asset_path, layers, resolver);
+            r.layer_offset = r.layer_offset.concatenate(&sdf::LayerOffset::scale_only(scale));
             Ok(())
         },
     )
@@ -749,6 +786,9 @@ pub(super) fn collect_payloads_in(
         |p: &mut Payload, layer| {
             p.asset_path = expr::evaluate_asset_path(&p.asset_path, expr_vars)?;
             anchor_asset_path(&mut p.asset_path, &layers[layer], resolver);
+            let scale = arc_tcps_scale(&layers[layer], &p.asset_path, layers, resolver);
+            let offset = p.layer_offset.unwrap_or_default();
+            p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
             Ok(())
         },
     )
