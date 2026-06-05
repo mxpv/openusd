@@ -91,6 +91,7 @@ When implementing a new feature from the spec:
 
 - Write clean and idiomatic Rust code
 - Less is better - prefer functionality offered by stdlib
+- Order a file top-down by importance so the first thing a reader sees is the main type, not a helper: the primary type definition (and the structs it depends on) first, then its `impl` blocks, then free-standing helper functions, then the `#[cfg(test)] mod tests`. Don't open a file with a small private helper.
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
 - Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead

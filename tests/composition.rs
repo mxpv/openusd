@@ -94,7 +94,7 @@ fn run(name: &str, format: Format) {
         return;
     }
 
-    if SKIP_PCP_COMPLIANCE.contains(&name) {
+    if SKIP_PCP_COMPLIANCE.contains(&name) || UNREPRODUCIBLE_GOLDEN.contains(&name) {
         run_existence(name, format, &baseline, &entry);
     } else {
         run_pcp(name, format, &test_dir, &baseline, &entry);
@@ -155,9 +155,9 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 /// yet, so they fall back to the looser `pcp.json` existence checks. Two
 /// reasons:
 ///
-/// - The golden carries a Python traceback or a trailing `Errors`/`Warning`
-///   section (the C++ test framework prints these for error cases); our
-///   generated body has no such trailer.
+/// - The golden carries a trailing `Errors`/`Warning` section (the C++ test
+///   framework prints these for error cases) that our generated body has no
+///   trailer for, but the composition itself is otherwise reproducible.
 /// - A known composition gap: the golden is a genuine mismatch the task-queue
 ///   builder (the sole composition engine) does not yet reproduce. The deeper
 ///   relocate cases remaining are relocates interacting with classes and
@@ -167,11 +167,10 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///   the list are each tagged with a `TODO` naming the missing mechanism; remove
 ///   an asset once its cluster lands.
 ///
-/// Assets outside this list are compared byte-for-byte; a real composition
+/// Permanently unreproducible goldens live in [`UNREPRODUCIBLE_GOLDEN`] instead.
+/// Assets outside both lists are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
 const SKIP_PCP_COMPLIANCE: &[&str] = &[
-    "BasicInherits_root",
-    "BasicPayload_root",
     "BasicRelocateToAnimInterfaceAsNewRootPrim_root",
     "ElidedAncestralRelocates_root",
     "ErrorArcCycle_root",
@@ -184,12 +183,10 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "ErrorInvalidReferenceToRelocationSource_root",
     "ErrorInvalidTargetPath_root",
     "ErrorOpinionAtRelocationSource_root",
-    "ErrorRelocateWithVariantSelection_root",
     "ErrorSublayerCycle_root",
     "ReferenceListOpsWithOffsets_root",
     "RelocatePrimsWithSameName_root",
     "RelocateToNone_root",
-    "SubrootReferenceAndVariants_root",
     "SubrootReferenceNonCycle_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
@@ -197,8 +194,31 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "TrickyMultipleRelocationsAndClasses_root",
     "TrickySpecializesAndRelocates_root",
     "TrickySpookyInheritsInSymmetricBrowRig_root",
-    "TrickySpookyVariantSelection_root",
     "bug92827_root",
+];
+
+/// Assets whose `pcp.txt` golden can never be reproduced byte-for-byte, so they
+/// stay on the looser `pcp.json` existence check permanently (unlike
+/// [`SKIP_PCP_COMPLIANCE`], which retires as the engine improves).
+///
+/// The golden is a Python traceback or a pxr-internal C++ `file.cpp:line`
+/// warning emitted while the C++ test framework loads the asset — text tied to
+/// the reference implementation's source layout, not to composition behavior:
+///
+/// - `BasicInherits_root`, `SubrootReferenceAndVariants_root`, and
+///   `ErrorRelocateWithVariantSelection_root` author a variant selection inside
+///   an inherit / reference / relocate path. The C++ text parser rejects these
+///   at load with a traceback; our parser rejects them too (see
+///   `usda::parser`'s `reject_variant_selection_in_path` and its tests), but the
+///   traceback body is not something we emit.
+/// - `BasicPayload_root` authors an empty internal payload path, which C++ logs
+///   as an "Ill-formed SdfPath <>" warning carrying a `pxr/usd/sdf/path.cpp`
+///   location.
+const UNREPRODUCIBLE_GOLDEN: &[&str] = &[
+    "BasicInherits_root",
+    "BasicPayload_root",
+    "ErrorRelocateWithVariantSelection_root",
+    "SubrootReferenceAndVariants_root",
 ];
 
 /// The composition-dump separator: 72 dashes, matching the C++
