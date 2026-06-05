@@ -30,6 +30,21 @@ pub fn is_expression(s: &str) -> bool {
     s.starts_with('`') && s.ends_with('`') && s.len() >= 2
 }
 
+/// Reads a layer's pseudo-root `expressionVariables` dictionary, returning an
+/// empty map when the field is absent or is not a dictionary. Composing these
+/// variables across reference/payload arcs is a `pcp`-level concern (C++
+/// `PcpExpressionVariables`); this is the single per-layer read both layer
+/// collection and arc composition share.
+pub fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<HashMap<String, sdf::Value>> {
+    let root = sdf::Path::abs_root();
+    if let Some(value) = data.try_get(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
+        if let sdf::Value::Dictionary(dict) = value.into_owned() {
+            return Ok(dict);
+        }
+    }
+    Ok(HashMap::new())
+}
+
 /// Evaluates an expression-valued asset path against `vars`, or returns the path
 /// unchanged when it is not a backtick expression. The expression must evaluate
 /// to a string (C++ `Pcp` resolves variable expressions in reference/payload

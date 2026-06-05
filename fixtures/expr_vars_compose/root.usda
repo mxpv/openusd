@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    doc = """Cross-arc expression-variable composition (C++ PcpExpressionVariables).
+
+    The root layer stack overrides TARGET, so the reference authored inside
+    mid.usda (which sets TARGET = "wrong.usda" locally) must resolve to
+    right.usda, not wrong.usda. Layer collection has to evaluate that nested
+    asset-path expression against the composed variables — the referencing
+    stack winning over the referenced one — or it loads wrong.usda while
+    composition resolves right.usda and drops the arc as unresolved."""
+    expressionVariables = {
+        string TARGET = "right.usda"
+    }
+)
+
+def "Model" (
+    references = @./mid.usda@
+)
+{
+}

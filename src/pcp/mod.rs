@@ -644,6 +644,9 @@ impl LayerStack {
 /// effective rate than the layer that introduces it, the arc retimes by
 /// `introducing / target`, folded into the composed [`sdf::LayerOffset`]'s scale.
 pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
+    // Read directly from the layer's `AbstractData`: this must work for any
+    // backend (text, crate, in-memory), whereas the `PseudoRootSpec` accessors
+    // require the concrete in-memory `Data` backing a `Layer` may not have.
     let root = Path::abs_root();
     let read = |key: FieldKey| -> Option<f64> {
         match layer.try_get(&root, key.as_str()).ok()??.into_owned() {
@@ -718,6 +721,23 @@ pub enum Error {
         arc: ArcType,
         /// The prim path where the arc was authored.
         site_path: Path,
+    },
+
+    /// A reference/payload asset path is a variable expression that failed to
+    /// parse or did not evaluate to a string (C++ `PcpErrorVariableExpression`).
+    /// The arc is skipped and the rest of the prim still composes, so this is
+    /// recoverable.
+    #[error("invalid {arc:?} asset-path expression {expression} at {site_path}: {source}")]
+    InvalidExpression {
+        /// The raw, unevaluated backtick expression.
+        expression: String,
+        /// The composition arc type.
+        arc: ArcType,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+        /// The parse or evaluation failure.
+        #[source]
+        source: anyhow::Error,
     },
 
     /// A direct composition arc (a reference/inherit/payload/specialize

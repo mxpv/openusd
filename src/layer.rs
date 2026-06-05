@@ -164,7 +164,15 @@ impl<'a, R: ar::Resolver, E: Fn(Error) -> Result<()>> Collector<'a, R, E> {
             on_error: &self.on_error,
         };
 
-        collect_recursive(self.resolver, root_path, None, &context, &mut layers, &mut visited)?;
+        collect_recursive(
+            self.resolver,
+            root_path,
+            None,
+            &context,
+            &HashMap::new(),
+            &mut layers,
+            &mut visited,
+        )?;
 
         // Layers are collected in post-order (leaves first), reverse so root is first.
         layers.reverse();
@@ -174,11 +182,39 @@ impl<'a, R: ar::Resolver, E: Fn(Error) -> Result<()>> Collector<'a, R, E> {
 }
 
 /// Recursive layer collector.
+///
+/// `ancestor_expr_vars` are the expression variables composed from the
+/// referencing layer stacks above this one (empty at the root). They are
+/// applied over this layer's own `expressionVariables` so a closer-to-root
+/// stack's override wins (C++ `PcpExpressionVariables`); the combined set then
+/// drives expression evaluation in this layer's asset paths and is threaded
+/// into each child arc. Without this, an asset-path expression would evaluate
+/// against only the local variables during collection while the `pcp` builder
+/// evaluates it against the composed set, so a referencing override could
+/// resolve an arc to a layer collection never loaded — leaving the valid arc
+/// dropped as `UnresolvedLayer`.
+///
+/// TODO(expr-vars): two gaps remain versus a faithful `PcpExpressionVariables`:
+///
+/// 1. Within a layer stack the variables are not pre-composed: a sublayer sees
+///    only the variables of layers that sublayer it (applied as ancestors), not
+///    those of its weaker sibling sublayers, so a variable a weaker sublayer
+///    authors but a stronger layer's arc uses is missed.
+/// 2. A layer reached through two arcs with different composed variables is
+///    collected once (the `visited` set is keyed by identifier alone), so an
+///    expression that resolves to different targets on each path only loads the
+///    first. Both targets must be loaded.
+///
+/// The durable fix is to stop evaluating asset-path expressions in two places.
+/// Collection and the `pcp` builder should share one `PcpExpressionVariables`
+/// computation — ideally by having composition drive layer loading lazily —
+/// rather than two evaluators that must be kept in agreement.
 fn collect_recursive(
     resolver: &impl ar::Resolver,
     asset_path: &str,
     anchor: Option<&ar::ResolvedPath>,
     context: &CollectionContext<'_>,
+    ancestor_expr_vars: &HashMap<String, sdf::Value>,
     layers: &mut Vec<sdf::Layer>,
     visited: &mut HashSet<String>,
 ) -> Result<()> {
@@ -201,8 +237,11 @@ fn collect_recursive(
     // Load and parse the layer.
     let data = open_layer(resolver, &resolved)?;
 
-    // Read expression variables from this layer's pseudo-root.
-    let expr_vars = read_expression_variables(data.as_ref())?;
+    // Compose this layer's authored expression variables with those inherited
+    // from the referencing layer stacks; the inherited (closer-to-root) set is
+    // applied last so it overrides this layer's own (C++ `PcpExpressionVariables`).
+    let mut expr_vars = expr::read_expression_variables(data.as_ref())?;
+    expr_vars.extend(ancestor_expr_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
     // Collect typed dependencies from this layer.
     let deps = collect_dependencies(data.as_ref(), context.load_payloads)?;
@@ -251,6 +290,7 @@ fn collect_recursive(
             &dep_asset,
             Some(&resolved),
             &context.with_filter(child_filter),
+            &expr_vars,
             layers,
             visited,
         )?;
@@ -405,17 +445,6 @@ pub fn open_layer(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> R
         let data = parser.parse().context("failed to parse USDA layer")?;
         Ok(Box::new(usda::TextReader::from_data(data)))
     }
-}
-
-/// Reads `expressionVariables` from the layer's pseudo-root, if present.
-fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<HashMap<String, sdf::Value>> {
-    let root = sdf::Path::abs_root();
-    if let Some(value) = data.try_get(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
-        if let sdf::Value::Dictionary(dict) = value.into_owned() {
-            return Ok(dict);
-        }
-    }
-    Ok(HashMap::new())
 }
 
 #[cfg(test)]
