@@ -354,7 +354,7 @@ struct Inputs<'a> {
     /// The layer stack being composed.
     stack: &'a LayerStack,
     /// Composition context flowing from the parent prim (variant selections /
-    /// fallbacks, `within_instance`, denied prefixes, ancestor arcs).
+    /// fallbacks, instance depth, denied prefixes, ancestor arcs).
     ctx: &'a CompositionContext,
     /// Cached prim indices from the composition cache. The parent prim's index
     /// is read from here to seed this child's graph (C++
@@ -484,7 +484,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         //   * a prim inside an instance (spec 11.3.3): an instance descendant's
         //     local opinions and the arcs they spawn are discarded, so the
         //     subtree composes only from the shared arcs the instance brings in.
-        if !self.root_contributes || self.inputs.ctx.within_instance {
+        if !self.root_contributes || self.inputs.ctx.within_instance() {
             let local_root = self.output.local_root();
             if local_root.is_valid() {
                 self.output.nodes[local_root.idx()].flags |= NodeFlags::INERT;

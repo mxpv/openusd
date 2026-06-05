@@ -146,6 +146,66 @@ impl PrimIndex {
         }
     }
 
+    /// Classifies each node as instance-local (`true`) or shared (`false`) for an
+    /// enclosing instance at `instance_depth` (spec 11.3.3), indexed by
+    /// [`NodeId`] arena position. The shared nodes are the prototype subtree; the
+    /// instance-local nodes are the opinions authored at the instance's own
+    /// namespace, which an instance's child names, descendants, and instance key
+    /// must drop.
+    ///
+    /// This is the C++ `!PcpNodeRef::HasTransitiveDirectDependency` partition.
+    /// Instance-local = the local root plus the contiguous *trunk* of ancestral
+    /// references/payloads the instance prim is nested under — the outer arcs
+    /// reaching down to, but stopping above, the instanceable arc. The
+    /// instanceable arc (the first reference/payload introduced at the instance's
+    /// own depth) and everything below it stay shared, as do the implied classes
+    /// (class-based arcs).
+    ///
+    /// Trunk membership is structural, not a flat depth test: a node is on the
+    /// trunk only if it is a reference/payload introduced above the instance
+    /// (`namespace_depth < instance_depth`) *and* its parent is also on the
+    /// trunk. The parent check is what keeps a reference or payload nested
+    /// *inside* the prototype (below the instanceable arc) shared — such an arc
+    /// is authored in the referenced layer's namespace, so its `namespace_depth`
+    /// is shallow and would otherwise be misread as an outer arc.
+    ///
+    /// The arena is append-only with each node's parent preceding it, so one
+    /// forward pass propagates trunk-ness parent→child.
+    pub(crate) fn instance_local_nodes(&self, instance_depth: u16) -> Vec<bool> {
+        let nodes = &self.graph.nodes;
+        let mut local = vec![false; nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            local[i] = match node.arc {
+                // The local site (and the synthetic root) is always instance-local.
+                ArcType::Root => true,
+                ArcType::Reference | ArcType::Payload => {
+                    node.namespace_depth < instance_depth && node.parent.is_some_and(|p| local[p.idx()])
+                }
+                _ => false,
+            };
+        }
+        local
+    }
+
+    /// Inerts the instance-namespace opinions on a prim composed inside an
+    /// instance (spec 11.3.3), so value resolution sees only the shared subtree
+    /// the instance brings in. `instance_depth` is the nearest enclosing
+    /// instance prim's namespace depth; the partition is
+    /// [`instance_local_nodes`](Self::instance_local_nodes).
+    ///
+    /// Each node is inerted individually, not its subtree: the implied classes a
+    /// dropped reference helped derive are children in the graph yet stay shared.
+    /// (The local root is also inerted earlier by the builder via
+    /// [`CompositionContext::within_instance`](super::index::CompositionContext::within_instance).)
+    pub(crate) fn mark_instance_local_inert(&mut self, instance_depth: u16) {
+        let local = self.instance_local_nodes(instance_depth);
+        for (node, &is_local) in self.graph.nodes.iter_mut().zip(local.iter()) {
+            if is_local {
+                node.flags |= NodeFlags::INERT;
+            }
+        }
+    }
+
     /// Returns the node behind a handle.
     pub fn node(&self, id: NodeId) -> &Node {
         &self.graph.nodes[id.idx()]
@@ -345,7 +405,7 @@ impl PrimIndex {
             variant_fallbacks: parent_ctx.variant_fallbacks.clone(),
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
-            within_instance: parent_ctx.within_instance,
+            instance_depth: parent_ctx.instance_depth,
             // Carried forward; the cache appends this prim's own denied targets.
             denied_prefixes: parent_ctx.denied_prefixes.clone(),
         }
@@ -398,17 +458,29 @@ pub(crate) struct CompositionContext {
     /// Variant fallback selections for sets without authored opinions.
     /// Propagated unchanged from the stage configuration.
     pub variant_fallbacks: VariantFallbackMap,
-    /// `true` when this prim is a descendant of an instance prim (spec
-    /// 11.3.3). Set by the cache once an ancestor resolves as an instance and
-    /// inherited by every deeper prim, so local opinions on the instance
-    /// subtree can be discarded during composition.
-    pub within_instance: bool,
+    /// Namespace depth of the nearest enclosing instance prim (spec 11.3.3),
+    /// or `None` when this prim is not inside an instance. Set by the cache once
+    /// an ancestor resolves as an instance and inherited by every deeper prim; a
+    /// nested instance re-arms it to its own (deeper) depth. Opinions authored at
+    /// the instance's own namespace — its local root and the ancestral
+    /// references introduced above it (at a shallower namespace depth) — are
+    /// discarded, so the subtree composes only from the arcs the instance brings
+    /// in (the instanceable arc and below, plus its implied classes).
+    pub instance_depth: Option<u16>,
     /// Target-namespace paths an ancestor's direct arc to a `permission =
     /// private` site denied (spec 10.3.3). A node whose path lies under one of
     /// these prefixes was reached through that denied arc, so the cache marks
     /// it `PERMISSION_DENIED` even in descendant prims composed separately
     /// (where the arc is extended, not authored here).
     pub denied_prefixes: Vec<Path>,
+}
+
+impl CompositionContext {
+    /// `true` when this prim is composed inside an instance (spec 11.3.3), so
+    /// its local opinions are discarded. Equivalent to `instance_depth.is_some()`.
+    pub fn within_instance(&self) -> bool {
+        self.instance_depth.is_some()
+    }
 }
 
 /// Records an ancestor composition arc for descendant namespace remapping.

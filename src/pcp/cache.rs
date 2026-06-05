@@ -77,14 +77,39 @@ pub struct Cache {
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
-/// (spec 11.3.3). Its composition is backed by the canonical instance's
-/// already arc-only subtree, exposed under a synthetic `/__Prototype_N` path.
+/// (spec 11.3.3). Its composition is backed by the canonical instance, exposed
+/// under a synthetic `/__Prototype_N` path. The instance-namespace opinions are
+/// suppressed where they would leak into shared content: an instance's child
+/// names and every descendant compose only from the shared subtree (the
+/// instanceable arc and below, plus implied classes), with the local root and
+/// the ancestral references above the instanceable arc inerted (see
+/// [`Cache::is_instance_local`] and [`PrimIndex::mark_instance_local_inert`]).
 ///
-/// TODO: the prototype is alias-backed by the canonical instance rather than
-/// composed as its own root, so prototype-root attribute queries reflect the
-/// canonical instance's composition (which keeps its own local opinions).
-/// Materializing `/__Prototype_N` as an independently composed namespace is
-/// future work.
+/// TODO(instancing): instancing is functionally correct for stage-level
+/// instance and descendant queries (the composition goldens pass byte-exact),
+/// but three gaps remain before it reaches full C++ `Pcp`/`UsdStage` parity:
+///
+/// 1. Alias-backed prototype root. The prototype is the canonical instance,
+///    not a separately composed namespace, so a query on the prototype *root*
+///    itself (`/__Prototype_N`, no tail) reflects the canonical instance's
+///    root — which keeps that instance's allowed root property overrides (spec
+///    11.3.3 permits overriding property values at an instance root). A faithful
+///    `/__Prototype_N` composed as its own root would drop those overrides too.
+///    The descendant suppression here only fixes child names and the subtree
+///    (the spec's "overrides on descendants are ignored" rule); the prototype
+///    *root* override leak is the part `effective_path`'s aliasing cannot reach.
+///    The goldens compose the namespace prims, not the prototype root, so they
+///    do not exercise it.
+/// 2. Relationship-target / connection-target remap into the prototype is gated
+///    on §12.4 target resolution and not done for the prototype namespace.
+/// 3. Distinct prototypes compose independent subtrees and could be built in
+///    parallel (see the `TODO(rayon)` on [`Self::canonical_instance`]); today
+///    they are composed serially on the `&mut self` path.
+///
+/// Closing (1) — materializing `/__Prototype_N` as an independently composed
+/// root — is the structural change that would also make (2) natural, since the
+/// prototype would then be a real prim index to resolve targets against rather
+/// than an alias.
 struct Prototype {
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
@@ -752,26 +777,22 @@ impl Cache {
         ))
     }
 
-    /// `true` for a node that is a local opinion — authored directly in the
-    /// root layer stack (`Root` arc), as opposed to brought in by a
-    /// composition arc. These are discarded on instance subtrees (spec
-    /// 11.3.3). The `local` set is [`Self::local_layers`].
-    fn is_local_opinion(node: &Node, local: &HashSet<usize>) -> bool {
-        node.arc == ArcType::Root && local.contains(&node.layer_index())
-    }
-
     /// Computes the instancing key for an already-built instance index: the
-    /// arc-introduced (non-local) opinions that define the shared subtree,
+    /// arc-introduced (shared) opinions that define the prototype subtree,
     /// independent of the instance's own stage path (spec 11.3.3).
+    /// `instance_depth` is the instance prim's own namespace depth, used to
+    /// partition shared from instance-local nodes
+    /// ([`PrimIndex::instance_local_nodes`]).
     ///
     /// TODO: variant selections are captured only implicitly via variant
     /// nodes' paths; fold the resolved selection set in explicitly if a case
     /// surfaces where that is insufficient.
-    fn instance_key(&self, index: &PrimIndex, local: &HashSet<usize>) -> InstanceKey {
+    fn instance_key(&self, index: &PrimIndex, instance_depth: u16) -> InstanceKey {
+        let local = index.instance_local_nodes(instance_depth);
         let arcs = index
-            .nodes()
-            .filter(|node| !Self::is_local_opinion(node, local))
-            .map(|node| {
+            .nodes_with_ids()
+            .filter(|(id, node)| !local[id.idx()] && !node.is_culled())
+            .map(|(_, node)| {
                 let offset = node.map_to_root.time_offset();
                 InstanceArc {
                     arc: node.arc as u8,
@@ -805,8 +826,7 @@ impl Cache {
     /// `(canonical instance, prototype path)` pair.
     fn register_prototype(&mut self, instance: &Path) -> Result<(Path, Path)> {
         self.ensure_index(instance)?;
-        let local = self.local_layers();
-        let key = self.instance_key(&self.indices[instance], &local);
+        let key = self.instance_key(&self.indices[instance], instance.prim_element_count() as u16);
 
         if let Some(root) = self.prototype_keys.get(&key) {
             let root = root.clone();
@@ -1553,6 +1573,18 @@ impl Cache {
         }
         index.mark_permission_denied_under(&denied_prefixes);
 
+        // Inside an instance, the ancestral references the instance prim is
+        // nested under contribute opinions at the instance's own namespace that
+        // must not leak into the shared subtree (spec 11.3.3). The builder
+        // already inerted the local root for an instance descendant; this inerts
+        // those outer references too (the C++ `!HasTransitiveDirectDependency`
+        // nodes), leaving only the instanceable arc, its descendants, and the
+        // implied classes. Runs before deriving instance state below so the
+        // suppressed opinions are already inert.
+        if let Some(depth) = parent_ctx.instance_depth {
+            index.mark_instance_local_inert(depth);
+        }
+
         // This prim is an instance when its composition declares
         // `instanceable = true` and carries an arc; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
@@ -1566,7 +1598,14 @@ impl Cache {
             );
 
         let mut child_context = index.context_for_children(&self.stack, &parent_ctx);
-        child_context.within_instance = parent_ctx.within_instance || is_instance;
+        // A nested instance re-arms the depth to its own (deeper) level, so an
+        // inner instance's descendants drop opinions above its instanceable arc
+        // rather than the outer instance's.
+        child_context.instance_depth = if is_instance {
+            Some(path.prim_element_count() as u16)
+        } else {
+            parent_ctx.instance_depth
+        };
         child_context.denied_prefixes = denied_prefixes;
         self.deps.add(path, &index, self.stack.len());
         self.indices.insert(path.clone(), index);
@@ -1638,31 +1677,34 @@ impl Cache {
         self.ensure_index(path)?;
 
         // An instance prim's children come only from its composition arcs;
-        // local opinions contributing to `primChildren` are discarded (spec
-        // 11.3.3). The instance prim's own index is otherwise left intact, so
-        // its own properties still see local opinions.
+        // opinions authored at the instance's own namespace — the local root and
+        // the ancestral references above the instanceable arc — are discarded
+        // (spec 11.3.3). The instance prim's own index is otherwise left intact,
+        // so its own properties still see local opinions.
         let drop_local = matches!(children_field, ChildrenKey::PrimChildren) && self.is_instance(path)?;
-        let local = if drop_local {
-            self.local_layers()
-        } else {
-            HashSet::new()
-        };
 
         let index = &self.indices[path];
+        // The instance-local partition is keyed by the prim's own namespace depth
+        // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
+        let local = if drop_local {
+            index.instance_local_nodes(path.prim_element_count() as u16)
+        } else {
+            Vec::new()
+        };
         let order_key = order_field.map(|f| f.as_str());
         let mut result: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
         // Collect (node path, layer) pairs strongest-first, then fold in
         // reverse so the merge runs weakest-to-strongest across both nodes and,
-        // within each node, its layers. `node.layers()` and `index.nodes()` are
+        // within each node, its layers. `node.layers()` and the node iterators are
         // not double-ended, so the flattened pairs are reversed together. The
         // node paths are borrowed (no clone); `seen` dedups names in O(1) while
         // `result` preserves order.
         let sites: Vec<(&Path, usize)> = index
-            .nodes()
-            .filter(|node| !(drop_local && Self::is_local_opinion(node, &local)))
-            .flat_map(|node| node.layers().map(move |(layer, _)| (&node.path, layer)))
+            .nodes_with_ids()
+            .filter(|(id, node)| !(node.is_culled() || drop_local && local[id.idx()]))
+            .flat_map(|(_, node)| node.layers().map(move |(layer, _)| (&node.path, layer)))
             .collect();
 
         for (node_path, layer) in sites.into_iter().rev() {
@@ -2165,6 +2207,51 @@ def "A" (
         assert!(cache.is_indexed(&sdf::path("/A/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
         assert!(cache.is_indexed(&sdf::path("/C/Child")?));
+        Ok(())
+    }
+
+    /// A reference nested inside the prototype (below the instanceable arc) is
+    /// shared (spec 11.3.3): its opinions reach the instance through the direct
+    /// instanceable arc, so they survive in the instance's child names and
+    /// descendants. The nested arc is authored in the referenced namespace, so
+    /// its namespace depth is shallow — a flat `namespace_depth < instance_depth`
+    /// test would wrongly drop it as an outer reference; the structural trunk
+    /// partition keeps it because its parent (the prototype root) is not on the
+    /// instance trunk.
+    #[test]
+    fn nested_reference_in_prototype_shared() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_reference.usda", manifest_dir());
+        let mut cache = Cache::new(single_layer_stack(&root), VariantFallbackMap::new());
+        let inst = sdf::path("/World/Inst")?;
+
+        // The instance is at namespace depth 2 and is a real instance.
+        assert!(cache.is_instance(&inst)?, "/World/Inst resolves as an instance");
+
+        // Child names come from the shared prototype: ProtoChild from /Proto and
+        // OtherChild from the nested /Other reference (the leaked case the flat
+        // depth proxy dropped).
+        let children = cache.prim_children(&inst)?;
+        assert!(
+            children.contains(&"ProtoChild".to_string()),
+            "prototype child must appear: {children:?}"
+        );
+        assert!(
+            children.contains(&"OtherChild".to_string()),
+            "nested-reference child must appear: {children:?}"
+        );
+
+        // The nested reference's opinions resolve on the shared descendant.
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&sdf::path("/World/Inst/OtherChild.size")?, 0.0, &interp)?,
+            Some(Value::Double(7.0)),
+            "nested-reference descendant value survives in the shared subtree"
+        );
+        assert_eq!(
+            cache.value_at(&sdf::path("/World/Inst.otherAttr")?, 0.0, &interp)?,
+            Some(Value::Double(5.0)),
+            "nested-reference attribute survives on the instance root"
+        );
         Ok(())
     }
 

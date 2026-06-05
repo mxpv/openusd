@@ -1,0 +1,42 @@
+#usda 1.0
+(
+    doc = """Instancing with a reference nested inside the prototype (spec 11.3.3).
+
+    /World/Inst (namespace depth 2) is an instance whose instanceable arc
+    references /Proto, and /Proto in turn references /Other. /Other is below
+    the instanceable arc, so its opinions (the `OtherChild` prim and the
+    `otherAttr` value) are part of the shared prototype and must survive in the
+    instance's child names and descendant composition — even though the nested
+    reference is authored in the referenced namespace and so carries a shallow
+    namespace depth that must not be mistaken for an outer reference above the
+    instance."""
+)
+
+def Scope "Other"
+{
+    double otherAttr = 5.0
+
+    def Scope "OtherChild"
+    {
+        double size = 7.0
+    }
+}
+
+def Scope "Proto" (
+    references = </Other>
+)
+{
+    def Scope "ProtoChild"
+    {
+    }
+}
+
+def Scope "World"
+{
+    def Scope "Inst" (
+        instanceable = true
+        references = </Proto>
+    )
+    {
+    }
+}
