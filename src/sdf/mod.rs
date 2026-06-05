@@ -175,6 +175,14 @@ impl LayerOffset {
         Self { offset, scale }
     }
 
+    /// A pure time scaling `(0.0, scale)` with no offset. Composed onto another
+    /// offset it scales without shifting — used to fold a `timeCodesPerSecond`
+    /// retiming ratio into an arc's offset (spec 12.3.2).
+    #[inline]
+    pub fn scale_only(scale: f64) -> Self {
+        Self { offset: 0.0, scale }
+    }
+
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.offset.is_finite() && self.scale.is_finite()

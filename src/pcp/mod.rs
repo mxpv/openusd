@@ -598,6 +598,9 @@ impl LayerStack {
             .get(&root, FieldKey::SubLayers.as_str())
             .map(|v| v.into_owned())
         {
+            // The parent's effective rate is fixed across its sublayers, so it
+            // is read once for the per-hop `timeCodesPerSecond` retiming below.
+            let parent_tcps = effective_time_codes_per_second(&layers[idx]);
             // Offsets live in a parallel field; missing entries fall back to
             // the identity offset per spec 16.2.18.3.
             let offsets: Vec<sdf::LayerOffset> = layers[idx]
@@ -616,13 +619,51 @@ impl LayerStack {
                 if ancestors.contains(&sub_idx) {
                     continue;
                 }
-                let local = offsets.get(i).copied().unwrap_or_default().sanitized();
+                // Fold the time-codes-per-second retiming for this hop into the
+                // sublayer's scale (spec 12.3.2): a sublayer whose rate differs
+                // from its parent retimes by `parent / child`. Offset is unscaled.
+                let ratio = parent_tcps / effective_time_codes_per_second(&layers[sub_idx]);
+                let local = offsets
+                    .get(i)
+                    .copied()
+                    .unwrap_or_default()
+                    .sanitized()
+                    .concatenate(&sdf::LayerOffset::scale_only(ratio));
                 let child = effective.concatenate(&local);
                 Self::collect_sublayers(sub_idx, child, layers, resolver, stack, ancestors);
             }
         }
 
         ancestors.remove(&idx);
+    }
+}
+
+/// The effective time-codes-per-second of a layer for offset retiming (spec
+/// 12.3.2): the authored `timeCodesPerSecond`, else `framesPerSecond`, else the
+/// 24.0 default. When a sublayer or reference/payload target has a different
+/// effective rate than the layer that introduces it, the arc retimes by
+/// `introducing / target`, folded into the composed [`sdf::LayerOffset`]'s scale.
+pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
+    let root = Path::abs_root();
+    let read = |key: FieldKey| -> Option<f64> {
+        match layer.try_get(&root, key.as_str()).ok()??.into_owned() {
+            Value::Double(v) => Some(v),
+            Value::Float(v) => Some(v as f64),
+            _ => None,
+        }
+    };
+    let rate = read(FieldKey::TimeCodesPerSecond)
+        .or_else(|| read(FieldKey::FramesPerSecond))
+        .unwrap_or(24.0);
+    // A non-positive or non-finite authored rate is degenerate. Fall back to the
+    // 24.0 default so the retiming ratio stays finite and positive: the sublayer
+    // offset path folds this scale into the composed offset without re-running
+    // `LayerOffset::sanitized` (the scale > 0 guard), so an `inf`/`NaN`/negative
+    // rate here would otherwise corrupt downstream value resolution.
+    if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        24.0
     }
 }
 
@@ -736,6 +777,34 @@ mod tests {
             stack.relocation_source(&[(0, sdf::LayerOffset::default())], &Path::new("/B").unwrap()),
             Some(Path::new("/A").unwrap()),
             "recompute re-extracts the per-layer relocate pairs the builder reads"
+        );
+    }
+
+    /// `effective_time_codes_per_second` reads the authored rate but clamps a
+    /// degenerate one (zero / negative / non-finite) back to the 24.0 default,
+    /// so the retiming ratio folded into sublayer offsets stays finite and
+    /// positive (the fold runs without re-`sanitized`-ing the result).
+    #[test]
+    fn effective_tcps_clamps_degenerate() {
+        let header = |meta: &str| format!("#usda 1.0\n(\n{meta}\n)\ndef \"A\" {{}}\n");
+        let tcps = |meta: &str| effective_time_codes_per_second(&layer("l.usd", &header(meta)));
+
+        assert_eq!(tcps("    timeCodesPerSecond = 48"), 48.0, "authored rate is used");
+        assert_eq!(
+            tcps("    framesPerSecond = 12"),
+            12.0,
+            "framesPerSecond is the fallback"
+        );
+        assert_eq!(tcps(""), 24.0, "unset rate defaults to 24");
+        assert_eq!(
+            tcps("    timeCodesPerSecond = 0"),
+            24.0,
+            "zero rate clamps to the default"
+        );
+        assert_eq!(
+            tcps("    timeCodesPerSecond = -24"),
+            24.0,
+            "negative rate clamps to the default"
         );
     }
 }

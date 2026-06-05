@@ -152,14 +152,12 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 }
 
 /// Assets whose `pcp.txt` baseline the [`run_pcp`] harness cannot reproduce
-/// yet, so they fall back to the looser `pcp.json` existence checks. Three
+/// yet, so they fall back to the looser `pcp.json` existence checks. Two
 /// reasons:
 ///
 /// - The golden carries a Python traceback or a trailing `Errors`/`Warning`
 ///   section (the C++ test framework prints these for error cases); our
 ///   generated body has no such trailer.
-/// - The golden contains a `Time Offsets` section whose values depend on
-///   `timeCodesPerSecond`-derived scaling the engine does not fold in yet.
 /// - A known composition gap: the golden is a genuine mismatch the task-queue
 ///   builder (the sole composition engine) does not yet reproduce. The deeper
 ///   relocate cases remaining are relocates interacting with classes and
@@ -193,13 +191,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "RelocateToNone_root",
     "SubrootReferenceAndVariants_root",
     "SubrootReferenceNonCycle_root",
-    "TimeCodesPerSecond_root",
-    "TimeCodesPerSecond_root_12fps",
-    "TimeCodesPerSecond_root_24tcps_12fps",
-    "TimeCodesPerSecond_root_48tcps",
-    "TimeCodesPerSecond_session",
-    "TimeCodesPerSecond_session_24fps",
-    "TimeCodesPerSecond_session_48tcps",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
     "TrickyMultipleRelocations4_root",
