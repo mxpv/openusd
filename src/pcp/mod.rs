@@ -199,11 +199,9 @@
 //!
 //! Specializes global weakness (spec 10.4.1) is realized by copying specializes
 //! nodes under the local root (C++ `_PropagateNodeToRoot`, the builder's
-//! `propagate_node_to_root`): the graph is flagged `specializes_propagated`, so
-//! `finalize_strength_order`'s plain DFS already
-//! places the globally-weak band last and orders it with the faithful
-//! `PcpCompareSiblingNodeStrength`. `compute_specialize_chain_depths` remains a
-//! fallback for any graph that did not propagate.
+//! `propagate_node_to_root`): specialize is the weakest arc, so
+//! `finalize_strength_order`'s plain DFS already places the globally-weak band
+//! last and orders it with the faithful `PcpCompareSiblingNodeStrength`.
 //!
 //! ## Lower-priority / opportunistic
 //!

@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    relocates = {
+        </Source/Inner>: </Dest/Moved>
+    }
+)
+
+def "Source"
+{
+    def "Inner"
+    {
+        custom double op = 1
+    }
+}
+
+def "Dest"
+{
+}

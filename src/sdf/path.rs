@@ -155,7 +155,10 @@ impl Path {
     /// which only inspects the final component, this finds a selection embedded
     /// anywhere in the prim namespace.
     pub fn contains_prim_variant_selection(&self) -> bool {
-        self.path.contains('{')
+        // A `{` outside the prim namespace (e.g. inside a relationship-target
+        // bracket) is not a prim variant selection, so confirm it via the
+        // structured components after the cheap reject.
+        self.path.contains('{') && self.components().any(|c| matches!(c, PathComponent::Variant { .. }))
     }
 
     pub fn prim_path(&self) -> Path {
@@ -908,6 +911,26 @@ mod tests {
         for (input, expected) in cases {
             let p = Path::new(input).unwrap();
             assert_eq!(p.strip_all_variant_selections().as_str(), *expected, "input {input}");
+        }
+    }
+
+    #[test]
+    fn contains_prim_variant_selection() {
+        // A selection anywhere in the prim namespace counts; a `{` that is not a
+        // prim-namespace variant (a relationship-target bracket) does not.
+        let cases: &[(&str, bool)] = &[
+            ("/A/B", false),
+            ("/A{set=sel}", true),
+            ("/A{set=sel}/Child", true),
+            ("/A{x=y}B{p=q}C", true),
+            ("/A.rel[/B{x=y}]", false),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                Path::from_str_unchecked(input).contains_prim_variant_selection(),
+                *expected,
+                "input {input}"
+            );
         }
     }
 
