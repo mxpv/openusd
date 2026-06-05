@@ -242,7 +242,6 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
 pub(crate) use cache::Cache;
-pub use cache::TimeOffset;
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
 pub use graph::{ArcType, Node, NodeFlags, NodeId};

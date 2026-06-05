@@ -291,31 +291,49 @@ fn site_line(out: &mut String, canonical_base: Option<&Path>, identifier: &str, 
     let _ = writeln!(out, "    {:<20} {}", display_name(canonical_base, identifier), path);
 }
 
-/// A `Time Offsets` row. A node row (`row.path` is `Some`) prints the layer in
-/// a 20-wide field, the path in a 15-wide field, then the arc and offset; a
+/// A `Time Offsets` row. A node row (`path` is `Some`) prints the layer in a
+/// 20-wide field, the path in a 15-wide field, then the arc and offset; a
 /// sublayer row prints the layer in a 32-wide field (keeping the arc column
 /// aligned with node rows), then `sublayer` and the offset.
-fn time_offset_line(out: &mut String, canonical_base: Option<&Path>, row: &pcp::TimeOffset) {
+fn time_offset_line(
+    out: &mut String,
+    canonical_base: Option<&Path>,
+    layer_id: &str,
+    path: Option<&sdf::Path>,
+    arc: &str,
+    offset: sdf::LayerOffset,
+) {
     use std::fmt::Write as _;
-    let layer = display_name(canonical_base, &row.layer);
-    let (offset, scale) = (row.offset.offset, row.offset.scale);
-    match &row.path {
+    let layer = display_name(canonical_base, layer_id);
+    let (off, scale) = (offset.offset, offset.scale);
+    match path {
         Some(path) => {
             let _ = writeln!(
                 out,
-                "    {layer:<20} {:<15} {:<10} (offset={offset:.2}, scale={scale:.2})",
+                "    {layer:<20} {:<15} {arc:<10} (offset={off:.2}, scale={scale:.2})",
                 path.to_string(),
-                row.arc,
             );
         }
         None => {
-            let _ = writeln!(
-                out,
-                "        {layer:<32} {:<10} (offset={offset:.2}, scale={scale:.2})",
-                row.arc,
-            );
+            let _ = writeln!(out, "        {layer:<32} {arc:<10} (offset={off:.2}, scale={scale:.2})");
         }
     }
+}
+
+/// Tree pre-order walk of a prim index's nodes (C++ `WalkNodes` over the root
+/// node), excluding the synthetic inert tree root. Children are visited in their
+/// stored strength order.
+fn walk_nodes(index: &pcp::PrimIndex) -> Vec<pcp::NodeId> {
+    let Some(root) = index.root() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack: Vec<pcp::NodeId> = index.children(root).iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        out.push(id);
+        stack.extend(index.children(id).iter().rev().copied());
+    }
+    out
 }
 
 /// Python list-literal of names, e.g. `['a', 'b']` (matching the C++ dump,
@@ -392,11 +410,45 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         }
         out.push('\n');
 
-        let offsets = prim.time_offsets().unwrap();
-        if !offsets.is_empty() {
+        // Time Offsets: walk the prim index's nodes in tree pre-order, printing
+        // each node's cumulative `map_to_root` offset and every non-identity
+        // sublayer member offset (C++ `testPcpCompositionResults`'s node walk).
+        let index = prim.prim_index().graph().unwrap();
+        let walk = walk_nodes(&index);
+        let has_offsets = walk.iter().any(|&id| {
+            let node = index.node(id);
+            !node.map_to_parent.time_offset().is_identity()
+                || node.layer_stack().iter().any(|(_, off)| !off.is_identity())
+        });
+        if has_offsets {
             let _ = writeln!(out, "Time Offsets:");
-            for row in &offsets {
-                time_offset_line(&mut out, base, row);
+            for id in walk {
+                let node = index.node(id);
+                let layer_id = stage.layer_identifier(node.layer_index()).unwrap_or_default();
+                // Lowercase arc name matching C++ `PcpArcType`'s `displayName`.
+                let arc = match node.arc {
+                    pcp::ArcType::Root => "root",
+                    pcp::ArcType::Inherit => "inherit",
+                    pcp::ArcType::Variant => "variant",
+                    pcp::ArcType::Relocate => "relocate",
+                    pcp::ArcType::Reference => "reference",
+                    pcp::ArcType::Payload => "payload",
+                    pcp::ArcType::Specialize => "specialize",
+                };
+                time_offset_line(
+                    &mut out,
+                    base,
+                    &layer_id,
+                    Some(&node.path),
+                    arc,
+                    node.map_to_root.time_offset(),
+                );
+                for &(layer, off) in node.layer_stack() {
+                    if !off.is_identity() {
+                        let layer_id = stage.layer_identifier(layer).unwrap_or_default();
+                        time_offset_line(&mut out, base, &layer_id, None, "sublayer", off);
+                    }
+                }
             }
             out.push('\n');
         }
@@ -410,14 +462,13 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
             out.push('\n');
         }
 
-        let children = stage.prim_children(path.clone()).unwrap();
+        let (children, prohibited) = prim.prim_index().child_names().unwrap();
         if !children.is_empty() {
             let _ = writeln!(out, "Child names:");
             let _ = writeln!(out, "     {}", name_list(&children));
             out.push('\n');
         }
 
-        let prohibited = prim.prohibited_children().unwrap();
         if !prohibited.is_empty() {
             let _ = writeln!(out, "Prohibited child names:");
             let _ = writeln!(out, "     {}", name_list(&prohibited));
@@ -455,23 +506,19 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
             };
             match stage.spec_type(prop_path.clone()).unwrap() {
                 Some(sdf::SpecType::Relationship) => {
-                    let rel = prim.relationship(name);
-                    let targets = rel.get_targets().unwrap();
+                    let (targets, del) = prim.relationship(name).compute_targets().unwrap();
                     if !targets.is_empty() {
                         rel_targets.push((prop_path.clone(), targets));
                     }
-                    let del = rel.deleted_targets().unwrap();
                     if !del.is_empty() {
                         deleted.push((prop_path, del));
                     }
                 }
                 Some(sdf::SpecType::Attribute) => {
-                    let attr = prim.attribute(name);
-                    let conns = attr.get_connections().unwrap();
+                    let (conns, del) = prim.attribute(name).compute_connections().unwrap();
                     if !conns.is_empty() {
                         attr_conns.push((prop_path.clone(), conns));
                     }
-                    let del = attr.deleted_connections().unwrap();
                     if !del.is_empty() {
                         deleted.push((prop_path, del));
                     }

@@ -25,42 +25,6 @@ use super::index::{AncestorArc, CompositionContext, PrimIndex};
 use super::rel::Relocates;
 use super::{Error, LayerStack, VariantFallbackMap};
 
-/// One row of the `Time Offsets` composition dump (C++
-/// `testPcpCompositionResults`'s per-node and per-sublayer offset lines).
-///
-/// A node row carries the node's composed `path` and its arc display name; a
-/// sublayer row (a contributing sublayer member of a node's layer stack) has no
-/// `path` and an `arc` of `"sublayer"`. The `offset` shown is a node's
-/// cumulative `map_to_root` time offset for a node row, or the member's own
-/// stored sublayer offset for a sublayer row.
-#[derive(Debug, Clone)]
-pub struct TimeOffset {
-    /// Layer identifier of the row's representative layer.
-    pub layer: String,
-    /// Composed path for a node row; `None` for a sublayer row.
-    pub path: Option<Path>,
-    /// Arc display name for a node row, or `"sublayer"` for a sublayer row.
-    pub arc: &'static str,
-    /// The time offset shown for this row.
-    pub offset: sdf::LayerOffset,
-}
-
-/// Collects a prim index's nodes in tree pre-order (C++ `WalkNodes` over the
-/// root node), excluding the synthetic inert tree root that has no C++ analog.
-/// Children are visited in their stored strength order.
-fn walk_nodes(index: &PrimIndex) -> Vec<NodeId> {
-    let Some(root) = index.root() else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut stack: Vec<NodeId> = index.children(root).iter().rev().copied().collect();
-    while let Some(id) = stack.pop() {
-        out.push(id);
-        stack.extend(index.children(id).iter().rev().copied());
-    }
-    out
-}
-
 /// Lazily-built composition graph.
 ///
 /// Caches per-prim composition indices and contexts. When a prim is queried
@@ -1147,20 +1111,28 @@ impl Cache {
         Ok(targets)
     }
 
-    /// Returns the deleted target paths of a relationship's `targetPaths`
-    /// list-op: targets named in a `delete` operation, mapped into stage
-    /// namespace (C++ `ComputeRelationshipTargetPaths`'s deleted-paths
-    /// out-param). Non-property paths return an empty list.
-    pub fn deleted_relationship_targets(&mut self, path: &Path) -> Result<Vec<Path>> {
-        self.compose_property_paths(path, FieldKey::TargetPaths, true)
+    /// Composes a relationship's target paths together with the paths its
+    /// list-op deletes, returned as `(targets, deleted)` (C++
+    /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
+    /// mapped into stage namespace; a non-property path yields two empty lists.
+    pub fn compute_relationship_target_paths(&mut self, path: &Path) -> Result<(Vec<Path>, Vec<Path>)> {
+        self.compute_target_paths(path, FieldKey::TargetPaths)
     }
 
-    /// Returns the deleted connection paths of an attribute's `connectionPaths`
-    /// list-op: connections named in a `delete` operation, mapped into stage
-    /// namespace (C++ `ComputeAttributeConnectionPaths`'s deleted-paths
-    /// out-param). Non-property paths return an empty list.
-    pub fn deleted_connection_paths(&mut self, path: &Path) -> Result<Vec<Path>> {
-        self.compose_property_paths(path, FieldKey::ConnectionPaths, true)
+    /// Composes an attribute's connection paths together with the paths its
+    /// list-op deletes (the connection analog of
+    /// [`Self::compute_relationship_target_paths`]).
+    pub fn compute_attribute_connection_paths(&mut self, path: &Path) -> Result<(Vec<Path>, Vec<Path>)> {
+        self.compute_target_paths(path, FieldKey::ConnectionPaths)
+    }
+
+    /// Composes both the resolved and the deleted entries of a path-list-op
+    /// property field. TODO(perf): C++ surfaces both from a single target-index
+    /// build; this composes the field twice.
+    fn compute_target_paths(&mut self, path: &Path, field: FieldKey) -> Result<(Vec<Path>, Vec<Path>)> {
+        let targets = self.compose_property_paths(path, field, false)?;
+        let deleted = self.compose_property_paths(path, field, true)?;
+        Ok((targets, deleted))
     }
 
     /// Returns pseudo-root stage metadata, composing session-layer opinions
@@ -1224,11 +1196,22 @@ impl Cache {
         Ok(children)
     }
 
+    /// Composes a prim's child names alongside the names prohibited at it (C++
+    /// `PcpPrimIndex::ComputePrimChildNames`, whose `nameOrder` and
+    /// `prohibitedNames` out-params this returns as a pair). A prohibited name is
+    /// a child relocated away from this prim (renamed or deleted) that cannot be
+    /// re-introduced here.
+    pub fn compute_prim_child_names(&mut self, path: &Path) -> Result<(Vec<String>, Vec<String>)> {
+        let children = self.prim_children(path)?;
+        let prohibited = self.prohibited_children(path)?;
+        Ok((children, prohibited))
+    }
+
     /// Returns the prohibited child names for a prim: the names of children that
     /// have been relocated away from this prim (a relocation source, whether
     /// renamed or deleted), sorted. These names cannot be re-introduced here
     /// (C++ `PcpPrimIndex::ComputePrimChildNames`'s prohibited-names out-param).
-    pub fn prohibited_children(&mut self, path: &Path) -> Result<Vec<String>> {
+    fn prohibited_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = self.effective_path(path)?;
         if self.relocates.is_empty() {
             return Ok(Vec::new());
@@ -1256,6 +1239,16 @@ impl Cache {
         self.composed_children(path, ChildrenKey::PropertyChildren, None)
     }
 
+    /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
+    /// `UsdPrim::GetPrimIndex` / `PcpCache::ComputePrimIndex`). The borrow is
+    /// tied to the cache, so callers reach it through the borrowing
+    /// [`PrimIndexRef`](crate::usd::PrimIndexRef) view.
+    pub fn index(&mut self, path: &Path) -> Result<&PrimIndex> {
+        let path = self.effective_path(&path.prim_path())?;
+        self.ensure_index(&path)?;
+        Ok(&self.indices[&path])
+    }
+
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
     /// contributes a prim spec, strongest first. Backs C++
     /// `UsdPrim::GetPrimStack` (each per-site node fans out into one entry per
@@ -1276,53 +1269,6 @@ impl Cache {
             }
         }
         Ok(stack)
-    }
-
-    /// Returns the `Time Offsets` dump rows for a prim (C++
-    /// `testPcpCompositionResults`). Each composition node yields a row carrying
-    /// its cumulative `map_to_root` offset, followed by a row for each
-    /// non-identity sublayer member of its layer stack (the member's own stored
-    /// offset). Nodes are walked in tree pre-order from the root node, matching
-    /// the harness's `WalkNodes`.
-    ///
-    /// Returns an empty vector unless some node carries a non-identity arc offset
-    /// or layer-stack member offset — the harness emits the section only then.
-    pub fn time_offsets(&mut self, path: &Path) -> Result<Vec<TimeOffset>> {
-        let path = self.effective_path(&path.prim_path())?;
-        self.ensure_index(&path)?;
-        let index = &self.indices[&path];
-
-        let walk = walk_nodes(index);
-        let has_offsets = walk.iter().any(|&id| {
-            let node = index.node(id);
-            !node.map_to_parent.time_offset().is_identity()
-                || node.layer_stack().iter().any(|(_, off)| !off.is_identity())
-        });
-        if !has_offsets {
-            return Ok(Vec::new());
-        }
-
-        let mut rows = Vec::new();
-        for id in walk {
-            let node = index.node(id);
-            rows.push(TimeOffset {
-                layer: self.stack.identifier(node.layer_index()).to_string(),
-                path: Some(node.path.clone()),
-                arc: node.arc.dump_name(),
-                offset: node.map_to_root.time_offset(),
-            });
-            for &(layer, off) in node.layer_stack() {
-                if !off.is_identity() {
-                    rows.push(TimeOffset {
-                        layer: self.stack.identifier(layer).to_string(),
-                        path: None,
-                        arc: "sublayer",
-                        offset: off,
-                    });
-                }
-            }
-        }
-        Ok(rows)
     }
 
     /// Returns the property stack for a property path: each `(layer identifier,

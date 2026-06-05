@@ -157,11 +157,14 @@ impl Relationship {
         self.stage.relationship_targets(&self.path)
     }
 
-    /// Deleted target paths: targets named in a `delete` list-op, mapped to
-    /// stage namespace. Mirrors the deleted-paths out-param of C++
-    /// `UsdRelationship`'s target composition.
-    pub fn deleted_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.deleted_relationship_targets(&self.path)
+    /// Composes this relationship's target paths together with the paths its
+    /// list-op deletes, returned as `(targets, deleted)` (C++
+    /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). The
+    /// targets match [`Relationship::get_targets`]; both are empty when the
+    /// owning prim is outside the population mask.
+    pub fn compute_targets(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
+        self.stage
+            .masked_property(&self.path, |cache| cache.compute_relationship_target_paths(&self.path))
     }
 
     /// Composed forwarded targets. See [`Stage::forwarded_relationship_targets`]

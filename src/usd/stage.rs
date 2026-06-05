@@ -1080,7 +1080,7 @@ impl Stage {
     /// an empty list for non-property paths or attributes with no authored
     /// connections.
     pub fn connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property_targets(attr, |cache| cache.connection_paths(attr))
+        self.masked_property(attr, |cache| cache.connection_paths(attr))
     }
 
     /// Returns the composed raw `targetPaths` list for a relationship, folding
@@ -1092,23 +1092,7 @@ impl Stage {
     /// These are the raw targets (spec 12.4); target forwarding — recursively
     /// chasing relationship-to-relationship chains — is not applied.
     pub fn relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property_targets(rel, |cache| cache.relationship_targets(rel))
-    }
-
-    /// Returns the deleted target paths of a relationship's `targetPaths`
-    /// list-op (targets named in a `delete` operation, mapped to stage
-    /// namespace). Mirrors the deleted-paths out-param of C++
-    /// `PcpCache::ComputeRelationshipTargetPaths`.
-    pub fn deleted_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property_targets(rel, |cache| cache.deleted_relationship_targets(rel))
-    }
-
-    /// Returns the deleted connection paths of an attribute's `connectionPaths`
-    /// list-op (connections named in a `delete` operation, mapped to stage
-    /// namespace). Mirrors the deleted-paths out-param of C++
-    /// `PcpCache::ComputeAttributeConnectionPaths`.
-    pub fn deleted_connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property_targets(attr, |cache| cache.deleted_connection_paths(attr))
+        self.masked_property(rel, |cache| cache.relationship_targets(rel))
     }
 
     /// Returns the forwarded `targetPaths` for a relationship. A target that
@@ -1125,23 +1109,41 @@ impl Stage {
     /// matching raw [`Self::relationship_targets`].
     pub fn forwarded_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
         let mask = &self.population_mask;
-        self.masked_property_targets(rel, |cache| {
+        self.masked_property(rel, |cache| {
             cache.forwarded_relationship_targets(rel, &|p| mask.includes(p))
         })
     }
 
-    /// Runs a property-target query (`connectionPaths` / `targetPaths`) under
-    /// the population mask: a property whose owning prim is outside the working
-    /// set resolves to an empty list without touching the cache.
-    fn masked_property_targets(
+    /// Runs a property query (`targetPaths` / `connectionPaths`, with or without
+    /// the deleted-paths pair) under the population mask: a property whose owning
+    /// prim is outside the working set resolves to the empty default without
+    /// touching the cache. The population mask is a [`Stage`] concern, so the
+    /// `Relationship` / `Attribute` handles route their cache queries through it.
+    pub(crate) fn masked_property<T: Default>(
         &self,
         prop: &sdf::Path,
-        query: impl FnOnce(&mut pcp::Cache) -> Result<Vec<sdf::Path>>,
-    ) -> Result<Vec<sdf::Path>> {
+        query: impl FnOnce(&mut pcp::Cache) -> Result<T>,
+    ) -> Result<T> {
         if !self.population_mask.includes(&prop.prim_path()) {
-            return Ok(Vec::new());
+            return Ok(T::default());
         }
         self.try_or_handle(query)
+    }
+
+    /// Returns a handle to a prim's composition index (C++
+    /// `UsdPrim::GetPrimIndex`). The handle is a cheap `(stage, path)` value;
+    /// each of its queries borrows the cache briefly, so it can be held and
+    /// reused freely.
+    pub fn prim_index(&self, prim: impl Into<sdf::Path>) -> super::PrimIndexRef {
+        super::PrimIndexRef::new(self, prim.into())
+    }
+
+    /// Resolves a global layer index — as carried by a composition
+    /// [`Node`](pcp::Node) (`layer_index`, `layer_stack`) — to its identifier.
+    /// Unlike [`Self::layer_stack`], this covers every loaded layer, including
+    /// those reached across reference/payload arcs.
+    pub fn layer_identifier(&self, index: usize) -> Option<String> {
+        self.graph.borrow().layer_identifier(index).map(str::to_string)
     }
 
     /// Returns the composed `typeName` for a prim, if set.

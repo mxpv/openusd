@@ -1,7 +1,7 @@
 /// The following fields are pre-registered by Sdf.
 ///
 /// See <https://github.com/PixarAnimationStudios/OpenUSD/blob/release/pxr/usd/sdf/schema.h#L597>
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum FieldKey {
     Active,
     AllowedTokens,

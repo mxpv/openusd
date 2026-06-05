@@ -44,23 +44,6 @@ pub enum ArcType {
     Specialize,
 }
 
-impl ArcType {
-    /// Lowercase display name matching C++ `PcpArcType`'s `displayName`, used by
-    /// the composition dump (`root`, `inherit`, `variant`, `relocate`,
-    /// `reference`, `payload`, `specialize`).
-    pub fn dump_name(self) -> &'static str {
-        match self {
-            ArcType::Root => "root",
-            ArcType::Inherit => "inherit",
-            ArcType::Variant => "variant",
-            ArcType::Relocate => "relocate",
-            ArcType::Reference => "reference",
-            ArcType::Payload => "payload",
-            ArcType::Specialize => "specialize",
-        }
-    }
-}
-
 /// Stable handle to a [`Node`] within a [`PrimIndex`](crate::pcp::PrimIndex)'s
 /// composition graph (C++ `PcpNodeRef`).
 ///
@@ -256,10 +239,12 @@ impl Node {
     }
 
     /// The site's contributing layers as stored: `(layer index, sublayer
-    /// offset)` members, strongest first. Used when grafting a node into
-    /// another index, which copies the stack verbatim. Value resolution should
-    /// use [`layers`](Self::layers) instead, which folds in the arc offset.
-    pub(crate) fn layer_stack(&self) -> &[(usize, LayerOffset)] {
+    /// offset)` members, strongest first — the node's `(layerStack, path)` site
+    /// (C++ `PcpNodeRef::GetLayerStack`'s layers and their offsets). The offsets
+    /// are the raw sublayer offsets; for value resolution use
+    /// [`layers`](Self::layers), which folds the arc offset on top. This raw form
+    /// is for structural introspection.
+    pub fn layer_stack(&self) -> &[(usize, LayerOffset)] {
         &self.layer_stack
     }
 
