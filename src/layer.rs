@@ -16,7 +16,8 @@ use std::io::Cursor;
 
 use anyhow::{bail, Context, Result};
 
-use crate::{ar, expr, sdf, usda, usdc, usdz};
+use crate::sdf::expr;
+use crate::{ar, sdf, usda, usdc, usdz};
 
 /// The kind of layer dependency that triggered a composition error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,7 +217,7 @@ fn collect_recursive(
         }
 
         // Evaluate expression-valued asset paths.
-        let dep_asset = resolve_expression(&dep.asset_path, &expr_vars)?;
+        let dep_asset = expr::evaluate_asset_path(&dep.asset_path, &expr_vars)?;
 
         if is_usdz {
             bail!(
@@ -415,22 +416,6 @@ fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<HashMap<Str
         }
     }
     Ok(HashMap::new())
-}
-
-/// Evaluates an expression-valued asset path, or passes it through unchanged.
-fn resolve_expression(path: &str, vars: &HashMap<String, sdf::Value>) -> Result<String> {
-    if expr::is_expression(path) {
-        let expression = expr::Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
-        let result = expression
-            .eval(vars)
-            .with_context(|| format!("failed to evaluate expression: {path}"))?;
-        match result {
-            sdf::Value::String(s) => Ok(s),
-            other => bail!("expression must evaluate to a string, got: {other:?}"),
-        }
-    } else {
-        Ok(path.to_string())
-    }
 }
 
 #[cfg(test)]

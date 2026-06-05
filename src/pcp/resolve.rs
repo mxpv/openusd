@@ -159,9 +159,47 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &node.map_to_root));
+            let map = self.faithful_map_to_root(node);
+            ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &map));
         }
         Ok(ops)
+    }
+
+    /// Recomputes a node's map to the root namespace with the faithful function
+    /// composition ([`MapFunction::compose_to_root`]), used when mapping the
+    /// authored target/connection paths of a property.
+    ///
+    /// The node's stored `map_to_root` is accumulated with the plain
+    /// [`compose`](MapFunction::compose), which keeps reverse lookups (variant
+    /// selection, relocates) unambiguous at the cost of dropping the identity
+    /// preimage a variant strip introduces. A connection target naming a prim
+    /// beside the arc's own subtree (e.g. `</Model.attr>` authored inside a
+    /// variant of `/Model`) only maps through that dropped pair, so target
+    /// resolution rebuilds the map faithfully from the node's arc chain. The two
+    /// agree for every injective arc; they differ only where a variant collapses
+    /// its `{set=sel}` segment.
+    ///
+    /// TODO(perf): this re-walks the arc chain and re-folds `compose_to_root` for
+    /// every contributing opinion of a target/connection field, re-doing the work
+    /// for ancestor prefixes shared across a property's node stack. It is a cold
+    /// path (target/connection resolution, not value resolution); memoize the
+    /// faithful map per node if it ever shows up in a profile.
+    fn faithful_map_to_root(&self, node: &Node) -> MapFunction {
+        // Collect the `map_to_parent` chain node-first up to the tree root.
+        let mut chain = vec![&node.map_to_parent];
+        let mut cur = node;
+        while let Some(parent) = cur.parent {
+            let p = self.node(parent);
+            chain.push(&p.map_to_parent);
+            cur = p;
+        }
+        // Fold root-first so each arc's strip composes onto the accumulated map.
+        let mut iter = chain.into_iter().rev();
+        let mut acc = iter.next().expect("chain holds at least the node itself").clone();
+        for map in iter {
+            acc = acc.compose_to_root(map);
+        }
+        acc
     }
 
     /// Resolves the deleted target/connection paths of a path-list-op field:

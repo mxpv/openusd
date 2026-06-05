@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::ar::Resolver;
+use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
@@ -546,7 +547,7 @@ where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
     R: FnMut(&mut T, LayerOffset),
-    A: FnMut(&mut T, usize),
+    A: FnMut(&mut T, usize) -> Result<()>,
 {
     let mut combined: Option<ListOp<T>> = None;
 
@@ -562,7 +563,9 @@ where
             // so a relative asset path in different sublayers resolves to
             // distinct targets and is not wrongly deduped (e.g. `@./ref.usd@`
             // authored in `sub1/` and `sub2/` are two references, not one).
-            list_op.iter_mut().for_each(|item| anchor(item, layer));
+            for item in list_op.iter_mut() {
+                anchor(item, layer)?;
+            }
             if !sub.is_identity() {
                 list_op.iter_mut().for_each(|item| retime(item, sub));
             }
@@ -592,7 +595,7 @@ where
         layers,
         |v| v.try_into().ok(),
         |_, _| {},
-        |_, _| {},
+        |_, _| Ok(()),
     )
 }
 
@@ -631,6 +634,7 @@ pub(super) fn compose_references_in(
     nodes: &[Node],
     layers: &[sdf::Layer],
     resolver: &dyn Resolver,
+    expr_vars: &HashMap<String, Value>,
 ) -> Result<Vec<Reference>> {
     compose_list_op_in(
         nodes,
@@ -638,7 +642,11 @@ pub(super) fn compose_references_in(
         layers,
         |v| v.try_into().ok(),
         |r: &mut Reference, sub| r.layer_offset = sub.concatenate(&r.layer_offset),
-        |r: &mut Reference, layer| anchor_asset_path(&mut r.asset_path, &layers[layer], resolver),
+        |r: &mut Reference, layer| {
+            r.asset_path = expr::evaluate_asset_path(&r.asset_path, expr_vars)?;
+            anchor_asset_path(&mut r.asset_path, &layers[layer], resolver);
+            Ok(())
+        },
     )
 }
 
@@ -650,6 +658,7 @@ pub(super) fn collect_payloads_in(
     nodes: &[Node],
     layers: &[sdf::Layer],
     resolver: &dyn Resolver,
+    expr_vars: &HashMap<String, Value>,
 ) -> Result<Vec<Payload>> {
     compose_list_op_in(
         nodes,
@@ -665,7 +674,11 @@ pub(super) fn collect_payloads_in(
             _ => None,
         },
         |p: &mut Payload, sub| p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default())),
-        |p: &mut Payload, layer| anchor_asset_path(&mut p.asset_path, &layers[layer], resolver),
+        |p: &mut Payload, layer| {
+            p.asset_path = expr::evaluate_asset_path(&p.asset_path, expr_vars)?;
+            anchor_asset_path(&mut p.asset_path, &layers[layer], resolver);
+            Ok(())
+        },
     )
 }
 
