@@ -5,7 +5,7 @@
 //! [module-level docs](super) for the full composition overview.
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -175,6 +175,13 @@ impl PrimIndex {
         let nodes = &self.graph.nodes;
         let mut local = vec![false; nodes.len()];
         for (i, node) in nodes.iter().enumerate() {
+            // The single forward pass only reads an already-computed parent
+            // entry; a parent inserted after its child would be read as a stale
+            // `false`, silently leaking an instance-local arc into the prototype.
+            debug_assert!(
+                node.parent.is_none_or(|p| p.idx() < i),
+                "instance partition requires every node's parent to precede it in the arena"
+            );
             local[i] = match node.arc {
                 // The local site (and the synthetic root) is always instance-local.
                 ArcType::Root => true,
@@ -619,7 +626,7 @@ where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
     R: FnMut(&mut T, LayerOffset),
-    A: FnMut(&mut T, usize) -> Result<()>,
+    A: FnMut(&mut T, usize),
 {
     let mut combined: Option<ListOp<T>> = None;
 
@@ -633,12 +640,11 @@ where
         // fold a different offset into each copy of an offset-bearing item
         // (a reference/payload), defeating the list-op dedup and leaving one
         // arc node per occupied sublayer slot.
-        let mut seen_layers: Vec<usize> = Vec::new();
+        let mut seen_layers: HashSet<usize> = HashSet::new();
         for &(layer, sub) in node.layer_stack() {
-            if seen_layers.contains(&layer) {
+            if !seen_layers.insert(layer) {
                 continue;
             }
-            seen_layers.push(layer);
             let Some(value) = layers[layer].try_get(&node.path, field)? else {
                 continue;
             };
@@ -649,9 +655,7 @@ where
             // so a relative asset path in different sublayers resolves to
             // distinct targets and is not wrongly deduped (e.g. `@./ref.usd@`
             // authored in `sub1/` and `sub2/` are two references, not one).
-            for item in list_op.iter_mut() {
-                anchor(item, layer)?;
-            }
+            list_op.iter_mut().for_each(|item| anchor(item, layer));
             if !sub.is_identity() {
                 list_op.iter_mut().for_each(|item| retime(item, sub));
             }
@@ -681,7 +685,7 @@ where
         layers,
         |v| v.try_into().ok(),
         |_, _| {},
-        |_, _| Ok(()),
+        |_, _| {},
     )
 }
 
@@ -731,6 +735,43 @@ fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, reso
     *asset_path = resolve_against_layer(asset_path, authoring_layer, resolver);
 }
 
+/// Resolves a reference/payload arc's asset path in place: evaluates a backtick
+/// variable expression against `expr_vars`, anchors the result to its authoring
+/// layer, and returns the time-codes-per-second retiming scale to fold into the
+/// arc offset (spec 12.3.2). Shared by [`compose_references_in`] and
+/// [`collect_payloads_in`], which differ only in their offset field's shape.
+///
+/// A malformed or non-string expression is recoverable (C++
+/// `PcpErrorVariableExpression`): the failure is recorded in `errors`, the path
+/// is left as the raw unevaluated expression for the caller to drop, and `None`
+/// is returned so no scale is folded.
+#[allow(clippy::too_many_arguments)]
+fn resolve_arc_asset_path(
+    asset_path: &mut String,
+    authoring_layer: usize,
+    layers: &[sdf::Layer],
+    resolver: &dyn Resolver,
+    expr_vars: &HashMap<String, Value>,
+    arc: ArcType,
+    site: &Path,
+    errors: &mut Vec<Error>,
+) -> Option<f64> {
+    match expr::evaluate_asset_path(asset_path, expr_vars) {
+        Ok(resolved) => *asset_path = resolved,
+        Err(source) => {
+            errors.push(Error::InvalidExpression {
+                expression: asset_path.clone(),
+                arc,
+                site_path: site.clone(),
+                source,
+            });
+            return None;
+        }
+    }
+    anchor_asset_path(asset_path, &layers[authoring_layer], resolver);
+    Some(arc_tcps_scale(&layers[authoring_layer], asset_path, layers, resolver))
+}
+
 /// Composes the `references` list-op, folding each authoring sublayer's offset
 /// into its references' layer offsets (C++ `PcpComposeSiteReferences`). A
 /// reference brought in by a sublayer with a non-identity offset retimes its
@@ -742,21 +783,36 @@ pub(super) fn compose_references_in(
     layers: &[sdf::Layer],
     resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
+    site: &Path,
+    errors: &mut Vec<Error>,
 ) -> Result<Vec<Reference>> {
-    compose_list_op_in(
+    let mut refs = compose_list_op_in(
         nodes,
         FieldKey::References.as_str(),
         layers,
         |v| v.try_into().ok(),
         |r: &mut Reference, sub| r.layer_offset = sub.concatenate(&r.layer_offset),
-        |r: &mut Reference, layer| {
-            r.asset_path = expr::evaluate_asset_path(&r.asset_path, expr_vars)?;
-            anchor_asset_path(&mut r.asset_path, &layers[layer], resolver);
-            let scale = arc_tcps_scale(&layers[layer], &r.asset_path, layers, resolver);
-            r.layer_offset = r.layer_offset.concatenate(&sdf::LayerOffset::scale_only(scale));
-            Ok(())
+        |r: &mut Reference, layer| match resolve_arc_asset_path(
+            &mut r.asset_path,
+            layer,
+            layers,
+            resolver,
+            expr_vars,
+            ArcType::Reference,
+            site,
+            errors,
+        ) {
+            Some(scale) if scale != 1.0 => {
+                r.layer_offset = r.layer_offset.concatenate(&sdf::LayerOffset::scale_only(scale));
+            }
+            _ => {}
         },
-    )
+    )?;
+    // A reference whose expression failed to evaluate keeps its raw backtick
+    // path (the failure is already recorded in `errors`); drop it so it is not
+    // mistaken for a literal asset path and grafted as a broken arc.
+    refs.retain(|r| !expr::is_expression(&r.asset_path));
+    Ok(refs)
 }
 
 /// Collects payloads from nodes, handling both single `Payload` and
@@ -768,8 +824,10 @@ pub(super) fn collect_payloads_in(
     layers: &[sdf::Layer],
     resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
+    site: &Path,
+    errors: &mut Vec<Error>,
 ) -> Result<Vec<Payload>> {
-    compose_list_op_in(
+    let mut payloads = compose_list_op_in(
         nodes,
         FieldKey::Payload.as_str(),
         layers,
@@ -784,14 +842,33 @@ pub(super) fn collect_payloads_in(
         },
         |p: &mut Payload, sub| p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default())),
         |p: &mut Payload, layer| {
-            p.asset_path = expr::evaluate_asset_path(&p.asset_path, expr_vars)?;
-            anchor_asset_path(&mut p.asset_path, &layers[layer], resolver);
-            let scale = arc_tcps_scale(&layers[layer], &p.asset_path, layers, resolver);
-            let offset = p.layer_offset.unwrap_or_default();
-            p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
-            Ok(())
+            // Fold the retiming only when it is not identity, so a payload with
+            // no authored offset and no rate change keeps its `layer_offset` as
+            // `None` (mirrors the sublayer-offset guard above; identity `Some`
+            // would change the serialized form without affecting composition).
+            match resolve_arc_asset_path(
+                &mut p.asset_path,
+                layer,
+                layers,
+                resolver,
+                expr_vars,
+                ArcType::Payload,
+                site,
+                errors,
+            ) {
+                Some(scale) if scale != 1.0 => {
+                    let offset = p.layer_offset.unwrap_or_default();
+                    p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
+                }
+                _ => {}
+            }
         },
-    )
+    )?;
+    // A payload whose expression failed to evaluate keeps its raw backtick path
+    // (the failure is already recorded in `errors`); drop it, as in
+    // [`compose_references_in`].
+    payloads.retain(|p| !expr::is_expression(&p.asset_path));
+    Ok(payloads)
 }
 
 /// Finds a layer index whose identifier matches `asset_path`.

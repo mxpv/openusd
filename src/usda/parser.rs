@@ -678,8 +678,8 @@ impl<'a> Parser<'a> {
             let tgt = this.fetch_path_ref().context("Expected relocate target path")?;
             let src_path = sdf::Path::new(src)?;
             let tgt_path = sdf::Path::from(tgt);
-            reject_variant_selection_in_path(&src_path, "Relocates")?;
-            reject_variant_selection_in_path(&tgt_path, "Relocates")?;
+            reject_variant_selection_in_path(&src_path, "Relocate source")?;
+            reject_variant_selection_in_path(&tgt_path, "Relocate target")?;
             pairs.push((src_path, tgt_path));
             Ok(())
         })?;

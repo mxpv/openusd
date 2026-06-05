@@ -1,0 +1,9 @@
+#usda 1.0
+(
+    defaultPrim = "Right"
+)
+
+def "Right"
+{
+    custom string source = "right"
+}

@@ -83,7 +83,7 @@ pub struct Cache {
 /// names and every descendant compose only from the shared subtree (the
 /// instanceable arc and below, plus implied classes), with the local root and
 /// the ancestral references above the instanceable arc inerted (see
-/// [`Cache::is_instance_local`] and [`PrimIndex::mark_instance_local_inert`]).
+/// [`PrimIndex::instance_local_nodes`] and [`PrimIndex::mark_instance_local_inert`]).
 ///
 /// TODO(instancing): instancing is functionally correct for stage-level
 /// instance and descendant queries (the composition goldens pass byte-exact),
@@ -2071,6 +2071,63 @@ def "A" (
                 .iter()
                 .any(|e| matches!(e, Error::UnresolvedLayer { .. })),
             "the ancestor's unresolved reference is recorded"
+        );
+        Ok(())
+    }
+
+    /// A reference whose asset path is a variable expression that fails to
+    /// evaluate (here a non-string result) is recoverable: the broken arc is
+    /// skipped and recorded as `InvalidExpression`, while the prim's own local
+    /// opinion still composes — it does not abort the whole prim index.
+    #[test]
+    fn invalid_expression_arc_recoverable() -> Result<()> {
+        let text = r#"#usda 1.0
+def "A" (
+    references = @`42`@
+)
+{
+    custom string marker = "ok"
+}
+"#;
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        let stack = LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true);
+        let mut cache = Cache::new(stack, VariantFallbackMap::new());
+
+        let a = sdf::path("/A")?;
+        cache.ensure_index(&a)?;
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&sdf::path("/A.marker")?, 0.0, &interp)?,
+            Some(Value::String("ok".to_string())),
+            "the prim's local opinion survives the broken expression arc"
+        );
+        assert!(
+            cache
+                .take_pending_errors()
+                .iter()
+                .any(|e| matches!(e, Error::InvalidExpression { .. })),
+            "the invalid asset-path expression is recorded as a recoverable error"
+        );
+        Ok(())
+    }
+
+    /// A reference's asset-path expression authored inside a referenced layer
+    /// is evaluated against the composed expression variables, with the
+    /// referencing layer stack overriding the referenced one (C++
+    /// `PcpExpressionVariables`). The root sets `TARGET = "right.usda"`,
+    /// overriding mid.usda's local `TARGET = "wrong.usda"`, so `/Model` resolves
+    /// through mid to right.usda — collection must load right.usda for the arc
+    /// to compose rather than the locally-named wrong.usda.
+    #[test]
+    fn expr_vars_compose_across_reference() -> Result<()> {
+        let root = format!("{}/fixtures/expr_vars_compose/root.usda", manifest_dir());
+        let mut cache = Cache::new(collected_stack(&root), VariantFallbackMap::new());
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&sdf::path("/Model.source")?, 0.0, &interp)?,
+            Some(Value::String("right".to_string())),
+            "the referencing layer's TARGET override resolves the nested reference to right.usda"
         );
         Ok(())
     }

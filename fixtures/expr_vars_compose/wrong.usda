@@ -1,0 +1,9 @@
+#usda 1.0
+(
+    defaultPrim = "Wrong"
+)
+
+def "Wrong"
+{
+    custom string source = "wrong"
+}

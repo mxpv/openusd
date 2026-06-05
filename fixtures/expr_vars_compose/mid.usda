@@ -1,0 +1,13 @@
+#usda 1.0
+(
+    defaultPrim = "Mid"
+    expressionVariables = {
+        string TARGET = "wrong.usda"
+    }
+)
+
+def "Mid" (
+    references = @`${TARGET}`@
+)
+{
+}

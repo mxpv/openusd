@@ -95,6 +95,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, LayerOffset, Path, Value};
 
@@ -1246,6 +1247,11 @@ impl<'a, 'f> Builder<'a, 'f> {
             return Ok(());
         }
         let expr_vars = self.composed_expr_vars(node);
+        let site_path = self.node(node).path.clone();
+        // Recoverable arc errors (an invalid asset-path expression) are collected
+        // locally so the immutable borrow of `self` taken by the composers is
+        // released before they are appended to `self.errors` below.
+        let mut arc_errors: Vec<Error> = Vec::new();
         let (arc, arcs) = match kind {
             TaskKind::EvalNodeReferences => {
                 let refs = compose_references_in(
@@ -1253,6 +1259,8 @@ impl<'a, 'f> Builder<'a, 'f> {
                     &self.inputs.stack.layers,
                     &*self.inputs.stack.resolver,
                     &expr_vars,
+                    &site_path,
+                    &mut arc_errors,
                 )?;
                 let arcs = refs
                     .into_iter()
@@ -1266,6 +1274,8 @@ impl<'a, 'f> Builder<'a, 'f> {
                     &self.inputs.stack.layers,
                     &*self.inputs.stack.resolver,
                     &expr_vars,
+                    &site_path,
+                    &mut arc_errors,
                 )?;
                 let arcs = payloads
                     .into_iter()
@@ -1282,6 +1292,7 @@ impl<'a, 'f> Builder<'a, 'f> {
             // `eval_arcs` is dispatched only for reference and payload tasks.
             _ => unreachable!("eval_arcs handles only reference and payload tasks"),
         };
+        self.errors.append(&mut arc_errors);
         for (asset_path, prim_path, offset) in &arcs {
             self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
         }
@@ -1324,18 +1335,10 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// composing them across the stack with the strongest member winning.
     fn layer_stack_expr_vars(&self, members: &[(usize, LayerOffset)]) -> HashMap<String, Value> {
         let mut vars = HashMap::new();
-        let root = Path::abs_root();
         // Members are strongest-first; apply weakest-first so the strongest wins.
         for &(layer, _) in members.iter().rev() {
-            if let Ok(Some(value)) = self
-                .inputs
-                .stack
-                .layer(layer)
-                .try_get(&root, FieldKey::ExpressionVariables.as_str())
-            {
-                if let Value::Dictionary(dict) = value.into_owned() {
-                    vars.extend(dict);
-                }
+            if let Ok(dict) = expr::read_expression_variables(self.inputs.stack.layer(layer).data()) {
+                vars.extend(dict);
             }
         }
         vars
