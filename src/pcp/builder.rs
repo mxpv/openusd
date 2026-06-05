@@ -1245,12 +1245,14 @@ impl<'a, 'f> Builder<'a, 'f> {
         if self.node(node).is_inert() {
             return Ok(());
         }
+        let expr_vars = self.composed_expr_vars(node);
         let (arc, arcs) = match kind {
             TaskKind::EvalNodeReferences => {
                 let refs = compose_references_in(
                     self.node_slice(node),
                     &self.inputs.stack.layers,
                     &*self.inputs.stack.resolver,
+                    &expr_vars,
                 )?;
                 let arcs = refs
                     .into_iter()
@@ -1263,6 +1265,7 @@ impl<'a, 'f> Builder<'a, 'f> {
                     self.node_slice(node),
                     &self.inputs.stack.layers,
                     &*self.inputs.stack.resolver,
+                    &expr_vars,
                 )?;
                 let arcs = payloads
                     .into_iter()
@@ -1283,6 +1286,59 @@ impl<'a, 'f> Builder<'a, 'f> {
             self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
         }
         Ok(())
+    }
+
+    /// Composes the expression variables visible at `node` for evaluating the
+    /// variable expressions in its reference/payload asset paths (C++
+    /// `PcpExpressionVariables::Compute`). Walking from `node` to the root, each
+    /// reference/payload arc enters a new layer stack that contributes its own
+    /// authored `expressionVariables`; the closer-to-root stack overrides the
+    /// farther one (the referencing layer stack wins over the referenced one).
+    ///
+    /// TODO(expr-arcs): a reference authored inside a sub-root arc target is
+    /// composed in a nested sub-build whose graph holds only the target's
+    /// subtree, so this walk stops at the sub-build root and misses the outer
+    /// frames' overrides. Thread the variables across the [`Frame`] chain to
+    /// cover that case.
+    ///
+    /// TODO(perf): this runs per reference/payload eval task and reads each
+    /// boundary layer's `expressionVariables` even when no asset path is an
+    /// expression (the common case). Compute it lazily — only once an authored
+    /// asset path is a backtick expression.
+    fn composed_expr_vars(&self, node: NodeId) -> HashMap<String, Value> {
+        // Walk node→root, applying each reference/payload boundary's variables so
+        // the closer-to-root stack (applied last) overrides the farther one.
+        let mut composed = HashMap::new();
+        let mut cur = Some(node);
+        while let Some(id) = cur {
+            let n = &self.output.nodes[id.idx()];
+            if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
+                composed.extend(self.layer_stack_expr_vars(n.layer_stack()));
+            }
+            cur = n.parent;
+        }
+        composed
+    }
+
+    /// Reads the `expressionVariables` authored by a layer stack's own layers,
+    /// composing them across the stack with the strongest member winning.
+    fn layer_stack_expr_vars(&self, members: &[(usize, LayerOffset)]) -> HashMap<String, Value> {
+        let mut vars = HashMap::new();
+        let root = Path::abs_root();
+        // Members are strongest-first; apply weakest-first so the strongest wins.
+        for &(layer, _) in members.iter().rev() {
+            if let Ok(Some(value)) = self
+                .inputs
+                .stack
+                .layer(layer)
+                .try_get(&root, FieldKey::ExpressionVariables.as_str())
+            {
+                if let Value::Dictionary(dict) = value.into_owned() {
+                    vars.extend(dict);
+                }
+            }
+        }
+        vars
     }
 
     /// Composes the class-based arcs (inherits or specializes) authored at
@@ -1627,6 +1683,15 @@ impl<'a, 'f> Builder<'a, 'f> {
         // Skip duplicate nodes when the variant descends from a class-based arc
         // introduced at this namespace level, matching the skip the class arc set.
         let skip = self.variant_arc_skips_duplicates(node);
+        // The grafted variant *root* site is not dup-checked by the sub-build
+        // (that guards only the arcs composed inside it), so cull it here when
+        // skipping: an implied class propagated across a variant arc reaches the
+        // same `{set=sel}` target the direct class already grafted, and grafting
+        // it again would duplicate that site (C++ `_AddArc`'s `skipDuplicateNodes`
+        // covering the arc's own target node).
+        if skip && self.find_duplicate(layers[0].0, &var_path) {
+            return Ok(());
+        }
         let grafted = self.compose_and_graft(
             &var_path,
             &layers,

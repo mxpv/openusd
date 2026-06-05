@@ -223,37 +223,24 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     // `/A/defaultImplementation` — implied specializes through a specializes
     // chain, not yet ported.
     "SpecializesAndVariants4_root",
-    // TODO(ancestral-variants): the ancestral variant task family
-    // (`_EvalNodeAncestralVariantSets` + `_AddAncestralVariantArc`) and the
-    // faithful cross-frame `_ComposeVariantSelection` are ported, so a local
-    // variant set on a sub-root arc target and an ancestral variant selection
-    // (including one that a weaker variant set provides for a stronger one, and a
-    // sub-root reference to a prim that exists only inside a variant) compose
-    // byte-exact. These remaining cases have a residual strength-ordering or
-    // duplicate-node difference: `SubrootInheritsAndVariants` mis-selects between
-    // the referencing-layer and referenced-layer copies of an inherit target
-    // inside a variant; `SubrootReferenceAndVariants2` orders two inherit-band
-    // sites one position off; `TrickyInheritsInVariants2` keeps an extra implied
-    // node.
+    // TODO(ancestral-variants): both drop an implied-class node a sub-root arc
+    // target carries through an ancestral variant — `SubrootInheritsAndVariants`
+    // omits the `/Group{v=y}Model` inherit site, `SubrootReferenceAndVariants2`
+    // the `/CHARGROUP{v=x}CHARACTER` band — the same seed map-deepening gap as
+    // `SubrootReferenceAndClasses`, surfacing through a variant rather than a
+    // plain reference.
     "SubrootInheritsAndVariants_root",
     "SubrootReferenceAndVariants2_root",
-    "TrickyInheritsInVariants2_root",
-    // TODO(variant-arcs): forward attribute connections / relationship targets
-    // and references introduced inside a selected variant — the variant's
-    // `Attribute connections` block is missing from the composed result.
-    "BasicVariantWithConnections_root",
-    "BasicVariantWithReference_root",
     // TODO(instancing): route instance prims through shared prototypes so the
     // prim stack and child names match the prototype-composed result.
     "BasicInstancing_root",
     "BasicInstancingAndNestedInstances_root",
-    // TODO(implied-classes): `SubrootReferenceAndClasses` reaches the builder but
-    // its implied class ordering still differs.
+    // TODO(implied-classes): an implied class propagated across a sub-root arc
+    // loses the namespace depth its target site carries — the seed deepens node
+    // paths but not map functions, so the conjugation lands the implied node at
+    // the arc's own prim (`/SubrootRef`) instead of the deepened class site
+    // (`/Inherit/Model`). Needs the full `_EvalImpliedClassTree` deepening.
     "SubrootReferenceAndClasses_root",
-    // TODO(expr-arcs): evaluate variable expressions in reference/payload asset
-    // paths so the composed arc target resolves.
-    "ExpressionsInPayloads_root",
-    "ExpressionsInReferences_root",
 ];
 
 /// The composition-dump separator: 72 dashes, matching the C++

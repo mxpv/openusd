@@ -162,9 +162,9 @@
 //!   variant-gated source opinion is missed. Cross-arc implied relocations (C++
 //!   `_EvalImpliedRelocations`'s graft) are likewise unported
 //!   (`eval_implied_relocations`'s `TODO(relocates)`).
-//! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), variable
-//!   expressions in reference/payload asset paths, residual implied/nested-class
-//!   ordering, and prototype-redirection in the instancing dump.
+//! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), residual
+//!   implied/nested-class ordering, and prototype-redirection in the instancing
+//!   dump.
 //!
 //! ## Permissions (`permission = private`)
 //!

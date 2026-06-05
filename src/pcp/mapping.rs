@@ -311,6 +311,29 @@ impl MapFunction {
     /// the deeper offset (`inner`) per the spec retiming formula — see
     /// [`sdf::LayerOffset::concatenate`].
     pub fn compose(&self, inner: &MapFunction) -> MapFunction {
+        self.compose_impl(inner, false)
+    }
+
+    /// Composes for the accumulation of a node's `map_to_root`
+    /// (`parent.map_to_root.compose_to_root(child.map_to_parent)`), where the
+    /// full function composition is needed (C++ `PcpMapFunction::Compose`).
+    ///
+    /// `inner` may send several sources to one target — a variant arc's strip
+    /// pair plus its `(/, /)` identity both reach the prim the variant sits
+    /// under. The plain [`compose`](Self::compose) pulls `self`'s domain back
+    /// through only the longest-match preimage (keeping conjugations like the
+    /// implied-class map unambiguous), which drops the identity preimage and
+    /// loses the mapping for a path beside the arc's own subtree (e.g. a
+    /// connection target naming the referenced prim from inside a variant). This
+    /// variant keeps every preimage so `map_to_root` translates such paths.
+    pub fn compose_to_root(&self, inner: &MapFunction) -> MapFunction {
+        self.compose_impl(inner, true)
+    }
+
+    /// The shared composition body. When `all_preimages` is set, half 2 pulls
+    /// `self`'s domain back through *every* `inner` pair, not just the longest
+    /// match — the faithful composition needed for `map_to_root`.
+    fn compose_impl(&self, inner: &MapFunction, all_preimages: bool) -> MapFunction {
         // Skip the concat in the overwhelmingly common case where neither
         // side carries a retiming — composition gets called per Node at
         // `add_child` time, so the four f64 ops per call add up.
@@ -341,7 +364,15 @@ impl MapFunction {
         // Half 2: self's input domain pulled back through inner. A source
         // already produced by half 1 keeps that (stronger) mapping.
         for (outer_src, outer_tgt) in self.path_map.as_slice() {
-            if let Some(source) = inner.map_target_to_source(outer_src) {
+            if all_preimages {
+                for (inner_src, inner_tgt) in inner.path_map.as_slice() {
+                    if let Some(source) = outer_src.replace_prefix(inner_tgt, inner_src) {
+                        if !pairs.iter().any(|(s, _)| *s == source) {
+                            pairs.push((source, outer_tgt.clone()));
+                        }
+                    }
+                }
+            } else if let Some(source) = inner.map_target_to_source(outer_src) {
                 if !pairs.iter().any(|(s, _)| *s == source) {
                     pairs.push((source, outer_tgt.clone()));
                 }

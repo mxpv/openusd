@@ -11,6 +11,7 @@ use strum::{Display, EnumCount, FromRepr};
 
 mod change;
 mod data;
+pub mod expr;
 mod layer;
 mod ordering;
 mod path;
@@ -20,6 +21,7 @@ mod value;
 
 pub use change::{ChangeEntry, ChangeFlags, ChangeList};
 pub use data::Data;
+pub use expr::Expr;
 pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::apply_ordering;
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};

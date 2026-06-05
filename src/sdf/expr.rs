@@ -1,22 +1,24 @@
-//! Variable expression tokenizer and parser.
+//! Variable expression tokenizer and parser (C++ `SdfVariableExpression`).
 //!
 //! Implements USD variable expressions as described in:
 //! <https://openusd.org/dev/user_guides/variable_expressions.html>
 //!
 //! Expressions are strings enclosed in backticks that are evaluated at runtime
 //! to produce a final value. They support variable substitution, function calls,
-//! and various literal types.
+//! and various literal types. Composing the `expressionVariables` an expression
+//! evaluates against across composition arcs is a separate, `pcp`-level concern
+//! (C++ `PcpExpressionVariables`).
 //!
 //! # Example
 //!
 //! ```
-//! use openusd::expr::Expr;
+//! use openusd::sdf::expr::Expr;
 //!
 //! let expr: Expr = r#"if(${USE_HIGH_RES}, "high", "low")"#.parse().unwrap();
 //! ```
 
 use crate::sdf;
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use logos::{Logos, SpannedIter};
 use std::collections::HashMap;
 use std::iter::Peekable;
@@ -26,6 +28,24 @@ use strum::EnumString;
 /// Returns `true` if the string is a variable expression (backtick-delimited).
 pub fn is_expression(s: &str) -> bool {
     s.starts_with('`') && s.ends_with('`') && s.len() >= 2
+}
+
+/// Evaluates an expression-valued asset path against `vars`, or returns the path
+/// unchanged when it is not a backtick expression. The expression must evaluate
+/// to a string (C++ `Pcp` resolves variable expressions in reference/payload
+/// asset paths against the composed `PcpExpressionVariables`).
+pub fn evaluate_asset_path(path: &str, vars: &HashMap<String, sdf::Value>) -> Result<String> {
+    if !is_expression(path) {
+        return Ok(path.to_string());
+    }
+    let expression = Expr::parse(path).with_context(|| format!("failed to parse expression: {path}"))?;
+    match expression
+        .eval(vars)
+        .with_context(|| format!("failed to evaluate expression: {path}"))?
+    {
+        sdf::Value::String(s) => Ok(s),
+        other => bail!("expression must evaluate to a string, got: {other:?}"),
+    }
 }
 
 /// Tokens for USD variable expressions.
