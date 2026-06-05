@@ -422,6 +422,62 @@ impl MapFunction {
         MapFunction::new(pairs).with_time_offset(self.time_offset)
     }
 
+    /// Returns this class-arc map deepened so its non-identity pairs apply at
+    /// `node_path` rather than at the shallower site where the arc was
+    /// introduced.
+    ///
+    /// The ancestor seed (`append_child_name_to_all_sites`) deepens a class
+    /// node's path by the child name but leaves its prefix map at the
+    /// introduction level (a class `</Inherit>` on `/Set` stays `/Inherit →
+    /// /Set` even after the node deepens to `/Inherit/Model`). Conjugating the
+    /// implied class across a sub-root reference whose transfer is at the
+    /// deepened level (`/Set/Model → /SubrootRef`) needs the class map at the
+    /// node's true depth (`/Inherit/Model → /Set/Model`), or the conjugation
+    /// collapses to the catch-all and the implied node lands at the arc's own
+    /// prim instead of the deepened class site.
+    ///
+    /// Only the class pair is deepened: the non-`/` pair whose source is the
+    /// longest prefix of `node_path` has its source replaced by `node_path` and
+    /// the same trailing suffix appended to its target. Every other pair — the
+    /// `(/, /)` catch-all, a relocation's `source → target` pair folded into a
+    /// spooky inherit's map (which addresses a sibling subtree, never a prefix of
+    /// `node_path`) — is kept unchanged, so a multi-pair class map is not
+    /// corrupted. When the map already carries a pair at `node_path` it is at the
+    /// node's depth and is returned unchanged.
+    ///
+    /// Variant selections never appear in mapping-function paths, so `node_path`
+    /// is stripped of its selections before matching and deepening.
+    pub(crate) fn deepen_to(&self, node_path: &Path) -> MapFunction {
+        let node = node_path.strip_all_variant_selections();
+        let pairs = self.path_map.as_slice();
+        // Already at depth: a pair maps the node's full path.
+        if pairs.iter().any(|(s, _)| *s == node) {
+            return self.clone();
+        }
+        // The class pair: the longest non-root source that prefixes the node.
+        let class = pairs
+            .iter()
+            .filter(|(s, _)| s.as_str() != "/" && node.has_prefix(s))
+            .max_by_key(|(s, _)| s.as_str().len());
+        let Some((class_src, class_tgt)) = class else {
+            return self.clone();
+        };
+        let Some(deepened_target) = node.replace_prefix(class_src, class_tgt) else {
+            return self.clone();
+        };
+        let deepened: Vec<(Path, Path)> = pairs
+            .iter()
+            .map(|(s, t)| {
+                if s == class_src {
+                    (node.clone(), deepened_target.clone())
+                } else {
+                    (s.clone(), t.clone())
+                }
+            })
+            .collect();
+        MapFunction::new(deepened).with_time_offset(self.time_offset)
+    }
+
     /// Builds the implied-class map for propagating a class arc across this
     /// transfer arc (C++ `PcpMapFunction::ImpliedClass`).
     ///
