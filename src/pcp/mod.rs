@@ -187,13 +187,13 @@
 //! ## Ordered prim children — relocates during the fold
 //!
 //! Child names fold weakest-to-strongest with `primOrder` reapplied per layer
-//! (mirroring C++ `PcpComposeSiteChildNames`). Composed *opinions* now apply
-//! relocates during the build (the builder's relocate arcs), but the child-name
-//! list still applies them once *after* the fold (`Cache::prim_children` →
-//! `Relocates::apply_relocates_to_children`) rather than per layer stack during
-//! it, so a scene combining multi-sublayer `primOrder` with relocates can order
-//! children differently from C++. Folding relocates into the per-node child-name
-//! merge is the remaining piece.
+//! (mirroring C++ `PcpComposeSiteChildNames`). Relocates apply per node during
+//! that fold (`Cache::compute_prim_child_names` → `rel::apply_child_relocates`,
+//! the port of C++ `_ComposePrimChildNamesAtNode`): at each node its layer stack's
+//! relocates rename, remove, or add direct children — a renamed child keeps the
+//! source's position — and every relocation source becomes a prohibited name
+//! removed from the final order, so a scene combining multi-sublayer `primOrder`
+//! with relocates orders children as C++ does.
 //!
 //! ## Structural specializes
 //!
@@ -413,11 +413,13 @@ impl LayerStack {
         Some(MapFunction::new(pairs))
     }
 
-    /// Chains the per-layer authored relocates of `ambient` into a single
-    /// source→target map (C++ `PcpLayerStack::GetRelocatesSourceToTarget`): the
-    /// strongest layer wins a duplicate source, and a target that is itself a
-    /// relocation source is followed to the final target.
-    fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
+    /// The as-authored relocates of `ambient`, strongest layer first with
+    /// duplicate sources dropped (C++ `PcpLayerStack::GetIncrementalRelocates*`,
+    /// the per-layer-stack relocates keyed by their authored source). Unlike
+    /// [`combined_relocates`](Self::combined_relocates) the pairs are not chained:
+    /// each keeps its authored source and target, which is what the per-node
+    /// child-name relocate classification needs.
+    pub(crate) fn incremental_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
         let mut pairs: Vec<(Path, Path)> = Vec::new();
         for &(layer, _) in ambient {
             let Some(layer_pairs) = self.layer_relocates.get(&layer) else {
@@ -429,6 +431,15 @@ impl LayerStack {
                 }
             }
         }
+        pairs
+    }
+
+    /// Chains the per-layer authored relocates of `ambient` into a single
+    /// source→target map (C++ `PcpLayerStack::GetRelocatesSourceToTarget`): the
+    /// strongest layer wins a duplicate source, and a target that is itself a
+    /// relocation source is followed to the final target.
+    fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
+        let mut pairs = self.incremental_relocates(ambient);
         // Follow chains: a target that is itself relocated (at or below another
         // relocate's source) maps onward to its final location.
         let snapshot = pairs.clone();

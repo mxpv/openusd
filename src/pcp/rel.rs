@@ -8,7 +8,7 @@
 //! external data (layer stack, cached indices, cached contexts) is passed
 //! in through method parameters.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, PathComponent, Value};
@@ -84,6 +84,76 @@ fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> 
         .unwrap_or_else(|| endpoint.clone())
 }
 
+/// Applies one node's layer-stack relocates to a running child-name order, in
+/// place (C++ `_ComposePrimChildNamesAtNode`'s relocate classification). The
+/// `pairs` are the node layer stack's as-authored relocates; `parent` is the
+/// node's path. Renames keep the source name's position, removes drop it, and
+/// cross-hierarchy targets are appended in lexicographic order. Every relocation
+/// source under `parent` is recorded in `prohibited`.
+pub(crate) fn apply_child_relocates(
+    parent: &Path,
+    pairs: &[(Path, Path)],
+    name_order: &mut Vec<String>,
+    name_set: &mut HashSet<String>,
+    prohibited: &mut HashSet<String>,
+) {
+    let mut renames: HashMap<String, String> = HashMap::new();
+    let mut removes: HashSet<String> = HashSet::new();
+    let mut adds: BTreeSet<String> = BTreeSet::new();
+
+    for (src, tgt) in pairs {
+        let src_is_child = src.parent().as_ref() == Some(parent);
+        let tgt_is_child = !tgt.is_empty() && tgt.parent().as_ref() == Some(parent);
+        if src_is_child {
+            if let Some(name) = src.name() {
+                prohibited.insert(name.to_string());
+                match (tgt_is_child, tgt.name()) {
+                    // Target shares the parent: a rename keeps the old position.
+                    (true, Some(tgt_name)) => {
+                        renames.insert(name.to_string(), tgt_name.to_string());
+                    }
+                    // Target moves elsewhere (or is a deletion): a removal.
+                    _ => {
+                        removes.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        // A child relocated in from a different parent is an addition.
+        if tgt_is_child && !src_is_child {
+            if let Some(tgt_name) = tgt.name() {
+                adds.insert(tgt_name.to_string());
+            }
+        }
+    }
+
+    if !renames.is_empty() || !removes.is_empty() {
+        let mut retained: Vec<String> = Vec::with_capacity(name_order.len());
+        for name in name_order.drain(..) {
+            if let Some(new_name) = renames.get(&name) {
+                name_set.remove(&name);
+                // A weaker node may already contribute the new name (a "shadow"
+                // child across a reference); the relocation silently drops it
+                // (C++ `_ComposePrimChildNamesAtNode`).
+                if name_set.insert(new_name.clone()) {
+                    retained.push(new_name.clone());
+                }
+            } else if removes.contains(&name) {
+                name_set.remove(&name);
+            } else {
+                retained.push(name);
+            }
+        }
+        *name_order = retained;
+    }
+
+    for name in adds {
+        if name_set.insert(name.clone()) {
+            name_order.push(name);
+        }
+    }
+}
+
 /// Extracts each layer's authored `layerRelocates` pairs `(source, target)`,
 /// keyed by layer index; layers without relocates are omitted. Shared by
 /// [`Relocates::new`] and [`LayerStack`](super::LayerStack).
@@ -116,50 +186,6 @@ impl Relocates {
         self.layer_relocates.is_empty()
     }
 
-    // ------------------------------------------------------------------
-    // Child name adjustment
-    // ------------------------------------------------------------------
-
-    /// Applies per-node layer relocates to a list of child names.
-    ///
-    /// Each node's layer may have relocates that create children under the
-    /// node's path. This handles children that exist only through relocates
-    /// within a referenced layer (e.g. Knot03 under Tentacle in TentacleRig).
-    pub fn apply_node_relocates(&self, path: &Path, children: &mut Vec<String>, indices: &HashMap<Path, PrimIndex>) {
-        let Some(cached_index) = indices.get(path) else {
-            return;
-        };
-        for node in cached_index.nodes() {
-            // Check every contributing sublayer of the per-site node, not just
-            // the strongest representative: a weaker sublayer may author the
-            // `layerRelocates` that creates or hides a child here.
-            for (layer, _) in node.layers() {
-                let Some(relocates) = self.layer_relocates.get(&layer) else {
-                    continue;
-                };
-                for (src, tgt) in relocates {
-                    // Target child: add if target's parent matches this node's path.
-                    if !tgt.is_empty() {
-                        if let Some(tgt_name) = tgt.name() {
-                            if tgt.parent().as_ref() == Some(&node.path) {
-                                let name = tgt_name.to_string();
-                                if !children.contains(&name) {
-                                    children.push(name);
-                                }
-                            }
-                        }
-                    }
-                    // Source child: remove if source's parent matches this node's path.
-                    if let Some(src_name) = src.name() {
-                        if src.parent().as_ref() == Some(&node.path) {
-                            children.retain(|n| n != src_name);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Computes effective relocates for a parent prim in composed namespace.
     ///
     /// Collects relocates from all layers reachable through any cached prim
@@ -187,63 +213,6 @@ impl Relocates {
 
         result
     }
-
-    /// Applies relocate namespace remapping to a list of child names.
-    ///
-    /// - Source children are removed (or remapped if the target is a child of
-    ///   the same parent).
-    /// - Target children whose parent matches but source comes from a different
-    ///   parent are added (cross-hierarchy relocation).
-    pub fn apply_children_remapping(parent: &Path, children: &mut Vec<String>, relocates: &[(Path, Path)]) {
-        let mut to_remove = Vec::new();
-        let mut to_add: Vec<String> = Vec::new();
-
-        for (i, name) in children.iter().enumerate() {
-            let Ok(child_path) = parent.append_path(name.as_str()) else {
-                continue;
-            };
-            if let Some(target) = relocates.iter().find(|(s, _)| *s == child_path).map(|(_, t)| t) {
-                to_remove.push(i);
-                if !target.is_empty() {
-                    if let Some(tname) = target.name() {
-                        let tname = tname.to_string();
-                        if target.parent().as_ref() == Some(parent) && !children.contains(&tname) {
-                            to_add.push(tname);
-                        }
-                    }
-                }
-            }
-        }
-
-        for &i in to_remove.iter().rev() {
-            children.remove(i);
-        }
-        for name in to_add {
-            if !children.contains(&name) {
-                children.push(name);
-            }
-        }
-
-        // Cross-hierarchy: add targets whose parent is this prim but source is
-        // from a different parent.
-        for (source, target) in relocates {
-            if target.is_empty() {
-                continue;
-            }
-            if target.parent().as_ref() == Some(parent) {
-                if let Some(tname) = target.name() {
-                    let name = tname.to_string();
-                    if !children.contains(&name) && source.parent().as_ref() != Some(parent) {
-                        children.push(name);
-                    }
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Private helpers
-    // ------------------------------------------------------------------
 
     /// Raw (unchained) effective relocates. Each layer's relocates are mapped
     /// through namespace mappings found in cached prims.
