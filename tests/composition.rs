@@ -162,18 +162,15 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///   builder (the sole composition engine) does not yet reproduce. The deeper
 ///   relocate cases remaining are relocate/connection target remapping through
 ///   relocates (`ErrorInvalidPreRelocateTargetPath`,
-///   `BasicRelocateToAnimInterfaceAsNewRootPrim`), salted-earth elision of a
-///   relocation source reached through a variant
-///   (`ElidedAncestralRelocates`), and cross-arc implied relocations. Several
-///   `Error*` cases otherwise compose correctly and wait only on the `Errors`
-///   trailer above.
+///   `BasicRelocateToAnimInterfaceAsNewRootPrim`) and cross-arc implied
+///   relocations. Several `Error*` cases otherwise compose correctly and wait
+///   only on the `Errors` trailer above.
 ///
 /// Permanently unreproducible goldens live in [`UNREPRODUCIBLE_GOLDEN`] instead.
 /// Assets outside both lists are compared byte-for-byte; a real composition
 /// mismatch there is a bug to fix, not a reason to suppress.
 const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "BasicRelocateToAnimInterfaceAsNewRootPrim_root",
-    "ElidedAncestralRelocates_root",
     "ErrorArcCycle_root",
     "ErrorInconsistentProperties_root",
     "ErrorInvalidAuthoredRelocates_root",

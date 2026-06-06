@@ -1182,10 +1182,16 @@ impl<'a, 'f> Builder<'a, 'f> {
     }
 
     /// Marks `root` and its whole subtree culled so they contribute no opinions
-    /// (C++ `_ElideSubtree`).
+    /// (C++ `_ElideSubtree`). The spec-contribution restriction depth is also
+    /// pinned to 1, so a later ancestral task (notably an ancestral variant
+    /// re-evaluated at the top level) sees the elided node as non-contributing
+    /// and does not graft a live arc beneath it (C++ `_ElideSubtree`'s
+    /// `SetSpecContributionRestrictedDepth(1)`).
     fn elide_subtree(&mut self, root: NodeId) {
         for id in self.subtree_nodes(root) {
-            self.output.nodes[id.idx()].flags |= NodeFlags::CULLED;
+            let n = &mut self.output.nodes[id.idx()];
+            n.flags |= NodeFlags::CULLED;
+            n.restriction_depth = 1;
         }
     }
 
