@@ -718,6 +718,58 @@ composition_tests! {
     VariantSpecializesAndReferenceSurprisingBehavior_root,
 }
 
+/// Composition over assets with arc cycles and invalid relocates must terminate
+/// (these once overflowed the stack or hung). The compliance harness suppresses
+/// these assets for their `Errors` trailer, and `run_existence` skips error
+/// cases without traversing — so the termination + composed-result guarantees
+/// are exercised here directly.
+#[cfg(test)]
+mod cycle_termination {
+    use super::*;
+
+    fn open(asset: &str) -> usd::Stage {
+        let entry = Path::new(ASSETS).join(asset).join("usda").join("root.usd");
+        open_stage(&entry)
+    }
+
+    /// `ErrorArcCycle` mixes reference, inherit, self-inherit, co-recursive, and
+    /// ancestral-reference cycles. Traversing every prim must finish, and the
+    /// dropped cycle arcs must leave the documented composed shape: the reference
+    /// diamond keeps three nodes, while the self- and co-recursive inherits gain
+    /// no runaway namespace child.
+    #[test]
+    fn error_arc_cycle_terminates() {
+        let stage = open("ErrorArcCycle_root");
+        let mut count = 0;
+        stage.traverse(usd::PrimPredicate::ALL, |_| count += 1).unwrap();
+        assert!(count > 0, "traversal composed at least one prim");
+
+        // The reference diamond GroupRoot -> A -> B -> A keeps GroupA's child.
+        let group_root = stage.prim_at(sdf::path("/GroupRoot").unwrap());
+        assert_eq!(group_root.child_names().unwrap(), vec!["ChildA"]);
+
+        // A prim inheriting its own ancestor gains no further self-named child.
+        let yap_child = stage.prim_at(sdf::path("/YetAnotherParent/Child").unwrap());
+        assert!(yap_child.child_names().unwrap().is_empty());
+
+        // The co-recursive inherit resolves one level then drops the cycle.
+        let corec = stage.prim_at(sdf::path("/CoRecursiveParent1/Child1/Child2").unwrap());
+        assert!(corec.child_names().unwrap().is_empty());
+    }
+
+    /// `bug92827` authors a relocate whose target is an ancestor of its source.
+    /// The relocate is invalid and dropped (it once hung), while the layer's
+    /// valid relocate still makes `B` a prohibited child of `/Rig/Other/A`.
+    #[test]
+    fn bug92827_invalid_relocate_dropped() {
+        let stage = open("bug92827_root");
+        let a = stage.prim_at(sdf::path("/Rig/Other/A").unwrap());
+        let (children, prohibited) = a.prim_index().child_names().unwrap();
+        assert_eq!(children, vec!["Instance"]);
+        assert_eq!(prohibited, vec!["B"]);
+    }
+}
+
 #[cfg(test)]
 mod reorder {
     use super::*;

@@ -455,8 +455,10 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// target cannot be resolved is recorded and skipped, so the rest of the prim
     /// still composes). The graph is `None` when the seed cannot be established or
     /// the runaway nesting backstop trips, which the cache treats as an empty prim
-    /// index. A genuine composition cycle aborts the build as
-    /// [`Error::ArcCycle`] by [`arc_target_in_bounds`](Self::arc_target_in_bounds).
+    /// index. A composition cycle is likewise recorded as [`Error::ArcCycle`] and
+    /// the cycle-closing arc dropped (by [`class_arc_is_cycle`](Self::class_arc_is_cycle)
+    /// for inherits/specializes and [`arc_target_in_bounds`](Self::arc_target_in_bounds)
+    /// for references/payloads), so the rest of the prim still composes.
     pub(crate) fn build(mut self, path: &Path) -> Result<BuildOutput, Error> {
         // Backstop pathological growth that site-identity cycle detection cannot
         // catch — an unbounded chain of ever-deeper sites that never repeats.
@@ -1812,6 +1814,26 @@ impl<'a, 'f> Builder<'a, 'f> {
         let parent_layers = self.node(parent).layer_stack().to_vec();
         let rep = parent_layers[0].0;
 
+        // A class arc whose target is nested with an ancestor node's site — in the
+        // same layer stack, the target path being a prefix of, or prefixed by, that
+        // site — is a composition cycle: the inheriting prim would contain, or be
+        // contained by, what it inherits, so following the arc re-introduces the
+        // same prim forever (the self- and co-recursive inherits in `ErrorArcCycle`).
+        // Record the cycle and drop the arc; the rest of the prim still composes
+        // (C++ `_CheckForCycle` / `_HasAncestorCycle`). Only directly-authored
+        // arcs are checked: an implied class arc is a propagated copy of one
+        // already vetted where it was authored, and propagation deliberately
+        // lands it at nested namespace sites (the spooky / symmetric-rig inherits),
+        // which the cycle test would otherwise reject (C++ excludes implied
+        // class-based arcs under relocates from the check).
+        if !implied && self.class_arc_is_cycle(parent, rep, &inherit_path) {
+            self.errors.push(Error::ArcCycle {
+                path: self.site.path.clone(),
+                depth: self.frame_depth,
+            });
+            return Ok(None);
+        }
+
         // Dedup: a matching child already inherits this site.
         if let Some(existing) = self.find_matching_child(parent, rep, &inherit_path, arc, &inherit_map, origin) {
             return Ok(Some(existing));
@@ -2324,11 +2346,17 @@ impl<'a, 'f> Builder<'a, 'f> {
         if self.frame_skip() && self.find_duplicate(rep, &source) {
             return Ok(());
         }
+        // A reference/payload that lands back on an active ancestor site closes a
+        // composition cycle (C++ `_CheckForCycle`): record it and skip just this
+        // arc, leaving the chain composed so far intact, rather than abandoning the
+        // whole prim. The reference diamond `GroupRoot → A → B → A` keeps its
+        // `[GroupRoot, GroupA, GroupB]` stack and drops only the closing `B → A`.
         if !self.arc_target_in_bounds(parent, rep, &source) {
-            return Err(Error::ArcCycle {
+            self.errors.push(Error::ArcCycle {
                 path: self.site.path.clone(),
                 depth: self.frame_depth,
             });
+            return Ok(());
         }
 
         // Variant selections address opinion storage but are not part of
@@ -2409,18 +2437,41 @@ impl<'a, 'f> Builder<'a, 'f> {
         }
     }
 
+    /// Whether a class-based arc (inherit/specialize) to `(rep, path)` under
+    /// `parent` closes a composition cycle (C++ `_CheckForCycle` /
+    /// `_HasAncestorCycle`): walking the parent chain, an ancestor node in the
+    /// same layer stack whose site is nested with `path` — its path a prefix of,
+    /// or prefixed by, `path` — means the arc would re-introduce a prim that
+    /// contains or is contained by the inheriting one. Variant arcs are not
+    /// class-based and never reach here.
+    fn class_arc_is_cycle(&self, parent: NodeId, rep: usize, path: &Path) -> bool {
+        let mut cur = parent;
+        while cur.is_valid() {
+            let n = self.node(cur);
+            if n.layer_index() == rep && n.path.is_nested_with(path) {
+                return true;
+            }
+            cur = n.parent().unwrap_or(NodeId::INVALID);
+        }
+        false
+    }
+
     /// Returns `true` when an arc to `(root_layer, path)` under `parent` is
     /// within the depth bound and is not a composition cycle (C++
     /// `_CheckForCycle`). The walk crosses stack frames: it visits the target's
     /// ancestor sites in this graph, then each parent frame still under
     /// composition, rejecting an arc that lands back on an active ancestor site.
+    /// An ancestor site in the same layer stack that is nested with `path` (its
+    /// path a prefix of, or prefixed by, the target) closes the cycle — covering
+    /// the ancestral reference cycle `AnotherChild → Model → AnotherParent`, where
+    /// the target is a namespace ancestor of the composing prim.
     fn arc_target_in_bounds(&self, parent: NodeId, root_layer: usize, path: &Path) -> bool {
         // Count the arc target node itself, then each ancestor up to the root.
         let mut depth = 1;
         let mut cur = parent;
         while cur.is_valid() {
             let n = self.node(cur);
-            if n.layer_index() == root_layer && &n.path == path {
+            if n.layer_index() == root_layer && n.path.is_nested_with(path) {
                 return false;
             }
             depth += 1;
