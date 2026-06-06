@@ -63,7 +63,7 @@ impl PrimIndex {
     /// they sit in the arena. Inert and culled nodes are skipped — they
     /// contribute no opinions. The iterator is cheap and re-creatable; call it
     /// again for another pass rather than collecting.
-    pub fn nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
         self.all_nodes().filter(|node| !node.is_culled())
     }
 
@@ -73,7 +73,7 @@ impl PrimIndex {
     /// propagation adds. Used for composition introspection and change tracking,
     /// where the full arc structure matters even where it contributes no
     /// opinions; value resolution uses [`nodes`](Self::nodes) instead.
-    pub fn all_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+    pub fn all_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
         self.ordered_nodes().filter(|node| !node.is_inert())
     }
 
@@ -89,7 +89,7 @@ impl PrimIndex {
 
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
-    fn ordered_nodes(&self) -> impl Iterator<Item = &Node> + Clone + '_ {
+    fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
         let nodes = &self.graph.nodes;
         self.graph.strength_order.iter().map(move |id| &nodes[id.idx()])
     }
@@ -98,7 +98,7 @@ impl PrimIndex {
     /// graft, which needs each node's [`NodeId`] to rebuild parent links. The
     /// inert synthetic root is skipped, so a grafted target's real roots become
     /// orphans that re-parent under the destination's own root.
-    pub(crate) fn nodes_with_ids(&self) -> impl Iterator<Item = (NodeId, &Node)> + '_ {
+    pub(crate) fn nodes_with_ids(&self) -> impl DoubleEndedIterator<Item = (NodeId, &Node)> + '_ {
         let nodes = &self.graph.nodes;
         self.graph
             .strength_order

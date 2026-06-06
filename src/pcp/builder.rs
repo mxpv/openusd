@@ -1182,16 +1182,22 @@ impl<'a, 'f> Builder<'a, 'f> {
     }
 
     /// Marks `root` and its whole subtree culled so they contribute no opinions
-    /// (C++ `_ElideSubtree`). The spec-contribution restriction depth is also
-    /// pinned to 1, so a later ancestral task (notably an ancestral variant
-    /// re-evaluated at the top level) sees the elided node as non-contributing
-    /// and does not graft a live arc beneath it (C++ `_ElideSubtree`'s
-    /// `SetSpecContributionRestrictedDepth(1)`).
+    /// (C++ `_ElideSubtree`). An unrestricted node's spec-contribution restriction
+    /// depth is also pinned to 1, so a later ancestral task (notably an ancestral
+    /// variant re-evaluated at the top level) sees the elided node as
+    /// non-contributing and does not graft a live arc beneath it (C++
+    /// `_ElideSubtree`'s `SetSpecContributionRestrictedDepth(1)`). A node already
+    /// restricted at a deeper depth — a relocate source pinned to its own path
+    /// depth so its spooky-ancestor opinions stay live (see the salted-earth
+    /// `restriction_depth` assignment in [`build`](Self::build)) — keeps that
+    /// depth; C++ guards the assignment with `if depth == 0` for the same reason.
     fn elide_subtree(&mut self, root: NodeId) {
         for id in self.subtree_nodes(root) {
             let n = &mut self.output.nodes[id.idx()];
             n.flags |= NodeFlags::CULLED;
-            n.restriction_depth = 1;
+            if n.restriction_depth == 0 {
+                n.restriction_depth = 1;
+            }
         }
     }
 
