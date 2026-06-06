@@ -1114,6 +1114,15 @@ impl Cache {
         // relocates are computed there too, before the instance-anchor remap.
         // Chaining follows a multi-step move (`/A/C -> /B/C`, `/B/C -> /D`) to its
         // final target, matching C++'s source-origin-keyed combined relocates map.
+        //
+        // TODO: `effective_relocates` discovers relocates by scanning whichever
+        // prims happen to be cached, so a relocate authored only in an as-yet-
+        // untraversed sibling branch can be missed (the deleted child-name path
+        // used to warm this cache by precaching relocate sources). Route this
+        // through the layer-stack-based relocates (`LayerStack::combined_relocates`,
+        // C++ `PcpLayerStack::GetRelocatesSourceToTarget`), the same source the
+        // per-node child-name fold now uses, to make target remapping independent
+        // of traversal order.
         if !self.relocates.is_empty() {
             let relocates = self.relocates.effective_relocates(&resolved_prim, &self.indices);
             for target in &mut targets {
@@ -1250,29 +1259,39 @@ impl Cache {
         let mut name_set: HashSet<String> = HashSet::new();
         let mut prohibited: HashSet<String> = HashSet::new();
 
-        // Contributing nodes strongest-first; processed in reverse (weak-to-
+        // Contributing nodes are walked in reverse strength order (weak-to-
         // strong) — the order in which C++ `_ComposePrimChildNames` finishes each
         // node, visiting every descendant before its ancestor.
-        let nodes: Vec<&Node> = index
+        let nodes = index
             .nodes_with_ids()
             .filter(|(id, node)| !(node.is_culled() || drop_local && local[id.idx()]))
             .map(|(_, node)| node)
-            .collect();
+            .rev();
 
-        for node in nodes.into_iter().rev() {
+        for node in nodes {
             // Apply this node's layer-stack relocates to the names contributed so
-            // far, then compose the node's own children on top.
-            // TODO(perf): `incremental_relocates` rescans and re-allocates the
+            // far, then compose the node's own children on top. A relocation
+            // source is always a namespace child introduced by a composition arc
+            // (a strictly weaker node), so by the time this node's relocates run
+            // the source name is already in `name_order`; the relocates therefore
+            // correctly run before this node's own `primChildren` fold.
+            //
+            // The pairs are chained within the node's layer stack
+            // (`combined_relocates`, C++ `GetRelocatesSourceToTarget`): a same-
+            // parent chain `A -> B`, `B -> C` resolves `A` straight to `C`, so the
+            // intermediate `B` (a prohibited source) does not survive as the final
+            // name. TODO(perf): `combined_relocates` rescans and re-allocates the
             // node's layer-stack relocates on every node; memoize per layer stack
             // (C++ caches these on `PcpLayerStack`).
             if has_relocates {
-                let pairs = self.stack.incremental_relocates(node.layer_stack());
+                let pairs = self.stack.combined_relocates(node.layer_stack());
                 super::rel::apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);
             }
-            // The node's contributing layers fold weakest-first; `node.layers()`
-            // is strongest-first and not double-ended, so it is reversed here.
-            let layers: Vec<usize> = node.layers().map(|(layer, _)| layer).collect();
-            for layer in layers.into_iter().rev() {
+            // The node's contributing layers fold weakest-first; `layer_stack()`
+            // is strongest-first, so it is reversed here. Only the layer index is
+            // needed (the offset `layers()` folds in is irrelevant to name
+            // composition), so the borrowed slice is reversed in place.
+            for &(layer, _) in node.layer_stack().iter().rev() {
                 let layer_data = self.stack.layer(layer);
                 append_unseen_names(
                     layer_data,
@@ -1699,27 +1718,21 @@ impl Cache {
         let mut result: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Collect (node path, layer) pairs strongest-first, then fold in reverse
-        // so the merge runs weakest-to-strongest across both nodes and, within
-        // each node, its layers. `node.layers()` and the node iterators are not
-        // double-ended, so the flattened pairs are reversed together. The node
-        // paths are borrowed (no clone); `seen` dedups names in O(1) while
-        // `result` preserves order.
-        let sites: Vec<(&Path, usize)> = index
-            .nodes_with_ids()
-            .filter(|(_, node)| !node.is_culled())
-            .flat_map(|(_, node)| node.layers().map(move |(layer, _)| (&node.path, layer)))
-            .collect();
-
-        for (node_path, layer) in sites.into_iter().rev() {
-            let layer_data = self.stack.layer(layer);
-            append_unseen_names(
-                layer_data,
-                node_path,
-                ChildrenKey::PropertyChildren,
-                &mut result,
-                &mut seen,
-            );
+        // Fold weakest-to-strongest across both nodes and, within each node, its
+        // layers: contributing nodes in reverse strength order, and `layer_stack()`
+        // (strongest first) reversed in place. `seen` dedups names in O(1) while
+        // `result` preserves the weakest-position order.
+        for node in index.nodes().rev() {
+            for &(layer, _) in node.layer_stack().iter().rev() {
+                let layer_data = self.stack.layer(layer);
+                append_unseen_names(
+                    layer_data,
+                    &node.path,
+                    ChildrenKey::PropertyChildren,
+                    &mut result,
+                    &mut seen,
+                );
+            }
         }
 
         Ok(result)

@@ -25,20 +25,21 @@
 //! Relocates are non-destructive namespace remapping authored via
 //! `relocates = { </Source>: </Target> }` in a layer's metadata. They
 //! allow moving prims in the composed namespace without modifying the
-//! underlying layers. The `Cache` handles relocates at the scene graph
-//! level:
+//! underlying layers. They are split between the builder and the cache:
 //!
 //! - `layerRelocates` are extracted from each layer's pseudoroot at
 //!   construction and mapped into the composed namespace through each
 //!   layer's namespace mapping.
-//! - When composing a prim that is a relocate target, the cache finds the
-//!   pre-relocation source path, builds a full composition index for it,
-//!   and merges the resulting nodes as `Relocate` arc nodes. Each grafted
-//!   node carries the source site's full layer stack, so a relocate source
-//!   spanning several sublayers keeps every member, not just the strongest.
-//! - Prim children are adjusted to hide relocated source children and
-//!   expose target children, including children created by relocates
-//!   within referenced layers.
+//! - When composing a prim that is a relocate target, the builder
+//!   (`eval_node_relocations`) finds the pre-relocation source path, composes
+//!   it as a sub-index, and grafts the result as a `Relocate` arc node. Each
+//!   grafted node carries the source site's full layer stack, so a relocate
+//!   source spanning several sublayers keeps every member, not just the
+//!   strongest.
+//! - Child names are folded per composition node: each node's layer-stack
+//!   relocates (chained within the layer stack) rename, remove, or add direct
+//!   children, and every relocation source becomes a prohibited name
+//!   (`Cache::compute_prim_child_names` → `rel::apply_child_relocates`).
 //!
 //! # Module structure
 //!
@@ -155,13 +156,19 @@
 //!   (`eval_class_arcs` skips it); it needs C++ `_DetermineInheritPath`'s
 //!   strip/re-add of the selection together with the specializes-copy-to-root
 //!   and reference strength interaction (`SpecializesAndVariants4`).
-//! - "Spooky" relocated opinions. When a relocation source is reached through a
-//!   variant, a symmetric rig, or a multi-relocation chain, its deeper opinions
-//!   must still contribute through the relocate arc; `eval_node_relocations`
-//!   composes the source as a nested sub-index where variants are deferred, so a
-//!   variant-gated source opinion is missed. Cross-arc implied relocations (C++
-//!   `_EvalImpliedRelocations`'s graft) are likewise unported
-//!   (`eval_implied_relocations`'s `TODO(relocates)`).
+//! - Relocate target remapping. A relationship/connection target naming a
+//!   pre-relocation source is remapped through `effective_relocates`, which
+//!   discovers relocates by scanning whichever prims are already cached, so the
+//!   result is traversal-order-dependent rather than derived from the layer
+//!   stack's relocates (`ErrorInvalidPreRelocateTargetPath`,
+//!   `BasicRelocateToAnimInterfaceAsNewRootPrim`; the `TODO` at
+//!   `Cache::compose_property_paths`).
+//! - Relocates re-rooting a prim under an inherit
+//!   (`TrickyInheritsAndRelocates`, `TrickyInheritsAndRelocatesToNewRootPrim`)
+//!   and cross-arc implied relocations (C++ `_EvalImpliedRelocations`'s graft)
+//!   are unported (`eval_implied_relocations`'s `TODO(relocates)`). The
+//!   per-node child-name fold otherwise reproduces the symmetric-rig and
+//!   multi-relocation-chain cases.
 //! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), residual
 //!   implied/nested-class ordering, and prototype-redirection in the instancing
 //!   dump.
@@ -417,9 +424,9 @@ impl LayerStack {
     /// duplicate sources dropped (C++ `PcpLayerStack::GetIncrementalRelocates*`,
     /// the per-layer-stack relocates keyed by their authored source). Unlike
     /// [`combined_relocates`](Self::combined_relocates) the pairs are not chained:
-    /// each keeps its authored source and target, which is what the per-node
-    /// child-name relocate classification needs.
-    pub(crate) fn incremental_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
+    /// each keeps its authored source and target. The unchained form is the base
+    /// `combined_relocates` chains on top of.
+    fn incremental_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
         let mut pairs: Vec<(Path, Path)> = Vec::new();
         for &(layer, _) in ambient {
             let Some(layer_pairs) = self.layer_relocates.get(&layer) else {
@@ -437,8 +444,10 @@ impl LayerStack {
     /// Chains the per-layer authored relocates of `ambient` into a single
     /// source→target map (C++ `PcpLayerStack::GetRelocatesSourceToTarget`): the
     /// strongest layer wins a duplicate source, and a target that is itself a
-    /// relocation source is followed to the final target.
-    fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
+    /// relocation source is followed to the final target. This is the form the
+    /// per-node child-name relocate classification consumes, so a same-parent
+    /// chain resolves to its final target in one pass.
+    pub(crate) fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
         let mut pairs = self.incremental_relocates(ambient);
         // Follow chains: a target that is itself relocated (at or below another
         // relocate's source) maps onward to its final location.

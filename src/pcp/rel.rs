@@ -88,8 +88,10 @@ fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> 
 /// place (C++ `_ComposePrimChildNamesAtNode`'s relocate classification). The
 /// `pairs` are the node layer stack's as-authored relocates; `parent` is the
 /// node's path. Renames keep the source name's position, removes drop it, and
-/// cross-hierarchy targets are appended in lexicographic order. Every relocation
-/// source under `parent` is recorded in `prohibited`.
+/// cross-hierarchy targets are appended in lexicographic name order — which, for
+/// targets sharing `parent`, matches the path order C++ folds them in from the
+/// `std::map`-backed `SdfRelocatesMap`. Every relocation source under `parent`
+/// is recorded in `prohibited`.
 pub(crate) fn apply_child_relocates(
     parent: &Path,
     pairs: &[(Path, Path)],
@@ -97,8 +99,9 @@ pub(crate) fn apply_child_relocates(
     name_set: &mut HashSet<String>,
     prohibited: &mut HashSet<String>,
 ) {
-    let mut renames: HashMap<String, String> = HashMap::new();
-    let mut removes: HashSet<String> = HashSet::new();
+    // A source child maps to `Some(new_name)` (renamed in place) or `None`
+    // (removed — moved to a different parent or deleted).
+    let mut relocations: HashMap<String, Option<String>> = HashMap::new();
     let mut adds: BTreeSet<String> = BTreeSet::new();
 
     for (src, tgt) in pairs {
@@ -107,16 +110,10 @@ pub(crate) fn apply_child_relocates(
         if src_is_child {
             if let Some(name) = src.name() {
                 prohibited.insert(name.to_string());
-                match (tgt_is_child, tgt.name()) {
-                    // Target shares the parent: a rename keeps the old position.
-                    (true, Some(tgt_name)) => {
-                        renames.insert(name.to_string(), tgt_name.to_string());
-                    }
-                    // Target moves elsewhere (or is a deletion): a removal.
-                    _ => {
-                        removes.insert(name.to_string());
-                    }
-                }
+                // A target sharing the parent renames in place; anything else
+                // (a move elsewhere or a deletion) removes the child.
+                let rename = tgt_is_child.then(|| tgt.name()).flatten();
+                relocations.insert(name.to_string(), rename.map(str::to_string));
             }
         }
         // A child relocated in from a different parent is an addition.
@@ -127,21 +124,23 @@ pub(crate) fn apply_child_relocates(
         }
     }
 
-    if !renames.is_empty() || !removes.is_empty() {
+    if !relocations.is_empty() {
         let mut retained: Vec<String> = Vec::with_capacity(name_order.len());
         for name in name_order.drain(..) {
-            if let Some(new_name) = renames.get(&name) {
-                name_set.remove(&name);
-                // A weaker node may already contribute the new name (a "shadow"
-                // child across a reference); the relocation silently drops it
-                // (C++ `_ComposePrimChildNamesAtNode`).
-                if name_set.insert(new_name.clone()) {
-                    retained.push(new_name.clone());
+            match relocations.get(&name) {
+                Some(Some(new_name)) => {
+                    name_set.remove(&name);
+                    // A weaker node may already contribute the new name (a "shadow"
+                    // child across a reference); the relocation silently drops it
+                    // (C++ `_ComposePrimChildNamesAtNode`).
+                    if name_set.insert(new_name.clone()) {
+                        retained.push(new_name.clone());
+                    }
                 }
-            } else if removes.contains(&name) {
-                name_set.remove(&name);
-            } else {
-                retained.push(name);
+                Some(None) => {
+                    name_set.remove(&name);
+                }
+                None => retained.push(name),
             }
         }
         *name_order = retained;
