@@ -162,6 +162,12 @@ pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> HashMap<usize, V
     for (i, layer) in layers.iter().enumerate() {
         if let Ok(val) = layer.get(&root, FieldKey::LayerRelocates.as_str()) {
             if let Value::Relocates(pairs) = val.into_owned() {
+                // TODO(errors): an invalid relocate is dropped silently here.
+                // C++ records `PcpErrorInvalidAuthoredRelocates` ("Relocation
+                // ... is invalid and will be ignored", per the bug92827 golden);
+                // once the layer-stack `Errors` trailer exists, surface each
+                // dropped pair as a recoverable error instead of discarding it.
+                let pairs: Vec<(Path, Path)> = pairs.into_iter().filter(|(s, t)| is_valid_relocate(s, t)).collect();
                 if !pairs.is_empty() {
                     out.insert(i, pairs);
                 }
@@ -169,6 +175,20 @@ pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> HashMap<usize, V
         }
     }
     out
+}
+
+/// Whether an authored relocate `source -> target` is structurally valid (C++
+/// `Pcp_ComputeRelocationsForLayerStack`'s authored-relocate validation). An
+/// invalid relocate is ignored rather than composed; composing one whose source
+/// and target are nested recurses without terminating (the bug-92827 hang).
+///
+/// A deletion relocate (empty target) is always valid. Otherwise the source and
+/// target must not be nested within one another: a relocate whose target is an
+/// ancestor of its source (or vice versa, or identical) cannot be composed
+/// because the moved prim would contain — or be contained by — its own
+/// destination.
+fn is_valid_relocate(source: &Path, target: &Path) -> bool {
+    target.is_empty() || !source.is_nested_with(target)
 }
 
 impl Relocates {
@@ -308,6 +328,26 @@ impl Relocates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relocate is invalid when its source and target are nested within one
+    /// another (C++ "the target of a relocate cannot be an ancestor of its
+    /// source"). Composing such a relocate recurses forever (bug 92827), so the
+    /// pair is dropped at extraction. Deletion (empty target) and disjoint
+    /// source/target pairs stay valid.
+    #[test]
+    fn relocate_validity() {
+        let p = Path::from;
+        // Target is an ancestor of the source (the bug-92827 hang).
+        assert!(!is_valid_relocate(&p("/Rig/Other/A/Instance/A"), &p("/Rig/Other/A")));
+        // Source is an ancestor of the target.
+        assert!(!is_valid_relocate(&p("/A"), &p("/A/B")));
+        // Identical source and target.
+        assert!(!is_valid_relocate(&p("/A/B"), &p("/A/B")));
+        // Disjoint move — the ordinary valid case.
+        assert!(is_valid_relocate(&p("/Rig/Model"), &p("/Group/Model")));
+        // Deletion relocate (empty target) keeps its source as a prohibited name.
+        assert!(is_valid_relocate(&p("/Rig/Model"), &p("")));
+    }
 
     /// Only the nearest ancestor rename shifts an endpoint; a relocate's source
     /// is not transitively re-chained through a rename applied to an already-

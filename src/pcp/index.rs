@@ -1528,10 +1528,11 @@ mod tests {
         Box::new(crate::usda::TextReader::from_data(data))
     }
 
-    /// Composition depth exceeding the limit returns `Error::ArcCycle`
-    /// instead of panicking.
+    /// A reference cycle is recorded as a recoverable `Error::ArcCycle` and the
+    /// cycle-closing arc is skipped, rather than aborting the whole build (C++
+    /// `_CheckForCycle` drops the arc and continues).
     #[test]
-    fn arc_cycle_returns_error() -> Result<()> {
+    fn arc_cycle_recorded() -> Result<()> {
         // A.usd references B.usd which references A.usd — cycle.
         let a = parse_usda(
             r#"#usda 1.0
@@ -1560,22 +1561,26 @@ def "Root" (
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
-        let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
+        let (_index, errors) = PrimIndex::build_with_cache(
+            &Path::from("/Root"),
+            &stack,
+            &CompositionContext::default(),
+            &HashMap::new(),
+        )?;
         assert!(
-            matches!(result, Err(Error::ArcCycle { .. })),
-            "expected ArcCycle error, got {result:?}"
+            errors.iter().any(|e| matches!(e, Error::ArcCycle { .. })),
+            "expected a recorded ArcCycle error, got {errors:?}"
         );
         Ok(())
     }
 
     /// A cycle realized across stack frames — `/Root` references a sub-root prim
-    /// in another layer that references back into `/Root` — is reported as
-    /// `ArcCycle`, not silently composed to an empty prim index. The sub-root
-    /// target composes an ancestral sub-index in its own frame, so the
-    /// back-reference is only caught by the cross-frame walk in
-    /// `arc_target_in_bounds`.
+    /// in another layer that references back into `/Root` — is recorded as
+    /// `ArcCycle`, not silently composed away. The sub-root target composes an
+    /// ancestral sub-index in its own frame, so the back-reference is only caught
+    /// by the cross-frame walk in `arc_target_in_bounds`.
     #[test]
-    fn subroot_arc_cycle_returns_error() -> Result<()> {
+    fn subroot_arc_cycle_recorded() -> Result<()> {
         let a = parse_usda(
             r#"#usda 1.0
 (
@@ -1603,10 +1608,15 @@ def "Outer"
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
         let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
 
-        let result = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default());
+        let (_index, errors) = PrimIndex::build_with_cache(
+            &Path::from("/Root"),
+            &stack,
+            &CompositionContext::default(),
+            &HashMap::new(),
+        )?;
         assert!(
-            matches!(result, Err(Error::ArcCycle { .. })),
-            "expected ArcCycle error for a cross-frame cycle, got {result:?}"
+            errors.iter().any(|e| matches!(e, Error::ArcCycle { .. })),
+            "expected a recorded ArcCycle error for a cross-frame cycle, got {errors:?}"
         );
         Ok(())
     }

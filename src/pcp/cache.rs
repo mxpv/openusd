@@ -74,6 +74,14 @@ pub struct Cache {
     /// the cache borrow is released, so the handler may re-enter) and routes
     /// them to its error handler.
     pending_errors: Vec<Error>,
+    /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
+    /// stack. Pre-caching an inherit/specialize target (and that target's own
+    /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
+    /// prims that inherit each other) would otherwise recurse forever before any
+    /// of them is inserted into `indices`. Re-entry for an in-progress path
+    /// returns early, so the cycle-closing arc simply finds no cached target and
+    /// drops out of composition.
+    in_progress: HashSet<Path>,
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
@@ -168,6 +176,7 @@ impl Cache {
             prototype_keys: HashMap::new(),
             prototype_count: 0,
             pending_errors: Vec::new(),
+            in_progress: HashSet::new(),
         }
     }
 
@@ -1578,7 +1587,31 @@ impl Cache {
         if self.indices.contains_key(path) {
             return Ok(());
         }
+        // Composing a prim whose ancestor is still mid-build cannot seed from that
+        // ancestor's opinions. This happens only when pre-caching an
+        // inherit/specialize target that is a namespace descendant of an
+        // in-progress ancestor (a prim inheriting its own descendant). The
+        // descendant may be more than one level down (`/A` inheriting `/A/B/C`),
+        // so every strict ancestor is checked, not just the parent. Defer without
+        // caching an under-seeded result; a later query composes it correctly once
+        // the ancestor is cached, and the cycle-closing arc finds no cached target.
+        if self.in_progress.iter().any(|a| a != path && path.has_prefix(a)) {
+            return Ok(());
+        }
+        // A re-entrant call for a path already mid-build is a class-hierarchy
+        // cycle reached through inherit/specialize pre-caching. Bail out: the
+        // outer build finishes, and the cycle-closing arc finds no cached target.
+        if !self.in_progress.insert(path.clone()) {
+            return Ok(());
+        }
+        let result = self.build_index(path);
+        self.in_progress.remove(path);
+        result
+    }
 
+    /// Builds and caches the index for `path`, assuming `path` is already
+    /// recorded in [`in_progress`](Self::in_progress) (see [`ensure_index`](Self::ensure_index)).
+    fn build_index(&mut self, path: &Path) -> Result<()> {
         // Compose ancestors first so the parent's `CompositionContext` (and
         // its `within_instance` flag, spec 11.3.3) is available. Composition
         // is a pure function of the layer stack, path, and parent context, so
@@ -1779,6 +1812,14 @@ mod tests {
         LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
     }
 
+    /// Builds a one-layer stack from in-memory USDA text, for composition cases
+    /// that need no on-disk asset.
+    fn in_memory_stack(text: &str) -> LayerStack {
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true)
+    }
+
     /// Builds a one-layer stack whose root is loaded from a real path, so the
     /// resolver can anchor clip asset paths relative to it.
     fn single_layer_stack(path: &str) -> LayerStack {
@@ -1814,6 +1855,45 @@ mod tests {
         // Second lookup is a cache hit; a bogus path resolves to None.
         assert!(cache.clip_layer("./clip.usda", 0)?.is_some());
         assert!(cache.clip_layer("./does_not_exist.usda", 0)?.is_none());
+        Ok(())
+    }
+
+    /// A prim inheriting its own grand-descendant (`/A` inherits `/A/B/C`) is a
+    /// cycle whose arc is dropped, but composing `/A` must not cache an
+    /// under-seeded `/A/B/C`. The inherit-target precache builds `/A/B/C` while
+    /// `/A` is in progress, and its parent `/A/B` is not the in-progress prim, so
+    /// the deferral guard must check every ancestor, not just the parent. `/A/B`
+    /// references `</Lib/Ref>`, so a correctly-seeded `/A/B/C` exposes the
+    /// reference's `mark` property.
+    #[test]
+    fn grandchild_inherit_target_seeds_ancestors() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Lib" {
+    def "Ref" {
+        def "C" { custom string mark = "from-ref" }
+    }
+}
+def "A" (
+    inherits = </A/B/C>
+)
+{
+    def "B" (
+        references = </Lib/Ref>
+    )
+    {
+    }
+}
+"#;
+        let mut cache = Cache::new(in_memory_stack(text), VariantFallbackMap::new());
+        // Compose /A first so its inherit-target precache runs before /A/B/C is
+        // queried; the precache must not leave a stale, parentless /A/B/C cached.
+        cache.ensure_index(&sdf::path("/A")?)?;
+        assert!(
+            cache
+                .prim_properties(&sdf::path("/A/B/C")?)?
+                .contains(&"mark".to_string()),
+            "/A/B/C must inherit the reference's `mark` via /A/B even when reached through /A's precache"
+        );
         Ok(())
     }
 

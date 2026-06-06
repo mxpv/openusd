@@ -462,6 +462,14 @@ impl Path {
             || prefix.is_prim_variant_selection_path()
     }
 
+    /// Whether this path and `other` are nested — one is a prefix of the other,
+    /// or they are equal. The symmetric form of [`has_prefix`](Self::has_prefix);
+    /// used to detect relocates and composition arcs whose endpoints would
+    /// contain, or be contained by, one another.
+    pub fn is_nested_with(&self, other: &Path) -> bool {
+        self.has_prefix(other) || other.has_prefix(self)
+    }
+
     /// Replaces a prefix path with a new prefix, used for namespace remapping
     /// during composition (e.g. references and inherits).
     ///
