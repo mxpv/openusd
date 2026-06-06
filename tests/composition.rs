@@ -160,12 +160,13 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
 ///   trailer for, but the composition itself is otherwise reproducible.
 /// - A known composition gap: the golden is a genuine mismatch the task-queue
 ///   builder (the sole composition engine) does not yet reproduce. The deeper
-///   relocate cases remaining are relocates interacting with classes and
-///   variants (the relocation source's class/variant children, the spooky
-///   implied-inherit-across-relocate, and cross-arc implied relocations), plus a
-///   class arc authored inside a selected variant. The clusters at the end of
-///   the list are each tagged with a `TODO` naming the missing mechanism; remove
-///   an asset once its cluster lands.
+///   relocate cases remaining are relocate/connection target remapping through
+///   relocates (`ErrorInvalidPreRelocateTargetPath`,
+///   `BasicRelocateToAnimInterfaceAsNewRootPrim`), salted-earth elision of a
+///   relocation source reached through a variant
+///   (`ElidedAncestralRelocates`), and cross-arc implied relocations. Several
+///   `Error*` cases otherwise compose correctly and wait only on the `Errors`
+///   trailer above.
 ///
 /// Permanently unreproducible goldens live in [`UNREPRODUCIBLE_GOLDEN`] instead.
 /// Assets outside both lists are compared byte-for-byte; a real composition
@@ -190,10 +191,6 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "SubrootReferenceNonCycle_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
-    "TrickyMultipleRelocations4_root",
-    "TrickyMultipleRelocationsAndClasses_root",
-    "TrickySpecializesAndRelocates_root",
-    "TrickySpookyInheritsInSymmetricBrowRig_root",
     "bug92827_root",
 ];
 

@@ -5,10 +5,10 @@
 //! [`CompositionContext`] that flows from parent prims to children, so ancestor
 //! composition is never recomputed.
 //!
-//! Relocates (`layerRelocates`) are handled at the cache level: source paths
-//! are resolved, full composition indices are built for them, and the results
-//! are merged as `ArcType::Relocate` nodes. The child name lists are
-//! adjusted to hide relocated sources and expose targets.
+//! Relocates (`layerRelocates`) are composed by the builder as `ArcType::Relocate`
+//! nodes; the cache applies each node's layer-stack relocates while folding the
+//! child-name list (`compute_prim_child_names`), renaming or hiding relocated
+//! sources and exposing targets in place.
 
 use std::collections::{HashMap, HashSet};
 
@@ -1199,53 +1199,105 @@ impl Cache {
         Ok(Some(value.into_owned()))
     }
 
-    /// Returns the composed list of child names for a prim path.
-    ///
-    /// Merges `primChildren` across all composition nodes weakest-to-strongest,
-    /// reapplying each layer's `primOrder` as it folds (see
-    /// [`Self::composed_children`]). When relocates are present, source children
-    /// are then hidden and target children added.
+    /// Returns the composed list of child names for a prim path (C++
+    /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
     pub fn prim_children(&mut self, path: &Path) -> Result<Vec<String>> {
-        let path = &self.effective_path(path)?;
-        let mut children = self.composed_children(path, ChildrenKey::PrimChildren, Some(FieldKey::PrimOrder))?;
-
-        if !self.relocates.is_empty() {
-            self.apply_relocates_to_children(path, &mut children);
-        }
-
-        Ok(children)
+        Ok(self.compute_prim_child_names(path)?.0)
     }
 
     /// Composes a prim's child names alongside the names prohibited at it (C++
-    /// `PcpPrimIndex::ComputePrimChildNames`, whose `nameOrder` and
-    /// `prohibitedNames` out-params this returns as a pair). A prohibited name is
-    /// a child relocated away from this prim (renamed or deleted) that cannot be
-    /// re-introduced here.
+    /// `PcpPrimIndex::ComputePrimChildNames` / `_ComposePrimChildNames`, whose
+    /// `nameOrder` and `prohibitedNames` out-params this returns as a pair).
+    ///
+    /// The composition graph is walked weakest-to-strongest. At each contributing
+    /// node, the relocates authored in that node's layer stack are applied to the
+    /// names contributed so far (`rel::apply_child_relocates`) — a child renamed
+    /// within the same parent keeps the source's position, a child relocated to a
+    /// different parent is removed, and a child relocated in from elsewhere is
+    /// appended (lexicographically) — and then the node's own `primChildren` /
+    /// `primOrder` compose over the running order (mirroring C++
+    /// `_ComposePrimChildNamesAtNode`). Every relocation source becomes a
+    /// prohibited name, removed from the final order.
+    ///
+    /// Within a node, the contributing layers fold weakest-first: each appends
+    /// its not-yet-seen names in authored order, then its `primOrder` opinion
+    /// reshuffles the running list, so several sublayers can contribute partial
+    /// orderings. The recursive build already grafts inherit/specialize/reference
+    /// targets with their subtrees, so a single structural walk covers class
+    /// children. On an instance prim, locally-authored children are dropped (spec
+    /// 11.3.3) so the children come only from the composition arcs.
     pub fn compute_prim_child_names(&mut self, path: &Path) -> Result<(Vec<String>, Vec<String>)> {
-        let children = self.prim_children(path)?;
-        let prohibited = self.prohibited_children(path)?;
-        Ok((children, prohibited))
-    }
-
-    /// Returns the prohibited child names for a prim: the names of children that
-    /// have been relocated away from this prim (a relocation source, whether
-    /// renamed or deleted), sorted. These names cannot be re-introduced here
-    /// (C++ `PcpPrimIndex::ComputePrimChildNames`'s prohibited-names out-param).
-    fn prohibited_children(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = self.effective_path(path)?;
-        if self.relocates.is_empty() {
-            return Ok(Vec::new());
-        }
         self.ensure_index(&path)?;
-        let effective = self.relocates.effective_relocates(&path, &self.indices);
-        let mut names: Vec<String> = effective
-            .iter()
-            .filter(|(src, _)| src.parent().as_ref() == Some(&path))
-            .filter_map(|(src, _)| src.name().map(str::to_string))
+
+        // An instance prim's children come only from its composition arcs;
+        // opinions authored at the instance's own namespace — the local root and
+        // the ancestral references above the instanceable arc — are discarded
+        // (spec 11.3.3). The instance prim's own index is otherwise left intact.
+        let drop_local = self.is_instance(&path)?;
+
+        let index = &self.indices[&path];
+        // The instance-local partition is keyed by the prim's own namespace depth
+        // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
+        let local = if drop_local {
+            index.instance_local_nodes(path.prim_element_count() as u16)
+        } else {
+            Vec::new()
+        };
+
+        let has_relocates = self.stack.has_relocates;
+        let mut name_order: Vec<String> = Vec::new();
+        let mut name_set: HashSet<String> = HashSet::new();
+        let mut prohibited: HashSet<String> = HashSet::new();
+
+        // Contributing nodes strongest-first; processed in reverse (weak-to-
+        // strong) — the order in which C++ `_ComposePrimChildNames` finishes each
+        // node, visiting every descendant before its ancestor.
+        let nodes: Vec<&Node> = index
+            .nodes_with_ids()
+            .filter(|(id, node)| !(node.is_culled() || drop_local && local[id.idx()]))
+            .map(|(_, node)| node)
             .collect();
-        names.sort();
-        names.dedup();
-        Ok(names)
+
+        for node in nodes.into_iter().rev() {
+            // Apply this node's layer-stack relocates to the names contributed so
+            // far, then compose the node's own children on top.
+            // TODO(perf): `incremental_relocates` rescans and re-allocates the
+            // node's layer-stack relocates on every node; memoize per layer stack
+            // (C++ caches these on `PcpLayerStack`).
+            if has_relocates {
+                let pairs = self.stack.incremental_relocates(node.layer_stack());
+                super::rel::apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);
+            }
+            // The node's contributing layers fold weakest-first; `node.layers()`
+            // is strongest-first and not double-ended, so it is reversed here.
+            let layers: Vec<usize> = node.layers().map(|(layer, _)| layer).collect();
+            for layer in layers.into_iter().rev() {
+                let layer_data = self.stack.layer(layer);
+                append_unseen_names(
+                    layer_data,
+                    &node.path,
+                    ChildrenKey::PrimChildren,
+                    &mut name_order,
+                    &mut name_set,
+                );
+                if let Ok(Value::TokenVec(order)) = layer_data
+                    .get(&node.path, FieldKey::PrimOrder.as_str())
+                    .map(|v| v.into_owned())
+                {
+                    sdf::apply_ordering(&mut name_order, &order);
+                }
+            }
+        }
+
+        // Names relocated away cannot reappear here (C++ removes the prohibited
+        // set from the composed order after the walk).
+        if !prohibited.is_empty() {
+            name_order.retain(|name| !prohibited.contains(name));
+        }
+        let mut prohibited: Vec<String> = prohibited.into_iter().collect();
+        prohibited.sort();
+        Ok((name_order, prohibited))
     }
 
     /// Returns the composed list of property names for a prim path.
@@ -1256,7 +1308,7 @@ impl Cache {
     /// composed property order follows authoring order alone.
     pub fn prim_properties(&mut self, path: &Path) -> Result<Vec<String>> {
         let path = &self.effective_path(path)?;
-        self.composed_children(path, ChildrenKey::PropertyChildren, None)
+        self.composed_property_names(path)
     }
 
     /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
@@ -1629,104 +1681,68 @@ impl Cache {
         }
     }
 
-    /// Applies relocate namespace remapping to a list of child names.
+    /// Composes a prim's property names across its composition index, folding
+    /// `propertyChildren` weakest-to-strongest (C++ `_ComposePrimPropertyNames`).
     ///
-    /// Per-node layer relocates are applied first, then effective relocates
-    /// remap source children to targets and add cross-hierarchy targets.
-    /// Source ancestor chains are pre-cached so their prim indices are
-    /// available when building relocated target indices later.
-    fn apply_relocates_to_children(&mut self, path: &Path, children: &mut Vec<String>) {
-        self.relocates.apply_node_relocates(path, children, &self.indices);
-
-        let effective = self.relocates.effective_relocates(path, &self.indices);
-        if !effective.is_empty() {
-            for (src, _) in &effective {
-                self.precache_path(src);
-            }
-            Relocates::apply_children_remapping(path, children, &effective);
-        }
-    }
-
-    /// Composes a children-name field (`primChildren` / `propertyChildren`)
-    /// across the prim's composition index, folding opinions
-    /// weakest-to-strongest and reapplying `order_field` after each contributing
-    /// layer. `order_field` is `Some(primOrder)` for prim children and `None`
-    /// for properties, since USD value resolution ignores `reorder properties`
-    /// (C++ `_ComposePrimPropertyNames` passes a null order field in USD mode).
-    ///
-    /// This mirrors C++ `PcpComposeSiteChildNames`: nodes are visited weakest
-    /// first (the reverse of strength order), and within each node its
-    /// contributing layers are visited weakest first. Each layer appends its
-    /// not-yet-seen names in authored order — so a name keeps its weakest
-    /// position — and the layer's order opinion then reshuffles the running
-    /// list. Folding the order after every layer, rather than applying only the
-    /// strongest opinion once at the end, is what lets several sublayers
-    /// contribute partial orderings that compose like C++ `Pcp`.
-    ///
-    /// The recursive build grafts inherit/specialize/reference targets with
-    /// their subtrees, so the index nodes already cover class children; this is
-    /// a single structural walk with no separate target rediscovery. On an
-    /// instance prim, `primChildren` from local opinions are dropped (spec
-    /// 11.3.3) so the children come only from the composition arcs.
-    fn composed_children(
-        &mut self,
-        path: &Path,
-        children_field: ChildrenKey,
-        order_field: Option<FieldKey>,
-    ) -> Result<Vec<String>> {
+    /// Nodes are visited weakest first (the reverse of strength order), and
+    /// within each node its contributing layers weakest first; each layer appends
+    /// its not-yet-seen names in authored order, so a name keeps its weakest
+    /// position. `propertyOrder` is not applied — USD value resolution ignores
+    /// `reorder properties` — so composed property order follows authoring order
+    /// alone. The recursive build already grafts inherit/specialize/reference
+    /// targets with their subtrees, so this single structural walk covers class
+    /// properties with no separate target rediscovery.
+    fn composed_property_names(&mut self, path: &Path) -> Result<Vec<String>> {
         self.ensure_index(path)?;
 
-        // An instance prim's children come only from its composition arcs;
-        // opinions authored at the instance's own namespace — the local root and
-        // the ancestral references above the instanceable arc — are discarded
-        // (spec 11.3.3). The instance prim's own index is otherwise left intact,
-        // so its own properties still see local opinions.
-        let drop_local = matches!(children_field, ChildrenKey::PrimChildren) && self.is_instance(path)?;
-
         let index = &self.indices[path];
-        // The instance-local partition is keyed by the prim's own namespace depth
-        // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
-        let local = if drop_local {
-            index.instance_local_nodes(path.prim_element_count() as u16)
-        } else {
-            Vec::new()
-        };
-        let order_key = order_field.map(|f| f.as_str());
         let mut result: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Collect (node path, layer) pairs strongest-first, then fold in
-        // reverse so the merge runs weakest-to-strongest across both nodes and,
-        // within each node, its layers. `node.layers()` and the node iterators are
-        // not double-ended, so the flattened pairs are reversed together. The
-        // node paths are borrowed (no clone); `seen` dedups names in O(1) while
+        // Collect (node path, layer) pairs strongest-first, then fold in reverse
+        // so the merge runs weakest-to-strongest across both nodes and, within
+        // each node, its layers. `node.layers()` and the node iterators are not
+        // double-ended, so the flattened pairs are reversed together. The node
+        // paths are borrowed (no clone); `seen` dedups names in O(1) while
         // `result` preserves order.
         let sites: Vec<(&Path, usize)> = index
             .nodes_with_ids()
-            .filter(|(id, node)| !(node.is_culled() || drop_local && local[id.idx()]))
+            .filter(|(_, node)| !node.is_culled())
             .flat_map(|(_, node)| node.layers().map(move |(layer, _)| (&node.path, layer)))
             .collect();
 
         for (node_path, layer) in sites.into_iter().rev() {
             let layer_data = self.stack.layer(layer);
-            if let Ok(Value::TokenVec(names)) = layer_data
-                .get(node_path, children_field.as_str())
-                .map(|v| v.into_owned())
-            {
-                for name in names {
-                    if seen.insert(name.clone()) {
-                        result.push(name);
-                    }
-                }
-            }
-            if let Some(order_key) = order_key {
-                if let Ok(Value::TokenVec(order)) = layer_data.get(node_path, order_key).map(|v| v.into_owned()) {
-                    sdf::apply_ordering(&mut result, &order);
-                }
-            }
+            append_unseen_names(
+                layer_data,
+                node_path,
+                ChildrenKey::PropertyChildren,
+                &mut result,
+                &mut seen,
+            );
         }
 
         Ok(result)
+    }
+}
+
+/// Appends a layer's not-yet-seen `field` children (`primChildren` /
+/// `propertyChildren`) to `order` in authored order, recording each in `seen`.
+/// A name already present keeps its weaker position. Shared by the prim- and
+/// property-name folds (C++ `PcpComposeSiteChildNames`'s append step).
+fn append_unseen_names(
+    layer: &sdf::Layer,
+    path: &Path,
+    field: ChildrenKey,
+    order: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if let Ok(Value::TokenVec(names)) = layer.get(path, field.as_str()).map(|v| v.into_owned()) {
+        for name in names {
+            if seen.insert(name.clone()) {
+                order.push(name);
+            }
+        }
     }
 }
 
