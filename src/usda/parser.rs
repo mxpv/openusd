@@ -228,9 +228,13 @@ impl<'a> Parser<'a> {
         let mut pseudo_root_spec = self.read_pseudo_root().context("Unable to parse pseudo root")?;
         let mut root_children = Vec::new();
 
-        // Read root defs.
-        while self.peek_next().is_some() {
-            self.read_prim(&current_path, &mut root_children, &mut data)?;
+        // Read root defs and any layer-level `reorder rootPrims` statements.
+        while let Some(token) = self.peek_next() {
+            if matches!(token, Ok(Token::Reorder)) {
+                self.read_reorder(&mut pseudo_root_spec)?;
+            } else {
+                self.read_prim(&current_path, &mut root_children, &mut data)?;
+            }
         }
 
         if !root_children.is_empty() {
@@ -424,10 +428,12 @@ impl<'a> Parser<'a> {
         Ok((children, properties, variant_sets))
     }
 
-    /// Parse `reorder nameChildren = [...]` or `reorder properties = [...]`.
+    /// Parse `reorder nameChildren = [...]`, `reorder properties = [...]`, or
+    /// the layer-level `reorder rootPrims = [...]`.
     ///
     /// These statements set the `primOrder` or `propertyOrder` fields on the
-    /// owning prim/variant spec, controlling child/property display order.
+    /// owning prim/variant spec, controlling child/property display order;
+    /// `rootPrims` sets `primOrder` on the pseudo-root.
     fn read_reorder(&mut self, owner_spec: &mut sdf::Spec) -> Result<()> {
         self.fetch_next()?; // consume `reorder`
 
@@ -435,7 +441,7 @@ impl<'a> Parser<'a> {
             .fetch_next()
             .context("Expected 'nameChildren' or 'properties' after 'reorder'")?;
         let field_key = match token {
-            Token::NameChildren => FieldKey::PrimOrder,
+            Token::NameChildren | Token::RootPrims => FieldKey::PrimOrder,
             Token::Properties => FieldKey::PropertyOrder,
             other => bail!("Unsupported reorder target: {other:?}"),
         };
@@ -3115,6 +3121,23 @@ def Xform "X"
     fn arc_path_without_variant_selection_ok() {
         let text = "#usda 1.0\ndef \"A\" (\n    inherits = </Class>\n    references = @./r.usd@</Model>\n    variants = { string v = \"x\" }\n)\n{\n}\n";
         assert!(Parser::new(text).parse().is_ok());
+    }
+
+    /// Layer-level `reorder rootPrims` sets `primOrder` on the pseudo-root,
+    /// the same field `reorder nameChildren` uses inside a prim body.
+    #[test]
+    fn reorder_root_prims() {
+        let text = "#usda 1.0\nreorder rootPrims = [\"B\", \"A\"]\ndef \"A\" {}\ndef \"B\" {}\n";
+        let data = Parser::new(text).parse().expect("reorder rootPrims parses");
+        let order = data
+            .get(&sdf::Path::abs_root())
+            .unwrap()
+            .get(FieldKey::PrimOrder.as_str())
+            .expect("primOrder on pseudo-root")
+            .clone()
+            .try_as_token_vec()
+            .expect("primOrder is a token vec");
+        assert_eq!(order, vec!["B".to_string(), "A".to_string()]);
     }
 
     #[test]
