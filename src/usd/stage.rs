@@ -1464,6 +1464,7 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gf;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -1629,7 +1630,7 @@ mod tests {
         // The composed value must come from the stronger layer (blue),
         // not the weaker layer (red). Verify by checking it's not the base red.
         let value = value.unwrap();
-        let base_red = sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]);
+        let base_red = sdf::Value::Vec3fVec(vec![gf::vec3f(1.0, 0.0, 0.0)]);
         assert_ne!(value, base_red, "stronger layer opinion should win over weaker");
 
         Ok(())
@@ -1778,7 +1779,7 @@ mod tests {
         assert!(value.is_some());
 
         // Verify it's the local red, not the inherited green.
-        let green = sdf::Value::Vec3fVec(vec![[0.0, 0.8, 0.0]]);
+        let green = sdf::Value::Vec3fVec(vec![gf::vec3f(0.0, 0.8, 0.0)]);
         assert_ne!(value.unwrap(), green, "local opinion should win over inherited");
 
         Ok(())
@@ -1837,7 +1838,7 @@ mod tests {
         assert!(value.is_some());
 
         // Local is yellow (0.8, 0.8, 0), source is red (0.8, 0, 0).
-        let red = sdf::Value::Vec3fVec(vec![[0.8, 0.0, 0.0]]);
+        let red = sdf::Value::Vec3fVec(vec![gf::vec3f(0.8, 0.0, 0.0)]);
         assert_ne!(value.unwrap(), red, "local opinion should win over specialized");
 
         Ok(())

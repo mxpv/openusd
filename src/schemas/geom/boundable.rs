@@ -14,7 +14,7 @@ pub trait Boundable: Xformable {
     /// `[min, max]`, used as a fast, authored bound for the prim's geometry.
     /// C++ `UsdGeomBoundable::GetExtentAttr`.
     ///
-    /// Type `float3[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `float3[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn extent_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_EXTENT)
     }

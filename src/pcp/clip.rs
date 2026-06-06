@@ -441,7 +441,7 @@ fn as_string_vec(value: &Value) -> Option<Vec<String>> {
 /// Extracts `(f64, f64)` pairs from a `double2[]` value (`active`, `times`).
 fn as_pairs(value: &Value) -> Vec<(f64, f64)> {
     match value {
-        Value::Vec2dVec(pairs) => pairs.iter().map(|p| (p[0], p[1])).collect(),
+        Value::Vec2dVec(pairs) => pairs.iter().map(|p| (p.x, p.y)).collect(),
         _ => Vec::new(),
     }
 }

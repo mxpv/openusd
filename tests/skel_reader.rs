@@ -4,6 +4,7 @@
 //! discovery).
 
 use anyhow::Result;
+use openusd::gf::{Matrix4d, Quatf, Vec3f};
 use openusd::schemas::geom::Boundable;
 use openusd::schemas::skel::{
     discover_bindings, AnimMapper, BlendShape, InfluenceInterpolation, SkelAnimQuery, SkelAnimation, SkelBindingAPI,
@@ -55,7 +56,14 @@ fn reads_skel_root_extent() -> Result<()> {
     let root = SkelRoot::get(&stage, "/World/Character")?.expect("SkelRoot");
     assert_eq!(
         root.extent_attr().get::<Value>()?.and_then(|v| v.try_as_vec_3f_vec()),
-        Some(vec![[-1.0, 0.0, -1.0], [1.0, 2.0, 1.0]])
+        Some(vec![
+            openusd::gf::Vec3f {
+                x: -1.0,
+                y: 0.0,
+                z: -1.0
+            },
+            openusd::gf::Vec3f { x: 1.0, y: 2.0, z: 1.0 },
+        ])
     );
     Ok(())
 }
@@ -70,8 +78,8 @@ fn reads_skeleton_joints_and_transforms() -> Result<()> {
     assert_eq!(skl.rest_transforms()?.len(), 3);
 
     // bindTransforms world-space: Hip is at (0, 1, 0), Knee at (0, 2, 0).
-    assert_eq!(bind[1][12..16], [0.0, 1.0, 0.0, 1.0]);
-    assert_eq!(bind[2][12..16], [0.0, 2.0, 0.0, 1.0]);
+    assert_eq!(bind[1].0[12..16], [0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(bind[2].0[12..16], [0.0, 2.0, 0.0, 1.0]);
 
     // Parent indices derive from the path encoding.
     assert_eq!(skl.joint_parent_indices()?, vec![None, Some(0), Some(1)]);
@@ -93,7 +101,10 @@ fn maps_anim_joints_to_skeleton_indices() -> Result<()> {
 fn reads_blend_shape_with_inbetween() -> Result<()> {
     let stage = open()?;
     let bs = BlendShape::get(&stage, "/World/Character/Smile")?.expect("BlendShape");
-    assert_eq!(bs.offsets()?, vec![[0.0, 0.1, 0.0], [0.0, 0.1, 0.0]]);
+    assert_eq!(
+        bs.offsets()?,
+        vec![Vec3f { x: 0.0, y: 0.1, z: 0.0 }, Vec3f { x: 0.0, y: 0.1, z: 0.0 }]
+    );
     assert_eq!(bs.normal_offsets()?.len(), 2);
     assert_eq!(bs.point_indices()?, vec![0, 1]);
 
@@ -102,7 +113,21 @@ fn reads_blend_shape_with_inbetween() -> Result<()> {
     let inb = &inbetweens[0];
     assert_eq!(inb.name, "half");
     assert_eq!(inb.weight, Some(0.5));
-    assert_eq!(inb.offsets, vec![[0.0, 0.04, 0.0], [0.0, 0.04, 0.0]]);
+    assert_eq!(
+        inb.offsets,
+        vec![
+            Vec3f {
+                x: 0.0,
+                y: 0.04,
+                z: 0.0
+            },
+            Vec3f {
+                x: 0.0,
+                y: 0.04,
+                z: 0.0
+            }
+        ]
+    );
     Ok(())
 }
 
@@ -187,8 +212,8 @@ fn skeleton_resolver_pre_computes_inverse_bind() -> Result<()> {
     // (0,0,0) → (0,1,0) → (0,2,0) should produce skel-space translations
     // matching the bind transforms.
     let skel_space = resolver.rest_pose_skel_space();
-    assert_eq!(skel_space[1][12..16], [0.0, 1.0, 0.0, 1.0]);
-    assert_eq!(skel_space[2][12..16], [0.0, 2.0, 0.0, 1.0]);
+    assert_eq!(skel_space[1].0[12..16], [0.0, 1.0, 0.0, 1.0]);
+    assert_eq!(skel_space[2].0[12..16], [0.0, 2.0, 0.0, 1.0]);
     Ok(())
 }
 
@@ -207,7 +232,7 @@ fn skinning_resolver_remaps_through_skel_joints_subset() -> Result<()> {
     assert_eq!(resolver.joint_order_len(), 2);
     assert_eq!(resolver.skinning_method(), SkinningMethod::ClassicLinear);
 
-    let identity = openusd::math::IDENTITY_MAT4;
+    let identity = Matrix4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
     let mesh_xforms = resolver.remap_skinning_xforms(&skel_xforms);
     assert_eq!(mesh_xforms.len(), 2);
@@ -223,23 +248,32 @@ fn skinning_resolver_with_identity_xforms_returns_bind_pose_points() -> Result<(
     let resolver = SkinningResolver::from_binding(&binding, &skl.joints()?)?;
 
     let pts = [
-        [-0.5_f32, 0.0, -0.5],
-        [0.5, 0.0, -0.5],
-        [0.5, 0.0, 0.5],
-        [-0.5, 0.0, 0.5],
+        Vec3f {
+            x: -0.5,
+            y: 0.0,
+            z: -0.5,
+        },
+        Vec3f {
+            x: 0.5,
+            y: 0.0,
+            z: -0.5,
+        },
+        Vec3f { x: 0.5, y: 0.0, z: 0.5 },
+        Vec3f {
+            x: -0.5,
+            y: 0.0,
+            z: 0.5,
+        },
     ];
-    let identity = openusd::math::IDENTITY_MAT4;
+    let identity = Matrix4d::IDENTITY;
     let skel_xforms = vec![identity; 3];
     let out = resolver.compute_skinned_points(&pts, &skel_xforms);
     // Identity geom-bind + identity joints + weight 1.0 = no movement.
     for (i, p) in out.iter().enumerate() {
-        for k in 0..3 {
-            assert!(
-                (p[k] - pts[i][k]).abs() < 1e-6,
-                "point {i}: got {p:?}, want {:?}",
-                pts[i]
-            );
-        }
+        let want = pts[i];
+        assert!((p.x - want.x).abs() < 1e-6, "point {i}: got {p:?}, want {want:?}");
+        assert!((p.y - want.y).abs() < 1e-6, "point {i}: got {p:?}, want {want:?}");
+        assert!((p.z - want.z).abs() < 1e-6, "point {i}: got {p:?}, want {want:?}");
     }
     Ok(())
 }
@@ -285,9 +319,9 @@ fn skel_anim_query_components_at_start_frame() -> Result<()> {
     let (t, r, s) = q.compute_joint_local_transform_components(&stage, 0.0)?;
     // Authored at t=0: hip is at (0, 1, 0), all rotations identity, scales
     // unauthored so they default to unit.
-    assert_eq!(t[1], [0.0, 1.0, 0.0]);
-    assert_eq!(r[1], [1.0, 0.0, 0.0, 0.0]);
-    assert_eq!(s[1], [1.0, 1.0, 1.0]);
+    assert_eq!(t[1], Vec3f { x: 0.0, y: 1.0, z: 0.0 });
+    assert_eq!(r[1], Quatf::IDENTITY);
+    assert_eq!(s[1], Vec3f { x: 1.0, y: 1.0, z: 1.0 });
     Ok(())
 }
 
@@ -297,12 +331,12 @@ fn skel_anim_query_components_lerp_at_midframe() -> Result<()> {
     let q = SkelAnimQuery::new(&stage, sdf::path("/World/Character/Anim")?)?.unwrap();
     let (t, r, _) = q.compute_joint_local_transform_components(&stage, 5.0)?;
     // Hip translation lerps from (0,1,0) at t=0 to (0,1.5,0) at t=10.
-    assert!((t[1][1] - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1][1]);
+    assert!((t[1].y - 1.25).abs() < 1e-5, "hip y at t=5: got {}", t[1].y);
     // Hip rotation slerps from identity to ~45° about +Z; at t=5 ~22.5°.
     let w_expected = (std::f32::consts::PI / 8.0).cos();
     let z_expected = (std::f32::consts::PI / 8.0).sin();
-    assert!((r[1][0] - w_expected).abs() < 1e-3, "w: {}", r[1][0]);
-    assert!((r[1][3] - z_expected).abs() < 1e-3, "z: {}", r[1][3]);
+    assert!((r[1].w - w_expected).abs() < 1e-3, "w: {}", r[1].w);
+    assert!((r[1].z - z_expected).abs() < 1e-3, "z: {}", r[1].z);
     Ok(())
 }
 
@@ -327,10 +361,10 @@ fn skel_anim_query_joint_local_matrices_drive_skeleton_resolver() -> Result<()> 
     let locals = q.compute_joint_local_transforms(&stage, 0.0)?;
     assert_eq!(locals.len(), 3);
     // Hip's local at t=0 carries the (0,1,0) translation (row-major [12..15]).
-    assert_eq!(&locals[1][12..15], &[0.0, 1.0, 0.0]);
+    assert_eq!(locals[1].0[12..15], [0.0, 1.0, 0.0]);
 
-    let identity_world = openusd::math::IDENTITY_MAT4;
-    let skinning = resolver.compute_skinning_transforms_from_local(&locals, &identity_world);
+    let identity_world = Matrix4d::IDENTITY;
+    let skinning = resolver.compute_skinning_transforms_from_local(&locals, identity_world);
     assert_eq!(skinning.len(), 3);
     Ok(())
 }

@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Specifier, Value};
 
@@ -660,12 +661,9 @@ fn retime_clip_stage_times(value: Value, offset: LayerOffset) -> Value {
         return value;
     }
     match value {
-        Value::Vec2dVec(pairs) => Value::Vec2dVec(
-            pairs
-                .into_iter()
-                .map(|[stage, data]| [offset.apply(stage), data])
-                .collect(),
-        ),
+        Value::Vec2dVec(pairs) => {
+            Value::Vec2dVec(pairs.into_iter().map(|p| gf::vec2d(offset.apply(p.x), p.y)).collect())
+        }
         other => other,
     }
 }

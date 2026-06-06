@@ -232,7 +232,7 @@ impl HermiteCurves {
     /// and its tangent define the cubic-Hermite segment leaving that vertex.
     /// C++ `UsdGeomHermiteCurves::GetTangentsAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn tangents_attr(&self) -> Attribute {
         self.attribute(tok::A_TANGENTS)
     }
@@ -437,8 +437,10 @@ mod tests {
     fn basis_curves_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let c = BasisCurves::define(&stage, "/C")?;
-        c.create_points_attr()?
-            .set(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+        ]))?;
         c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
         c.create_type_attr()?.set(sdf::Value::Token("linear".into()))?;
         c.create_widths_attr()?
@@ -481,11 +483,15 @@ mod tests {
     fn hermite_curves_tangents() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let c = HermiteCurves::define(&stage, "/H")?;
-        c.create_points_attr()?
-            .set(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        c.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+        ]))?;
         c.create_curve_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![2]))?;
-        c.create_tangents_attr()?
-            .set(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        c.create_tangents_attr()?.set(sdf::Value::Vec3fVec(vec![
+            [1.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+        ]))?;
 
         let c = HermiteCurves::get(&stage, "/H")?.expect("HermiteCurves");
         assert_eq!(

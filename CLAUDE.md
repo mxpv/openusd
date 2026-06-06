@@ -39,7 +39,16 @@ The codebase follows the same module structure as the C++ OpenUSD SDK:
 
 - **`schemas/`** - Domain-schema readers/authoring layered on top of the core `sdf` / `usd` machinery (the AOUSD core spec covers composition, value resolution, and file formats — not these schemas). Each sub-module is feature-gated: `geom` (UsdGeom), `physics` (UsdPhysics), `skel` (UsdSkel + skinning), `lux` (UsdLux), `shade` (UsdShade), `render` (UsdRender). `schemas/registry.rs` is the eventual schema-registry surface (currently a stub).
 
-- **`math`** - Shared 4×4 row-major matrix helpers used by the schema layer.
+- **`gf/`** - Graphics Foundations: vector, quaternion, and matrix types mirroring
+  the C++ `Gf` namespace (`GfVec*`, `GfQuat*`, `GfMatrix*`). All types are
+  `#[repr(C)]` / `#[repr(transparent)]` + `bytemuck::Pod` so they can be
+  bulk-cast for binary serialization. `Vec2/3/4` in `f32` (`f`), `f64` (`d`),
+  `f16` (`h`), and `i32` (`i`) variants; `Quatf/d/h` with `(w, x, y, z)` field
+  order and `slerp`; `Mat2d`, `Mat3d`, `Matrix4d` (row-major, row-vector
+  convention). `gf::f16` re-exports `half::f16`. Free-function constructors
+  (`vec3f`, `quatf`, …) and `lerp` / `lerp_half` / `slerp` live in `gf/mod.rs`.
+  `From<gf::T> for sdf::Value` and `TryFrom<sdf::Value> for gf::T` cover every
+  gf type so schema code can convert without boilerplate.
 
 The `AbstractData` trait in `sdf/mod.rs` serves as the central abstraction, providing a unified interface for text, binary, and archive format readers.
 

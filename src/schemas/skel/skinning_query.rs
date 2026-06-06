@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 
-use crate::math::IDENTITY_MAT4;
+use crate::gf;
 use crate::usd::SchemaBase;
 
 use super::anim_mapper::AnimMapper;
@@ -45,7 +45,7 @@ pub struct SkinningResolver {
     /// skeleton's joint count).
     mapper: AnimMapper,
     /// Cached `geomBindTransform`. Spec default = identity.
-    geom_bind_transform: [f64; 16],
+    geom_bind_transform: gf::Matrix4d,
 }
 
 impl SkinningResolver {
@@ -69,7 +69,7 @@ impl SkinningResolver {
             skinning_method: binding.skinning_method()?,
             elements_per_element: binding.elements_per_element()?,
             mapper,
-            geom_bind_transform: binding.geom_bind_transform()?.unwrap_or(IDENTITY_MAT4),
+            geom_bind_transform: binding.geom_bind_transform()?.unwrap_or(gf::Matrix4d::IDENTITY),
         })
     }
 
@@ -106,8 +106,8 @@ impl SkinningResolver {
     }
 
     /// Cached `geomBindTransform` — identity when unauthored.
-    pub fn geom_bind_transform(&self) -> &[f64; 16] {
-        &self.geom_bind_transform
+    pub fn geom_bind_transform(&self) -> gf::Matrix4d {
+        self.geom_bind_transform
     }
 
     /// Authored skinning method. Spec default is
@@ -123,15 +123,15 @@ impl SkinningResolver {
     ///
     /// Walks the pre-computed mapper indices once with no intermediate buffers,
     /// so this is cheap to call per frame. Missing joints (a target joint that
-    /// isn't in the bound skeleton — rare but legal) get [`IDENTITY_MAT4`].
-    pub fn remap_skinning_xforms(&self, skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f64; 16]> {
+    /// isn't in the bound skeleton — rare but legal) get [`gf::Matrix4d::IDENTITY`].
+    pub fn remap_skinning_xforms(&self, skel_skinning_xforms: &[gf::Matrix4d]) -> Vec<gf::Matrix4d> {
         if self.mapper.is_identity() {
             return skel_skinning_xforms.to_vec();
         }
         (0..self.mapper.target_len())
             .map(|t| match self.mapper.source_index(t) {
                 Some(i) => skel_skinning_xforms[i],
-                None => IDENTITY_MAT4,
+                None => gf::Matrix4d::IDENTITY,
             })
             .collect()
     }
@@ -142,7 +142,11 @@ impl SkinningResolver {
     ///
     /// Panics when called on a rigidly-deformed binding — use
     /// [`compute_rigid_transform`](Self::compute_rigid_transform) for that case.
-    pub fn compute_skinned_points(&self, points: &[[f32; 3]], skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f32; 3]> {
+    pub fn compute_skinned_points(
+        &self,
+        points: &[gf::Vec3f],
+        skel_skinning_xforms: &[gf::Matrix4d],
+    ) -> Vec<gf::Vec3f> {
         assert!(
             !self.is_rigidly_deformed(),
             "compute_skinned_points called on rigidly-deformed binding"
@@ -153,7 +157,7 @@ impl SkinningResolver {
             &self.joint_indices,
             &self.joint_weights,
             self.num_influences_per_component(),
-            &self.geom_bind_transform,
+            self.geom_bind_transform,
             &mesh_xforms,
         )
     }
@@ -162,7 +166,11 @@ impl SkinningResolver {
     /// [`compute_skinned_points`](Self::compute_skinned_points). Normalises each
     /// result; see [`super::skinning::skin_normals_lbs`] for the caveat about
     /// inverse-transpose under non-uniform scale.
-    pub fn compute_skinned_normals(&self, normals: &[[f32; 3]], skel_skinning_xforms: &[[f64; 16]]) -> Vec<[f32; 3]> {
+    pub fn compute_skinned_normals(
+        &self,
+        normals: &[gf::Vec3f],
+        skel_skinning_xforms: &[gf::Matrix4d],
+    ) -> Vec<gf::Vec3f> {
         assert!(
             !self.is_rigidly_deformed(),
             "compute_skinned_normals called on rigidly-deformed binding"
@@ -173,7 +181,7 @@ impl SkinningResolver {
             &self.joint_indices,
             &self.joint_weights,
             self.num_influences_per_component(),
-            &self.geom_bind_transform,
+            self.geom_bind_transform,
             &mesh_xforms,
         )
     }
@@ -184,7 +192,7 @@ impl SkinningResolver {
     /// Panics when called on a per-vertex binding — use
     /// [`compute_skinned_points`](Self::compute_skinned_points) /
     /// [`compute_skinned_normals`](Self::compute_skinned_normals) there.
-    pub fn compute_rigid_transform(&self, skel_skinning_xforms: &[[f64; 16]]) -> [f64; 16] {
+    pub fn compute_rigid_transform(&self, skel_skinning_xforms: &[gf::Matrix4d]) -> gf::Matrix4d {
         assert!(
             self.is_rigidly_deformed(),
             "compute_rigid_transform called on per-vertex binding"
@@ -194,7 +202,7 @@ impl SkinningResolver {
             &self.joint_indices,
             &self.joint_weights,
             self.num_influences_per_component(),
-            &self.geom_bind_transform,
+            self.geom_bind_transform,
             &mesh_xforms,
         )
     }

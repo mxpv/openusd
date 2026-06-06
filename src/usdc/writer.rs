@@ -9,12 +9,15 @@
 use std::collections::HashMap;
 use std::io::{Seek, SeekFrom, Write};
 
+use crate::gf::f16;
 use anyhow::{bail, Context, Result};
 use bytemuck::{bytes_of, Pod};
-use half::f16;
 use num_traits::{AsPrimitive, PrimInt};
 
-use crate::sdf::{AbstractData, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value};
+use crate::{
+    gf,
+    sdf::{AbstractData, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
+};
 
 use super::coding;
 use super::layout::{
@@ -498,7 +501,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             // round-trips with Pixar tools remain semantically correct
             // and `write → read` round-trips here are identity.
             Value::Quath(a) => {
-                let pixar = [a[1], a[2], a[3], a[0]];
+                let pixar = [a.x, a.y, a.z, a.w];
                 self.write_pod_out(Type::Quath, &pixar)
             }
 
@@ -506,7 +509,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec3f(a) => self.write_pod_out(Type::Vec3f, a),
             Value::Vec4f(a) => self.write_pod_out(Type::Vec4f, a),
             Value::Quatf(a) => {
-                let pixar = [a[1], a[2], a[3], a[0]];
+                let pixar = [a.x, a.y, a.z, a.w];
                 self.write_pod_out(Type::Quatf, &pixar)
             }
 
@@ -514,7 +517,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Vec3d(a) => self.write_pod_out(Type::Vec3d, a),
             Value::Vec4d(a) => self.write_pod_out(Type::Vec4d, a),
             Value::Quatd(a) => {
-                let pixar = [a[1], a[2], a[3], a[0]];
+                let pixar = [a.x, a.y, a.z, a.w];
                 self.write_pod_out(Type::Quatd, &pixar)
             }
 
@@ -540,24 +543,24 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::FloatVec(v) => self.write_array_f32(v),
             Value::DoubleVec(v) => self.write_array_f64_type(Type::Double, v),
 
-            Value::Vec2hVec(v) => self.write_array_arr_half::<2>(Type::Vec2h, v),
-            Value::Vec3hVec(v) => self.write_array_arr_half::<3>(Type::Vec3h, v),
-            Value::Vec4hVec(v) => self.write_array_arr_half::<4>(Type::Vec4h, v),
-            Value::QuathVec(v) => self.write_array_quat_wxyz(Type::Quath, v),
-            Value::Vec2fVec(v) => self.write_array_arr_f32::<2>(Type::Vec2f, v),
-            Value::Vec3fVec(v) => self.write_array_arr_f32::<3>(Type::Vec3f, v),
-            Value::Vec4fVec(v) => self.write_array_arr_f32::<4>(Type::Vec4f, v),
-            Value::QuatfVec(v) => self.write_array_quat_wxyz(Type::Quatf, v),
-            Value::Vec2dVec(v) => self.write_array_arr_f64::<2>(Type::Vec2d, v),
-            Value::Vec3dVec(v) => self.write_array_arr_f64::<3>(Type::Vec3d, v),
-            Value::Vec4dVec(v) => self.write_array_arr_f64::<4>(Type::Vec4d, v),
-            Value::QuatdVec(v) => self.write_array_quat_wxyz(Type::Quatd, v),
-            Value::Vec2iVec(v) => self.write_array_arr_i32::<2>(Type::Vec2i, v),
-            Value::Vec3iVec(v) => self.write_array_arr_i32::<3>(Type::Vec3i, v),
-            Value::Vec4iVec(v) => self.write_array_arr_i32::<4>(Type::Vec4i, v),
-            Value::Matrix2dVec(v) => self.write_array_arr_f64::<4>(Type::Matrix2d, v),
-            Value::Matrix3dVec(v) => self.write_array_arr_f64::<9>(Type::Matrix3d, v),
-            Value::Matrix4dVec(v) => self.write_array_arr_f64::<16>(Type::Matrix4d, v),
+            Value::Vec2hVec(v) => self.write_array(Type::Vec2h, v.len(), v),
+            Value::Vec3hVec(v) => self.write_array(Type::Vec3h, v.len(), v),
+            Value::Vec4hVec(v) => self.write_array(Type::Vec4h, v.len(), v),
+            Value::QuathVec(v) => self.write_gf_quat_half_wxyz(Type::Quath, v),
+            Value::Vec2fVec(v) => self.write_array(Type::Vec2f, v.len(), v),
+            Value::Vec3fVec(v) => self.write_array(Type::Vec3f, v.len(), v),
+            Value::Vec4fVec(v) => self.write_array(Type::Vec4f, v.len(), v),
+            Value::QuatfVec(v) => self.write_gf_quat_f32_wxyz(Type::Quatf, v),
+            Value::Vec2dVec(v) => self.write_array(Type::Vec2d, v.len(), v),
+            Value::Vec3dVec(v) => self.write_array(Type::Vec3d, v.len(), v),
+            Value::Vec4dVec(v) => self.write_array(Type::Vec4d, v.len(), v),
+            Value::QuatdVec(v) => self.write_gf_quat_f64_wxyz(Type::Quatd, v),
+            Value::Vec2iVec(v) => self.write_array(Type::Vec2i, v.len(), v),
+            Value::Vec3iVec(v) => self.write_array(Type::Vec3i, v.len(), v),
+            Value::Vec4iVec(v) => self.write_array(Type::Vec4i, v.len(), v),
+            Value::Matrix2dVec(v) => self.write_array(Type::Matrix2d, v.len(), v),
+            Value::Matrix3dVec(v) => self.write_array(Type::Matrix3d, v.len(), v),
+            Value::Matrix4dVec(v) => self.write_array(Type::Matrix4d, v.len(), v),
             Value::TimeCodeVec(v) => self.write_array_f64_type(Type::TimeCode, v),
 
             // Strings stored in their own arrays (StringVec also via token lookup).
@@ -741,60 +744,44 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    /// Write a quat array, reordering each element from internal `(w, x, y, z)` to Pixar's
-    /// on-disk `[x, y, z, w]` layout (GfQuat stores imaginary before real).
-    fn write_array_quat_wxyz<T: Pod + Copy>(&mut self, ty: Type, v: &[[T; 4]]) -> Result<ValueRep> {
+    /// Write a quat array reordering each element from internal `(w, x, y, z)`
+    /// to Pixar's on-disk `[x, y, z, w]` layout.
+    fn write_gf_quat_f32_wxyz(&mut self, ty: Type, v: &[gf::Quatf]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for q in v {
-            self.write_pod(&q[1])?;
-            self.write_pod(&q[2])?;
-            self.write_pod(&q[3])?;
-            self.write_pod(&q[0])?;
+            self.write_pod(&q.x)?;
+            self.write_pod(&q.y)?;
+            self.write_pod(&q.z)?;
+            self.write_pod(&q.w)?;
         }
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_array_arr_half<const N: usize>(&mut self, ty: Type, v: &[[f16; N]]) -> Result<ValueRep> {
+    /// Write a quat array reordering each element from internal `(w, x, y, z)`
+    /// to Pixar's on-disk `[x, y, z, w]` layout.
+    fn write_gf_quat_f64_wxyz(&mut self, ty: Type, v: &[gf::Quatd]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
-        for arr in v {
-            for h in arr {
-                self.write_pod(&h.to_bits())?;
-            }
+        for q in v {
+            self.write_pod(&q.x)?;
+            self.write_pod(&q.y)?;
+            self.write_pod(&q.z)?;
+            self.write_pod(&q.w)?;
         }
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_array_arr_f32<const N: usize>(&mut self, ty: Type, v: &[[f32; N]]) -> Result<ValueRep> {
+    /// Write a quat array reordering each element from internal `(w, x, y, z)`
+    /// to Pixar's on-disk `[x, y, z, w]` layout.
+    fn write_gf_quat_half_wxyz(&mut self, ty: Type, v: &[gf::Quath]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
-        for arr in v {
-            for f in arr {
-                self.write_pod(f)?;
-            }
-        }
-        Ok(rep_heap(ty, off, true))
-    }
-
-    fn write_array_arr_f64<const N: usize>(&mut self, ty: Type, v: &[[f64; N]]) -> Result<ValueRep> {
-        let off = self.pos()?;
-        self.write_count(v.len() as u64)?;
-        for arr in v {
-            for f in arr {
-                self.write_pod(f)?;
-            }
-        }
-        Ok(rep_heap(ty, off, true))
-    }
-
-    fn write_array_arr_i32<const N: usize>(&mut self, ty: Type, v: &[[i32; N]]) -> Result<ValueRep> {
-        let off = self.pos()?;
-        self.write_count(v.len() as u64)?;
-        for arr in v {
-            for i in arr {
-                self.write_pod(i)?;
-            }
+        for q in v {
+            self.write_pod(&q.x.to_bits())?;
+            self.write_pod(&q.y.to_bits())?;
+            self.write_pod(&q.z.to_bits())?;
+            self.write_pod(&q.w.to_bits())?;
         }
         Ok(rep_heap(ty, off, true))
     }

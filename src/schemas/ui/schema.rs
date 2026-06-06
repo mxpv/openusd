@@ -129,7 +129,7 @@ impl NodeGraphNodeAPI {
     /// The node's position in the editor canvas, in editor units.
     /// C++ `UsdUINodeGraphNodeAPI::GetPosAttr`.
     ///
-    /// Type `uniform float2`. Fetch with `get::<[f32; 2]>()?`.
+    /// Type `uniform float2`. Fetch with `get::<gf::Vec2f>()?`.
     pub fn pos_attr(&self) -> Attribute {
         self.attribute(tok::A_NODE_POS)
     }
@@ -142,7 +142,7 @@ impl NodeGraphNodeAPI {
     /// The node's size in the editor canvas, in editor units.
     /// C++ `UsdUINodeGraphNodeAPI::GetSizeAttr`.
     ///
-    /// Type `uniform float2`. Fetch with `get::<[f32; 2]>()?`.
+    /// Type `uniform float2`. Fetch with `get::<gf::Vec2f>()?`.
     pub fn size_attr(&self) -> Attribute {
         self.attribute(tok::A_NODE_SIZE)
     }
@@ -169,7 +169,7 @@ impl NodeGraphNodeAPI {
     /// The node's background tint in the editor.
     /// C++ `UsdUINodeGraphNodeAPI::GetDisplayColorAttr`.
     ///
-    /// Type `uniform color3f`. Fetch with `get::<[f32; 3]>()?`.
+    /// Type `uniform color3f`. Fetch with `get::<gf::Vec3f>()?`.
     pub fn display_color_attr(&self) -> Attribute {
         self.attribute(tok::A_NODE_DISPLAY_COLOR)
     }
@@ -237,6 +237,7 @@ impl_ui_schema!(single_api NodeGraphNodeAPI);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gf;
     use crate::schemas::ui::ExpansionState;
     use crate::usd::SchemaBase;
 
@@ -263,19 +264,22 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/Mat/Shader")?)?.set_type_name("Shader")?;
         let n = NodeGraphNodeAPI::apply(&stage, "/Mat/Shader")?;
-        n.create_pos_attr()?.set([12.0_f32, 34.0])?;
-        n.create_size_attr()?.set([180.0_f32, 90.0])?;
+        n.create_pos_attr()?.set(gf::vec2f(12.0, 34.0))?;
+        n.create_size_attr()?.set(gf::vec2f(180.0, 90.0))?;
         n.create_stacking_order_attr()?.set(3)?;
-        n.create_display_color_attr()?.set([0.2_f32, 0.4, 0.8])?;
+        n.create_display_color_attr()?.set(gf::vec3f(0.2, 0.4, 0.8))?;
         n.create_icon_attr()?.set(sdf::Value::AssetPath("./node.png".into()))?;
         n.create_expansion_state_attr()?.set(ExpansionState::Minimized)?;
         n.create_doc_uri_attr()?.set("https://example.com/node".to_string())?;
 
         let n = NodeGraphNodeAPI::get(&stage, "/Mat/Shader")?.expect("NodeGraphNodeAPI");
-        assert_eq!(n.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
-        assert_eq!(n.size_attr().get::<[f32; 2]>()?, Some([180.0, 90.0]));
+        assert_eq!(n.pos_attr().get::<gf::Vec2f>()?, Some(gf::vec2f(12.0, 34.0)));
+        assert_eq!(n.size_attr().get::<gf::Vec2f>()?, Some(gf::vec2f(180.0, 90.0)));
         assert_eq!(n.stacking_order_attr().get::<i32>()?, Some(3));
-        assert_eq!(n.display_color_attr().get::<[f32; 3]>()?, Some([0.2, 0.4, 0.8]));
+        assert_eq!(
+            n.display_color_attr().get::<gf::Vec3f>()?,
+            Some(gf::vec3f(0.2, 0.4, 0.8))
+        );
         assert_eq!(
             n.expansion_state_attr().get::<ExpansionState>()?,
             Some(ExpansionState::Minimized)

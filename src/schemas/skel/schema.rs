@@ -5,12 +5,13 @@
 //! is the single-apply API wiring skinnable geometry to a skeleton.
 //!
 //! The decoded getters (`joints()`, `bind_transforms()`, …) own the numeric
-//! coercion the toolkit needs: matrices are row-major flattened `[f64; 16]`,
+//! coercion the toolkit needs: matrices are [`gf::Matrix4d`](gf::Matrix4d),
 //! quaternions stay in USD's `(w, x, y, z)` order, and half-precision storage
 //! is widened to `f32`.
 
 use anyhow::Result;
 
+use crate::gf;
 use crate::sdf::{self, Value, Variability};
 use crate::usd::{Attribute, Prim, Relationship, Stage};
 
@@ -131,13 +132,13 @@ impl Skeleton {
         token_vec(&self.joints_attr())
     }
 
-    /// Decoded `bindTransforms` as row-major flattened 4×4 matrices.
-    pub fn bind_transforms(&self) -> Result<Vec<[f64; 16]>> {
+    /// Decoded `bindTransforms` as row-major 4×4 matrices.
+    pub fn bind_transforms(&self) -> Result<Vec<gf::Matrix4d>> {
         mat4_vec(&self.bind_transforms_attr())
     }
 
-    /// Decoded `restTransforms` as row-major flattened 4×4 matrices.
-    pub fn rest_transforms(&self) -> Result<Vec<[f64; 16]>> {
+    /// Decoded `restTransforms` as row-major 4×4 matrices.
+    pub fn rest_transforms(&self) -> Result<Vec<gf::Matrix4d>> {
         mat4_vec(&self.rest_transforms_attr())
     }
 
@@ -305,9 +306,9 @@ pub struct Inbetween {
     /// `weight` metadata. Required by spec; `None` flags malformed authoring.
     pub weight: Option<f32>,
     /// Position offsets, parallel to the parent's `pointIndices` layout.
-    pub offsets: Vec<[f32; 3]>,
+    pub offsets: Vec<gf::Vec3f>,
     /// Optional `inbetweens:<name>:normalOffsets`. Empty when unauthored.
-    pub normal_offsets: Vec<[f32; 3]>,
+    pub normal_offsets: Vec<gf::Vec3f>,
 }
 
 /// Per-vertex position / normal offsets defining a deformation target (C++
@@ -380,12 +381,12 @@ impl BlendShape {
     }
 
     /// Decoded `offsets`.
-    pub fn offsets(&self) -> Result<Vec<[f32; 3]>> {
+    pub fn offsets(&self) -> Result<Vec<gf::Vec3f>> {
         vec3f_vec(&self.offsets_attr())
     }
 
     /// Decoded `normalOffsets`.
-    pub fn normal_offsets(&self) -> Result<Vec<[f32; 3]>> {
+    pub fn normal_offsets(&self) -> Result<Vec<gf::Vec3f>> {
         vec3f_vec(&self.normal_offsets_attr())
     }
 
@@ -568,7 +569,7 @@ impl SkelBindingAPI {
     /// Bind-time world-space transform of the skinned primitive; spec default
     /// is the identity (C++ `GetGeomBindTransformAttr`).
     ///
-    /// Type `matrix4d`. Fetch with `get::<[f64; 16]>()?`.
+    /// Type `matrix4d`. Fetch with `get::<sdf::Value>()?` (`Value::Matrix4d`).
     pub fn geom_bind_transform_attr(&self) -> Attribute {
         self.attribute(tok::A_GEOM_BIND_TRANSFORM)
     }
@@ -658,7 +659,7 @@ impl SkelBindingAPI {
 
     /// Decoded `primvars:skel:geomBindTransform`; `None` when unauthored (the
     /// spec default is the identity matrix).
-    pub fn geom_bind_transform(&self) -> Result<Option<[f64; 16]>> {
+    pub fn geom_bind_transform(&self) -> Result<Option<gf::Matrix4d>> {
         Ok(match self.geom_bind_transform_attr().get::<Value>()? {
             Some(Value::Matrix4d(m)) => Some(m),
             _ => None,
@@ -724,7 +725,7 @@ fn token_vec(attr: &Attribute) -> Result<Vec<String>> {
 }
 
 /// Decode a `matrix4d[]` attribute (empty when unauthored).
-fn mat4_vec(attr: &Attribute) -> Result<Vec<[f64; 16]>> {
+fn mat4_vec(attr: &Attribute) -> Result<Vec<gf::Matrix4d>> {
     Ok(match attr.get::<Value>()? {
         Some(Value::Matrix4dVec(v)) => v,
         _ => Vec::new(),
@@ -733,13 +734,16 @@ fn mat4_vec(attr: &Attribute) -> Result<Vec<[f64; 16]>> {
 
 /// Decode a `vector3f[]` attribute, widening `double` / `half` storage to
 /// `f32` (empty when unauthored).
-fn vec3f_vec(attr: &Attribute) -> Result<Vec<[f32; 3]>> {
+fn vec3f_vec(attr: &Attribute) -> Result<Vec<gf::Vec3f>> {
     Ok(match attr.get::<Value>()? {
         Some(Value::Vec3fVec(v)) => v,
-        Some(Value::Vec3dVec(v)) => v.into_iter().map(|a| [a[0] as f32, a[1] as f32, a[2] as f32]).collect(),
+        Some(Value::Vec3dVec(v)) => v
+            .into_iter()
+            .map(|a| gf::vec3f(a.x as f32, a.y as f32, a.z as f32))
+            .collect(),
         Some(Value::Vec3hVec(v)) => v
             .into_iter()
-            .map(|a| [a[0].to_f32(), a[1].to_f32(), a[2].to_f32()])
+            .map(|a| gf::vec3f(a.x.to_f32(), a.y.to_f32(), a.z.to_f32()))
             .collect(),
         _ => Vec::new(),
     })
@@ -772,12 +776,14 @@ mod tests {
     fn skel_root_is_boundable() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let root = SkelRoot::define(&stage, "/Char")?;
-        root.create_extent_attr()?
-            .set(Value::Vec3fVec(vec![[-1.0, 0.0, -1.0], [1.0, 2.0, 1.0]]))?;
+        root.create_extent_attr()?.set(Value::Vec3fVec(vec![
+            [-1.0_f32, 0.0, -1.0].into(),
+            [1.0, 2.0, 1.0].into(),
+        ]))?;
         let root = SkelRoot::get(&stage, "/Char")?.expect("SkelRoot");
         assert_eq!(
             root.extent_attr().get::<Value>()?.and_then(|v| v.try_as_vec_3f_vec()),
-            Some(vec![[-1.0, 0.0, -1.0], [1.0, 2.0, 1.0]])
+            Some(vec![gf::vec3f(-1.0, 0.0, -1.0), gf::vec3f(1.0, 2.0, 1.0)])
         );
         Ok(())
     }
@@ -812,23 +818,24 @@ mod tests {
     fn blend_shape_inbetween() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let bs = BlendShape::define(&stage, "/Smile")?;
-        bs.create_offsets_attr()?.set(Value::Vec3fVec(vec![[0.0, 0.1, 0.0]]))?;
+        bs.create_offsets_attr()?
+            .set(Value::Vec3fVec(vec![[0.0_f32, 0.1, 0.0].into()]))?;
         bs.create_point_indices_attr()?.set(Value::IntVec(vec![0]))?;
         // Author an inbetween at weight 0.5.
         let inb = bs
             .create_attribute("inbetweens:half", "vector3f[]")?
             .set_custom(false)?;
-        inb.set(Value::Vec3fVec(vec![[0.0, 0.04, 0.0]]))?
+        inb.set(Value::Vec3fVec(vec![[0.0_f32, 0.04, 0.0].into()]))?
             .set_metadata(tok::META_WEIGHT, Value::Float(0.5))?;
 
         let bs = BlendShape::get(&stage, "/Smile")?.expect("BlendShape");
-        assert_eq!(bs.offsets()?, vec![[0.0, 0.1, 0.0]]);
+        assert_eq!(bs.offsets()?, vec![gf::vec3f(0.0, 0.1, 0.0)]);
         assert_eq!(bs.point_indices()?, vec![0]);
         let inbetweens = bs.inbetweens()?;
         assert_eq!(inbetweens.len(), 1);
         assert_eq!(inbetweens[0].name, "half");
         assert_eq!(inbetweens[0].weight, Some(0.5));
-        assert_eq!(inbetweens[0].offsets, vec![[0.0, 0.04, 0.0]]);
+        assert_eq!(inbetweens[0].offsets, vec![gf::vec3f(0.0, 0.04, 0.0)]);
         Ok(())
     }
 }

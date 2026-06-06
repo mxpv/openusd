@@ -881,46 +881,46 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
 
         Value::AssetPath(v) => write_asset_path(s, v)?,
 
-        Value::Vec2h(a) => format_tuple_half(s, a)?,
-        Value::Vec3h(a) => format_tuple_half(s, a)?,
-        Value::Vec4h(a) => format_tuple_half(s, a)?,
-        Value::Quath(a) => format_tuple_half(s, a)?,
-        Value::Vec2hVec(v) => format_vec(s, v, format_tuple_half)?,
-        Value::Vec3hVec(v) => format_vec(s, v, format_tuple_half)?,
-        Value::Vec4hVec(v) => format_vec(s, v, format_tuple_half)?,
-        Value::QuathVec(v) => format_vec(s, v, format_tuple_half)?,
+        Value::Vec2h(a) => format_tuple_half(s, &[a.x, a.y])?,
+        Value::Vec3h(a) => format_tuple_half(s, &[a.x, a.y, a.z])?,
+        Value::Vec4h(a) => format_tuple_half(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Quath(a) => format_tuple_half(s, &[a.w, a.x, a.y, a.z])?,
+        Value::Vec2hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y]))?,
+        Value::Vec3hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4hVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::QuathVec(v) => format_vec(s, v, |s, a| format_tuple_half(s, &[a.w, a.x, a.y, a.z]))?,
 
-        Value::Vec2f(a) => format_tuple_f32(s, a)?,
-        Value::Vec3f(a) => format_tuple_f32(s, a)?,
-        Value::Vec4f(a) => format_tuple_f32(s, a)?,
-        Value::Quatf(a) => format_tuple_f32(s, a)?,
-        Value::Vec2fVec(v) => format_vec(s, v, format_tuple_f32)?,
-        Value::Vec3fVec(v) => format_vec(s, v, format_tuple_f32)?,
-        Value::Vec4fVec(v) => format_vec(s, v, format_tuple_f32)?,
-        Value::QuatfVec(v) => format_vec(s, v, format_tuple_f32)?,
+        Value::Vec2f(a) => format_tuple_f32(s, &[a.x, a.y])?,
+        Value::Vec3f(a) => format_tuple_f32(s, &[a.x, a.y, a.z])?,
+        Value::Vec4f(a) => format_tuple_f32(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Quatf(a) => format_tuple_f32(s, &[a.w, a.x, a.y, a.z])?,
+        Value::Vec2fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y]))?,
+        Value::Vec3fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4fVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::QuatfVec(v) => format_vec(s, v, |s, a| format_tuple_f32(s, &[a.w, a.x, a.y, a.z]))?,
 
-        Value::Vec2d(a) => format_tuple_f64(s, a)?,
-        Value::Vec3d(a) => format_tuple_f64(s, a)?,
-        Value::Vec4d(a) => format_tuple_f64(s, a)?,
-        Value::Quatd(a) => format_tuple_f64(s, a)?,
-        Value::Vec2dVec(v) => format_vec(s, v, format_tuple_f64)?,
-        Value::Vec3dVec(v) => format_vec(s, v, format_tuple_f64)?,
-        Value::Vec4dVec(v) => format_vec(s, v, format_tuple_f64)?,
-        Value::QuatdVec(v) => format_vec(s, v, format_tuple_f64)?,
+        Value::Vec2d(a) => format_tuple_f64(s, &[a.x, a.y])?,
+        Value::Vec3d(a) => format_tuple_f64(s, &[a.x, a.y, a.z])?,
+        Value::Vec4d(a) => format_tuple_f64(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Quatd(a) => format_tuple_f64(s, &[a.w, a.x, a.y, a.z])?,
+        Value::Vec2dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y]))?,
+        Value::Vec3dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4dVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.x, a.y, a.z, a.w]))?,
+        Value::QuatdVec(v) => format_vec(s, v, |s, a| format_tuple_f64(s, &[a.w, a.x, a.y, a.z]))?,
 
-        Value::Vec2i(a) => format_tuple_int(s, a)?,
-        Value::Vec3i(a) => format_tuple_int(s, a)?,
-        Value::Vec4i(a) => format_tuple_int(s, a)?,
-        Value::Vec2iVec(v) => format_vec(s, v, format_tuple_int)?,
-        Value::Vec3iVec(v) => format_vec(s, v, format_tuple_int)?,
-        Value::Vec4iVec(v) => format_vec(s, v, format_tuple_int)?,
+        Value::Vec2i(a) => format_tuple_int(s, &[a.x, a.y])?,
+        Value::Vec3i(a) => format_tuple_int(s, &[a.x, a.y, a.z])?,
+        Value::Vec4i(a) => format_tuple_int(s, &[a.x, a.y, a.z, a.w])?,
+        Value::Vec2iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y]))?,
+        Value::Vec3iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y, a.z]))?,
+        Value::Vec4iVec(v) => format_vec(s, v, |s, a| format_tuple_int(s, &[a.x, a.y, a.z, a.w]))?,
 
-        Value::Matrix2d(m) => format_matrix(s, m, 2)?,
-        Value::Matrix3d(m) => format_matrix(s, m, 3)?,
-        Value::Matrix4d(m) => format_matrix(s, m, 4)?,
-        Value::Matrix2dVec(v) => format_vec(s, v, |s, m| format_matrix(s, m, 2))?,
-        Value::Matrix3dVec(v) => format_vec(s, v, |s, m| format_matrix(s, m, 3))?,
-        Value::Matrix4dVec(v) => format_vec(s, v, |s, m| format_matrix(s, m, 4))?,
+        Value::Matrix2d(m) => format_matrix(s, &m.0, 2)?,
+        Value::Matrix3d(m) => format_matrix(s, &m.0, 3)?,
+        Value::Matrix4d(m) => format_matrix(s, &m.0, 4)?,
+        Value::Matrix2dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 2))?,
+        Value::Matrix3dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 3))?,
+        Value::Matrix4dVec(v) => format_vec(s, v, |s, m| format_matrix(s, &m.0, 4))?,
 
         Value::Specifier(sp) => s.push_str(specifier_keyword(*sp)),
         Value::Permission(p) => s.push_str(match p {
@@ -1032,7 +1032,7 @@ where
     format_vec(s, &op.explicit_items, fmt_item)
 }
 
-fn format_tuple_half<const N: usize>(s: &mut String, a: &[half::f16; N]) -> Result<()> {
+fn format_tuple_half<const N: usize>(s: &mut String, a: &[crate::gf::f16; N]) -> Result<()> {
     s.push('(');
     for (i, v) in a.iter().enumerate() {
         if i > 0 {

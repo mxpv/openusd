@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use half::f16;
+use crate::gf::f16;
 use strum::{EnumIs, EnumTryAs, IntoStaticStr};
+
+use crate::gf;
 
 use super::*;
 
@@ -18,7 +20,7 @@ use super::*;
 /// - `i` — `i32` (int)
 ///
 /// Type-safe extraction is supported via [`TryFrom<Value>`] implementations for common Rust
-/// types (e.g. `f32`, `String`, `[f32; 3]`).
+/// types (e.g. `f32`, `String`, `gf::Vec3f`).
 #[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr)]
 pub enum Value {
     /// None value, only produced by expressions (not directly assignable).
@@ -59,46 +61,46 @@ pub enum Value {
 
     AssetPath(String),
 
-    Quath([f16; 4]),
-    Quatf([f32; 4]),
-    Quatd([f64; 4]),
-    QuathVec(Vec<[f16; 4]>),
-    QuatfVec(Vec<[f32; 4]>),
-    QuatdVec(Vec<[f64; 4]>),
+    Quath(gf::Quath),
+    Quatf(gf::Quatf),
+    Quatd(gf::Quatd),
+    QuathVec(Vec<gf::Quath>),
+    QuatfVec(Vec<gf::Quatf>),
+    QuatdVec(Vec<gf::Quatd>),
 
-    Vec2h([f16; 2]),
-    Vec2f([f32; 2]),
-    Vec2d([f64; 2]),
-    Vec2i([i32; 2]),
-    Vec2hVec(Vec<[f16; 2]>),
-    Vec2fVec(Vec<[f32; 2]>),
-    Vec2dVec(Vec<[f64; 2]>),
-    Vec2iVec(Vec<[i32; 2]>),
+    Vec2h(gf::Vec2h),
+    Vec2f(gf::Vec2f),
+    Vec2d(gf::Vec2d),
+    Vec2i(gf::Vec2i),
+    Vec2hVec(Vec<gf::Vec2h>),
+    Vec2fVec(Vec<gf::Vec2f>),
+    Vec2dVec(Vec<gf::Vec2d>),
+    Vec2iVec(Vec<gf::Vec2i>),
 
-    Vec3h([f16; 3]),
-    Vec3f([f32; 3]),
-    Vec3d([f64; 3]),
-    Vec3i([i32; 3]),
-    Vec3hVec(Vec<[f16; 3]>),
-    Vec3fVec(Vec<[f32; 3]>),
-    Vec3dVec(Vec<[f64; 3]>),
-    Vec3iVec(Vec<[i32; 3]>),
+    Vec3h(gf::Vec3h),
+    Vec3f(gf::Vec3f),
+    Vec3d(gf::Vec3d),
+    Vec3i(gf::Vec3i),
+    Vec3hVec(Vec<gf::Vec3h>),
+    Vec3fVec(Vec<gf::Vec3f>),
+    Vec3dVec(Vec<gf::Vec3d>),
+    Vec3iVec(Vec<gf::Vec3i>),
 
-    Vec4h([f16; 4]),
-    Vec4f([f32; 4]),
-    Vec4d([f64; 4]),
-    Vec4i([i32; 4]),
-    Vec4hVec(Vec<[f16; 4]>),
-    Vec4fVec(Vec<[f32; 4]>),
-    Vec4dVec(Vec<[f64; 4]>),
-    Vec4iVec(Vec<[i32; 4]>),
+    Vec4h(gf::Vec4h),
+    Vec4f(gf::Vec4f),
+    Vec4d(gf::Vec4d),
+    Vec4i(gf::Vec4i),
+    Vec4hVec(Vec<gf::Vec4h>),
+    Vec4fVec(Vec<gf::Vec4f>),
+    Vec4dVec(Vec<gf::Vec4d>),
+    Vec4iVec(Vec<gf::Vec4i>),
 
-    Matrix2d([f64; 4]),
-    Matrix3d([f64; 9]),
-    Matrix4d([f64; 16]),
-    Matrix2dVec(Vec<[f64; 4]>),
-    Matrix3dVec(Vec<[f64; 9]>),
-    Matrix4dVec(Vec<[f64; 16]>),
+    Matrix2d(gf::Mat2d),
+    Matrix3d(gf::Mat3d),
+    Matrix4d(gf::Matrix4d),
+    Matrix2dVec(Vec<gf::Mat2d>),
+    Matrix3dVec(Vec<gf::Mat3d>),
+    Matrix4dVec(Vec<gf::Matrix4d>),
 
     Specifier(Specifier),
     Permission(Permission),
@@ -205,22 +207,22 @@ impl serde::Serialize for Value {
             Value::Vec3iVec(v) => v.serialize(serializer),
             Value::Vec4iVec(v) => v.serialize(serializer),
 
-            Value::Matrix2d(v) => v.chunks(2).collect::<Vec<_>>().serialize(serializer),
-            Value::Matrix3d(v) => v.chunks(3).collect::<Vec<_>>().serialize(serializer),
-            Value::Matrix4d(v) => v.chunks(4).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix2d(m) => m.0.chunks(2).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix3d(m) => m.0.chunks(3).collect::<Vec<_>>().serialize(serializer),
+            Value::Matrix4d(m) => m.0.chunks(4).collect::<Vec<_>>().serialize(serializer),
             Value::Matrix2dVec(v) => v
                 .iter()
-                .map(|m| m.chunks(2).collect::<Vec<_>>())
+                .map(|m| m.0.chunks(2).collect::<Vec<_>>())
                 .collect::<Vec<_>>()
                 .serialize(serializer),
             Value::Matrix3dVec(v) => v
                 .iter()
-                .map(|m| m.chunks(3).collect::<Vec<_>>())
+                .map(|m| m.0.chunks(3).collect::<Vec<_>>())
                 .collect::<Vec<_>>()
                 .serialize(serializer),
             Value::Matrix4dVec(v) => v
                 .iter()
-                .map(|m| m.chunks(4).collect::<Vec<_>>())
+                .map(|m| m.0.chunks(4).collect::<Vec<_>>())
                 .collect::<Vec<_>>()
                 .serialize(serializer),
 
@@ -338,10 +340,45 @@ impl_try_from_value!(ReferenceListOp, try_as_reference_list_op, "ReferenceListOp
 impl_try_from_value!(PayloadListOp, try_as_payload_list_op, "PayloadListOp");
 impl_try_from_value!(PathListOp, try_as_path_list_op, "PathListOp");
 
-// Float array (`[]`) payloads — positions, normals, UVs, tangents, etc.
-impl_try_from_value!(Vec<[f32; 2]>, try_as_vec_2f_vec, "Vec2fVec");
-impl_try_from_value!(Vec<[f32; 3]>, try_as_vec_3f_vec, "Vec3fVec");
-impl_try_from_value!(Vec<[f32; 4]>, try_as_vec_4f_vec, "Vec4fVec");
+// gf scalar types — trivially unwrap the matching variant.
+impl_try_from_value!(gf::Vec2f, try_as_vec_2f, "gf::Vec2f");
+impl_try_from_value!(gf::Vec2d, try_as_vec_2d, "gf::Vec2d");
+impl_try_from_value!(gf::Vec2i, try_as_vec_2i, "gf::Vec2i");
+impl_try_from_value!(gf::Vec2h, try_as_vec_2h, "gf::Vec2h");
+impl_try_from_value!(gf::Vec3f, try_as_vec_3f, "gf::Vec3f");
+impl_try_from_value!(gf::Vec3d, try_as_vec_3d, "gf::Vec3d");
+impl_try_from_value!(gf::Vec3i, try_as_vec_3i, "gf::Vec3i");
+impl_try_from_value!(gf::Vec3h, try_as_vec_3h, "gf::Vec3h");
+impl_try_from_value!(gf::Vec4f, try_as_vec_4f, "gf::Vec4f");
+impl_try_from_value!(gf::Vec4d, try_as_vec_4d, "gf::Vec4d");
+impl_try_from_value!(gf::Vec4i, try_as_vec_4i, "gf::Vec4i");
+impl_try_from_value!(gf::Vec4h, try_as_vec_4h, "gf::Vec4h");
+impl_try_from_value!(gf::Quatf, try_as_quatf, "gf::Quatf");
+impl_try_from_value!(gf::Quatd, try_as_quatd, "gf::Quatd");
+impl_try_from_value!(gf::Quath, try_as_quath, "gf::Quath");
+impl_try_from_value!(gf::Mat2d, try_as_matrix_2d, "gf::Mat2d");
+impl_try_from_value!(gf::Mat3d, try_as_matrix_3d, "gf::Mat3d");
+impl_try_from_value!(gf::Matrix4d, try_as_matrix_4d, "gf::Matrix4d");
+
+// gf array types.
+impl_try_from_value!(Vec<gf::Vec2f>, try_as_vec_2f_vec, "Vec2fVec");
+impl_try_from_value!(Vec<gf::Vec2d>, try_as_vec_2d_vec, "Vec2dVec");
+impl_try_from_value!(Vec<gf::Vec2i>, try_as_vec_2i_vec, "Vec2iVec");
+impl_try_from_value!(Vec<gf::Vec2h>, try_as_vec_2h_vec, "Vec2hVec");
+impl_try_from_value!(Vec<gf::Vec3f>, try_as_vec_3f_vec, "Vec3fVec");
+impl_try_from_value!(Vec<gf::Vec3d>, try_as_vec_3d_vec, "Vec3dVec");
+impl_try_from_value!(Vec<gf::Vec3i>, try_as_vec_3i_vec, "Vec3iVec");
+impl_try_from_value!(Vec<gf::Vec3h>, try_as_vec_3h_vec, "Vec3hVec");
+impl_try_from_value!(Vec<gf::Vec4f>, try_as_vec_4f_vec, "Vec4fVec");
+impl_try_from_value!(Vec<gf::Vec4d>, try_as_vec_4d_vec, "Vec4dVec");
+impl_try_from_value!(Vec<gf::Vec4i>, try_as_vec_4i_vec, "Vec4iVec");
+impl_try_from_value!(Vec<gf::Vec4h>, try_as_vec_4h_vec, "Vec4hVec");
+impl_try_from_value!(Vec<gf::Quatf>, try_as_quatf_vec, "QuatfVec");
+impl_try_from_value!(Vec<gf::Quatd>, try_as_quatd_vec, "QuatdVec");
+impl_try_from_value!(Vec<gf::Quath>, try_as_quath_vec, "QuathVec");
+impl_try_from_value!(Vec<gf::Mat2d>, try_as_matrix_2d_vec, "Matrix2dVec");
+impl_try_from_value!(Vec<gf::Mat3d>, try_as_matrix_3d_vec, "Matrix3dVec");
+impl_try_from_value!(Vec<gf::Matrix4d>, try_as_matrix_4d_vec, "Matrix4dVec");
 
 impl TryFrom<Value> for String {
     type Error = ValueConversionError;
@@ -354,13 +391,16 @@ impl TryFrom<Value> for String {
     }
 }
 
+// Raw array convenience conversions — extract the inner gf type then convert
+// via its Into<[T; N]> impl.
+
 impl TryFrom<Value> for [f32; 2] {
     type Error = ValueConversionError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec2f(v) => Ok(v),
-            other => ValueConversionError::err("Vec2f", &other),
+            Value::Vec2f(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec2f", &other),
         }
     }
 }
@@ -370,8 +410,8 @@ impl TryFrom<Value> for [f32; 3] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec3f(v) => Ok(v),
-            other => ValueConversionError::err("Vec3f", &other),
+            Value::Vec3f(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec3f", &other),
         }
     }
 }
@@ -381,8 +421,9 @@ impl TryFrom<Value> for [f32; 4] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec4f(v) | Value::Quatf(v) => Ok(v),
-            other => ValueConversionError::err("Vec4f or Quatf", &other),
+            Value::Vec4f(v) => Ok(v.into()),
+            Value::Quatf(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec4f or gf::Quatf", &other),
         }
     }
 }
@@ -392,8 +433,8 @@ impl TryFrom<Value> for [f64; 2] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec2d(v) => Ok(v),
-            other => ValueConversionError::err("Vec2d", &other),
+            Value::Vec2d(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec2d", &other),
         }
     }
 }
@@ -403,8 +444,8 @@ impl TryFrom<Value> for [f64; 3] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec3d(v) => Ok(v),
-            other => ValueConversionError::err("Vec3d", &other),
+            Value::Vec3d(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec3d", &other),
         }
     }
 }
@@ -414,8 +455,42 @@ impl TryFrom<Value> for [f64; 4] {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::Vec4d(v) | Value::Quatd(v) => Ok(v),
-            other => ValueConversionError::err("Vec4d or Quatd", &other),
+            Value::Vec4d(v) => Ok(v.into()),
+            Value::Quatd(v) => Ok(v.into()),
+            other => ValueConversionError::err("gf::Vec4d or gf::Quatd", &other),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<[f32; 2]> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec2fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
+            other => ValueConversionError::err("Vec2fVec", &other),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<[f32; 3]> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec3fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
+            other => ValueConversionError::err("Vec3fVec", &other),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<[f32; 4]> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Vec4fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
+            other => ValueConversionError::err("Vec4fVec", &other),
         }
     }
 }
@@ -426,10 +501,10 @@ impl TryFrom<Value> for Vec<f32> {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::FloatVec(v) => Ok(v),
-            Value::Vec2f(v) => Ok(v.into()),
-            Value::Vec3f(v) => Ok(v.into()),
-            Value::Vec4f(v) => Ok(v.into()),
-            other => ValueConversionError::err("FloatVec, Vec2f, Vec3f, or Vec4f", &other),
+            Value::Vec2f(v) => Ok(<[f32; 2]>::from(v).into()),
+            Value::Vec3f(v) => Ok(<[f32; 3]>::from(v).into()),
+            Value::Vec4f(v) => Ok(<[f32; 4]>::from(v).into()),
+            other => ValueConversionError::err("FloatVec, gf::Vec2f, gf::Vec3f, or gf::Vec4f", &other),
         }
     }
 }
@@ -440,10 +515,10 @@ impl TryFrom<Value> for Vec<f64> {
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::DoubleVec(v) => Ok(v),
-            Value::Vec2d(v) => Ok(v.into()),
-            Value::Vec3d(v) => Ok(v.into()),
-            Value::Vec4d(v) => Ok(v.into()),
-            other => ValueConversionError::err("DoubleVec, Vec2d, Vec3d, or Vec4d", &other),
+            Value::Vec2d(v) => Ok(<[f64; 2]>::from(v).into()),
+            Value::Vec3d(v) => Ok(<[f64; 3]>::from(v).into()),
+            Value::Vec4d(v) => Ok(<[f64; 4]>::from(v).into()),
+            other => ValueConversionError::err("DoubleVec, gf::Vec2d, gf::Vec3d, or gf::Vec4d", &other),
         }
     }
 }
@@ -460,13 +535,12 @@ impl<'a> From<&'a str> for Value {
 /// Wrap a value in its `Value` variant, so `impl Into<Value>` sinks (such as
 /// [`AttributeMut::set`](crate::sdf::AttributeSpecMut) and the composed
 /// `Attribute::set`) accept the bare Rust value: `set(2.5_f64)`,
-/// `set(vec![4])`, `set(vec![[0.0, 0.0, 0.0]])`.
+/// `set(vec![4])`, `set(vec![gf::vec3f(0.0, 0.0, 0.0)])`.
 ///
 /// Only types whose Rust representation maps to exactly one variant get a
 /// `From`. The ambiguous ones are omitted so the wrong variant is never picked
 /// silently — construct those explicitly:
-/// - `[f32; 4]` / `[f64; 4]` / `[f16; 4]` ([`Value::Vec4f`] vs
-///   [`Value::Quatf`], plus [`Value::Matrix2d`] for `[f64; 4]`),
+/// - `gf::Vec4f` / `gf::Vec4d` / `gf::Vec4h` ([`Value::Vec4f`] vs [`Value::Quatf`], etc.),
 /// - `Vec<String>` ([`Value::StringVec`] vs [`Value::TokenVec`]).
 ///
 /// An unsuffixed float literal needs a type suffix (`2.5_f64`) to pick between
@@ -493,16 +567,25 @@ impl_from!(f32, Float);
 impl_from!(f64, Double);
 impl_from!(String, String);
 
-// Fixed-size vectors and matrices.
-impl_from!([f32; 2], Vec2f);
-impl_from!([f32; 3], Vec3f);
-impl_from!([f64; 2], Vec2d);
-impl_from!([f64; 3], Vec3d);
-impl_from!([i32; 2], Vec2i);
-impl_from!([i32; 3], Vec3i);
-impl_from!([i32; 4], Vec4i);
-impl_from!([f64; 9], Matrix3d);
-impl_from!([f64; 16], Matrix4d);
+// gf vector and quaternion types.
+impl_from!(gf::Vec2f, Vec2f);
+impl_from!(gf::Vec2d, Vec2d);
+impl_from!(gf::Vec2i, Vec2i);
+impl_from!(gf::Vec2h, Vec2h);
+impl_from!(gf::Vec3f, Vec3f);
+impl_from!(gf::Vec3d, Vec3d);
+impl_from!(gf::Vec3i, Vec3i);
+impl_from!(gf::Vec3h, Vec3h);
+impl_from!(gf::Vec4f, Vec4f);
+impl_from!(gf::Vec4d, Vec4d);
+impl_from!(gf::Vec4i, Vec4i);
+impl_from!(gf::Vec4h, Vec4h);
+impl_from!(gf::Quatf, Quatf);
+impl_from!(gf::Quatd, Quatd);
+impl_from!(gf::Quath, Quath);
+impl_from!(gf::Mat2d, Matrix2d);
+impl_from!(gf::Mat3d, Matrix3d);
+impl_from!(gf::Matrix4d, Matrix4d);
 
 // Flat scalar arrays.
 impl_from!(Vec<bool>, BoolVec);
@@ -515,14 +598,116 @@ impl_from!(Vec<f16>, HalfVec);
 impl_from!(Vec<f32>, FloatVec);
 impl_from!(Vec<f64>, DoubleVec);
 
-// Arrays of fixed-size vectors.
-impl_from!(Vec<[f32; 2]>, Vec2fVec);
-impl_from!(Vec<[f32; 3]>, Vec3fVec);
-impl_from!(Vec<[f64; 2]>, Vec2dVec);
-impl_from!(Vec<[f64; 3]>, Vec3dVec);
-impl_from!(Vec<[i32; 2]>, Vec2iVec);
-impl_from!(Vec<[i32; 3]>, Vec3iVec);
-impl_from!(Vec<[i32; 4]>, Vec4iVec);
+// Arrays of gf vector and quaternion types.
+impl_from!(Vec<gf::Vec2f>, Vec2fVec);
+impl_from!(Vec<gf::Vec2d>, Vec2dVec);
+impl_from!(Vec<gf::Vec2i>, Vec2iVec);
+impl_from!(Vec<gf::Vec2h>, Vec2hVec);
+impl_from!(Vec<gf::Vec3f>, Vec3fVec);
+impl_from!(Vec<gf::Vec3d>, Vec3dVec);
+impl_from!(Vec<gf::Vec3i>, Vec3iVec);
+impl_from!(Vec<gf::Vec3h>, Vec3hVec);
+impl_from!(Vec<gf::Vec4f>, Vec4fVec);
+impl_from!(Vec<gf::Vec4d>, Vec4dVec);
+impl_from!(Vec<gf::Vec4i>, Vec4iVec);
+impl_from!(Vec<gf::Vec4h>, Vec4hVec);
+impl_from!(Vec<gf::Quatf>, QuatfVec);
+impl_from!(Vec<gf::Quatd>, QuatdVec);
+impl_from!(Vec<gf::Quath>, QuathVec);
+impl_from!(Vec<gf::Matrix4d>, Matrix4dVec);
+
+// Raw array convenience conversions. Only unambiguous sizes are included:
+// [f32; 4] / [f64; 4] / [f16; 4] are omitted (Vec4 vs Quat ambiguity).
+impl From<[f32; 2]> for Value {
+    fn from(v: [f32; 2]) -> Self {
+        Value::Vec2f(v.into())
+    }
+}
+impl From<[f32; 3]> for Value {
+    fn from(v: [f32; 3]) -> Self {
+        Value::Vec3f(v.into())
+    }
+}
+impl From<[f64; 2]> for Value {
+    fn from(v: [f64; 2]) -> Self {
+        Value::Vec2d(v.into())
+    }
+}
+impl From<[f64; 3]> for Value {
+    fn from(v: [f64; 3]) -> Self {
+        Value::Vec3d(v.into())
+    }
+}
+impl From<[i32; 2]> for Value {
+    fn from(v: [i32; 2]) -> Self {
+        Value::Vec2i(v.into())
+    }
+}
+impl From<[i32; 3]> for Value {
+    fn from(v: [i32; 3]) -> Self {
+        Value::Vec3i(v.into())
+    }
+}
+impl From<[i32; 4]> for Value {
+    fn from(v: [i32; 4]) -> Self {
+        Value::Vec4i(v.into())
+    }
+}
+impl From<[f64; 16]> for Value {
+    fn from(v: [f64; 16]) -> Self {
+        Value::Matrix4d(gf::Matrix4d(v))
+    }
+}
+
+// Shorthand constructors for the gf vector and quaternion variants,
+// mirroring the `gf::vec3f(x, y, z)` free-function convention.
+impl Value {
+    pub fn vec2f(x: f32, y: f32) -> Self {
+        Self::Vec2f(gf::vec2f(x, y))
+    }
+    pub fn vec3f(x: f32, y: f32, z: f32) -> Self {
+        Self::Vec3f(gf::vec3f(x, y, z))
+    }
+    pub fn vec4f(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self::Vec4f(gf::vec4f(x, y, z, w))
+    }
+    pub fn vec2d(x: f64, y: f64) -> Self {
+        Self::Vec2d(gf::vec2d(x, y))
+    }
+    pub fn vec3d(x: f64, y: f64, z: f64) -> Self {
+        Self::Vec3d(gf::vec3d(x, y, z))
+    }
+    pub fn vec4d(x: f64, y: f64, z: f64, w: f64) -> Self {
+        Self::Vec4d(gf::vec4d(x, y, z, w))
+    }
+    pub fn vec2i(x: i32, y: i32) -> Self {
+        Self::Vec2i(gf::vec2i(x, y))
+    }
+    pub fn vec3i(x: i32, y: i32, z: i32) -> Self {
+        Self::Vec3i(gf::vec3i(x, y, z))
+    }
+    pub fn vec4i(x: i32, y: i32, z: i32, w: i32) -> Self {
+        Self::Vec4i(gf::vec4i(x, y, z, w))
+    }
+    pub fn vec2h(x: f16, y: f16) -> Self {
+        Self::Vec2h(gf::vec2h(x, y))
+    }
+    pub fn vec3h(x: f16, y: f16, z: f16) -> Self {
+        Self::Vec3h(gf::vec3h(x, y, z))
+    }
+    pub fn vec4h(x: f16, y: f16, z: f16, w: f16) -> Self {
+        Self::Vec4h(gf::vec4h(x, y, z, w))
+    }
+    pub fn quatf(w: f32, x: f32, y: f32, z: f32) -> Self {
+        Self::Quatf(gf::quatf(w, x, y, z))
+    }
+    pub fn quatd(w: f64, x: f64, y: f64, z: f64) -> Self {
+        Self::Quatd(gf::quatd(w, x, y, z))
+    }
+    pub fn quath(w: f16, x: f16, y: f16, z: f16) -> Self {
+        Self::Quath(gf::quath(w, x, y, z))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -553,31 +738,43 @@ mod tests {
     }
 
     #[test]
+    fn try_from_gf_types() {
+        let v3 = gf::vec3f(1.0, 2.0, 3.0);
+        assert_eq!(gf::Vec3f::try_from(Value::Vec3f(v3)).unwrap(), v3);
+
+        let q = gf::quatf(1.0, 0.0, 0.0, 0.0);
+        assert_eq!(gf::Quatf::try_from(Value::Quatf(q)).unwrap(), q);
+
+        let m = gf::Matrix4d::IDENTITY;
+        assert_eq!(gf::Matrix4d::try_from(Value::Matrix4d(m)).unwrap(), m);
+    }
+
+    #[test]
     fn try_from_fixed_arrays() {
-        assert_eq!(<[f32; 2]>::try_from(Value::Vec2f([1.0, 2.0])).unwrap(), [1.0, 2.0]);
-        assert_eq!(
-            <[f32; 3]>::try_from(Value::Vec3f([1.0, 2.0, 3.0])).unwrap(),
-            [1.0, 2.0, 3.0]
-        );
-        assert_eq!(
-            <[f32; 4]>::try_from(Value::Vec4f([1.0, 2.0, 3.0, 4.0])).unwrap(),
-            [1.0, 2.0, 3.0, 4.0]
-        );
-        assert_eq!(
-            <[f64; 3]>::try_from(Value::Vec3d([1.0, 2.0, 3.0])).unwrap(),
-            [1.0, 2.0, 3.0]
-        );
+        let v = gf::vec2f(1.0, 2.0);
+        assert_eq!(<[f32; 2]>::try_from(Value::Vec2f(v)).unwrap(), [1.0, 2.0]);
+
+        let v = gf::vec3f(1.0, 2.0, 3.0);
+        assert_eq!(<[f32; 3]>::try_from(Value::Vec3f(v)).unwrap(), [1.0, 2.0, 3.0]);
+
+        let v = gf::vec4f(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(<[f32; 4]>::try_from(Value::Vec4f(v)).unwrap(), [1.0, 2.0, 3.0, 4.0]);
+
+        let v = gf::vec3d(1.0, 2.0, 3.0);
+        assert_eq!(<[f64; 3]>::try_from(Value::Vec3d(v)).unwrap(), [1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn try_from_vec() {
         // Vec<f32> accepts any float vector variant.
         assert!(Vec::<f32>::try_from(Value::FloatVec(vec![1.0])).is_ok());
-        assert!(Vec::<f32>::try_from(Value::Vec3f([1.0, 2.0, 3.0])).is_ok());
+        let v = gf::vec3f(1.0, 2.0, 3.0);
+        assert!(Vec::<f32>::try_from(Value::Vec3f(v)).is_ok());
 
         // Vec<f64> accepts any double vector variant.
         assert!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).is_ok());
-        assert!(Vec::<f64>::try_from(Value::Vec2d([1.0, 2.0])).is_ok());
+        let v = gf::vec2d(1.0, 2.0);
+        assert!(Vec::<f64>::try_from(Value::Vec2d(v)).is_ok());
     }
 
     #[test]
@@ -585,7 +782,16 @@ mod tests {
         let err = f32::try_from(Value::Int(1)).unwrap_err();
         assert_eq!(err.to_string(), "expected Float, got Int");
 
-        let err = <[f32; 3]>::try_from(Value::Bool(true)).unwrap_err();
-        assert_eq!(err.to_string(), "expected Vec3f, got Bool");
+        let err = gf::Vec3f::try_from(Value::Bool(true)).unwrap_err();
+        assert_eq!(err.to_string(), "expected gf::Vec3f, got Bool");
+    }
+
+    #[test]
+    fn from_gf_roundtrip() {
+        let v = gf::vec3f(1.0, 2.0, 3.0);
+        assert_eq!(Value::from(v), Value::Vec3f(v));
+
+        let m = gf::Matrix4d::IDENTITY;
+        assert_eq!(Value::from(m), Value::Matrix4d(m));
     }
 }

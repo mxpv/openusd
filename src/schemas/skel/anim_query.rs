@@ -13,18 +13,17 @@
 
 use anyhow::Result;
 
+use crate::gf;
 use crate::sdf::{Path, Value};
 use crate::usd::{SchemaBase, Stage};
 
 use super::schema::SkelAnimation;
 use super::tokens::{A_BLEND_SHAPE_WEIGHTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS};
-use crate::math::{mat4_from_quat, mat4_mul, mat4_scale, mat4_translation};
 
 /// Decomposed joint-local transforms at a stage time: one entry per
-/// joint, holding translation `[x, y, z]`, rotation `[w, x, y, z]`,
-/// and scale `[x, y, z]`. Returned by
+/// joint, holding translation, rotation, and scale. Returned by
 /// [`SkelAnimQuery::compute_joint_local_transform_components`].
-pub type JointTransformComponents = (Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<[f32; 3]>);
+pub type JointTransformComponents = (Vec<gf::Vec3f>, Vec<gf::Quatf>, Vec<gf::Vec3f>);
 
 /// Pre-resolved description of one `SkelAnimation` prim. Holds the
 /// joint and blend-shape ordering tokens plus flags recording which
@@ -107,9 +106,9 @@ impl SkelAnimQuery {
         time: f64,
     ) -> Result<JointTransformComponents> {
         let n = self.joints.len();
-        let translations = self.read_vec3f_attr_at(stage, A_TRANSLATIONS, time, n, [0.0, 0.0, 0.0])?;
-        let rotations = self.read_quatf_attr_at(stage, A_ROTATIONS, time, n, [1.0, 0.0, 0.0, 0.0])?;
-        let scales = self.read_vec3f_attr_at(stage, A_SCALES, time, n, [1.0, 1.0, 1.0])?;
+        let translations = self.read_vec3f_attr_at(stage, A_TRANSLATIONS, time, n, gf::Vec3f::default())?;
+        let rotations = self.read_quatf_attr_at(stage, A_ROTATIONS, time, n, gf::Quatf::IDENTITY)?;
+        let scales = self.read_vec3f_attr_at(stage, A_SCALES, time, n, gf::vec3f(1.0, 1.0, 1.0))?;
         Ok((translations, rotations, scales))
     }
 
@@ -118,13 +117,13 @@ impl SkelAnimQuery {
     /// convention. Callers feeding the result into
     /// [`super::SkeletonResolver::compute_skinning_transforms_from_local`]
     /// get full skinning transforms out the other side.
-    pub fn compute_joint_local_transforms(&self, stage: &Stage, time: f64) -> Result<Vec<[f64; 16]>> {
+    pub fn compute_joint_local_transforms(&self, stage: &Stage, time: f64) -> Result<Vec<gf::Matrix4d>> {
         let (translations, rotations, scales) = self.compute_joint_local_transform_components(stage, time)?;
         Ok(translations
             .iter()
             .zip(rotations.iter())
             .zip(scales.iter())
-            .map(|((t, r), s)| compose_trs(*t, *r, *s))
+            .map(|((t, r), s)| gf::Matrix4d::from_trs(*t, *r, *s))
             .collect())
     }
 
@@ -152,18 +151,19 @@ impl SkelAnimQuery {
         name: &str,
         time: f64,
         n: usize,
-        default: [f32; 3],
-    ) -> Result<Vec<[f32; 3]>> {
+        default: gf::Vec3f,
+    ) -> Result<Vec<gf::Vec3f>> {
         let attr = self.prim.append_property(name)?;
         let v = stage.value_at(attr, time)?;
         Ok(match v {
             Some(Value::Vec3fVec(a)) if a.len() == n => a,
-            Some(Value::Vec3dVec(a)) if a.len() == n => {
-                a.into_iter().map(|x| [x[0] as f32, x[1] as f32, x[2] as f32]).collect()
-            }
+            Some(Value::Vec3dVec(a)) if a.len() == n => a
+                .into_iter()
+                .map(|x| gf::vec3f(x.x as f32, x.y as f32, x.z as f32))
+                .collect(),
             Some(Value::Vec3hVec(a)) if a.len() == n => a
                 .into_iter()
-                .map(|x| [x[0].to_f32(), x[1].to_f32(), x[2].to_f32()])
+                .map(|x| gf::vec3f(x.x.to_f32(), x.y.to_f32(), x.z.to_f32()))
                 .collect(),
             _ => vec![default; n],
         })
@@ -175,19 +175,19 @@ impl SkelAnimQuery {
         name: &str,
         time: f64,
         n: usize,
-        default: [f32; 4],
-    ) -> Result<Vec<[f32; 4]>> {
+        default: gf::Quatf,
+    ) -> Result<Vec<gf::Quatf>> {
         let attr = self.prim.append_property(name)?;
         let v = stage.value_at(attr, time)?;
         Ok(match v {
             Some(Value::QuatfVec(a)) if a.len() == n => a,
             Some(Value::QuatdVec(a)) if a.len() == n => a
                 .into_iter()
-                .map(|q| [q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32])
+                .map(|q| gf::quatf(q.w as f32, q.x as f32, q.y as f32, q.z as f32))
                 .collect(),
             Some(Value::QuathVec(a)) if a.len() == n => a
                 .into_iter()
-                .map(|q| [q[0].to_f32(), q[1].to_f32(), q[2].to_f32(), q[3].to_f32()])
+                .map(|q| gf::quatf(q.w.to_f32(), q.x.to_f32(), q.y.to_f32(), q.z.to_f32()))
                 .collect(),
             _ => vec![default; n],
         })
@@ -204,41 +204,25 @@ fn attr_authored(stage: &Stage, prim: &Path, name: &str) -> Result<bool> {
     Ok(matches!(samples, Some(Value::TimeSamples(_))))
 }
 
-/// Compose translation + rotation + scale into a 4×4 in USD's
-/// row-major form, where `v_out = v_in · M`. Component order is
-/// `M = scale · rotation · translation`, matching every other matrix
-/// helper in this crate.
-fn compose_trs(t: [f32; 3], r: [f32; 4], s: [f32; 3]) -> [f64; 16] {
-    let scale = mat4_scale(s);
-    let rotation = mat4_from_quat(r);
-    let translation = mat4_translation(t);
-    mat4_mul(&mat4_mul(&scale, &rotation), &translation)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn compose_trs_with_identity_rotation_and_unit_scale() {
-        let m = compose_trs([1.0, 2.0, 3.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        // Translation lives in the last row (row-major).
-        assert_eq!(m[12..16], [1.0, 2.0, 3.0, 1.0]);
-        // Upper-left 3x3 is identity.
-        assert_eq!(m[0], 1.0);
-        assert_eq!(m[5], 1.0);
-        assert_eq!(m[10], 1.0);
+    fn from_trs_identity_rotation_unit_scale() {
+        let m = gf::Matrix4d::from_trs(gf::vec3f(1.0, 2.0, 3.0), gf::Quatf::IDENTITY, gf::vec3f(1.0, 1.0, 1.0));
+        assert_eq!(m.0[12..16], [1.0, 2.0, 3.0, 1.0]);
+        assert_eq!(m[(0, 0)], 1.0);
+        assert_eq!(m[(1, 1)], 1.0);
+        assert_eq!(m[(2, 2)], 1.0);
     }
 
     #[test]
-    fn compose_trs_with_scale_then_translation() {
-        let m = compose_trs([10.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [2.0, 3.0, 4.0]);
-        // Scale on diagonal.
-        assert_eq!(m[0], 2.0);
-        assert_eq!(m[5], 3.0);
-        assert_eq!(m[10], 4.0);
-        // Translation unchanged by scale (translation row is last
-        // and scale applies to the linear part).
-        assert_eq!(m[12], 10.0);
+    fn from_trs_scale_then_translation() {
+        let m = gf::Matrix4d::from_trs(gf::vec3f(10.0, 0.0, 0.0), gf::Quatf::IDENTITY, gf::vec3f(2.0, 3.0, 4.0));
+        assert_eq!(m[(0, 0)], 2.0);
+        assert_eq!(m[(1, 1)], 3.0);
+        assert_eq!(m[(2, 2)], 4.0);
+        assert_eq!(m[(3, 0)], 10.0);
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use openusd::gf;
 use openusd::sdf::{self, ChildrenKey, FieldKey, LayerOffset, ListOp, Reference, SpecType, Specifier, Value};
 use openusd::usda::TextWriter;
 
@@ -20,16 +21,16 @@ fn write_spheres(path: &str) -> anyhow::Result<()> {
         Value::TokenVec(vec!["BlueSphere".into(), "GreenSphere".into(), "RedSphere".into()]),
     );
 
-    add_sphere(&mut data, "/BlueSphere", [0.0, 0.0, 1.0])?;
-    add_sphere(&mut data, "/GreenSphere", [0.0, 1.0, 0.0])?;
-    add_sphere(&mut data, "/RedSphere", [1.0, 0.0, 0.0])?;
+    add_sphere(&mut data, "/BlueSphere", gf::vec3f(0.0, 0.0, 1.0))?;
+    add_sphere(&mut data, "/GreenSphere", gf::vec3f(0.0, 1.0, 0.0))?;
+    add_sphere(&mut data, "/RedSphere", gf::vec3f(1.0, 0.0, 0.0))?;
 
     TextWriter::write_to_file(&data, path)?;
     println!("Wrote {} spec(s) to {path}", data.len());
     Ok(())
 }
 
-fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: [f32; 3]) -> anyhow::Result<()> {
+fn add_sphere(data: &mut sdf::Data, prim_path: &str, color: gf::Vec3f) -> anyhow::Result<()> {
     let prim = sdf::path(prim_path)?;
     let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
     prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));

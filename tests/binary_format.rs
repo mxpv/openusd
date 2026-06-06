@@ -18,7 +18,7 @@
 
 use std::fs::File;
 
-use openusd::f16;
+use openusd::gf::f16;
 use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Value, Variability};
 use openusd::usdc::CrateData;
 
@@ -88,27 +88,28 @@ fn vec_f64(v: &Value) -> Vec<f64> {
 /// Extract a single vector/quaternion value as a component list.
 fn comps(v: &Value) -> Vec<f64> {
     match v {
-        Value::Vec2h(a) => a.iter().map(|x| x.to_f64()).collect(),
-        Value::Vec3h(a) => a.iter().map(|x| x.to_f64()).collect(),
-        Value::Vec4h(a) => a.iter().map(|x| x.to_f64()).collect(),
-        Value::Quath(a) => a.iter().map(|x| x.to_f64()).collect(),
-        Value::Vec2f(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Vec3f(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Vec4f(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Quatf(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Vec2d(a) => a.to_vec(),
-        Value::Vec3d(a) => a.to_vec(),
-        Value::Vec4d(a) => a.to_vec(),
-        Value::Quatd(a) => a.to_vec(),
-        Value::Vec2i(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Vec3i(a) => a.iter().map(|&x| x as f64).collect(),
-        Value::Vec4i(a) => a.iter().map(|&x| x as f64).collect(),
+        Value::Vec2h(a) => vec![a.x.to_f64(), a.y.to_f64()],
+        Value::Vec3h(a) => vec![a.x.to_f64(), a.y.to_f64(), a.z.to_f64()],
+        Value::Vec4h(a) => vec![a.x.to_f64(), a.y.to_f64(), a.z.to_f64(), a.w.to_f64()],
+        Value::Quath(a) => vec![a.w.to_f64(), a.x.to_f64(), a.y.to_f64(), a.z.to_f64()],
+        Value::Vec2f(a) => vec![a.x as f64, a.y as f64],
+        Value::Vec3f(a) => vec![a.x as f64, a.y as f64, a.z as f64],
+        Value::Vec4f(a) => vec![a.x as f64, a.y as f64, a.z as f64, a.w as f64],
+        Value::Quatf(a) => vec![a.w as f64, a.x as f64, a.y as f64, a.z as f64],
+        Value::Vec2d(a) => vec![a.x, a.y],
+        Value::Vec3d(a) => vec![a.x, a.y, a.z],
+        Value::Vec4d(a) => vec![a.x, a.y, a.z, a.w],
+        Value::Quatd(a) => vec![a.w, a.x, a.y, a.z],
+        Value::Vec2i(a) => vec![a.x as f64, a.y as f64],
+        Value::Vec3i(a) => vec![a.x as f64, a.y as f64, a.z as f64],
+        Value::Vec4i(a) => vec![a.x as f64, a.y as f64, a.z as f64, a.w as f64],
         other => panic!("not a vector/quat value: {other:?}"),
     }
 }
 
 /// Extract a vector/quaternion array as a list of component lists.
 fn arr_comps(v: &Value) -> Vec<Vec<f64>> {
+    use bytemuck::cast_slice;
     fn h<const N: usize>(a: &[[f16; N]]) -> Vec<Vec<f64>> {
         a.iter().map(|e| e.iter().map(|x| x.to_f64()).collect()).collect()
     }
@@ -122,21 +123,21 @@ fn arr_comps(v: &Value) -> Vec<Vec<f64>> {
         a.iter().map(|e| e.iter().map(|&x| x as f64).collect()).collect()
     }
     match v {
-        Value::Vec2hVec(a) => h(a),
-        Value::Vec3hVec(a) => h(a),
-        Value::Vec4hVec(a) => h(a),
-        Value::QuathVec(a) => h(a),
-        Value::Vec2fVec(a) => f(a),
-        Value::Vec3fVec(a) => f(a),
-        Value::Vec4fVec(a) => f(a),
-        Value::QuatfVec(a) => f(a),
-        Value::Vec2dVec(a) => d(a),
-        Value::Vec3dVec(a) => d(a),
-        Value::Vec4dVec(a) => d(a),
-        Value::QuatdVec(a) => d(a),
-        Value::Vec2iVec(a) => i(a),
-        Value::Vec3iVec(a) => i(a),
-        Value::Vec4iVec(a) => i(a),
+        Value::Vec2hVec(a) => h(cast_slice::<_, [f16; 2]>(a)),
+        Value::Vec3hVec(a) => h(cast_slice::<_, [f16; 3]>(a)),
+        Value::Vec4hVec(a) => h(cast_slice::<_, [f16; 4]>(a)),
+        Value::QuathVec(a) => h(cast_slice::<_, [f16; 4]>(a)),
+        Value::Vec2fVec(a) => f(cast_slice::<_, [f32; 2]>(a)),
+        Value::Vec3fVec(a) => f(cast_slice::<_, [f32; 3]>(a)),
+        Value::Vec4fVec(a) => f(cast_slice::<_, [f32; 4]>(a)),
+        Value::QuatfVec(a) => f(cast_slice::<_, [f32; 4]>(a)),
+        Value::Vec2dVec(a) => d(cast_slice::<_, [f64; 2]>(a)),
+        Value::Vec3dVec(a) => d(cast_slice::<_, [f64; 3]>(a)),
+        Value::Vec4dVec(a) => d(cast_slice::<_, [f64; 4]>(a)),
+        Value::QuatdVec(a) => d(cast_slice::<_, [f64; 4]>(a)),
+        Value::Vec2iVec(a) => i(cast_slice::<_, [i32; 2]>(a)),
+        Value::Vec3iVec(a) => i(cast_slice::<_, [i32; 3]>(a)),
+        Value::Vec4iVec(a) => i(cast_slice::<_, [i32; 4]>(a)),
         other => panic!("not a vector/quat array: {other:?}"),
     }
 }
@@ -203,18 +204,18 @@ fn assert_matrices(dim: usize) {
 
 fn mat_f64(v: &Value) -> Vec<f64> {
     match v {
-        Value::Matrix2d(a) => a.to_vec(),
-        Value::Matrix3d(a) => a.to_vec(),
-        Value::Matrix4d(a) => a.to_vec(),
+        Value::Matrix2d(a) => a.0.to_vec(),
+        Value::Matrix3d(a) => a.0.to_vec(),
+        Value::Matrix4d(a) => a.0.to_vec(),
         other => panic!("not a matrix: {other:?}"),
     }
 }
 
 fn mat_array_f64(v: &Value) -> Vec<Vec<f64>> {
     match v {
-        Value::Matrix2dVec(a) => a.iter().map(|m| m.to_vec()).collect(),
-        Value::Matrix3dVec(a) => a.iter().map(|m| m.to_vec()).collect(),
-        Value::Matrix4dVec(a) => a.iter().map(|m| m.to_vec()).collect(),
+        Value::Matrix2dVec(a) => a.iter().map(|m| m.0.to_vec()).collect(),
+        Value::Matrix3dVec(a) => a.iter().map(|m| m.0.to_vec()).collect(),
+        Value::Matrix4dVec(a) => a.iter().map(|m| m.0.to_vec()).collect(),
         other => panic!("not a matrix array: {other:?}"),
     }
 }

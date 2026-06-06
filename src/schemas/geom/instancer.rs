@@ -66,7 +66,7 @@ impl PointInstancer {
     /// the translation part of every instance transform.
     /// C++ `UsdGeomPointInstancer::GetPositionsAttr`.
     ///
-    /// Type `point3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `point3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn positions_attr(&self) -> Attribute {
         self.attribute(tok::A_POSITIONS)
     }
@@ -99,7 +99,7 @@ impl PointInstancer {
     /// `orientations`.
     /// C++ `UsdGeomPointInstancer::GetOrientationsfAttr`.
     ///
-    /// Type `quatf[]`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::QuatfVec`).
+    /// Type `quatf[]`. Fetch with `get::<Vec<gf::Quatf>>()?`.
     pub fn orientationsf_attr(&self) -> Attribute {
         self.attribute(tok::A_ORIENTATIONS_F)
     }
@@ -115,7 +115,7 @@ impl PointInstancer {
     /// every instance transform.
     /// C++ `UsdGeomPointInstancer::GetScalesAttr`.
     ///
-    /// Type `float3[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `float3[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn scales_attr(&self) -> Attribute {
         self.attribute(tok::A_SCALES)
     }
@@ -130,7 +130,7 @@ impl PointInstancer {
     /// linearly blending `positions`.
     /// C++ `UsdGeomPointInstancer::GetVelocitiesAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn velocities_attr(&self) -> Attribute {
         self.attribute(tok::A_VELOCITIES)
     }
@@ -146,7 +146,7 @@ impl PointInstancer {
     /// position interpolation into a quadratic motion model.
     /// C++ `UsdGeomPointInstancer::GetAccelerationsAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn accelerations_attr(&self) -> Attribute {
         self.attribute(tok::A_ACCELERATIONS)
     }
@@ -163,7 +163,7 @@ impl PointInstancer {
     /// blur.
     /// C++ `UsdGeomPointInstancer::GetAngularVelocitiesAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     pub fn angular_velocities_attr(&self) -> Attribute {
         self.attribute(tok::A_ANGULAR_VELOCITIES)
     }
@@ -227,9 +227,9 @@ mod tests {
         pi.create_prototypes_rel()?.set_targets([sdf::path("/Proto/Marker")?])?;
         pi.create_proto_indices_attr()?.set(sdf::Value::IntVec(vec![0, 0, 0]))?;
         pi.create_positions_attr()?.set(sdf::Value::Vec3fVec(vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+            [2.0, 0.0, 0.0].into(),
         ]))?;
         pi.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![100, 200, 300]))?;
         pi.create_invisible_ids_attr()?.set(sdf::Value::Int64Vec(vec![200]))?;

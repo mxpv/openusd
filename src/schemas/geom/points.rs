@@ -126,8 +126,10 @@ mod tests {
     fn points_widths_and_ids() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let p = Points::define(&stage, "/Cloud")?;
-        p.create_points_attr()?
-            .set(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))?;
+        p.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+        ]))?;
         p.create_widths_attr()?.set(sdf::Value::FloatVec(vec![0.1, 0.1]))?;
         p.create_ids_attr()?.set(sdf::Value::Int64Vec(vec![10, 20]))?;
 
@@ -142,12 +144,12 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let t = TetMesh::define(&stage, "/Soft")?;
         t.create_tet_vertex_indices_attr()?
-            .set(sdf::Value::Vec4iVec(vec![[0, 1, 2, 3]]))?;
+            .set(sdf::Value::Vec4iVec(vec![[0_i32, 1, 2, 3].into()]))?;
 
         let t = TetMesh::get(&stage, "/Soft")?.expect("TetMesh");
         assert_eq!(
             t.tet_vertex_indices_attr().get()?,
-            Some(sdf::Value::Vec4iVec(vec![[0, 1, 2, 3]]))
+            Some(sdf::Value::Vec4iVec(vec![[0_i32, 1, 2, 3].into()]))
         );
         assert!(t.surface_face_vertex_indices_attr().get::<sdf::Value>()?.is_none());
         Ok(())

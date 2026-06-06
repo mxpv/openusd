@@ -30,7 +30,7 @@ fn linear_double_midpoint() -> Result<()> {
 fn linear_vec3f_componentwise() -> Result<()> {
     let stage = open()?;
     let v = stage.value_at(path("/Prim.vec")?, 5.0)?.unwrap();
-    assert_eq!(v, Value::Vec3f([5.0, 10.0, 15.0]));
+    assert_eq!(v, Value::vec3f(5.0_f32, 10.0, 15.0));
     Ok(())
 }
 
@@ -41,10 +41,10 @@ fn linear_quatf_uses_slerp() -> Result<()> {
     if let Value::Quatf(q) = v {
         let expected_w = std::f32::consts::FRAC_PI_4.cos();
         let expected_x = std::f32::consts::FRAC_PI_4.sin();
-        assert!((q[0] - expected_w).abs() < 1e-5, "w: {q:?}");
-        assert!((q[1] - expected_x).abs() < 1e-5, "x: {q:?}");
-        assert!(q[2].abs() < 1e-5);
-        assert!(q[3].abs() < 1e-5);
+        assert!((q.w - expected_w).abs() < 1e-5, "w: {q:?}");
+        assert!((q.x - expected_x).abs() < 1e-5, "x: {q:?}");
+        assert!(q.y.abs() < 1e-5);
+        assert!(q.z.abs() < 1e-5);
     } else {
         panic!("expected Quatf, got {v:?}");
     }

@@ -3,7 +3,7 @@
 //! surface, the `Xformable` transform stack, and every concrete prim view.
 
 use anyhow::Result;
-use openusd::math::{mat4_transform_point, IDENTITY_MAT4};
+use openusd::gf::{Matrix4d, Vec3f};
 use openusd::schemas::geom::{
     self, Axis, BasisCurves, Boundable, Camera, Capsule, Cone, Cube, Curves, Cylinder, ElementType, GeomSubset, Gprim,
     HermiteCurves, Imageable, InterpolateBoundary, Interpolation, Mesh, NurbsCurves, NurbsPatch, PatchForm, Plane,
@@ -133,7 +133,14 @@ fn reads_extent_when_authored() -> Result<()> {
     let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
     assert_eq!(
         hero.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]))
+        Some(sdf::Value::Vec3fVec(vec![
+            openusd::gf::Vec3f {
+                x: -1.0,
+                y: -1.0,
+                z: -1.0
+            },
+            openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 1.0 },
+        ]))
     );
     Ok(())
 }
@@ -178,7 +185,7 @@ fn resets_xform_stack_detects_sentinel() -> Result<()> {
 fn unauthored_xform_is_identity() -> Result<()> {
     let stage = open()?;
     let m = xform(&stage, "/World")?.local_to_parent_transform(0.0)?;
-    assert_eq!(m, IDENTITY_MAT4);
+    assert_eq!(m, Matrix4d::IDENTITY);
     Ok(())
 }
 
@@ -186,7 +193,7 @@ fn unauthored_xform_is_identity() -> Result<()> {
 fn matrix_op_round_trips_to_authored_matrix() -> Result<()> {
     let stage = open()?;
     let m = xform(&stage, "/World/MatrixOp")?.local_to_parent_transform(0.0)?;
-    assert_eq!(&m[12..15], &[5.0, 6.0, 7.0]);
+    assert_eq!(m.0[12..15], [5.0, 6.0, 7.0]);
     Ok(())
 }
 
@@ -195,7 +202,7 @@ fn invert_prefix_inverts_the_op() -> Result<()> {
     let stage = open()?;
     // Authored translate (4, 0, 0), then !invert! it → translation row (-4, 0, 0).
     let m = xform(&stage, "/World/Inverted")?.local_to_parent_transform(0.0)?;
-    assert_eq!(&m[12..15], &[-4.0, 0.0, 0.0]);
+    assert_eq!(m.0[12..15], [-4.0, 0.0, 0.0]);
     Ok(())
 }
 
@@ -207,10 +214,10 @@ fn rotate_xyz_matches_pixar_composition() -> Result<()> {
     // +X to -Z.
     let stage = open()?;
     let m = xform(&stage, "/World/EulerXYZ")?.local_to_parent_transform(0.0)?;
-    let p = mat4_transform_point(&m, [1.0, 0.0, 0.0]);
-    assert!(p[0].abs() < 1e-5, "x: {}", p[0]);
-    assert!(p[1].abs() < 1e-5, "y: {}", p[1]);
-    assert!((p[2] + 1.0).abs() < 1e-5, "z: {} (expected -1)", p[2]);
+    let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+    assert!(p.x.abs() < 1e-5, "x: {}", p.x);
+    assert!(p.y.abs() < 1e-5, "y: {}", p.y);
+    assert!((p.z + 1.0).abs() < 1e-5, "z: {} (expected -1)", p.z);
     Ok(())
 }
 
@@ -225,10 +232,10 @@ fn trs_stack_composes_in_authored_order() -> Result<()> {
     //      translated point): (1, 2, 3) → (3, 2, -1)
     //   3. scale by 2: → (6, 4, -2)
     let m = xform(&stage, "/World/TRS")?.local_to_parent_transform(0.0)?;
-    let p = mat4_transform_point(&m, [0.0, 0.0, 0.0]);
-    assert!((p[0] - 6.0).abs() < 1e-4, "x: {}", p[0]);
-    assert!((p[1] - 4.0).abs() < 1e-4, "y: {}", p[1]);
-    assert!((p[2] + 2.0).abs() < 1e-4, "z: {}", p[2]);
+    let p = m.transform_point(Vec3f { x: 0.0, y: 0.0, z: 0.0 });
+    assert!((p.x - 6.0).abs() < 1e-4, "x: {}", p.x);
+    assert!((p.y - 4.0).abs() < 1e-4, "y: {}", p.y);
+    assert!((p.z + 2.0).abs() < 1e-4, "z: {}", p.z);
     Ok(())
 }
 
@@ -423,7 +430,10 @@ fn mesh_gprim_attrs_round_trip() -> Result<()> {
     assert_eq!(m.orientation_attr().get::<String>()?.as_deref(), Some("leftHanded"));
     assert_eq!(
         m.extent_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]))
+        Some(sdf::Value::Vec3fVec(vec![
+            openusd::gf::Vec3f { x: 0.0, y: 0.0, z: 0.0 },
+            openusd::gf::Vec3f { x: 1.0, y: 1.0, z: 0.0 },
+        ]))
     );
     Ok(())
 }
@@ -492,7 +502,11 @@ fn mesh_display_color() -> Result<()> {
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(
         m.display_color_attr().get()?,
-        Some(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]))
+        Some(sdf::Value::Vec3fVec(vec![openusd::gf::Vec3f {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0
+        }]))
     );
     assert_eq!(
         m.display_color_attr()
@@ -696,7 +710,7 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
         .and_then(|v| v.try_as_vec_3f_vec())
         .expect("scales");
     assert_eq!(scales.len(), 4);
-    assert_eq!(scales[1], [2.0, 2.0, 2.0]);
+    assert_eq!(scales[1], openusd::gf::Vec3f { x: 2.0, y: 2.0, z: 2.0 });
     assert_eq!(
         pi.ids_attr().get()?,
         Some(sdf::Value::Int64Vec(vec![100, 200, 300, 400]))

@@ -243,7 +243,15 @@ fn quat_write_read_preserves_wxyz_convention() {
         .get(&sdf::path("/World.quatfSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
-    assert_eq!(scalar, Value::Quatf([1.4, 2.9, 8.5, 4.6]));
+    assert_eq!(
+        scalar,
+        Value::Quatf(openusd::gf::Quatf {
+            w: 1.4,
+            x: 2.9,
+            y: 8.5,
+            z: 4.6
+        })
+    );
 
     // fields.usda: quatf[] quatfArr = [(4.2, 3.5, 2.6, 3.6), (2.4, 5.3, 6.3, 5.2), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
@@ -252,7 +260,26 @@ fn quat_write_read_preserves_wxyz_convention() {
         .into_owned();
     assert_eq!(
         arr,
-        Value::QuatfVec(vec![[4.2, 3.5, 2.6, 3.6], [2.4, 5.3, 6.3, 5.2], [7.1, 4.3, 2.4, 6.4]])
+        Value::QuatfVec(vec![
+            openusd::gf::Quatf {
+                w: 4.2,
+                x: 3.5,
+                y: 2.6,
+                z: 3.6
+            },
+            openusd::gf::Quatf {
+                w: 2.4,
+                x: 5.3,
+                y: 6.3,
+                z: 5.2
+            },
+            openusd::gf::Quatf {
+                w: 7.1,
+                x: 4.3,
+                y: 2.4,
+                z: 6.4
+            },
+        ])
     );
 
     // fields.usda: quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
@@ -260,14 +287,38 @@ fn quat_write_read_preserves_wxyz_convention() {
         .get(&sdf::path("/World.quatdSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
-    assert_eq!(scalar, Value::Quatd([2.4, 5.3, 6.3, 5.2]));
+    assert_eq!(
+        scalar,
+        Value::Quatd(openusd::gf::Quatd {
+            w: 2.4,
+            x: 5.3,
+            y: 6.3,
+            z: 5.2
+        })
+    );
 
     // fields.usda: quatd[] quatdArr = [(4.2, 3.5, 2.6, 3.6), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
         .get(&sdf::path("/World.quatdArr").unwrap(), "default")
         .unwrap()
         .into_owned();
-    assert_eq!(arr, Value::QuatdVec(vec![[4.2, 3.5, 2.6, 3.6], [7.1, 4.3, 2.4, 6.4]]));
+    assert_eq!(
+        arr,
+        Value::QuatdVec(vec![
+            openusd::gf::Quatd {
+                w: 4.2,
+                x: 3.5,
+                y: 2.6,
+                z: 3.6
+            },
+            openusd::gf::Quatd {
+                w: 7.1,
+                x: 4.3,
+                y: 2.4,
+                z: 6.4
+            },
+        ])
+    );
 }
 
 // Skipped fixtures — these fail during the *read* step, not during writing,

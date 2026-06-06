@@ -320,10 +320,10 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let m = Mesh::define(&stage, "/M")?;
         m.create_points_attr()?.set(sdf::Value::Vec3fVec(vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
+            [0.0_f32, 0.0, 0.0].into(),
+            [1.0, 0.0, 0.0].into(),
+            [1.0, 1.0, 0.0].into(),
+            [0.0, 1.0, 0.0].into(),
         ]))?;
         m.create_face_vertex_counts_attr()?.set(sdf::Value::IntVec(vec![4]))?;
         m.create_face_vertex_indices_attr()?
@@ -333,7 +333,7 @@ mod tests {
         m.create_orientation_attr()?
             .set(sdf::Value::Token("leftHanded".into()))?;
         m.create_display_color_attr()?
-            .set(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]))?;
+            .set(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))?;
 
         let m = Mesh::get(&stage, "/M")?.expect("Mesh");
         assert_eq!(m.face_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
@@ -359,7 +359,7 @@ mod tests {
         );
         assert_eq!(
             m.display_color_attr().get()?,
-            Some(sdf::Value::Vec3fVec(vec![[1.0, 0.0, 0.0]]))
+            Some(sdf::Value::Vec3fVec(vec![[1.0_f32, 0.0, 0.0].into()]))
         );
         Ok(())
     }

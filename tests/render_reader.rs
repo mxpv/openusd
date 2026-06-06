@@ -34,7 +34,7 @@ fn reads_render_settings() -> Result<()> {
     let s = RenderSettings::get(&stage, "/Render/settings")?.expect("RenderSettings");
     assert_eq!(
         s.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
-        Some([1920, 1080])
+        Some(openusd::gf::vec2i(1920, 1080))
     );
     assert_eq!(
         s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
@@ -64,7 +64,7 @@ fn reads_products_and_vars() -> Result<()> {
     // Product override of the settings 1920×1080.
     assert_eq!(
         p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
-        Some([1024, 512])
+        Some(openusd::gf::vec2i(1024, 512))
     );
     assert_eq!(
         p.ordered_vars_rel().targets()?,

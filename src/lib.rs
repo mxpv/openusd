@@ -15,7 +15,7 @@
 //! | [`layer`] | Layer collection. [`Collector`](layer::Collector) recursively loads all layers from a root file. |
 //! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering, per-prim index caching, and namespace mapping via [`MapFunction`](pcp::MapFunction). |
 //! | [`usd`] | Composed stage API. [`Stage`](usd::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
-//! | [`math`] | Shared 4×4 row-major matrix helpers used by the schema layer. |
+//! | [`gf`] | Graphics foundations — linear algebra types (`Vec3f`, `Matrix4d`, …). |
 //! | [`schemas`] | Domain-schema readers (UsdPhysics, UsdSkel, …) — non-core extensions, feature-gated. |
 //!
 //! # Quick start
@@ -31,8 +31,8 @@
 //! ```
 
 pub mod ar;
+pub mod gf;
 pub mod layer;
-pub mod math;
 pub mod pcp;
 pub mod schemas;
 pub mod sdf;
@@ -41,5 +41,4 @@ pub mod usda;
 pub mod usdc;
 pub mod usdz;
 
-pub use half::f16;
 pub use layer::{Collector, DependencyKind};

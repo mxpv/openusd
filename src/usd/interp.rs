@@ -25,6 +25,7 @@
 //! [`Value::None`], evaluation returns `None` — the spec semantics
 //! for a "blocked" sample.
 
+use crate::gf;
 use crate::sdf::Value;
 
 /// Stage-level interpolation mode for time-sampled attributes.
@@ -111,206 +112,94 @@ fn lerp_value(a: &Value, b: &Value, t: f64) -> Option<Value> {
     use crate::sdf::Value as V;
     let t32 = t as f32;
     Some(match (a, b) {
-        (V::Half(x), V::Half(y)) => V::Half(half::f16::from_f32(lerp_f32(x.to_f32(), y.to_f32(), t32))),
-        (V::Float(x), V::Float(y)) => V::Float(lerp_f32(*x, *y, t32)),
-        (V::Double(x), V::Double(y)) => V::Double(lerp_f64(*x, *y, t)),
-        (V::TimeCode(x), V::TimeCode(y)) => V::TimeCode(lerp_f64(*x, *y, t)),
+        (V::Half(x), V::Half(y)) => V::Half(gf::lerp_half(*x, *y, t32)),
+        (V::Float(x), V::Float(y)) => V::Float(gf::lerp(*x, *y, t32)),
+        (V::Double(x), V::Double(y)) => V::Double(gf::lerp(*x, *y, t)),
+        (V::TimeCode(x), V::TimeCode(y)) => V::TimeCode(gf::lerp(*x, *y, t)),
 
-        (V::Matrix2d(x), V::Matrix2d(y)) => V::Matrix2d(lerp_array_f64::<4>(x, y, t)),
-        (V::Matrix3d(x), V::Matrix3d(y)) => V::Matrix3d(lerp_array_f64::<9>(x, y, t)),
-        (V::Matrix4d(x), V::Matrix4d(y)) => V::Matrix4d(lerp_array_f64::<16>(x, y, t)),
+        (V::Matrix2d(x), V::Matrix2d(y)) => V::Matrix2d(x.lerp(*y, t)),
+        (V::Matrix3d(x), V::Matrix3d(y)) => V::Matrix3d(x.lerp(*y, t)),
+        (V::Matrix4d(x), V::Matrix4d(y)) => V::Matrix4d(x.lerp(*y, t)),
 
-        (V::Vec2h(x), V::Vec2h(y)) => V::Vec2h(lerp_half_array::<2>(x, y, t32)),
-        (V::Vec2f(x), V::Vec2f(y)) => V::Vec2f(lerp_array_f32::<2>(x, y, t32)),
-        (V::Vec2d(x), V::Vec2d(y)) => V::Vec2d(lerp_array_f64::<2>(x, y, t)),
-        (V::Vec3h(x), V::Vec3h(y)) => V::Vec3h(lerp_half_array::<3>(x, y, t32)),
-        (V::Vec3f(x), V::Vec3f(y)) => V::Vec3f(lerp_array_f32::<3>(x, y, t32)),
-        (V::Vec3d(x), V::Vec3d(y)) => V::Vec3d(lerp_array_f64::<3>(x, y, t)),
-        (V::Vec4h(x), V::Vec4h(y)) => V::Vec4h(lerp_half_array::<4>(x, y, t32)),
-        (V::Vec4f(x), V::Vec4f(y)) => V::Vec4f(lerp_array_f32::<4>(x, y, t32)),
-        (V::Vec4d(x), V::Vec4d(y)) => V::Vec4d(lerp_array_f64::<4>(x, y, t)),
+        (V::Vec2h(x), V::Vec2h(y)) => V::Vec2h(x.lerp(*y, t32)),
+        (V::Vec2f(x), V::Vec2f(y)) => V::Vec2f(x.lerp(*y, t32)),
+        (V::Vec2d(x), V::Vec2d(y)) => V::Vec2d(x.lerp(*y, t)),
+        (V::Vec3h(x), V::Vec3h(y)) => V::Vec3h(x.lerp(*y, t32)),
+        (V::Vec3f(x), V::Vec3f(y)) => V::Vec3f(x.lerp(*y, t32)),
+        (V::Vec3d(x), V::Vec3d(y)) => V::Vec3d(x.lerp(*y, t)),
+        (V::Vec4h(x), V::Vec4h(y)) => V::Vec4h(x.lerp(*y, t32)),
+        (V::Vec4f(x), V::Vec4f(y)) => V::Vec4f(x.lerp(*y, t32)),
+        (V::Vec4d(x), V::Vec4d(y)) => V::Vec4d(x.lerp(*y, t)),
 
-        (V::Quath(x), V::Quath(y)) => V::Quath(slerp_half(x, y, t)),
-        (V::Quatf(x), V::Quatf(y)) => V::Quatf(slerp_quatf(x, y, t)),
-        (V::Quatd(x), V::Quatd(y)) => V::Quatd(slerp_quatd(x, y, t)),
+        (V::Quath(x), V::Quath(y)) => V::Quath(x.slerp(*y, t)),
+        (V::Quatf(x), V::Quatf(y)) => V::Quatf(x.slerp(*y, t)),
+        (V::Quatd(x), V::Quatd(y)) => V::Quatd(x.slerp(*y, t)),
 
         // Array (VtArray) variants. Per C++: bracketing samples must
         // agree on length, otherwise fall back to held.
-        (V::HalfVec(x), V::HalfVec(y)) if x.len() == y.len() => V::HalfVec(
-            x.iter()
-                .zip(y)
-                .map(|(a, b)| half::f16::from_f32(lerp_f32(a.to_f32(), b.to_f32(), t32)))
-                .collect(),
-        ),
+        (V::HalfVec(x), V::HalfVec(y)) if x.len() == y.len() => {
+            V::HalfVec(x.iter().zip(y).map(|(a, b)| gf::lerp_half(*a, *b, t32)).collect())
+        }
         (V::FloatVec(x), V::FloatVec(y)) if x.len() == y.len() => {
-            V::FloatVec(x.iter().zip(y).map(|(a, b)| lerp_f32(*a, *b, t32)).collect())
+            V::FloatVec(x.iter().zip(y).map(|(a, b)| gf::lerp(*a, *b, t32)).collect())
         }
         (V::DoubleVec(x), V::DoubleVec(y)) if x.len() == y.len() => {
-            V::DoubleVec(x.iter().zip(y).map(|(a, b)| lerp_f64(*a, *b, t)).collect())
+            V::DoubleVec(x.iter().zip(y).map(|(a, b)| gf::lerp(*a, *b, t)).collect())
         }
         (V::TimeCodeVec(x), V::TimeCodeVec(y)) if x.len() == y.len() => {
-            V::TimeCodeVec(x.iter().zip(y).map(|(a, b)| lerp_f64(*a, *b, t)).collect())
+            V::TimeCodeVec(x.iter().zip(y).map(|(a, b)| gf::lerp(*a, *b, t)).collect())
         }
 
         (V::Matrix2dVec(x), V::Matrix2dVec(y)) if x.len() == y.len() => {
-            V::Matrix2dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<4>(a, b, t)).collect())
+            V::Matrix2dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
         (V::Matrix3dVec(x), V::Matrix3dVec(y)) if x.len() == y.len() => {
-            V::Matrix3dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<9>(a, b, t)).collect())
+            V::Matrix3dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
         (V::Matrix4dVec(x), V::Matrix4dVec(y)) if x.len() == y.len() => {
-            V::Matrix4dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<16>(a, b, t)).collect())
+            V::Matrix4dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
 
         (V::Vec2hVec(x), V::Vec2hVec(y)) if x.len() == y.len() => {
-            V::Vec2hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<2>(a, b, t32)).collect())
+            V::Vec2hVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec2fVec(x), V::Vec2fVec(y)) if x.len() == y.len() => {
-            V::Vec2fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<2>(a, b, t32)).collect())
+            V::Vec2fVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec2dVec(x), V::Vec2dVec(y)) if x.len() == y.len() => {
-            V::Vec2dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<2>(a, b, t)).collect())
+            V::Vec2dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
         (V::Vec3hVec(x), V::Vec3hVec(y)) if x.len() == y.len() => {
-            V::Vec3hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<3>(a, b, t32)).collect())
+            V::Vec3hVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec3fVec(x), V::Vec3fVec(y)) if x.len() == y.len() => {
-            V::Vec3fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<3>(a, b, t32)).collect())
+            V::Vec3fVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec3dVec(x), V::Vec3dVec(y)) if x.len() == y.len() => {
-            V::Vec3dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<3>(a, b, t)).collect())
+            V::Vec3dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
         (V::Vec4hVec(x), V::Vec4hVec(y)) if x.len() == y.len() => {
-            V::Vec4hVec(x.iter().zip(y).map(|(a, b)| lerp_half_array::<4>(a, b, t32)).collect())
+            V::Vec4hVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec4fVec(x), V::Vec4fVec(y)) if x.len() == y.len() => {
-            V::Vec4fVec(x.iter().zip(y).map(|(a, b)| lerp_array_f32::<4>(a, b, t32)).collect())
+            V::Vec4fVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t32)).collect())
         }
         (V::Vec4dVec(x), V::Vec4dVec(y)) if x.len() == y.len() => {
-            V::Vec4dVec(x.iter().zip(y).map(|(a, b)| lerp_array_f64::<4>(a, b, t)).collect())
+            V::Vec4dVec(x.iter().zip(y).map(|(a, b)| a.lerp(*b, t)).collect())
         }
 
         (V::QuathVec(x), V::QuathVec(y)) if x.len() == y.len() => {
-            V::QuathVec(x.iter().zip(y).map(|(a, b)| slerp_half(a, b, t)).collect())
+            V::QuathVec(x.iter().zip(y).map(|(a, b)| a.slerp(*b, t)).collect())
         }
         (V::QuatfVec(x), V::QuatfVec(y)) if x.len() == y.len() => {
-            V::QuatfVec(x.iter().zip(y).map(|(a, b)| slerp_quatf(a, b, t)).collect())
+            V::QuatfVec(x.iter().zip(y).map(|(a, b)| a.slerp(*b, t)).collect())
         }
         (V::QuatdVec(x), V::QuatdVec(y)) if x.len() == y.len() => {
-            V::QuatdVec(x.iter().zip(y).map(|(a, b)| slerp_quatd(a, b, t)).collect())
+            V::QuatdVec(x.iter().zip(y).map(|(a, b)| a.slerp(*b, t)).collect())
         }
 
         _ => return None,
     })
-}
-
-fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-
-fn lerp_f64(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t
-}
-
-fn lerp_array_f32<const N: usize>(a: &[f32; N], b: &[f32; N], t: f32) -> [f32; N] {
-    let mut out = [0.0f32; N];
-    for i in 0..N {
-        out[i] = lerp_f32(a[i], b[i], t);
-    }
-    out
-}
-
-fn lerp_array_f64<const N: usize>(a: &[f64; N], b: &[f64; N], t: f64) -> [f64; N] {
-    let mut out = [0.0f64; N];
-    for i in 0..N {
-        out[i] = lerp_f64(a[i], b[i], t);
-    }
-    out
-}
-
-fn lerp_half_array<const N: usize>(a: &[half::f16; N], b: &[half::f16; N], t: f32) -> [half::f16; N] {
-    let mut out = [half::f16::ZERO; N];
-    for i in 0..N {
-        out[i] = half::f16::from_f32(lerp_f32(a[i].to_f32(), b[i].to_f32(), t));
-    }
-    out
-}
-
-// ──────────────────────────────────────────────────────────────────
-// Quaternion slerp — spec §12.5.2 mandates slerp for quat types.
-// USD's quaternion layout is (w, x, y, z) per the textual encoding;
-// the slerp math below treats element [0] as the real part.
-// ──────────────────────────────────────────────────────────────────
-
-fn slerp_quatf(a: &[f32; 4], b: &[f32; 4], t: f64) -> [f32; 4] {
-    let aa = [a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64];
-    let bb = [b[0] as f64, b[1] as f64, b[2] as f64, b[3] as f64];
-    let out = slerp_f64(&aa, &bb, t);
-    [out[0] as f32, out[1] as f32, out[2] as f32, out[3] as f32]
-}
-
-fn slerp_quatd(a: &[f64; 4], b: &[f64; 4], t: f64) -> [f64; 4] {
-    slerp_f64(a, b, t)
-}
-
-fn slerp_half(a: &[half::f16; 4], b: &[half::f16; 4], t: f64) -> [half::f16; 4] {
-    let aa = [
-        a[0].to_f32() as f64,
-        a[1].to_f32() as f64,
-        a[2].to_f32() as f64,
-        a[3].to_f32() as f64,
-    ];
-    let bb = [
-        b[0].to_f32() as f64,
-        b[1].to_f32() as f64,
-        b[2].to_f32() as f64,
-        b[3].to_f32() as f64,
-    ];
-    let out = slerp_f64(&aa, &bb, t);
-    [
-        half::f16::from_f32(out[0] as f32),
-        half::f16::from_f32(out[1] as f32),
-        half::f16::from_f32(out[2] as f32),
-        half::f16::from_f32(out[3] as f32),
-    ]
-}
-
-/// Quaternion slerp in `(w, x, y, z)` order. Chooses the
-/// shorter great-circle arc, and falls back to nlerp when the two
-/// quaternions are within numerical noise of each other to avoid
-/// the sin(0)/0 singularity.
-fn slerp_f64(a: &[f64; 4], b: &[f64; 4], t: f64) -> [f64; 4] {
-    let mut dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
-    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
-    dot = dot.abs();
-    if dot > 0.9995 {
-        // Quaternions are colinear — lerp + normalise is stable and
-        // visually indistinguishable from slerp at this range.
-        return normalise_quat(&[
-            a[0] + (sign * b[0] - a[0]) * t,
-            a[1] + (sign * b[1] - a[1]) * t,
-            a[2] + (sign * b[2] - a[2]) * t,
-            a[3] + (sign * b[3] - a[3]) * t,
-        ]);
-    }
-    let theta = dot.acos();
-    let sin_theta = theta.sin();
-    let s_a = ((1.0 - t) * theta).sin() / sin_theta;
-    let s_b = (t * theta).sin() / sin_theta * sign;
-    [
-        a[0] * s_a + b[0] * s_b,
-        a[1] * s_a + b[1] * s_b,
-        a[2] * s_a + b[2] * s_b,
-        a[3] * s_a + b[3] * s_b,
-    ]
-}
-
-fn normalise_quat(q: &[f64; 4]) -> [f64; 4] {
-    let mag = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-    if mag == 0.0 {
-        return [1.0, 0.0, 0.0, 0.0];
-    }
-    [q[0] / mag, q[1] / mag, q[2] / mag, q[3] / mag]
 }
 
 #[cfg(test)]
@@ -375,12 +264,12 @@ mod tests {
     #[test]
     fn linear_vec3f_lerps_componentwise() {
         let s = vec![
-            (0.0, Value::Vec3f([0.0, 0.0, 0.0])),
-            (10.0, Value::Vec3f([10.0, 20.0, 30.0])),
+            (0.0, Value::vec3f(0.0_f32, 0.0, 0.0)),
+            (10.0, Value::vec3f(10.0_f32, 20.0, 30.0)),
         ];
         assert_eq!(
             evaluate(&s, 5.0, InterpolationType::Linear),
-            Some(Value::Vec3f([5.0, 10.0, 15.0]))
+            Some(Value::vec3f(5.0_f32, 10.0, 15.0))
         );
     }
 
@@ -390,62 +279,49 @@ mod tests {
         let mut b = [0.0f64; 16];
         a[0] = 1.0;
         b[0] = 3.0;
-        let s = vec![(0.0, Value::Matrix4d(a)), (10.0, Value::Matrix4d(b))];
+        let s = vec![
+            (0.0, Value::Matrix4d(gf::Matrix4d(a))),
+            (10.0, Value::Matrix4d(gf::Matrix4d(b))),
+        ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         if let Value::Matrix4d(m) = out {
-            assert!((m[0] - 2.0).abs() < 1e-9);
+            assert!((m[(0, 0)] - 2.0).abs() < 1e-9);
         } else {
             panic!("expected Matrix4d, got {out:?}");
         }
     }
 
     #[test]
-    fn slerp_quatf_90deg_at_t_half() {
-        // Identity → 180° about +X. At t=0.5 the result should be a
-        // 90° rotation about +X: (w=cos(45°), x=sin(45°), 0, 0).
-        let id = [1.0f32, 0.0, 0.0, 0.0];
-        let half_turn = [0.0f32, 1.0, 0.0, 0.0];
-        let out = slerp_quatf(&id, &half_turn, 0.5);
-        let expected_w = (std::f32::consts::FRAC_PI_4).cos();
-        let expected_x = (std::f32::consts::FRAC_PI_4).sin();
-        assert!(
-            (out[0] - expected_w).abs() < 1e-5,
-            "w: got {} expected {}",
-            out[0],
-            expected_w
-        );
-        assert!(
-            (out[1] - expected_x).abs() < 1e-5,
-            "x: got {} expected {}",
-            out[1],
-            expected_x
-        );
-        assert!(out[2].abs() < 1e-5);
-        assert!(out[3].abs() < 1e-5);
-    }
-
-    #[test]
     fn linear_vec3f_array_lerps_per_element() {
         let s = vec![
-            (0.0, Value::Vec3fVec(vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])),
-            (10.0, Value::Vec3fVec(vec![[10.0, 0.0, 0.0], [10.0, 20.0, 0.0]])),
+            (
+                0.0,
+                Value::Vec3fVec(vec![gf::vec3f(0.0, 0.0, 0.0), gf::vec3f(10.0, 0.0, 0.0)]),
+            ),
+            (
+                10.0,
+                Value::Vec3fVec(vec![gf::vec3f(10.0, 0.0, 0.0), gf::vec3f(10.0, 20.0, 0.0)]),
+            ),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
-        assert_eq!(out, Value::Vec3fVec(vec![[5.0, 0.0, 0.0], [10.0, 10.0, 0.0]]));
+        assert_eq!(
+            out,
+            Value::Vec3fVec(vec![gf::vec3f(5.0, 0.0, 0.0), gf::vec3f(10.0, 10.0, 0.0)])
+        );
     }
 
     #[test]
     fn linear_quatf_array_slerps_per_element() {
         let s = vec![
-            (0.0, Value::QuatfVec(vec![[1.0, 0.0, 0.0, 0.0]])),
-            (10.0, Value::QuatfVec(vec![[0.0, 1.0, 0.0, 0.0]])),
+            (0.0, Value::QuatfVec(vec![gf::quatf(1.0, 0.0, 0.0, 0.0)])),
+            (10.0, Value::QuatfVec(vec![gf::quatf(0.0, 1.0, 0.0, 0.0)])),
         ];
         let out = evaluate(&s, 5.0, InterpolationType::Linear).unwrap();
         if let Value::QuatfVec(v) = out {
             let expected_w = std::f32::consts::FRAC_PI_4.cos();
             let expected_x = std::f32::consts::FRAC_PI_4.sin();
-            assert!((v[0][0] - expected_w).abs() < 1e-5);
-            assert!((v[0][1] - expected_x).abs() < 1e-5);
+            assert!((v[0].w - expected_w).abs() < 1e-5);
+            assert!((v[0].x - expected_x).abs() < 1e-5);
         } else {
             panic!("expected QuatfVec, got {out:?}");
         }
@@ -481,17 +357,5 @@ mod tests {
         let s = samples_f64(&[(0.0, 0.0), (10.0, 20.0), (20.0, 30.0)]);
         assert_eq!(evaluate(&s, 10.0, InterpolationType::Linear), Some(Value::Double(20.0)));
         assert_eq!(evaluate(&s, 10.0, InterpolationType::Held), Some(Value::Double(20.0)));
-    }
-
-    #[test]
-    fn slerp_takes_shorter_arc_when_dot_is_negative() {
-        // q and -q represent the same rotation; slerp should detect
-        // the sign flip and produce a result close to identity, not
-        // the long way around.
-        let id = [1.0f64, 0.0, 0.0, 0.0];
-        let neg_id = [-1.0f64, 0.0, 0.0, 0.0];
-        let out = slerp_f64(&id, &neg_id, 0.5);
-        // Result should still represent identity (up to sign).
-        assert!((out[0].abs() - 1.0).abs() < 1e-9);
     }
 }

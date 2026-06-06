@@ -280,14 +280,14 @@ mod tests {
         shader.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
         shader
             .create_input("diffuseColor", "color3f")?
-            .set(Value::Vec3f([0.8, 0.2, 0.2]))?;
+            .set(Value::vec3f(0.8_f32, 0.2, 0.2))?;
         shader.create_output("surface", "token")?;
 
         let shader = Shader::get(&stage, "/Mat/Surface")?.expect("Shader");
         assert_eq!(shader.id()?.as_deref(), Some("UsdPreviewSurface"));
         assert_eq!(
             shader.input("diffuseColor").get::<Value>()?,
-            Some(Value::Vec3f([0.8, 0.2, 0.2]))
+            Some(Value::vec3f(0.8_f32, 0.2, 0.2))
         );
         assert!(shader
             .input_names()

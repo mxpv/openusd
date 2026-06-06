@@ -404,13 +404,14 @@ impl_render_schema!(typed RenderDenoisePass);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gf;
     use crate::schemas::render::{AspectRatioConformPolicy, ProductType, RenderSettingsBase, SourceType};
 
     #[test]
     fn render_settings_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let s = RenderSettings::define(&stage, "/Render/Settings")?;
-        s.create_resolution_attr()?.set([1280, 720])?;
+        s.create_resolution_attr()?.set(gf::vec2i(1280, 720))?;
         s.create_aspect_ratio_conform_policy_attr()?
             .set(AspectRatioConformPolicy::AdjustApertureWidth)?;
         s.create_camera_rel()?.add_target(sdf::path("/World/Cam")?)?;
@@ -423,7 +424,7 @@ mod tests {
         let s = RenderSettings::get(&stage, "/Render/Settings")?.expect("RenderSettings");
         assert_eq!(
             s.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
-            Some([1280, 720])
+            Some(gf::vec2i(1280, 720))
         );
         assert_eq!(
             s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
@@ -449,7 +450,7 @@ mod tests {
         p.create_product_type_attr()?.set(ProductType::Raster)?;
         p.create_product_name_attr()?.set("beauty.exr".to_string())?;
         // A product-level override of an inherited base attribute.
-        p.create_resolution_attr()?.set([512, 512])?;
+        p.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
         p.create_ordered_vars_rel()?
             .add_target(sdf::path("/Render/Vars/color")?)?;
 
@@ -458,7 +459,7 @@ mod tests {
         assert_eq!(p.product_name_attr().get::<String>()?.as_deref(), Some("beauty.exr"));
         assert_eq!(
             p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
-            Some([512, 512])
+            Some(gf::vec2i(512, 512))
         );
         assert_eq!(p.ordered_vars_rel().targets()?, vec![sdf::path("/Render/Vars/color")?]);
         Ok(())

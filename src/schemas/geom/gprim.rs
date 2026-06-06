@@ -54,7 +54,7 @@ pub trait Gprim: Boundable {
     /// gprim when no bound material provides one (RGB in linear space).
     /// C++ `UsdGeomGprim::GetDisplayColorAttr`.
     ///
-    /// Type `color3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `color3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn display_color_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_DISPLAY_COLOR)
     }

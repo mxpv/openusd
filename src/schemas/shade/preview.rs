@@ -11,6 +11,7 @@
 
 use anyhow::Result;
 
+use crate::gf;
 use crate::sdf::{FieldKey, Path, Value};
 use crate::usd::Stage;
 
@@ -53,14 +54,14 @@ impl<T> Channel<T> {
 }
 
 /// Decoded `UsdPreviewSurface`. Every channel is a [`Channel`] — scalar,
-/// texture, or unset. Colour channels are `[f32; 3]`, scalar channels `f32`.
+/// texture, or unset. Colour channels are `gf::Vec3f`, scalar channels `f32`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReadPreviewSurface {
     /// Shader prim path this was read from.
     pub shader: String,
-    pub diffuse_color: Channel<[f32; 3]>,
-    pub emissive_color: Channel<[f32; 3]>,
-    pub specular_color: Channel<[f32; 3]>,
+    pub diffuse_color: Channel<gf::Vec3f>,
+    pub emissive_color: Channel<gf::Vec3f>,
+    pub specular_color: Channel<gf::Vec3f>,
     pub metallic: Channel<f32>,
     pub roughness: Channel<f32>,
     pub clearcoat: Channel<f32>,
@@ -69,7 +70,7 @@ pub struct ReadPreviewSurface {
     pub opacity_threshold: Channel<f32>,
     pub ior: Channel<f32>,
     /// `normal` input — only its texture form is meaningful (a normal map).
-    pub normal: Channel<[f32; 3]>,
+    pub normal: Channel<gf::Vec3f>,
     pub occlusion: Channel<f32>,
 }
 
@@ -147,14 +148,14 @@ fn resolve_asset_value(stage: &Stage, attr: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<[f32; 3]>> {
+fn read_color_channel(shader: &Shader, base: &str) -> Result<Channel<gf::Vec3f>> {
     if let Some(file) = connected_texture_file(shader, base)? {
         return Ok(Channel::Texture(file));
     }
     Ok(match shader.input(base).get::<Value>()? {
         Some(Value::Vec3f(v)) => Channel::Value(v),
-        Some(Value::Vec3d(v)) => Channel::Value([v[0] as f32, v[1] as f32, v[2] as f32]),
-        Some(Value::Vec3h(v)) => Channel::Value([v[0].to_f32(), v[1].to_f32(), v[2].to_f32()]),
+        Some(Value::Vec3d(v)) => Channel::Value(gf::vec3f(v.x as f32, v.y as f32, v.z as f32)),
+        Some(Value::Vec3h(v)) => Channel::Value(gf::vec3f(v.x.to_f32(), v.y.to_f32(), v.z.to_f32())),
         _ => Channel::Unset,
     })
 }

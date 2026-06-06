@@ -26,13 +26,14 @@
 //! # Example
 //!
 //! ```
+//! use openusd::gf;
 //! use openusd::schemas::render::{self, RenderSettingsBase};
 //! use openusd::usd::Stage;
 //!
 //! let stage = Stage::builder().in_memory("scene.usda").unwrap();
 //!
 //! let settings = render::RenderSettings::define(&stage, "/Render/Settings").unwrap();
-//! settings.create_resolution_attr().unwrap().set([1920, 1080]).unwrap();
+//! settings.create_resolution_attr().unwrap().set(gf::vec2i(1920, 1080)).unwrap();
 //! settings.create_products_rel().unwrap().add_target("/Render/Products/beauty".parse().unwrap()).unwrap();
 //!
 //! render::RenderProduct::define(&stage, "/Render/Products/beauty").unwrap()

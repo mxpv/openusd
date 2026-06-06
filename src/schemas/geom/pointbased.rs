@@ -21,7 +21,7 @@ pub trait PointBased: Gprim {
     /// topology (faces, curves, tets) indexes into this array.
     /// C++ `UsdGeomPointBased::GetPointsAttr`.
     ///
-    /// Type `point3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `point3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn points_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_POINTS)
     }
@@ -39,7 +39,7 @@ pub trait PointBased: Gprim {
     /// whether they are per-point, per-face, or face-varying; a mesh's
     /// `subdivisionScheme` may override them. C++ `UsdGeomPointBased::GetNormalsAttr`.
     ///
-    /// Type `normal3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `normal3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn normals_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_NORMALS)
     }
@@ -57,7 +57,7 @@ pub trait PointBased: Gprim {
     /// and interpolate [`points`](Self::points_attr) between samples instead of
     /// relying on neighboring time samples. C++ `UsdGeomPointBased::GetVelocitiesAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn velocities_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_VELOCITIES)
     }
@@ -75,7 +75,7 @@ pub trait PointBased: Gprim {
     /// [`velocities`](Self::velocities_attr)-based motion model to a quadratic
     /// position estimate within a frame. C++ `UsdGeomPointBased::GetAccelerationsAttr`.
     ///
-    /// Type `vector3f[]`. Fetch with `get::<Vec<[f32; 3]>>()?`.
+    /// Type `vector3f[]`. Fetch with `get::<Vec<gf::Vec3f>>()?`.
     fn accelerations_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_ACCELERATIONS)
     }

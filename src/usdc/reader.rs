@@ -7,12 +7,13 @@ use std::{
     mem, str, vec,
 };
 
+use crate::gf::f16;
 use anyhow::{bail, ensure, Context, Result};
 use bytemuck::{bytes_of, bytes_of_mut, cast_slice_mut, AnyBitPattern, NoUninit, Pod};
-use half::f16;
 use num_traits::{AsPrimitive, Float, PrimInt};
 
 use crate::{
+    gf,
     sdf::{self, Value},
     usdc::coding,
 };
@@ -847,6 +848,20 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
     }
 
     /// Read an array of fixed-size vectors (e.g. `Vec<[f32; 3]>`).
+    /// Reads an array of POD values (including `repr(C)` gf types) directly,
+    /// without the intermediate `[T; N]` grouping step that
+    /// [`read_vec_array`] performs. `U` must have the same binary layout as
+    /// the on-disk element — safe for all gf vec types since they are
+    /// `#[repr(C)]` and `bytemuck::Pod`.
+    fn read_gf_array<U: Default + NoUninit + AnyBitPattern>(&mut self, value: ValueRep) -> Result<Vec<U>> {
+        debug_assert!(value.is_array() && !value.is_compressed());
+        let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
+        if count == 0 {
+            return Ok(Vec::default());
+        }
+        self.reader.read_vec::<U>(count)
+    }
+
     fn read_vec_array<T: Default + NoUninit + AnyBitPattern, const N: usize>(
         &mut self,
         value: ValueRep,
@@ -983,71 +998,123 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             //
             // Vectors (half, float, double, int + vec{2,3,4})
             //
-            Type::Vec2h if value.is_array() => Value::Vec2hVec(self.read_vec_array::<f16, 2>(value)?),
-            Type::Vec2f if value.is_array() => Value::Vec2fVec(self.read_vec_array::<f32, 2>(value)?),
-            Type::Vec2d if value.is_array() => Value::Vec2dVec(self.read_vec_array::<f64, 2>(value)?),
-            Type::Vec2i if value.is_array() => Value::Vec2iVec(self.read_vec_array::<i32, 2>(value)?),
+            Type::Vec2h if value.is_array() => Value::Vec2hVec(self.read_gf_array::<gf::Vec2h>(value)?),
+            Type::Vec2f if value.is_array() => Value::Vec2fVec(self.read_gf_array::<gf::Vec2f>(value)?),
+            Type::Vec2d if value.is_array() => Value::Vec2dVec(self.read_gf_array::<gf::Vec2d>(value)?),
+            Type::Vec2i if value.is_array() => Value::Vec2iVec(self.read_gf_array::<gf::Vec2i>(value)?),
 
-            Type::Vec3h if value.is_array() => Value::Vec3hVec(self.read_vec_array::<f16, 3>(value)?),
-            Type::Vec3f if value.is_array() => Value::Vec3fVec(self.read_vec_array::<f32, 3>(value)?),
-            Type::Vec3d if value.is_array() => Value::Vec3dVec(self.read_vec_array::<f64, 3>(value)?),
-            Type::Vec3i if value.is_array() => Value::Vec3iVec(self.read_vec_array::<i32, 3>(value)?),
+            Type::Vec3h if value.is_array() => Value::Vec3hVec(self.read_gf_array::<gf::Vec3h>(value)?),
+            Type::Vec3f if value.is_array() => Value::Vec3fVec(self.read_gf_array::<gf::Vec3f>(value)?),
+            Type::Vec3d if value.is_array() => Value::Vec3dVec(self.read_gf_array::<gf::Vec3d>(value)?),
+            Type::Vec3i if value.is_array() => Value::Vec3iVec(self.read_gf_array::<gf::Vec3i>(value)?),
 
-            Type::Vec4h if value.is_array() => Value::Vec4hVec(self.read_vec_array::<f16, 4>(value)?),
-            Type::Vec4f if value.is_array() => Value::Vec4fVec(self.read_vec_array::<f32, 4>(value)?),
-            Type::Vec4d if value.is_array() => Value::Vec4dVec(self.read_vec_array::<f64, 4>(value)?),
-            Type::Vec4i if value.is_array() => Value::Vec4iVec(self.read_vec_array::<i32, 4>(value)?),
+            Type::Vec4h if value.is_array() => Value::Vec4hVec(self.read_gf_array::<gf::Vec4h>(value)?),
+            Type::Vec4f if value.is_array() => Value::Vec4fVec(self.read_gf_array::<gf::Vec4f>(value)?),
+            Type::Vec4d if value.is_array() => Value::Vec4dVec(self.read_gf_array::<gf::Vec4d>(value)?),
+            Type::Vec4i if value.is_array() => Value::Vec4iVec(self.read_gf_array::<gf::Vec4i>(value)?),
 
-            Type::Vec2h if value.is_inlined() => sdf::Value::Vec2h(self.unpack_value::<[f16; 2]>(value)?),
-            Type::Vec2f if value.is_inlined() => sdf::Value::Vec2f(to_vec::<f32, 2>(self.unpack_value(value)?)),
-            Type::Vec2d if value.is_inlined() => sdf::Value::Vec2d(to_vec::<f64, 2>(self.unpack_value(value)?)),
-            Type::Vec2i if value.is_inlined() => sdf::Value::Vec2i(to_vec::<i32, 2>(self.unpack_value(value)?)),
+            // Inlined scalar vecs: the 32-bit inline payload stores [i8; N]
+            // sign-extended integers for all types except half-2, which is the
+            // only half variant that fits (2 × 2 bytes = 4 bytes).
+            Type::Vec2h if value.is_inlined() => sdf::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
+            Type::Vec2f if value.is_inlined() => {
+                let [x, y] = to_vec::<f32, 2>(self.unpack_value(value)?);
+                sdf::Value::Vec2f(gf::vec2f(x, y))
+            }
+            Type::Vec2d if value.is_inlined() => {
+                let [x, y] = to_vec::<f64, 2>(self.unpack_value(value)?);
+                sdf::Value::Vec2d(gf::vec2d(x, y))
+            }
+            Type::Vec2i if value.is_inlined() => {
+                let [x, y] = to_vec::<i32, 2>(self.unpack_value(value)?);
+                sdf::Value::Vec2i(gf::vec2i(x, y))
+            }
 
-            Type::Vec3h if value.is_inlined() => sdf::Value::Vec3h(to_vec::<f16, 3>(self.unpack_value(value)?)),
-            Type::Vec3f if value.is_inlined() => sdf::Value::Vec3f(to_vec::<f32, 3>(self.unpack_value(value)?)),
-            Type::Vec3d if value.is_inlined() => sdf::Value::Vec3d(to_vec::<f64, 3>(self.unpack_value(value)?)),
-            Type::Vec3i if value.is_inlined() => sdf::Value::Vec3i(to_vec::<i32, 3>(self.unpack_value(value)?)),
+            Type::Vec3h if value.is_inlined() => {
+                let [x, y, z] = to_vec::<f16, 3>(self.unpack_value(value)?);
+                sdf::Value::Vec3h(gf::vec3h(x, y, z))
+            }
+            Type::Vec3f if value.is_inlined() => {
+                let [x, y, z] = to_vec::<f32, 3>(self.unpack_value(value)?);
+                sdf::Value::Vec3f(gf::vec3f(x, y, z))
+            }
+            Type::Vec3d if value.is_inlined() => {
+                let [x, y, z] = to_vec::<f64, 3>(self.unpack_value(value)?);
+                sdf::Value::Vec3d(gf::vec3d(x, y, z))
+            }
+            Type::Vec3i if value.is_inlined() => {
+                let [x, y, z] = to_vec::<i32, 3>(self.unpack_value(value)?);
+                sdf::Value::Vec3i(gf::vec3i(x, y, z))
+            }
 
-            Type::Vec4h if value.is_inlined() => sdf::Value::Vec4h(to_vec::<f16, 4>(self.unpack_value(value)?)),
-            Type::Vec4f if value.is_inlined() => sdf::Value::Vec4f(to_vec::<f32, 4>(self.unpack_value(value)?)),
-            Type::Vec4d if value.is_inlined() => sdf::Value::Vec4d(to_vec::<f64, 4>(self.unpack_value(value)?)),
-            Type::Vec4i if value.is_inlined() => sdf::Value::Vec4i(to_vec::<i32, 4>(self.unpack_value(value)?)),
+            Type::Vec4h if value.is_inlined() => {
+                let [x, y, z, w] = to_vec::<f16, 4>(self.unpack_value(value)?);
+                sdf::Value::Vec4h(gf::vec4h(x, y, z, w))
+            }
+            Type::Vec4f if value.is_inlined() => {
+                let [x, y, z, w] = to_vec::<f32, 4>(self.unpack_value(value)?);
+                sdf::Value::Vec4f(gf::vec4f(x, y, z, w))
+            }
+            Type::Vec4d if value.is_inlined() => {
+                let [x, y, z, w] = to_vec::<f64, 4>(self.unpack_value(value)?);
+                sdf::Value::Vec4d(gf::vec4d(x, y, z, w))
+            }
+            Type::Vec4i if value.is_inlined() => {
+                let [x, y, z, w] = to_vec::<i32, 4>(self.unpack_value(value)?);
+                sdf::Value::Vec4i(gf::vec4i(x, y, z, w))
+            }
 
-            Type::Vec2h => sdf::Value::Vec2h(self.unpack_value::<[f16; 2]>(value)?),
-            Type::Vec2f => sdf::Value::Vec2f(self.unpack_value::<[f32; 2]>(value)?),
-            Type::Vec2d => sdf::Value::Vec2d(self.unpack_value::<[f64; 2]>(value)?),
-            Type::Vec2i => sdf::Value::Vec2i(self.unpack_value::<[i32; 2]>(value)?),
+            // Non-inlined scalar vecs: repr(C) + Pod layout matches [T; N].
+            Type::Vec2h => sdf::Value::Vec2h(self.unpack_value::<gf::Vec2h>(value)?),
+            Type::Vec2f => sdf::Value::Vec2f(self.unpack_value::<gf::Vec2f>(value)?),
+            Type::Vec2d => sdf::Value::Vec2d(self.unpack_value::<gf::Vec2d>(value)?),
+            Type::Vec2i => sdf::Value::Vec2i(self.unpack_value::<gf::Vec2i>(value)?),
 
-            Type::Vec3h => sdf::Value::Vec3h(self.unpack_value::<[f16; 3]>(value)?),
-            Type::Vec3f => sdf::Value::Vec3f(self.unpack_value::<[f32; 3]>(value)?),
-            Type::Vec3d => sdf::Value::Vec3d(self.unpack_value::<[f64; 3]>(value)?),
-            Type::Vec3i => sdf::Value::Vec3i(self.unpack_value::<[i32; 3]>(value)?),
+            Type::Vec3h => sdf::Value::Vec3h(self.unpack_value::<gf::Vec3h>(value)?),
+            Type::Vec3f => sdf::Value::Vec3f(self.unpack_value::<gf::Vec3f>(value)?),
+            Type::Vec3d => sdf::Value::Vec3d(self.unpack_value::<gf::Vec3d>(value)?),
+            Type::Vec3i => sdf::Value::Vec3i(self.unpack_value::<gf::Vec3i>(value)?),
 
-            Type::Vec4h => sdf::Value::Vec4h(self.unpack_value::<[f16; 4]>(value)?),
-            Type::Vec4f => sdf::Value::Vec4f(self.unpack_value::<[f32; 4]>(value)?),
-            Type::Vec4d => sdf::Value::Vec4d(self.unpack_value::<[f64; 4]>(value)?),
-            Type::Vec4i => sdf::Value::Vec4i(self.unpack_value::<[i32; 4]>(value)?),
+            Type::Vec4h => sdf::Value::Vec4h(self.unpack_value::<gf::Vec4h>(value)?),
+            Type::Vec4f => sdf::Value::Vec4f(self.unpack_value::<gf::Vec4f>(value)?),
+            Type::Vec4d => sdf::Value::Vec4d(self.unpack_value::<gf::Vec4d>(value)?),
+            Type::Vec4i => sdf::Value::Vec4i(self.unpack_value::<gf::Vec4i>(value)?),
 
             //
             // Matrices
             //
-            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(self.read_vec_array::<f64, 4>(value)?),
-            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(self.read_vec_array::<f64, 9>(value)?),
-            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(self.read_vec_array::<f64, 16>(value)?),
+            Type::Matrix2d if value.is_array() => Value::Matrix2dVec(
+                self.read_vec_array::<f64, 4>(value)?
+                    .into_iter()
+                    .map(gf::Mat2d)
+                    .collect(),
+            ),
+            Type::Matrix3d if value.is_array() => Value::Matrix3dVec(
+                self.read_vec_array::<f64, 9>(value)?
+                    .into_iter()
+                    .map(gf::Mat3d)
+                    .collect(),
+            ),
+            Type::Matrix4d if value.is_array() => Value::Matrix4dVec(
+                self.read_vec_array::<f64, 16>(value)?
+                    .into_iter()
+                    .map(gf::Matrix4d)
+                    .collect(),
+            ),
 
             Type::Matrix2d if value.is_inlined() => {
-                sdf::Value::Matrix2d(to_mat_diag::<2, 4>(self.unpack_value(value)?))
+                sdf::Value::Matrix2d(gf::Mat2d(to_mat_diag::<2, 4>(self.unpack_value(value)?)))
             }
             Type::Matrix3d if value.is_inlined() => {
-                sdf::Value::Matrix3d(to_mat_diag::<3, 9>(self.unpack_value(value)?))
+                sdf::Value::Matrix3d(gf::Mat3d(to_mat_diag::<3, 9>(self.unpack_value(value)?)))
             }
             Type::Matrix4d if value.is_inlined() => {
-                sdf::Value::Matrix4d(to_mat_diag::<4, 16>(self.unpack_value(value)?))
+                sdf::Value::Matrix4d(gf::Matrix4d(to_mat_diag::<4, 16>(self.unpack_value(value)?)))
             }
 
-            Type::Matrix2d => sdf::Value::Matrix2d(self.unpack_value::<[f64; 4]>(value)?),
-            Type::Matrix3d => sdf::Value::Matrix3d(self.unpack_value::<[f64; 9]>(value)?),
-            Type::Matrix4d => sdf::Value::Matrix4d(self.unpack_value::<[f64; 16]>(value)?),
+            Type::Matrix2d => sdf::Value::Matrix2d(gf::Mat2d(self.unpack_value::<[f64; 4]>(value)?)),
+            Type::Matrix3d => sdf::Value::Matrix3d(gf::Mat3d(self.unpack_value::<[f64; 9]>(value)?)),
+            Type::Matrix4d => sdf::Value::Matrix4d(gf::Matrix4d(self.unpack_value::<[f64; 16]>(value)?)),
 
             //
             // Quats
@@ -1061,22 +1128,28 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             // — without this, binary USDC quats from real production
             // assets (Isaac Sim Agilebot, Omniverse robotics scenes)
             // come out with axes scrambled.
-            Type::Quath if value.is_array() => Value::QuathVec(xyzw_to_wxyz(self.read_vec_array::<f16, 4>(value)?)),
+            Type::Quath if value.is_array() => {
+                Value::QuathVec(xyzw_to_wxyz_quath(self.read_vec_array::<f16, 4>(value)?))
+            }
             Type::Quath => {
                 let raw = self.unpack_value::<[f16; 4]>(value)?;
-                sdf::Value::Quath([raw[3], raw[0], raw[1], raw[2]])
+                sdf::Value::quath(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatf if value.is_array() => Value::QuatfVec(xyzw_to_wxyz(self.read_vec_array::<f32, 4>(value)?)),
+            Type::Quatf if value.is_array() => {
+                Value::QuatfVec(xyzw_to_wxyz_quatf(self.read_vec_array::<f32, 4>(value)?))
+            }
             Type::Quatf => {
                 let raw = self.unpack_value::<[f32; 4]>(value)?;
-                sdf::Value::Quatf([raw[3], raw[0], raw[1], raw[2]])
+                sdf::Value::quatf(raw[3], raw[0], raw[1], raw[2])
             }
 
-            Type::Quatd if value.is_array() => Value::QuatdVec(xyzw_to_wxyz(self.read_vec_array::<f64, 4>(value)?)),
+            Type::Quatd if value.is_array() => {
+                Value::QuatdVec(xyzw_to_wxyz_quatd(self.read_vec_array::<f64, 4>(value)?))
+            }
             Type::Quatd => {
                 let raw = self.unpack_value::<[f64; 4]>(value)?;
-                sdf::Value::Quatd([raw[3], raw[0], raw[1], raw[2]])
+                sdf::Value::quatd(raw[3], raw[0], raw[1], raw[2])
             }
 
             //
@@ -1352,14 +1425,20 @@ enum ArrayKind {
 }
 
 /// Pixar's `GfQuat<T>` stores components on disk as `[x, y, z, w]` (imaginary fields first,
-/// then real), because `GfVec3<T> _imaginary` is declared before `T _real` in the struct.
-/// Reorder each element to `[w, x, y, z]` in place so `Value::Quat*` is always
-/// `(real, i, j, k)` regardless of whether the value came from USDC or USDA.
-fn xyzw_to_wxyz<T: Copy>(mut v: Vec<[T; 4]>) -> Vec<[T; 4]> {
-    for q in &mut v {
-        *q = [q[3], q[0], q[1], q[2]];
-    }
-    v
+/// Reorder each element from on-disk `[x, y, z, w]` to `(w, x, y, z)` so
+/// `Value::Quat*` is always `(real, i, j, k)` regardless of whether the value
+/// came from USDC or USDA. Pixar's `GfQuat<T>` declares `_imaginary:
+/// GfVec3<T>` before `T _real`, so on-disk bytes are `[x, y, z, w]`.
+fn xyzw_to_wxyz_quatf(v: Vec<[f32; 4]>) -> Vec<gf::Quatf> {
+    v.into_iter().map(|q| gf::quatf(q[3], q[0], q[1], q[2])).collect()
+}
+
+fn xyzw_to_wxyz_quatd(v: Vec<[f64; 4]>) -> Vec<gf::Quatd> {
+    v.into_iter().map(|q| gf::quatd(q[3], q[0], q[1], q[2])).collect()
+}
+
+fn xyzw_to_wxyz_quath(v: Vec<[f16; 4]>) -> Vec<gf::Quath> {
+    v.into_iter().map(|q| gf::quath(q[3], q[0], q[1], q[2])).collect()
 }
 
 fn to_vec<T: From<i8>, const N: usize>(data: [i8; N]) -> [T; N] {

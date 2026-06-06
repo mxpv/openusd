@@ -261,13 +261,13 @@ fn read_f32(attr: &Attribute) -> Result<Option<f32>> {
 }
 
 fn read_int2(attr: &Attribute) -> Result<Option<[i32; 2]>> {
-    Ok(attr.get::<Value>()?.and_then(|v| v.try_as_vec_2i()))
+    Ok(attr.get::<Value>()?.and_then(|v| v.try_as_vec_2i()).map(|v| [v.x, v.y]))
 }
 
 fn read_float4(attr: &Attribute) -> Result<Option<[f32; 4]>> {
     Ok(match attr.get::<Value>()? {
-        Some(Value::Vec4f(v)) => Some(v),
-        Some(Value::Vec4d(v)) => Some([f64_to_f32(v[0]), f64_to_f32(v[1]), f64_to_f32(v[2]), f64_to_f32(v[3])]),
+        Some(Value::Vec4f(v)) => Some([v.x, v.y, v.z, v.w]),
+        Some(Value::Vec4d(v)) => Some([f64_to_f32(v.x), f64_to_f32(v.y), f64_to_f32(v.z), f64_to_f32(v.w)]),
         _ => None,
     })
 }
@@ -286,6 +286,7 @@ fn read_rel_first_target(rel: &Relationship) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gf;
     use crate::sdf;
 
     /// Two products share one var: it appears once in the global list and is
@@ -312,7 +313,7 @@ mod tests {
             .set_targets([sdf::path("/Render/Vars/color")?])?;
 
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set([1024, 512])?;
+        settings.create_resolution_attr()?.set(gf::vec2i(1024, 512))?;
         settings.create_products_rel()?.set_targets([
             sdf::path("/Render/Products/beauty")?,
             sdf::path("/Render/Products/matte")?,
@@ -339,7 +340,7 @@ mod tests {
     fn product_overrides_only_authored() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set([1920, 1080])?;
+        settings.create_resolution_attr()?.set(gf::vec2i(1920, 1080))?;
         settings.create_pixel_aspect_ratio_attr()?.set(2.0_f32)?;
         settings
             .create_products_rel()?
@@ -347,7 +348,7 @@ mod tests {
         // Product authors only `resolution`.
         RenderProduct::define(&stage, "/Render/Products/p")?
             .create_resolution_attr()?
-            .set([512, 512])?;
+            .set(gf::vec2i(512, 512))?;
 
         let spec = compute_render_spec(&stage, &sdf::path("/Render/Settings")?, &[])?.expect("RenderSpec");
         let p = &spec.products[0];
@@ -369,7 +370,7 @@ mod tests {
         }
         RenderProduct::define(&stage, "/Render/Products/p")?;
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set([200, 100])?;
+        settings.create_resolution_attr()?.set(gf::vec2i(200, 100))?;
         settings.create_camera_rel()?.add_target(sdf::path("/World/Cam")?)?;
         settings
             .create_products_rel()?
@@ -398,7 +399,7 @@ mod tests {
     fn namespaced_settings_filtered() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let settings = RenderSettings::define(&stage, "/Render/Settings")?;
-        settings.create_resolution_attr()?.set([512, 512])?;
+        settings.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
         // A render-delegate setting (gathered) and a foreign-namespace one (filtered out).
         stage
             .create_attribute(settings.path().append_property("ri:hider:maxsamples")?, "int")?

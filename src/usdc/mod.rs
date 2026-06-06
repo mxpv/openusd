@@ -151,7 +151,8 @@ const CRATE_PROPERTY_CHILDREN: &str = "properties";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use half::f16;
+    use crate::gf;
+    use crate::gf::f16;
     use std::path::Path;
 
     #[test]
@@ -281,7 +282,7 @@ mod tests {
 
         // USDC bytes are `[x, y, z, w]` (Pixar GfQuat layout); the
         // reader reorders to `(w, x, y, z)` to match USDA convention.
-        assert_eq!(quat, [1.4, 2.9, 8.5, 4.6]);
+        assert_eq!(quat, gf::quatf(1.4, 2.9, 8.5, 4.6));
 
         let quat = data
             .get(&sdf::path("/World.quatfArr")?, "default")?
@@ -292,9 +293,9 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [4.2, 3.5, 2.6, 3.6], // 1
-                [2.4, 5.3, 6.3, 5.2], // 2
-                [7.1, 4.3, 2.4, 6.4], // 3
+                gf::quatf(4.2, 3.5, 2.6, 3.6), // 1
+                gf::quatf(2.4, 5.3, 6.3, 5.2), // 2
+                gf::quatf(7.1, 4.3, 2.4, 6.4), // 3
             ]
         );
 
@@ -312,7 +313,7 @@ mod tests {
             .unwrap();
 
         // USDC bytes are `[x, y, z, w]`; reader returns `(w, x, y, z)`.
-        assert_eq!(quat, [2.4, 5.3, 6.3, 5.2]);
+        assert_eq!(quat, gf::quatd(2.4, 5.3, 6.3, 5.2));
 
         let quat = data
             .get(&sdf::path("/World.quatdArr")?, "default")?
@@ -323,8 +324,8 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [4.2, 3.5, 2.6, 3.6], // 1
-                [7.1, 4.3, 2.4, 6.4], // 2
+                gf::quatd(4.2, 3.5, 2.6, 3.6), // 1
+                gf::quatd(7.1, 4.3, 2.4, 6.4), // 2
             ]
         );
 
@@ -342,7 +343,15 @@ mod tests {
             .unwrap();
 
         // USDC bytes are `[x, y, z, w]`; reader returns `(w, x, y, z)`.
-        assert_eq!(quat, [3.5, 4.6, 2.5, 7.6].map(f16::from_f32));
+        assert_eq!(
+            quat,
+            gf::quath(
+                f16::from_f32(3.5),
+                f16::from_f32(4.6),
+                f16::from_f32(2.5),
+                f16::from_f32(7.6)
+            )
+        );
 
         let quat = data
             .get(&sdf::path("/World.quathArr")?, "default")?
@@ -353,8 +362,18 @@ mod tests {
         assert_eq!(
             quat,
             vec![
-                [4.7, 2.4, 7.8, 8.5].map(f16::from_f32), // 1
-                [4.6, 6.7, 5.6, 5.3].map(f16::from_f32), // 2
+                gf::quath(
+                    f16::from_f32(4.7),
+                    f16::from_f32(2.4),
+                    f16::from_f32(7.8),
+                    f16::from_f32(8.5)
+                ), // 1
+                gf::quath(
+                    f16::from_f32(4.6),
+                    f16::from_f32(6.7),
+                    f16::from_f32(5.6),
+                    f16::from_f32(5.3)
+                ), // 2
             ]
         );
 
@@ -766,11 +785,17 @@ mod tests {
 
         // float2 clippingRange = (1, 10000000)
         let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
-        assert_eq!(clipping_range.into_owned().try_as_vec_2f().unwrap(), [1.0, 10000000.0]);
+        assert_eq!(
+            clipping_range.into_owned().try_as_vec_2f().unwrap(),
+            gf::vec2f(1.0, 10000000.0)
+        );
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
         let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
-        assert_eq!(diffuse_color.into_owned().try_as_vec_3f().unwrap(), [0.18, 0.18, 0.18]);
+        assert_eq!(
+            diffuse_color.into_owned().try_as_vec_3f().unwrap(),
+            gf::vec3f(0.18, 0.18, 0.18)
+        );
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
         let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
@@ -784,27 +809,33 @@ mod tests {
         assert_eq!(
             normals.try_as_vec_3f_vec_ref().unwrap(),
             &[
-                [0.0, 1.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-                [1.0, 0.0, 0.0],
+                gf::vec3f(0.0, 1.0, 0.0),
+                gf::vec3f(1.0, 0.0, 0.0),
+                gf::vec3f(0.0, 1.0, 0.0),
+                gf::vec3f(0.0, 0.0, 1.0),
+                gf::vec3f(0.0, 1.0, 0.0),
+                gf::vec3f(0.0, 0.0, 1.0),
+                gf::vec3f(1.0, 0.0, 0.0),
             ]
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)
         let xform_op_rotate_xyz = data.get(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
-        assert_eq!(xform_op_rotate_xyz.try_as_vec_3d_ref().unwrap(), &[0.0, 0.0, 0.0]);
+        assert_eq!(
+            *xform_op_rotate_xyz.try_as_vec_3d_ref().unwrap(),
+            gf::vec3d(0.0, 0.0, 0.0)
+        );
 
         // double3 xformOp:scale = (1, 1, 1)
         let xform_op_scale = data.get(&sdf::path("/World.xformOp:scale")?, "default")?;
-        assert_eq!(xform_op_scale.try_as_vec_3d_ref().unwrap(), &[1.0, 1.0, 1.0]);
+        assert_eq!(*xform_op_scale.try_as_vec_3d_ref().unwrap(), gf::vec3d(1.0, 1.0, 1.0));
 
         // double3 xformOp:translate = (0, 1, 0)
         let xform_op_translate = data.get(&sdf::path("/World.xformOp:translate")?, "default")?;
-        assert_eq!(xform_op_translate.try_as_vec_3d_ref().unwrap(), &[0.0, 1.0, 0.0]);
+        assert_eq!(
+            *xform_op_translate.try_as_vec_3d_ref().unwrap(),
+            gf::vec3d(0.0, 1.0, 0.0)
+        );
 
         Ok(())
     }
@@ -867,7 +898,7 @@ mod tests {
         Ok(())
     }
 
-    /// Vec2h single value should read half-floats, not raw integers.
+    /// gf::Vec2h single value should read half-floats, not raw integers.
     #[test]
     fn test_read_vec2h_single() -> Result<()> {
         let data =

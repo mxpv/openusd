@@ -300,7 +300,7 @@ impl Camera {
     /// plane equation that clips geometry on its negative side. C++
     /// `UsdGeomCamera::GetClippingPlanesAttr`.
     ///
-    /// Type `float4[]`. Fetch with `get::<Vec<[f32; 4]>>()?`.
+    /// Type `float4[]`. Fetch with `get::<Vec<gf::Vec4f>>()?`.
     pub fn clipping_planes_attr(&self) -> Attribute {
         self.attribute(tok::A_CLIPPING_PLANES)
     }
@@ -327,7 +327,7 @@ mod tests {
         cam.create_projection_attr()?
             .set(sdf::Value::Token("perspective".into()))?;
         cam.create_clipping_range_attr()?
-            .set(sdf::Value::Vec2f([0.1, 1000.0]))?;
+            .set(sdf::Value::vec2f(0.1_f32, 1000.0))?;
 
         let cam = Camera::get(&stage, "/Cam")?.expect("Camera");
         assert_eq!(cam.focal_length_attr().get()?, Some(sdf::Value::Float(50.0)));
@@ -335,7 +335,10 @@ mod tests {
             cam.projection_attr().get()?,
             Some(sdf::Value::Token("perspective".into()))
         );
-        assert_eq!(cam.clipping_range_attr().get()?, Some(sdf::Value::Vec2f([0.1, 1000.0])));
+        assert_eq!(
+            cam.clipping_range_attr().get()?,
+            Some(sdf::Value::vec2f(0.1_f32, 1000.0))
+        );
         assert!(Camera::get(&stage, "/Cam")?.is_some());
         Ok(())
     }

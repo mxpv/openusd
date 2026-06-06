@@ -155,16 +155,16 @@ With the `geom` feature, read typed schema views over the composed stage — her
 ```rust,no_run
 // `PointBased` is brought in so its inherited accessors resolve on the view.
 use openusd::schemas::geom::{self, PointBased};
-use openusd::usd;
+use openusd::{gf, usd};
 
 let stage = usd::Stage::open("scene.usda")?;
 
 if let Some(mesh) = geom::Mesh::get(&stage, "/World/Mesh")? {
     // `points_attr` / `normals_attr` are inherited from the `PointBased` trait
-    // up the chain. `point3f[]` and `normal3f[]` both decode to `Vec<[f32; 3]>`,
+    // up the chain. `point3f[]` and `normal3f[]` both decode to `Vec<gf::Vec3f>`,
     // so `get` extracts them directly.
-    let points = mesh.points_attr().get::<Vec<[f32; 3]>>()?;
-    let normals = mesh.normals_attr().get::<Vec<[f32; 3]>>()?;
+    let points = mesh.points_attr().get::<Vec<gf::Vec3f>>()?;
+    let normals = mesh.normals_attr().get::<Vec<gf::Vec3f>>()?;
 
     if let Some(points) = points {
         println!("{} points, normals authored: {}", points.len(), normals.is_some());

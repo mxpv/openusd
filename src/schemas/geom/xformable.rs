@@ -11,10 +11,7 @@
 
 use anyhow::Result;
 
-use crate::math::{
-    mat4_from_quat, mat4_inverse, mat4_mul, mat4_rotation_x, mat4_rotation_y, mat4_rotation_z, mat4_scale,
-    mat4_translation, IDENTITY_MAT4,
-};
+use crate::gf;
 use crate::sdf;
 use crate::usd::{Attribute, Prim};
 
@@ -76,13 +73,13 @@ pub trait Xformable: Imageable {
     }
 
     /// Compose `xformOpOrder` into a single local-to-parent 4×4 matrix at
-    /// `time` (row-major flattened). [`IDENTITY_MAT4`] when no stack is
-    /// authored. Mirrors C++ `ComputeLocalToParentTransform`.
-    fn local_to_parent_transform(&self, time: f64) -> Result<[f64; 16]> {
+    /// `time`. [`gf::Matrix4d::IDENTITY`] when no stack is authored. Mirrors C++
+    /// `ComputeLocalToParentTransform`.
+    fn local_to_parent_transform(&self, time: f64) -> Result<gf::Matrix4d> {
         let Some(order) = self.xform_op_order()? else {
-            return Ok(IDENTITY_MAT4);
+            return Ok(gf::Matrix4d::IDENTITY);
         };
-        let mut m = IDENTITY_MAT4;
+        let mut m = gf::Matrix4d::IDENTITY;
         for (i, op_name) in order.iter().enumerate() {
             if op_name == TOKEN_RESET_XFORM_STACK {
                 if i == 0 {
@@ -97,7 +94,7 @@ pub trait Xformable: Imageable {
             // Row-vector convention: the first listed op is most local
             // (applied first to a point), so the cumulative matrix grows on
             // the right.
-            m = mat4_mul(&m, &build_op_matrix(self.prim(), op_name, time)?);
+            m = m * build_op_matrix(self.prim(), op_name, time)?;
         }
         Ok(m)
     }
@@ -121,21 +118,21 @@ pub trait Xformable: Imageable {
     }
 
     /// Author `xformOp:translate` (`double3`) and append it to the stack.
-    fn set_translate(self, value: [f64; 3]) -> Result<Self>
+    fn set_translate(self, value: gf::Vec3d) -> Result<Self>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "translate", "double3", sdf::Value::Vec3d(value))?;
+        author_xform_op(self.prim(), "translate", "double3", sdf::Value::from(value))?;
         append_op(self.prim(), "translate")?;
         Ok(self)
     }
 
     /// Author `xformOp:scale` (`float3`) and append it to the stack.
-    fn set_scale(self, value: [f32; 3]) -> Result<Self>
+    fn set_scale(self, value: gf::Vec3f) -> Result<Self>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "scale", "float3", sdf::Value::Vec3f(value))?;
+        author_xform_op(self.prim(), "scale", "float3", sdf::Value::from(value))?;
         append_op(self.prim(), "scale")?;
         Ok(self)
     }
@@ -166,32 +163,32 @@ pub trait Xformable: Imageable {
 
     /// Author `xformOp:rotateXYZ` (Euler degrees, applied X → Y → Z) and
     /// append it to the stack.
-    fn set_rotate_xyz(self, degrees: [f32; 3]) -> Result<Self>
+    fn set_rotate_xyz(self, degrees: gf::Vec3f) -> Result<Self>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "rotateXYZ", "float3", sdf::Value::Vec3f(degrees))?;
+        author_xform_op(self.prim(), "rotateXYZ", "float3", sdf::Value::from(degrees))?;
         append_op(self.prim(), "rotateXYZ")?;
         Ok(self)
     }
 
     /// Author `xformOp:orient` (`quatf`, `(w, x, y, z)`) and append it.
-    fn set_orient(self, quat_wxyz: [f32; 4]) -> Result<Self>
+    fn set_orient(self, q: gf::Quatf) -> Result<Self>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "orient", "quatf", sdf::Value::Quatf(quat_wxyz))?;
+        author_xform_op(self.prim(), "orient", "quatf", sdf::Value::from(q))?;
         append_op(self.prim(), "orient")?;
         Ok(self)
     }
 
     /// Author `xformOp:transform` (`matrix4d`, row-major flattened) and
     /// append it — for an exact 4×4 that does not decompose into T·R·S.
-    fn set_transform(self, matrix: [f64; 16]) -> Result<Self>
+    fn set_transform(self, matrix: gf::Matrix4d) -> Result<Self>
     where
         Self: Sized,
     {
-        author_xform_op(self.prim(), "transform", "matrix4d", sdf::Value::Matrix4d(matrix))?;
+        author_xform_op(self.prim(), "transform", "matrix4d", sdf::Value::from(matrix))?;
         append_op(self.prim(), "transform")?;
         Ok(self)
     }
@@ -208,7 +205,7 @@ pub trait Xformable: Imageable {
 }
 
 /// Build the 4×4 contribution of a single xformOp (possibly `!invert!`-ed).
-fn build_op_matrix(prim: &Prim, op_name: &str, time: f64) -> Result<[f64; 16]> {
+fn build_op_matrix(prim: &Prim, op_name: &str, time: f64) -> Result<gf::Matrix4d> {
     let (inverted, base) = match op_name.strip_prefix(TOKEN_INVERT_PREFIX) {
         Some(stripped) => (true, stripped),
         None => (false, op_name),
@@ -216,53 +213,54 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: f64) -> Result<[f64; 16]> {
 
     let attr = prim.path().append_property(base)?;
     let Some(raw) = prim.stage().value_at(attr, time)? else {
-        return Ok(IDENTITY_MAT4);
+        return Ok(gf::Matrix4d::IDENTITY);
     };
 
     let after_ns = base.strip_prefix(NS_XFORM_OP).unwrap_or(base);
     let kind = after_ns.split(':').next().unwrap_or(after_ns);
 
     let m = match kind {
-        "translate" => mat4_translation(value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0])),
-        "translateX" => mat4_translation([value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0, 0.0]),
-        "translateY" => mat4_translation([0.0, value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0]),
-        "translateZ" => mat4_translation([0.0, 0.0, value_to_scalar_f64(&raw).unwrap_or(0.0)]),
-        "scale" => mat4_scale(value_to_vec3_f64(&raw).unwrap_or([1.0, 1.0, 1.0])),
-        "scaleX" => mat4_scale([value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0, 1.0]),
-        "scaleY" => mat4_scale([1.0, value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0]),
-        "scaleZ" => mat4_scale([1.0, 1.0, value_to_scalar_f64(&raw).unwrap_or(1.0)]),
-        "orient" => mat4_from_quat(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
+        "translate" => gf::Matrix4d::translation(value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0])),
+        "translateX" => gf::Matrix4d::translation([value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0, 0.0]),
+        "translateY" => gf::Matrix4d::translation([0.0, value_to_scalar_f64(&raw).unwrap_or(0.0), 0.0]),
+        "translateZ" => gf::Matrix4d::translation([0.0, 0.0, value_to_scalar_f64(&raw).unwrap_or(0.0)]),
+        "scale" => gf::Matrix4d::scale(value_to_vec3_f64(&raw).unwrap_or([1.0, 1.0, 1.0])),
+        "scaleX" => gf::Matrix4d::scale([value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0, 1.0]),
+        "scaleY" => gf::Matrix4d::scale([1.0, value_to_scalar_f64(&raw).unwrap_or(1.0), 1.0]),
+        "scaleZ" => gf::Matrix4d::scale([1.0, 1.0, value_to_scalar_f64(&raw).unwrap_or(1.0)]),
+        "orient" => gf::Matrix4d::from_quat(value_to_quat_wxyz(&raw).unwrap_or([1.0, 0.0, 0.0, 0.0])),
         // Rotation ops stay in f64 end-to-end; xformOp:rotate* may be authored
         // as `float` or `double` per the precision system, and reading via f32
         // would truncate the double-authored case before the trig math runs.
-        "rotateX" => mat4_rotation_x(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateY" => mat4_rotation_y(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
-        "rotateZ" => mat4_rotation_z(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateX" => gf::Matrix4d::rotation_x(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateY" => gf::Matrix4d::rotation_y(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
+        "rotateZ" => gf::Matrix4d::rotation_z(value_to_scalar_f64(&raw).unwrap_or(0.0).to_radians()),
         "rotateXYZ" | "rotateYXZ" | "rotateZXY" | "rotateXZY" | "rotateYZX" | "rotateZYX" => {
             let v = value_to_vec3_f64(&raw).unwrap_or([0.0, 0.0, 0.0]);
-            let rx = mat4_rotation_x(v[0].to_radians());
-            let ry = mat4_rotation_y(v[1].to_radians());
-            let rz = mat4_rotation_z(v[2].to_radians());
+            let rx = gf::Matrix4d::rotation_x(v[0].to_radians());
+            let ry = gf::Matrix4d::rotation_y(v[1].to_radians());
+            let rz = gf::Matrix4d::rotation_z(v[2].to_radians());
             // Apply axes in the order spelled by `kind` (row-vector product).
             match kind {
-                "rotateXYZ" => mat4_mul(&rx, &mat4_mul(&ry, &rz)),
-                "rotateYXZ" => mat4_mul(&ry, &mat4_mul(&rx, &rz)),
-                "rotateZXY" => mat4_mul(&rz, &mat4_mul(&rx, &ry)),
-                "rotateXZY" => mat4_mul(&rx, &mat4_mul(&rz, &ry)),
-                "rotateYZX" => mat4_mul(&ry, &mat4_mul(&rz, &rx)),
-                "rotateZYX" => mat4_mul(&rz, &mat4_mul(&ry, &rx)),
+                "rotateXYZ" => rx * ry * rz,
+                "rotateYXZ" => ry * rx * rz,
+                "rotateZXY" => rz * rx * ry,
+                "rotateXZY" => rx * rz * ry,
+                "rotateYZX" => ry * rz * rx,
+                "rotateZYX" => rz * ry * rx,
                 _ => unreachable!("kind guard above"),
             }
         }
         "transform" => match raw {
             sdf::Value::Matrix4d(m) => m,
-            _ => IDENTITY_MAT4,
+            _ => gf::Matrix4d::IDENTITY,
         },
-        _ => IDENTITY_MAT4,
+        _ => gf::Matrix4d::IDENTITY,
     };
 
     if inverted {
-        mat4_inverse(&m).ok_or_else(|| anyhow::anyhow!("xformOp `{op_name}` matrix is singular and cannot be inverted"))
+        m.inverse()
+            .ok_or_else(|| anyhow::anyhow!("xformOp `{op_name}` matrix is singular and cannot be inverted"))
     } else {
         Ok(m)
     }
@@ -295,22 +293,22 @@ fn value_to_scalar_f64(v: &sdf::Value) -> Option<f64> {
 
 fn value_to_vec3_f64(v: &sdf::Value) -> Option<[f64; 3]> {
     match v {
-        sdf::Value::Vec3d(a) => Some(*a),
-        sdf::Value::Vec3f(a) => Some([a[0] as f64, a[1] as f64, a[2] as f64]),
-        sdf::Value::Vec3h(a) => Some([a[0].to_f32() as f64, a[1].to_f32() as f64, a[2].to_f32() as f64]),
+        sdf::Value::Vec3d(a) => Some(<[f64; 3]>::from(*a)),
+        sdf::Value::Vec3f(a) => Some([a.x as f64, a.y as f64, a.z as f64]),
+        sdf::Value::Vec3h(a) => Some([a.x.to_f32() as f64, a.y.to_f32() as f64, a.z.to_f32() as f64]),
         _ => None,
     }
 }
 
 fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
     match v {
-        sdf::Value::Quatd(q) => Some(*q),
-        sdf::Value::Quatf(q) => Some([q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64]),
+        sdf::Value::Quatd(q) => Some(<[f64; 4]>::from(*q)),
+        sdf::Value::Quatf(q) => Some([q.w as f64, q.x as f64, q.y as f64, q.z as f64]),
         sdf::Value::Quath(q) => Some([
-            q[0].to_f32() as f64,
-            q[1].to_f32() as f64,
-            q[2].to_f32() as f64,
-            q[3].to_f32() as f64,
+            q.w.to_f32() as f64,
+            q.x.to_f32() as f64,
+            q.y.to_f32() as f64,
+            q.z.to_f32() as f64,
         ]),
         _ => None,
     }
@@ -319,6 +317,7 @@ fn value_to_quat_wxyz(v: &sdf::Value) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::Xformable;
+    use crate::gf;
     use crate::schemas::geom::Xform;
     use crate::sdf;
     use crate::usd::Stage;
@@ -327,11 +326,11 @@ mod tests {
     #[test]
     fn translate_appears_in_order() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let x = Xform::define(&stage, "/X")?.set_translate([1.0, 2.0, 3.0])?;
+        let x = Xform::define(&stage, "/X")?.set_translate(gf::vec3d(1.0, 2.0, 3.0))?;
         assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:translate", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3d([1.0, 2.0, 3.0]))
+            Some(sdf::Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)))
         );
         Ok(())
     }
@@ -340,9 +339,9 @@ mod tests {
     fn trs_preserves_insertion_order() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
-            .set_translate([1.0, 2.0, 3.0])?
+            .set_translate(gf::vec3d(1.0, 2.0, 3.0))?
             .set_rotate_y(90.0)?
-            .set_scale([2.0, 2.0, 2.0])?;
+            .set_scale(gf::vec3f(2.0, 2.0, 2.0))?;
         assert_eq!(
             x.xform_op_order()?,
             Some(vec![
@@ -358,8 +357,8 @@ mod tests {
     fn re_authoring_op_does_not_duplicate() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let x = Xform::define(&stage, "/X")?
-            .set_translate([1.0, 0.0, 0.0])?
-            .set_translate([2.0, 0.0, 0.0])?;
+            .set_translate(gf::vec3d(1.0, 0.0, 0.0))?
+            .set_translate(gf::vec3d(2.0, 0.0, 0.0))?;
         assert_eq!(x.xform_op_order()?, Some(vec!["xformOp:translate".to_string()]));
         Ok(())
     }
@@ -367,10 +366,10 @@ mod tests {
     #[test]
     fn rotate_xyz_authors_float3() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        Xform::define(&stage, "/X")?.set_rotate_xyz([30.0, 45.0, 60.0])?;
+        Xform::define(&stage, "/X")?.set_rotate_xyz(gf::vec3f(30.0, 45.0, 60.0))?;
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:rotateXYZ", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Vec3f([30.0, 45.0, 60.0]))
+            Some(sdf::Value::Vec3f(gf::vec3f(30.0, 45.0, 60.0)))
         );
         Ok(())
     }
@@ -378,10 +377,10 @@ mod tests {
     #[test]
     fn orient_writes_quatf() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        Xform::define(&stage, "/X")?.set_orient([1.0, 0.0, 0.0, 0.0])?;
+        Xform::define(&stage, "/X")?.set_orient(gf::quatf(1.0, 0.0, 0.0, 0.0))?;
         assert_eq!(
             stage.field::<sdf::Value>("/X.xformOp:orient", sdf::FieldKey::Default)?,
-            Some(sdf::Value::Quatf([1.0, 0.0, 0.0, 0.0]))
+            Some(sdf::Value::quatf(1.0, 0.0, 0.0, 0.0))
         );
         Ok(())
     }
@@ -389,16 +388,16 @@ mod tests {
     #[test]
     fn transform_writes_matrix4d() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let m = [
+        let m = gf::Matrix4d([
             1.0, 0.0, 0.0, 0.0, //
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
             5.0, 0.0, 0.0, 1.0,
-        ];
+        ]);
         Xform::define(&stage, "/X")?.set_transform(m)?;
         match stage.field::<sdf::Value>("/X.xformOp:transform", sdf::FieldKey::Default)? {
             Some(sdf::Value::Matrix4d(v)) => assert_eq!(v[12], 5.0),
-            other => panic!("expected Matrix4d, got {other:?}"),
+            other => panic!("expected gf::Matrix4d, got {other:?}"),
         }
         Ok(())
     }
