@@ -181,14 +181,12 @@ const SKIP_PCP_COMPLIANCE: &[&str] = &[
     "ErrorInvalidReferenceToRelocationSource_root",
     "ErrorInvalidTargetPath_root",
     "ErrorOpinionAtRelocationSource_root",
-    "ErrorSublayerCycle_root",
     "ReferenceListOpsWithOffsets_root",
     "RelocatePrimsWithSameName_root",
     "RelocateToNone_root",
     "SubrootReferenceNonCycle_root",
     "TrickyInheritsAndRelocatesToNewRootPrim_root",
     "TrickyInheritsAndRelocates_root",
-    "bug92827_root",
 ];
 
 /// Assets whose `pcp.txt` golden can never be reproduced byte-for-byte, so they
@@ -524,6 +522,62 @@ fn first_diff_lines(actual: &str, expected: &str, limit: usize) -> String {
     report
 }
 
+/// Renders the trailing `Errors`/footer section of the composition dump from the
+/// recoverable errors collected during composition, matching the C++ test
+/// framework's output.
+///
+/// The framework prints only a subset of error kinds in this trailer. Layer-stack
+/// errors (sublayer cycles, invalid authored relocates) are grouped under a
+/// single `Errors while computing Layer Stack` section; other kinds (notably
+/// `permission = private` denials) fall through the wildcard and are omitted,
+/// matching the baselines. A new error kind opts in by adding an arm below. When
+/// any error is rendered, the dump ends with the framework's `ERROR:` footer.
+fn error_trailer(name: &str, errors: &[pcp::Error], base: Option<&Path>) -> String {
+    use std::fmt::Write as _;
+
+    // Layer identifiers inside trailer messages use the asset-repo-relative form
+    // `composition/tests/assets/<name>/usda/<rel>`, matching the `Loading` header
+    // rather than the bare-basename form the site lines use.
+    let layer_id = |id: &str| format!("composition/tests/assets/{name}/usda/{}", display_name(base, id));
+
+    let layer_stack: Vec<String> = errors
+        .iter()
+        .filter_map(|e| match e {
+            pcp::Error::SublayerCycle { root_layer, seen_layer } => Some(format!(
+                "Sublayer hierarchy with root layer @{}@ has cycles. \
+                 Detected when layer @{}@ was seen in the layer stack for the second time.",
+                layer_id(root_layer),
+                layer_id(seen_layer),
+            )),
+            pcp::Error::InvalidRelocate {
+                source_path,
+                target_path,
+                layer,
+            } => Some(format!(
+                "Relocation from <{source_path}> to <{target_path}> authored at @{}@</> is invalid and will be ignored: \
+                 The target of a relocate cannot be an ancestor of its source.",
+                layer_id(layer),
+            )),
+            _ => None,
+        })
+        .collect();
+
+    if layer_stack.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let _ = writeln!(out, "\n{}", separator());
+    let _ = writeln!(out, "Errors while computing Layer Stack");
+    out.push('\n');
+    for msg in &layer_stack {
+        let _ = writeln!(out, "{msg}");
+    }
+    out.push('\n');
+    let _ = writeln!(out, "ERROR: Unexpected error(s) encountered during test!");
+    out
+}
+
 /// Regenerates the composition dump from the stage parsed by `format` and
 /// asserts it matches the vendor `pcp.txt` baseline byte-for-byte.
 ///
@@ -536,9 +590,28 @@ fn run_pcp(name: &str, format: Format, test_dir: &Path, baseline: &schema::Basel
         .expect("read pcp.txt")
         .replace("\r\n", "\n");
 
-    let stage = open_stage(entry);
+    // Collect recoverable composition errors so the dump can reproduce the
+    // baseline's trailing `Errors`/footer section. The C++ test framework prints
+    // only a subset of error kinds there (see `error_trailer`), so the handler
+    // captures everything and the trailer filters.
+    let errors: std::rc::Rc<std::cell::RefCell<Vec<pcp::Error>>> = Default::default();
+    let sink = errors.clone();
+    let stage = usd::Stage::builder()
+        .on_error(move |e| {
+            if let usd::CompositionError::Pcp(p) = e {
+                sink.borrow_mut().push(p);
+            }
+            Ok(())
+        })
+        .variant_fallbacks(variant_fallbacks())
+        .open(entry.to_str().unwrap())
+        .unwrap();
     let base = entry.parent().expect("entry has a parent directory");
-    let actual = pcp_dump(name, &baseline.entry, base, &stage);
+    // `pcp_dump` runs the queries that surface the errors into `errors`, so the
+    // trailer is appended afterward.
+    let mut actual = pcp_dump(name, &baseline.entry, base, &stage);
+    let canonical_base = std::fs::canonicalize(base).ok();
+    actual.push_str(&error_trailer(name, &errors.borrow(), canonical_base.as_deref()));
     if actual != expected {
         // Persist the full generated dump so a failing case can be diffed
         // against its baseline without re-running; the panic message only shows

@@ -162,8 +162,12 @@ fn block_to_none(value: Value) -> Option<Value> {
 
 impl Cache {
     /// Creates a new composition graph from a prebuilt layer stack.
-    pub(crate) fn new(stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
+    pub(crate) fn new(mut stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
         let relocates = Relocates::new(&stack.layers);
+        // Errors detected while assembling the layer stack (sublayer cycles,
+        // invalid relocates) reach the stage error handler the same way per-prim
+        // errors do: seeded into the pending queue and drained on the first query.
+        let pending_errors = std::mem::take(&mut stack.layer_stack_errors);
         Self {
             stack,
             indices: HashMap::new(),
@@ -175,7 +179,7 @@ impl Cache {
             prototypes: HashMap::new(),
             prototype_keys: HashMap::new(),
             prototype_count: 0,
-            pending_errors: Vec::new(),
+            pending_errors,
             in_progress: HashSet::new(),
         }
     }
@@ -668,6 +672,17 @@ impl Cache {
     pub(super) fn recompute_relocates(&mut self) {
         self.relocates = Relocates::new(&self.stack.layers);
         self.stack.recompute_relocate_data();
+    }
+
+    /// Moves the layer stack's freshly-recomputed errors into the pending queue so
+    /// they reach the stage error handler on the next query. Called once after a
+    /// `subLayers`/`layerRelocates` edit recomputes them — the construction-time
+    /// seed in [`new`](Self::new) is a one-shot drain, and a single `subLayers`
+    /// edit triggers both [`recompute_layer_stack`](Self::recompute_layer_stack)
+    /// and [`recompute_relocates`](Self::recompute_relocates), so queuing here
+    /// (rather than per-recompute) delivers each error exactly once.
+    pub(super) fn queue_layer_stack_errors(&mut self) {
+        self.pending_errors.append(&mut self.stack.layer_stack_errors);
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -1812,12 +1827,16 @@ mod tests {
         LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
     }
 
+    /// Parses in-memory USDA text into a single `root.usda` layer.
+    fn parse_layer(text: &str) -> sdf::Layer {
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)))
+    }
+
     /// Builds a one-layer stack from in-memory USDA text, for composition cases
     /// that need no on-disk asset.
     fn in_memory_stack(text: &str) -> LayerStack {
-        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
-        LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true)
+        LayerStack::new(vec![parse_layer(text)], 0, Box::new(DefaultResolver::new()), true)
     }
 
     /// Builds a one-layer stack whose root is loaded from a real path, so the
@@ -2457,6 +2476,37 @@ def "A" (
         changes.apply(&mut cache);
 
         assert!(cache.prototypes().is_empty());
+        Ok(())
+    }
+
+    /// A `layerRelocates` edit that authors an invalid relocate after stage
+    /// creation must surface the `InvalidRelocate` error to the handler. The
+    /// construction-time seed into `pending_errors` is a one-shot drain, so the
+    /// recompute path has to re-queue the regenerated layer-stack errors.
+    #[test]
+    fn invalid_relocate_edit_surfaces_error() -> Result<()> {
+        let mut cache = Cache::new(in_memory_stack("#usda 1.0\ndef \"A\" {}\n"), VariantFallbackMap::new());
+        // No relocates authored yet, so nothing is pending.
+        assert!(cache.take_pending_errors().is_empty());
+
+        // Author an invalid relocate (the target is an ancestor of the source).
+        *cache.layer_mut(0).expect("layer 0 exists") =
+            parse_layer("#usda 1.0\n(\n    relocates = { </A/B/C>: </A> }\n)\ndef \"A\" {}\n");
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&Path::abs_root())
+            .info_changed
+            .insert(sdf::FieldKey::LayerRelocates.as_str());
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(0, cl)]);
+        changes.apply(&mut cache);
+
+        assert!(
+            cache
+                .take_pending_errors()
+                .iter()
+                .any(|e| matches!(e, Error::InvalidRelocate { .. })),
+            "an invalid relocate authored after construction must reach the error handler"
+        );
         Ok(())
     }
 }

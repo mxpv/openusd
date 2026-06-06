@@ -263,6 +263,16 @@ impl Changes {
         if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
             cache.recompute_relocates();
         }
+        // A `subLayers` edit sets `LAYERS`, which both rebuild masks include, so
+        // both recomputes above can run for one edit. Queue the regenerated
+        // layer-stack errors once, after both, so each reaches the error handler
+        // exactly once.
+        if self
+            .layer_stack
+            .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD | LayerStackChanges::NEEDS_RELOCATES_REBUILD)
+        {
+            cache.queue_layer_stack_errors();
+        }
         if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             // Cache already cleared above; layer-stack precomputed state
             // is now in sync. Skip the per-path drops below since they'd

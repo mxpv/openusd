@@ -334,7 +334,14 @@ pub(crate) struct LayerStack {
     /// layer's own namespace, keyed by layer index; empty when no layer
     /// relocates. The task-queue builder reads these to compose relocate arcs in
     /// a node's layer stack (C++ `PcpLayerStack::GetIncrementalRelocates*`).
-    pub(crate) layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
+    pub(crate) layer_relocates: rel::LayerRelocates,
+    /// Recoverable errors detected while assembling the layer stack — sublayer
+    /// cycles and structurally invalid authored relocates (C++ errors surfaced
+    /// while computing the layer stack). The [`Cache`](cache::Cache) drains these
+    /// into its pending errors — once at construction and again whenever a
+    /// `subLayers`/`layerRelocates` edit recomputes them — so they reach the stage
+    /// error handler the same way per-prim composition errors do.
+    pub(crate) layer_stack_errors: Vec<Error>,
     /// Resolver used to anchor relative asset paths when locating layers.
     pub(crate) resolver: Box<dyn Resolver>,
 }
@@ -347,11 +354,24 @@ impl LayerStack {
         resolver: Box<dyn Resolver>,
         load_payloads: bool,
     ) -> Self {
+        // Keep the sublayer-cycle errors from the stage-root build; the other
+        // per-layer builds detect their own subtrees' cycles, which would
+        // duplicate the root's, so they share one discarded `scratch` sink.
+        let mut layer_stack_errors = Vec::new();
+        let mut scratch = Vec::new();
         let sublayer_stacks: SublayerStacks = (0..layers.len())
-            .map(|i| (i, Self::build_sublayer_stack(i, &layers, &*resolver)))
+            .map(|i| {
+                let errors = if i == session_layer_count {
+                    &mut layer_stack_errors
+                } else {
+                    &mut scratch
+                };
+                (i, Self::build_sublayer_stack(i, &layers, &*resolver, errors))
+            })
             .collect();
         let has_relocates = Self::compute_has_relocates(&layers);
-        let layer_relocates = rel::extract_layer_relocates(&layers);
+        let (layer_relocates, relocate_errors) = rel::extract_layer_relocates(&layers);
+        layer_stack_errors.extend(relocate_errors);
         Self {
             layers,
             sublayer_stacks,
@@ -359,6 +379,7 @@ impl LayerStack {
             load_payloads,
             has_relocates,
             layer_relocates,
+            layer_stack_errors,
             resolver,
         }
     }
@@ -473,14 +494,19 @@ impl LayerStack {
         })
     }
 
-    /// Re-derives the cached relocate state — [`has_relocates`](Self::has_relocates)
-    /// and [`layer_relocates`](Self::layer_relocates) — from the current layers.
-    /// Called after a `layerRelocates` edit that does not rebuild the sublayer
-    /// precomputation (which would refresh both itself); keeping them in sync is
-    /// what re-enables and re-targets the builder's relocate passes.
+    /// Re-derives the cached relocate state — [`has_relocates`](Self::has_relocates),
+    /// [`layer_relocates`](Self::layer_relocates), and the invalid-relocate
+    /// portion of [`layer_stack_errors`](Self::layer_stack_errors) — from the
+    /// current layers. Called after a `layerRelocates` edit that does not rebuild
+    /// the sublayer precomputation (which would refresh both itself); keeping
+    /// them in sync is what re-enables and re-targets the builder's relocate passes.
     pub(crate) fn recompute_relocate_data(&mut self) {
         self.has_relocates = Self::compute_has_relocates(&self.layers);
-        self.layer_relocates = rel::extract_layer_relocates(&self.layers);
+        let (layer_relocates, relocate_errors) = rel::extract_layer_relocates(&self.layers);
+        self.layer_relocates = layer_relocates;
+        self.layer_stack_errors
+            .retain(|e| !matches!(e, Error::InvalidRelocate { .. }));
+        self.layer_stack_errors.extend(relocate_errors);
     }
 
     /// Whether any layer authors `layerRelocates` at its pseudo-root.
@@ -522,9 +548,22 @@ impl LayerStack {
     /// [`Cache::recompute_layer_stack`](super::cache::Cache::recompute_layer_stack)
     /// after authoring touched `subLayers` / `subLayerOffsets`.
     fn calc_precomputed(&mut self) {
+        // Refresh the sublayer-cycle errors from the stage-root build (the other
+        // builds share one discarded `scratch` sink); `recompute_relocate_data`
+        // then keeps these and re-appends the invalid-relocate errors.
+        let mut layer_stack_errors = Vec::new();
+        let mut scratch = Vec::new();
         self.sublayer_stacks = (0..self.layers.len())
-            .map(|i| (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver)))
+            .map(|i| {
+                let errors = if i == self.session_layer_count {
+                    &mut layer_stack_errors
+                } else {
+                    &mut scratch
+                };
+                (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver, errors))
+            })
             .collect();
+        self.layer_stack_errors = layer_stack_errors;
         self.recompute_relocate_data();
     }
 
@@ -576,13 +615,18 @@ impl LayerStack {
         self.sublayer_stacks
             .get(&root_layer)
             .cloned()
-            .unwrap_or_else(|| Self::build_sublayer_stack(root_layer, &self.layers, &*self.resolver))
+            .unwrap_or_else(|| Self::build_sublayer_stack(root_layer, &self.layers, &*self.resolver, &mut Vec::new()))
     }
 
+    /// Builds the sublayer stack rooted at `root_layer`, recording any sublayer
+    /// cycle it encounters into `errors` as [`Error::SublayerCycle`]. Callers that
+    /// only need the stack pass a throwaway `errors` vec; the layer stack keeps
+    /// the errors from the stage-root build (see [`new`](Self::new)).
     pub(crate) fn build_sublayer_stack(
         root_layer: usize,
         layers: &[sdf::Layer],
         resolver: &dyn Resolver,
+        errors: &mut Vec<Error>,
     ) -> Vec<(usize, sdf::LayerOffset)> {
         let mut stack: Vec<(usize, sdf::LayerOffset)> = Vec::new();
         let mut ancestors: HashSet<usize> = HashSet::new();
@@ -593,6 +637,7 @@ impl LayerStack {
             resolver,
             &mut stack,
             &mut ancestors,
+            errors,
         );
         stack
     }
@@ -600,8 +645,11 @@ impl LayerStack {
     /// Appends `idx` and its sublayer subtree to `stack` in depth-first
     /// pre-order. `ancestors` holds the layers on the path from the root to
     /// `idx`; a sublayer already on that path is a cycle (C++
-    /// `PcpErrorSublayerCycle`) and is skipped, while a layer reached off the
-    /// path is a permitted duplicate and is expanded again.
+    /// `PcpErrorSublayerCycle`): it is skipped and recorded in `errors` (the
+    /// message pairs `idx`, the layer whose `subLayers` closes the cycle, with the
+    /// re-included `sub_idx`), while a layer reached off the path is a permitted
+    /// duplicate and is expanded again.
+    #[allow(clippy::too_many_arguments)]
     fn collect_sublayers(
         idx: usize,
         effective: sdf::LayerOffset,
@@ -609,6 +657,7 @@ impl LayerStack {
         resolver: &dyn Resolver,
         stack: &mut Vec<(usize, sdf::LayerOffset)>,
         ancestors: &mut HashSet<usize>,
+        errors: &mut Vec<Error>,
     ) {
         stack.push((idx, effective));
         ancestors.insert(idx);
@@ -637,6 +686,10 @@ impl LayerStack {
                     continue;
                 };
                 if ancestors.contains(&sub_idx) {
+                    errors.push(Error::SublayerCycle {
+                        root_layer: layers[idx].identifier.clone(),
+                        seen_layer: layers[sub_idx].identifier.clone(),
+                    });
                     continue;
                 }
                 // Fold the time-codes-per-second retiming for this hop into the
@@ -650,7 +703,7 @@ impl LayerStack {
                     .sanitized()
                     .concatenate(&sdf::LayerOffset::scale_only(ratio));
                 let child = effective.concatenate(&local);
-                Self::collect_sublayers(sub_idx, child, layers, resolver, stack, ancestors);
+                Self::collect_sublayers(sub_idx, child, layers, resolver, stack, ancestors, errors);
             }
         }
 
@@ -772,6 +825,33 @@ pub enum Error {
         arc: ArcType,
         /// The private site the arc targets.
         target_path: Path,
+    },
+
+    /// A layer's `subLayers` form a cycle — a layer includes itself, directly or
+    /// transitively (C++ `PcpErrorSublayerCycle`). Detected while building the
+    /// stage root layer stack; the cyclic sublayer is skipped and the rest of the
+    /// stack still composes. `root_layer` is the layer whose sublayer list
+    /// re-introduces `seen_layer`.
+    #[error("sublayer cycle: {root_layer} re-includes {seen_layer}")]
+    SublayerCycle {
+        /// Identifier of the layer whose `subLayers` closes the cycle.
+        root_layer: String,
+        /// Identifier of the already-seen layer the cycle re-includes.
+        seen_layer: String,
+    },
+
+    /// An authored relocate whose source and target are nested — the target an
+    /// ancestor of the source, or vice versa, or identical — is structurally
+    /// invalid and ignored (C++ `PcpErrorInvalidAuthoredRelocates`). Composing it
+    /// would not terminate, so it is dropped while the layer stack still composes.
+    #[error("invalid relocate from {source_path} to {target_path} authored in {layer}")]
+    InvalidRelocate {
+        /// The relocate source path.
+        source_path: Path,
+        /// The relocate target path.
+        target_path: Path,
+        /// Identifier of the layer that authored the relocate.
+        layer: String,
     },
 
     /// Unexpected internal failure surfaced during composition (typically I/O
