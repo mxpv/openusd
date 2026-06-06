@@ -17,6 +17,9 @@ use super::graph::ArcType;
 use super::index::PrimIndex;
 use super::mapping::MapFunction;
 
+/// Per-layer authored relocate pairs `(source, target)`, keyed by layer index.
+pub(crate) type LayerRelocates = HashMap<usize, Vec<(Path, Path)>>;
+
 /// Per-layer relocates and operations for namespace remapping.
 ///
 /// Owns the `layerRelocates` data extracted at construction time. All
@@ -24,7 +27,7 @@ use super::mapping::MapFunction;
 /// (layer stack, indices, contexts) as explicit parameters.
 pub(super) struct Relocates {
     /// Per-layer relocates: `layerRelocates` extracted from each layer's pseudoroot.
-    layer_relocates: HashMap<usize, Vec<(Path, Path)>>,
+    layer_relocates: LayerRelocates,
 }
 
 /// Follows `path` to its final location through a set of relocates, applying the
@@ -153,28 +156,40 @@ pub(crate) fn apply_child_relocates(
     }
 }
 
-/// Extracts each layer's authored `layerRelocates` pairs `(source, target)`,
-/// keyed by layer index; layers without relocates are omitted. Shared by
-/// [`Relocates::new`] and [`LayerStack`](super::LayerStack).
-pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> HashMap<usize, Vec<(Path, Path)>> {
+/// Extracts each layer's authored `layerRelocates` in one pass: structurally
+/// valid pairs `(source, target)` are returned keyed by layer index (layers
+/// without valid relocates are omitted), and each invalid pair becomes an
+/// [`Error::InvalidRelocate`](super::Error::InvalidRelocate) reported in authored
+/// order (C++ `PcpErrorInvalidAuthoredRelocates`). Shared by [`Relocates::new`]
+/// and [`LayerStack`](super::LayerStack).
+pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> (LayerRelocates, Vec<super::Error>) {
     let root = Path::abs_root();
     let mut out = HashMap::new();
+    let mut errors = Vec::new();
     for (i, layer) in layers.iter().enumerate() {
-        if let Ok(val) = layer.get(&root, FieldKey::LayerRelocates.as_str()) {
-            if let Value::Relocates(pairs) = val.into_owned() {
-                // TODO(errors): an invalid relocate is dropped silently here.
-                // C++ records `PcpErrorInvalidAuthoredRelocates` ("Relocation
-                // ... is invalid and will be ignored", per the bug92827 golden);
-                // once the layer-stack `Errors` trailer exists, surface each
-                // dropped pair as a recoverable error instead of discarding it.
-                let pairs: Vec<(Path, Path)> = pairs.into_iter().filter(|(s, t)| is_valid_relocate(s, t)).collect();
-                if !pairs.is_empty() {
-                    out.insert(i, pairs);
-                }
+        let Ok(Value::Relocates(pairs)) = layer
+            .get(&root, FieldKey::LayerRelocates.as_str())
+            .map(|v| v.into_owned())
+        else {
+            continue;
+        };
+        let mut valid = Vec::new();
+        for (source, target) in pairs {
+            if is_valid_relocate(&source, &target) {
+                valid.push((source, target));
+            } else {
+                errors.push(super::Error::InvalidRelocate {
+                    source_path: source,
+                    target_path: target,
+                    layer: layer.identifier.clone(),
+                });
             }
         }
+        if !valid.is_empty() {
+            out.insert(i, valid);
+        }
     }
-    out
+    (out, errors)
 }
 
 /// Whether an authored relocate `source -> target` is structurally valid (C++
@@ -196,7 +211,7 @@ impl Relocates {
     /// layer's pseudoroot.
     pub fn new(layers: &[sdf::Layer]) -> Self {
         Self {
-            layer_relocates: extract_layer_relocates(layers),
+            layer_relocates: extract_layer_relocates(layers).0,
         }
     }
 
