@@ -93,6 +93,15 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, ")")?;
         }
 
+        // Layer-level `reorder rootPrims`, stored as `primOrder` on the
+        // pseudo-root. Emitted between the metadata block and the root prims.
+        if has_root {
+            if let Some(Value::TokenVec(v)) = get_value(data, &root, FieldKey::PrimOrder.as_str()) {
+                writeln!(self.out)?;
+                self.emit_reorder("rootPrims", &v)?;
+            }
+        }
+
         // Root prims
         let children = if has_root {
             prim_children(data, &root)
