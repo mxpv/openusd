@@ -135,7 +135,7 @@ mod tests {
         let schema = Marker(prim);
         assert_eq!(schema.path().as_str(), "/World");
         // `stage()` resolves through the prim's own shared handle.
-        assert_eq!(schema.stage().type_name(schema.path())?, None);
+        assert_eq!(schema.stage().prim_at(schema.path()).type_name()?, None);
         Ok(())
     }
 

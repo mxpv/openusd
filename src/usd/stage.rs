@@ -93,7 +93,7 @@ pub struct PrimPredicate {
     rejected: PrimStatus,
     /// When `false` (the default), traversal does not descend into an instance
     /// prim's subtree — its contents are reached through the prototype
-    /// (`Stage::get_prototype`). When `true`, instance subtrees are traversed
+    /// (`Prim::prototype`). When `true`, instance subtrees are traversed
     /// directly (the "instance proxy" view, spec 11.3.3).
     traverse_instance_proxies: bool,
 }
@@ -944,8 +944,21 @@ impl Stage {
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; it is returned unconditionally and does not assert that a prim
     /// is composed at the path (query the handle to find out).
-    pub fn prim_at_path(&self, path: impl Into<sdf::Path>) -> super::Prim {
+    pub fn prim_at(&self, path: impl Into<sdf::Path>) -> super::Prim {
         super::Prim::new(self, path.into().prim_path())
+    }
+
+    /// Returns an [`Attribute`](super::Attribute) handle anchored to `path`.
+    /// Mirrors C++ `UsdStage::GetAttributeAtPath`. Like [`Self::prim_at`],
+    /// the handle is returned unconditionally; query it to resolve a value.
+    pub fn attribute_at(&self, path: impl Into<sdf::Path>) -> super::Attribute {
+        super::Attribute::new(self, path.into())
+    }
+
+    /// Returns a [`Relationship`](super::Relationship) handle anchored to `path`.
+    /// Mirrors C++ `UsdStage::GetRelationshipAtPath`.
+    pub fn relationship_at(&self, path: impl Into<sdf::Path>) -> super::Relationship {
+        super::Relationship::new(self, path.into())
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
@@ -955,45 +968,21 @@ impl Stage {
         Ok(self.filter_child_names(&root, children))
     }
 
-    // TODO: the path-keyed scene queries below (`prim_children`,
-    // `prim_properties`, `connection_paths`, `relationship_targets`,
-    // `forwarded_relationship_targets`, `has_spec`, `spec_type`, …) belong on
-    // the composed handles to match C++ — child/property names and the prim
-    // stack on `Prim` (`UsdPrim::GetChildren` / `GetPropertyNames` /
-    // `GetPrimStack`), targets/connections on `Relationship` / `Attribute`
-    // (`UsdRelationship::GetTargets`, `UsdAttribute::GetConnections`). They live
-    // on `Stage(path)` for historical reasons; move them onto the handles (with
-    // thin `pub(crate)` plumbing here) and keep only genuinely stage-scoped
-    // queries (`GetLayerStack`, `GetPrimAtPath`) public on `Stage`.
-
-    /// Returns the composed list of child prim names for a given prim path.
-    ///
-    /// Merges `primChildren` across all layers that have a spec at the given
-    /// path, collecting the union of child names while preserving the order
-    /// from the strongest layer.
-    pub fn prim_children(&self, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
-        let path = path.into().prim_path();
-        if !self.population_mask.includes(&path) {
-            return Ok(Vec::new());
-        }
-        let children = self.try_or_handle(|cache| cache.prim_children(&path))?;
-        Ok(self.filter_child_names(&path, children))
-    }
-
-    /// Returns the composed list of property names for a given prim path.
-    pub fn prim_properties(&self, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
-        let path = path.into().prim_path();
-        if !self.population_mask.includes(&path) {
-            return Ok(Vec::new());
-        }
-        self.try_or_handle(|cache| cache.prim_properties(&path))
-    }
+    // `has_spec` / `spec_type` below are low-level composed-spec infrastructure
+    // (the post-composition analog of `SdfAbstractData::HasSpec` /
+    // `GetSpecType`), shared by the composed handles and the stage's own status
+    // queries. The public, C++-shaped scene queries live on the handles:
+    // children / property names on `Prim` (`GetChildren` / `GetPropertyNames`),
+    // targets / connections on `Relationship` / `Attribute` (`GetTargets` /
+    // `GetConnections`). The handles reach the cache through the query runners
+    // ([`Self::try_or_handle`], [`Self::masked`]) and the population-mask helpers
+    // ([`Self::filter_child_names`], [`Self::population_mask`]).
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub fn has_spec(&self, path: impl Into<sdf::Path>) -> Result<bool> {
+    pub(crate) fn has_spec(&self, path: impl Into<sdf::Path>) -> Result<bool> {
         let path = path.into();
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(false);
@@ -1002,7 +991,7 @@ impl Stage {
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
-    pub fn spec_type(&self, path: impl Into<sdf::Path>) -> Result<Option<sdf::SpecType>> {
+    pub(crate) fn spec_type(&self, path: impl Into<sdf::Path>) -> Result<Option<sdf::SpecType>> {
         let path = path.into();
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
@@ -1010,7 +999,12 @@ impl Stage {
         self.try_or_handle(|cache| cache.spec_type(&path))
     }
 
-    /// Resolves a field value by walking the prim index from strongest to weakest.
+    /// Resolves a composed field value by walking the prim index from strongest
+    /// to weakest. This is the crate-internal composed-field primitive — the
+    /// post-composition analog of `SdfLayer::GetField` / `SdfAbstractData::Get`,
+    /// not a `UsdStage` API (C++ has no `UsdStage::GetField`). Public reads go
+    /// through the typed handle accessors ([`Attribute::get`], the `Prim::*`
+    /// accessors, and the `Stage::*` accessors), which delegate here.
     ///
     /// For prim paths, walks the prim index nodes. For property paths (containing
     /// a `.`), uses the owning prim's index to determine layer order, then queries
@@ -1026,13 +1020,8 @@ impl Stage {
     ///
     /// Accepts both [`sdf::FieldKey`] and `&str` as the field name.
     ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let active: Option<bool> = stage.field(&prim, sdf::FieldKey::Active)?;
-    /// let raw: Option<sdf::Value> = stage.field(&prim, sdf::FieldKey::Active)?;
-    /// ```
-    pub fn field<T>(&self, path: impl Into<sdf::Path>, field: impl AsRef<str>) -> Result<Option<T>>
+    /// [`Attribute::get`]: super::Attribute::get
+    pub(crate) fn field<T>(&self, path: impl Into<sdf::Path>, field: impl AsRef<str>) -> Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
@@ -1048,83 +1037,18 @@ impl Stage {
         }
     }
 
-    /// Returns the composed `apiSchemas` list for a prim, flattened across all
-    /// contributing layer opinions.
-    ///
-    /// Property paths are coerced to their owning prim — `api_schemas` is a
-    /// prim-level field. This matches how [`Stage::specifier`] and
-    /// [`Stage::kind`] handle their inputs.
-    ///
-    /// Multi-apply schema instances (e.g. `PhysicsLimitAPI:rotZ`) are included
-    /// as-is; callers that need to match only the base name should strip the
-    /// instance suffix themselves.
-    pub fn api_schemas(&self, prim: &sdf::Path) -> Result<Vec<String>> {
-        let prim = prim.prim_path();
-        if !self.population_mask.includes(&prim) {
-            return Ok(Vec::new());
-        }
-        self.try_or_handle(|cache| cache.api_schemas(&prim))
-    }
-
-    /// Returns `true` when `name` appears in the prim's composed `apiSchemas` list.
-    ///
-    /// For multi-apply schemas pass the full instance name (e.g.
-    /// `"PhysicsLimitAPI:rotZ"`), not just the base name.
-    pub fn has_api_schema(&self, prim: &sdf::Path, name: &str) -> Result<bool> {
-        Ok(self.api_schemas(prim)?.iter().any(|s| s == name))
-    }
-
-    /// Returns the composed `connectionPaths` list for an attribute path,
-    /// folding list-op edits (prepend / append / add / delete) across every
-    /// contributing layer. Mirrors C++ `UsdAttribute::GetConnections`. Returns
-    /// an empty list for non-property paths or attributes with no authored
-    /// connections.
-    pub fn connection_paths(&self, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property(attr, |cache| cache.connection_paths(attr))
-    }
-
-    /// Returns the composed raw `targetPaths` list for a relationship, folding
-    /// list-op edits (prepend / append / add / delete) across every
-    /// contributing layer. Mirrors C++ `UsdRelationship::GetTargets`. Returns
-    /// an empty list for non-property paths or relationships with no authored
-    /// targets.
-    ///
-    /// These are the raw targets (spec 12.4); target forwarding — recursively
-    /// chasing relationship-to-relationship chains — is not applied.
-    pub fn relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        self.masked_property(rel, |cache| cache.relationship_targets(rel))
-    }
-
-    /// Returns the forwarded `targetPaths` for a relationship. A target that
-    /// resolves to another relationship is replaced, recursively, by that
-    /// relationship's forwarded targets; every other target is kept as-is,
-    /// including prim paths, attribute paths, and dangling paths (spec 12.4).
-    /// Cycles are broken and duplicates collapse. Mirrors C++
-    /// `UsdRelationship::GetForwardedTargets`.
-    ///
-    /// Forwarding honors the population mask: a target relationship on a prim
-    /// outside the working set is not followed, so the result never includes
-    /// scene the mask excludes. Target paths that are themselves outside the
-    /// mask but reached directly (prim/attribute terminals) are still returned,
-    /// matching raw [`Self::relationship_targets`].
-    pub fn forwarded_relationship_targets(&self, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
-        let mask = &self.population_mask;
-        self.masked_property(rel, |cache| {
-            cache.forwarded_relationship_targets(rel, &|p| mask.includes(p))
-        })
-    }
-
-    /// Runs a property query (`targetPaths` / `connectionPaths`, with or without
-    /// the deleted-paths pair) under the population mask: a property whose owning
-    /// prim is outside the working set resolves to the empty default without
-    /// touching the cache. The population mask is a [`Stage`] concern, so the
-    /// `Relationship` / `Attribute` handles route their cache queries through it.
-    pub(crate) fn masked_property<T: Default>(
+    /// Runs a composed query at `path` under the population mask: when the
+    /// path's owning prim is outside the working set, resolves to `T::default()`
+    /// without touching the cache; otherwise runs `query` through
+    /// [`Self::try_or_handle`]. This is the mask-gated query runner the composed
+    /// handles ([`Prim`](super::Prim) / [`Attribute`](super::Attribute) /
+    /// [`Relationship`](super::Relationship)) build their scene queries on.
+    pub(crate) fn masked<T: Default>(
         &self,
-        prop: &sdf::Path,
+        path: &sdf::Path,
         query: impl FnOnce(&mut pcp::Cache) -> Result<T>,
     ) -> Result<T> {
-        if !self.population_mask.includes(&prop.prim_path()) {
+        if !self.population_mask.includes(&path.prim_path()) {
             return Ok(T::default());
         }
         self.try_or_handle(query)
@@ -1146,138 +1070,12 @@ impl Stage {
         self.graph.borrow().layer_identifier(index).map(str::to_string)
     }
 
-    /// Returns the composed `typeName` for a prim, if set.
-    pub fn type_name(&self, prim: &sdf::Path) -> Result<Option<String>> {
-        self.field::<String>(prim, "typeName")
-    }
-
-    /// Returns the composed specifier for a prim, if one resolves.
-    pub fn specifier(&self, prim: impl Into<sdf::Path>) -> Result<Option<sdf::Specifier>> {
-        self.field::<sdf::Specifier>(prim.into().prim_path(), sdf::FieldKey::Specifier)
-    }
-
-    /// Returns the composed `kind` metadata for a prim, if authored.
-    pub fn kind(&self, prim: impl Into<sdf::Path>) -> Result<Option<String>> {
-        self.field::<String>(prim.into().prim_path(), sdf::FieldKey::Kind)
-    }
-
-    /// Returns `true` if the prim and all ancestors are active.
-    ///
-    /// Missing `active` opinions default to `true`; a non-existent prim returns
-    /// `false`.
-    pub fn is_active(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if prim == sdf::Path::abs_root() {
-            return Ok(true);
-        }
-        if !self.has_spec(&prim)? {
-            return Ok(false);
-        }
-        for path in Self::prim_ancestors_inclusive(prim) {
-            if self
-                .field::<bool>(&path, sdf::FieldKey::Active)?
-                .is_some_and(|active| !active)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Returns `true` if the prim is loaded.
-    pub fn is_loaded(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if !self.is_active(&prim)? {
-            return Ok(false);
-        }
-        if self.initial_load_set.load_payloads() {
-            return Ok(true);
-        }
-        for path in Self::prim_ancestors_inclusive(prim) {
-            if self.has_payload(&path)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Returns `true` if the prim and all ancestors have defining specifiers.
-    ///
-    /// `def` and `class` are defining. `over`, missing specs, and missing
-    /// specifier opinions are not defining.
-    pub fn is_defined(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if prim == sdf::Path::abs_root() {
-            return Ok(true);
-        }
-        if !self.has_spec(&prim)? {
-            return Ok(false);
-        }
-        for path in Self::prim_ancestors_inclusive(prim) {
-            if !matches!(self.specifier(path)?, Some(sdf::Specifier::Def | sdf::Specifier::Class)) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Returns `true` if the prim or any ancestor resolves to `class`.
-    pub fn is_abstract(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
-            return Ok(false);
-        }
-        for path in Self::prim_ancestors_inclusive(prim) {
-            if self.specifier(path)? == Some(sdf::Specifier::Class) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Returns `true` if the prim index contains at least one composition arc.
-    pub fn has_composition_arc(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if !self.population_mask.includes(&prim) {
-            return Ok(false);
-        }
-        self.try_or_handle(|cache| cache.has_composition_arc(&prim))
-    }
-
-    /// Returns `true` if `instanceable` resolves to true and the prim has a composition arc.
-    pub fn is_instance(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        let prim = prim.into().prim_path();
-        if prim == sdf::Path::abs_root() || !self.population_mask.includes(&prim) || !self.has_spec(&prim)? {
-            return Ok(false);
-        }
-        if !self.field::<bool>(&prim, sdf::FieldKey::Instanceable)?.unwrap_or(false) {
-            return Ok(false);
-        }
-        self.has_composition_arc(&prim)
-    }
-
-    /// Returns the shared prototype path (`/__Prototype_N`) for an instance
-    /// prim, or `None` if `prim` is not an instance (spec 11.3.3). Instances
-    /// with the same composition share one prototype. Prims outside the
-    /// population mask are not instanced and return `None`.
-    pub fn get_prototype(&self, prim: impl Into<sdf::Path>) -> Result<Option<sdf::Path>> {
-        let prim = prim.into().prim_path();
-        if !self.population_mask.includes(&prim) {
-            return Ok(None);
-        }
-        self.try_or_handle(|cache| cache.prototype_of(&prim))
-    }
-
-    /// Returns the instance prims sharing the prototype at `prototype` (a
-    /// `/__Prototype_N` path), sorted by namespace path. Instances outside the
-    /// population mask are excluded.
-    pub fn get_instances(&self, prototype: impl Into<sdf::Path>) -> Result<Vec<sdf::Path>> {
-        let prototype = prototype.into();
-        let instances = self.try_or_handle(|cache| Ok(cache.instances_of(&prototype)))?;
-        Ok(instances
-            .into_iter()
-            .filter(|instance| self.population_mask.includes(instance))
-            .collect())
+    /// Returns the root layer's `customLayerData` dictionary, if authored.
+    /// Mirrors C++ `UsdStage::GetRootLayer()->GetCustomLayerData()`: layer
+    /// metadata is read from the root layer alone, not composed across the
+    /// layer stack.
+    pub fn custom_layer_data(&self) -> Result<Option<sdf::Value>> {
+        self.field::<sdf::Value>(sdf::Path::abs_root(), sdf::FieldKey::CustomLayerData)
     }
 
     /// Returns every registered prototype root (`/__Prototype_N`) with at least
@@ -1293,43 +1091,6 @@ impl Stage {
         })
     }
 
-    /// Returns `true` if `path` is a prototype root (`/__Prototype_N`).
-    pub fn is_prototype(&self, path: impl Into<sdf::Path>) -> Result<bool> {
-        let path = path.into();
-        self.try_or_handle(|cache| Ok(cache.is_prototype(&path)))
-    }
-
-    /// Returns `true` if `path` lies within a prototype's namespace (spec
-    /// 11.3.3).
-    pub fn is_in_prototype(&self, path: impl Into<sdf::Path>) -> Result<bool> {
-        let path = path.into();
-        self.try_or_handle(|cache| Ok(cache.is_in_prototype(&path)))
-    }
-
-    /// Returns `true` if the prim is in the contiguous model hierarchy.
-    ///
-    /// A model prim has `kind` equal to `group`, `assembly`, or `component`.
-    /// Any ancestor below the pseudo-root must have `kind` equal to `group` or
-    /// `assembly`; `subcomponent` is intentionally not part of the hierarchy.
-    pub fn is_model(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        Ok(self.model_kind(prim.into())?.is_some())
-    }
-
-    /// Returns `true` if the prim is a group-like model (`group` or `assembly`).
-    pub fn is_group(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        Ok(matches!(self.model_kind(prim.into())?, Some("group" | "assembly")))
-    }
-
-    /// Returns `true` if the prim is a component model in a valid model hierarchy.
-    pub fn is_component(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        Ok(self.model_kind(prim.into())? == Some("component"))
-    }
-
-    /// Returns `true` if the prim has `kind = "subcomponent"`.
-    pub fn is_subcomponent(&self, prim: impl Into<sdf::Path>) -> Result<bool> {
-        Ok(self.kind(prim)?.as_deref() == Some("subcomponent"))
-    }
-
     /// Returns the resolved stage status bits for a prim.
     pub fn prim_status(&self, prim: impl Into<sdf::Path>) -> Result<PrimStatus> {
         self.prim_status_masked(&prim.into().prim_path(), PrimStatus::all())
@@ -1339,69 +1100,36 @@ impl Stage {
     /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
     /// for default traversal) are skipped.
     fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
+        let prim = self.prim_at(prim.clone());
         let mut status = PrimStatus::empty();
         if mask.contains(PrimStatus::ACTIVE) {
-            status.set(PrimStatus::ACTIVE, self.is_active(prim)?);
+            status.set(PrimStatus::ACTIVE, prim.is_active()?);
         }
         if mask.contains(PrimStatus::LOADED) {
-            status.set(PrimStatus::LOADED, self.is_loaded(prim)?);
+            status.set(PrimStatus::LOADED, prim.is_loaded()?);
         }
         if mask.contains(PrimStatus::DEFINED) {
-            status.set(PrimStatus::DEFINED, self.is_defined(prim)?);
+            status.set(PrimStatus::DEFINED, prim.is_defined()?);
         }
         if mask.contains(PrimStatus::ABSTRACT) {
-            status.set(PrimStatus::ABSTRACT, self.is_abstract(prim)?);
+            status.set(PrimStatus::ABSTRACT, prim.is_abstract()?);
         }
         if mask.contains(PrimStatus::INSTANCE) {
-            status.set(PrimStatus::INSTANCE, self.is_instance(prim)?);
+            status.set(PrimStatus::INSTANCE, prim.is_instance()?);
         }
         if mask.contains(PrimStatus::MODEL) {
-            status.set(PrimStatus::MODEL, self.is_model(prim)?);
+            status.set(PrimStatus::MODEL, prim.is_model()?);
         }
         if mask.contains(PrimStatus::IN_PROTOTYPE) {
-            status.set(PrimStatus::IN_PROTOTYPE, self.is_in_prototype(prim)?);
+            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
         }
         Ok(status)
     }
 
-    /// Returns the model-hierarchy `kind` for the prim — `Some("group" | "assembly" | "component")`
-    /// when the prim and all ancestors form a contiguous model hierarchy, else `None`.
-    fn model_kind(&self, prim: sdf::Path) -> Result<Option<&'static str>> {
-        let prim = prim.prim_path();
-        if prim == sdf::Path::abs_root() || !self.has_spec(&prim)? {
-            return Ok(None);
-        }
-        let leaf = match self.kind(&prim)?.as_deref() {
-            Some("group") => "group",
-            Some("assembly") => "assembly",
-            Some("component") => "component",
-            _ => return Ok(None),
-        };
-        let Some(parent) = prim.parent() else {
-            return Ok(Some(leaf));
-        };
-        for ancestor in Self::prim_ancestors_inclusive(parent) {
-            if !matches!(self.kind(ancestor)?.as_deref(), Some("group" | "assembly")) {
-                return Ok(None);
-            }
-        }
-        Ok(Some(leaf))
-    }
-
-    fn has_payload(&self, prim: &sdf::Path) -> Result<bool> {
-        let payload = self.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
-        Ok(match payload {
-            Some(sdf::Value::Payload(payload)) => Self::payload_has_target(&payload),
-            Some(sdf::Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(Self::payload_has_target),
-            _ => false,
-        })
-    }
-
-    fn payload_has_target(payload: &sdf::Payload) -> bool {
-        !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
-    }
-
-    fn filter_child_names(&self, parent: &sdf::Path, children: Vec<String>) -> Vec<String> {
+    /// Filters a child-name list to the prims the population mask includes.
+    /// Population-mask infrastructure shared by [`Prim::children`](super::Prim::children)
+    /// and the stage's own [`traverse`](Self::traverse) walk.
+    pub(crate) fn filter_child_names(&self, parent: &sdf::Path, children: Vec<String>) -> Vec<String> {
         if self.population_mask.is_all() {
             return children;
         }
@@ -1417,7 +1145,7 @@ impl Stage {
 
     /// Iterates the prim path and its ancestors from leaf to root, stopping
     /// before the pseudo-root. Assumes `start` is already a prim path.
-    fn prim_ancestors_inclusive(start: sdf::Path) -> impl Iterator<Item = sdf::Path> {
+    pub(crate) fn prim_ancestors_inclusive(start: sdf::Path) -> impl Iterator<Item = sdf::Path> {
         std::iter::successors(Some(start), sdf::Path::parent).take_while(|p| *p != sdf::Path::abs_root())
     }
 
@@ -1460,6 +1188,13 @@ impl Stage {
 
         while let Some(path) = stack.pop() {
             if path != sdf::Path::abs_root() {
+                // TODO(perf): each `prim_status_masked` call recomputes the
+                // inherited bits (active/loaded/defined/abstract/model) by
+                // walking this prim's ancestor chain to the root, and several
+                // predicates re-walk it for the same fields. Since traversal is
+                // top-down, the parent's resolved inherited status could be
+                // threaded down the stack so each prim only consults its own
+                // local opinion — turning the per-prim O(depth) walk into O(1).
                 let status = self.prim_status_masked(&path, needed)?;
                 if predicate.matches(status) {
                     visitor(&path);
@@ -1474,7 +1209,8 @@ impl Stage {
                 }
             }
 
-            let children = self.prim_children(&path)?;
+            let names = self.masked(&path, |cache| cache.prim_children(&path))?;
+            let children = self.filter_child_names(&path, names);
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
                 if let Ok(child) = path.append_path(name.as_str()) {
@@ -1743,6 +1479,28 @@ mod tests {
         format!("{}/fixtures/{relative}", manifest_dir())
     }
 
+    // Composed-scene query shims used throughout these tests: each routes
+    // through the handle that now owns the query so the assertions stay terse.
+    fn child_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
+        stage.prim_at(path).child_names()
+    }
+
+    fn prop_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
+        stage.prim_at(path).property_names()
+    }
+
+    fn connections(stage: &Stage, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        stage.attribute_at(attr).connections()
+    }
+
+    fn rel_targets(stage: &Stage, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        stage.relationship_at(rel).targets()
+    }
+
+    fn fwd_targets(stage: &Stage, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
+        stage.relationship_at(rel).forwarded_targets()
+    }
+
     // --- Basic stage opening (vendor/usd-wg-assets) ---
 
     /// A direct arc to a `permission = private` site is reported through
@@ -1884,7 +1642,7 @@ mod tests {
         let path = fixture_path("sublayer_override.usda");
         let stage = Stage::open(&path)?;
 
-        let children = stage.prim_children("/World")?;
+        let children = child_names(&stage, "/World")?;
         // Override layer adds Sphere; base layer defines Cube.
         assert!(children.contains(&"Cube".to_string()), "Cube from base layer");
         assert!(children.contains(&"Sphere".to_string()), "Sphere from override layer");
@@ -1941,7 +1699,7 @@ mod tests {
         assert!(stage.has_spec("/World/MyPrim")?);
 
         // /World/MyPrim/Child should be reachable via namespace remapping.
-        let children = stage.prim_children("/World/MyPrim")?;
+        let children = child_names(&stage, "/World/MyPrim")?;
         assert!(
             children.contains(&"Child".to_string()),
             "referenced children should be visible"
@@ -1960,7 +1718,7 @@ mod tests {
 
         // /World references _stage.usda's defaultPrim ("World"),
         // so /World/Cube should come from the referenced layer.
-        let children = stage.prim_children("/World")?;
+        let children = child_names(&stage, "/World")?;
         assert!(
             children.contains(&"Cube".to_string()),
             "Cube from referenced layer should appear under /World"
@@ -1978,7 +1736,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // /Source/Child in ref_target.usda should appear as /World/RefPrim/Child.
-        let children = stage.prim_children("/World/RefPrim")?;
+        let children = child_names(&stage, "/World/RefPrim")?;
         assert!(
             children.contains(&"Child".to_string()),
             "referenced children should be namespace-remapped"
@@ -1997,7 +1755,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         // The inherited property should be visible.
-        let props = stage.prim_properties("/World/cubeWithoutSetColor")?;
+        let props = prop_names(&stage, "/World/cubeWithoutSetColor")?;
         assert!(
             props.contains(&"primvars:displayColor".to_string()),
             "inherited property should be visible"
@@ -2056,7 +1814,7 @@ mod tests {
 
         // The payload target layer has /World/Cube. Since /World is the payload
         // target, /World/Cube should appear.
-        let children = stage.prim_children("/World")?;
+        let children = child_names(&stage, "/World")?;
         assert!(
             children.contains(&"Cube".to_string()),
             "Cube from payload layer should appear under /World"
@@ -2169,7 +1927,7 @@ mod tests {
 
         // /Instance inherits /BaseClass which has child /BaseClass/Child.
         // /Instance/Child should exist even though Instance has no local "Child".
-        let children = stage.prim_children("/Instance")?;
+        let children = child_names(&stage, "/Instance")?;
         assert!(
             children.contains(&"Child".to_string()),
             "inherited child should appear: got {children:?}"
@@ -2193,13 +1951,13 @@ mod tests {
 
         // /Prim inherits /Base. /Base/A/B exists with val=1.0.
         // /Prim/A should exist, /Prim/A/B should exist.
-        let a_children = stage.prim_children("/Prim")?;
+        let a_children = child_names(&stage, "/Prim")?;
         assert!(
             a_children.contains(&"A".to_string()),
             "first-level child: got {a_children:?}"
         );
 
-        let b_children = stage.prim_children("/Prim/A")?;
+        let b_children = child_names(&stage, "/Prim/A")?;
         assert!(
             b_children.contains(&"B".to_string()),
             "second-level child: got {b_children:?}"
@@ -2221,7 +1979,7 @@ mod tests {
 
         // /Leaf inherits /Middle which inherits /GrandBase.
         // /GrandBase/Deep exists with x=42. /Leaf/Deep should exist.
-        let children = stage.prim_children("/Leaf")?;
+        let children = child_names(&stage, "/Leaf")?;
         assert!(
             children.contains(&"Deep".to_string()),
             "chain-inherited child: got {children:?}"
@@ -2310,7 +2068,7 @@ mod tests {
     fn session_layer_preserves_children() -> Result<()> {
         let stage = open_with_session()?;
 
-        let children = stage.prim_children("/World")?;
+        let children = child_names(&stage, "/World")?;
         assert!(
             children.contains(&"Child".to_string()),
             "root layer's children should be visible: got {children:?}"
@@ -2323,7 +2081,7 @@ mod tests {
     fn api_schemas_returns_applied_schemas() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let geo = sdf::Path::new("/World/Geo")?;
-        let schemas = stage.api_schemas(&geo)?;
+        let schemas = stage.prim_at(geo.clone()).api_schemas()?;
         assert!(schemas.contains(&"MaterialBindingAPI".to_string()));
         assert!(schemas.contains(&"SkelBindingAPI".to_string()));
         Ok(())
@@ -2387,7 +2145,7 @@ over "World"
         )?;
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-        let schemas = stage.api_schemas(&sdf::Path::new("/World/Geo")?)?;
+        let schemas = stage.prim_at(sdf::Path::new("/World/Geo")?).api_schemas()?;
         assert_eq!(schemas, vec!["StrongAPI".to_string(), "WeakAPI".to_string()]);
         Ok(())
     }
@@ -2431,7 +2189,7 @@ over "World"
         )?;
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-        let schemas = stage.api_schemas(&sdf::Path::new("/World/Geo")?)?;
+        let schemas = stage.prim_at(sdf::Path::new("/World/Geo")?).api_schemas()?;
         assert_eq!(schemas, vec!["C".to_string(), "A".to_string(), "B".to_string()]);
         Ok(())
     }
@@ -2468,11 +2226,11 @@ def Xform "World"
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let geo = sdf::Path::new("/World/Geo")?;
         assert_eq!(
-            stage.api_schemas(&geo)?,
+            stage.prim_at(geo.clone()).api_schemas()?,
             vec!["LocalAPI".to_string(), "BaseAPI".to_string()],
         );
-        assert!(stage.has_api_schema(&geo, "BaseAPI")?);
-        assert!(stage.has_api_schema(&geo, "LocalAPI")?);
+        assert!(stage.prim_at(geo.clone()).has_api_schema("BaseAPI")?);
+        assert!(stage.prim_at(geo.clone()).has_api_schema("LocalAPI")?);
         Ok(())
     }
 
@@ -2514,7 +2272,7 @@ def Xform "World"
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let geo = sdf::Path::new("/World/Geo")?;
         assert_eq!(
-            stage.api_schemas(&geo)?,
+            stage.prim_at(geo.clone()).api_schemas()?,
             vec!["LocalAPI".to_string(), "AssetAPI".to_string()],
         );
         Ok(())
@@ -2554,7 +2312,7 @@ def Xform "World"
         )?;
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let geo = sdf::Path::new("/World/Geo")?;
-        let schemas = stage.api_schemas(&geo)?;
+        let schemas = stage.prim_at(geo.clone()).api_schemas()?;
         assert!(
             schemas.contains(&"VariantAPI".to_string()),
             "variant contribution missing: {schemas:?}",
@@ -2573,7 +2331,7 @@ def Xform "World"
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let prim = sdf::Path::new("/World/Geo")?;
         let prop = sdf::Path::new("/World/Geo.points")?;
-        assert_eq!(stage.api_schemas(&prop)?, stage.api_schemas(&prim)?);
+        assert_eq!(stage.prim_at(prop).api_schemas()?, stage.prim_at(prim).api_schemas()?);
         Ok(())
     }
 
@@ -2612,7 +2370,7 @@ over "Mat"
         )?;
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-        let conns = stage.connection_paths(&sdf::Path::new("/Mat.inputs:in")?)?;
+        let conns = connections(&stage, &sdf::Path::new("/Mat.inputs:in")?)?;
         assert_eq!(
             conns,
             vec![
@@ -2658,7 +2416,7 @@ over "Set"
         )?;
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-        let targets = stage.relationship_targets(&sdf::Path::new("/Set.members")?)?;
+        let targets = rel_targets(&stage, &sdf::Path::new("/Set.members")?)?;
         assert_eq!(targets, vec![sdf::Path::new("/Set/A")?, sdf::Path::new("/Set/B")?]);
         Ok(())
     }
@@ -2696,7 +2454,7 @@ def "Inst" (
         )?;
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
-        let targets = stage.relationship_targets(&sdf::Path::new("/Inst.members")?)?;
+        let targets = rel_targets(&stage, &sdf::Path::new("/Inst.members")?)?;
         assert_eq!(targets, vec![sdf::Path::new("/Inst/Child")?]);
         Ok(())
     }
@@ -2731,12 +2489,10 @@ def "Hidden"
             .open(root.to_str().expect("utf-8 temp path"))?;
 
         // /Hidden is masked out: its relationship is not followed.
-        assert!(stage
-            .forwarded_relationship_targets(&sdf::Path::new("/Vis.chain")?)?
-            .is_empty());
+        assert!(fwd_targets(&stage, &sdf::Path::new("/Vis.chain")?)?.is_empty());
         // A direct prim target is still returned, matching raw targets.
         assert_eq!(
-            stage.forwarded_relationship_targets(&sdf::Path::new("/Vis.direct")?)?,
+            fwd_targets(&stage, &sdf::Path::new("/Vis.direct")?)?,
             vec![sdf::Path::new("/Hidden")?]
         );
         Ok(())
@@ -2775,7 +2531,7 @@ def Shader "Mat" (
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
         let output = sdf::Path::new("/Mat.outputs:out")?;
-        assert_eq!(stage.connection_paths(&input)?, vec![output.clone()]);
+        assert_eq!(connections(&stage, &input)?, vec![output.clone()]);
 
         let graph = crate::usd::ConnectionGraph::from_stage(&stage)?;
         assert_eq!(graph.sources(&input), std::slice::from_ref(&output));
@@ -2800,9 +2556,9 @@ def Shader "Mat" (
         let stage = Stage::builder().make_stage(vec![strong, weak], 0);
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
-        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        assert_eq!(attr.connections()?, vec![target.clone()]);
         assert!(attr.remove_connection(&target)?);
-        assert!(attr.get_connections()?.is_empty());
+        assert!(attr.connections()?.is_empty());
 
         let op = stage
             .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
@@ -2831,7 +2587,7 @@ def Shader "Mat" (
         let attr = crate::usd::Attribute::new(&stage, input.clone());
         let attr = attr.add_connection(target.clone())?;
 
-        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        assert_eq!(attr.connections()?, vec![target.clone()]);
         let op = stage
             .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
             .unwrap()
@@ -2860,10 +2616,10 @@ def Shader "Mat" (
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
         assert!(attr.remove_connection(&target)?);
-        assert!(attr.get_connections()?.is_empty());
+        assert!(attr.connections()?.is_empty());
         let attr = attr.add_connection(target.clone())?;
 
-        assert_eq!(attr.get_connections()?, vec![target.clone()]);
+        assert_eq!(attr.connections()?, vec![target.clone()]);
         let op = stage
             .field::<sdf::Value>(&input, sdf::FieldKey::ConnectionPaths)?
             .unwrap()
@@ -2878,7 +2634,7 @@ def Shader "Mat" (
     fn api_schemas_empty_for_prim_without_schemas() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let props = sdf::Path::new("/World/Props")?;
-        assert!(stage.api_schemas(&props)?.is_empty());
+        assert!(stage.prim_at(props).api_schemas()?.is_empty());
         Ok(())
     }
 
@@ -2886,8 +2642,8 @@ def Shader "Mat" (
     fn has_api_schema_matches_applied() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let geo = sdf::Path::new("/World/Geo")?;
-        assert!(stage.has_api_schema(&geo, "MaterialBindingAPI")?);
-        assert!(!stage.has_api_schema(&geo, "SkelRootAPI")?);
+        assert!(stage.prim_at(geo.clone()).has_api_schema("MaterialBindingAPI")?);
+        assert!(!stage.prim_at(geo.clone()).has_api_schema("SkelRootAPI")?);
         Ok(())
     }
 
@@ -2895,10 +2651,13 @@ def Shader "Mat" (
     fn type_name_returns_prim_type() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         assert_eq!(
-            stage.type_name(&sdf::Path::new("/World/Geo")?)?,
+            stage.prim_at(sdf::Path::new("/World/Geo")?).type_name()?,
             Some("Mesh".to_string())
         );
-        assert_eq!(stage.type_name(&sdf::Path::new("/World")?)?, Some("Xform".to_string()));
+        assert_eq!(
+            stage.prim_at(sdf::Path::new("/World")?).type_name()?,
+            Some("Xform".to_string())
+        );
         Ok(())
     }
 
@@ -2910,14 +2669,14 @@ def Shader "Mat" (
     fn active_loaded() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert!(stage.is_active("/World/ActiveParent/Child")?);
-        assert!(stage.is_loaded("/World/ActiveParent/Child")?);
+        assert!(stage.prim_at("/World/ActiveParent/Child").is_active()?);
+        assert!(stage.prim_at("/World/ActiveParent/Child").is_loaded()?);
 
-        assert!(!stage.is_active("/World/InactiveParent")?);
-        assert!(!stage.is_active("/World/InactiveParent/Child")?);
-        assert!(!stage.is_loaded("/World/InactiveParent/Child")?);
+        assert!(!stage.prim_at("/World/InactiveParent").is_active()?);
+        assert!(!stage.prim_at("/World/InactiveParent/Child").is_active()?);
+        assert!(!stage.prim_at("/World/InactiveParent/Child").is_loaded()?);
 
-        assert!(!stage.is_active("/World/Missing")?);
+        assert!(!stage.prim_at("/World/Missing").is_active()?);
         Ok(())
     }
 
@@ -2927,16 +2686,16 @@ def Shader "Mat" (
 
         let loaded = Stage::open(&path)?;
         assert_eq!(loaded.layer_count(), 2);
-        assert!(loaded.is_loaded("/World")?);
-        assert_eq!(loaded.prim_children("/World")?, vec!["Cube"]);
+        assert!(loaded.prim_at("/World").is_loaded()?);
+        assert_eq!(child_names(&loaded, "/World")?, vec!["Cube"]);
 
         let unloaded = Stage::builder()
             .initial_load_set(InitialLoadSet::LoadNone)
             .open(&path)?;
         assert_eq!(unloaded.initial_load_set(), InitialLoadSet::LoadNone);
         assert_eq!(unloaded.layer_count(), 1);
-        assert!(!unloaded.is_loaded("/World")?);
-        assert_eq!(unloaded.prim_children("/World")?, Vec::<String>::new());
+        assert!(!unloaded.prim_at("/World").is_loaded()?);
+        assert_eq!(child_names(&unloaded, "/World")?, Vec::<String>::new());
 
         let mut prims = Vec::new();
         unloaded.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
@@ -2951,13 +2710,13 @@ def Shader "Mat" (
             .open("fixtures/stage_queries.usda")?;
 
         assert_eq!(stage.root_prims()?, vec!["World"]);
-        assert_eq!(stage.prim_children("/World")?, vec!["ActiveParent"]);
-        assert_eq!(stage.prim_children("/World/ActiveParent")?, vec!["Child"]);
+        assert_eq!(child_names(&stage, "/World")?, vec!["ActiveParent"]);
+        assert_eq!(child_names(&stage, "/World/ActiveParent")?, vec!["Child"]);
 
         assert!(stage.has_spec("/World")?);
         assert!(stage.has_spec("/World/ActiveParent/Child")?);
         assert!(!stage.has_spec("/World/Group")?);
-        assert_eq!(stage.kind("/World/Group")?, None);
+        assert_eq!(stage.prim_at("/World/Group").kind()?, None);
 
         let mut prims = Vec::new();
         stage.traverse(PrimPredicate::ALL, |p| prims.push(p.as_str().to_string()))?;
@@ -2976,7 +2735,7 @@ def Shader "Mat" (
             .open(&path)?;
 
         assert_eq!(stage.root_prims()?, vec!["World"]);
-        assert_eq!(stage.prim_children("/World")?, vec!["cube"]);
+        assert_eq!(child_names(&stage, "/World")?, vec!["cube"]);
         assert!(!stage.has_spec("/World/invalid_reference")?);
         Ok(())
     }
@@ -2985,15 +2744,18 @@ def Shader "Mat" (
     fn defined_abstract() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert_eq!(stage.specifier("/World/OverOnly")?, Some(sdf::Specifier::Over));
-        assert!(stage.is_defined("/World/ActiveParent/Child")?);
-        assert!(!stage.is_defined("/World/OverOnly")?);
-        assert!(!stage.is_defined("/World/OverParent/Child")?);
+        assert_eq!(
+            stage.prim_at("/World/OverOnly").specifier()?,
+            Some(sdf::Specifier::Over)
+        );
+        assert!(stage.prim_at("/World/ActiveParent/Child").is_defined()?);
+        assert!(!stage.prim_at("/World/OverOnly").is_defined()?);
+        assert!(!stage.prim_at("/World/OverParent/Child").is_defined()?);
 
-        assert!(stage.is_defined("/World/ClassParent/Child")?);
-        assert!(stage.is_abstract("/World/ClassParent")?);
-        assert!(stage.is_abstract("/World/ClassParent/Child")?);
-        assert!(!stage.is_abstract("/World/ActiveParent/Child")?);
+        assert!(stage.prim_at("/World/ClassParent/Child").is_defined()?);
+        assert!(stage.prim_at("/World/ClassParent").is_abstract()?);
+        assert!(stage.prim_at("/World/ClassParent/Child").is_abstract()?);
+        assert!(!stage.prim_at("/World/ActiveParent/Child").is_abstract()?);
         Ok(())
     }
 
@@ -3001,11 +2763,11 @@ def Shader "Mat" (
     fn instance_flag() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert!(stage.has_composition_arc("/World/Instance")?);
-        assert!(stage.is_instance("/World/Instance")?);
+        assert!(stage.prim_at("/World/Instance").has_composition_arc()?);
+        assert!(stage.prim_at("/World/Instance").is_instance()?);
 
-        assert!(!stage.has_composition_arc("/World/InstanceableNoArc")?);
-        assert!(!stage.is_instance("/World/InstanceableNoArc")?);
+        assert!(!stage.prim_at("/World/InstanceableNoArc").has_composition_arc()?);
+        assert!(!stage.prim_at("/World/InstanceableNoArc").is_instance()?);
         Ok(())
     }
 
@@ -3015,13 +2777,13 @@ def Shader "Mat" (
     fn instance_children_from_arcs_only() -> Result<()> {
         let stage = Stage::open(&fixture_path("instancing.usda"))?;
 
-        let mut children = stage.prim_children("/Instance")?;
+        let mut children = child_names(&stage, "/Instance")?;
         children.sort();
         assert_eq!(children, vec!["Child".to_string()]);
 
         // A plain (non-instance) reference still merges local and referenced
         // children.
-        let mut non_instance = stage.prim_children("/NonInstance")?;
+        let mut non_instance = child_names(&stage, "/NonInstance")?;
         non_instance.sort();
         assert_eq!(non_instance, vec!["Child".to_string(), "LocalOnly".to_string()]);
         Ok(())
@@ -3037,8 +2799,8 @@ def Shader "Mat" (
         assert_eq!(stage.value_at("/B/Child.size", 0.0)?, Some(sdf::Value::Double(5.0)));
         assert_eq!(stage.value_at("/C/Child.size", 0.0)?, Some(sdf::Value::Double(9.0)));
 
-        assert_eq!(stage.prim_children("/A")?, vec!["Child".to_string()]);
-        assert_eq!(stage.prim_children("/B")?, vec!["Child".to_string()]);
+        assert_eq!(child_names(&stage, "/A")?, vec!["Child".to_string()]);
+        assert_eq!(child_names(&stage, "/B")?, vec!["Child".to_string()]);
         Ok(())
     }
 
@@ -3048,22 +2810,27 @@ def Shader "Mat" (
     fn prototype_queries() -> Result<()> {
         let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-        let proto = stage.get_prototype("/A")?;
+        let proto = stage.prim_at("/A").prototype()?;
         assert!(proto.is_some());
-        assert_eq!(stage.get_prototype("/B")?, proto); // same composition → shared
-        assert_ne!(stage.get_prototype("/C")?, proto); // different prototype
-        assert_eq!(stage.get_prototype("/Proto")?, None); // not an instance
+        assert_eq!(stage.prim_at("/B").prototype()?, proto); // same composition → shared
+        assert_ne!(stage.prim_at("/C").prototype()?, proto); // different prototype
+        assert_eq!(stage.prim_at("/Proto").prototype()?, None); // not an instance
 
         let proto = proto.unwrap();
         // Returned sorted by path, so callers need not sort themselves.
-        let instances: Vec<String> = stage.get_instances(&proto)?.iter().map(|p| p.to_string()).collect();
+        let instances: Vec<String> = stage
+            .prim_at(proto.clone())
+            .instances()?
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
         assert_eq!(instances, vec!["/A".to_string(), "/B".to_string()]);
 
         // The prototype namespace is addressable and resolves to the shared
         // (arc-only) subtree.
-        assert!(stage.is_prototype(&proto)?);
+        assert!(stage.prim_at(proto.clone()).is_prototype()?);
         let child = sdf::path(format!("{proto}/Child"))?;
-        assert!(stage.is_in_prototype(&child)?);
+        assert!(stage.prim_at(child.clone()).is_in_prototype()?);
         assert_eq!(
             stage.value_at(child.append_property("size")?, 0.0)?,
             Some(sdf::Value::Double(5.0))
@@ -3080,16 +2847,16 @@ def Shader "Mat" (
             .open(&fixture_path("instancing_shared.usda"))?;
 
         // /A is in the mask; /B (which shares /A's prototype) is not.
-        assert!(stage.is_instance("/A")?);
-        assert!(!stage.is_instance("/B")?);
+        assert!(stage.prim_at("/A").is_instance()?);
+        assert!(!stage.prim_at("/B").is_instance()?);
 
-        let proto = stage.get_prototype("/A")?;
+        let proto = stage.prim_at("/A").prototype()?;
         assert!(proto.is_some());
-        assert_eq!(stage.get_prototype("/B")?, None);
+        assert_eq!(stage.prim_at("/B").prototype()?, None);
 
         // The masked-out /B is excluded from the prototype's instance list.
         let proto = proto.unwrap();
-        assert_eq!(stage.get_instances(&proto)?, vec![sdf::path("/A")?]);
+        assert_eq!(stage.prim_at(proto.clone()).instances()?, vec![sdf::path("/A")?]);
         assert_eq!(stage.prototypes()?, vec![proto]);
         Ok(())
     }
@@ -3105,15 +2872,15 @@ def Shader "Mat" (
         assert_eq!(stage.value_at("/B/Sub/L.v", 0.0)?, Some(sdf::Value::Double(7.0)));
 
         // The nested prims are instances and share one prototype.
-        assert!(stage.is_instance("/A/Sub")?);
-        assert!(stage.is_instance("/B/Sub")?);
-        let nested = stage.get_prototype("/A/Sub")?;
+        assert!(stage.prim_at("/A/Sub").is_instance()?);
+        assert!(stage.prim_at("/B/Sub").is_instance()?);
+        let nested = stage.prim_at("/A/Sub").prototype()?;
         assert!(nested.is_some());
-        assert_eq!(stage.get_prototype("/B/Sub")?, nested);
+        assert_eq!(stage.prim_at("/B/Sub").prototype()?, nested);
 
         // The outer instances share a distinct prototype.
-        let outer = stage.get_prototype("/A")?;
-        assert_eq!(stage.get_prototype("/B")?, outer);
+        let outer = stage.prim_at("/A").prototype()?;
+        assert_eq!(stage.prim_at("/B").prototype()?, outer);
         assert_ne!(outer, nested);
 
         // The nested subtree is also reachable through the outer prototype.
@@ -3133,12 +2900,12 @@ def Shader "Mat" (
 
         // Query /I1 first so it becomes canonical.
         assert_eq!(
-            stage.connection_paths(&sdf::path("/I1/Dst.inputs:in")?)?,
+            connections(&stage, &sdf::path("/I1/Dst.inputs:in")?)?,
             vec![sdf::path("/I1/Src.outputs:out")?]
         );
         // /I2 shares the prototype; its connection must point into /I2.
         assert_eq!(
-            stage.connection_paths(&sdf::path("/I2/Dst.inputs:in")?)?,
+            connections(&stage, &sdf::path("/I2/Dst.inputs:in")?)?,
             vec![sdf::path("/I2/Src.outputs:out")?]
         );
         Ok(())
@@ -3191,11 +2958,11 @@ def "I2" (
         // chain -> direct (a prototype relationship) -> Target. Each hop stays
         // in the queried instance's namespace.
         assert_eq!(
-            stage.forwarded_relationship_targets(&sdf::path("/I1.chain")?)?,
+            fwd_targets(&stage, &sdf::path("/I1.chain")?)?,
             vec![sdf::path("/I1/Target")?]
         );
         assert_eq!(
-            stage.forwarded_relationship_targets(&sdf::path("/I2.chain")?)?,
+            fwd_targets(&stage, &sdf::path("/I2.chain")?)?,
             vec![sdf::path("/I2/Target")?]
         );
         Ok(())
@@ -3272,24 +3039,26 @@ def "I2" (
     fn model_hierarchy() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert_eq!(stage.kind("/World")?, Some("assembly".to_string()));
-        assert!(stage.is_model("/World")?);
-        assert!(stage.is_group("/World")?);
+        assert_eq!(stage.prim_at("/World").kind()?, Some("assembly".to_string()));
+        assert!(stage.prim_at("/World").is_model()?);
+        assert!(stage.prim_at("/World").is_group()?);
 
-        assert!(stage.is_model("/World/Group")?);
-        assert!(stage.is_group("/World/Group")?);
-        assert!(stage.is_model("/World/Group/Component")?);
-        assert!(stage.is_component("/World/Group/Component")?);
+        assert!(stage.prim_at("/World/Group").is_model()?);
+        assert!(stage.prim_at("/World/Group").is_group()?);
+        assert!(stage.prim_at("/World/Group/Component").is_model()?);
+        assert!(stage.prim_at("/World/Group/Component").is_component()?);
 
-        assert!(!stage.is_model("/World/Group/Subcomponent")?);
-        assert!(stage.is_subcomponent("/World/Group/Subcomponent")?);
+        assert!(!stage.prim_at("/World/Group/Subcomponent").is_model()?);
+        assert!(stage.prim_at("/World/Group/Subcomponent").is_subcomponent()?);
 
         assert_eq!(
-            stage.kind("/World/InvalidComponentParent/Component")?,
+            stage.prim_at("/World/InvalidComponentParent/Component").kind()?,
             Some("component".to_string())
         );
-        assert!(!stage.is_model("/World/InvalidComponentParent/Component")?);
-        assert!(!stage.is_component("/World/InvalidComponentParent/Component")?);
+        assert!(!stage.prim_at("/World/InvalidComponentParent/Component").is_model()?);
+        assert!(!stage
+            .prim_at("/World/InvalidComponentParent/Component")
+            .is_component()?);
         Ok(())
     }
 
@@ -3379,6 +3148,30 @@ def "I2" (
             stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
             Some(sdf::Value::Token("Xform".into())),
         );
+        Ok(())
+    }
+
+    /// `Stage::custom_layer_data` reads the root layer's `customLayerData`
+    /// dictionary (C++ `UsdStage::GetRootLayer()->GetCustomLayerData`).
+    #[test]
+    fn custom_layer_data() -> Result<()> {
+        let stage = in_memory_stage()?;
+        assert!(stage.custom_layer_data()?.is_none());
+
+        let dict = sdf::Value::Dictionary([("tool".to_string(), sdf::Value::String("rs".into()))].into());
+        stage.with_target_layer_at(&sdf::Path::abs_root(), |layer, _| {
+            layer.pseudo_root_mut()?.add(sdf::FieldKey::CustomLayerData, dict);
+            let mut cl = sdf::ChangeList::new();
+            cl.entry_mut(&sdf::Path::abs_root())
+                .info_changed
+                .insert(sdf::FieldKey::CustomLayerData.as_str());
+            Ok(cl)
+        })?;
+
+        let Some(sdf::Value::Dictionary(read)) = stage.custom_layer_data()? else {
+            panic!("customLayerData should resolve to a dictionary");
+        };
+        assert_eq!(read.get("tool"), Some(&sdf::Value::String("rs".into())));
         Ok(())
     }
 

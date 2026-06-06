@@ -63,9 +63,9 @@ impl ConnectionGraph {
     }
 
     fn index_prim(&mut self, stage: &Stage, prim: &Path) -> Result<()> {
-        for prop in stage.prim_properties(prim.clone())? {
+        for prop in stage.prim_at(prim.clone()).property_names()? {
             let attr = prim.append_property(&prop)?;
-            let sources = stage.connection_paths(&attr)?;
+            let sources = stage.attribute_at(attr.clone()).connections()?;
             if sources.is_empty() {
                 continue;
             }

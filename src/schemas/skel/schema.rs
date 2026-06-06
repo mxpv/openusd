@@ -402,7 +402,7 @@ impl BlendShape {
     /// `offsets`, and optional `inbetweens:<name>:normalOffsets`.
     pub fn inbetweens(&self) -> Result<Vec<Inbetween>> {
         let mut out = Vec::new();
-        let props = self.stage().prim_properties(self.path().clone())?;
+        let props = self.stage().prim_at(self.path().clone()).property_names()?;
         for name in &props {
             let Some(rest) = name.strip_prefix(tok::NS_INBETWEENS) else {
                 continue;
@@ -602,13 +602,13 @@ impl SkelBindingAPI {
     /// The `skel:skeleton` target authored directly on this prim (C++
     /// `GetSkeleton`), or `None` when only inherited.
     pub fn skeleton(&self) -> Result<Option<sdf::Path>> {
-        Ok(self.skeleton_rel().get_targets()?.into_iter().next())
+        Ok(self.skeleton_rel().targets()?.into_iter().next())
     }
 
     /// The `skel:animationSource` target authored directly on this prim
     /// (C++ `GetAnimationSource`), or `None` when only inherited.
     pub fn animation_source(&self) -> Result<Option<sdf::Path>> {
-        Ok(self.animation_source_rel().get_targets()?.into_iter().next())
+        Ok(self.animation_source_rel().targets()?.into_iter().next())
     }
 
     /// Resolve the inherited `skel:skeleton` by walking this prim and its
@@ -653,7 +653,7 @@ impl SkelBindingAPI {
 
     /// Decoded `skel:blendShapeTargets` prim paths.
     pub fn blend_shape_targets(&self) -> Result<Vec<sdf::Path>> {
-        self.blend_shape_targets_rel().get_targets()
+        self.blend_shape_targets_rel().targets()
     }
 
     /// Decoded `primvars:skel:geomBindTransform`; `None` when unauthored (the
@@ -705,7 +705,7 @@ fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: &str) -> Result<Opti
     let mut cur = prim.clone();
     loop {
         let rel = cur.append_property(rel_name)?;
-        if let Some(target) = stage.relationship_targets(&rel)?.into_iter().next() {
+        if let Some(target) = stage.relationship_at(rel).targets()?.into_iter().next() {
             return Ok(Some(target));
         }
         match cur.parent() {

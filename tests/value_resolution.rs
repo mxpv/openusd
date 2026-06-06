@@ -44,7 +44,7 @@ fn value_at(stage: &usd::Stage, attr: &str, time: f64) -> Option<f64> {
 #[test]
 fn default_opinion() -> Result<()> {
     let stage = open("default")?;
-    let default = stage.field::<Value>(path("/Root.root")?, "default")?;
+    let default = stage.prim_at(path("/Root")?).attribute("root").get::<Value>()?;
     assert_eq!(scalar(default), Some(2.0));
     Ok(())
 }

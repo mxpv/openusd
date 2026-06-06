@@ -429,11 +429,8 @@ mod tests {
             s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
             Some(AspectRatioConformPolicy::AdjustApertureWidth)
         );
-        assert_eq!(s.camera_rel().get_targets()?, vec![sdf::path("/World/Cam")?]);
-        assert_eq!(
-            s.products_rel().get_targets()?,
-            vec![sdf::path("/Render/Products/beauty")?]
-        );
+        assert_eq!(s.camera_rel().targets()?, vec![sdf::path("/World/Cam")?]);
+        assert_eq!(s.products_rel().targets()?, vec![sdf::path("/Render/Products/beauty")?]);
         assert_eq!(
             s.rendering_color_space_attr().get::<String>()?.as_deref(),
             Some("lin_rec709")
@@ -463,10 +460,7 @@ mod tests {
             p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
             Some([512, 512])
         );
-        assert_eq!(
-            p.ordered_vars_rel().get_targets()?,
-            vec![sdf::path("/Render/Vars/color")?]
-        );
+        assert_eq!(p.ordered_vars_rel().targets()?, vec![sdf::path("/Render/Vars/color")?]);
         Ok(())
     }
 
@@ -507,10 +501,7 @@ mod tests {
             p.command_attr().get::<Value>()?.and_then(|v| v.try_as_string_vec()),
             Some(vec!["prman".to_string(), "-t:0".to_string(), "{fileName}".to_string()])
         );
-        assert_eq!(
-            p.render_source_rel().get_targets()?,
-            vec![sdf::path("/Render/Settings")?]
-        );
+        assert_eq!(p.render_source_rel().targets()?, vec![sdf::path("/Render/Settings")?]);
         assert_eq!(p.camera_visibility_include_root_attr().get::<bool>()?, Some(false));
         Ok(())
     }

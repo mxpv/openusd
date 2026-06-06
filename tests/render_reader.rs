@@ -40,7 +40,7 @@ fn reads_render_settings() -> Result<()> {
         s.aspect_ratio_conform_policy_attr().get::<AspectRatioConformPolicy>()?,
         Some(AspectRatioConformPolicy::ExpandAperture)
     );
-    assert_eq!(s.camera_rel().get_targets()?, vec![sdf::path("/World/Camera")?]);
+    assert_eq!(s.camera_rel().targets()?, vec![sdf::path("/World/Camera")?]);
     assert_eq!(
         s.included_purposes_attr()
             .get::<Value>()?
@@ -51,10 +51,7 @@ fn reads_render_settings() -> Result<()> {
         s.rendering_color_space_attr().get::<String>()?.as_deref(),
         Some("lin_rec709")
     );
-    assert_eq!(
-        s.products_rel().get_targets()?,
-        vec![sdf::path("/Render/products/beauty")?]
-    );
+    assert_eq!(s.products_rel().targets()?, vec![sdf::path("/Render/products/beauty")?]);
     Ok(())
 }
 
@@ -70,7 +67,7 @@ fn reads_products_and_vars() -> Result<()> {
         Some([1024, 512])
     );
     assert_eq!(
-        p.ordered_vars_rel().get_targets()?,
+        p.ordered_vars_rel().targets()?,
         vec![sdf::path("/Render/vars/color")?, sdf::path("/Render/vars/alpha")?]
     );
 

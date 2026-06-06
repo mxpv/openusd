@@ -8,7 +8,7 @@
 //! attribute; both are plain attributes, so the accessors return
 //! [`Attribute`] handles and connections are authored / read through
 //! [`Attribute::set_connections`](crate::usd::Attribute::set_connections) /
-//! [`get_connections`](crate::usd::Attribute::get_connections).
+//! [`connections`](crate::usd::Attribute::connections).
 
 use anyhow::Result;
 
@@ -25,7 +25,7 @@ use super::Connectability;
 /// you).
 pub trait Connectable: SchemaBase {
     /// Handle to the `inputs:<base>` attribute (C++ `GetInput`). Read its value
-    /// with `get::<T>()` or its connection sources with `get_connections()`.
+    /// with `get::<T>()` or its connection sources with `connections()`.
     fn input(&self, base: &str) -> Attribute {
         self.prim().attribute(&input_name(base))
     }
@@ -60,8 +60,8 @@ pub trait Connectable: SchemaBase {
     /// (C++ `GetInputs`).
     fn input_names(&self) -> Result<Vec<String>> {
         Ok(self
-            .stage()
-            .prim_properties(self.path().clone())?
+            .prim()
+            .property_names()?
             .into_iter()
             .filter_map(|p| p.strip_prefix(NS_INPUTS).map(str::to_string))
             .collect())
@@ -71,8 +71,8 @@ pub trait Connectable: SchemaBase {
     /// (C++ `GetOutputs`).
     fn output_names(&self) -> Result<Vec<String>> {
         Ok(self
-            .stage()
-            .prim_properties(self.path().clone())?
+            .prim()
+            .property_names()?
             .into_iter()
             .filter_map(|p| p.strip_prefix(NS_OUTPUTS).map(str::to_string))
             .collect())

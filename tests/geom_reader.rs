@@ -120,7 +120,7 @@ fn compute_purpose_walks_ancestors() -> Result<()> {
 fn reads_proxy_prim_rel() -> Result<()> {
     let stage = open()?;
     let hero = Mesh::get(&stage, sdf::path("/World/Geometry/Hero")?)?.expect("Mesh");
-    let targets = hero.proxy_prim_rel().get_targets()?;
+    let targets = hero.proxy_prim_rel().targets()?;
     assert_eq!(targets.first().map(|p| p.as_str()), Some("/World/Geometry/HeroProxy"));
     Ok(())
 }
@@ -682,7 +682,7 @@ fn point_instancer_prototypes_and_arrays() -> Result<()> {
     let stage = open()?;
     let pi = PointInstancer::get(&stage, sdf::path("/World/InstancerScope/Stars")?)?.expect("PointInstancer");
     assert_eq!(
-        pi.prototypes_rel().get_targets()?,
+        pi.prototypes_rel().targets()?,
         vec![sdf::path("/World/InstancerScope/Proto")?]
     );
     assert_eq!(

@@ -142,12 +142,12 @@ impl Collection {
 
     /// The authored `includes` relationship targets.
     pub fn includes(&self, stage: &Stage) -> Result<Vec<Path>> {
-        stage.relationship_targets(&self.prop(INCLUDES)?)
+        stage.relationship_at(self.prop(INCLUDES)?).targets()
     }
 
     /// The authored `excludes` relationship targets.
     pub fn excludes(&self, stage: &Stage) -> Result<Vec<Path>> {
-        stage.relationship_targets(&self.prop(EXCLUDES)?)
+        stage.relationship_at(self.prop(EXCLUDES)?).targets()
     }
 
     /// The raw `membershipExpression` string, if authored. Read-only —
@@ -360,7 +360,7 @@ pub fn apply_collection(stage: &Stage, prim: impl Into<Path>, name: impl Into<St
 /// `apiSchemas` (`CollectionAPI:<name>`).
 pub fn collections_on(stage: &Stage, prim: &Path) -> Result<Vec<Collection>> {
     let mut out = Vec::new();
-    for schema in stage.api_schemas(prim)? {
+    for schema in stage.prim_at(prim.clone()).api_schemas()? {
         if let Some(name) = instance_name(&schema) {
             out.push(Collection::new(prim.clone(), name));
         }
@@ -468,7 +468,7 @@ fn push_member_properties(
     seen: &mut HashSet<Path>,
     out: &mut Vec<Path>,
 ) -> Result<()> {
-    for name in stage.prim_properties(prim.clone())? {
+    for name in stage.prim_at(prim.clone()).property_names()? {
         let prop = prim.append_property(&name)?;
         let (included, _) = query.is_path_included_below(&prop, prim_rule);
         if included && seen.insert(prop.clone()) {

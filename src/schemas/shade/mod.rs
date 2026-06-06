@@ -19,7 +19,7 @@
 //! [`Connectable`] is the shared `inputs:` / `outputs:` surface (C++
 //! `UsdShadeConnectableAPI`); connections are wired with
 //! [`Attribute::connect_to`](crate::usd::Attribute::connect_to) and read back
-//! through [`get_connections`](crate::usd::Attribute::get_connections). The
+//! through [`connections`](crate::usd::Attribute::connections). The
 //! connection-following computation is kept as
 //! [`Material::compute_surface_source`] (resolve a Material's surface terminal
 //! back to its shader) and [`read_preview_surface`] (decode the canonical

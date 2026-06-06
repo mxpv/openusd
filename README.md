@@ -138,14 +138,15 @@ let stage = usd::Stage::builder()
 stage.traverse(usd::PrimPredicate::DEFAULT, |path| println!("{path}"))?;
 stage.traverse(usd::PrimPredicate::ALL, |path| println!("{path}"))?;
 
-// Composed prim queries.
-let active = stage.is_active("/World/Hero")?;
-let is_model = stage.is_model("/World/Hero")?;
-let type_name = stage.type_name("/World/Hero")?;
+// Composed prim queries go through a `Prim` handle (mirroring C++ `UsdPrim`).
+let hero = stage.prim_at("/World/Hero");
+let active = hero.is_active()?;
+let is_model = hero.is_model()?;
+let type_name = hero.type_name()?;
 
-// Access children composed across layers, references, and payloads.
-let children = stage.prim_children("/World/Hero")?;
-let properties = stage.prim_properties("/World/Hero")?;
+// Access children and properties composed across layers, references, and payloads.
+let children = hero.children()?;
+let properties = hero.property_names()?;
 ```
 
 With the `geom` feature, read typed schema views over the composed stage — here a

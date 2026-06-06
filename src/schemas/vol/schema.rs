@@ -53,19 +53,19 @@ impl Volume {
     /// (C++ `UsdVolVolume::HasFieldRelationship`).
     pub fn has_field_relationship(&self, name: &str) -> Result<bool> {
         let rel = self.path().append_property(&format!("{}{name}", tok::NS_FIELD))?;
-        Ok(!self.stage().relationship_targets(&rel)?.is_empty())
+        Ok(!self.stage().relationship_at(rel).targets()?.is_empty())
     }
 
     /// The volume's `(field name, target prim path)` bindings, sorted by field
     /// name (C++ `UsdVolVolume::GetFieldPaths`).
     pub fn field_paths(&self) -> Result<Vec<(String, sdf::Path)>> {
         let mut fields = Vec::new();
-        for name in self.stage().prim_properties(self.path().clone())? {
+        for name in self.stage().prim_at(self.path().clone()).property_names()? {
             let Some(field_name) = name.strip_prefix(tok::NS_FIELD) else {
                 continue;
             };
             let rel = self.path().append_property(&name)?;
-            if let Some(target) = self.stage().relationship_targets(&rel)?.into_iter().next() {
+            if let Some(target) = self.stage().relationship_at(rel).targets()?.into_iter().next() {
                 fields.push((field_name.to_string(), target));
             }
         }

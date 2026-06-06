@@ -139,8 +139,6 @@ impl Relationship {
     /// `true` when any target opinion is authored — including an
     /// explicit-empty list op (`rel r = []`), the canonical way to block
     /// weaker-layer targets. Mirrors C++ `UsdRelationship::HasAuthoredTargets`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
     pub fn has_authored_targets(&self) -> anyhow::Result<bool> {
         Ok(self
             .stage
@@ -148,40 +146,46 @@ impl Relationship {
             .is_some())
     }
 
-    /// Composed raw `targetPaths`. See [`Stage::relationship_targets`] for the
-    /// resolution contract. Mirrors C++ `UsdRelationship::GetTargets`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::relationship_targets` returns
-    // a typed error.
-    pub fn get_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.relationship_targets(&self.path)
+    /// Composed raw `targetPaths`, with list-op edits folded across every
+    /// contributing layer (prepend / append / add / delete). These are the raw
+    /// targets (spec 12.4); target forwarding is not applied — see
+    /// [`Self::forwarded_targets`]. Returns an empty vec for a non-property
+    /// path, an unauthored relationship, or an owning prim outside the
+    /// population mask. Mirrors C++ `UsdRelationship::GetTargets`.
+    pub fn targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage
+            .masked(&self.path, |cache| cache.relationship_targets(&self.path))
     }
 
     /// Composes this relationship's target paths together with the paths its
     /// list-op deletes, returned as `(targets, deleted)` (C++
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). The
-    /// targets match [`Relationship::get_targets`]; both are empty when the
+    /// targets match [`Relationship::targets`]; both are empty when the
     /// owning prim is outside the population mask.
     pub fn compute_targets(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
         self.stage
-            .masked_property(&self.path, |cache| cache.compute_relationship_target_paths(&self.path))
+            .masked(&self.path, |cache| cache.compute_relationship_target_paths(&self.path))
     }
 
-    /// Composed forwarded targets. See [`Stage::forwarded_relationship_targets`]
-    /// for the forwarding, cycle, and mask contract. Mirrors C++
+    /// Composed forwarded targets: a target that resolves to another
+    /// relationship is replaced, recursively, by that relationship's forwarded
+    /// targets; every other target is kept as-is, including prim paths,
+    /// attribute paths, and dangling paths (spec 12.4). Cycles are broken and
+    /// duplicates collapse. Forwarding honors the population mask — a target
+    /// relationship on a prim outside the working set is not followed, while a
+    /// directly-reached terminal outside the mask is still returned, matching
+    /// raw [`Self::targets`]. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::forwarded_relationship_targets`
-    // returns a typed error.
-    pub fn get_forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.forwarded_relationship_targets(&self.path)
+    pub fn forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        let mask = self.stage.population_mask();
+        self.stage.masked(&self.path, |cache| {
+            cache.forwarded_relationship_targets(&self.path, &|p| mask.includes(p))
+        })
     }
 
     /// Returns the property stack: each `(layer identifier, spec path)` site
     /// that authors a spec for this relationship, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
-    //
-    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
         self.stage.try_or_handle(|cache| cache.property_stack(&self.path))
     }
@@ -293,13 +297,13 @@ mod tests {
             .add_target(sdf::Path::new("/World/Material2")?)?;
         assert!(binding.has_authored_targets()?);
         assert_eq!(
-            binding.get_targets()?,
+            binding.targets()?,
             vec![sdf::Path::new("/World/Material")?, sdf::Path::new("/World/Material2")?]
         );
 
         // Removing a target updates the composed list.
         assert!(binding.remove_target(&sdf::Path::new("/World/Material2")?)?);
-        assert_eq!(binding.get_targets()?, vec![sdf::Path::new("/World/Material")?]);
+        assert_eq!(binding.targets()?, vec![sdf::Path::new("/World/Material")?]);
         Ok(())
     }
 
@@ -311,7 +315,7 @@ mod tests {
             .set_type_name("Mesh")?
             .create_relationship("material:binding")?;
         assert!(!rel.has_authored_targets()?);
-        assert!(rel.get_targets()?.is_empty());
+        assert!(rel.targets()?.is_empty());
         Ok(())
     }
 
@@ -335,7 +339,7 @@ mod tests {
             .set_targets([sdf::path("/foo/bar")?, sdf::path("/baz.bazrel")?])?;
 
         assert_eq!(
-            my_rel.get_forwarded_targets()?,
+            my_rel.forwarded_targets()?,
             vec![
                 sdf::path("/foo/bar")?,
                 sdf::path("/foo/foobar")?,
@@ -343,7 +347,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            my_rel.get_targets()?,
+            my_rel.targets()?,
             vec![sdf::path("/foo/bar")?, sdf::path("/baz.bazrel")?]
         );
         Ok(())
@@ -359,7 +363,7 @@ mod tests {
         p.create_relationship("b")?.set_targets([sdf::path("/P.c")?])?;
         let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
 
-        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
     }
 
@@ -380,7 +384,7 @@ mod tests {
         host.create_relationship(&format!("r{}", N - 1))?
             .set_targets([sdf::path("/Geom")?])?;
 
-        assert_eq!(r0.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        assert_eq!(r0.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
     }
 
@@ -395,11 +399,11 @@ mod tests {
         let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
 
         // /P.b is not a relationship yet -> a forwards to the raw path /P.b.
-        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/P.b")?]);
+        assert_eq!(a.forwarded_targets()?, vec![sdf::path("/P.b")?]);
 
         // Author /P.b as a relationship; forwarding must now follow it.
         p.create_relationship("b")?.set_targets([sdf::path("/Geom")?])?;
-        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
     }
 
@@ -416,7 +420,7 @@ mod tests {
             .set_targets([sdf::path("/Geom")?, sdf::path("/Nowhere.rel")?])?;
 
         assert_eq!(
-            a.get_forwarded_targets()?,
+            a.forwarded_targets()?,
             vec![sdf::path("/Geom")?, sdf::path("/Nowhere.rel")?]
         );
         Ok(())
@@ -435,7 +439,7 @@ mod tests {
             .set_targets([sdf::path("/Geom")?, sdf::path("/P.b")?])?;
 
         // /Geom is reached directly and again via /P.b; it appears once.
-        assert_eq!(a.get_forwarded_targets()?, vec![sdf::path("/Geom")?]);
+        assert_eq!(a.forwarded_targets()?, vec![sdf::path("/Geom")?]);
         Ok(())
     }
 
@@ -448,7 +452,7 @@ mod tests {
         let a = p.create_relationship("a")?.set_targets([sdf::path("/P.b")?])?;
         p.create_relationship("b")?.set_targets([sdf::path("/P.a")?])?;
 
-        assert!(a.get_forwarded_targets()?.is_empty());
+        assert!(a.forwarded_targets()?.is_empty());
         Ok(())
     }
 }

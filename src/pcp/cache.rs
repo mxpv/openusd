@@ -1589,7 +1589,7 @@ impl Cache {
         // `instanceable = true` and carries an arc; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
         // flag for its own subtree. Computed from the freshly built index (after
-        // permission inerting, so it agrees with a later `Stage::is_instance`)
+        // permission inerting, so it agrees with a later `Prim::is_instance`)
         // to avoid re-entering `ensure_index` for `path`.
         let is_instance = index.has_composition_arc()
             && matches!(

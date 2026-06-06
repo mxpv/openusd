@@ -62,7 +62,7 @@ fn rigid_body_mass_and_articulation() -> Result<()> {
 fn filtered_pairs_relationship() -> Result<()> {
     let stage = open()?;
     let arm = physics::FilteredPairsAPI::get(&stage, sdf::path("/World/Arm")?)?.expect("FilteredPairsAPI");
-    let targets = stage.relationship_targets(arm.filtered_pairs_rel().path())?;
+    let targets = arm.filtered_pairs_rel().targets()?;
     assert_eq!(targets, vec![sdf::path("/World/Base")?]);
     Ok(())
 }
@@ -78,10 +78,7 @@ fn every_joint_kind() -> Result<()> {
     // Inherited JointBase attributes.
     assert_eq!(hinge.break_force_attr().get::<f32>()?, Some(1000.0));
     assert_eq!(hinge.break_torque_attr().get::<f32>()?, Some(500.0));
-    assert_eq!(
-        stage.relationship_targets(hinge.body0_rel().path())?,
-        vec![sdf::path("/World/Base")?]
-    );
+    assert_eq!(hinge.body0_rel().targets()?, vec![sdf::path("/World/Base")?]);
 
     let slider = physics::PrismaticJoint::get(&stage, sdf::path("/World/Slider")?)?.expect("PrismaticJoint");
     assert_eq!(slider.axis_attr().get::<JointAxis>()?, Some(JointAxis::X));

@@ -47,7 +47,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
     let mut var_index: HashMap<String, usize> = HashMap::new();
     let mut products: Vec<Product> = Vec::new();
 
-    for product_path in settings.products_rel().get_forwarded_targets()? {
+    for product_path in settings.products_rel().forwarded_targets()? {
         let Some(product) = RenderProduct::get(stage, product_path.clone())? else {
             continue; // a `products` target that isn't a RenderProduct is ignored
         };
@@ -174,7 +174,7 @@ impl ResolvedBase {
 /// available; only plain authored namespaced attributes are gathered here.
 pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::new();
-    for name in stage.prim_properties(prim)? {
+    for name in stage.prim_at(prim.clone()).property_names()? {
         // TODO(shade): `outputs:`-connected settings are driven by a node
         // graph; resolving their value producer needs UsdShade.
         if name.starts_with("outputs:") {
@@ -207,7 +207,7 @@ fn collect_var_indices(
     namespaces: &[&str],
 ) -> Result<Vec<usize>> {
     let mut indices = Vec::new();
-    for var_path in ordered_vars_rel.get_forwarded_targets()? {
+    for var_path in ordered_vars_rel.forwarded_targets()? {
         let key = var_path.as_str().to_string();
         if let Some(&i) = var_index.get(&key) {
             indices.push(i);
@@ -238,7 +238,7 @@ fn collect_var_indices(
 /// aperture attributes by name so it needs no dependency on the `geom`
 /// feature — the conform policy only needs these two floats.
 fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
-    let prim = stage.prim_at_path(camera.clone());
+    let prim = stage.prim_at(camera.clone());
     Ok([
         read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(20.955),
         read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(15.2908),
@@ -280,7 +280,7 @@ fn read_token_vec(attr: &Attribute) -> Result<Option<Vec<String>>> {
 }
 
 fn read_rel_first_target(rel: &Relationship) -> Result<Option<String>> {
-    Ok(rel.get_targets()?.into_iter().next().map(|p| p.as_str().to_string()))
+    Ok(rel.targets()?.into_iter().next().map(|p| p.as_str().to_string()))
 }
 
 #[cfg(test)]

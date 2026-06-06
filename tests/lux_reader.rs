@@ -132,10 +132,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
         Some(TextureFormat::Latlong)
     );
     assert_eq!(dome.guide_radius_attr().get()?, Some(sdf::Value::Float(50.0)));
-    assert_eq!(
-        dome.portals_rel().get_targets()?,
-        vec![sdf::path("/World/Dome/Portal")?]
-    );
+    assert_eq!(dome.portals_rel().targets()?, vec![sdf::path("/World/Dome/Portal")?]);
     Ok(())
 }
 
@@ -152,7 +149,7 @@ fn portal_light_dimensions() -> Result<()> {
 fn geometry_light_target() -> Result<()> {
     let stage = open()?;
     let g = GeometryLight::get(&stage, sdf::path("/World/MeshLight")?)?.expect("GeometryLight");
-    assert_eq!(g.geometry_rel().get_targets()?, vec![sdf::path("/World/Emitter")?]);
+    assert_eq!(g.geometry_rel().targets()?, vec![sdf::path("/World/Emitter")?]);
     assert_eq!(g.intensity_attr().get()?, Some(sdf::Value::Float(200.0)));
     Ok(())
 }
@@ -177,7 +174,7 @@ fn light_list_api() -> Result<()> {
             .and_then(LightListCacheBehavior::from_token),
         Some(LightListCacheBehavior::ConsumeAndContinue)
     );
-    let lights = list.light_list_rel().get_targets()?;
+    let lights = list.light_list_rel().targets()?;
     assert!(lights.contains(&sdf::path("/World/Sun")?));
     assert!(lights.contains(&sdf::path("/World/Dome/Portal")?));
     Ok(())

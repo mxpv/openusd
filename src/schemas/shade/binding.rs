@@ -109,7 +109,7 @@ impl MaterialBindingAPI {
         let rel = self
             .path()
             .append_property(&collection_binding_rel(purpose, binding_name))?;
-        let targets = self.stage().relationship_targets(&rel)?;
+        let targets = self.stage().relationship_at(rel).targets()?;
         Ok(match targets.as_slice() {
             [collection, material] => Some((collection.clone(), material.clone())),
             _ => None,
@@ -195,7 +195,7 @@ fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
 /// The directly-bound Material for `purpose` on the prim at `prim`.
 fn direct_binding(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
     let rel = prim.append_property(&direct_binding_rel(purpose))?;
-    Ok(stage.relationship_targets(&rel)?.into_iter().next())
+    Ok(stage.relationship_at(rel).targets()?.into_iter().next())
 }
 
 /// The `bindMaterialAs` strength on the direct binding for `purpose`.
@@ -255,7 +255,7 @@ fn winning_binding_at(
 fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<(Path, Path, BindingStrength)>> {
     let prefix = format!("{REL_MATERIAL_BINDING_COLLECTION}:");
     let mut out = Vec::new();
-    for name in stage.prim_properties(p.clone())? {
+    for name in stage.prim_at(p.clone()).property_names()? {
         let Some(rest) = name.strip_prefix(&prefix) else {
             continue;
         };
@@ -271,7 +271,7 @@ fn collection_bindings_on(stage: &Stage, p: &Path, purpose: &str) -> Result<Vec<
             continue;
         }
         let rel = p.append_property(&name)?;
-        if let [collection, material] = stage.relationship_targets(&rel)?.as_slice() {
+        if let [collection, material] = stage.relationship_at(rel.clone()).targets()?.as_slice() {
             out.push((collection.clone(), material.clone(), composed_strength(stage, &rel)?));
         }
     }
@@ -393,7 +393,7 @@ mod tests {
     }
 
     fn bound(stage: &Stage, prim: &str, purpose: &str) -> Option<String> {
-        MaterialBindingAPI(stage.prim_at_path(sdf::path(prim).unwrap()))
+        MaterialBindingAPI(stage.prim_at(sdf::path(prim).unwrap()))
             .compute_bound_material(purpose)
             .unwrap()
             .map(|p| p.as_str().to_string())

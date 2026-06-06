@@ -42,19 +42,19 @@ pub(crate) fn value_as_asset_str(value: &Value) -> Option<&str> {
 /// Wrap `path` as a concrete view's `Prim` if its composed `typeName` equals
 /// `type_name` — the type-gate every typed view's `get` performs.
 pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: &str) -> Result<Option<Prim>> {
-    let path = path.into();
-    if stage.type_name(&path)?.as_deref() != Some(type_name) {
+    let prim = stage.prim_at(path);
+    if prim.type_name()?.as_deref() != Some(type_name) {
         return Ok(None);
     }
-    Ok(Some(stage.prim_at_path(path)))
+    Ok(Some(prim))
 }
 
 /// Like [`get_typed`], but matches any of `type_names` — for views that share
 /// one Rust type across several concrete schemas.
 pub(crate) fn get_typed_any(stage: &Stage, path: impl Into<Path>, type_names: &[&str]) -> Result<Option<Prim>> {
-    let path = path.into();
-    match stage.type_name(&path)? {
-        Some(t) if type_names.contains(&t.as_str()) => Ok(Some(stage.prim_at_path(path))),
+    let prim = stage.prim_at(path);
+    match prim.type_name()? {
+        Some(t) if type_names.contains(&t.as_str()) => Ok(Some(prim)),
         _ => Ok(None),
     }
 }
@@ -63,10 +63,10 @@ pub(crate) fn get_typed_any(stage: &Stage, path: impl Into<Path>, type_names: &[
 /// prim's composed `apiSchemas` — the gate every single-apply API view's `get`
 /// performs.
 pub(crate) fn get_with_api(stage: &Stage, path: impl Into<Path>, apis: &[&str]) -> Result<Option<Prim>> {
-    let path = path.into();
-    let applied = stage.api_schemas(&path)?;
+    let prim = stage.prim_at(path);
+    let applied = prim.api_schemas()?;
     if apis.iter().any(|a| applied.iter().any(|s| s == a)) {
-        Ok(Some(stage.prim_at_path(path)))
+        Ok(Some(prim))
     } else {
         Ok(None)
     }

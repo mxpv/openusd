@@ -814,7 +814,7 @@ mod tests {
 
         let r = RectLight::get(&stage, "/Rect")?.expect("RectLight");
         assert_eq!(r.width_attr().get()?, Some(sdf::Value::Float(2.0)));
-        assert_eq!(r.filters_rel().get_targets()?, vec![sdf::path("/Filter")?]);
+        assert_eq!(r.filters_rel().targets()?, vec![sdf::path("/Filter")?]);
         Ok(())
     }
 
@@ -838,7 +838,7 @@ mod tests {
         g.create_geometry_rel()?.set_targets([sdf::path("/Emitter")?])?;
 
         let g = GeometryLight::get(&stage, "/Light")?.expect("GeometryLight");
-        assert_eq!(g.geometry_rel().get_targets()?, vec![sdf::path("/Emitter")?]);
+        assert_eq!(g.geometry_rel().targets()?, vec![sdf::path("/Emitter")?]);
         Ok(())
     }
 
@@ -888,7 +888,8 @@ mod tests {
         light.create_intensity_attr()?.set(1500.0_f32)?;
 
         assert!(stage
-            .api_schemas(&sdf::path("/Emitter")?)?
+            .prim_at(sdf::path("/Emitter")?)
+            .api_schemas()?
             .iter()
             .any(|s| s == "LightAPI"));
         let light = LightAPI::get(&stage, "/Emitter")?.expect("LightAPI");
@@ -935,7 +936,7 @@ mod tests {
             .set(sdf::Value::Token("consumeAndContinue".into()))?;
 
         let list = LightListAPI::get(&stage, "/World")?.expect("LightListAPI");
-        assert_eq!(list.light_list_rel().get_targets()?, vec![sdf::path("/World/Sun")?]);
+        assert_eq!(list.light_list_rel().targets()?, vec![sdf::path("/World/Sun")?]);
         assert_eq!(
             list.cache_behavior_attr().get()?,
             Some(sdf::Value::Token("consumeAndContinue".into()))

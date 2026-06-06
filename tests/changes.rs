@@ -11,6 +11,14 @@ fn open_in_memory() -> usd::Stage {
     usd::Stage::builder().in_memory("anon.usda").expect("in-memory stage")
 }
 
+fn exists(stage: &usd::Stage, path: &str) -> bool {
+    stage.prim_at(path).is_valid().unwrap()
+}
+
+fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
+    stage.prim_at(path).child_names().unwrap()
+}
+
 /// Warm two sibling prim indices, author at one — the other must stay indexed.
 #[test]
 fn author_at_one_prim_keeps_sibling_indexed() {
@@ -19,8 +27,8 @@ fn author_at_one_prim_keeps_sibling_indexed() {
     stage.define_prim("/Bar").unwrap().set_type_name("Xform").unwrap();
 
     // Force both indices into the cache.
-    let _ = stage.type_name(&sdf::path("/Foo").unwrap()).unwrap();
-    let _ = stage.type_name(&sdf::path("/Bar").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/Foo").unwrap()).type_name().unwrap();
+    let _ = stage.prim_at(sdf::path("/Bar").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Bar").unwrap()));
 
@@ -48,7 +56,7 @@ fn attribute_value_write_keeps_owner_indexed() {
         .set(sdf::Value::Double(1.0))
         .unwrap();
 
-    let _ = stage.type_name(&sdf::path("/A").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/A").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     // Set a different value — owner's graph must stay cached, and the new
@@ -68,8 +76,8 @@ fn set_instanceable_invalidates_owner() {
     let stage = open_in_memory();
     stage.define_prim("/Inst").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
-    let _ = stage.type_name(&sdf::path("/Inst").unwrap()).unwrap();
-    let _ = stage.type_name(&sdf::path("/Other").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/Inst").unwrap()).type_name().unwrap();
+    let _ = stage.prim_at(sdf::path("/Other").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Inst").unwrap()));
 
     stage.override_prim("/Inst").unwrap().set_instanceable(true).unwrap();
@@ -92,7 +100,7 @@ fn set_instanceable_invalidates_owner() {
 fn kind_change_no_op_for_cache() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
-    let _ = stage.type_name(&sdf::path("/A").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/A").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     prim.set_kind("group").unwrap();
@@ -101,7 +109,7 @@ fn kind_change_no_op_for_cache() {
         stage.is_indexed(&sdf::path("/A").unwrap()),
         "spec-only field changes must not invalidate the prim graph",
     );
-    assert_eq!(stage.kind("/A").unwrap().as_deref(), Some("group"));
+    assert_eq!(stage.prim_at("/A").kind().unwrap().as_deref(), Some("group"));
 }
 
 /// `set_default_prim` writes `defaultPrim` at the root, which the
@@ -112,8 +120,8 @@ fn default_prim_change_clears_root_cache() {
     stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
 
-    let _ = stage.type_name(&sdf::path("/World").unwrap()).unwrap();
-    let _ = stage.type_name(&sdf::path("/Other").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/World").unwrap()).type_name().unwrap();
+    let _ = stage.prim_at(sdf::path("/Other").unwrap()).type_name().unwrap();
     let pre = stage.indexed_count();
     assert!(pre >= 2);
 
@@ -136,13 +144,13 @@ fn default_prim_change_clears_root_cache() {
 fn override_prim_after_cached_miss_invalidates() {
     let stage = open_in_memory();
     // Cached miss: warms an empty index at /A.
-    assert!(!stage.has_spec("/A").unwrap());
+    assert!(!exists(&stage, "/A"));
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     stage.override_prim("/A").unwrap();
 
     assert!(
-        stage.has_spec("/A").unwrap(),
+        exists(&stage, "/A"),
         "inert add must invalidate cached empty index — otherwise has_spec keeps returning the pre-author miss",
     );
 }
@@ -154,21 +162,18 @@ fn override_prim_after_cached_miss_invalidates() {
 fn define_prim_invalidates_auto_created_ancestors() {
     let stage = open_in_memory();
     // Warm cached misses at /A and /A/B.
-    assert!(!stage.has_spec("/A").unwrap());
-    assert!(!stage.has_spec("/A/B").unwrap());
+    assert!(!exists(&stage, "/A"));
+    assert!(!exists(&stage, "/A/B"));
 
     stage.define_prim("/A/B/C").unwrap().set_type_name("Xform").unwrap();
 
     assert!(
-        stage.has_spec("/A").unwrap(),
+        exists(&stage, "/A"),
         "auto-created /A ancestor must be visible after define_prim('/A/B/C')",
     );
-    assert!(
-        stage.has_spec("/A/B").unwrap(),
-        "auto-created /A/B ancestor must be visible",
-    );
-    assert!(stage.prim_children("/A").unwrap().contains(&"B".to_string()));
-    assert!(stage.prim_children("/A/B").unwrap().contains(&"C".to_string()));
+    assert!(exists(&stage, "/A/B"), "auto-created /A/B ancestor must be visible",);
+    assert!(child_names(&stage, "/A").contains(&"B".to_string()));
+    assert!(child_names(&stage, "/A/B").contains(&"C".to_string()));
 }
 
 /// `create_attribute` auto-creates the owning prim (and its ancestors) as
@@ -176,12 +181,12 @@ fn define_prim_invalidates_auto_created_ancestors() {
 #[test]
 fn create_attribute_invalidates_auto_created_owner() {
     let stage = open_in_memory();
-    assert!(!stage.has_spec("/Mesh").unwrap());
+    assert!(!exists(&stage, "/Mesh"));
 
     stage.create_attribute("/Mesh.x", "double").unwrap();
 
     assert!(
-        stage.has_spec("/Mesh").unwrap(),
+        exists(&stage, "/Mesh"),
         "auto-created owning prim /Mesh must be visible after create_attribute",
     );
 }
@@ -193,8 +198,8 @@ fn idempotent_define_prim_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Foo/Child").unwrap();
-    let _ = stage.type_name(&sdf::path("/Foo").unwrap()).unwrap();
-    let _ = stage.type_name(&sdf::path("/Foo/Child").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/Foo").unwrap()).type_name().unwrap();
+    let _ = stage.prim_at(sdf::path("/Foo/Child").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Foo/Child").unwrap()));
 
@@ -216,7 +221,7 @@ fn idempotent_define_prim_preserves_cache() {
 fn idempotent_override_prim_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap();
-    let _ = stage.type_name(&sdf::path("/Foo").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/Foo").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
 
     stage.override_prim("/Foo").unwrap();
@@ -235,7 +240,7 @@ fn add_applied_schema_invalidates_owner() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
     // Warm the cache.
-    assert_eq!(stage.api_schemas(prim.path()).unwrap(), Vec::<String>::new());
+    assert_eq!(stage.prim_at(prim.path()).api_schemas().unwrap(), Vec::<String>::new());
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     prim.add_applied_schema("MaterialBindingAPI").unwrap();
@@ -245,7 +250,7 @@ fn add_applied_schema_invalidates_owner() {
         "apiSchemas authoring must invalidate the owner's cached prim index",
     );
     assert_eq!(
-        stage.api_schemas(&sdf::path("/A").unwrap()).unwrap(),
+        stage.prim_at(sdf::path("/A").unwrap()).api_schemas().unwrap(),
         vec!["MaterialBindingAPI".to_string()],
     );
 }
@@ -257,7 +262,7 @@ fn idempotent_set_default_prim_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/World").unwrap();
     stage.set_default_prim("World").unwrap();
-    let _ = stage.type_name(&sdf::path("/World").unwrap()).unwrap();
+    let _ = stage.prim_at(sdf::path("/World").unwrap()).type_name().unwrap();
     let pre = stage.indexed_count();
     assert!(pre > 0);
 
@@ -281,7 +286,7 @@ fn reference_fixture_composes_correctly() {
 
     // Reading children warms the cache via the new dependency-tracking
     // ensure_index path. The composed result is the union of both layers.
-    let children = stage.prim_children("/World").unwrap();
+    let children = child_names(&stage, "/World");
     assert!(children.contains(&"Cube".to_string()));
     assert!(children.contains(&"Sphere".to_string()));
     assert!(

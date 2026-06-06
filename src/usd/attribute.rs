@@ -182,11 +182,10 @@ impl Attribute {
     }
 
     fn add_connection_at(self, target: sdf::Path, prepend: bool) -> Result<Self, StageAuthoringError> {
-        let path = self.path.clone();
         // Dedup against the composed result, not just the local edit-target
         // op. Otherwise adding a weaker-layer target would author a stronger
         // duplicate and could accidentally reorder it.
-        if self.stage.connection_paths(&path)?.iter().any(|p| p == &target) {
+        if self.connections()?.iter().any(|p| p == &target) {
             return Ok(self);
         }
         self.edit_connection(move |spec| spec.add_connection_path(target, prepend))
@@ -200,7 +199,7 @@ impl Attribute {
         // The target may exist only through weaker layers. Check the composed
         // list first so this call can author a delete opinion even when the
         // edit-target layer has no local connection item to remove.
-        if !self.stage.connection_paths(&self.path)?.iter().any(|p| p == &target) {
+        if !self.connections()?.iter().any(|p| p == &target) {
             return Ok(false);
         }
         let type_name = self.stage.field::<String>(&self.path, sdf::FieldKey::TypeName)?;
@@ -289,8 +288,6 @@ impl Attribute {
     /// explicit-empty list op (`.connect = []`), the canonical way to
     /// block weaker-layer connections. Mirrors C++
     /// `UsdAttribute::HasAuthoredConnections`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
     pub fn has_authored_connections(&self) -> anyhow::Result<bool> {
         Ok(self
             .stage
@@ -299,13 +296,13 @@ impl Attribute {
     }
 
     /// Composed `connectionPaths`, with list-op edits folded across every
-    /// contributing layer. Returns an empty vec when no connection is
-    /// authored. Mirrors C++ `UsdAttribute::GetConnections`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::connection_paths` returns
-    // a typed error.
-    pub fn get_connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        self.stage.connection_paths(&self.path)
+    /// contributing layer (prepend / append / add / delete). Returns an empty
+    /// vec when no connection is authored, the path is not a property, or the
+    /// owning prim is outside the population mask. Mirrors C++
+    /// `UsdAttribute::GetConnections`.
+    pub fn connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        self.stage
+            .masked(&self.path, |cache| cache.connection_paths(&self.path))
     }
 
     /// Composes this attribute's connection paths together with the paths its
@@ -314,7 +311,25 @@ impl Attribute {
     /// empty when the owning prim is outside the population mask.
     pub fn compute_connections(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
         self.stage
-            .masked_property(&self.path, |cache| cache.compute_attribute_connection_paths(&self.path))
+            .masked(&self.path, |cache| cache.compute_attribute_connection_paths(&self.path))
+    }
+
+    /// Composed `variability` for this attribute (spec 12.2.3: the weakest
+    /// authored opinion wins), if any layer authored one. Mirrors C++
+    /// `UsdAttribute::GetVariability`.
+    pub fn variability(&self) -> anyhow::Result<Option<sdf::Variability>> {
+        self.stage
+            .field::<sdf::Variability>(&self.path, sdf::FieldKey::Variability)
+    }
+
+    /// `true` when this attribute is composed as `custom` (spec 12.2.4: true if
+    /// *any* opinion in the stack is true). Mirrors C++ `UsdProperty::IsCustom`;
+    /// an unauthored `custom` field resolves to `false`.
+    pub fn is_custom(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .stage
+            .field::<bool>(&self.path, sdf::FieldKey::Custom)?
+            .unwrap_or(false))
     }
 
     /// Composed default value decoded to `T`, if any layer authored one.
@@ -324,8 +339,6 @@ impl Attribute {
     /// (`get::<f32>()`), an array (`get::<Vec<f32>>()`), or [`sdf::Value`]
     /// itself (`get::<sdf::Value>()`) for the raw value. A type mismatch
     /// against the authored value surfaces as an `Err`, not `None`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
     pub fn get<T>(&self) -> anyhow::Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
@@ -337,9 +350,6 @@ impl Attribute {
     /// Composed value at `time` decoded to `T`, applying the stage's
     /// interpolation type. The time-sampled counterpart of [`Attribute::get`];
     /// mirrors C++ `UsdAttribute::Get(time)`.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::value_at` returns a typed
-    // error.
     pub fn get_at<T>(&self, time: f64) -> anyhow::Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
@@ -357,8 +367,6 @@ impl Attribute {
     /// `elementSize` on primvars, UsdSkel's inbetween `weight`, …). Decode to
     /// the field's type (`get_metadata::<i32>("elementSize")`) or to
     /// [`sdf::Value`] for the raw value.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::field` returns a typed error.
     pub fn get_metadata<T>(&self, key: &str) -> anyhow::Result<Option<T>>
     where
         T: TryFrom<sdf::Value>,
@@ -368,9 +376,6 @@ impl Attribute {
     }
 
     /// Composed `timeSamples` map.
-    //
-    // TODO: drop `anyhow::Result` once `Stage::time_samples` returns a typed
-    // error.
     pub fn time_samples(&self) -> anyhow::Result<Option<sdf::TimeSampleMap>> {
         self.stage.time_samples(&self.path)
     }
@@ -378,8 +383,6 @@ impl Attribute {
     /// Returns the property stack: each `(layer identifier, spec path)` site
     /// that authors a spec for this attribute, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
-    //
-    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
         self.stage.try_or_handle(|cache| cache.property_stack(&self.path))
     }
@@ -441,6 +444,25 @@ mod tests {
         );
         assert_eq!(radius.path().as_str(), "/Sphere.radius");
         assert_eq!(radius.prim().path().as_str(), "/Sphere");
+        Ok(())
+    }
+
+    /// `Attribute::variability`/`is_custom` read the composed core fields
+    /// (C++ `UsdAttribute::GetVariability` / `UsdProperty::IsCustom`).
+    #[test]
+    fn attribute_variability_custom() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let prim = stage.define_prim("/A")?.set_type_name("Xform")?;
+        let uniform = prim
+            .create_attribute("u", "double")?
+            .set_variability(sdf::Variability::Uniform)?
+            .set_custom(true)?;
+        assert_eq!(uniform.variability()?, Some(sdf::Variability::Uniform));
+        assert!(uniform.is_custom()?);
+
+        // A schema-style attribute authored with `custom = false` resolves false.
+        let schema_attr = prim.create_attribute("v", "double")?.set_custom(false)?;
+        assert!(!schema_attr.is_custom()?);
         Ok(())
     }
 
@@ -510,30 +532,30 @@ mod tests {
             .create_attribute("inputs:diffuseColor", "color3f")?
             .set_connections([tex_out.path().clone()])?;
 
-        let conns = input.get_connections()?;
+        let conns = input.connections()?;
         assert_eq!(conns, vec![tex_out.path().clone()]);
         assert!(input.has_authored_connections()?);
 
         // Re-authoring replaces, doesn't append.
         let iface = sdf::Path::new("/Mat.inputs:diffuseColor")?;
         let input = input.set_connections([iface.clone()])?;
-        assert_eq!(input.get_connections()?, vec![iface.clone()]);
+        assert_eq!(input.connections()?, vec![iface.clone()]);
 
         // add_connection prepends by default; dedups.
         let input = input.add_connection(tex_out.path().clone())?;
-        assert_eq!(input.get_connections()?, vec![tex_out.path().clone(), iface.clone()]);
+        assert_eq!(input.connections()?, vec![tex_out.path().clone(), iface.clone()]);
         let input = input.add_connection(tex_out.path().clone())?;
-        assert_eq!(input.get_connections()?.len(), 2);
+        assert_eq!(input.connections()?.len(), 2);
 
         // remove_connection.
         assert!(input.remove_connection(&iface)?);
-        assert_eq!(input.get_connections()?, vec![tex_out.path().clone()]);
+        assert_eq!(input.connections()?, vec![tex_out.path().clone()]);
         assert!(!input.remove_connection(&iface)?);
 
         // clear_connections.
         let input = input.clear_connections()?;
         assert!(!input.has_authored_connections()?);
-        assert!(input.get_connections()?.is_empty());
+        assert!(input.connections()?.is_empty());
         Ok(())
     }
 
@@ -550,7 +572,7 @@ mod tests {
             .create_attribute("inputs:diffuseColor", "color3f")?
             .set_connections::<[sdf::Path; 0]>([])?;
         assert!(attr.has_authored_connections()?);
-        assert!(attr.get_connections()?.is_empty());
+        assert!(attr.connections()?.is_empty());
         Ok(())
     }
 

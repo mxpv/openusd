@@ -136,10 +136,10 @@ fn run_existence(name: &str, format: Format, baseline: &schema::Baseline, entry:
         }
 
         // Check property names.
+        let props = stage.prim_at(prim_path.as_str()).property_names().unwrap_or_default();
         for prop in &expected.property_names {
-            let prop_path = format!("{prim_path}.{prop}");
-            if !stage.has_spec(sdf::path(&prop_path).unwrap()).unwrap_or(false) {
-                failures.push(format!("missing property: {prop_path}"));
+            if !props.contains(prop) {
+                failures.push(format!("missing property: {prim_path}.{prop}"));
             }
         }
     }
@@ -363,7 +363,7 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
         .unwrap();
 
     for path in &prims {
-        let prim = stage.prim_at_path(path.clone());
+        let prim = stage.prim_at(path.clone());
 
         let _ = writeln!(out, "{sep}");
         let _ = writeln!(out, "Results for composing <{path}>");
@@ -440,7 +440,7 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
             out.push('\n');
         }
 
-        let properties = stage.prim_properties(path.clone()).unwrap();
+        let properties = prim.property_names().unwrap();
         if !properties.is_empty() {
             let _ = writeln!(out, "Property names:");
             let _ = writeln!(out, "     {}", name_list(&properties));
@@ -462,6 +462,12 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
 
         // Relationship targets and attribute connections, split by spec type.
         // Deleted target paths from both kinds merge into one map, printed last.
+        let rel_paths: std::collections::HashSet<sdf::Path> = prim
+            .relationships()
+            .unwrap()
+            .iter()
+            .map(|rel| rel.path().clone())
+            .collect();
         let mut rel_targets: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
         let mut attr_conns: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
         let mut deleted: Vec<(sdf::Path, Vec<sdf::Path>)> = Vec::new();
@@ -469,26 +475,22 @@ fn pcp_dump(name: &str, entry: &str, base: &Path, stage: &usd::Stage) -> String 
             let Some(prop_path) = path.append_property(name).ok() else {
                 continue;
             };
-            match stage.spec_type(prop_path.clone()).unwrap() {
-                Some(sdf::SpecType::Relationship) => {
-                    let (targets, del) = prim.relationship(name).compute_targets().unwrap();
-                    if !targets.is_empty() {
-                        rel_targets.push((prop_path.clone(), targets));
-                    }
-                    if !del.is_empty() {
-                        deleted.push((prop_path, del));
-                    }
+            if rel_paths.contains(&prop_path) {
+                let (targets, del) = prim.relationship(name).compute_targets().unwrap();
+                if !targets.is_empty() {
+                    rel_targets.push((prop_path.clone(), targets));
                 }
-                Some(sdf::SpecType::Attribute) => {
-                    let (conns, del) = prim.attribute(name).compute_connections().unwrap();
-                    if !conns.is_empty() {
-                        attr_conns.push((prop_path.clone(), conns));
-                    }
-                    if !del.is_empty() {
-                        deleted.push((prop_path, del));
-                    }
+                if !del.is_empty() {
+                    deleted.push((prop_path, del));
                 }
-                _ => {}
+            } else {
+                let (conns, del) = prim.attribute(name).compute_connections().unwrap();
+                if !conns.is_empty() {
+                    attr_conns.push((prop_path.clone(), conns));
+                }
+                if !del.is_empty() {
+                    deleted.push((prop_path, del));
+                }
             }
         }
 
@@ -733,7 +735,7 @@ mod reorder {
     #[test]
     fn prim_order_reorders_named_children() {
         let stage = open_fixture();
-        let children = stage.prim_children(sdf::path("/Root").unwrap()).unwrap();
+        let children = stage.prim_at(sdf::path("/Root").unwrap()).child_names().unwrap();
         assert_eq!(children, vec!["C", "D", "A", "B"]);
     }
 
@@ -743,7 +745,7 @@ mod reorder {
         // order follows authoring order despite the `reorder properties = [y, x]`
         // opinion in the fixture.
         let stage = open_fixture();
-        let props = stage.prim_properties(sdf::path("/Props").unwrap()).unwrap();
+        let props = stage.prim_at(sdf::path("/Props").unwrap()).property_names().unwrap();
         assert_eq!(props, vec!["x", "y", "z"]);
     }
 }
@@ -753,7 +755,7 @@ mod value_resolution {
     use std::collections::HashMap;
 
     use super::*;
-    use openusd::sdf::{FieldKey, Specifier, Value, Variability};
+    use openusd::sdf::{Specifier, Value, Variability};
 
     fn open_fixture() -> usd::Stage {
         usd::Stage::open("fixtures/value_resolution.usda").expect("open value_resolution fixture")
@@ -778,28 +780,22 @@ mod value_resolution {
         // Local `over` opinion plus an inherit from a `class`. With strongest-
         // wins this would be `over`; per spec 12.2.1 it must be `class`.
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/InheritOnly").unwrap(), FieldKey::Specifier)
-            .unwrap();
-        assert_eq!(value, Some(Value::Specifier(Specifier::Class)));
+        let value = stage.prim_at(sdf::path("/InheritOnly").unwrap()).specifier().unwrap();
+        assert_eq!(value, Some(Specifier::Class));
     }
 
     #[test]
     fn specifier_all_over_resolves_to_over() {
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/AllOver").unwrap(), FieldKey::Specifier)
-            .unwrap();
-        assert_eq!(value, Some(Value::Specifier(Specifier::Over)));
+        let value = stage.prim_at(sdf::path("/AllOver").unwrap()).specifier().unwrap();
+        assert_eq!(value, Some(Specifier::Over));
     }
 
     #[test]
     fn specifier_def_resolves_to_def() {
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/DefPrim").unwrap(), FieldKey::Specifier)
-            .unwrap();
-        assert_eq!(value, Some(Value::Specifier(Specifier::Def)));
+        let value = stage.prim_at(sdf::path("/DefPrim").unwrap()).specifier().unwrap();
+        assert_eq!(value, Some(Specifier::Def));
     }
 
     #[test]
@@ -808,10 +804,12 @@ mod value_resolution {
         // field. Per spec 12.2.3 the resolved variability is the weakest
         // authored opinion (`uniform`).
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/VarTest.attr").unwrap(), FieldKey::Variability)
+        let value = stage
+            .prim_at(sdf::path("/VarTest").unwrap())
+            .attribute("attr")
+            .variability()
             .unwrap();
-        assert_eq!(value, Some(Value::Variability(Variability::Uniform)));
+        assert_eq!(value, Some(Variability::Uniform));
     }
 
     #[test]
@@ -819,18 +817,18 @@ mod value_resolution {
         // Only the weak sublayer authors `custom`. Per spec 12.2.4 the
         // resolved value is `true` because *any* opinion in the stack is true.
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/CustomTest.attr").unwrap(), FieldKey::Custom)
+        let value = stage
+            .prim_at(sdf::path("/CustomTest").unwrap())
+            .attribute("attr")
+            .is_custom()
             .unwrap();
-        assert_eq!(value, Some(Value::Bool(true)));
+        assert!(value);
     }
 
     #[test]
     fn dictionary_values_compose_recursively() {
         let stage = open_fixture();
-        let value: Option<Value> = stage
-            .field(sdf::path("/DictTest").unwrap(), FieldKey::CustomData)
-            .unwrap();
+        let value = stage.prim_at(sdf::path("/DictTest").unwrap()).custom_data().unwrap();
         let Some(Value::Dictionary(dict)) = value else {
             panic!("customData should resolve to a dictionary");
         };
@@ -856,7 +854,7 @@ mod value_resolution {
     #[test]
     fn layer_metadata_dictionary_uses_root_layer_only() {
         let stage = open_fixture();
-        let value: Option<Value> = stage.field(sdf::Path::abs_root(), FieldKey::CustomLayerData).unwrap();
+        let value = stage.custom_layer_data().unwrap();
         let Some(Value::Dictionary(dict)) = value else {
             panic!("customLayerData should resolve to a dictionary");
         };

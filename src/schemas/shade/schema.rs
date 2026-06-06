@@ -222,12 +222,13 @@ impl Material {
     /// choice). Returns `None` when no surface terminal is connected, or its
     /// source prim is not a `Shader`.
     pub fn compute_surface_source(&self) -> Result<Option<Shader>> {
-        let mut conns = self.surface_output().get_connections()?;
+        let mut conns = self.surface_output().connections()?;
         if conns.is_empty() {
             let suffix = format!(":{}", tok::TERMINAL_SURFACE);
             let mut contexts: Vec<String> = self
                 .stage()
-                .prim_properties(self.path().clone())?
+                .prim_at(self.path().clone())
+                .property_names()?
                 .into_iter()
                 .filter(|prop| {
                     prop.strip_prefix(tok::NS_OUTPUTS)
@@ -237,7 +238,7 @@ impl Material {
                 .collect();
             contexts.sort();
             for prop in contexts {
-                conns = self.attribute(&prop).get_connections()?;
+                conns = self.attribute(&prop).connections()?;
                 if !conns.is_empty() {
                     break;
                 }
@@ -335,7 +336,7 @@ mod tests {
         mat.create_surface_output()?.set_connections([shader_out.clone()])?;
 
         let mat = Material::get(&stage, "/Mat")?.expect("Material");
-        assert_eq!(mat.surface_output().get_connections()?, vec![shader_out]);
+        assert_eq!(mat.surface_output().connections()?, vec![shader_out]);
         let surface = mat.compute_surface_source()?.expect("surface shader");
         assert_eq!(surface.path().as_str(), "/Mat/Surface");
         Ok(())
@@ -380,7 +381,7 @@ mod tests {
         surf.create_input("diffuseColor", "color3f")?
             .connect_to(&tex.output("rgb"))?;
         assert_eq!(
-            surf.input("diffuseColor").get_connections()?,
+            surf.input("diffuseColor").connections()?,
             vec![sdf::path("/Mat/Tex.outputs:rgb")?]
         );
 

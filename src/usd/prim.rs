@@ -268,33 +268,226 @@ impl Prim {
         Ok(!self.clip_sets()?.is_empty())
     }
 
-    /// Returns `true` if this prim is an instance (spec 11.3.3): `instanceable`
-    /// resolves true and the prim has a composition arc.
+    /// Composed `typeName`, if set. Mirrors C++ `UsdPrim::GetTypeName`.
+    pub fn type_name(&self) -> anyhow::Result<Option<String>> {
+        self.stage.field::<String>(&self.path, sdf::FieldKey::TypeName)
+    }
+
+    /// Composed specifier, if one resolves. Mirrors C++ `UsdPrim::GetSpecifier`.
+    pub fn specifier(&self) -> anyhow::Result<Option<sdf::Specifier>> {
+        self.stage.field::<sdf::Specifier>(&self.path, sdf::FieldKey::Specifier)
+    }
+
+    /// Composed `kind` metadata, if authored. Mirrors C++ `UsdPrim::GetKind`.
+    pub fn kind(&self) -> anyhow::Result<Option<String>> {
+        self.stage.field::<String>(&self.path, sdf::FieldKey::Kind)
+    }
+
+    /// Returns this prim's composed `customData` dictionary, if authored.
+    /// Mirrors C++ `UsdObject::GetCustomData`.
+    pub fn custom_data(&self) -> anyhow::Result<Option<sdf::Value>> {
+        self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::CustomData)
+    }
+
+    /// The prim's composed applied `apiSchemas`, flattened across all
+    /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas`.
+    /// Multi-apply instances appear as-is (e.g. `PhysicsLimitAPI:rotZ`).
+    pub fn api_schemas(&self) -> anyhow::Result<Vec<String>> {
+        self.stage.masked(&self.path, |cache| cache.api_schemas(&self.path))
+    }
+
+    /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
+    /// instance name for multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
+    pub fn has_api_schema(&self, name: &str) -> anyhow::Result<bool> {
+        Ok(self.api_schemas()?.iter().any(|s| s == name))
+    }
+
+    /// `true` if the prim and all ancestors are active. Missing `active`
+    /// opinions default to `true`; a non-existent prim is inactive. Mirrors C++
+    /// `UsdPrim::IsActive`.
+    pub fn is_active(&self) -> anyhow::Result<bool> {
+        // `active` defaults to true, so an ancestor blocks only when it
+        // explicitly authors `false`.
+        self.all_ancestors(|stage, path| Ok(stage.field::<bool>(path, sdf::FieldKey::Active)?.unwrap_or(true)))
+    }
+
+    /// `true` if the prim is loaded — active, and no ancestor carries an
+    /// unloaded payload. Mirrors C++ `UsdPrim::IsLoaded`.
+    pub fn is_loaded(&self) -> anyhow::Result<bool> {
+        if !self.is_active()? {
+            return Ok(false);
+        }
+        if self.stage.initial_load_set().load_payloads() {
+            return Ok(true);
+        }
+        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+            if has_payload(&self.stage, &path)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// `true` if the prim and all ancestors have defining specifiers (`def` or
+    /// `class`). `over`, missing specs, and missing specifier opinions are not
+    /// defining. Mirrors C++ `UsdPrim::IsDefined`.
+    pub fn is_defined(&self) -> anyhow::Result<bool> {
+        self.all_ancestors(|stage, path| {
+            let specifier = stage.field::<sdf::Specifier>(path, sdf::FieldKey::Specifier)?;
+            Ok(matches!(specifier, Some(sdf::Specifier::Def | sdf::Specifier::Class)))
+        })
+    }
+
+    /// `true` if the prim or any ancestor resolves to `class`. Mirrors C++
+    /// `UsdPrim::IsAbstract`.
+    pub fn is_abstract(&self) -> anyhow::Result<bool> {
+        if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
+            return Ok(false);
+        }
+        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+            if self.stage.field::<sdf::Specifier>(&path, sdf::FieldKey::Specifier)? == Some(sdf::Specifier::Class) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `true` if the prim index contains at least one composition arc.
+    pub fn has_composition_arc(&self) -> anyhow::Result<bool> {
+        self.stage
+            .masked(&self.path, |cache| cache.has_composition_arc(&self.path))
+    }
+
+    /// `true` if this prim is an instance (spec 11.3.3): `instanceable` resolves
+    /// true and the prim has a composition arc. Mirrors C++ `UsdPrim::IsInstance`.
     pub fn is_instance(&self) -> anyhow::Result<bool> {
-        self.stage.is_instance(self.path.clone())
+        if self.path == sdf::Path::abs_root()
+            || !self.stage.population_mask().includes(&self.path)
+            || !self.stage.has_spec(&self.path)?
+        {
+            return Ok(false);
+        }
+        if !self
+            .stage
+            .field::<bool>(&self.path, sdf::FieldKey::Instanceable)?
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        self.has_composition_arc()
+    }
+
+    /// `true` if the prim is in the contiguous model hierarchy: its `kind` is
+    /// `group` / `assembly` / `component`, and every ancestor below the
+    /// pseudo-root is `group` / `assembly`. Mirrors C++ `UsdPrim::IsModel`.
+    pub fn is_model(&self) -> anyhow::Result<bool> {
+        Ok(self.model_kind()?.is_some())
+    }
+
+    /// `true` if the prim is a group-like model (`group` or `assembly`).
+    /// Mirrors C++ `UsdPrim::IsGroup`.
+    pub fn is_group(&self) -> anyhow::Result<bool> {
+        Ok(matches!(self.model_kind()?, Some("group" | "assembly")))
+    }
+
+    /// `true` if the prim is a component model in a valid model hierarchy.
+    /// Mirrors C++ `UsdPrim::IsComponent`.
+    pub fn is_component(&self) -> anyhow::Result<bool> {
+        Ok(self.model_kind()? == Some("component"))
+    }
+
+    /// `true` if the prim has `kind = "subcomponent"`. Mirrors C++
+    /// `UsdPrim::IsSubComponent`.
+    pub fn is_subcomponent(&self) -> anyhow::Result<bool> {
+        Ok(self.kind()?.as_deref() == Some("subcomponent"))
     }
 
     /// Returns the shared prototype path (`/__Prototype_N`) for this prim if it
-    /// is an instance, else `None` (spec 11.3.3).
+    /// is an instance, else `None` (spec 11.3.3). Mirrors C++
+    /// `UsdPrim::GetPrototype`.
     pub fn prototype(&self) -> anyhow::Result<Option<sdf::Path>> {
-        self.stage.get_prototype(self.path.clone())
+        self.stage.masked(&self.path, |cache| cache.prototype_of(&self.path))
+    }
+
+    /// Returns the instance prims sharing this prototype root (a
+    /// `/__Prototype_N` prim), sorted by namespace path and filtered to the
+    /// population mask. Mirrors C++ `UsdPrim::GetInstances`.
+    ///
+    /// The mask filters the *results* rather than gating the query (unlike the
+    /// `self.path`-gated sibling queries such as [`is_instance`](Self::is_instance)):
+    /// `self.path` here is the synthetic prototype root, which is never in a
+    /// user population mask, so gating on it would always yield nothing.
+    pub fn instances(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        let mask = self.stage.population_mask();
+        let instances = self.stage.try_or_handle(|cache| Ok(cache.instances_of(&self.path)))?;
+        Ok(instances
+            .into_iter()
+            .filter(|instance| mask.includes(instance))
+            .collect())
     }
 
     /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
+    /// Mirrors C++ `UsdPrim::IsPrototype`.
     pub fn is_prototype(&self) -> anyhow::Result<bool> {
-        self.stage.is_prototype(self.path.clone())
+        self.stage.try_or_handle(|cache| Ok(cache.is_prototype(&self.path)))
     }
 
     /// Returns `true` if this prim lies within a prototype's namespace.
+    /// Mirrors C++ `UsdPrim::IsInPrototype`.
     pub fn is_in_prototype(&self) -> anyhow::Result<bool> {
-        self.stage.is_in_prototype(self.path.clone())
+        self.stage.try_or_handle(|cache| Ok(cache.is_in_prototype(&self.path)))
+    }
+
+    /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
+    /// "component")` when the prim and all ancestors form a contiguous model
+    /// hierarchy, else `None`.
+    fn model_kind(&self) -> anyhow::Result<Option<&'static str>> {
+        if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
+            return Ok(None);
+        }
+        let leaf = match self.kind()?.as_deref() {
+            Some("group") => "group",
+            Some("assembly") => "assembly",
+            Some("component") => "component",
+            _ => return Ok(None),
+        };
+        let Some(parent) = self.path.parent() else {
+            return Ok(Some(leaf));
+        };
+        for ancestor in Stage::prim_ancestors_inclusive(parent) {
+            let kind = self.stage.field::<String>(&ancestor, sdf::FieldKey::Kind)?;
+            if !matches!(kind.as_deref(), Some("group" | "assembly")) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(leaf))
+    }
+
+    /// `true` when every ancestor (self included, up to but excluding the
+    /// pseudo-root) satisfies `keep`. The pseudo-root is vacuously true; a prim
+    /// with no composed spec is false. Shared skeleton of
+    /// [`is_active`](Self::is_active) and [`is_defined`](Self::is_defined).
+    fn all_ancestors<F>(&self, keep: F) -> anyhow::Result<bool>
+    where
+        F: Fn(&Stage, &sdf::Path) -> anyhow::Result<bool>,
+    {
+        if self.path == sdf::Path::abs_root() {
+            return Ok(true);
+        }
+        if !self.stage.has_spec(&self.path)? {
+            return Ok(false);
+        }
+        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+            if !keep(&self.stage, &path)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
     /// contributes a prim spec to this prim, strongest first. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
-    //
-    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
         self.stage.try_or_handle(|cache| cache.prim_stack(&self.path))
     }
@@ -321,6 +514,72 @@ impl Prim {
     /// for the handle's non-authoring, non-validating contract.
     pub fn relationship(&self, name: &str) -> Relationship {
         Relationship::new(&self.stage, self.property_path(name))
+    }
+
+    /// Returns the composed child prim names, in strongest-layer order and
+    /// filtered by the stage's population mask. The name-only counterpart of
+    /// [`children`](Self::children).
+    pub fn child_names(&self) -> anyhow::Result<Vec<String>> {
+        let names = self.stage.masked(&self.path, |cache| cache.prim_children(&self.path))?;
+        Ok(self.stage.filter_child_names(&self.path, names))
+    }
+
+    /// Returns the composed child prims, in strongest-layer order and filtered
+    /// by the stage's population mask. Mirrors C++ `UsdPrim::GetChildren`.
+    pub fn children(&self) -> anyhow::Result<Vec<Prim>> {
+        Ok(self
+            .child_names()?
+            .into_iter()
+            .filter_map(|name| self.path.append_path(name.as_str()).ok())
+            .map(|path| Prim::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns the composed property names of this prim. Mirrors C++
+    /// `UsdPrim::GetPropertyNames`.
+    pub fn property_names(&self) -> anyhow::Result<Vec<String>> {
+        self.stage.masked(&self.path, |cache| cache.prim_properties(&self.path))
+    }
+
+    /// Returns handles to the composed attributes of this prim. Mirrors C++
+    /// `UsdPrim::GetAttributes`.
+    pub fn attributes(&self) -> anyhow::Result<Vec<Attribute>> {
+        Ok(self
+            .properties_of_type(sdf::SpecType::Attribute)?
+            .into_iter()
+            .map(|path| Attribute::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns handles to the composed relationships of this prim. Mirrors C++
+    /// `UsdPrim::GetRelationships`.
+    pub fn relationships(&self) -> anyhow::Result<Vec<Relationship>> {
+        Ok(self
+            .properties_of_type(sdf::SpecType::Relationship)?
+            .into_iter()
+            .map(|path| Relationship::new(&self.stage, path))
+            .collect())
+    }
+
+    /// Returns `true` when a prim spec is composed at this path. Mirrors C++
+    /// `UsdPrim::IsValid` for a handle obtained from
+    /// [`Stage::prim_at`](crate::usd::Stage::prim_at): a path with no
+    /// contributing spec yields a handle that is not valid.
+    pub fn is_valid(&self) -> anyhow::Result<bool> {
+        self.stage.has_spec(&self.path)
+    }
+
+    /// Property paths under this prim whose composed spec type matches `ty`,
+    /// preserving the composed property order.
+    fn properties_of_type(&self, ty: sdf::SpecType) -> anyhow::Result<Vec<sdf::Path>> {
+        let mut paths = Vec::new();
+        for name in self.property_names()? {
+            let path = self.property_path(&name);
+            if self.stage.spec_type(&path)? == Some(ty) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 
     /// Property path for `name` under this prim, falling back to the prim path
@@ -368,6 +627,21 @@ impl Prim {
         })?;
         Ok(self)
     }
+}
+
+/// `true` when a non-empty `payload` opinion is composed at `prim` — the
+/// per-prim check behind [`Prim::is_loaded`].
+fn has_payload(stage: &Stage, prim: &sdf::Path) -> anyhow::Result<bool> {
+    let payload = stage.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
+    Ok(match payload {
+        Some(sdf::Value::Payload(payload)) => payload_has_target(&payload),
+        Some(sdf::Value::PayloadListOp(op)) => op.reduced().flatten().iter().any(payload_has_target),
+        _ => false,
+    })
+}
+
+fn payload_has_target(payload: &sdf::Payload) -> bool {
+    !payload.asset_path.is_empty() || !payload.prim_path.is_empty()
 }
 
 /// A handle to a single prim's composition index, the analog of C++
@@ -437,8 +711,6 @@ impl VariantSets {
     /// `UsdVariantSets::GetAllVariantSelections`. These are the effective
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
-    //
-    // TODO: drop `anyhow::Result` once the cache plumbing returns a typed error.
     pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
         self.stage.try_or_handle(|cache| cache.variant_selections(&self.prim))
     }
@@ -463,13 +735,13 @@ mod tests {
             let stage = stage()?;
             stage.define_prim("/A")?.set_type_name("Xform")?;
             stage.define_prim("/B")?.set_type_name("Scope")?;
-            vec![stage.prim_at_path("/A"), stage.prim_at_path("/B")]
+            vec![stage.prim_at("/A"), stage.prim_at("/B")]
             // `stage` is dropped here; each handle's cloned `Rc` keeps the
             // shared state alive.
         };
 
         assert_eq!(prims[0].path().as_str(), "/A");
-        let type_name = prims[1].stage().type_name(prims[1].path())?;
+        let type_name = prims[1].stage().prim_at(prims[1].path()).type_name()?;
         assert_eq!(type_name.as_deref(), Some("Scope"));
         Ok(())
     }
@@ -516,6 +788,35 @@ mod tests {
         Ok(())
     }
 
+    /// `Prim::specifier` mirrors C++ `UsdPrim::GetSpecifier`: `define_prim`
+    /// resolves to `Def`, `override_prim` to `Over`.
+    #[test]
+    fn prim_specifier() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage.define_prim("/Def")?;
+        stage.override_prim("/Over")?;
+        assert_eq!(stage.prim_at("/Def").specifier()?, Some(sdf::Specifier::Def));
+        assert_eq!(stage.prim_at("/Over").specifier()?, Some(sdf::Specifier::Over));
+        Ok(())
+    }
+
+    /// `Prim::custom_data` reads the composed `customData` dictionary
+    /// (C++ `UsdObject::GetCustomData`).
+    #[test]
+    fn prim_custom_data() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let dict = sdf::Value::Dictionary([("note".to_string(), sdf::Value::String("hi".into()))].into());
+        stage
+            .define_prim("/A")?
+            .set_metadata(sdf::FieldKey::CustomData.as_str(), dict)?;
+        let Some(sdf::Value::Dictionary(read)) = stage.prim_at("/A").custom_data()? else {
+            panic!("customData should resolve to a dictionary");
+        };
+        assert_eq!(read.get("note"), Some(&sdf::Value::String("hi".into())));
+        assert!(stage.prim_at("/B").custom_data()?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn prim_chain() -> anyhow::Result<()> {
         let stage = stage()?;
@@ -528,7 +829,7 @@ mod tests {
             stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
             Some(sdf::Value::Token("Xform".into())),
         );
-        assert_eq!(stage.kind("/World")?.as_deref(), Some("group"));
+        assert_eq!(stage.prim_at("/World").kind()?.as_deref(), Some("group"));
         Ok(())
     }
 
@@ -536,8 +837,11 @@ mod tests {
     fn add_api_schema() -> anyhow::Result<()> {
         let stage = stage()?;
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
-        assert_eq!(stage.api_schemas(prim.path())?, vec!["MaterialBindingAPI".to_string()]);
-        assert!(stage.has_api_schema(prim.path(), "MaterialBindingAPI")?);
+        assert_eq!(
+            stage.prim_at(prim.path()).api_schemas()?,
+            vec!["MaterialBindingAPI".to_string()]
+        );
+        assert!(stage.prim_at(prim.path()).has_api_schema("MaterialBindingAPI")?);
         Ok(())
     }
 
