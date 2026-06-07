@@ -19,7 +19,7 @@
 
 use crate::sdf;
 
-use super::Stage;
+use super::{EditTarget, Stage, StageAuthoringError};
 
 /// A single staged namespace edit. A `None` `new_path` is a delete.
 #[derive(Clone, Debug)]
@@ -145,6 +145,78 @@ impl NamespaceEditor {
             None => self.stage.prim_at(path.clone()).is_valid().map_err(to_err),
         }
     }
+
+    /// Validate and apply the pending edit, then clear it.
+    ///
+    /// v1 handles **prim** edits on the local layer stack: the spec subtree is
+    /// moved or removed in every contributing layer. A prim that composes only
+    /// across a reference / payload (its spec sits at a different namespace
+    /// location) would need relocates and is rejected. Property edits and
+    /// the target/connection fix-up land in follow-up commits.
+    pub fn apply_edits(&mut self) -> Result<(), StageAuthoringError> {
+        self.can_apply_edits()
+            .map_err(|why| StageAuthoringError::Composition(anyhow::anyhow!("cannot apply namespace edit: {why}")))?;
+        let edit = self.pending.clone().expect("validated above");
+        let old = &edit.old_path;
+
+        if old.is_property_path() {
+            return Err(StageAuthoringError::Composition(anyhow::anyhow!(
+                "property namespace edits are not yet supported"
+            )));
+        }
+
+        // Layers that author a spec at `old`. Reject any whose spec sits at a
+        // different namespace location — that means the prim composes across an
+        // arc, and moving it would require relocates (not yet supported).
+        let stack = self
+            .stage
+            .prim_at(old.clone())
+            .prim_stack()
+            .map_err(StageAuthoringError::Composition)?;
+        for (_id, spec_path) in &stack {
+            if spec_path != old {
+                return Err(StageAuthoringError::Composition(anyhow::anyhow!(
+                    "{old} composes across an arc (spec at {spec_path}); moving it would require relocates"
+                )));
+            }
+        }
+
+        let identifiers = self.stage.layer_identifiers();
+        let saved_target = self.stage.edit_target();
+
+        let apply = || -> Result<(), StageAuthoringError> {
+            for (layer_id, _) in &stack {
+                let idx = identifiers.iter().position(|i| i == layer_id).ok_or_else(|| {
+                    StageAuthoringError::Composition(anyhow::anyhow!("layer {layer_id} not found in stack"))
+                })?;
+                self.stage.set_edit_target(EditTarget::for_layer_index(idx))?;
+                self.stage.with_target_layer_at(old, |layer, old_spec| {
+                    let mut cl = sdf::ChangeList::new();
+                    match edit.new_path.as_ref() {
+                        None => {
+                            layer.remove_spec_subtree(&old_spec)?;
+                            cl.entry_mut(&old_spec).flags |= sdf::ChangeFlags::REMOVE_NON_INERT_PRIM;
+                        }
+                        Some(new) => {
+                            layer.move_spec_subtree(&old_spec, new)?;
+                            cl.entry_mut(&old_spec).flags |= sdf::ChangeFlags::REMOVE_NON_INERT_PRIM;
+                            cl.entry_mut(new).flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
+                        }
+                    }
+                    Ok(cl)
+                })?;
+            }
+            Ok(())
+        };
+
+        let result = apply();
+        // Restore the caller's edit target regardless of outcome.
+        let _ = self.stage.set_edit_target(saved_target);
+        result?;
+
+        self.pending = None;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +289,33 @@ mod tests {
         let editor = NamespaceEditor::new(&stage);
         // Nothing staged yet.
         assert!(editor.can_apply_edits().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_prim_rename_moving_the_subtree() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim(sdf::path("/World/A/Child")?)?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/C")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/C/Child")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_prim_delete() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_at_path(sdf::path("/World/B")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim_at(sdf::path("/World/B")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/A")?).is_valid()?);
         Ok(())
     }
 
