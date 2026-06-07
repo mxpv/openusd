@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="openusd logo" width="200">
+  <img src="docs/logo.svg" alt="openusd logo" width="300px">
 </p>
 
 # openusd
