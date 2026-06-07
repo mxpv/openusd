@@ -148,31 +148,22 @@ impl NamespaceEditor {
 
     /// Validate and apply the pending edit, then clear it.
     ///
-    /// v1 handles **prim** edits on the local layer stack: the spec subtree is
-    /// moved or removed in every contributing layer. A prim that composes only
-    /// across a reference / payload (its spec sits at a different namespace
-    /// location) would need relocates and is rejected. Property edits and
-    /// the target/connection fix-up land in follow-up commits.
+    /// Handles prim and property edits on the local layer stack: the spec (and,
+    /// for a prim, its whole subtree) is moved or removed in every contributing
+    /// layer, then [`fixup_targets`](Self::fixup_targets) rewrites the
+    /// references to it. An object that composes only across a reference /
+    /// payload — its spec sits at a different namespace location — would need
+    /// relocates and is rejected.
     pub fn apply_edits(&mut self) -> Result<(), StageAuthoringError> {
         self.can_apply_edits()
             .map_err(|why| StageAuthoringError::Composition(anyhow::anyhow!("cannot apply namespace edit: {why}")))?;
         let edit = self.pending.clone().expect("validated above");
         let old = &edit.old_path;
 
-        if old.is_property_path() {
-            return Err(StageAuthoringError::Composition(anyhow::anyhow!(
-                "property namespace edits are not yet supported"
-            )));
-        }
-
         // Layers that author a spec at `old`. Reject any whose spec sits at a
-        // different namespace location — that means the prim composes across an
-        // arc, and moving it would require relocates (not yet supported).
-        let stack = self
-            .stage
-            .prim_at(old.clone())
-            .prim_stack()
-            .map_err(StageAuthoringError::Composition)?;
+        // different namespace location — that means the object composes across
+        // an arc, and moving it would require relocates (not yet supported).
+        let stack = self.contributing_layers(old)?;
         for (_id, spec_path) in &stack {
             if spec_path != old {
                 return Err(StageAuthoringError::Composition(anyhow::anyhow!(
@@ -180,6 +171,15 @@ impl NamespaceEditor {
                 )));
             }
         }
+
+        let (remove_flag, add_flag) = if old.is_property_path() {
+            (sdf::ChangeFlags::REMOVE_PROPERTY, sdf::ChangeFlags::ADD_PROPERTY)
+        } else {
+            (
+                sdf::ChangeFlags::REMOVE_NON_INERT_PRIM,
+                sdf::ChangeFlags::ADD_NON_INERT_PRIM,
+            )
+        };
 
         let identifiers = self.stage.layer_identifiers();
         let saved_target = self.stage.edit_target();
@@ -195,12 +195,12 @@ impl NamespaceEditor {
                     match edit.new_path.as_ref() {
                         None => {
                             layer.remove_spec_subtree(&old_spec)?;
-                            cl.entry_mut(&old_spec).flags |= sdf::ChangeFlags::REMOVE_NON_INERT_PRIM;
+                            cl.entry_mut(&old_spec).flags |= remove_flag;
                         }
                         Some(new) => {
                             layer.move_spec_subtree(&old_spec, new)?;
-                            cl.entry_mut(&old_spec).flags |= sdf::ChangeFlags::REMOVE_NON_INERT_PRIM;
-                            cl.entry_mut(new).flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
+                            cl.entry_mut(&old_spec).flags |= remove_flag;
+                            cl.entry_mut(new).flags |= add_flag;
                         }
                     }
                     Ok(cl)
@@ -220,6 +220,28 @@ impl NamespaceEditor {
 
         self.pending = None;
         Ok(())
+    }
+
+    /// Layers that author a spec at `path` (prim or property), strongest-first,
+    /// as `(layer_identifier, spec_path)` — the editing surface for the move.
+    fn contributing_layers(&self, path: &sdf::Path) -> Result<Vec<(String, sdf::Path)>, StageAuthoringError> {
+        let map = StageAuthoringError::Composition;
+        match path.split_property() {
+            None => self.stage.prim_at(path.clone()).prim_stack().map_err(map),
+            Some((prim_path, name)) => {
+                let prim = self.stage.prim_at(prim_path);
+                let is_rel = prim
+                    .relationships()
+                    .map_err(map)?
+                    .iter()
+                    .any(|r| r.path().name() == Some(name));
+                if is_rel {
+                    prim.relationship(name).property_stack().map_err(map)
+                } else {
+                    prim.attribute(name).property_stack().map_err(map)
+                }
+            }
+        }
     }
 
     /// Stage-wide pass that rewrites relationship targets and attribute
@@ -451,6 +473,28 @@ mod tests {
 
         let conns = stage.prim_at(sdf::path("/World/B")?).attribute("in").connections()?;
         assert_eq!(conns, vec![sdf::path("/World/C.attr")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_property_rename_with_connection_fixup() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.in connected to the to-be-renamed /World/A.attr
+        stage
+            .prim_at(sdf::path("/World/B")?)
+            .create_attribute("in", "double")?
+            .set_connections([sdf::path("/World/A.attr")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A.attr")?, sdf::path("/World/A.renamed")?);
+        editor.apply_edits()?;
+
+        let props = stage.prim_at(sdf::path("/World/A")?).property_names()?;
+        assert!(props.iter().any(|n| n == "renamed"));
+        assert!(!props.iter().any(|n| n == "attr"));
+
+        let conns = stage.prim_at(sdf::path("/World/B")?).attribute("in").connections()?;
+        assert_eq!(conns, vec![sdf::path("/World/A.renamed")?]);
         Ok(())
     }
 
