@@ -19,7 +19,7 @@
 
 use crate::sdf;
 
-use super::{EditTarget, Stage, StageAuthoringError};
+use super::{Attribute, EditTarget, Prim, PrimPredicate, Relationship, Stage, StageAuthoringError};
 
 /// A single staged namespace edit. A `None` `new_path` is a delete.
 #[derive(Clone, Debug)]
@@ -214,9 +214,93 @@ impl NamespaceEditor {
         let _ = self.stage.set_edit_target(saved_target);
         result?;
 
+        // Rewrite every relationship target / attribute connection that pointed
+        // into the moved-or-deleted subtree so nothing dangles.
+        self.fixup_targets(old, edit.new_path.as_ref())?;
+
         self.pending = None;
         Ok(())
     }
+
+    /// Stage-wide pass that rewrites relationship targets and attribute
+    /// connections referencing `old` (or any descendant): prefix-replaced to
+    /// `new` on a move, or dropped on a delete (`new` is `None`).
+    ///
+    /// Collects the rewrites in one traversal, then authors them on the current
+    /// edit target — so a fixed target list lands as an explicit opinion in the
+    /// editing layer (a v1 simplification of C++'s per-spec list-op edits).
+    fn fixup_targets(&self, old: &sdf::Path, new: Option<&sdf::Path>) -> Result<(), StageAuthoringError> {
+        let mut rel_edits: Vec<(Relationship, Vec<sdf::Path>)> = Vec::new();
+        let mut attr_edits: Vec<(Attribute, Vec<sdf::Path>)> = Vec::new();
+        let mut scan_err: Option<anyhow::Error> = None;
+
+        self.stage
+            .traverse(PrimPredicate::DEFAULT, |prim_path| {
+                if scan_err.is_some() {
+                    return;
+                }
+                let prim = self.stage.prim_at(prim_path.clone());
+                if let Err(e) = collect_prim_fixups(&prim, old, new, &mut rel_edits, &mut attr_edits) {
+                    scan_err = Some(e);
+                }
+            })
+            .map_err(StageAuthoringError::Composition)?;
+
+        if let Some(e) = scan_err {
+            return Err(StageAuthoringError::Composition(e));
+        }
+
+        for (rel, targets) in rel_edits {
+            rel.set_targets(targets)?;
+        }
+        for (attr, connections) in attr_edits {
+            attr.set_connections(connections)?;
+        }
+        Ok(())
+    }
+}
+
+/// Rewrite `paths` for an edit of `old` → `new` (`None` = delete): entries at or
+/// below `old` are prefix-replaced (or dropped on delete); the rest pass
+/// through. Returns `None` when nothing referenced `old` (no edit needed).
+fn rewrite_paths(paths: &[sdf::Path], old: &sdf::Path, new: Option<&sdf::Path>) -> Option<Vec<sdf::Path>> {
+    if !paths.iter().any(|p| p.has_prefix(old)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for p in paths {
+        if p.has_prefix(old) {
+            if let Some(new) = new {
+                out.push(p.replace_prefix(old, new).unwrap_or_else(|| p.clone()));
+            }
+            // delete: drop the entry
+        } else {
+            out.push(p.clone());
+        }
+    }
+    Some(out)
+}
+
+/// Collect the relationship-target / attribute-connection rewrites a single
+/// prim needs for the pending edit.
+fn collect_prim_fixups(
+    prim: &Prim,
+    old: &sdf::Path,
+    new: Option<&sdf::Path>,
+    rel_out: &mut Vec<(Relationship, Vec<sdf::Path>)>,
+    attr_out: &mut Vec<(Attribute, Vec<sdf::Path>)>,
+) -> anyhow::Result<()> {
+    for rel in prim.relationships()? {
+        if let Some(rewritten) = rewrite_paths(&rel.targets()?, old, new) {
+            rel_out.push((rel, rewritten));
+        }
+    }
+    for attr in prim.attributes()? {
+        if let Some(rewritten) = rewrite_paths(&attr.connections()?, old, new) {
+            attr_out.push((attr, rewritten));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -316,6 +400,41 @@ mod tests {
 
         assert!(!stage.prim_at(sdf::path("/World/B")?).is_valid()?);
         assert!(stage.prim_at(sdf::path("/World/A")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_fixes_up_relationship_targets() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.rel -> /World/A
+        stage
+            .prim_at(sdf::path("/World/B")?)
+            .create_relationship("rel")?
+            .set_targets([sdf::path("/World/A")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        let targets = stage.prim_at(sdf::path("/World/B")?).relationship("rel").targets()?;
+        assert_eq!(targets, vec![sdf::path("/World/C")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_drops_relationship_targets() -> Result<()> {
+        let stage = stage()?;
+        stage
+            .prim_at(sdf::path("/World/B")?)
+            .create_relationship("rel")?
+            .set_targets([sdf::path("/World/A")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_at_path(sdf::path("/World/A")?);
+        editor.apply_edits()?;
+
+        let targets = stage.prim_at(sdf::path("/World/B")?).relationship("rel").targets()?;
+        assert!(targets.is_empty());
         Ok(())
     }
 
