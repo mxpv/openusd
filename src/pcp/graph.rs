@@ -12,6 +12,7 @@ use bitflags::bitflags;
 use crate::sdf::{LayerOffset, Path};
 
 use super::mapping::MapFunction;
+use super::LayerId;
 
 /// Whether an arc introduces a class hierarchy node — an inherit or a
 /// specializes (C++ `PcpIsClassBasedArc`).
@@ -124,11 +125,11 @@ bitflags! {
 #[derive(Debug, Clone)]
 pub struct Node {
     /// The layer stack contributing opinions at this site (C++
-    /// `PcpNode::GetLayerStack`): each member is a `(layer index, sublayer
-    /// offset)` pair, strongest sublayer first. A member's sublayer offset is
-    /// composed atop `map_to_root`'s arc offset during value resolution (see
+    /// `PcpNode::GetLayerStack`): each member is a `(layer id, sublayer offset)`
+    /// pair, strongest sublayer first. A member's sublayer offset is composed
+    /// atop `map_to_root`'s arc offset during value resolution (see
     /// [`layers`](Self::layers)).
-    pub(crate) layer_stack: Vec<(usize, LayerOffset)>,
+    pub(crate) layer_stack: Vec<(LayerId, LayerOffset)>,
     /// The path within that layer (may differ from composed path due to remapping).
     pub path: Path,
     /// The composition arc that introduced this node.
@@ -191,7 +192,7 @@ impl Node {
     /// `parent`/`children` populated by the builder; the relocate inserts and
     /// grafts set the links explicitly afterward.
     pub(crate) fn new(
-        layer_index: usize,
+        layer_id: LayerId,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
@@ -207,7 +208,7 @@ impl Node {
             // A node lists one layer until the per-site model folds a whole
             // sublayer stack into it; that lone layer's sublayer offset is
             // already baked into `map_to_root`, so its entry offset is identity.
-            layer_stack: vec![(layer_index, LayerOffset::IDENTITY)],
+            layer_stack: vec![(layer_id, LayerOffset::IDENTITY)],
             path,
             arc,
             map_to_parent,
@@ -223,20 +224,20 @@ impl Node {
         }
     }
 
-    /// Index of the strongest layer contributing at this site. A representative
+    /// Id of the strongest layer contributing at this site. A representative
     /// for callers that key on a single layer (dependencies, dumps); value
     /// resolution iterates [`layers`](Self::layers) instead.
-    pub fn layer_index(&self) -> usize {
+    pub fn layer_id(&self) -> LayerId {
         self.layer_stack[0].0
     }
 
-    /// The site's contributing layers as stored: `(layer index, sublayer
-    /// offset)` members, strongest first — the node's `(layerStack, path)` site
-    /// (C++ `PcpNodeRef::GetLayerStack`'s layers and their offsets). The offsets
-    /// are the raw sublayer offsets; for value resolution use
-    /// [`layers`](Self::layers), which folds the arc offset on top. This raw form
-    /// is for structural introspection.
-    pub fn layer_stack(&self) -> &[(usize, LayerOffset)] {
+    /// The site's contributing layers as stored: `(layer id, sublayer offset)`
+    /// members, strongest first — the node's `(layerStack, path)` site (C++
+    /// `PcpNodeRef::GetLayerStack`'s layers and their offsets). The offsets are
+    /// the raw sublayer offsets; for value resolution use [`layers`](Self::layers),
+    /// which folds the arc offset on top. This raw form is for structural
+    /// introspection.
+    pub fn layer_stack(&self) -> &[(LayerId, LayerOffset)] {
         &self.layer_stack
     }
 
@@ -245,7 +246,7 @@ impl Node {
     /// arc offset with the member's sublayer offset composed on top. Value
     /// resolution reads opinions through this iterator so one per-site node can
     /// fold every sublayer.
-    pub fn layers(&self) -> impl Iterator<Item = (usize, LayerOffset)> + '_ {
+    pub fn layers(&self) -> impl Iterator<Item = (LayerId, LayerOffset)> + '_ {
         let arc_offset = self.map_to_root.time_offset();
         self.layer_stack
             .iter()
@@ -401,12 +402,12 @@ impl PrimIndexGraph {
     /// (`identity ∘ child.map_to_parent == child.map_to_parent`), so a former
     /// forest root keeps the `map_to_root` it had with no parent. The node is
     /// flagged [`INERT`](NodeFlags::INERT) and skipped by value resolution.
-    pub(crate) fn init_root(&mut self, path: Path) -> NodeId {
+    pub(crate) fn init_root(&mut self, layer_id: LayerId, path: Path) -> NodeId {
         debug_assert!(self.nodes.is_empty(), "synthetic root must be the first node");
         let id = NodeId(self.nodes.len() as u32);
         let depth = path.prim_element_count() as u16;
         let mut node = Node::new(
-            0,
+            layer_id,
             path,
             ArcType::Root,
             MapFunction::identity(),
@@ -434,7 +435,7 @@ impl PrimIndexGraph {
     pub(crate) fn add_child(
         &mut self,
         parent: NodeId,
-        layer_index: usize,
+        layer_id: LayerId,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
@@ -462,7 +463,7 @@ impl PrimIndexGraph {
         } as u16;
         let idx = NodeId(self.nodes.len() as u32);
         let mut node = Node::new(
-            layer_index,
+            layer_id,
             path,
             arc,
             map_to_parent,
@@ -491,7 +492,7 @@ impl PrimIndexGraph {
     pub(crate) fn add_site_child(
         &mut self,
         parent: NodeId,
-        layer_stack: Vec<(usize, LayerOffset)>,
+        layer_stack: Vec<(LayerId, LayerOffset)>,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
@@ -518,12 +519,12 @@ impl PrimIndexGraph {
     /// task-queue builder uses this for opt-in duplicate-node skipping by the
     /// class-based arcs (inherits/specializes); reference/payload arcs keep
     /// diamonds.
-    pub(crate) fn node_using_site(&self, root_layer: usize, path: &Path) -> Option<NodeId> {
+    pub(crate) fn node_using_site(&self, root_layer: LayerId, path: &Path) -> Option<NodeId> {
         self.nodes
             .iter()
             .position(|node| {
                 !node.flags.intersects(NodeFlags::INERT | NodeFlags::CULLED)
-                    && node.layer_index() == root_layer
+                    && node.layer_id() == root_layer
                     && &node.path == path
             })
             .map(|i| NodeId(i as u32))
@@ -764,7 +765,7 @@ impl PrimIndexGraph {
     pub(crate) fn same_site(&self, a: NodeId, b: NodeId) -> bool {
         a.is_valid()
             && b.is_valid()
-            && self.nodes[a.idx()].layer_index() == self.nodes[b.idx()].layer_index()
+            && self.nodes[a.idx()].layer_id() == self.nodes[b.idx()].layer_id()
             && self.nodes[a.idx()].path == self.nodes[b.idx()].path
     }
 
@@ -983,7 +984,7 @@ mod tests {
 
     fn node(path: &str, namespace_depth: u16) -> Node {
         let mut n = Node::new(
-            0,
+            LayerId::from_raw(0),
             Path::from(path),
             ArcType::Inherit,
             MapFunction::identity(),

@@ -302,7 +302,7 @@ impl Attribute {
     /// `UsdAttribute::GetConnections`.
     pub fn connections(&self) -> anyhow::Result<Vec<sdf::Path>> {
         self.stage
-            .masked(&self.path, |cache| cache.connection_paths(&self.path))
+            .masked(&self.path, |g, cache| cache.connection_paths(g, &self.path))
     }
 
     /// Composes this attribute's connection paths together with the paths its
@@ -310,8 +310,9 @@ impl Attribute {
     /// `PcpBuildFilteredTargetIndex` and its `deletedPaths` out-param). Both are
     /// empty when the owning prim is outside the population mask.
     pub fn compute_connections(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        self.stage
-            .masked(&self.path, |cache| cache.compute_attribute_connection_paths(&self.path))
+        self.stage.masked(&self.path, |g, cache| {
+            cache.compute_attribute_connection_paths(g, &self.path)
+        })
     }
 
     /// Composed `variability` for this attribute (spec 12.2.3: the weakest
@@ -384,7 +385,7 @@ impl Attribute {
     /// that authors a spec for this attribute, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
     pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.cache_mut().property_stack(&self.path)
+        self.stage.with_cache(|g, c| c.property_stack(g, &self.path))
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,

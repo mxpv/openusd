@@ -16,43 +16,35 @@ use crate::sdf::Path;
 
 use super::graph::ArcType;
 use super::index::PrimIndex;
+use super::LayerId;
 
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
-    /// `per_layer[layer_index][site_path]` = prim index paths that read this site.
-    per_layer: Vec<HashMap<Path, Vec<Path>>>,
+    /// `per_layer[layer_id][site_path]` = prim index paths that read this site.
+    per_layer: HashMap<LayerId, HashMap<Path, Vec<Path>>>,
     /// Reverse map for cheap removal: prim_index_path → list of (layer, site)
     /// it registered. Avoids re-walking the index when invalidating.
-    by_prim: HashMap<Path, Vec<(usize, Path)>>,
+    by_prim: HashMap<Path, Vec<(LayerId, Path)>>,
 }
 
 impl Dependencies {
-    /// Ensure `per_layer` has at least `layer_count` slots.
-    fn ensure_layer_capacity(&mut self, layer_count: usize) {
-        if self.per_layer.len() < layer_count {
-            self.per_layer.resize_with(layer_count, HashMap::new);
-        }
-    }
-
-    /// Register every `(layer_index, node.path)` site referenced by `index` as
-    /// a dependency of `prim_index_path`. Replaces any prior registration for
-    /// the same prim. A site whose node spans several sublayers registers each
-    /// member layer, so a change to any of them fans out to this prim.
+    /// Register every `(layer_id, node.path)` site referenced by `index` as a
+    /// dependency of `prim_index_path`. Replaces any prior registration for the
+    /// same prim. A site whose node spans several sublayers registers each member
+    /// layer, so a change to any of them fans out to this prim.
     ///
     /// The implicit "self" edge — a Root node whose path equals the prim's
     /// own path — is skipped to keep the map compact. C++
     /// `PcpDependencyTypeRoot` follows the same rule.
-    pub(super) fn add(&mut self, prim_index_path: &Path, index: &PrimIndex, layer_count: usize) {
-        self.ensure_layer_capacity(layer_count);
-
+    pub(super) fn add(&mut self, prim_index_path: &Path, index: &PrimIndex, all_layers: &[LayerId]) {
         // Clear any previous registration before adding the new one.
         self.remove(prim_index_path);
 
         // `seen` provides O(1) dedup as we walk graph nodes; the parallel
         // `registered` Vec preserves insertion order for the reverse-map
         // entry (the order is irrelevant to lookups but helps debug).
-        let mut seen: HashSet<(usize, Path)> = HashSet::new();
-        let mut registered: Vec<(usize, Path)> = Vec::new();
+        let mut seen: HashSet<(LayerId, Path)> = HashSet::new();
+        let mut registered: Vec<(LayerId, Path)> = Vec::new();
         // Include culled arc nodes (empty targets) and inert relocation-source
         // nodes: authoring a spec at such a site must invalidate this prim so the
         // node un-culls / re-relocates on recomposition.
@@ -66,7 +58,9 @@ impl Dependencies {
                     continue;
                 }
                 registered.push(key);
-                self.per_layer[layer]
+                self.per_layer
+                    .entry(layer)
+                    .or_default()
                     .entry(node.path.clone())
                     .or_default()
                     .push(prim_index_path.clone());
@@ -78,16 +72,17 @@ impl Dependencies {
         // indices have no reverse-map entry, so an authoring change that
         // names exactly this path on a layer the graph doesn't already
         // touch cannot reach them via `lookup_with_ancestors`. Synthetic
-        // self-registrations are cheap (O(layer_count)) and let the
-        // dependency map serve as the single source of truth for "which
-        // prims observe site X on layer L".
-        for li in 0..layer_count {
+        // self-registrations are cheap and let the dependency map serve as
+        // the single source of truth for "which prims observe site X on layer L".
+        for &li in all_layers {
             let key = (li, prim_index_path.clone());
             if !seen.insert(key.clone()) {
                 continue;
             }
             registered.push(key);
-            self.per_layer[li]
+            self.per_layer
+                .entry(li)
+                .or_default()
                 .entry(prim_index_path.clone())
                 .or_default()
                 .push(prim_index_path.clone());
@@ -101,7 +96,7 @@ impl Dependencies {
             return;
         };
         for (li, site) in sites {
-            if let Some(map) = self.per_layer.get_mut(li) {
+            if let Some(map) = self.per_layer.get_mut(&li) {
                 if let Some(deps) = map.get_mut(&site) {
                     deps.retain(|p| p != prim_index_path);
                     if deps.is_empty() {
@@ -114,21 +109,19 @@ impl Dependencies {
 
     /// Drop all entries.
     pub(super) fn clear(&mut self) {
-        for m in &mut self.per_layer {
-            m.clear();
-        }
+        self.per_layer.clear();
         self.by_prim.clear();
     }
 
-    /// Find prim indices that depend on `(layer_index, site_path)` or on any
+    /// Find prim indices that depend on `(layer_id, site_path)` or on any
     /// ancestor of `site_path`.
     ///
     /// The ancestor walk matches C++ `Pcp_DidChangeDependents` (changes.cpp):
     /// an arc introduced at `/Foo` makes `/Foo/Bar`'s composed index depend
     /// transitively on opinions at `/Foo`, so a change at `/Foo` invalidates
     /// `/Foo/Bar` too.
-    pub(super) fn lookup_with_ancestors(&self, layer_index: usize, site_path: &Path) -> Vec<Path> {
-        let Some(map) = self.per_layer.get(layer_index) else {
+    pub(super) fn lookup_with_ancestors(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
         let mut out: Vec<Path> = Vec::new();
@@ -167,8 +160,8 @@ impl Dependencies {
     // `Builder` culls weaker nodes during composition; without a snapshot,
     // an inert spec added at a culled site fails to un-cull the node on
     // next composition.
-    pub(super) fn subtree_lookup(&self, layer_index: usize, prefix: &Path) -> Vec<Path> {
-        let Some(map) = self.per_layer.get(layer_index) else {
+    pub(super) fn subtree_lookup(&self, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
+        let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
         let mut out: Vec<Path> = Vec::new();
@@ -196,11 +189,16 @@ mod tests {
         Path::new(s).expect("valid path")
     }
 
-    fn make_index(prim_path: &Path, nodes: Vec<(ArcType, usize, Path)>) -> PrimIndex {
+    /// A deterministic test layer id for the n-th synthetic layer.
+    fn l(n: u32) -> LayerId {
+        LayerId::from_raw(n)
+    }
+
+    fn make_index(prim_path: &Path, nodes: Vec<(ArcType, LayerId, Path)>) -> PrimIndex {
         let mut idx = PrimIndex::default();
-        for (arc, layer_index, node_path) in nodes {
+        for (arc, layer_id, node_path) in nodes {
             let map = MapFunction::from_pair_identity(node_path.clone(), prim_path.clone());
-            idx.push_node(Node::new(layer_index, node_path, arc, map.clone(), map, false));
+            idx.push_node(Node::new(layer_id, node_path, arc, map.clone(), map, false));
         }
         idx
     }
@@ -213,10 +211,10 @@ mod tests {
         // the prim path is still findable on every layer.
         let mut deps = Dependencies::default();
         let foo = p("/Foo");
-        let index = make_index(&foo, vec![(ArcType::Root, 0, foo.clone())]);
-        deps.add(&foo, &index, 2);
-        assert_eq!(deps.lookup_with_ancestors(0, &foo), vec![foo.clone()]);
-        assert_eq!(deps.lookup_with_ancestors(1, &foo), vec![foo.clone()]);
+        let index = make_index(&foo, vec![(ArcType::Root, l(0), foo.clone())]);
+        deps.add(&foo, &index, &[l(0), l(1)]);
+        assert_eq!(deps.lookup_with_ancestors(l(0), &foo), vec![foo.clone()]);
+        assert_eq!(deps.lookup_with_ancestors(l(1), &foo), vec![foo.clone()]);
     }
 
     #[test]
@@ -226,10 +224,13 @@ mod tests {
         let there = p("/Model");
         let index = make_index(
             &here,
-            vec![(ArcType::Root, 0, here.clone()), (ArcType::Reference, 1, there.clone())],
+            vec![
+                (ArcType::Root, l(0), here.clone()),
+                (ArcType::Reference, l(1), there.clone()),
+            ],
         );
-        deps.add(&here, &index, 2);
-        assert_eq!(deps.lookup_with_ancestors(1, &there), vec![here.clone()]);
+        deps.add(&here, &index, &[l(0), l(1)]);
+        assert_eq!(deps.lookup_with_ancestors(l(1), &there), vec![here.clone()]);
     }
 
     #[test]
@@ -240,14 +241,14 @@ mod tests {
         let index = make_index(
             &here,
             vec![
-                (ArcType::Root, 0, here.clone()),
-                (ArcType::Inherit, 0, arc_site.clone()),
+                (ArcType::Root, l(0), here.clone()),
+                (ArcType::Inherit, l(0), arc_site.clone()),
             ],
         );
-        deps.add(&here, &index, 1);
+        deps.add(&here, &index, &[l(0)]);
         // A change at /X/Y/Child should still invalidate /A/B (it depends
         // transitively on /X/Y).
-        assert_eq!(deps.lookup_with_ancestors(0, &p("/X/Y/Child")), vec![here.clone()]);
+        assert_eq!(deps.lookup_with_ancestors(l(0), &p("/X/Y/Child")), vec![here.clone()]);
     }
 
     #[test]
@@ -257,10 +258,18 @@ mod tests {
         let b = p("/B");
         let xy = p("/X/Y");
         let xy_child = p("/X/Y/Child");
-        deps.add(&a, &make_index(&a, vec![(ArcType::Reference, 0, xy.clone())]), 1);
-        deps.add(&b, &make_index(&b, vec![(ArcType::Reference, 0, xy_child.clone())]), 1);
+        deps.add(
+            &a,
+            &make_index(&a, vec![(ArcType::Reference, l(0), xy.clone())]),
+            &[l(0)],
+        );
+        deps.add(
+            &b,
+            &make_index(&b, vec![(ArcType::Reference, l(0), xy_child.clone())]),
+            &[l(0)],
+        );
         // Subtree at /X/Y catches both sites.
-        let mut found = deps.subtree_lookup(0, &p("/X"));
+        let mut found = deps.subtree_lookup(l(0), &p("/X"));
         found.sort();
         assert_eq!(found, vec![a.clone(), b.clone()]);
     }
@@ -272,11 +281,11 @@ mod tests {
         let there = p("/X");
         deps.add(
             &here,
-            &make_index(&here, vec![(ArcType::Reference, 0, there.clone())]),
-            1,
+            &make_index(&here, vec![(ArcType::Reference, l(0), there.clone())]),
+            &[l(0)],
         );
-        assert!(!deps.lookup_with_ancestors(0, &there).is_empty());
+        assert!(!deps.lookup_with_ancestors(l(0), &there).is_empty());
         deps.remove(&here);
-        assert!(deps.lookup_with_ancestors(0, &there).is_empty());
+        assert!(deps.lookup_with_ancestors(l(0), &there).is_empty());
     }
 }

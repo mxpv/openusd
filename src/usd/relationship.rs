@@ -154,7 +154,7 @@ impl Relationship {
     /// population mask. Mirrors C++ `UsdRelationship::GetTargets`.
     pub fn targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
         self.stage
-            .masked(&self.path, |cache| cache.relationship_targets(&self.path))
+            .masked(&self.path, |g, cache| cache.relationship_targets(g, &self.path))
     }
 
     /// Composes this relationship's target paths together with the paths its
@@ -163,8 +163,9 @@ impl Relationship {
     /// targets match [`Relationship::targets`]; both are empty when the
     /// owning prim is outside the population mask.
     pub fn compute_targets(&self) -> anyhow::Result<(Vec<sdf::Path>, Vec<sdf::Path>)> {
-        self.stage
-            .masked(&self.path, |cache| cache.compute_relationship_target_paths(&self.path))
+        self.stage.masked(&self.path, |g, cache| {
+            cache.compute_relationship_target_paths(g, &self.path)
+        })
     }
 
     /// Composed forwarded targets: a target that resolves to another
@@ -178,8 +179,8 @@ impl Relationship {
     /// `UsdRelationship::GetForwardedTargets`.
     pub fn forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
         let mask = self.stage.population_mask();
-        self.stage.masked(&self.path, |cache| {
-            cache.forwarded_relationship_targets(&self.path, &|p| mask.includes(p))
+        self.stage.masked(&self.path, |g, cache| {
+            cache.forwarded_relationship_targets(g, &self.path, &|p| mask.includes(p))
         })
     }
 
@@ -187,7 +188,7 @@ impl Relationship {
     /// that authors a spec for this relationship, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
     pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.cache_mut().property_stack(&self.path)
+        self.stage.with_cache(|g, c| c.property_stack(g, &self.path))
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's

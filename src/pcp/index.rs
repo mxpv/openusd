@@ -18,7 +18,7 @@ use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, Payload
 use super::builder::BuildResult;
 use super::graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
 use super::mapping::MapFunction;
-use super::{Error, LayerStack, VariantFallbackMap};
+use super::{Error, LayerGraph, LayerId, VariantFallbackMap};
 
 /// Composition index for a single prim.
 ///
@@ -261,10 +261,10 @@ impl PrimIndex {
             let node = self.node(id);
             let _ = write!(
                 out,
-                "{:indent$}{:?} [{}] {} #{}",
+                "{:indent$}{:?} [{:?}] {} #{}",
                 "",
                 node.arc,
-                node.layer_index(),
+                node.layer_id(),
                 node.path,
                 rank[id.idx()],
                 indent = depth * 4
@@ -311,7 +311,7 @@ impl PrimIndex {
     /// prim must instead be built through a cache holding its ancestors, since
     /// the builder seeds a child from its cached parent.
     #[cfg(test)]
-    pub(crate) fn build_with_context(path: &Path, stack: &LayerStack, ctx: &CompositionContext) -> BuildResult<Self> {
+    pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
         Self::build_with_cache(path, stack, ctx, &HashMap::new()).map(|(index, _errors)| index)
     }
 
@@ -321,11 +321,11 @@ impl PrimIndex {
     /// fully-composed result (including ancestor-propagated specs).
     pub(crate) fn build_with_cache(
         path: &Path,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &HashMap<Path, PrimIndex>,
     ) -> BuildResult<(Self, Vec<Error>)> {
-        Self::build_with_cache_in(path, stack, ctx, cached_indices, &stack.root_layer_stack(), true)
+        Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack(), true)
     }
 
     /// Builds a prim index whose root `L` site scans the given `ambient` layer
@@ -338,10 +338,10 @@ impl PrimIndex {
     /// case where the shared `cached_indices` (keyed by stage path) apply.
     pub(crate) fn build_with_cache_in(
         path: &Path,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &HashMap<Path, PrimIndex>,
-        ambient: &[(usize, LayerOffset)],
+        ambient: &[(LayerId, LayerOffset)],
         ambient_is_root: bool,
     ) -> BuildResult<(Self, Vec<Error>)> {
         if ambient_is_root {
@@ -369,14 +369,14 @@ impl PrimIndex {
     /// variant selections without recomputing them.
     pub(crate) fn context_for_children(
         &self,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         parent_ctx: &CompositionContext,
     ) -> CompositionContext {
         // Gather variant selections from this prim's nodes; ancestor selections
         // outrank this prim's local fallbacks.
         let selections = resolve_variant_selections_in(
             self.nodes(),
-            &stack.layers,
+            stack,
             &parent_ctx.variant_fallbacks,
             &parent_ctx.selections,
         );
@@ -532,7 +532,7 @@ pub(crate) struct AncestorArc {
 ///   from a namespace-ancestor seed would fix it.
 fn resolve_variant_selections_in<'a>(
     nodes: impl Iterator<Item = &'a Node> + Clone,
-    layers: &[sdf::Layer],
+    graph: &LayerGraph,
     variant_fallbacks: &VariantFallbackMap,
     seed: &HashMap<String, String>,
 ) -> HashMap<String, String> {
@@ -561,7 +561,7 @@ fn resolve_variant_selections_in<'a>(
     // node fans out into its layer stack, strongest sublayer first.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
-            if let Ok(value) = layers[layer].get(&node.path, FieldKey::VariantSelection.as_str()) {
+            if let Ok(value) = graph.layer(layer).get(&node.path, FieldKey::VariantSelection.as_str()) {
                 if let Value::VariantSelectionMap(map) = value.into_owned() {
                     for (set_name, selection) in map {
                         selections.entry(set_name).or_insert(selection);
@@ -577,7 +577,7 @@ fn resolve_variant_selections_in<'a>(
     // first-variant default, matching the builder.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
-            let data = &layers[layer];
+            let data = graph.layer(layer);
             let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
@@ -618,7 +618,7 @@ fn resolve_variant_selections_in<'a>(
 fn compose_list_op_in<T, D, R, A>(
     nodes: &[Node],
     field: &str,
-    layers: &[sdf::Layer],
+    graph: &LayerGraph,
     decode: D,
     mut retime: R,
     mut anchor: A,
@@ -627,7 +627,7 @@ where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
     R: FnMut(&mut T, LayerOffset, f64),
-    A: FnMut(&mut T, usize) -> f64,
+    A: FnMut(&mut T, LayerId) -> f64,
 {
     let mut combined: Option<ListOp<T>> = None;
     // The sublayer offset and time-codes scale to fold into each item, keyed by
@@ -648,12 +648,12 @@ where
         // every occurrence — only the composed offset differs — so it is read
         // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
         // single-valued per layer).
-        let mut seen_layers: HashSet<usize> = HashSet::new();
+        let mut seen_layers: HashSet<LayerId> = HashSet::new();
         for &(layer, sub) in node.layer_stack() {
             if !seen_layers.insert(layer) {
                 continue;
             }
-            let Some(value) = layers[layer].try_get(&node.path, field)? else {
+            let Some(value) = graph.layer(layer).try_get(&node.path, field)? else {
                 continue;
             };
             let Some(mut list_op) = decode(value.into_owned()) else {
@@ -692,7 +692,7 @@ where
 pub(super) fn compose_arc_list_in<T: Default + Clone + PartialEq>(
     nodes: &[Node],
     field: FieldKey,
-    layers: &[sdf::Layer],
+    graph: &LayerGraph,
 ) -> Result<Vec<T>>
 where
     Value: TryInto<ListOp<T>>,
@@ -700,7 +700,7 @@ where
     compose_list_op_in(
         nodes,
         field.as_str(),
-        layers,
+        graph,
         |v| v.try_into().ok(),
         |_, _, _| {},
         |_, _| 1.0,
@@ -709,7 +709,7 @@ where
 
 /// Resolves `asset_path` against `layer`'s identifier, yielding the canonical
 /// identifier of the targeted layer. Shared by [`anchor_asset_path`] (binding a
-/// reference to its authoring layer) and [`find_layer`] (locating a parent-
+/// reference to its authoring layer) and [`find_layer_id`] (locating a parent-
 /// relative sublayer).
 ///
 /// TODO(perf): `create_identifier` canonicalizes via the filesystem, so this
@@ -727,18 +727,19 @@ fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, resolver: &dyn Re
 /// An internal arc (empty asset path) or an unresolved target retimes by 1.0.
 /// `asset_path` must already be anchored to its authoring layer.
 //
-// TODO(perf): this `find_layer` re-resolves the target that
+// TODO(perf): this `graph.find` re-resolves the target that
 // `builder::add_ref_or_payload_arc` resolves again moments later for the same
 // anchored path. The duplicate can't be hoisted trivially — the ratio's
 // numerator is the per-member authoring rate, knowable only here inside the
 // in-place list-op fold, while the target stack is needed there — so it waits on
 // the asset-path resolution cache the `resolve_against_layer` TODO(perf) calls for.
-fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> f64 {
+fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, graph: &LayerGraph) -> f64 {
     if asset_path.is_empty() {
         return 1.0;
     }
-    find_layer(asset_path, layers, resolver).map_or(1.0, |target| {
-        super::effective_time_codes_per_second(introducing) / super::effective_time_codes_per_second(&layers[target])
+    graph.find(asset_path).map_or(1.0, |target| {
+        super::effective_time_codes_per_second(introducing)
+            / super::effective_time_codes_per_second(graph.layer(target))
     })
 }
 
@@ -766,8 +767,8 @@ fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, reso
 #[allow(clippy::too_many_arguments)]
 fn resolve_arc_asset_path(
     asset_path: &mut String,
-    authoring_layer: usize,
-    layers: &[sdf::Layer],
+    authoring_layer: LayerId,
+    graph: &LayerGraph,
     resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     arc: ArcType,
@@ -786,8 +787,8 @@ fn resolve_arc_asset_path(
             return None;
         }
     }
-    anchor_asset_path(asset_path, &layers[authoring_layer], resolver);
-    Some(arc_tcps_scale(&layers[authoring_layer], asset_path, layers, resolver))
+    anchor_asset_path(asset_path, graph.layer(authoring_layer), resolver);
+    Some(arc_tcps_scale(graph.layer(authoring_layer), asset_path, graph))
 }
 
 /// Composes the `references` list-op, folding each authoring sublayer's offset
@@ -798,7 +799,7 @@ fn resolve_arc_asset_path(
 /// relative paths in distinct sublayers stay distinct.
 pub(super) fn compose_references_in(
     nodes: &[Node],
-    layers: &[sdf::Layer],
+    graph: &LayerGraph,
     resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
@@ -807,7 +808,7 @@ pub(super) fn compose_references_in(
     let mut refs = compose_list_op_in(
         nodes,
         FieldKey::References.as_str(),
-        layers,
+        graph,
         |v| v.try_into().ok(),
         |r: &mut Reference, sub, scale| {
             if scale != 1.0 {
@@ -821,7 +822,7 @@ pub(super) fn compose_references_in(
             resolve_arc_asset_path(
                 &mut r.asset_path,
                 layer,
-                layers,
+                graph,
                 resolver,
                 expr_vars,
                 ArcType::Reference,
@@ -844,7 +845,7 @@ pub(super) fn compose_references_in(
 /// asset path is anchored to its authoring layer.
 pub(super) fn collect_payloads_in(
     nodes: &[Node],
-    layers: &[sdf::Layer],
+    graph: &LayerGraph,
     resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
@@ -853,7 +854,7 @@ pub(super) fn collect_payloads_in(
     let mut payloads = compose_list_op_in(
         nodes,
         FieldKey::Payload.as_str(),
-        layers,
+        graph,
         |v| match v {
             Value::Payload(p) => Some(PayloadListOp {
                 explicit: true,
@@ -881,7 +882,7 @@ pub(super) fn collect_payloads_in(
             resolve_arc_asset_path(
                 &mut p.asset_path,
                 layer,
-                layers,
+                graph,
                 resolver,
                 expr_vars,
                 ArcType::Payload,
@@ -898,34 +899,33 @@ pub(super) fn collect_payloads_in(
     Ok(payloads)
 }
 
-/// Finds a layer index whose identifier matches `asset_path`.
-///
-/// Tries an exact match first, then suffix-matches at a path-separator
-/// boundary. For relative paths that traverse parent directories (`../foo`,
-/// `..\foo`), these strategies fail against canonical absolute identifiers.
-/// The resolver anchors the path against each candidate identifier so that
-/// custom asset resolution backends work correctly without any filesystem
-/// access in this function.
-pub(super) fn find_layer(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
+/// Finds the [`LayerId`] of a layer whose identifier matches
+/// `asset_path`, iterating `order` (the [`LayerGraph`](super::layer_graph::LayerGraph)
+/// collection order) so the first match is deterministic: an exact or
+/// path-separator-boundary suffix match against canonical identifiers, then
+/// resolver anchoring for parent-relative paths (`../foo`), which custom asset
+/// resolution backends handle without filesystem access here.
+pub(super) fn find_layer_id<'a>(
+    asset_path: &str,
+    order: &[LayerId],
+    layer: impl Fn(LayerId) -> &'a sdf::Layer,
+    resolver: &dyn Resolver,
+) -> Option<LayerId> {
     let asset_path_ref = std::path::Path::new(asset_path);
     let needle = asset_path_ref.strip_prefix(".").unwrap_or(asset_path_ref);
 
-    // Fast path: exact or suffix match against canonical identifiers.
-    for (i, layer) in layers.iter().enumerate() {
-        let identifier = std::path::Path::new(layer.identifier.as_str());
+    for &id in order {
+        let identifier = std::path::Path::new(layer(id).identifier());
         if identifier == needle || identifier.ends_with(needle) {
-            return Some(i);
+            return Some(id);
         }
     }
 
-    // Relative paths traversing parent directories need anchoring. Delegate to
-    // the resolver so custom AR backends override path handling without any
-    // filesystem access here.
     if needle.starts_with("..") {
-        for anchor_layer in layers {
-            let resolved = resolve_against_layer(asset_path, anchor_layer, resolver);
-            if let Some(pos) = layers.iter().position(|layer| layer.identifier == resolved) {
-                return Some(pos);
+        for &anchor_id in order {
+            let resolved = resolve_against_layer(asset_path, layer(anchor_id), resolver);
+            if let Some(&id) = order.iter().find(|&&id| layer(id).identifier() == resolved) {
+                return Some(id);
             }
         }
     }
@@ -967,8 +967,18 @@ mod tests {
         Collector::new(&resolver).collect(path)
     }
 
+    /// Resolves `asset_path` against a layer slice to its index, adapting the
+    /// production [`find_layer_id`] (which keys on [`LayerId`]) so the
+    /// matching-logic tests can assert by position.
+    fn find(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
+        // Synthesize one id per position so the result maps straight back to it.
+        let ids: Vec<LayerId> = (0..layers.len() as u32).map(LayerId::from_raw).collect();
+        let position = |id: LayerId| ids.iter().position(|&x| x == id).unwrap();
+        find_layer_id(asset_path, &ids, |id| &layers[position(id)], resolver).map(position)
+    }
+
     /// Builds a prim index for a given path string.
-    fn build(stack: &LayerStack, prim: &str) -> PrimIndex {
+    fn build(stack: &LayerGraph, prim: &str) -> PrimIndex {
         build_with_fallbacks(stack, prim, VariantFallbackMap::new())
     }
 
@@ -977,7 +987,7 @@ mod tests {
     /// The task-queue builder seeds a child prim from its cached parent, so the
     /// ancestors are composed top-down into a cache first (mirroring the cache's
     /// `ensure_index`), threading each prim's child context to the next.
-    fn build_with_fallbacks(stack: &LayerStack, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
+    fn build_with_fallbacks(stack: &LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
         let path = Path::from(prim);
 
         // Namespace chain from the topmost prim down to `path`.
@@ -1008,22 +1018,27 @@ mod tests {
         last.expect("a non-empty namespace chain")
     }
 
-    /// Helper: loads layers and creates a [`LayerStack`].
-    fn load_stack(path: &str) -> anyhow::Result<LayerStack> {
+    /// Helper: loads layers and builds a [`LayerGraph`].
+    fn load_stack(path: &str) -> anyhow::Result<LayerGraph> {
         let layers = load_layers(path)?;
-        Ok(LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true))
+        Ok(LayerGraph::from_layers(
+            layers,
+            0,
+            Box::new(DefaultResolver::new()),
+            true,
+        ))
     }
 
     /// Builds a single-layer stack from in-memory `root.usd` data.
-    fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerStack {
+    fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root)];
-        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true)
     }
 
     /// Builds a two-layer stack from in-memory `root.usd` + `ref.usd` data.
-    fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerStack {
+    fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
-        LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true)
     }
 
     #[test]
@@ -1032,7 +1047,7 @@ mod tests {
         let index = build(&stack, "/World");
 
         assert_eq!(index.nodes().count(), 1);
-        assert_eq!(index.nodes().next().unwrap().layer_index(), 0);
+        assert_eq!(index.nodes().next().unwrap().layer_id(), stack.all_ids()[0]);
         assert_eq!(index.nodes().next().unwrap().arc, ArcType::Root);
         Ok(())
     }
@@ -1045,8 +1060,9 @@ mod tests {
         let ns: Vec<_> = index.nodes().collect();
         assert_eq!(ns.len(), 1, "one per-site node spans both sublayers");
         assert_eq!(ns[0].arc, ArcType::Root);
-        let layers: Vec<usize> = ns[0].layers().map(|(li, _)| li).collect();
-        assert_eq!(layers, vec![0, 1], "stronger sublayer first");
+        let layers: Vec<LayerId> = ns[0].layers().map(|(li, _)| li).collect();
+        let expected: Vec<LayerId> = stack.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert_eq!(layers, expected, "stronger sublayer first");
         Ok(())
     }
 
@@ -1056,7 +1072,7 @@ mod tests {
         let index = build(&stack, "/World/Sphere");
 
         assert_eq!(index.nodes().count(), 1);
-        assert_eq!(index.nodes().next().unwrap().layer_index(), 0);
+        assert_eq!(index.nodes().next().unwrap().layer_id(), stack.all_ids()[0]);
         Ok(())
     }
 
@@ -1084,7 +1100,7 @@ mod tests {
         let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {\n  custom double x = 1\n}\n");
         let base = parse_usda("#usda 1.0\ndef \"Other\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/A");
 
         // The empty target is retained as a culled node so an editor sees the
@@ -1117,7 +1133,7 @@ mod tests {
             "#usda 1.0\ndef \"Ref\" {\n  def \"Sub\" ( inherits = </Ref/Class> ) {}\n  class \"Class\" { custom string x = \"ref\" }\n}\n",
         );
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let index = build(&stack, "/Model/Sub");
         let implied = index
@@ -1260,7 +1276,7 @@ mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let index = build(&stack, "/Model");
         let find = |p: &str| {
@@ -1295,7 +1311,7 @@ mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/Model");
 
         let dump = index.dump_to_string();
@@ -1369,7 +1385,7 @@ mod tests {
     fn find_layer_exact_match() -> Result<()> {
         let resolver = DefaultResolver::new();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer(&layers[0].identifier, &layers, &resolver).is_some());
+        assert!(find(&layers[0].identifier, &layers, &resolver).is_some());
         Ok(())
     }
 
@@ -1377,7 +1393,7 @@ mod tests {
     fn find_layer_suffix_match() -> Result<()> {
         let resolver = DefaultResolver::new();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("ref_target.usda", &layers, &resolver).is_some());
+        assert!(find("ref_target.usda", &layers, &resolver).is_some());
         Ok(())
     }
 
@@ -1394,7 +1410,7 @@ mod tests {
             model.canonicalize()?.to_string_lossy(),
             Box::new(sdf::Data::new()),
         )];
-        assert_eq!(find_layer("./asset/model.usda", &layers, &resolver), Some(0));
+        assert_eq!(find("./asset/model.usda", &layers, &resolver), Some(0));
         Ok(())
     }
 
@@ -1402,7 +1418,7 @@ mod tests {
     fn find_layer_no_partial_name_match() -> Result<()> {
         let resolver = DefaultResolver::new();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("target.usda", &layers, &resolver).is_none());
+        assert!(find("target.usda", &layers, &resolver).is_none());
         Ok(())
     }
 
@@ -1410,7 +1426,7 @@ mod tests {
     fn find_layer_not_found() -> Result<()> {
         let resolver = DefaultResolver::new();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find_layer("nonexistent.usda", &layers, &resolver).is_none());
+        assert!(find("nonexistent.usda", &layers, &resolver).is_none());
         Ok(())
     }
 
@@ -1436,7 +1452,7 @@ mod tests {
         let resolver = DefaultResolver::new();
         // `../Materials/Materials.usd` written inside `Props/link.usd`
         // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(find_layer("../Materials/Materials.usd", &layers, &resolver), Some(1));
+        assert_eq!(find("../Materials/Materials.usd", &layers, &resolver), Some(1));
         Ok(())
     }
 
@@ -1470,7 +1486,7 @@ mod tests {
             "should have node from C.usd via nested reference"
         );
 
-        let a_idx = find_layer("A.usd", &stack.layers, &*stack.resolver).unwrap();
+        let a_idx = stack.find("A.usd").unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
             stack.layer(a_idx).has_spec(&a_attr_path),
@@ -1517,7 +1533,7 @@ mod tests {
         let stack = load_stack(&path)?;
 
         assert!(
-            find_layer("camera_perspective.usd", &stack.layers, &*stack.resolver).is_some(),
+            stack.find("camera_perspective.usd").is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
@@ -1586,7 +1602,7 @@ def "Root" (
 "#,
         );
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let (_index, errors) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
@@ -1633,7 +1649,7 @@ def "Outer"
 "#,
         );
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let (_index, errors) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
@@ -1664,7 +1680,7 @@ def "Prim" (
 "#,
         );
         let layers = vec![sdf::Layer::new("test.usda", layer)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let (index, errors) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
@@ -1702,7 +1718,7 @@ def "Prim" (
             sdf::Layer::new("root.usda", root),
             sdf::Layer::new("target.usda", target),
         ];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
 
         let (index, errors) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
@@ -1817,11 +1833,12 @@ def "Prim" (
     fn node_strength_comparator() {
         let p = |s: &str| Path::from(s.to_string());
         let id = MapFunction::identity();
+        let lid = LayerId::from_raw(0);
         let mut g = PrimIndexGraph::default();
-        let root = g.add_child(NodeId::INVALID, 0, p("/A"), ArcType::Root, id.clone(), false);
-        let inh = g.add_child(root, 0, p("/Class"), ArcType::Inherit, id.clone(), false);
-        let r1 = g.add_child(root, 0, p("/R1"), ArcType::Reference, id.clone(), false);
-        let r2 = g.add_child(root, 0, p("/R2"), ArcType::Reference, id.clone(), false);
+        let root = g.add_child(NodeId::INVALID, lid, p("/A"), ArcType::Root, id.clone(), false);
+        let inh = g.add_child(root, lid, p("/Class"), ArcType::Inherit, id.clone(), false);
+        let r1 = g.add_child(root, lid, p("/R1"), ArcType::Reference, id.clone(), false);
+        let r2 = g.add_child(root, lid, p("/R2"), ArcType::Reference, id.clone(), false);
 
         // Arc type: an inherit outranks a reference.
         assert_eq!(g.compare_sibling_node_strength(inh, r1), Ordering::Less);
@@ -1837,7 +1854,7 @@ def "Prim" (
         assert_eq!(g.compare_node_strength(r2, r2), Ordering::Equal);
 
         // Namespace depth: a deeper arc-introduction site is stronger.
-        let deep = g.add_child(root, 0, p("/D"), ArcType::Reference, id.clone(), false);
+        let deep = g.add_child(root, lid, p("/D"), ArcType::Reference, id.clone(), false);
         g.nodes[deep.idx()].namespace_depth = 5;
         assert_eq!(g.compare_sibling_node_strength(deep, r1), Ordering::Less);
     }
@@ -1869,12 +1886,12 @@ def "Prim" (
     }
 
     /// Formats a prim stack as a vec of (layer_name, path) pairs for assertion.
-    fn prim_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String)> {
+    fn prim_stack(index: &PrimIndex, stack: &LayerGraph) -> Vec<(String, String)> {
         index
             .nodes()
             .map(|n| {
                 (
-                    layer_name(stack.identifier(n.layer_index())).to_owned(),
+                    layer_name(stack.identifier(n.layer_id())).to_owned(),
                     n.path.to_string(),
                 )
             })
@@ -2005,7 +2022,7 @@ def "Prim" (
     /// [`sdf::LayerOffset`] carried by the node — i.e., the composition of
     /// every arc offset and sublayer offset from the stage root down to this
     /// node's layer.
-    fn offset_stack(index: &PrimIndex, stack: &LayerStack) -> Vec<(String, String, ArcType, f64, f64)> {
+    fn offset_stack(index: &PrimIndex, stack: &LayerGraph) -> Vec<(String, String, ArcType, f64, f64)> {
         index
             .nodes()
             .flat_map(|n| {
@@ -2027,7 +2044,7 @@ def "Prim" (
             .collect()
     }
 
-    fn basic_time_offset_stack() -> anyhow::Result<LayerStack> {
+    fn basic_time_offset_stack() -> anyhow::Result<LayerGraph> {
         load_stack(&spec_composition_path("BasicTimeOffset_root/usda/root.usd"))
     }
 
@@ -2157,7 +2174,7 @@ def "Model"
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
 
         let samples = index
@@ -2189,7 +2206,7 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2216,7 +2233,7 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2244,7 +2261,7 @@ def "Root" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2286,7 +2303,7 @@ over "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/P");
 
         // Strongest-only resolution would drop the weaker "b"; folding keeps it.
@@ -2307,7 +2324,7 @@ def "P" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, None);
@@ -2330,7 +2347,7 @@ def "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerStack::new(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));

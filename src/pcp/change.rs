@@ -23,7 +23,8 @@ use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
 
-use super::Cache;
+use super::layer_graph::LayerGraph;
+use super::{Cache, LayerId};
 
 /// Plan + apply object for one author round.
 ///
@@ -104,7 +105,7 @@ impl Changes {
     /// data on every call, so a newly authored value is visible without
     /// any cache mutation. When the cache memoizes resolved property
     /// stacks, a tier-3 (`did_change_specs`) branch will land here.
-    pub fn did_change(&mut self, cache: &Cache, changes: &[(usize, ChangeList)]) {
+    pub fn did_change(&mut self, cache: &Cache, graph: &LayerGraph, changes: &[(LayerId, ChangeList)]) {
         for (layer_index, cl) in changes {
             for (path, entry) in cl.entries() {
                 if path.is_abs_root() {
@@ -112,13 +113,20 @@ impl Changes {
                 } else if path.is_property_path() {
                     continue;
                 } else {
-                    self.classify_prim_entry(cache, *layer_index, path, entry);
+                    self.classify_prim_entry(cache, graph, *layer_index, path, entry);
                 }
             }
         }
     }
 
-    fn classify_prim_entry(&mut self, cache: &Cache, layer: usize, path: &Path, entry: &ChangeEntry) {
+    fn classify_prim_entry(
+        &mut self,
+        cache: &Cache,
+        graph: &LayerGraph,
+        layer: LayerId,
+        path: &Path,
+        entry: &ChangeEntry,
+    ) {
         let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
             || entry
                 .info_changed
@@ -138,7 +146,7 @@ impl Changes {
                 self.fanout_significant(cache, layer, &stripped);
             }
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
-            if cache.layer_authors_field(layer, path, FieldKey::Instanceable.as_str()) {
+            if cache.layer_authors_field(graph, layer, path, FieldKey::Instanceable.as_str()) {
                 // An inert add whose spec carries `instanceable` flips the
                 // prim's instancing composition (spec 11.3.3) even though the
                 // add itself is inert; recompose the subtree.
@@ -172,7 +180,7 @@ impl Changes {
         //      `culled_dependencies` snapshot to consult.
     }
 
-    fn classify_root_entry(&mut self, _cache: &Cache, _layer: usize, entry: &ChangeEntry) {
+    fn classify_root_entry(&mut self, _cache: &Cache, _layer: LayerId, entry: &ChangeEntry) {
         for &key in &entry.info_changed {
             if key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
@@ -186,7 +194,7 @@ impl Changes {
         }
     }
 
-    fn fanout_significant(&mut self, cache: &Cache, layer: usize, path: &Path) {
+    fn fanout_significant(&mut self, cache: &Cache, layer: LayerId, path: &Path) {
         for dep in cache.dependencies().lookup_with_ancestors(layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
@@ -231,7 +239,7 @@ impl Changes {
     // ancestor subsumption. Once the classifier writes prim-tier entries
     // directly (today it collapses them into the significant set in
     // `classify_prim_entry`), this branch becomes load-bearing.
-    pub fn apply(self, cache: &mut Cache) {
+    pub fn apply(self, cache: &mut Cache, graph: &mut LayerGraph) {
         // Any index invalidation can change which prims are instances or how
         // they compose, so the shared-prototype registry (spec 11.3.3) must be
         // rebuilt rather than left stale. It is lazily repopulated on the next
@@ -254,24 +262,17 @@ impl Changes {
         if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             cache.clear_all_indices();
         }
+        // A `subLayers`/`subLayerOffsets` edit rebuilds the graph's sublayer
+        // edges (which subsumes the relocate recompute); a `layerRelocates`-only
+        // edit refreshes just the validated relocates. Each refreshes the graph's
+        // own diagnostic buckets in place; the cache holds no copy.
         if self
             .layer_stack
             .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
         {
-            cache.recompute_layer_stack();
-        }
-        if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
-            cache.recompute_relocates();
-        }
-        // A `subLayers` edit sets `LAYERS`, which both rebuild masks include, so
-        // both recomputes above can run for one edit. Queue the regenerated
-        // layer-stack errors once, after both, so each diagnostic is retained
-        // exactly once.
-        if self
-            .layer_stack
-            .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD | LayerStackChanges::NEEDS_RELOCATES_REBUILD)
-        {
-            cache.queue_layer_stack_errors();
+            graph.recompute_sublayers();
+        } else if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
+            graph.recompute_relocates();
         }
         if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
             // Cache already cleared above; layer-stack precomputed state
@@ -297,39 +298,44 @@ impl Changes {
 mod tests {
     use super::*;
     use crate::ar::DefaultResolver;
-    use crate::pcp::{LayerStack, VariantFallbackMap};
+    use crate::pcp::VariantFallbackMap;
     use crate::sdf::{ChangeFlags, ChangeList};
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")
     }
 
-    fn empty_cache() -> Cache {
-        let stack = LayerStack::new(Vec::new(), 0, Box::new(DefaultResolver::new()), true);
-        Cache::new(stack, VariantFallbackMap::new())
+    /// The first layer id in the graph, or a placeholder for an empty graph.
+    fn first_layer(graph: &LayerGraph) -> LayerId {
+        graph.all_ids().first().copied().unwrap_or(LayerId::INVALID)
+    }
+
+    fn empty_cache() -> (LayerGraph, Cache) {
+        let graph = LayerGraph::from_layers(Vec::new(), 0, Box::new(DefaultResolver::new()), true);
+        (graph, Cache::new(VariantFallbackMap::new(), Vec::new()))
     }
 
     #[test]
     fn references_promotes_to_significant() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
             .info_changed
             .insert(FieldKey::References.as_str());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
     #[test]
     fn variant_selection_promotes_to_significant() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
             .info_changed
             .insert(FieldKey::VariantSelection.as_str());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -343,24 +349,24 @@ mod tests {
             .create_prim("/X", crate::sdf::Specifier::Over, "")
             .unwrap()
             .set_instanceable(true);
-        let stack = LayerStack::new(vec![layer], 0, Box::new(DefaultResolver::new()), true);
-        let cache = Cache::new(stack, VariantFallbackMap::new());
+        let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
+        let cache = Cache::new(VariantFallbackMap::new(), Vec::new());
 
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/X")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
 
         assert!(changes.cache.did_change_significantly.contains(&p("/X")));
     }
 
     #[test]
     fn inert_add_lands_on_spec_tier() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         // No dependent indices exist on an empty cache, so nothing fans out
         // to the spec tier — but the prim itself is NOT in the significant
         // tier either (inert adds don't blow the graph).
@@ -370,60 +376,60 @@ mod tests {
 
     #[test]
     fn non_inert_add_is_significant_with_self_path() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
     #[test]
     fn sublayers_change_is_layer_stack_significant() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
             .insert(FieldKey::SubLayers.as_str());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         assert!(changes.layer_stack.contains(LayerStackChanges::LAYERS));
     }
 
     #[test]
     fn default_prim_change_is_significant_at_root() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
             .insert(FieldKey::DefaultPrim.as_str());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
 
     #[test]
     fn layer_relocates_change_flags_relocates() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
             .insert(FieldKey::LayerRelocates.as_str());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
 
     #[test]
     fn property_changes_no_op() {
-        let cache = empty_cache();
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &[(0, cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.is_empty());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));

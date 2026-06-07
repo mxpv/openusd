@@ -8,8 +8,11 @@
 //! (spec 12.3.4.1.3) are resolved to explicit metadata elsewhere and are not
 //! parsed by [`ClipSet::parse_all`].
 
-use crate::sdf::{LayerOffset, Path, Value};
 use std::collections::HashMap;
+
+use crate::sdf::{LayerOffset, Path, Value};
+
+use super::LayerId;
 
 /// Dictionary keys inside a single clip set's metadata (spec 12.3.4.1).
 pub(crate) mod keys {
@@ -71,8 +74,8 @@ pub(crate) struct ClipSet {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedClipSet {
     pub set: ClipSet,
-    pub asset_layer: usize,
-    pub manifest_layer: Option<usize>,
+    pub asset_layer: LayerId,
+    pub manifest_layer: Option<LayerId>,
 }
 
 impl ClipSet {

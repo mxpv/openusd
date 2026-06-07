@@ -46,6 +46,11 @@ impl Layer {
     pub fn data(&self) -> &dyn AbstractData {
         self.data.as_ref()
     }
+
+    /// The layer's resolved, canonical identifier.
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
 }
 
 /// Persistent format for a saved layer.

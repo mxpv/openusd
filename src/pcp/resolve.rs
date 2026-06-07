@@ -19,7 +19,7 @@ use super::clip;
 use super::graph::{ArcType, Node};
 use super::index::PrimIndex;
 use super::mapping::MapFunction;
-use super::LayerStack;
+use super::{LayerGraph, LayerId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
 ///
@@ -29,11 +29,11 @@ use super::LayerStack;
 struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
-    /// Global index of the contributing layer, as yielded by
+    /// Id of the contributing layer, as yielded by
     /// [`Node::layers`](super::graph::Node::layers) and used with
-    /// [`LayerStack::layer`](super::LayerStack::layer) — not a position within
+    /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
     /// the node's layer stack.
-    layer: usize,
+    layer: LayerId,
     /// The path queried in the contributing layer (the node path with the
     /// property suffix applied).
     query_path: Cow<'a, Path>,
@@ -55,7 +55,7 @@ pub(crate) struct InvalidTarget {
     /// The owning property path, in the contributing node's namespace.
     pub property: Path,
     /// Global index of the layer that authored the target.
-    pub layer: usize,
+    pub layer: LayerId,
     /// The arc the target was authored across (selects the "reference" /
     /// "inherit" / … phrasing).
     pub arc: ArcType,
@@ -80,7 +80,7 @@ impl PrimIndex {
     pub(crate) fn resolve_field(
         &self,
         field: &str,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Option<Value>> {
         if field == FieldKey::Specifier.as_str() {
@@ -107,7 +107,7 @@ impl PrimIndex {
     pub(crate) fn resolve_token_list_op(
         &self,
         field: FieldKey,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<String>> {
         let field = field.as_str();
@@ -146,10 +146,10 @@ impl PrimIndex {
     pub(crate) fn resolve_path_list_op_validated(
         &self,
         field: FieldKey,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
         relocates: &[(Path, Path)],
-        escaped: &[(Path, usize)],
+        escaped: &[(Path, LayerId)],
     ) -> Result<(Vec<Path>, Vec<InvalidTarget>)> {
         let mut ops = Vec::new();
         let mut invalid = Vec::new();
@@ -248,7 +248,7 @@ impl PrimIndex {
     fn collect_path_list_ops(
         &self,
         field: FieldKey,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<sdf::PathListOp>> {
         let field = field.as_str();
@@ -318,7 +318,7 @@ impl PrimIndex {
     pub(crate) fn resolve_path_list_op_deleted(
         &self,
         field: FieldKey,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Vec<Path>> {
         // `collect_path_list_ops` yields strongest first; deletions accumulate as
@@ -388,7 +388,7 @@ impl PrimIndex {
     fn opinions<'a>(
         &'a self,
         field: &'a str,
-        stack: &'a LayerStack,
+        stack: &'a LayerGraph,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
         // Each node fans out into one opinion per contributing layer in its
@@ -435,7 +435,7 @@ impl PrimIndex {
     /// recursively merged into it (spec 12.2.5); a `ValueBlock` then blocks
     /// only the remaining weaker opinions, and weaker non-dictionary opinions
     /// are ignored.
-    fn resolve_strongest(&self, field: &str, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_strongest(&self, field: &str, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let mut merged: Option<HashMap<String, Value>> = None;
         for opinion in self.opinions(field, stack, prop_suffix) {
             let value = opinion?.value;
@@ -463,7 +463,7 @@ impl PrimIndex {
     /// strongest authored opinion wins as a whole.
     pub(crate) fn resolve_time_samples(
         &self,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
         self.time_samples_in(stack, prop_suffix, None)
@@ -479,9 +479,9 @@ impl PrimIndex {
     /// stack counts as local.
     pub(crate) fn resolve_local_time_samples(
         &self,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        local_layers: &HashSet<usize>,
+        local_layers: &HashSet<LayerId>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
         self.time_samples_in(stack, prop_suffix, Some(local_layers))
     }
@@ -491,9 +491,9 @@ impl PrimIndex {
     /// root-layer-stack opinions contribute.
     fn time_samples_in(
         &self,
-        stack: &LayerStack,
+        stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        local_layers: Option<&HashSet<usize>>,
+        local_layers: Option<&HashSet<LayerId>>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -533,7 +533,7 @@ impl PrimIndex {
     /// encodings (and bare vecs, treated as explicit) are accepted, since USDC
     /// backends may decode it either way. A `ValueBlock` with no stronger
     /// opinion leaves the field unauthored (`None`), falling back to name order.
-    pub(crate) fn clip_sets_order(&self, stack: &LayerStack) -> Result<Option<Vec<String>>> {
+    pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>> {
         let mut ops = Vec::new();
         for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
@@ -554,11 +554,11 @@ impl PrimIndex {
     /// authored path-bearing fields. The top-level `clips` dictionary composes
     /// recursively, but relative clip assets must still be anchored to the
     /// layer that supplied `assetPaths`/`manifestAssetPath`.
-    pub(crate) fn resolve_clip_sets(&self, stack: &LayerStack) -> Result<Vec<clip::ResolvedClipSet>> {
+    pub(crate) fn resolve_clip_sets(&self, stack: &LayerGraph) -> Result<Vec<clip::ResolvedClipSet>> {
         let mut sets: HashMap<String, HashMap<String, Value>> = HashMap::new();
         let mut blocked_sets: HashSet<String> = HashSet::new();
-        let mut asset_layers: HashMap<String, usize> = HashMap::new();
-        let mut manifest_layers: HashMap<String, usize> = HashMap::new();
+        let mut asset_layers: HashMap<String, LayerId> = HashMap::new();
+        let mut manifest_layers: HashMap<String, LayerId> = HashMap::new();
         // Sets with explicit `assetPaths` (whose `active`/`times` are retimed
         // as they compose) versus the offset of a template set's authoring
         // node (whose schedule is derived later and retimed afterwards).
@@ -652,7 +652,7 @@ impl PrimIndex {
     /// Variability resolution per spec 12.2.3: weakest authored opinion wins.
     /// Iterates strongest-to-weakest tracking the latest match, so a
     /// [`Value::ValueBlock`] still blocks weaker opinions.
-    fn resolve_variability(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_variability(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Variability.as_str();
         let mut weakest = None;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -671,7 +671,7 @@ impl PrimIndex {
     /// Returns `Bool(true)` as soon as any opinion is true, `Bool(false)` if
     /// at least one opinion was authored but none were true, and `None`
     /// otherwise.
-    fn resolve_custom(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_custom(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Custom.as_str();
         let mut saw_opinion = false;
         for opinion in self.opinions(field, stack, prop_suffix) {
@@ -695,7 +695,7 @@ impl PrimIndex {
     /// It is `class` if the strongest defining opinion not from a direct
     /// inherit is `class`, or if every defining opinion is `class`. It is
     /// `over` only when every authored opinion is `over`.
-    fn resolve_specifier(&self, stack: &LayerStack, prop_suffix: Option<&str>) -> Result<Option<Value>> {
+    fn resolve_specifier(&self, stack: &LayerGraph, prop_suffix: Option<&str>) -> Result<Option<Value>> {
         let field = FieldKey::Specifier.as_str();
         let mut specs: Vec<(Specifier, ArcType)> = Vec::new();
         for opinion in self.opinions(field, stack, prop_suffix) {

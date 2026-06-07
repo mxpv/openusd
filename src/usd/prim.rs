@@ -293,7 +293,8 @@ impl Prim {
     /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas`.
     /// Multi-apply instances appear as-is (e.g. `PhysicsLimitAPI:rotZ`).
     pub fn api_schemas(&self) -> anyhow::Result<Vec<String>> {
-        self.stage.masked(&self.path, |cache| cache.api_schemas(&self.path))
+        self.stage
+            .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
 
     /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
@@ -355,7 +356,7 @@ impl Prim {
     /// `true` if the prim index contains at least one composition arc.
     pub fn has_composition_arc(&self) -> anyhow::Result<bool> {
         self.stage
-            .masked(&self.path, |cache| cache.has_composition_arc(&self.path))
+            .masked(&self.path, |g, cache| cache.has_composition_arc(g, &self.path))
     }
 
     /// `true` if this prim is an instance (spec 11.3.3): `instanceable` resolves
@@ -406,7 +407,8 @@ impl Prim {
     /// is an instance, else `None` (spec 11.3.3). Mirrors C++
     /// `UsdPrim::GetPrototype`.
     pub fn prototype(&self) -> anyhow::Result<Option<sdf::Path>> {
-        self.stage.masked(&self.path, |cache| cache.prototype_of(&self.path))
+        self.stage
+            .masked(&self.path, |g, cache| cache.prototype_of(g, &self.path))
     }
 
     /// Returns the instance prims sharing this prototype root (a
@@ -489,7 +491,7 @@ impl Prim {
     /// contributes a prim spec to this prim, strongest first. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
     pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.cache_mut().prim_stack(&self.path)
+        self.stage.with_cache(|g, c| c.prim_stack(g, &self.path))
     }
 
     /// Returns a handle to this prim's composition index (C++
@@ -520,7 +522,9 @@ impl Prim {
     /// filtered by the stage's population mask. The name-only counterpart of
     /// [`children`](Self::children).
     pub fn child_names(&self) -> anyhow::Result<Vec<String>> {
-        let names = self.stage.masked(&self.path, |cache| cache.prim_children(&self.path))?;
+        let names = self
+            .stage
+            .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))?;
         Ok(self.stage.filter_child_names(&self.path, names))
     }
 
@@ -538,7 +542,8 @@ impl Prim {
     /// Returns the composed property names of this prim. Mirrors C++
     /// `UsdPrim::GetPropertyNames`.
     pub fn property_names(&self) -> anyhow::Result<Vec<String>> {
-        self.stage.masked(&self.path, |cache| cache.prim_properties(&self.path))
+        self.stage
+            .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
     }
 
     /// Returns handles to the composed attributes of this prim. Mirrors C++
@@ -671,7 +676,7 @@ impl PrimIndexRef {
     /// Returns this prim's composition graph (C++ `UsdPrim::GetPrimIndex`),
     /// building it if needed. A clone, since the cache owns the cached index.
     pub fn graph(&self) -> anyhow::Result<pcp::PrimIndex> {
-        Ok(self.stage.cache_mut().index(&self.path)?.clone())
+        self.stage.with_cache(|g, c| Ok(c.index(g, &self.path)?.clone()))
     }
 
     /// Composes this prim's child names together with the names prohibited at it
@@ -679,7 +684,7 @@ impl PrimIndexRef {
     /// re-introduced — returned as `(children, prohibited)` (C++
     /// `PcpPrimIndex::ComputePrimChildNames`).
     pub fn child_names(&self) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        self.stage.cache_mut().compute_prim_child_names(&self.path)
+        self.stage.with_cache(|g, c| c.compute_prim_child_names(g, &self.path))
     }
 }
 
@@ -711,7 +716,7 @@ impl VariantSets {
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
     pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
-        self.stage.cache_mut().variant_selections(&self.prim)
+        self.stage.with_cache(|g, c| c.variant_selections(g, &self.prim))
     }
 }
 
