@@ -42,10 +42,8 @@ impl std::fmt::Display for DependencyKind {
 
 /// An error encountered during layer collection that may be recoverable.
 ///
-/// When opening a stage, some errors (such as missing referenced files) can be
-/// tolerated so that the stage is partially constructed. A callback provided via
-/// [`StageBuilder::on_error`](crate::usd::StageBuilder::on_error) receives
-/// these errors and decides whether to continue or abort.
+/// Some errors, such as missing referenced files, can be tolerated so collection
+/// can continue. [`Collector::on_error`] configures that policy.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

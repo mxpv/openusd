@@ -96,10 +96,9 @@
 //! takes only shared references, making it suitable for future parallel
 //! execution.
 //!
-//! Composition errors ([`Error`]) are returned from [`Cache`](cache::Cache)
-//! methods and handled by the [`Stage`](crate::usd::Stage)'s error callback.
-//! The callback decides whether to skip the broken arc and continue or
-//! abort composition entirely.
+//! Recoverable composition errors ([`Error`]) are retained by the cache and
+//! exposed through [`Stage::composition_errors`](crate::usd::Stage::composition_errors).
+//! Operational failures are returned to the caller.
 //!
 //! # Cache invalidation
 //!
@@ -149,29 +148,45 @@
 //! gaps are tracked asset-by-asset in `SKIP_PCP_COMPLIANCE`
 //! (`tests/composition.rs`).
 //!
-//! ## Composition gaps (suppressed compliance assets)
+//! ## Composition gaps
 //!
-//! - Specializes/inherit authored inside a selected variant. A class arc whose
-//!   target resolves to a variant-selection path is left uncomposed
-//!   (`eval_class_arcs` skips it); it needs C++ `_DetermineInheritPath`'s
-//!   strip/re-add of the selection together with the specializes-copy-to-root
-//!   and reference strength interaction (`SpecializesAndVariants4`).
-//! - Relocate target remapping. A relationship/connection target naming a
-//!   pre-relocation source is remapped through `effective_relocates`, which
-//!   discovers relocates by scanning whichever prims are already cached, so the
-//!   result is traversal-order-dependent rather than derived from the layer
-//!   stack's relocates (`ErrorInvalidPreRelocateTargetPath`,
-//!   `BasicRelocateToAnimInterfaceAsNewRootPrim`; the `TODO` at
-//!   `Cache::compose_property_paths`).
-//! - Relocates re-rooting a prim under an inherit
-//!   (`TrickyInheritsAndRelocates`, `TrickyInheritsAndRelocatesToNewRootPrim`)
-//!   and cross-arc implied relocations (C++ `_EvalImpliedRelocations`'s graft)
-//!   are unported (`eval_implied_relocations`'s `TODO(relocates)`). The
-//!   per-node child-name fold otherwise reproduces the symmetric-rig and
+//! One compliance asset is still suppressed in `SKIP_PCP_COMPLIANCE`
+//! (`tests/composition.rs`):
+//!
+//! - Instance-target-path validation (`ErrorInvalidInstanceTargetPath`). A
+//!   relationship/connection authored in a class that targets a *different*
+//!   instance of that class is invalid with its own "is authored in a class but
+//!   refers to an instance of that class" message (C++
+//!   `PcpErrorInvalidInstanceTargetPath`); the *self* instance keeps the generic
+//!   out-of-scope message. This needs a cross-prim check that the target prim
+//!   inherits the class, and it depends on the faithful relocate-target
+//!   translation below (the symmetric-rig case keeps a class connection target at
+//!   its pre-relocation path). A step-by-step plan lives in
+//!   `docs/plans/error-invalid-instance-target-path.md`.
+//!
+//! Two relocate approximations remain even though their former compliance assets
+//! now reproduce byte-for-byte — they are the deeper work the suppressed asset
+//! above needs:
+//!
+//! - Relocate-target translation. A relationship/connection target naming a
+//!   pre-relocation source is remapped by a global `chain_through_relocates` over
+//!   relocates discovered by scanning whichever prims are already cached, so the
+//!   result is traversal-order-dependent (the `TODO` at
+//!   `Cache::compose_property_paths`), with a layer-difference proxy in
+//!   `resolve_path_list_op_validated` standing in for the exact rule. The
+//!   faithful form folds relocates into each node's arc maps, so a target is
+//!   retimed only by the Relocate arcs in its own chain (C++
+//!   `PcpBuildFilteredTargetIndex` / `PcpTranslatePathFromNodeToRoot`).
+//! - Cross-arc implied relocations (C++ `_EvalImpliedRelocations`'s graft) are
+//!   unported (`eval_implied_relocations`'s `TODO(relocates)`). The per-node
+//!   child-name fold otherwise reproduces the symmetric-rig and
 //!   multi-relocation-chain cases.
-//! - `timeCodesPerSecond`-derived layer-offset scaling (spec 12.x), residual
-//!   implied/nested-class ordering, and prototype-redirection in the instancing
-//!   dump.
+//!
+//! Beyond the compliance assets, the instancing dump still redirects prototypes
+//! through aliases rather than composing dedicated prototype prims. Goldens that
+//! can never be reproduced byte-for-byte — pxr-internal C++ warnings or Python
+//! tracebacks emitted by the reference test framework — stay on the looser
+//! existence check in `UNREPRODUCIBLE_GOLDEN`.
 //!
 //! ## Permissions (`permission = private`)
 //!
@@ -338,9 +353,8 @@ pub(crate) struct LayerStack {
     /// Recoverable errors detected while assembling the layer stack — sublayer
     /// cycles and structurally invalid authored relocates (C++ errors surfaced
     /// while computing the layer stack). The [`Cache`](cache::Cache) drains these
-    /// into its pending errors — once at construction and again whenever a
-    /// `subLayers`/`layerRelocates` edit recomputes them — so they reach the stage
-    /// error handler the same way per-prim composition errors do.
+    /// into its composition errors once at construction and again whenever a
+    /// `subLayers`/`layerRelocates` edit recomputes them.
     pub(crate) layer_stack_errors: Vec<Error>,
     /// Resolver used to anchor relative asset paths when locating layers.
     pub(crate) resolver: Box<dyn Resolver>,
@@ -370,7 +384,8 @@ impl LayerStack {
             })
             .collect();
         let has_relocates = Self::compute_has_relocates(&layers);
-        let (layer_relocates, relocate_errors) = rel::extract_layer_relocates(&layers);
+        let (layer_relocates, relocate_errors) =
+            rel::extract_layer_relocates(&layers, &sublayer_stacks, session_layer_count);
         layer_stack_errors.extend(relocate_errors);
         Self {
             layers,
@@ -487,25 +502,43 @@ impl LayerStack {
     /// salted-earth prohibition). Includes deletion (empty-target) relocates:
     /// their source is still a prohibited relocation source.
     pub(crate) fn is_relocation_source(&self, ambient: &[(usize, sdf::LayerOffset)], source: &Path) -> bool {
-        ambient.iter().any(|&(layer, _)| {
+        self.relocation_source_layer(ambient, source).is_some()
+    }
+
+    /// Identifier of the strongest layer in `ambient` that authors a relocate
+    /// whose SOURCE is `source`, or `None` if none does. Names the layer in the
+    /// prohibited-relocation-source diagnostic.
+    pub(crate) fn relocation_source_layer(&self, ambient: &[(usize, sdf::LayerOffset)], source: &Path) -> Option<&str> {
+        ambient.iter().find_map(|&(layer, _)| {
             self.layer_relocates
                 .get(&layer)
-                .is_some_and(|pairs| pairs.iter().any(|(s, _)| s == source))
+                .filter(|pairs| pairs.iter().any(|(s, _)| s == source))
+                .map(|_| self.layers[layer].identifier.as_str())
         })
     }
 
     /// Re-derives the cached relocate state — [`has_relocates`](Self::has_relocates),
-    /// [`layer_relocates`](Self::layer_relocates), and the invalid-relocate
+    /// [`layer_relocates`](Self::layer_relocates), and the relocate-extraction
     /// portion of [`layer_stack_errors`](Self::layer_stack_errors) — from the
     /// current layers. Called after a `layerRelocates` edit that does not rebuild
     /// the sublayer precomputation (which would refresh both itself); keeping
     /// them in sync is what re-enables and re-targets the builder's relocate passes.
     pub(crate) fn recompute_relocate_data(&mut self) {
         self.has_relocates = Self::compute_has_relocates(&self.layers);
-        let (layer_relocates, relocate_errors) = rel::extract_layer_relocates(&self.layers);
+        let (layer_relocates, relocate_errors) =
+            rel::extract_layer_relocates(&self.layers, &self.sublayer_stacks, self.session_layer_count);
         self.layer_relocates = layer_relocates;
-        self.layer_stack_errors
-            .retain(|e| !matches!(e, Error::InvalidRelocate { .. }));
+        // Drop every error `extract_layer_relocates` can produce before re-adding
+        // the fresh set, so a resolved conflict clears and a surviving one is not
+        // duplicated across recomputes.
+        self.layer_stack_errors.retain(|e| {
+            !matches!(
+                e,
+                Error::InvalidRelocate { .. }
+                    | Error::SameTargetRelocations { .. }
+                    | Error::ConflictingRelocation { .. }
+            )
+        });
         self.layer_stack_errors.extend(relocate_errors);
     }
 
@@ -745,29 +778,45 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
 
 /// An error encountered while building a [`PrimIndex`](index::PrimIndex).
 ///
-/// These errors represent recoverable composition failures — a missing
-/// layer or invalid metadata does not have to be fatal. The error handler
-/// provided via [`StageBuilder::on_error`](crate::usd::StageBuilder::on_error)
-/// decides whether to skip the broken arc and continue, or abort.
-#[derive(Debug, thiserror::Error)]
+/// These errors represent composition diagnostics. Recoverable failures skip
+/// the broken opinion and are retained by [`Stage`](crate::usd::Stage).
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// A composition arc cycle was detected.
-    #[error("composition arc cycle at {path} (depth {depth})")]
-    ArcCycle {
-        /// The prim path where the cycle was detected.
-        path: Path,
-        /// Recursion depth when the cycle was detected.
-        depth: usize,
-    },
+    /// A composition arc cycle was detected (C++ `PcpErrorArcCycle`). The arc
+    /// closing the cycle is dropped so the rest of the prim still composes;
+    /// `.0.hops` is the chain of arcs from the composing prim to the cycle-closing
+    /// (CANNOT) arc, for the diagnostic.
+    #[error("composition arc cycle at {}", .0.composing)]
+    ArcCycle(CycleChain),
 
-    /// A layer referenced by a composition arc was not found among loaded layers.
+    /// A layer referenced by a composition arc was not found among loaded layers
+    /// (C++ "Could not open asset … for {arc}").
     #[error("unresolved {arc:?} layer @{asset_path}@ at {site_path}")]
     UnresolvedLayer {
         /// The asset path that could not be matched.
         asset_path: String,
         /// The composition arc type that introduced this dependency.
         arc: ArcType,
+        /// Identifier of the layer that authored the arc.
+        introduced_by: String,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+    },
+
+    /// A reference/payload resolved its target layer, but the named prim path
+    /// authors no spec there (C++ `PcpErrorUnresolvedPrimPath`). The arc is
+    /// dropped while the rest of the prim still composes.
+    #[error("unresolved {arc:?} prim path @{target_layer}@<{prim_path}> at {site_path}")]
+    UnresolvedPrimPath {
+        /// The composition arc type.
+        arc: ArcType,
+        /// Identifier of the resolved target layer that lacks the prim.
+        target_layer: String,
+        /// The prim path that authors no spec in the target layer.
+        prim_path: Path,
+        /// Identifier of the layer that authored the arc.
+        introduced_by: String,
         /// The prim path where the arc was authored.
         site_path: Path,
     },
@@ -800,7 +849,7 @@ pub enum Error {
     /// parse or did not evaluate to a string (C++ `PcpErrorVariableExpression`).
     /// The arc is skipped and the rest of the prim still composes, so this is
     /// recoverable.
-    #[error("invalid {arc:?} asset-path expression {expression} at {site_path}: {source}")]
+    #[error("invalid {arc:?} asset-path expression {expression} at {site_path}: {message}")]
     InvalidExpression {
         /// The raw, unevaluated backtick expression.
         expression: String,
@@ -809,8 +858,7 @@ pub enum Error {
         /// The prim path where the arc was authored.
         site_path: Path,
         /// The parse or evaluation failure.
-        #[source]
-        source: anyhow::Error,
+        message: String,
     },
 
     /// A direct composition arc (a reference/inherit/payload/specialize
@@ -827,6 +875,103 @@ pub enum Error {
         target_path: Path,
     },
 
+    /// A composition arc (inherit/specialize/reference/payload/relocate) targets
+    /// a prim that is the source of a relocation — a prohibited child of its
+    /// parent (C++ `PcpErrorArcToProhibitedChild`): allowing it would resurrect the
+    /// opinions the relocation moved away. The arc is dropped. Reported while
+    /// composing the prim that authored the arc (`composing`, stamped by the
+    /// cache).
+    #[error("{arc:?} at {site} targets prohibited relocation source {target}")]
+    ProhibitedRelocationSource {
+        /// The composition arc type.
+        arc: ArcType,
+        /// The prim that authored the arc.
+        site: Path,
+        /// Identifier of the layer that authored the arc.
+        site_layer: String,
+        /// The prohibited arc target.
+        target: Path,
+        /// Identifier of the layer containing the target.
+        target_layer: String,
+        /// The relocation source making the target prohibited.
+        reloc_source: Path,
+        /// Identifier of the layer authoring the relocation.
+        reloc_layer: String,
+        /// The prim being composed when the arc was followed.
+        composing: Path,
+    },
+
+    /// A relationship target or attribute connection authored across a
+    /// composition arc names a path outside that arc's namespace scope (C++
+    /// `PcpErrorInvalidExternalTargetPath`). The target cannot translate through
+    /// the arc, so it is dropped. Reported while composing the owning prim.
+    #[error("invalid external target {target} on {property}")]
+    InvalidExternalTargetPath {
+        /// Whether this is an attribute connection.
+        is_connection: bool,
+        /// The dropped target path.
+        target: Path,
+        /// The owning property path.
+        property: Path,
+        /// Identifier of the authoring layer.
+        layer: String,
+        /// The composition arc crossed by the opinion.
+        arc: ArcType,
+        /// The arc's root in composed namespace.
+        arc_root: Path,
+        /// The prim being composed when the target was found.
+        composing: Path,
+    },
+
+    /// A property composes specs of inconsistent types — an attribute spec and a
+    /// relationship spec at the same path (C++ `PcpErrorInconsistentPropertyType`).
+    /// The strongest (defining) spec's type wins; weaker specs of the other type
+    /// are ignored. Reported while composing the owning prim (`.composing`).
+    #[error("inconsistent spec types for property {property}")]
+    InconsistentPropertyType {
+        /// The composed property path.
+        property: Path,
+        /// Identifier of the defining spec's layer.
+        defining_layer: String,
+        /// The defining spec's path.
+        defining_path: Path,
+        /// Whether the defining spec is an attribute.
+        defining_is_attribute: bool,
+        /// Identifier of the conflicting spec's layer.
+        conflicting_layer: String,
+        /// The conflicting spec's path.
+        conflicting_path: Path,
+        /// Whether the conflicting spec is an attribute.
+        conflicting_is_attribute: bool,
+        /// The prim being composed when the conflict was found.
+        composing: Path,
+    },
+
+    /// A layer authors a direct opinion at a relocation source path, which is
+    /// invalid and ignored (C++ `PcpErrorOpinionAtRelocationSource`): once a prim
+    /// is relocated, its source location must be empty. Reported while composing
+    /// the prim that follows the relocation (`composing`); the cache stamps that
+    /// path when collecting the build's errors.
+    #[error("invalid opinion at relocation source {source_path} in layer {layer}")]
+    OpinionAtRelocationSource {
+        /// The relocation source path carrying the invalid opinion.
+        source_path: Path,
+        /// Identifier of the layer authoring the invalid opinion.
+        layer: String,
+        /// The prim being composed when the relocation was followed.
+        composing: Path,
+    },
+
+    /// A sublayer asset path could not be resolved while building a layer stack
+    /// (C++ `PcpErrorInvalidSublayerPath`). The missing sublayer is skipped.
+    #[error("unresolved sublayer @{asset_path}@ introduced by @{introduced_by}@")]
+    UnresolvedSublayer {
+        /// The unresolved authored asset path.
+        asset_path: String,
+        /// Identifier of the layer that authored the sublayer.
+        introduced_by: String,
+    },
+
     /// A layer's `subLayers` form a cycle — a layer includes itself, directly or
     /// transitively (C++ `PcpErrorSublayerCycle`). Detected while building the
     /// stage root layer stack; the cyclic sublayer is skipped and the rest of the
@@ -840,11 +985,44 @@ pub enum Error {
         seen_layer: String,
     },
 
-    /// An authored relocate whose source and target are nested — the target an
-    /// ancestor of the source, or vice versa, or identical — is structurally
-    /// invalid and ignored (C++ `PcpErrorInvalidAuthoredRelocates`). Composing it
-    /// would not terminate, so it is dropped while the layer stack still composes.
-    #[error("invalid relocate from {source_path} to {target_path} authored in {layer}")]
+    /// Several relocations in a layer stack move different sources to the same
+    /// target (C++ `PcpErrorInvalidSameTargetRelocations`). All of them are
+    /// invalid and dropped.
+    #[error("multiple relocations target {target}")]
+    SameTargetRelocations {
+        /// The shared target path.
+        target: Path,
+        /// Source paths and their authoring layer identifiers.
+        sources: Vec<(Path, String)>,
+    },
+
+    /// Two relocations in a layer stack conflict — one's target is another's
+    /// source, or one's source/target is a descendant of another's source (C++
+    /// `PcpErrorInvalidConflictingRelocation`). The relocate is dropped; `reason`
+    /// is the specific rule violated.
+    #[error("conflicting relocation from {source_path} to {target_path}")]
+    ConflictingRelocation {
+        /// The reported relocate's source.
+        source_path: Path,
+        /// The reported relocate's target.
+        target_path: Path,
+        /// Identifier of the reported relocate's layer.
+        layer: String,
+        /// The conflicting relocate's source.
+        other_source_path: Path,
+        /// The conflicting relocate's target.
+        other_target_path: Path,
+        /// Identifier of the conflicting relocate's layer.
+        other_layer: String,
+        /// The conflict rule violated.
+        reason: RelocateConflictReason,
+    },
+
+    /// An authored relocate that breaks a structural rule — source and target
+    /// identical or nested, or a root-prim source — is invalid and ignored (C++
+    /// `PcpErrorInvalidAuthoredRelocates`). It is dropped while the layer stack
+    /// still composes. `reason` is the specific rule violated.
+    #[error("invalid relocate from {source_path} to {target_path} authored in {layer}: {reason}")]
     InvalidRelocate {
         /// The relocate source path.
         source_path: Path,
@@ -852,12 +1030,69 @@ pub enum Error {
         target_path: Path,
         /// Identifier of the layer that authored the relocate.
         layer: String,
+        /// The structural rule the relocate violates.
+        reason: InvalidRelocateReason,
     },
+}
 
-    /// Unexpected internal failure surfaced during composition (typically I/O
-    /// or value-decoding errors from the underlying layer data).
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+/// Structural rule violated by an authored relocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InvalidRelocateReason {
+    /// A root prim cannot be relocated.
+    #[error("Root prims cannot be the source of a relocate.")]
+    RootPrimSource,
+    /// A relocate cannot target its source.
+    #[error("The target of a relocate cannot be the same as its source.")]
+    SourceEqualsTarget,
+    /// A relocate target cannot contain its source.
+    #[error("The target of a relocate cannot be an ancestor of its source.")]
+    TargetIsAncestor,
+    /// A relocate source cannot contain its target.
+    #[error("The target of a relocate cannot be a descendant of its source.")]
+    TargetIsDescendant,
+}
+
+/// Pairwise rule violated by two relocates in one layer stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, thiserror::Error)]
+pub enum RelocateConflictReason {
+    /// One relocate targets another relocate's source.
+    #[error("The target of a relocate cannot be the source of another relocate in the same layer stack.")]
+    TargetIsSource,
+    /// One relocate sources another relocate's target.
+    #[error("The source of a relocate cannot be the target of another relocate in the same layer stack.")]
+    SourceIsTarget,
+    /// One relocate targets a descendant of another relocate's source.
+    #[error("The target of a relocate cannot be a descendant of the source of another relocate.")]
+    TargetDescendant,
+    /// One relocate sources a descendant of another relocate's source.
+    #[error("The source of a relocate cannot be a descendant of the source of another relocate.")]
+    SourceDescendant,
+}
+
+/// A composition arc cycle ([`Error::ArcCycle`]). The chain reads from the
+/// composing prim (`composing`, in the `root_layer`) through each `hops` site;
+/// the last hop is the arc that closes the cycle and is dropped.
+#[derive(Debug, Clone)]
+pub struct CycleChain {
+    /// The prim being composed when the cycle was detected (the chain root).
+    pub composing: Path,
+    /// Identifier of the layer the composing prim's root node resolves in.
+    pub root_layer: String,
+    /// Each arc in the cycle chain, in order; the final entry is the dropped,
+    /// cycle-closing arc.
+    pub hops: Vec<CycleHop>,
+}
+
+/// One arc in a composition cycle chain ([`CycleChain::hops`]): the arc type and
+/// the `(layer, path)` site it reaches.
+#[derive(Debug, Clone)]
+pub struct CycleHop {
+    /// The arc reaching this site (selects "references" / "inherits from" / …).
+    pub arc: ArcType,
+    /// Identifier of the layer the site resolves in.
+    pub layer: String,
+    /// The site path, in that layer's namespace.
+    pub path: Path,
 }
 
 #[cfg(test)]
@@ -883,10 +1118,11 @@ mod tests {
         assert!(stack.layer_relocates.is_empty(), "no relocate pairs to start");
 
         // Author layerRelocates onto the layer (as an in-place edit would) and
-        // refresh the state the way `recompute_relocates` now does.
+        // refresh the state the way `recompute_relocates` now does. The source is
+        // a non-root prim — a root prim cannot be a relocate source.
         stack.layers[0] = layer(
             "root.usd",
-            "#usda 1.0\n(\n    relocates = { </A>: </B> }\n)\ndef \"A\" {}\n",
+            "#usda 1.0\n(\n    relocates = { </Grp/A>: </Grp/B> }\n)\ndef \"Grp\" {\n    def \"A\" {}\n}\n",
         );
         stack.recompute_relocate_data();
         assert!(
@@ -894,10 +1130,74 @@ mod tests {
             "recompute picks up the newly authored layerRelocates"
         );
         assert_eq!(
-            stack.relocation_source(&[(0, sdf::LayerOffset::default())], &Path::new("/B").unwrap()),
-            Some(Path::new("/A").unwrap()),
+            stack.relocation_source(&[(0, sdf::LayerOffset::default())], &Path::new("/Grp/B").unwrap()),
+            Some(Path::new("/Grp/A").unwrap()),
             "recompute re-extracts the per-layer relocate pairs the builder reads"
         );
+    }
+
+    #[test]
+    fn sublayer_relocate_conflict() {
+        let root = layer(
+            "root.usda",
+            r#"#usda 1.0
+(
+    subLayers = [@sub.usda@]
+    relocates = { </World/A>: </World/C> }
+)
+"#,
+        );
+        let sub = layer(
+            "sub.usda",
+            r#"#usda 1.0
+(
+    relocates = { </World/B>: </World/C> }
+)
+"#,
+        );
+        let stack = LayerStack::new(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+
+        assert!(
+            stack
+                .layer_stack_errors
+                .iter()
+                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+            "relocates in one sublayer stack must conflict"
+        );
+        assert!(
+            stack.layer_relocates.is_empty(),
+            "every relocate sharing the target is dropped"
+        );
+    }
+
+    #[test]
+    fn unrelated_relocates_coexist() {
+        let first = layer(
+            "first.usda",
+            r#"#usda 1.0
+(
+    relocates = { </World/A>: </World/C> }
+)
+"#,
+        );
+        let second = layer(
+            "second.usda",
+            r#"#usda 1.0
+(
+    relocates = { </World/B>: </World/C> }
+)
+"#,
+        );
+        let stack = LayerStack::new(vec![first, second], 0, Box::new(DefaultResolver::new()), true);
+
+        assert!(
+            !stack
+                .layer_stack_errors
+                .iter()
+                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+            "relocates in unrelated layer stacks do not conflict"
+        );
+        assert_eq!(stack.layer_relocates.len(), 2);
     }
 
     /// `effective_time_codes_per_second` reads the authored rate but clamps a

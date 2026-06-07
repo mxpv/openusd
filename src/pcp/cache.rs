@@ -37,9 +37,9 @@ use super::{Error, LayerStack, VariantFallbackMap};
 /// fallbacks are tried in order, and a set with no applicable fallback stays
 /// unselected.
 ///
-/// All public methods return `Result` — a [`pcp::Error`](super::Error) is
-/// returned when composition fails. The caller ([`Stage`](crate::usd::Stage))
-/// decides whether to skip or abort via its error handler.
+/// Recoverable composition errors are retained in
+/// [`Self::composition_errors`], while operational failures are returned to the
+/// caller.
 pub struct Cache {
     stack: LayerStack,
     /// Per-prim composition indices, keyed by composed path.
@@ -67,13 +67,12 @@ pub struct Cache {
     prototype_keys: HashMap<InstanceKey, Path>,
     /// Counter for minting `/__Prototype_N` identities in registration order.
     prototype_count: usize,
-    /// Recoverable composition errors produced since the last drain, awaiting
-    /// report — the analog of C++ `PcpCache::ComputePrimIndex`'s `allErrors`
-    /// out-param. Each freshly built index pushes its detected errors here; the
-    /// owning [`Stage`](crate::usd::Stage) drains them after each query (once
-    /// the cache borrow is released, so the handler may re-enter) and routes
-    /// them to its error handler.
-    pending_errors: Vec<Error>,
+    /// Recoverable composition errors encountered by this cache.
+    ///
+    /// The owning [`Stage`](crate::usd::Stage) exposes a snapshot. Since prim
+    /// indices are built lazily, this collection grows as more of the stage is
+    /// composed.
+    composition_errors: Vec<Error>,
     /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
     /// stack. Pre-caching an inherit/specialize target (and that target's own
     /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
@@ -163,11 +162,10 @@ fn block_to_none(value: Value) -> Option<Value> {
 impl Cache {
     /// Creates a new composition graph from a prebuilt layer stack.
     pub(crate) fn new(mut stack: LayerStack, variant_fallbacks: VariantFallbackMap) -> Self {
-        let relocates = Relocates::new(&stack.layers);
-        // Errors detected while assembling the layer stack (sublayer cycles,
-        // invalid relocates) reach the stage error handler the same way per-prim
-        // errors do: seeded into the pending queue and drained on the first query.
-        let pending_errors = std::mem::take(&mut stack.layer_stack_errors);
+        let relocates = Relocates::new(stack.layer_relocates.clone());
+        // Layer-stack errors are available immediately; per-prim errors join
+        // them as indices are composed.
+        let composition_errors = std::mem::take(&mut stack.layer_stack_errors);
         Self {
             stack,
             indices: HashMap::new(),
@@ -179,17 +177,19 @@ impl Cache {
             prototypes: HashMap::new(),
             prototype_keys: HashMap::new(),
             prototype_count: 0,
-            pending_errors,
+            composition_errors,
             in_progress: HashSet::new(),
         }
     }
 
-    /// Drains the recoverable composition errors produced since the last call
-    /// (e.g. arc-to-private-site permission errors, spec 10.3.3). The
-    /// [`Stage`](crate::usd::Stage) calls this after each query and forwards
-    /// each error to its handler.
-    pub(crate) fn take_pending_errors(&mut self) -> Vec<Error> {
-        std::mem::take(&mut self.pending_errors)
+    /// Returns the recoverable composition errors encountered so far.
+    pub(crate) fn composition_errors(&self) -> Vec<Error> {
+        self.composition_errors.clone()
+    }
+
+    #[cfg(test)]
+    fn take_composition_errors(&mut self) -> Vec<Error> {
+        std::mem::take(&mut self.composition_errors)
     }
 
     /// Loads a value-clip or manifest layer referenced by `asset_path`,
@@ -670,19 +670,19 @@ impl Cache {
     /// `layerRelocates`-only edit does not rebuild the sublayer precomputation,
     /// so the relocate state the builder reads would otherwise stay stale.
     pub(super) fn recompute_relocates(&mut self) {
-        self.relocates = Relocates::new(&self.stack.layers);
         self.stack.recompute_relocate_data();
+        self.relocates = Relocates::new(self.stack.layer_relocates.clone());
     }
 
-    /// Moves the layer stack's freshly-recomputed errors into the pending queue so
-    /// they reach the stage error handler on the next query. Called once after a
+    /// Moves the layer stack's freshly-recomputed errors into the cache's
+    /// diagnostic collection. Called once after a
     /// `subLayers`/`layerRelocates` edit recomputes them — the construction-time
     /// seed in [`new`](Self::new) is a one-shot drain, and a single `subLayers`
     /// edit triggers both [`recompute_layer_stack`](Self::recompute_layer_stack)
     /// and [`recompute_relocates`](Self::recompute_relocates), so queuing here
     /// (rather than per-recompute) delivers each error exactly once.
     pub(super) fn queue_layer_stack_errors(&mut self) {
-        self.pending_errors.append(&mut self.stack.layer_stack_errors);
+        self.composition_errors.append(&mut self.stack.layer_stack_errors);
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -1121,37 +1121,63 @@ impl Cache {
 
         let resolved_prim = match &anchor {
             Some((origin, canonical)) => prim.replace_prefix(origin, canonical).unwrap_or_else(|| prim.clone()),
-            None => prim,
+            None => prim.clone(),
         };
         self.ensure_index(&resolved_prim)?;
-        let index = &self.indices[&resolved_prim];
-        let mut targets = if deleted {
-            index.resolve_path_list_op_deleted(field, &self.stack, Some(&prop_suffix))?
-        } else {
-            index.resolve_path_list_op(field, &self.stack, Some(&prop_suffix))?
-        };
-
-        // A target naming a pre-relocation source resolves to the prim's
-        // post-relocation location (C++ `ComputeRelationshipTargetPaths` /
-        // `ComputeAttributeConnectionPaths` apply the layer stack's relocates to
-        // composed targets). Targets are in the resolved prim's namespace, so the
-        // relocates are computed there too, before the instance-anchor remap.
-        // Chaining follows a multi-step move (`/A/C -> /B/C`, `/B/C -> /D`) to its
-        // final target, matching C++'s source-origin-keyed combined relocates map.
+        // A target authored across an arc lands at its post-relocation location
+        // (C++ `ComputeRelationshipTargetPaths` / `ComputeAttributeConnectionPaths`
+        // apply the layer stack's relocates to composed targets). A local
+        // (root-node) target is not remapped, so the chaining is applied per node
+        // inside the resolved walk; the deleted-paths walk has no per-node origin,
+        // so it chains every entry here.
         //
         // TODO: `effective_relocates` discovers relocates by scanning whichever
         // prims happen to be cached, so a relocate authored only in an as-yet-
-        // untraversed sibling branch can be missed (the deleted child-name path
-        // used to warm this cache by precaching relocate sources). Route this
-        // through the layer-stack-based relocates (`LayerStack::combined_relocates`,
-        // C++ `PcpLayerStack::GetRelocatesSourceToTarget`), the same source the
+        // untraversed sibling branch can be missed. Route this through the
+        // layer-stack-based relocates (`LayerStack::combined_relocates`, C++
+        // `PcpLayerStack::GetRelocatesSourceToTarget`), the same source the
         // per-node child-name fold now uses, to make target remapping independent
         // of traversal order.
-        if !self.relocates.is_empty() {
-            let relocates = self.relocates.effective_relocates(&resolved_prim, &self.indices);
+        // `escaped` = relocation sources whose target escapes the prim's namespace
+        // (e.g. moved to a new root); a target under one points at content moved
+        // out of scope. Both come from one namespace scan. The deleted-paths walk
+        // does not validate scope, so it only needs the effective relocates.
+        let (relocates, escaped) = match (self.relocates.is_empty(), deleted) {
+            (true, _) => (Vec::new(), Vec::new()),
+            (false, true) => (
+                self.relocates.effective_relocates(&resolved_prim, &self.indices),
+                Vec::new(),
+            ),
+            (false, false) => self.relocates.effective_and_escaped(&resolved_prim, &self.indices),
+        };
+        let index = &self.indices[&resolved_prim];
+        let (mut targets, invalid) = if deleted {
+            (
+                index.resolve_path_list_op_deleted(field, &self.stack, Some(&prop_suffix))?,
+                Vec::new(),
+            )
+        } else {
+            index.resolve_path_list_op_validated(field, &self.stack, Some(&prop_suffix), &relocates, &escaped)?
+        };
+        if deleted {
             for target in &mut targets {
                 *target = super::rel::chain_through_relocates(target, &relocates, None);
             }
+        }
+
+        // A target authored across an arc that falls outside the arc's namespace
+        // scope is dropped and reported (C++ `PcpErrorInvalidExternalTargetPath`).
+        let is_connection = matches!(field, FieldKey::ConnectionPaths);
+        for inv in invalid {
+            self.composition_errors.push(Error::InvalidExternalTargetPath {
+                is_connection,
+                target: inv.target,
+                property: inv.property,
+                layer: self.stack.identifier(inv.layer).to_string(),
+                arc: inv.arc,
+                arc_root: inv.arc_root,
+                composing: prim.clone(),
+            });
         }
 
         if let Some((origin, canonical)) = &anchor {
@@ -1354,6 +1380,72 @@ impl Cache {
         self.composed_property_names(path)
     }
 
+    /// Pushes a [`Error::InconsistentPropertyType`] for each composed property of
+    /// `prim_path` whose specs mix attribute and relationship kinds (C++
+    /// `PcpErrorInconsistentPropertyType`). C++ reports the conflict on each
+    /// property-index composition; the dump's property-name pass (here) and
+    /// property-stack pass ([`property_stack`](Self::property_stack)) each compose
+    /// it, so the error surfaces once per pass.
+    fn report_property_type_conflicts(&mut self, prim_path: &Path, names: &[String]) {
+        let Some(index) = self.indices.get(prim_path) else {
+            return;
+        };
+        let mut conflicts = Vec::new();
+        for name in names {
+            let Ok(prop_path) = prim_path.append_property(name) else {
+                continue;
+            };
+            conflicts.extend(self.compose_property_specs(index, prim_path, &prop_path).1);
+        }
+        self.composition_errors.append(&mut conflicts);
+    }
+
+    /// Walks a property's specs strongest-first across the prim's composition
+    /// graph, returning its `(layer identifier, spec path)` stack and the
+    /// inconsistent-spec-type errors. The first spec's kind (attribute vs
+    /// relationship) is the defining type; weaker specs of the other kind are
+    /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
+    /// stack and reported. `prop_path` is the property in `prim_path`'s namespace.
+    fn compose_property_specs(
+        &self,
+        index: &PrimIndex,
+        prim_path: &Path,
+        prop_path: &Path,
+    ) -> (Vec<(String, Path)>, Vec<Error>) {
+        let mut stack = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut defining: Option<(SpecType, String, Path)> = None;
+        for node in index.nodes() {
+            let Some(p) = prop_path.replace_prefix(prim_path, &node.path) else {
+                continue;
+            };
+            for (layer, _) in node.layers() {
+                let Some(spec_type) = self.stack.layer(layer).spec_type(&p) else {
+                    continue;
+                };
+                match &defining {
+                    None => defining = Some((spec_type, self.stack.identifier(layer).to_string(), p.clone())),
+                    Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
+                        conflicts.push(Error::InconsistentPropertyType {
+                            property: prop_path.clone(),
+                            defining_layer: def_layer.clone(),
+                            defining_path: def_path.clone(),
+                            defining_is_attribute: *def_type == SpecType::Attribute,
+                            conflicting_layer: self.stack.identifier(layer).to_string(),
+                            conflicting_path: p.clone(),
+                            conflicting_is_attribute: spec_type == SpecType::Attribute,
+                            composing: prim_path.clone(),
+                        });
+                        continue;
+                    }
+                    Some(_) => {}
+                }
+                stack.push((self.stack.identifier(layer).to_string(), p.clone()));
+            }
+        }
+        (stack, conflicts)
+    }
+
     /// Returns the composed [`PrimIndex`] for a prim, building it if needed (C++
     /// `UsdPrim::GetPrimIndex` / `PcpCache::ComputePrimIndex`). The borrow is
     /// tied to the cache, so callers reach it through the borrowing
@@ -1400,17 +1492,13 @@ impl Cache {
         let Some(index) = self.indices.get(&prim_path) else {
             return Ok(Vec::new());
         };
-        let mut stack = Vec::new();
-        for node in index.nodes() {
-            let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
-                continue;
-            };
-            for (layer, _) in node.layers() {
-                if self.stack.layer(layer).has_spec(&prop_path) {
-                    stack.push((self.stack.identifier(layer).to_string(), prop_path.clone()));
-                }
-            }
-        }
+        let (stack, mut conflicts) = self.compose_property_specs(index, &prim_path, &path);
+        // TODO: this re-pushes the same `InconsistentPropertyType` conflicts on
+        // every call, so repeated `property_stack` queries on a conflicting
+        // property accumulate duplicates in `composition_errors` without bound.
+        // Revisit once the error model settles — dedup on insert, or compute
+        // conflicts once at index build and have queries read (not re-report) them.
+        self.composition_errors.append(&mut conflicts);
         Ok(stack)
     }
 
@@ -1658,14 +1746,25 @@ impl Cache {
         // The blocker is the shared `self.indices` map that inherit/specialize
         // targets read mid-build — parallelizing the driver needs a concurrent
         // map or a topological (targets-first) build order.
-        let (mut index, build_errors) = match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices)
-        {
-            Ok(result) => result,
-            Err(e) => return Err(e.into()),
-        };
-        // Surface recoverable composition errors recorded during the build (e.g.
-        // an unresolvable arc) to the stage error handler.
-        self.pending_errors.extend(build_errors);
+        let (mut index, mut build_errors) =
+            match PrimIndex::build_with_cache(path, &self.stack, &parent_ctx, &self.indices) {
+                Ok(result) => result,
+                Err(e) => return Err(e.into()),
+            };
+        // Retain recoverable composition errors recorded during the build (e.g.
+        // an unresolvable arc). An invalid opinion at a
+        // relocation source is reported "while composing" this prim, so stamp its
+        // path — the builder may have recorded it deep in a sub-index build whose
+        // own site path differs.
+        for error in &mut build_errors {
+            match error {
+                Error::OpinionAtRelocationSource { composing, .. } => *composing = path.clone(),
+                Error::ProhibitedRelocationSource { composing, .. } => *composing = path.clone(),
+                Error::ArcCycle(info) => info.composing = path.clone(),
+                _ => {}
+            }
+        }
+        self.composition_errors.extend(build_errors);
 
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
@@ -1688,7 +1787,7 @@ impl Cache {
             if !denied_prefixes.contains(&target) {
                 denied_prefixes.push(target);
             }
-            self.pending_errors.push(error);
+            self.composition_errors.push(error);
         }
         index.mark_permission_denied_under(&denied_prefixes);
 
@@ -1729,6 +1828,14 @@ impl Cache {
         self.deps.add(path, &index, self.stack.len());
         self.indices.insert(path.clone(), index);
         self.contexts.insert(path.clone(), child_context);
+        // Report inconsistent property types once per prim composition (C++
+        // `PcpErrorInconsistentPropertyType`); a later property-stack query
+        // reports the conflict again, matching C++'s per-pass reporting.
+        // TODO(perf): this composes property names on every prim build to find a
+        // rare conflict; gate it on a cheaper signal (e.g. a node carrying both
+        // attribute and relationship specs) before scanning.
+        let names = self.composed_property_names(path)?;
+        self.report_property_type_conflicts(path, &names);
         Ok(())
     }
 
@@ -1975,7 +2082,7 @@ def "A" (
         );
 
         // The direct inherit-to-private arc is queued for the stage to surface.
-        let pending = cache.take_pending_errors();
+        let pending = cache.take_composition_errors();
         assert!(
             pending.iter().any(|e| matches!(
                 e,
@@ -2195,7 +2302,7 @@ def "A" (
         );
         assert!(
             cache
-                .take_pending_errors()
+                .take_composition_errors()
                 .iter()
                 .any(|e| matches!(e, Error::UnresolvedLayer { .. })),
             "the ancestor's unresolved reference is recorded"
@@ -2232,7 +2339,7 @@ def "A" (
         );
         assert!(
             cache
-                .take_pending_errors()
+                .take_composition_errors()
                 .iter()
                 .any(|e| matches!(e, Error::InvalidExpression { .. })),
             "the invalid asset-path expression is recorded as a recoverable error"
@@ -2480,14 +2587,13 @@ def "A" (
     }
 
     /// A `layerRelocates` edit that authors an invalid relocate after stage
-    /// creation must surface the `InvalidRelocate` error to the handler. The
-    /// construction-time seed into `pending_errors` is a one-shot drain, so the
-    /// recompute path has to re-queue the regenerated layer-stack errors.
+    /// creation must add an `InvalidRelocate` diagnostic. The recompute path
+    /// refreshes and records the regenerated layer-stack errors.
     #[test]
     fn invalid_relocate_edit_surfaces_error() -> Result<()> {
         let mut cache = Cache::new(in_memory_stack("#usda 1.0\ndef \"A\" {}\n"), VariantFallbackMap::new());
-        // No relocates authored yet, so nothing is pending.
-        assert!(cache.take_pending_errors().is_empty());
+        // No relocates authored yet, so no diagnostics are recorded.
+        assert!(cache.take_composition_errors().is_empty());
 
         // Author an invalid relocate (the target is an ancestor of the source).
         *cache.layer_mut(0).expect("layer 0 exists") =
@@ -2502,10 +2608,10 @@ def "A" (
 
         assert!(
             cache
-                .take_pending_errors()
+                .take_composition_errors()
                 .iter()
                 .any(|e| matches!(e, Error::InvalidRelocate { .. })),
-            "an invalid relocate authored after construction must reach the error handler"
+            "an invalid relocate authored after construction must be retained"
         );
         Ok(())
     }

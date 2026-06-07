@@ -27,8 +27,6 @@
 //!
 //! - [`StageBuilder::resolver`] sets a custom
 //!   [`ar::Resolver`](crate::ar::Resolver) for mapping asset paths to files.
-//! - [`StageBuilder::on_error`] sets a callback for recoverable composition
-//!   errors (missing layers, arc cycles, etc.).
 //! - [`StageBuilder::variant_fallbacks`] provides a
 //!   [`VariantFallbackMap`](crate::pcp::VariantFallbackMap) with preferred
 //!   selections for variant sets that have no authored opinion.
@@ -39,7 +37,7 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -48,22 +46,6 @@ use bitflags::bitflags;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
-
-/// A recoverable error encountered during stage composition.
-///
-/// Wraps errors from both layer collection ([`layer::Error`]) and prim
-/// composition ([`pcp::Error`]). The error handler provided via
-/// [`StageBuilder::on_error`] decides whether to skip and continue or abort.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum CompositionError {
-    /// Error during layer collection (e.g. unresolved asset path).
-    #[error(transparent)]
-    Layer(#[from] layer::Error),
-    /// Error during prim composition (e.g. missing defaultPrim, arc cycle).
-    #[error(transparent)]
-    Pcp(#[from] pcp::Error),
-}
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -454,8 +436,6 @@ pub struct StageInner {
     initial_load_set: InitialLoadSet,
     /// Population mask limiting stage-visible prims.
     population_mask: StagePopulationMask,
-    /// PCP error handler wrapping the user's unified callback.
-    on_composition_error: Box<dyn Fn(pcp::Error) -> Result<()>>,
     /// Stage-level interpolation mode for time-sampled attributes
     /// (AOUSD §12.5). Defaults to [`InterpolationType::Linear`] per
     /// spec.
@@ -485,8 +465,9 @@ impl std::ops::Deref for Stage {
 impl Stage {
     /// Opens a stage from a root layer file using the [`ar::DefaultResolver`].
     ///
-    /// Any unresolvable transitive dependency causes an immediate error.
-    /// For custom resolver or error handling, use [`Stage::builder`].
+    /// An error opening the root layer fails. Recoverable composition errors in
+    /// transitive dependencies are available through
+    /// [`Stage::composition_errors`].
     pub fn open(root_path: &str) -> Result<Self> {
         Self::builder().open(root_path)
     }
@@ -498,16 +479,18 @@ impl Stage {
     /// ```no_run
     /// use openusd::usd;
     ///
-    /// let stage = usd::Stage::builder()
-    ///     .on_error(|err| {
-    ///         eprintln!("warning: {err}");
-    ///         Ok(())
-    ///     })
-    ///     .open("scene.usda")
-    ///     .unwrap();
+    /// let stage = usd::Stage::builder().open("scene.usda").unwrap();
     /// ```
     pub fn builder() -> StageBuilder<ar::DefaultResolver> {
         StageBuilder::new()
+    }
+
+    /// Returns composition errors encountered while composing this stage.
+    ///
+    /// Prim indices are built lazily, so this is a snapshot of errors
+    /// discovered by stage queries performed so far.
+    pub fn composition_errors(&self) -> Vec<pcp::Error> {
+        self.graph.borrow().composition_errors()
     }
 
     /// Returns the current edit target — the layer that authoring methods
@@ -937,7 +920,7 @@ impl Stage {
         }
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        self.try_or_handle(|cache| cache.value_at(&attr_path, time, &interp))
+        self.cache_mut().value_at(&attr_path, time, &interp)
     }
 
     /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
@@ -964,7 +947,7 @@ impl Stage {
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
         let root = sdf::Path::abs_root();
-        let children = self.try_or_handle(|cache| cache.prim_children(&root))?;
+        let children = self.cache_mut().prim_children(&root)?;
         Ok(self.filter_child_names(&root, children))
     }
 
@@ -974,9 +957,9 @@ impl Stage {
     // queries. The public, C++-shaped scene queries live on the handles:
     // children / property names on `Prim` (`GetChildren` / `GetPropertyNames`),
     // targets / connections on `Relationship` / `Attribute` (`GetTargets` /
-    // `GetConnections`). The handles reach the cache through the query runners
-    // ([`Self::try_or_handle`], [`Self::masked`]) and the population-mask helpers
-    // ([`Self::filter_child_names`], [`Self::population_mask`]).
+    // `GetConnections`). The handles reach the cache through [`Self::cache`]
+    // and [`Self::masked`], with population filtering supplied by
+    // [`Self::filter_child_names`] and [`Self::population_mask`].
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
@@ -987,7 +970,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(false);
         }
-        self.try_or_handle(|cache| cache.has_spec(&path))
+        self.cache_mut().has_spec(&path)
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
@@ -996,7 +979,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
         }
-        self.try_or_handle(|cache| cache.spec_type(&path))
+        self.cache_mut().spec_type(&path)
     }
 
     /// Resolves a composed field value by walking the prim index from strongest
@@ -1030,7 +1013,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
         }
-        let raw = self.try_or_handle(|cache| cache.resolve_field(&path, field.as_ref()))?;
+        let raw = self.cache_mut().resolve_field(&path, field.as_ref())?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
@@ -1039,9 +1022,9 @@ impl Stage {
 
     /// Runs a composed query at `path` under the population mask: when the
     /// path's owning prim is outside the working set, resolves to `T::default()`
-    /// without touching the cache; otherwise runs `query` through
-    /// [`Self::try_or_handle`]. This is the mask-gated query runner the composed
-    /// handles ([`Prim`](super::Prim) / [`Attribute`](super::Attribute) /
+    /// without touching the cache; otherwise runs `query` with a short mutable
+    /// cache borrow. This is the mask-gated query runner the composed handles
+    /// ([`Prim`](super::Prim) / [`Attribute`](super::Attribute) /
     /// [`Relationship`](super::Relationship)) build their scene queries on.
     pub(crate) fn masked<T: Default>(
         &self,
@@ -1051,7 +1034,8 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(T::default());
         }
-        self.try_or_handle(query)
+        let mut cache = self.cache_mut();
+        query(&mut cache)
     }
 
     /// Returns a handle to a prim's composition index (C++
@@ -1080,15 +1064,14 @@ impl Stage {
 
     /// Returns every registered prototype root (`/__Prototype_N`) with at least
     /// one instance inside the population mask.
-    pub fn prototypes(&self) -> Result<Vec<sdf::Path>> {
+    pub fn prototypes(&self) -> Vec<sdf::Path> {
         let mask = &self.population_mask;
-        self.try_or_handle(|cache| {
-            Ok(cache
-                .prototypes()
-                .into_iter()
-                .filter(|root| cache.instances_of(root).iter().any(|instance| mask.includes(instance)))
-                .collect())
-        })
+        let cache = self.cache();
+        cache
+            .prototypes()
+            .into_iter()
+            .filter(|root| cache.instances_of(root).iter().any(|instance| mask.includes(instance)))
+            .collect()
     }
 
     /// Returns the resolved stage status bits for a prim.
@@ -1121,7 +1104,7 @@ impl Stage {
             status.set(PrimStatus::MODEL, prim.is_model()?);
         }
         if mask.contains(PrimStatus::IN_PROTOTYPE) {
-            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype()?);
+            status.set(PrimStatus::IN_PROTOTYPE, prim.is_in_prototype());
         }
         Ok(status)
     }
@@ -1149,30 +1132,14 @@ impl Stage {
         std::iter::successors(Some(start), sdf::Path::parent).take_while(|p| *p != sdf::Path::abs_root())
     }
 
-    /// Calls `f` with a mutable reference to the composition cache. If `f`
-    /// returns a [`pcp::Error`], the error handler decides whether to skip
-    /// (returning a default value) or abort (propagating the error).
-    pub(crate) fn try_or_handle<T: Default>(&self, f: impl FnOnce(&mut pcp::Cache) -> Result<T>) -> Result<T> {
-        let mut cache = self.graph.borrow_mut();
-        let result = f(&mut cache);
-        // Surface recoverable errors collected while building indices (e.g.
-        // arc-to-private-site permission errors, spec 10.3.3) through the same
-        // handler. Drop the cache borrow first so the handler may re-enter.
-        let pending = cache.take_pending_errors();
-        drop(cache);
-        for error in pending {
-            (self.on_composition_error)(error)?;
-        }
-        match result {
-            Ok(val) => Ok(val),
-            Err(e) => match e.downcast::<pcp::Error>() {
-                Ok(pcp_err) => {
-                    (self.on_composition_error)(pcp_err)?;
-                    Ok(T::default())
-                }
-                Err(other) => Err(other),
-            },
-        }
+    /// Borrows the stage's composition cache.
+    pub(crate) fn cache(&self) -> Ref<'_, pcp::Cache> {
+        self.graph.borrow()
+    }
+
+    /// Mutably borrows the stage's composition cache for a lazy query.
+    pub(crate) fn cache_mut(&self) -> RefMut<'_, pcp::Cache> {
+        self.graph.borrow_mut()
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -1223,24 +1190,12 @@ impl Stage {
     }
 }
 
-/// Default composition error handler that treats all errors as fatal.
-type StrictErrorHandler = fn(CompositionError) -> Result<()>;
-
-/// Converts a composition error into a hard failure.
-fn strict_composition_error(e: CompositionError) -> Result<()> {
-    Err(anyhow::anyhow!("{e}"))
-}
-
 /// Builder for configuring and opening a [`Stage`].
 ///
-/// Created via [`Stage::builder`]. Allows setting a custom asset resolver
-/// and an error handler for recoverable composition failures.
-pub struct StageBuilder<
-    R: ar::Resolver = ar::DefaultResolver,
-    E: Fn(CompositionError) -> Result<()> = StrictErrorHandler,
-> {
+/// Created via [`Stage::builder`]. Allows setting a custom asset resolver and
+/// composition options.
+pub struct StageBuilder<R: ar::Resolver = ar::DefaultResolver> {
     resolver: R,
-    on_error: E,
     variant_fallbacks: pcp::VariantFallbackMap,
     session_layer: Option<String>,
     initial_load_set: InitialLoadSet,
@@ -1248,11 +1203,16 @@ pub struct StageBuilder<
     interpolation_type: InterpolationType,
 }
 
+#[derive(Default)]
+struct CollectedLayers {
+    layers: Vec<sdf::Layer>,
+    errors: Vec<pcp::Error>,
+}
+
 impl StageBuilder {
     fn new() -> Self {
         Self {
             resolver: ar::DefaultResolver::new(),
-            on_error: strict_composition_error,
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
             initial_load_set: InitialLoadSet::LoadAll,
@@ -1262,30 +1222,11 @@ impl StageBuilder {
     }
 }
 
-impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> {
+impl<R: ar::Resolver> StageBuilder<R> {
     /// Sets a custom asset resolver.
-    pub fn resolver<R2: ar::Resolver>(self, resolver: R2) -> StageBuilder<R2, E> {
+    pub fn resolver<R2: ar::Resolver>(self, resolver: R2) -> StageBuilder<R2> {
         StageBuilder {
             resolver,
-            on_error: self.on_error,
-            variant_fallbacks: self.variant_fallbacks,
-            session_layer: self.session_layer,
-            initial_load_set: self.initial_load_set,
-            population_mask: self.population_mask,
-            interpolation_type: self.interpolation_type,
-        }
-    }
-
-    /// Sets a callback invoked when a recoverable composition error occurs.
-    ///
-    /// Return `Ok(())` to skip the problematic dependency and continue,
-    /// or `Err(...)` to abort composition.
-    ///
-    /// By default, all composition errors are fatal.
-    pub fn on_error<E2: Fn(CompositionError) -> Result<()>>(self, handler: E2) -> StageBuilder<R, E2> {
-        StageBuilder {
-            resolver: self.resolver,
-            on_error: handler,
             variant_fallbacks: self.variant_fallbacks,
             session_layer: self.session_layer,
             initial_load_set: self.initial_load_set,
@@ -1374,13 +1315,13 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
     pub fn open(self, root_path: &str) -> Result<Stage>
     where
         R: 'static,
-        E: 'static,
     {
-        let session_layers = self.collect_optional_session_layers()?;
-        let root_layers = self.collect_layers(root_path)?;
-        let session_layer_count = session_layers.len();
-        let layers: Vec<sdf::Layer> = session_layers.into_iter().chain(root_layers).collect();
-        Ok(self.make_stage(layers, session_layer_count))
+        let session = self.collect_optional_session_layers()?;
+        let root = self.collect_layers(root_path)?;
+        let session_layer_count = session.layers.len();
+        let layers = session.layers.into_iter().chain(root.layers).collect();
+        let errors = session.errors.into_iter().chain(root.errors).collect();
+        Ok(self.make_stage(layers, session_layer_count, errors))
     }
 
     /// Create an in-memory stage backed by a single writable anonymous root
@@ -1402,37 +1343,58 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
     pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage>
     where
         R: 'static,
-        E: 'static,
     {
         let identifier = identifier.into();
-        let session_layers = self.collect_optional_session_layers()?;
-        let session_layer_count = session_layers.len();
-        let layers: Vec<sdf::Layer> = session_layers
+        let session = self.collect_optional_session_layers()?;
+        let session_layer_count = session.layers.len();
+        let layers: Vec<sdf::Layer> = session
+            .layers
             .into_iter()
             .chain(std::iter::once(sdf::Layer::new_anonymous(identifier)))
             .collect();
-        Ok(self.make_stage(layers, session_layer_count))
+        Ok(self.make_stage(layers, session_layer_count, session.errors))
     }
 
-    /// Collect layers reachable from `path`, honoring the builder's
-    /// resolver, error handler, payload-loading flag, and population mask.
-    fn collect_layers(&self, path: &str) -> Result<Vec<sdf::Layer>> {
+    /// Collect layers reachable from `path`, honoring the builder's resolver,
+    /// payload-loading flag, and population mask.
+    fn collect_layers(&self, path: &str) -> Result<CollectedLayers> {
         let include_prim_dependency = |p: &sdf::Path| self.population_mask.includes(p);
-        let collector = layer::Collector::new(&self.resolver)
-            .load_payloads(self.initial_load_set.load_payloads())
-            .on_error(|e| (self.on_error)(CompositionError::Layer(e)));
-        if self.population_mask.is_all() {
-            collector.collect(path)
-        } else {
-            collector.prim_dependency_filter(&include_prim_dependency).collect(path)
-        }
+        let errors = RefCell::new(Vec::new());
+        let layers = {
+            let collector = layer::Collector::new(&self.resolver)
+                .load_payloads(self.initial_load_set.load_payloads())
+                .on_error(|error| {
+                    if let layer::Error::UnresolvedAsset {
+                        asset_path,
+                        referencing_layer,
+                        kind: layer::DependencyKind::SubLayer,
+                        ..
+                    } = error
+                    {
+                        errors.borrow_mut().push(pcp::Error::UnresolvedSublayer {
+                            asset_path,
+                            introduced_by: referencing_layer,
+                        });
+                    }
+                    Ok(())
+                });
+            if self.population_mask.is_all() {
+                collector.collect(path)
+            } else {
+                collector.prim_dependency_filter(&include_prim_dependency).collect(path)
+            }
+        }?;
+        Ok(CollectedLayers {
+            layers,
+            errors: errors.into_inner(),
+        })
     }
 
     /// Collect the configured session layer (and its dependencies), if any.
-    fn collect_optional_session_layers(&self) -> Result<Vec<sdf::Layer>> {
+    fn collect_optional_session_layers(&self) -> Result<CollectedLayers> {
         match self.session_layer.as_deref() {
             Some(p) => self.collect_layers(p),
-            None => Ok(Vec::new()),
+            None => Ok(CollectedLayers::default()),
         }
     }
 
@@ -1440,21 +1402,23 @@ impl<R: ar::Resolver, E: Fn(CompositionError) -> Result<()>> StageBuilder<R, E> 
     /// construction tail for [`StageBuilder::open`] and
     /// [`StageBuilder::in_memory`]; any new `Stage` field must be wired in
     /// here once.
-    fn make_stage(self, layers: Vec<sdf::Layer>, session_layer_count: usize) -> Stage
+    fn make_stage(
+        self,
+        layers: Vec<sdf::Layer>,
+        session_layer_count: usize,
+        collection_errors: Vec<pcp::Error>,
+    ) -> Stage
     where
         R: 'static,
-        E: 'static,
     {
-        let on_error = self.on_error;
         let load_payloads = self.initial_load_set.load_payloads();
-        let stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
-        let on_composition_error = Box::new(move |e: pcp::Error| on_error(CompositionError::Pcp(e)));
+        let mut stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        stack.layer_stack_errors.extend(collection_errors);
         let edit_target = EditTarget::for_layer_index(session_layer_count);
         Stage(Rc::new(StageInner {
             graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
-            on_composition_error,
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
         }))
@@ -1504,35 +1468,46 @@ mod tests {
 
     // --- Basic stage opening (vendor/usd-wg-assets) ---
 
-    /// A direct arc to a `permission = private` site is reported through
-    /// `on_error` during composition, while the prim still composes (spec
-    /// 10.3.3). `/Model` inherits the private `/_PrivateClass` in
-    /// `ErrorPermissionDenied_root`.
+    #[test]
+    fn missing_sublayer_retained() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("root.usda");
+        std::fs::write(
+            &root,
+            "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\ndef \"Root\" {}\n",
+        )?;
+
+        let stage = Stage::open(root.to_str().unwrap())?;
+        assert!(stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::UnresolvedSublayer {
+                asset_path,
+                introduced_by,
+            } if asset_path == "missing.usda" && introduced_by.ends_with("root.usda")
+        )));
+        assert!(stage.prim_at("/Root").is_valid()?);
+        Ok(())
+    }
+
+    /// A direct arc to a `permission = private` site is retained as a
+    /// composition error while the prim still composes (spec 10.3.3).
     #[test]
     fn arc_permission_denied_surfaced() -> Result<()> {
-        use std::rc::Rc;
-
         let path = format!(
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
              ErrorPermissionDenied_root/usda/root.usd",
             manifest_dir()
         );
-        let collected = Rc::new(RefCell::new(Vec::new()));
-        let sink = collected.clone();
-        let stage = StageBuilder::new()
-            .on_error(move |e| {
-                sink.borrow_mut().push(format!("{e}"));
-                Ok(())
-            })
-            .open(&path)?;
+        let stage = StageBuilder::new().open(&path)?;
 
-        // Querying /Model composes the private inherit: the error reaches the
-        // handler, and visibility is unchanged (the inherited attr composes).
+        // Querying /Model composes the private inherit and retains the error.
         assert!(stage.has_spec("/Model.attr")?, "private inherit must stay visible");
         assert!(
-            collected.borrow().iter().any(|m| m.contains("private")),
-            "on_error should have received the permission error, got {:?}",
-            collected.borrow()
+            stage
+                .composition_errors()
+                .iter()
+                .any(|error| matches!(error, pcp::Error::ArcPermissionDenied { .. })),
+            "composition_errors should contain the permission error"
         );
 
         Ok(())
@@ -2554,7 +2529,7 @@ def Shader "Mat" (
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
             .set_connection_paths([target.clone()]);
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
         assert_eq!(attr.connections()?, vec![target.clone()]);
@@ -2584,7 +2559,7 @@ def Shader "Mat" (
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
             .set_connection_paths([target.clone()]);
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
         let attr = attr.add_connection(target.clone())?;
 
@@ -2613,7 +2588,7 @@ def Shader "Mat" (
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
             .set_connection_paths([target.clone()]);
 
-        let stage = Stage::builder().make_stage(vec![strong, weak], 0);
+        let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
 
         assert!(attr.remove_connection(&target)?);
@@ -2821,7 +2796,7 @@ def Shader "Mat" (
         // Returned sorted by path, so callers need not sort themselves.
         let instances: Vec<String> = stage
             .prim_at(proto.clone())
-            .instances()?
+            .instances()
             .iter()
             .map(|p| p.to_string())
             .collect();
@@ -2829,9 +2804,9 @@ def Shader "Mat" (
 
         // The prototype namespace is addressable and resolves to the shared
         // (arc-only) subtree.
-        assert!(stage.prim_at(proto.clone()).is_prototype()?);
+        assert!(stage.prim_at(proto.clone()).is_prototype());
         let child = sdf::path(format!("{proto}/Child"))?;
-        assert!(stage.prim_at(child.clone()).is_in_prototype()?);
+        assert!(stage.prim_at(child.clone()).is_in_prototype());
         assert_eq!(
             stage.value_at(child.append_property("size")?, 0.0)?,
             Some(sdf::Value::Double(5.0))
@@ -2857,8 +2832,8 @@ def Shader "Mat" (
 
         // The masked-out /B is excluded from the prototype's instance list.
         let proto = proto.unwrap();
-        assert_eq!(stage.prim_at(proto.clone()).instances()?, vec![sdf::path("/A")?]);
-        assert_eq!(stage.prototypes()?, vec![proto]);
+        assert_eq!(stage.prim_at(proto.clone()).instances(), vec![sdf::path("/A")?]);
+        assert_eq!(stage.prototypes(), vec![proto]);
         Ok(())
     }
 

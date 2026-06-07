@@ -265,7 +265,7 @@ impl Changes {
         }
         // A `subLayers` edit sets `LAYERS`, which both rebuild masks include, so
         // both recomputes above can run for one edit. Queue the regenerated
-        // layer-stack errors once, after both, so each reaches the error handler
+        // layer-stack errors once, after both, so each diagnostic is retained
         // exactly once.
         if self
             .layer_stack

@@ -93,8 +93,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
-
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, LayerOffset, Path, Value};
@@ -104,16 +102,30 @@ use super::index::{
     collect_payloads_in, compose_arc_list_in, compose_references_in, find_layer, CompositionContext, PrimIndex,
 };
 use super::mapping::MapFunction;
-use super::{Error, LayerStack};
+use super::{CycleChain, CycleHop, Error, LayerStack};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,
 /// composing to an empty prim index. Matches C++ `MAX_COMPOSITION_DEPTH`.
 const MAX_DEPTH: usize = 100;
 
-/// Whether `path` is a root prim (`/Foo`), whose composition needs no ancestral
-/// opinions because its only namespace ancestor is the pseudo-root.
-fn is_root_prim(path: &Path) -> bool {
-    path.parent().is_some_and(|p| p == Path::abs_root())
+pub(crate) type BuildResult<T> = std::result::Result<T, BuildError>;
+
+/// Operational failure while building a prim index.
+///
+/// Recoverable composition problems are recorded as [`Error`] diagnostics and
+/// do not use this path.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct BuildError {
+    message: String,
+}
+
+impl From<anyhow::Error> for BuildError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            message: format!("{error:#}"),
+        }
+    }
 }
 
 /// The nearest namespace ancestor of `path` (inclusive) whose final component is
@@ -191,6 +203,12 @@ struct Frame<'f> {
     /// The parent graph, searched for an existing node at the (prefix-replaced)
     /// site during duplicate-node skipping.
     graph: &'f PrimIndexGraph,
+    /// The arc that introduced this sub-build, used to label a cross-frame cycle
+    /// chain ([`cycle_error`](Builder::cycle_error)).
+    arc: ArcType,
+    /// The layer the requested site resolves in (the sub-build ambient's
+    /// representative), naming the cross-frame cycle chain's site.
+    requested_layer: usize,
     /// Whether duplicate-node skipping is in force for the sub-build this frame
     /// introduces, inherited from the arc that spawned it (C++ `_AddArc`'s
     /// `skipDuplicateNodes`). The top-level build has no frame and never skips.
@@ -416,9 +434,15 @@ pub(crate) struct Builder<'a, 'f> {
     /// Recoverable composition errors collected during the build (C++
     /// `Pcp_PrimIndexer`'s `allErrors`). An arc whose target cannot be resolved
     /// records its error here and contributes nothing, so the rest of the prim
-    /// still composes; the cache routes these to the stage error handler. Errors
-    /// from nested sub-builds are merged in at their call sites.
+    /// still composes; the cache retains these as stage composition diagnostics.
+    /// Errors from nested sub-builds are merged in at their call sites.
     errors: Vec<Error>,
+    /// Invalid-opinion-at-relocation-source errors deferred until the build
+    /// finishes, paired with the relocate node they were detected on. A relocate
+    /// composed under a culled branch (an empty ancestral reference at the
+    /// relocation target) reports no error, so only entries whose node survives
+    /// (is not culled) are kept — matching C++'s per-contributing-arc reporting.
+    pending_relocation_errors: Vec<(NodeId, Error)>,
 }
 
 impl<'a, 'f> Builder<'a, 'f> {
@@ -447,6 +471,7 @@ impl<'a, 'f> Builder<'a, 'f> {
             implied_seen: HashSet::new(),
             root_contributes: true,
             errors: Vec::new(),
+            pending_relocation_errors: Vec::new(),
         }
     }
 
@@ -459,7 +484,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// the cycle-closing arc dropped (by [`class_arc_is_cycle`](Self::class_arc_is_cycle)
     /// for inherits/specializes and [`arc_target_in_bounds`](Self::arc_target_in_bounds)
     /// for references/payloads), so the rest of the prim still composes.
-    pub(crate) fn build(mut self, path: &Path) -> Result<BuildOutput, Error> {
+    pub(crate) fn build(mut self, path: &Path) -> BuildResult<BuildOutput> {
         // Backstop pathological growth that site-identity cycle detection cannot
         // catch — an unbounded chain of ever-deeper sites that never repeats.
         if self.frame_depth > MAX_DEPTH {
@@ -559,6 +584,15 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
         }
 
+        // Keep only the relocation-source-opinion errors whose relocate node
+        // survived composition; one composed under a culled branch (an empty
+        // ancestral reference at the relocation target) reports nothing.
+        for (node, error) in std::mem::take(&mut self.pending_relocation_errors) {
+            if !self.output.nodes[node.idx()].is_culled() {
+                self.errors.push(error);
+            }
+        }
+
         // Specializes nodes were copied under the local root (C++
         // `_PropagateNodeToRoot`), so the strength-order DFS places that
         // globally-weak band (spec 10.4.1) last.
@@ -576,7 +610,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// local site. A child prim clones its already-composed parent's graph and
     /// deepens every site path by the child name, so the references and payloads
     /// an ancestor introduced re-evaluate at this prim's depth.
-    fn seed(&mut self, path: &Path) -> Result<bool, Error> {
+    fn seed(&mut self, path: &Path) -> BuildResult<bool> {
         let parent = path.parent();
         let needs_ancestor = matches!(&parent, Some(p) if p != &Path::abs_root());
 
@@ -697,7 +731,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// the composed graph (`None` when the parent cannot be composed — a cycle /
     /// unestablished seed) and the sub-build's recoverable errors, which the
     /// caller merges into its own.
-    fn compose_ancestral_subindex(&self, parent: &Path) -> Result<BuildOutput, Error> {
+    fn compose_ancestral_subindex(&self, parent: &Path) -> BuildResult<BuildOutput> {
         self.new_sub(self.site.ambient, self.site.is_root, self.frame, true)
             .build(parent)
     }
@@ -716,11 +750,14 @@ impl<'a, 'f> Builder<'a, 'f> {
         ambient_is_root: bool,
         skip: bool,
         root_contributes: bool,
-    ) -> Result<BuildOutput, Error> {
+        arc: ArcType,
+    ) -> BuildResult<BuildOutput> {
         let frame = Frame {
             requested_path: target.clone(),
             root_path: self.site.path.clone(),
             graph: &self.output,
+            arc,
+            requested_layer: ambient[0].0,
             skip,
             previous: self.frame,
         };
@@ -755,8 +792,9 @@ impl<'a, 'f> Builder<'a, 'f> {
         map: MapFunction,
         origin: NodeId,
         sibling: u16,
-    ) -> Result<Option<NodeId>, Error> {
-        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, ambient_is_root, skip, true)?)
+    ) -> BuildResult<Option<NodeId>> {
+        let Some(sub) =
+            self.merge_subindex(self.compose_subindex(target, ambient, ambient_is_root, skip, true, arc)?)
         else {
             return Ok(None);
         };
@@ -1097,7 +1135,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// sub-index with ancestral opinions, its direct site inert (salted earth),
     /// and grafted as a `Relocate` arc with an identity-stripping source→target
     /// map. Ancestral child subtrees the relocation supersedes are elided first.
-    fn eval_node_relocations(&mut self, node: NodeId) -> Result<(), Error> {
+    fn eval_node_relocations(&mut self, node: NodeId) -> BuildResult<()> {
         {
             let n = self.node(node);
             // C++ `CanContributeSpecs`: not inert/culled/permission-denied. A
@@ -1106,6 +1144,16 @@ impl<'a, 'f> Builder<'a, 'f> {
                 return Ok(());
             }
         }
+        // A node grafted from a sub-index (e.g. an inherit target) already had its
+        // relocation composed — and its source-opinion error reported — in that
+        // sub-build, so it carries a `Relocate` child. The relocation is still
+        // re-composed here (it does namespace work at this level), but the
+        // source-opinion error must not be reported a second time.
+        let already_relocated = self
+            .node(node)
+            .children()
+            .iter()
+            .any(|&c| self.node(c).arc == ArcType::Relocate);
         // Relocates are resolved against the node's own layer stack (C++
         // `node.GetLayerStack()->GetIncrementalRelocatesTargetToSource()`), keyed
         // by the node's path in that layer stack's namespace. This handles both
@@ -1117,6 +1165,21 @@ impl<'a, 'f> Builder<'a, 'f> {
             return Ok(());
         };
 
+        // A direct opinion authored at the source path (in the node's own layer
+        // stack, not the content the relocation moves in) is invalid and ignored
+        // by the salted-earth elision below (C++ `PcpErrorOpinionAtRelocationSource`).
+        // The error is deferred until the build finishes and kept only if the
+        // relocate node survives, so a relocate composed under a culled branch
+        // reports nothing; `composing` is stamped by the cache.
+        let opinion_layer = if already_relocated {
+            None
+        } else {
+            node_ambient
+                .iter()
+                .find(|&&(li, _)| self.inputs.stack.layer(li).has_spec(&source))
+                .map(|&(li, _)| self.inputs.stack.layer(li).identifier.clone())
+        };
+
         // Ancestral arcs superseded by this relocation contribute nothing; a
         // variant may still override a relocated prim, so keep variant children
         // (C++ `_EvalNodeRelocations`'s per-child-arc-type switch).
@@ -1126,12 +1189,10 @@ impl<'a, 'f> Builder<'a, 'f> {
             }
         }
 
-        // The relocate node maps its source to the relocation target: opinions
-        // and implied classes carried up across it translate the source namespace
-        // to the target. The source sub-index excludes this same relocate from its
-        // internal arc folds (see `fold_relocates_into`), so the shift is applied
-        // once, here.
-        let map = MapFunction::from_pair_identity(source.clone(), node_path);
+        // Compose the source as a sub-index (the relocation moves its content to
+        // the target). Its root is salted-earth inert; opinions and implied
+        // classes carried up across the relocate node translate the source
+        // namespace to the target.
         let ambient_is_root = self.ambient_is_root_for(&node_ambient);
         let Some(sub) = self.merge_subindex(self.compose_subindex(
             &source,
@@ -1139,13 +1200,66 @@ impl<'a, 'f> Builder<'a, 'f> {
             ambient_is_root,
             self.frame_skip(),
             false,
+            ArcType::Relocate,
         )?) else {
             return Ok(());
         };
+
+        // If the source prim itself is also a relocation source — the same prim
+        // reached through its reference chain (a reference/payload node at the
+        // source's own namespace level whose site is relocated away) — then
+        // `source` is a prohibited child: relocating from it would resurrect
+        // opinions that relocation moved (C++ `PcpErrorArcToProhibitedChild`,
+        // "CANNOT be relocated from"). A relocation source reached by an *inherit*
+        // (a symmetric-rig sibling) or sitting on a *descendant* is a different,
+        // handled relocation, so the match is restricted to same-depth
+        // reference/payload nodes. Drop and report it.
+        let source_depth = source.prim_element_count();
+        if let Some((reloc_source, reloc_layer)) = sub.nodes.iter().find_map(|n| {
+            if n.path != source
+                && matches!(n.arc, ArcType::Reference | ArcType::Payload)
+                && n.path.prim_element_count() == source_depth
+            {
+                self.inputs
+                    .stack
+                    .relocation_source_layer(n.layer_stack(), &n.path)
+                    .map(|l| (n.path.clone(), l.to_string()))
+            } else {
+                None
+            }
+        }) {
+            let site_layer = self.introducing_layer(node);
+            self.errors.push(Error::ProhibitedRelocationSource {
+                arc: ArcType::Relocate,
+                site: node_path.clone(),
+                site_layer: site_layer.clone(),
+                target: source.clone(),
+                target_layer: site_layer,
+                reloc_source,
+                reloc_layer,
+                composing: self.site.path.clone(),
+            });
+            return Ok(());
+        }
+
+        // The relocate node maps its source to the relocation target. The source
+        // sub-index excludes this same relocate from its internal arc folds (see
+        // `fold_relocates_into`), so the shift is applied once, here.
+        let map = MapFunction::from_pair_identity(source.clone(), node_path);
         let Some(grafted) = self.graft_subindex(&sub, node, ArcType::Relocate, map, node, 0) else {
             return Ok(());
         };
         self.output.nodes[grafted.idx()].flags |= NodeFlags::RELOCATE_SOURCE;
+        if let Some(layer) = opinion_layer {
+            self.pending_relocation_errors.push((
+                grafted,
+                Error::OpinionAtRelocationSource {
+                    source_path: source.clone(),
+                    layer,
+                    composing: self.site.path.clone(),
+                },
+            ));
+        }
         self.add_grafted_subtree_tasks(grafted);
         self.tasks.push(Task::new(TaskKind::EvalImpliedRelocations, grafted));
         self.elide_relocated_subtrees(grafted);
@@ -1165,7 +1279,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     // `_FindMatchingChild`'s relocate-arc comparison). The graft alone composes
     // no new opinion, so it lands with that cluster (TrickySpookyInherits*,
     // TrickyConnectionToRelocatedAttribute, TrickyMultipleRelocationsAndClasses2).
-    fn eval_implied_relocations(&mut self, _node: NodeId) -> Result<(), Error> {
+    fn eval_implied_relocations(&mut self, _node: NodeId) -> BuildResult<()> {
         Ok(())
     }
 
@@ -1252,7 +1366,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// arc for each (C++ `_EvalNodeReferences` / `_EvalNodePayloads`). Both
     /// resolve to a uniform `(asset, prim, offset)` list and share the arc-add
     /// loop.
-    fn eval_arcs(&mut self, node: NodeId, kind: TaskKind) -> Result<(), Error> {
+    fn eval_arcs(&mut self, node: NodeId, kind: TaskKind) -> BuildResult<()> {
         // An inert node (an implied-class placeholder) contributes no opinions
         // and must not re-express the arcs its origin site already composed; an
         // implied inherit at the referencing prim's own path would otherwise
@@ -1364,19 +1478,38 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// list ([`FieldKey::InheritPaths`] or [`FieldKey::Specializes`]) and `arc`
     /// the arc type; [`add_class_based_arc`](Self::add_class_based_arc) routes a
     /// specializes through the inert-placeholder / copy-to-root path.
-    fn eval_class_arcs(&mut self, node: NodeId, field: FieldKey, arc: ArcType) -> Result<(), Error> {
+    fn eval_class_arcs(&mut self, node: NodeId, field: FieldKey, arc: ArcType) -> BuildResult<()> {
         // An inert node (a non-contributing implied placeholder) authors nothing.
         if self.node(node).is_inert() {
             return Ok(());
         }
         let arcs = compose_arc_list_in::<Path>(self.node_slice(node), field, &self.inputs.stack.layers)?;
         let node_path = self.node(node).path.clone();
+        let node_ambient = self.node(node).layer_stack().to_vec();
         for (arc_num, class_path) in arcs.iter().enumerate() {
             let resolved = node_path.make_absolute(class_path);
             // A class arc must target a prim, not a variant selection. A target
             // that resolves to a variant-selection path is left uncomposed (the
             // strip/re-add of selections is future work, see `add_class_based_arc`).
             if resolved.is_prim_variant_selection_path() {
+                continue;
+            }
+            // Inheriting/specializing a prim that is itself a relocation source —
+            // or a child of one — is prohibited (salted earth, C++
+            // `PcpErrorArcToProhibitedChild`): the source is empty after
+            // relocation, so the arc is dropped and reported.
+            if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(&node_ambient, &resolved) {
+                let site_layer = self.introducing_layer(node);
+                self.errors.push(Error::ProhibitedRelocationSource {
+                    arc,
+                    site: node_path.clone(),
+                    site_layer: site_layer.clone(),
+                    target: resolved.clone(),
+                    target_layer: site_layer,
+                    reloc_source,
+                    reloc_layer,
+                    composing: self.site.path.clone(),
+                });
                 continue;
             }
             // The class-arc map sends the class to the instance; every other
@@ -1398,7 +1531,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// Finds the variant sets authored at `node`'s own site and enqueues an
     /// authored-selection task for each (C++ `_EvalNodeVariantSets` →
     /// `_EvalVariantSetsAtSite`).
-    fn eval_node_variant_sets(&mut self, node: NodeId) -> Result<(), Error> {
+    fn eval_node_variant_sets(&mut self, node: NodeId) -> BuildResult<()> {
         if !self.node_can_contribute_specs(node) {
             return Ok(());
         }
@@ -1411,7 +1544,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// `_EvalNodeAncestralVariantSets`). Walks from the node's parent path up to
     /// the root, stopping at the first variant-selection path — variant sets
     /// above it were already handled when that selection was made.
-    fn eval_node_ancestral_variant_sets(&mut self, node: NodeId) -> Result<(), Error> {
+    fn eval_node_ancestral_variant_sets(&mut self, node: NodeId) -> BuildResult<()> {
         let mut path = self.node(node).path.parent();
         while let Some(p) = path {
             if p == Path::abs_root() {
@@ -1436,7 +1569,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// The sets keep their declaration order, so a lower `vset_num` is stronger;
     /// `is_ancestral` selects the ancestral task band when the set sits above the
     /// node's own path.
-    fn eval_variant_sets_at_site(&mut self, node: NodeId, site_path: &Path, is_ancestral: bool) -> Result<(), Error> {
+    fn eval_variant_sets_at_site(&mut self, node: NodeId, site_path: &Path, is_ancestral: bool) -> BuildResult<()> {
         let sets = self.compose_token_children(node, site_path, ChildrenKey::VariantSetChildren)?;
         let kind = if is_ancestral {
             TaskKind::EvalNodeAncestralVariantAuthored
@@ -1466,7 +1599,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         node: NodeId,
         vt: &Option<VariantTask>,
         is_ancestral: bool,
-    ) -> Result<(), Error> {
+    ) -> BuildResult<()> {
         let Some(vt) = vt else { return Ok(()) };
         if !self.node_can_contribute_variant(node, &vt.vset_path, is_ancestral) {
             return Ok(());
@@ -1496,7 +1629,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         node: NodeId,
         vt: &Option<VariantTask>,
         is_ancestral: bool,
-    ) -> Result<(), Error> {
+    ) -> BuildResult<()> {
         let Some(vt) = vt else { return Ok(()) };
         if !self.node_can_contribute_variant(node, &vt.vset_path, is_ancestral) {
             return Ok(());
@@ -1536,7 +1669,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// search is rooted at the strongest node the set path maps to, so an arc
     /// boundary that blocks the mapping also blocks stronger frames' selections
     /// from leaking in. Returns the selection, or `None` when none is authored.
-    fn compose_variant_selection(&self, origin: NodeId, vset_path: &Path, vset: &str) -> Result<Option<String>, Error> {
+    fn compose_variant_selection(&self, origin: NodeId, vset_path: &Path, vset: &str) -> BuildResult<Option<String>> {
         // The strongest node the set path maps to, and the path in its namespace
         // (C++ `Pcp_TranslatePathFromNodeToRootOrClosestNode`).
         let (start, path_in_start) = self.translate_path_to_root_or_closest(origin, vset_path);
@@ -1667,7 +1800,7 @@ impl<'a, 'f> Builder<'a, 'f> {
 
     /// Composes the variant names available in set `vset` at `vset_path`, across
     /// `node`'s layer stack (C++ `PcpComposeSiteVariantSetOptions`).
-    fn compose_variant_options(&self, node: NodeId, vset_path: &Path, vset: &str) -> Result<Vec<String>, Error> {
+    fn compose_variant_options(&self, node: NodeId, vset_path: &Path, vset: &str) -> BuildResult<Vec<String>> {
         let set_path = vset_path.append_variant_selection(vset, "");
         self.compose_token_children(node, &set_path, ChildrenKey::VariantChildren)
     }
@@ -1682,7 +1815,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// (`is_ancestral`) inserts the selection at `vt.vset_path` above the node,
     /// keeps the node's deeper path below it, and composes the result as a
     /// sub-index with ancestral opinions before grafting it.
-    fn add_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str, is_ancestral: bool) -> Result<(), Error> {
+    fn add_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str, is_ancestral: bool) -> BuildResult<()> {
         if is_ancestral {
             return self.add_ancestral_variant_arc(node, vt, vsel);
         }
@@ -1708,7 +1841,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// Inserts an ancestral variant selection at `vt.vset_path` with the node's
     /// deeper path below it and grafts it as a sub-index carrying ancestral
     /// opinions (C++ `_AddAncestralVariantArc`).
-    fn add_ancestral_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> Result<(), Error> {
+    fn add_ancestral_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> BuildResult<()> {
         let n = self.node(node);
         let node_path = n.path.clone();
         let layers = n.layer_stack().to_vec();
@@ -1802,7 +1935,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         ignore_if_same_as_site: Option<(usize, Path)>,
         arc: ArcType,
         implied: bool,
-    ) -> Result<Option<NodeId>, Error> {
+    ) -> BuildResult<Option<NodeId>> {
         let parent_path = self.node(parent).path.clone();
         // Map the parent site back across the arc to find the site to inherit.
         // An empty result means there is no appropriate site (the parent is
@@ -1827,10 +1960,8 @@ impl<'a, 'f> Builder<'a, 'f> {
         // which the cycle test would otherwise reject (C++ excludes implied
         // class-based arcs under relocates from the check).
         if !implied && self.class_arc_is_cycle(parent, rep, &inherit_path) {
-            self.errors.push(Error::ArcCycle {
-                path: self.site.path.clone(),
-                depth: self.frame_depth,
-            });
+            self.errors
+                .push(Error::ArcCycle(self.cycle_error(parent, arc, rep, inherit_path)));
             return Ok(None);
         }
 
@@ -1899,7 +2030,7 @@ impl<'a, 'f> Builder<'a, 'f> {
 
         // A sub-root class needs the opinions above it: compose the target as its
         // own ancestral sub-index and graft it under the parent.
-        if direct_should && !is_root_prim(&inherit_path) {
+        if direct_should && !inherit_path.is_root_prim() {
             let target_is_root = self.ambient_is_root_for(&parent_layers);
             let grafted = self.compose_and_graft(
                 &inherit_path,
@@ -1949,7 +2080,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// Propagates `node`'s class-based children one level up to its parent (C++
     /// `_EvalImpliedClasses`): the queue repeats this, carrying a class brought
     /// in through a reference up the arc chain into the referencing namespace.
-    fn eval_implied_classes(&mut self, node: NodeId) -> Result<(), Error> {
+    fn eval_implied_classes(&mut self, node: NodeId) -> BuildResult<()> {
         let Some(parent) = self.node(node).parent() else {
             return Ok(());
         };
@@ -1977,7 +2108,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         src: NodeId,
         transfer: &MapFunction,
         start_of_tree: bool,
-    ) -> Result<(), Error> {
+    ) -> BuildResult<()> {
         // Implied classes are not propagated onto a relocate node (its class
         // children are only placeholders); instead they go directly to the
         // relocate node's parent, with the relocate's map folded into the
@@ -2013,7 +2144,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         // reference/payload collapses depth this way; crossing an inherit or
         // specialize keeps the class at its namespace level.
         let crosses_subroot_ref =
-            matches!(self.node(src).arc, ArcType::Reference | ArcType::Payload) && !is_root_prim(&self.node(src).path);
+            matches!(self.node(src).arc, ArcType::Reference | ArcType::Payload) && !self.node(src).path.is_root_prim();
         // A specializes node keeps its children on the copy under the root, so
         // iterate those (C++ `_EvalImpliedClassTree` reads the propagated node's
         // children when `srcNode` is a specializes node).
@@ -2204,7 +2335,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// ancestral opinions and grafted; a root-prim target is added directly.
     /// Returns the existing or new node, or `None` when a duplicate site is
     /// skipped.
-    fn propagate_node_to_root(&mut self, src: NodeId) -> Result<Option<NodeId>, Error> {
+    fn propagate_node_to_root(&mut self, src: NodeId) -> BuildResult<Option<NodeId>> {
         let root = self.output.local_root();
         if !root.is_valid() {
             return Ok(None);
@@ -2227,7 +2358,7 @@ impl<'a, 'f> Builder<'a, 'f> {
 
         // A sub-root specialize target needs the opinions above it (C++
         // `includeAncestralOpinions = !IsRootPrimPath`).
-        if !is_root_prim(&src_path) {
+        if !src_path.is_root_prim() {
             let target_is_root = self.ambient_is_root_for(&src_layers);
             return self.compose_and_graft(
                 &src_path,
@@ -2258,7 +2389,7 @@ impl<'a, 'f> Builder<'a, 'f> {
 
     /// Copies every specializes node in a grafted subtree under the root (C++
     /// `_EvalImpliedSpecializes`). A no-op at the root node, which has no parent.
-    fn eval_implied_specializes(&mut self, node: NodeId) -> Result<(), Error> {
+    fn eval_implied_specializes(&mut self, node: NodeId) -> BuildResult<()> {
         if self.node(node).parent().is_none() {
             return Ok(());
         }
@@ -2267,7 +2398,7 @@ impl<'a, 'f> Builder<'a, 'f> {
 
     /// Walks the subtree under `node`, copying each specializes node to the root
     /// (C++ `_FindSpecializesToPropagateToRoot`).
-    fn find_specializes_to_propagate_to_root(&mut self, node: NodeId) -> Result<(), Error> {
+    fn find_specializes_to_propagate_to_root(&mut self, node: NodeId) -> BuildResult<()> {
         if self.is_relocates_placeholder_implied_arc(node) {
             return Ok(());
         }
@@ -2295,7 +2426,7 @@ impl<'a, 'f> Builder<'a, 'f> {
         prim_path: &Path,
         arc: ArcType,
         arc_offset: LayerOffset,
-    ) -> Result<(), Error> {
+    ) -> BuildResult<()> {
         let is_internal = asset_path.is_empty();
         let parent_path = self.node(parent).path.clone();
 
@@ -2309,12 +2440,13 @@ impl<'a, 'f> Builder<'a, 'f> {
         } else {
             let Some(layer_index) = find_layer(asset_path, &self.inputs.stack.layers, &*self.inputs.stack.resolver)
             else {
-                // An unresolvable asset is a recoverable error (C++
-                // `PcpErrorUnresolvedPrimPath`): record it and skip the arc so the
-                // rest of the prim — including its own local opinions — still composes.
+                // An unresolvable asset is a recoverable error (C++ "Could not
+                // open asset … for {arc}"): record it and skip the arc so the rest
+                // of the prim — including its own local opinions — still composes.
                 self.errors.push(Error::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
+                    introduced_by: self.introducing_layer(parent),
                     site_path: parent_path,
                 });
                 return Ok(());
@@ -2352,9 +2484,23 @@ impl<'a, 'f> Builder<'a, 'f> {
         // whole prim. The reference diamond `GroupRoot → A → B → A` keeps its
         // `[GroupRoot, GroupA, GroupB]` stack and drops only the closing `B → A`.
         if !self.arc_target_in_bounds(parent, rep, &source) {
-            self.errors.push(Error::ArcCycle {
-                path: self.site.path.clone(),
-                depth: self.frame_depth,
+            self.errors
+                .push(Error::ArcCycle(self.cycle_error(parent, arc, rep, source)));
+            return Ok(());
+        }
+        // Referencing a prim that is a relocation source — or a child of one — is
+        // prohibited (C++ `PcpErrorArcToProhibitedChild`, "CANNOT reference"): the
+        // target is empty after relocation. Drop the arc and report it.
+        if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(&target_stack, &source) {
+            self.errors.push(Error::ProhibitedRelocationSource {
+                arc,
+                site: parent_path.clone(),
+                site_layer: self.introducing_layer(parent),
+                target: source.clone(),
+                target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                reloc_source,
+                reloc_layer,
+                composing: self.site.path.clone(),
             });
             return Ok(());
         }
@@ -2376,9 +2522,13 @@ impl<'a, 'f> Builder<'a, 'f> {
         }
 
         // A sub-root target needs the opinions above it: compose it as its own
-        // ancestral sub-index and graft it under the parent.
-        if !is_root_prim(&source) {
-            self.compose_and_graft(
+        // ancestral sub-index and graft it under the parent. A `None` result means
+        // the target could not be composed — e.g. its own ancestral chain closes a
+        // cycle — leaving the reference prim path unresolved (C++
+        // `PcpErrorUnresolvedPrimPath`).
+        if !source.is_root_prim() {
+            let before = self.errors.len();
+            let grafted = self.compose_and_graft(
                 &source,
                 &target_stack,
                 target_is_root,
@@ -2389,13 +2539,38 @@ impl<'a, 'f> Builder<'a, 'f> {
                 parent,
                 0,
             )?;
+            // The target is unresolved only when composing it hit a cycle (its own
+            // ancestral chain loops back) that left nothing — not when it is merely
+            // empty so far (e.g. a variant supplies its opinions later).
+            let hit_cycle = self.errors[before..].iter().any(|e| matches!(e, Error::ArcCycle(_)));
+            let unresolved = hit_cycle && !grafted.is_some_and(|g| self.subtree_has_specs(g));
+            if unresolved {
+                self.errors.push(Error::UnresolvedPrimPath {
+                    arc,
+                    target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                    prim_path: source.clone(),
+                    introduced_by: self.introducing_layer(parent),
+                    site_path: parent_path.clone(),
+                });
+            }
             return Ok(());
         }
 
         // An arc target authoring no spec is kept as a culled node (C++
         // culling): visible to change tracking and dependency registration, but
-        // contributing no opinions to value resolution.
+        // contributing no opinions to value resolution. A resolved-layer payload
+        // to such a prim is additionally an unresolved-prim-path error (C++
+        // `PcpErrorUnresolvedPrimPath`); the node is still culled.
         let empty = !self.stack_has_spec(&target_stack, &source);
+        if empty && !is_internal && arc == ArcType::Payload {
+            self.errors.push(Error::UnresolvedPrimPath {
+                arc,
+                target_layer: self.inputs.stack.layer(rep).identifier.clone(),
+                prim_path: source.clone(),
+                introduced_by: self.introducing_layer(parent),
+                site_path: parent_path.clone(),
+            });
+        }
         let new_node = self
             .output
             .add_site_child(parent, target_stack, source, arc, map, false);
@@ -2417,7 +2592,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// session layers ahead of the root layer, so the lookup uses the strongest
     /// non-session member rather than `target_stack[0]` — which for an internal
     /// reference on a stage with a session layer would be the session.
-    fn resolve_default_prim(&self, target_stack: &[(usize, LayerOffset)]) -> Result<Option<Path>, Error> {
+    fn resolve_default_prim(&self, target_stack: &[(usize, LayerOffset)]) -> BuildResult<Option<Path>> {
         let root_layer = target_stack
             .iter()
             .map(|&(li, _)| li)
@@ -2437,6 +2612,111 @@ impl<'a, 'f> Builder<'a, 'f> {
         }
     }
 
+    /// Identifier of the layer that authored an arc on `node` — its
+    /// representative (strongest) layer. Used to name the introducing layer in
+    /// recoverable arc errors.
+    fn introducing_layer(&self, node: NodeId) -> String {
+        self.inputs
+            .stack
+            .layer(self.node(node).layer_index())
+            .identifier
+            .clone()
+    }
+
+    /// Builds the cycle chain for an [`Error::ArcCycle`]: the arcs from the
+    /// composing prim down to the cycle-closing arc `(closing_arc, closing_layer,
+    /// closing_path)`. Walks `parent`'s ancestry (the no-parent node is the chain
+    /// root), records each intermediate site's arc, then appends the closing arc.
+    fn cycle_error(
+        &self,
+        parent: NodeId,
+        closing_arc: ArcType,
+        closing_layer: usize,
+        closing_path: Path,
+    ) -> CycleChain {
+        // Walk up to the local root — the node whose parent is the synthetic,
+        // inert graph root (or which has no parent). The local root is the chain
+        // root, displayed on its own line, not a hop.
+        let mut hops = Vec::new();
+        let mut cur = parent;
+        let root_node = loop {
+            let n = self.node(cur);
+            match n.parent() {
+                Some(p) if !self.node(p).is_inert() => {
+                    hops.push(CycleHop {
+                        arc: n.arc,
+                        layer: self.introducing_layer(cur),
+                        path: n.path.clone(),
+                    });
+                    cur = p;
+                }
+                _ => break cur,
+            }
+        };
+        hops.reverse();
+        // When the local root sits inside a parent frame (its site comes in
+        // through a sub-build), the chain begins above this build: prepend each
+        // frame's introduced site, outermost first, so the chain root is the
+        // top-level composing prim.
+        let mut composing = self.site.path.clone();
+        let mut root_layer = self.introducing_layer(root_node);
+        let mut frame_hops = Vec::new();
+        let mut frame = self.frame;
+        while let Some(f) = frame {
+            frame_hops.push(CycleHop {
+                arc: f.arc,
+                layer: self.inputs.stack.layer(f.requested_layer).identifier.clone(),
+                path: composing.clone(),
+            });
+            composing = f.root_path.clone();
+            root_layer = self.inputs.stack.layer(f.requested_layer).identifier.clone();
+            frame = f.previous;
+        }
+        frame_hops.reverse();
+        frame_hops.extend(hops);
+        let mut hops = frame_hops;
+        hops.push(CycleHop {
+            arc: closing_arc,
+            layer: self.inputs.stack.layer(closing_layer).identifier.clone(),
+            path: closing_path,
+        });
+        CycleChain {
+            composing,
+            root_layer,
+            hops,
+        }
+    }
+
+    /// Whether `node` or any descendant contributes a spec — used to tell a
+    /// sub-root arc whose target composed real opinions from one whose target was
+    /// elided to nothing (e.g. by a cycle in its own ancestral chain), which is an
+    /// unresolved prim path.
+    fn subtree_has_specs(&self, node: NodeId) -> bool {
+        let n = self.node(node);
+        if n.has_specs() {
+            return true;
+        }
+        n.children().iter().any(|&c| self.subtree_has_specs(c))
+    }
+
+    /// The relocation source making `path` (or its nearest ancestor) a prohibited
+    /// child in `ambient` — the path itself if it is relocated away, else the
+    /// closest ancestor that is, paired with the layer authoring that relocation.
+    /// `None` when neither `path` nor any ancestor is a relocation source.
+    fn prohibiting_relocation_source(&self, ambient: &[(usize, LayerOffset)], path: &Path) -> Option<(Path, String)> {
+        let mut p = Some(path.clone());
+        while let Some(cur) = p {
+            if let Some(layer) = self.inputs.stack.relocation_source_layer(ambient, &cur) {
+                return Some((cur, layer.to_string()));
+            }
+            if cur.is_abs_root() {
+                break;
+            }
+            p = cur.parent();
+        }
+        None
+    }
+
     /// Whether a class-based arc (inherit/specialize) to `(rep, path)` under
     /// `parent` closes a composition cycle (C++ `_CheckForCycle` /
     /// `_HasAncestorCycle`): walking the parent chain, an ancestor node in the
@@ -2452,6 +2732,15 @@ impl<'a, 'f> Builder<'a, 'f> {
                 return true;
             }
             cur = n.parent().unwrap_or(NodeId::INVALID);
+        }
+        // Continue across parent frames: a class arc landing back on a frame's
+        // build root inherits from an ancestor still under composition — the
+        // cross-frame mutual-inherit cycle (e.g. `Child1` inherits `Child2`, which
+        // inherits `Child1`, each composed as the other's sub-build).
+        for (f, search) in self.frame_sites(path) {
+            if search == f.root_path && f.graph.node_using_site(rep, &search).is_some() {
+                return true;
+            }
         }
         false
     }
@@ -2481,7 +2770,16 @@ impl<'a, 'f> Builder<'a, 'f> {
         // each frame is a sub-build still in progress, so an arc landing back on
         // a frame's build root targets an ancestor under composition — a cycle.
         for (f, search) in self.frame_sites(path) {
-            if search == f.root_path && f.graph.node_using_site(root_layer, &search).is_some() {
+            // The arc lands on a frame's build root (a node already composing there)
+            // or on a namespace ancestor of it — both are sites still under
+            // composition in a parent frame. The ancestor case closes the
+            // sub-root-reference cycle where the target's own ancestral chain
+            // re-introduces a prim above the referrer.
+            let at_root = search == f.root_path && f.graph.node_using_site(root_layer, &search).is_some();
+            let above_root = search != f.root_path
+                && f.root_path.has_prefix(&search)
+                && f.graph.node_using_site(root_layer, &f.root_path).is_some();
+            if at_root || above_root {
                 return false;
             }
             depth += 1;
@@ -2565,7 +2863,7 @@ impl<'a, 'f> Builder<'a, 'f> {
     /// Unions a node's named children (a `TokenVec` field) at `path` across its
     /// layer stack, keeping declaration order and dropping duplicates. Used to
     /// gather a site's variant set names and a set's variant options.
-    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> Result<Vec<String>, Error> {
+    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<String>> {
         let mut out: Vec<String> = Vec::new();
         for &(layer, _) in self.node(node).layer_stack() {
             let Some(value) = self.inputs.stack.layer(layer).try_get(path, key.as_str())? else {

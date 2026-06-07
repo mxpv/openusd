@@ -417,25 +417,25 @@ impl Prim {
     /// `self.path`-gated sibling queries such as [`is_instance`](Self::is_instance)):
     /// `self.path` here is the synthetic prototype root, which is never in a
     /// user population mask, so gating on it would always yield nothing.
-    pub fn instances(&self) -> anyhow::Result<Vec<sdf::Path>> {
+    pub fn instances(&self) -> Vec<sdf::Path> {
         let mask = self.stage.population_mask();
-        let instances = self.stage.try_or_handle(|cache| Ok(cache.instances_of(&self.path)))?;
-        Ok(instances
+        let instances = self.stage.cache().instances_of(&self.path);
+        instances
             .into_iter()
             .filter(|instance| mask.includes(instance))
-            .collect())
+            .collect()
     }
 
     /// Returns `true` if this prim is a prototype root (`/__Prototype_N`).
     /// Mirrors C++ `UsdPrim::IsPrototype`.
-    pub fn is_prototype(&self) -> anyhow::Result<bool> {
-        self.stage.try_or_handle(|cache| Ok(cache.is_prototype(&self.path)))
+    pub fn is_prototype(&self) -> bool {
+        self.stage.cache().is_prototype(&self.path)
     }
 
     /// Returns `true` if this prim lies within a prototype's namespace.
     /// Mirrors C++ `UsdPrim::IsInPrototype`.
-    pub fn is_in_prototype(&self) -> anyhow::Result<bool> {
-        self.stage.try_or_handle(|cache| Ok(cache.is_in_prototype(&self.path)))
+    pub fn is_in_prototype(&self) -> bool {
+        self.stage.cache().is_in_prototype(&self.path)
     }
 
     /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
@@ -489,7 +489,7 @@ impl Prim {
     /// contributes a prim spec to this prim, strongest first. Mirrors C++
     /// `UsdPrim::GetPrimStack`.
     pub fn prim_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.try_or_handle(|cache| cache.prim_stack(&self.path))
+        self.stage.cache_mut().prim_stack(&self.path)
     }
 
     /// Returns a handle to this prim's composition index (C++
@@ -652,8 +652,8 @@ fn payload_has_target(payload: &sdf::Payload) -> bool {
 /// the stage with the prim's path so the introspection that needs both — the
 /// composed child names — is reachable here, alongside the raw graph via
 /// [`graph`](Self::graph). Like [`Prim`], it is a cheap value handle: each query
-/// borrows the cache briefly and routes composition errors through the stage's
-/// error handler.
+/// borrows the cache briefly. Composition diagnostics remain available through
+/// [`Stage::composition_errors`].
 #[derive(Clone)]
 pub struct PrimIndexRef {
     stage: Stage,
@@ -671,7 +671,7 @@ impl PrimIndexRef {
     /// Returns this prim's composition graph (C++ `UsdPrim::GetPrimIndex`),
     /// building it if needed. A clone, since the cache owns the cached index.
     pub fn graph(&self) -> anyhow::Result<pcp::PrimIndex> {
-        self.stage.try_or_handle(|cache| Ok(cache.index(&self.path)?.clone()))
+        Ok(self.stage.cache_mut().index(&self.path)?.clone())
     }
 
     /// Composes this prim's child names together with the names prohibited at it
@@ -679,8 +679,7 @@ impl PrimIndexRef {
     /// re-introduced — returned as `(children, prohibited)` (C++
     /// `PcpPrimIndex::ComputePrimChildNames`).
     pub fn child_names(&self) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        self.stage
-            .try_or_handle(|cache| cache.compute_prim_child_names(&self.path))
+        self.stage.cache_mut().compute_prim_child_names(&self.path)
     }
 }
 
@@ -712,7 +711,7 @@ impl VariantSets {
     /// selections — authored, fallback, or default — read from the variant
     /// selection sites that actually contribute to the prim.
     pub fn get_all_variant_selections(&self) -> anyhow::Result<Vec<(String, String)>> {
-        self.stage.try_or_handle(|cache| cache.variant_selections(&self.prim))
+        self.stage.cache_mut().variant_selections(&self.prim)
     }
 }
 
@@ -780,7 +779,7 @@ mod tests {
         let a = super::Prim::new(&stage, sdf::path("/A")?);
         assert!(a.is_instance()?);
         assert!(a.prototype()?.is_some());
-        assert!(!a.is_in_prototype()?);
+        assert!(!a.is_in_prototype());
 
         let proto = super::Prim::new(&stage, sdf::path("/Proto")?);
         assert!(!proto.is_instance()?);
