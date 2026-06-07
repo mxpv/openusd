@@ -367,7 +367,7 @@ mod pcp_txt {
                 let _ = writeln!(out, "Time Offsets:");
                 for id in walk {
                     let node = index.node(id);
-                    let layer_id = stage.layer_identifier(node.layer_index()).unwrap_or_default();
+                    let layer_id = stage.layer_identifier(node.layer_id()).unwrap_or_default();
                     // Lowercase arc name matching C++ `PcpArcType`'s `displayName`.
                     let arc = match node.arc {
                         pcp::ArcType::Root => "root",

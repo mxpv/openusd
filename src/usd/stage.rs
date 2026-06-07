@@ -37,7 +37,7 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::{Cell, Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -299,7 +299,11 @@ impl Default for StagePopulationMask {
 // `session_layer_count`-arithmetic to address common slots.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditTarget {
-    layer_index: usize,
+    /// Canonical identifier of the layer this target writes to. Stored as a
+    /// string (not a [`pcp::LayerId`]) so the constructor needs no graph and the
+    /// target stays valid across layer remove/re-add; it is resolved to the
+    /// graph handle at author time.
+    layer_identifier: String,
     /// Maps the layer (spec) namespace to the stage (scene) namespace — the
     /// same orientation as [`pcp::Node`](crate::pcp::Node)'s `map_to_root`.
     /// Authoring queries it in reverse via
@@ -309,13 +313,11 @@ pub struct EditTarget {
 }
 
 impl EditTarget {
-    /// Edit target pointing at the layer with the given index in the stage's
-    /// layer stack, with an identity path mapping (scene path == spec path).
-    /// Session layers occupy the first `session_layer_count` slots; the root
-    /// layer sits at `session_layer_count`.
-    pub fn for_layer_index(layer_index: usize) -> Self {
+    /// Edit target pointing at the layer with the given identifier, with an
+    /// identity path mapping (scene path == spec path).
+    pub fn for_layer(layer_identifier: impl Into<String>) -> Self {
         Self {
-            layer_index,
+            layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::identity(),
         }
     }
@@ -327,17 +329,17 @@ impl EditTarget {
     ///
     /// Mirrors C++ `UsdEditTarget::ForLocalDirectVariant`. Paths outside the
     /// variant prim map to themselves, so authoring elsewhere is unaffected.
-    pub fn for_local_direct_variant(layer_index: usize, var_sel_path: sdf::Path) -> Self {
+    pub fn for_local_direct_variant(layer_identifier: impl Into<String>, var_sel_path: sdf::Path) -> Self {
         let stripped = var_sel_path.strip_all_variant_selections();
         Self {
-            layer_index,
+            layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
         }
     }
 
-    /// Returns the layer index this target writes to.
-    pub fn layer_index(&self) -> usize {
-        self.layer_index
+    /// The identifier of the layer this target writes to.
+    pub fn layer_identifier(&self) -> &str {
+        &self.layer_identifier
     }
 
     /// Maps a scene (stage-namespace) path to the spec (layer-namespace) path
@@ -358,9 +360,10 @@ impl EditTarget {
 /// ```no_run
 /// # use openusd::usd::{Stage, EditTarget};
 /// # fn f(stage: &Stage) -> anyhow::Result<()> {
+/// let root = stage.root_layer().identifier().to_string();
 /// {
-///     let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
-///     stage.define_prim("/World")?; // authored into layer 0
+///     let _ctx = stage.edit_context(EditTarget::for_layer(root))?;
+///     stage.define_prim("/World")?; // authored into the root layer
 /// } // previous edit target restored here
 /// # Ok(())
 /// # }
@@ -396,13 +399,11 @@ pub enum StageAuthoringError {
     #[error(transparent)]
     Composition(#[from] anyhow::Error),
 
-    /// The edit target's layer index is out of range for this stage.
-    #[error("edit target layer index {index} is out of range ({count} layers)")]
-    LayerOutOfRange {
-        /// The offending index.
-        index: usize,
-        /// The current number of layers.
-        count: usize,
+    /// The named layer is not present in this stage's layer graph.
+    #[error("layer {layer:?} is not in the stage")]
+    LayerNotFound {
+        /// The offending layer's identifier.
+        layer: String,
     },
 
     /// The path being authored falls outside the current edit target's
@@ -430,8 +431,15 @@ pub enum StageAuthoringError {
 /// private and this type is not re-exported, so it is not externally
 /// nameable, and all its fields are private.
 pub struct StageInner {
-    /// Lazily-built composition graph caching per-prim indices and contexts.
-    graph: RefCell<pcp::Cache>,
+    /// The loaded layers and their sublayer DAG. Held separately from the
+    /// composition cache so layer data and the composed index can be borrowed
+    /// independently.
+    layers: RefCell<pcp::LayerGraph>,
+    /// Lazily-built composition cache of per-prim indices and contexts.
+    cache: RefCell<pcp::Cache>,
+    /// Muted layer identifiers (C++ `UsdStage::MuteLayer`). A muted layer
+    /// contributes no opinions while remaining in the graph.
+    muted: RefCell<std::collections::HashSet<String>>,
     /// Initial payload loading behavior for this stage.
     initial_load_set: InitialLoadSet,
     /// Population mask limiting stage-visible prims.
@@ -487,10 +495,15 @@ impl Stage {
 
     /// Returns composition errors encountered while composing this stage.
     ///
-    /// Prim indices are built lazily, so this is a snapshot of errors
-    /// discovered by stage queries performed so far.
+    /// Combines the layer graph's current diagnostics (sublayer cycles and
+    /// invalid relocates, always reflecting present graph state) with the
+    /// cache's per-prim build errors. Prim indices are built lazily, so the
+    /// per-prim half is a snapshot of errors discovered by stage queries
+    /// performed so far.
     pub fn composition_errors(&self) -> Vec<pcp::Error> {
-        self.graph.borrow().composition_errors()
+        let mut errors = self.layers().errors();
+        errors.extend(self.cache().composition_errors());
+        errors
     }
 
     /// Returns the current edit target — the layer that authoring methods
@@ -502,13 +515,13 @@ impl Stage {
     /// Replace the current edit target. Subsequent authoring calls write to
     /// the new target's layer.
     ///
-    /// Validates that `target.layer_index()` is in range so a bad index
-    /// surfaces here, not on some later unrelated authoring call.
+    /// Validates that `target.layer_identifier()` names a layer in this stage so
+    /// a bad target surfaces here, not on some later unrelated authoring call.
     pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
-        let count = self.graph.borrow().layer_count();
-        let index = target.layer_index;
-        if index >= count {
-            return Err(StageAuthoringError::LayerOutOfRange { index, count });
+        if self.layers().id_of(target.layer_identifier()).is_none() {
+            return Err(StageAuthoringError::LayerNotFound {
+                layer: target.layer_identifier().to_string(),
+            });
         }
 
         *self.edit_target.borrow_mut() = target;
@@ -705,10 +718,10 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
-        // Read the layer index and mapped spec path under a short borrow of
-        // `edit_target` (which owns a heap `MapFunction`), releasing it before
-        // the `graph` borrow below.
-        let (index, spec_path) = {
+        // Read the target identifier and mapped spec path under a short borrow
+        // of `edit_target` (which owns a heap `MapFunction`), releasing it
+        // before the layer borrow below.
+        let (identifier, spec_path) = {
             let target = self.edit_target.borrow();
             let spec_path =
                 target
@@ -716,17 +729,17 @@ impl Stage {
                     .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
                         path: scene_path.clone(),
                     })?;
-            (target.layer_index, spec_path)
+            (target.layer_identifier.clone(), spec_path)
         };
-        let mut cache = self.graph.borrow_mut();
-        let count = cache.layer_count();
-        let result = {
-            let layer = cache
-                .layer_mut(index)
-                .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
-            f(layer, spec_path)
+        let (layer_id, result) = {
+            let mut layers = self.layers.borrow_mut();
+            let layer_id = layers
+                .id_of(&identifier)
+                .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
+            let node = layers.get_mut(layer_id).expect("id_of returned a live id");
+            (layer_id, f(&mut node.layer, spec_path))
         };
-        Self::finalize_layer(&mut cache, index, result)
+        self.finalize_layer(layer_id, result)
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
@@ -738,16 +751,19 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
     {
-        let mut cache = self.graph.borrow_mut();
-        let index = cache.session_layer_count();
-        let count = cache.layer_count();
+        let layer_id = self
+            .layers
+            .borrow()
+            .root_id()
+            .ok_or(StageAuthoringError::OutsideEditTarget {
+                path: sdf::Path::abs_root(),
+            })?;
         let result = {
-            let layer = cache
-                .layer_mut(index)
-                .ok_or(StageAuthoringError::LayerOutOfRange { index, count })?;
-            f(layer)
+            let mut layers = self.layers.borrow_mut();
+            let node = layers.get_mut(layer_id).expect("root_id refers to a live layer");
+            f(&mut node.layer)
         };
-        Self::finalize_layer(&mut cache, index, result).map(|_| ())
+        self.finalize_layer(layer_id, result).map(|_| ())
     }
 
     /// Translate a Layer-tier authoring result into the Stage error type and
@@ -762,30 +778,37 @@ impl Stage {
     // fallback can be narrowed to just the paths the closure touched
     // before failing.
     fn finalize_layer(
-        cache: &mut pcp::Cache,
-        layer_index: usize,
+        &self,
+        layer_id: pcp::LayerId,
         result: Result<sdf::ChangeList, sdf::AuthoringError>,
     ) -> Result<bool, StageAuthoringError> {
         match result {
             Ok(cl) if cl.is_empty() => Ok(false),
             Ok(cl) => {
                 let mut changes = pcp::Changes::new();
-                changes.did_change(cache, &[(layer_index, cl)]);
-                changes.apply(cache);
+                let edits = [(layer_id, cl)];
+                {
+                    let graph = self.layers.borrow();
+                    let cache = self.cache.borrow();
+                    changes.did_change(&cache, &graph, &edits);
+                }
+                let mut graph = self.layers.borrow_mut();
+                let mut cache = self.cache.borrow_mut();
+                changes.apply(&mut cache, &mut graph);
                 Ok(true)
             }
             Err(e) => {
                 if !matches!(e, sdf::AuthoringError::ReadOnly { .. }) {
-                    // Conservatively drop every cached index on
-                    // post-mutation failure (the layer may be in a
-                    // partial state). `SIGNIFICANT` alone is enough —
-                    // `apply` routes it through `clear_all_indices` and
-                    // the layer-stack precomputed maps (sublayer stacks,
-                    // relocates) cannot have been affected by a failing
-                    // prim/property edit.
+                    // Conservatively drop every cached index on post-mutation
+                    // failure (the layer may be in a partial state). `SIGNIFICANT`
+                    // alone is enough — `apply` routes it through
+                    // `clear_all_indices` and the layer graph cannot have been
+                    // affected by a failing prim/property edit.
                     let mut changes = pcp::Changes::new();
                     changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
-                    changes.apply(cache);
+                    let mut graph = self.layers.borrow_mut();
+                    let mut cache = self.cache.borrow_mut();
+                    changes.apply(&mut cache, &mut graph);
                 }
                 Err(StageAuthoringError::Layer(e))
             }
@@ -794,25 +817,25 @@ impl Stage {
 
     /// Returns the number of layers in the stage (including session layers).
     pub fn layer_count(&self) -> usize {
-        self.graph.borrow().layer_count()
+        self.layers().len()
     }
 
     /// Returns `true` when the composition cache currently holds a prim
     /// index at `path`. Useful for verifying surgical invalidation and
     /// for callers that want to observe cache occupancy.
     pub fn is_indexed(&self, path: &sdf::Path) -> bool {
-        self.graph.borrow().is_indexed(path)
+        self.cache().is_indexed(path)
     }
 
     /// Total number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
-        self.graph.borrow().indexed_count()
+        self.cache().indexed_count()
     }
 
     /// Returns the layer identifiers in strength order (session layers first,
     /// then root layer and its sublayers).
     pub fn layer_identifiers(&self) -> Vec<String> {
-        self.graph.borrow().layer_identifiers()
+        self.layers().identifiers()
     }
 
     /// Returns the identifiers of the stage's root layer stack — the session
@@ -823,12 +846,72 @@ impl Stage {
     /// loaded layer including those reached across reference/payload arcs, this
     /// is only the local layer stack a top-level prim scans for direct opinions.
     pub fn layer_stack(&self) -> Vec<String> {
-        self.graph.borrow().root_layer_stack_identifiers()
+        self.layers().root_layer_stack_identifiers()
     }
 
     /// Returns `true` if the stage has a session layer.
     pub fn has_session_layer(&self) -> bool {
-        self.graph.borrow().session_layer_count() > 0
+        self.layers().session_layer_count() > 0
+    }
+
+    /// Borrows the stage's root layer (C++ `UsdStage::GetRootLayer`). Panics if
+    /// the stage has no root layer (only possible for a degenerate empty graph,
+    /// which `StageBuilder` never produces).
+    ///
+    /// The returned [`Ref`] borrows the layer graph, and a `&self` authoring
+    /// call (`insert_sub_layer`, `define_prim`, …) takes `self.layers` mutably,
+    /// so a live `Ref` held across one panics with a `RefCell` double-borrow. In
+    /// particular `stage.insert_sub_layer(stage.root_layer().identifier(), …)`
+    /// panics — the `Ref` temporary lives to the end of the statement. Bind the
+    /// identifier first so the borrow is released:
+    ///
+    /// ```no_run
+    /// # use openusd::{sdf, usd};
+    /// # fn f(stage: &usd::Stage, layer: sdf::Layer) {
+    /// let id = stage.root_layer().identifier().to_owned();
+    /// stage.insert_sub_layer(&id, 0, layer, sdf::LayerOffset::IDENTITY).unwrap();
+    /// # }
+    /// ```
+    pub fn root_layer(&self) -> Ref<'_, sdf::Layer> {
+        Ref::map(self.layers(), |layers| {
+            layers.root_layer().expect("stage has a root layer")
+        })
+    }
+
+    /// The identifiers of the layers contributing to `parent`'s sublayer stack,
+    /// in strength order (the parent first). Empty when `parent` is not in the
+    /// stage. `parent` is matched by its canonical identifier.
+    pub fn sub_layers(&self, parent: &str) -> Vec<String> {
+        let graph = self.layers();
+        let Some(parent_id) = graph.id_of(parent) else {
+            return Vec::new();
+        };
+        graph.identifiers_of(graph.sublayer_stack(parent_id).iter().map(|&(id, _)| id))
+    }
+
+    /// Records a layer identifier in the muted set (C++ `UsdStage::MuteLayer`,
+    /// which likewise mutes by identifier — the layer need not be loaded). Full
+    /// value-resolution suppression of muted layers is not yet wired into
+    /// composition.
+    pub fn mute_layer(&self, identifier: impl Into<String>) {
+        self.muted.borrow_mut().insert(identifier.into());
+    }
+
+    /// Removes a layer identifier from the muted set.
+    pub fn unmute_layer(&self, identifier: &str) {
+        self.muted.borrow_mut().remove(identifier);
+    }
+
+    /// Whether the layer with the given identifier is currently muted.
+    pub fn is_layer_muted(&self, identifier: &str) -> bool {
+        self.muted.borrow().contains(identifier)
+    }
+
+    /// The currently muted layer identifiers, sorted for a deterministic result.
+    pub fn muted_layers(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.muted.borrow().iter().cloned().collect();
+        ids.sort();
+        ids
     }
 
     /// Returns the stage's initial payload loading behavior.
@@ -843,12 +926,11 @@ impl Stage {
 
     /// Returns the session layer identifier, if one was provided.
     pub fn session_layer(&self) -> Option<String> {
-        let cache = self.graph.borrow();
-        if cache.session_layer_count() > 0 {
-            cache.layer_identifier(0).map(str::to_owned)
-        } else {
-            None
-        }
+        let layers = self.layers();
+        layers
+            .session_layers()
+            .first()
+            .map(|&id| layers.identifier(id).to_string())
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -856,7 +938,7 @@ impl Stage {
     /// When a session layer is present, `defaultPrim` is still read from
     /// the root layer (not the session layer), matching C++ behavior.
     pub fn default_prim(&self) -> Option<String> {
-        self.graph.borrow().default_prim()
+        self.with_cache(|g, c| Ok(c.default_prim(g))).unwrap_or_default()
     }
 
     /// Returns composed pseudo-root stage metadata, honoring a session-layer
@@ -866,7 +948,7 @@ impl Stage {
     /// root-layer-only metadata for the spec 12.2.7 fields like `defaultPrim`.
     /// Returns the raw [`sdf::Value`]; the caller coerces it.
     pub fn stage_metadata(&self, field: impl AsRef<str>) -> Result<Option<sdf::Value>> {
-        self.graph.borrow().stage_metadata(field.as_ref())
+        self.with_cache(|g, c| c.stage_metadata(g, field.as_ref()))
     }
 
     /// Returns the stage-level interpolation mode used by
@@ -920,7 +1002,7 @@ impl Stage {
         }
         let interp_type = self.interpolation_type.get();
         let interp = |samples: &sdf::TimeSampleMap, t: f64| interp::evaluate(samples, t, interp_type);
-        self.cache_mut().value_at(&attr_path, time, &interp)
+        self.with_cache(|g, c| c.value_at(g, &attr_path, time, &interp))
     }
 
     /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
@@ -947,7 +1029,7 @@ impl Stage {
     /// Returns the composed list of root prim names (children of the pseudo-root).
     pub fn root_prims(&self) -> Result<Vec<String>> {
         let root = sdf::Path::abs_root();
-        let children = self.cache_mut().prim_children(&root)?;
+        let children = self.with_cache(|g, c| c.prim_children(g, &root))?;
         Ok(self.filter_child_names(&root, children))
     }
 
@@ -970,7 +1052,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(false);
         }
-        self.cache_mut().has_spec(&path)
+        self.with_cache(|g, c| c.has_spec(g, &path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
@@ -979,7 +1061,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
         }
-        self.cache_mut().spec_type(&path)
+        self.with_cache(|g, c| c.spec_type(g, &path))
     }
 
     /// Resolves a composed field value by walking the prim index from strongest
@@ -1013,7 +1095,7 @@ impl Stage {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(None);
         }
-        let raw = self.cache_mut().resolve_field(&path, field.as_ref())?;
+        let raw = self.with_cache(|g, c| c.resolve_field(g, &path, field.as_ref()))?;
         match raw {
             Some(value) => Ok(Some(T::try_from(value)?)),
             None => Ok(None),
@@ -1029,13 +1111,12 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnOnce(&mut pcp::Cache) -> Result<T>,
+        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::Cache) -> Result<T>,
     ) -> Result<T> {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(T::default());
         }
-        let mut cache = self.cache_mut();
-        query(&mut cache)
+        self.with_cache(query)
     }
 
     /// Returns a handle to a prim's composition index (C++
@@ -1046,12 +1127,13 @@ impl Stage {
         super::PrimIndexRef::new(self, prim.into())
     }
 
-    /// Resolves a global layer index — as carried by a composition
-    /// [`Node`](pcp::Node) (`layer_index`, `layer_stack`) — to its identifier.
+    /// Resolves a layer id — as carried by a composition
+    /// [`Node`](pcp::Node) (`layer_id`, `layer_stack`) — to its identifier.
     /// Unlike [`Self::layer_stack`], this covers every loaded layer, including
     /// those reached across reference/payload arcs.
-    pub fn layer_identifier(&self, index: usize) -> Option<String> {
-        self.graph.borrow().layer_identifier(index).map(str::to_string)
+    pub fn layer_identifier(&self, id: pcp::LayerId) -> Option<String> {
+        let layers = self.layers();
+        layers.contains(id).then(|| layers.identifier(id).to_string())
     }
 
     /// Returns the root layer's `customLayerData` dictionary, if authored.
@@ -1134,12 +1216,138 @@ impl Stage {
 
     /// Borrows the stage's composition cache.
     pub(crate) fn cache(&self) -> Ref<'_, pcp::Cache> {
-        self.graph.borrow()
+        self.cache.borrow()
     }
 
-    /// Mutably borrows the stage's composition cache for a lazy query.
-    pub(crate) fn cache_mut(&self) -> RefMut<'_, pcp::Cache> {
-        self.graph.borrow_mut()
+    /// Inserts `layer` as a sublayer of `parent` at `pos`. `parent` is matched
+    /// by its canonical identifier.
+    ///
+    /// `parent`'s `subLayers` / `subLayerOffsets` metadata is the single source
+    /// of truth: this authors `layer`'s identifier and `offset` there, then
+    /// rebuilds the graph edges and invalidates composition through the same
+    /// change pipeline an ordinary `subLayers` edit uses. The sublayer therefore
+    /// persists on save.
+    ///
+    /// Returns [`StageAuthoringError::LayerNotFound`] if `parent` is not in the
+    /// stage and [`StageAuthoringError::Layer`] if `parent` is read-only. In
+    /// both cases the graph is left untouched — `layer` only joins it once the
+    /// parent edit succeeds, so a failed insert never leaves an orphan node.
+    ///
+    /// Only `layer` itself is added. If `layer` authors its own `subLayers`
+    /// naming layers not already loaded in the stage, those nested sublayers are
+    /// not auto-collected from disk — their edges resolve to nothing and
+    /// contribute no opinions. Insert an already-collected layer (e.g. from a
+    /// [`layer::Collector`](crate::layer::Collector)) when nested sublayers must
+    /// load.
+    //
+    // TODO: run the collector on `layer` so its sublayer/reference/payload
+    // dependencies load (and unresolved ones surface as `UnresolvedSublayer`),
+    // matching what `StageBuilder::open` does for the root layer.
+    pub fn insert_sub_layer(
+        &self,
+        parent: &str,
+        pos: usize,
+        layer: sdf::Layer,
+        offset: sdf::LayerOffset,
+    ) -> Result<(), StageAuthoringError> {
+        let identifier = layer.identifier().to_string();
+        // Author the parent's metadata first; the child node is added only after
+        // this succeeds (the authored asset path is a plain string, so the node
+        // need not exist yet — only the later rebuild's `find()` needs it).
+        let (parent_id, cl) = {
+            let mut layers = self.layers.borrow_mut();
+            let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
+                layer: parent.to_string(),
+            })?;
+            let node = layers.get_mut(parent_id).expect("id_of returned a live id");
+            let cl = node.layer.pseudo_root_mut().map(|mut root| {
+                root.insert_sublayer(pos, identifier, offset);
+                Self::sublayers_change_list()
+            });
+            (parent_id, cl)
+        };
+        let cl = cl.map_err(StageAuthoringError::Layer)?;
+        self.layers.borrow_mut().ensure_layer(layer);
+        self.finalize_layer(parent_id, Ok(cl))?;
+        Ok(())
+    }
+
+    /// Removes the sublayer `child` from `parent`'s `subLayers` and its aligned
+    /// `subLayerOffsets` entry, then rebuilds the graph edges and invalidates
+    /// composition through the change pipeline. `parent` is matched by its
+    /// canonical identifier; `child` may be either a canonical identifier (as
+    /// returned by [`sub_layers`](Self::sub_layers)) or the as-authored asset
+    /// path — both are resolved to the same layer, and the authored `subLayers`
+    /// entry pointing at that layer is the one removed, even when the entry is a
+    /// relative path that differs from the canonical identifier.
+    ///
+    /// Returns `Ok(true)` if a sublayer was removed, `Ok(false)` if `child` is
+    /// not a sublayer of `parent`, [`StageAuthoringError::LayerNotFound`] if
+    /// `parent` is not in the stage, and [`StageAuthoringError::Layer`] if
+    /// `parent` is read-only.
+    pub fn remove_sub_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
+        let (parent_id, cl) = {
+            let mut layers = self.layers.borrow_mut();
+            let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
+                layer: parent.to_string(),
+            })?;
+            // Resolve `child` to a layer id (exact canonical identifier, or an
+            // authored asset path), then find the authored `subLayers` entry
+            // that resolves to it. The entry string can differ from the
+            // canonical id (e.g. a relative path), so an exact string match
+            // against the caller's `child` would miss it.
+            let authored = layers.id_of(child).or_else(|| layers.find(child)).and_then(|child_id| {
+                let subs = layers.get(parent_id)?.layer.pseudo_root()?.sublayers()?.to_vec();
+                subs.into_iter()
+                    .find(|entry| layers.id_of(entry).or_else(|| layers.find(entry)) == Some(child_id))
+            });
+            let cl = match authored {
+                Some(entry) => {
+                    let node = layers.get_mut(parent_id).expect("id_of returned a live id");
+                    node.layer
+                        .pseudo_root_mut()
+                        .map(|mut root| root.remove_sublayer(&entry).then(Self::sublayers_change_list))
+                }
+                None => Ok(None),
+            };
+            (parent_id, cl)
+        };
+        match cl.map_err(StageAuthoringError::Layer)? {
+            Some(cl) => {
+                self.finalize_layer(parent_id, Ok(cl))?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// A pseudo-root [`sdf::ChangeList`] recording a `subLayers` /
+    /// `subLayerOffsets` edit, so [`finalize_layer`](Self::finalize_layer)
+    /// classifies it as a layer-stack rebuild.
+    fn sublayers_change_list() -> sdf::ChangeList {
+        let mut cl = sdf::ChangeList::new();
+        let entry = cl.entry_mut(&sdf::Path::abs_root());
+        entry.info_changed.insert(sdf::FieldKey::SubLayers.as_str());
+        entry.info_changed.insert(sdf::FieldKey::SubLayerOffsets.as_str());
+        cl
+    }
+
+    /// Borrows the stage's layer graph.
+    pub(crate) fn layers(&self) -> Ref<'_, pcp::LayerGraph> {
+        self.layers.borrow()
+    }
+
+    /// Runs a composed query that needs both the layer graph and the
+    /// composition cache, borrowing each for the call. The layer graph is
+    /// borrowed shared and the cache mutably, mirroring how composition reads
+    /// layer data through a `&LayerGraph` while lazily building the index.
+    pub(crate) fn with_cache<T>(
+        &self,
+        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::Cache) -> Result<T>,
+    ) -> Result<T> {
+        let graph = self.layers.borrow();
+        let mut cache = self.cache.borrow_mut();
+        query(&graph, &mut cache)
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -1176,7 +1384,7 @@ impl Stage {
                 }
             }
 
-            let names = self.masked(&path, |cache| cache.prim_children(&path))?;
+            let names = self.masked(&path, |g, cache| cache.prim_children(g, &path))?;
             let children = self.filter_child_names(&path, names);
             // Push in reverse so first child is visited first.
             for name in children.iter().rev() {
@@ -1412,11 +1620,18 @@ impl<R: ar::Resolver> StageBuilder<R> {
         R: 'static,
     {
         let load_payloads = self.initial_load_set.load_payloads();
-        let mut stack = pcp::LayerStack::new(layers, session_layer_count, Box::new(self.resolver), load_payloads);
-        stack.layer_stack_errors.extend(collection_errors);
-        let edit_target = EditTarget::for_layer_index(session_layer_count);
+        // The graph keeps its own regenerable diagnostics (sublayer cycles,
+        // invalid relocates); the cache holds only the one-shot collection
+        // errors. `Stage::composition_errors` concatenates the two.
+        let graph = pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        // The root layer is the strongest authoring target by default; an
+        // empty graph (no layers) has none, so the target names no layer and
+        // resolves to nothing at author time.
+        let edit_target = EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default());
         Stage(Rc::new(StageInner {
-            graph: RefCell::new(pcp::Cache::new(stack, self.variant_fallbacks)),
+            layers: RefCell::new(graph),
+            cache: RefCell::new(pcp::Cache::new(self.variant_fallbacks, collection_errors)),
+            muted: RefCell::new(std::collections::HashSet::new()),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),
@@ -1427,6 +1642,13 @@ impl<R: ar::Resolver> StageBuilder<R> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The identifier of the stage's n-th layer (collection order), for tests
+    /// that previously addressed layers by index.
+    fn nth_identifier(stage: &Stage, n: usize) -> String {
+        let layers = stage.layers();
+        layers.identifier(layers.all_ids()[n]).to_string()
+    }
     use super::*;
     use crate::gf;
 
@@ -3233,7 +3455,7 @@ def "I2" (
     fn default_prim_targets_root() -> Result<()> {
         let session = fixture_path("session_layer.usda");
         let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
-        stage.set_edit_target(EditTarget::for_layer_index(0))?; // session layer
+        stage.set_edit_target(EditTarget::for_layer(nth_identifier(&stage, 0)))?; // session layer
         stage.set_default_prim("World")?;
         assert_eq!(stage.default_prim().as_deref(), Some("World"));
         Ok(())
@@ -3285,8 +3507,10 @@ def "I2" (
     #[test]
     fn edit_target_out_of_range() -> Result<()> {
         let stage = in_memory_stage()?;
-        let err = stage.set_edit_target(EditTarget::for_layer_index(99)).unwrap_err();
-        assert!(matches!(err, StageAuthoringError::LayerOutOfRange { .. }));
+        let err = stage
+            .set_edit_target(EditTarget::for_layer("missing-layer"))
+            .unwrap_err();
+        assert!(matches!(err, StageAuthoringError::LayerNotFound { .. }));
         Ok(())
     }
 
@@ -3300,7 +3524,7 @@ def "I2" (
         let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
         assert!(stage.has_session_layer());
         assert_eq!(stage.layer_count(), 2);
-        assert_eq!(stage.edit_target().layer_index(), 1);
+        assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 1));
         stage.define_prim("/World")?.set_type_name("Xform")?;
         assert_eq!(stage.spec_type("/World")?, Some(sdf::SpecType::Prim));
         Ok(())
@@ -3310,7 +3534,7 @@ def "I2" (
     /// unchanged from the bare-`layer_index` behavior.
     #[test]
     fn edit_target_local_is_identity() -> Result<()> {
-        let target = EditTarget::for_layer_index(0);
+        let target = EditTarget::for_layer("test");
         let path = sdf::path("/A/B")?;
         assert_eq!(target.map_to_spec_path(&path), Some(path));
         Ok(())
@@ -3320,7 +3544,7 @@ def "I2" (
     /// namespace; paths outside the variant prim map to themselves.
     #[test]
     fn variant_target_maps_selection() -> Result<()> {
-        let target = EditTarget::for_local_direct_variant(0, sdf::path("/Prim{set=sel}")?);
+        let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?);
         assert_eq!(
             target.map_to_spec_path(&sdf::path("/Prim/child")?),
             Some(sdf::path("/Prim{set=sel}child")?)
@@ -3341,16 +3565,19 @@ def "I2" (
     #[test]
     fn variant_target_routes_child() -> Result<()> {
         let stage = in_memory_stage()?;
-        let root = stage.edit_target().layer_index();
+        let root = stage.edit_target().layer_identifier().to_string();
         stage.define_prim("/Prim")?;
-        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(
+            root.clone(),
+            sdf::path("/Prim{set=sel}")?,
+        ))?;
         stage.define_prim("/Prim/child")?;
 
         let landed = {
             use sdf::AbstractData;
-            let mut cache = stage.graph.borrow_mut();
-            let layer = cache.layer_mut(root).expect("root layer");
-            layer.spec_type(&sdf::path("/Prim{set=sel}child")?)
+            let layers = stage.layers();
+            let root_id = layers.id_of(&root).unwrap();
+            layers.layer(root_id).spec_type(&sdf::path("/Prim{set=sel}child")?)
         };
         assert_eq!(landed, Some(sdf::SpecType::Prim));
         Ok(())
@@ -3361,16 +3588,19 @@ def "I2" (
     #[test]
     fn variant_target_routes_property() -> Result<()> {
         let stage = in_memory_stage()?;
-        let root = stage.edit_target().layer_index();
+        let root = stage.edit_target().layer_identifier().to_string();
         stage.define_prim("/Prim")?;
-        stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+        stage.set_edit_target(EditTarget::for_local_direct_variant(
+            root.clone(),
+            sdf::path("/Prim{set=sel}")?,
+        ))?;
         stage.create_attribute("/Prim.size", "double")?;
 
         let landed = {
             use sdf::AbstractData;
-            let mut cache = stage.graph.borrow_mut();
-            let layer = cache.layer_mut(root).expect("root layer");
-            layer.spec_type(&sdf::path("/Prim{set=sel}.size")?)
+            let layers = stage.layers();
+            let root_id = layers.id_of(&root).unwrap();
+            layers.layer(root_id).spec_type(&sdf::path("/Prim{set=sel}.size")?)
         };
         assert_eq!(landed, Some(sdf::SpecType::Attribute));
         Ok(())
@@ -3381,12 +3611,12 @@ def "I2" (
     fn edit_context_restores_on_drop() -> Result<()> {
         let session = fixture_path("session_layer.usda");
         let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
-        assert_eq!(stage.edit_target().layer_index(), 1);
+        assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 1));
         {
-            let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
-            assert_eq!(stage.edit_target().layer_index(), 0);
+            let _ctx = stage.edit_context(EditTarget::for_layer(nth_identifier(&stage, 0)))?;
+            assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 0));
         }
-        assert_eq!(stage.edit_target().layer_index(), 1);
+        assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 1));
         Ok(())
     }
 
@@ -3395,16 +3625,16 @@ def "I2" (
     fn edit_context_restores_on_error() -> Result<()> {
         let session = fixture_path("session_layer.usda");
         let stage = Stage::builder().session_layer(&session).in_memory("anon.usda")?;
-        assert_eq!(stage.edit_target().layer_index(), 1);
+        assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 1));
         let authored: std::result::Result<(), StageAuthoringError> = (|| {
-            let _ctx = stage.edit_context(EditTarget::for_layer_index(0))?;
+            let _ctx = stage.edit_context(EditTarget::for_layer(nth_identifier(&stage, 0)))?;
             // Layer 0 is the read-only session layer; the write fails and `?`
             // returns from this closure with the guard still in scope.
             stage.define_prim("/X")?;
             Ok(())
         })();
         assert!(authored.is_err());
-        assert_eq!(stage.edit_target().layer_index(), 1);
+        assert_eq!(stage.edit_target().layer_identifier(), nth_identifier(&stage, 1));
         Ok(())
     }
 
@@ -3413,10 +3643,10 @@ def "I2" (
     #[test]
     fn edit_context_rejects_bad_target() -> Result<()> {
         let stage = in_memory_stage()?;
-        let before = stage.edit_target().layer_index();
-        let result = stage.edit_context(EditTarget::for_layer_index(99));
-        assert!(matches!(result, Err(StageAuthoringError::LayerOutOfRange { .. })));
-        assert_eq!(stage.edit_target().layer_index(), before);
+        let before = stage.edit_target().layer_identifier().to_string();
+        let result = stage.edit_context(EditTarget::for_layer("missing-layer"));
+        assert!(matches!(result, Err(StageAuthoringError::LayerNotFound { .. })));
+        assert_eq!(stage.edit_target().layer_identifier(), before);
         Ok(())
     }
 
@@ -3426,7 +3656,7 @@ def "I2" (
     #[test]
     fn define_prim_at_variant_leaf_errors() -> Result<()> {
         let stage = in_memory_stage()?;
-        let root = stage.edit_target().layer_index();
+        let root = stage.edit_target().layer_identifier().to_string();
         stage.define_prim("/Prim")?;
         stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
         // `/Prim` maps to the variant selection `/Prim{set=sel}`.
@@ -3443,7 +3673,7 @@ def "I2" (
     #[test]
     fn variant_edit_invalidates_stripped_path() -> Result<()> {
         let stage = in_memory_stage()?;
-        let root = stage.edit_target().layer_index();
+        let root = stage.edit_target().layer_identifier().to_string();
         stage.define_prim("/Prim")?;
 
         // Cache a composed miss at the scene path.
@@ -3854,5 +4084,242 @@ def "Model"
         assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(10.0)); // jump → "at and after"
         assert_eq!(value_f64(&stage, "/Model.size", 30.0), Some(15.0));
         Ok(())
+    }
+
+    /// A weak sublayer carrying one opinion, for the sublayer-mutation tests.
+    fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
+        let mut layer = sdf::Layer::new_anonymous(identifier);
+        layer
+            .create_attribute("/A.x", "double", sdf::Variability::Varying, true)?
+            .set_default(sdf::Value::Double(value));
+        Ok(layer)
+    }
+
+    /// The parent layer's authored `subLayers` asset paths.
+    fn authored_sublayers(stage: &Stage) -> Vec<String> {
+        let root = stage.root_layer();
+        root.pseudo_root()
+            .and_then(|pr| pr.sublayers().map(<[String]>::to_vec))
+            .unwrap_or_default()
+    }
+
+    /// `insert_sub_layer` both composes the new layer's opinion and authors the
+    /// parent's `subLayers` metadata, so the edit persists on save.
+    #[test]
+    fn insert_sub_layer_authors_metadata() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![sdf::Layer::new_anonymous("root.usda")], 0, Vec::new());
+
+        stage.insert_sub_layer(
+            "root.usda",
+            0,
+            opinion_layer("weak.usda", 5.0)?,
+            sdf::LayerOffset::IDENTITY,
+        )?;
+
+        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(authored_sublayers(&stage), vec!["weak.usda".to_string()]);
+        Ok(())
+    }
+
+    /// `ensure_layer` must not clobber an already-loaded node: re-inserting a
+    /// layer whose identifier is already in the graph keeps the existing node's
+    /// data (and therefore its derived sublayer children), not the fresh empty
+    /// layer passed in.
+    #[test]
+    fn insert_sub_layer_keeps_loaded_node() -> Result<()> {
+        // root → mid → leaf, all loaded up front so `mid` has a derived child
+        // edge to `leaf` and `leaf`'s opinion composes.
+        let mut root = sdf::Layer::new_anonymous("root.usda");
+        root.pseudo_root_mut()?.set_sublayers(["mid.usda"]);
+        let mut mid = sdf::Layer::new_anonymous("mid.usda");
+        mid.pseudo_root_mut()?.set_sublayers(["leaf.usda"]);
+        let leaf = opinion_layer("leaf.usda", 5.0)?;
+
+        let stage = Stage::builder().make_stage(vec![root, mid, leaf], 0, Vec::new());
+        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+
+        // Re-insert `mid` by identifier, passing a fresh empty layer. The graph
+        // must keep the loaded `mid` (whose `subLayers` still names `leaf`), so
+        // `leaf`'s opinion survives the rebuild.
+        stage.insert_sub_layer(
+            "root.usda",
+            0,
+            sdf::Layer::new_anonymous("mid.usda"),
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        assert_eq!(
+            stage.value_at("/A.x", 0.0)?,
+            Some(sdf::Value::Double(5.0)),
+            "the already-loaded mid layer's child edge to leaf must survive re-insertion"
+        );
+        Ok(())
+    }
+
+    /// `remove_sub_layer` drops both the composed opinion and the parent's
+    /// authored `subLayers` entry.
+    #[test]
+    fn remove_sub_layer_clears_metadata() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![sdf::Layer::new_anonymous("root.usda")], 0, Vec::new());
+        stage.insert_sub_layer(
+            "root.usda",
+            0,
+            opinion_layer("weak.usda", 5.0)?,
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+
+        assert!(
+            stage.remove_sub_layer("root.usda", "weak.usda")?,
+            "a sublayer was removed"
+        );
+
+        assert_eq!(
+            stage.value_at("/A.x", 0.0)?,
+            None,
+            "the removed sublayer's opinion is gone"
+        );
+        assert!(
+            authored_sublayers(&stage).is_empty(),
+            "the removed sublayer's subLayers entry is gone"
+        );
+        Ok(())
+    }
+
+    /// `remove_sub_layer` resolves `child` to a layer before matching, so a
+    /// sublayer authored with a relative path (whose canonical identifier
+    /// differs from the authored entry) is still removed when named by the
+    /// canonical identifier `sub_layers` returns.
+    #[test]
+    fn remove_sub_layer_resolves_relative() -> Result<()> {
+        // root authors `subLayers = ["sub.usda"]`, but the child layer's
+        // canonical identifier is `dir/sub.usda` (find() resolves the relative
+        // entry to it by suffix).
+        let mut root = sdf::Layer::new_anonymous("root.usda");
+        root.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
+        let child = opinion_layer("dir/sub.usda", 5.0)?;
+        let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
+        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+
+        // sub_layers reports the canonical identifier, not the authored string.
+        let canonical = stage.sub_layers("root.usda");
+        assert!(canonical.iter().any(|id| id == "dir/sub.usda"));
+
+        // Removing by that canonical identifier must still drop the relative
+        // `sub.usda` entry (exact-string matching would have missed it).
+        assert!(
+            stage.remove_sub_layer("root.usda", "dir/sub.usda")?,
+            "the relative sublayer is removed when named by canonical identifier"
+        );
+        assert_eq!(
+            stage.value_at("/A.x", 0.0)?,
+            None,
+            "the removed sublayer's opinion is gone"
+        );
+        assert!(
+            authored_sublayers(&stage).is_empty(),
+            "the authored subLayers entry is gone"
+        );
+        Ok(())
+    }
+
+    /// Inserting under a read-only parent fails with `ReadOnly` and leaves the
+    /// graph untouched — no orphan node for the would-be sublayer.
+    #[test]
+    fn insert_sub_layer_read_only_parent() -> Result<()> {
+        let data = crate::usda::parser::Parser::new("#usda 1.0\n")
+            .parse()
+            .expect("parse usda");
+        let ro_root = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        let stage = Stage::builder().make_stage(vec![ro_root], 0, Vec::new());
+        let before = stage.layer_count();
+
+        let err = stage
+            .insert_sub_layer(
+                "root.usda",
+                0,
+                opinion_layer("weak.usda", 5.0)?,
+                sdf::LayerOffset::IDENTITY,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
+        ));
+        assert_eq!(
+            stage.layer_count(),
+            before,
+            "a failed insert must not leave an orphan node"
+        );
+        Ok(())
+    }
+
+    /// Inserting under a parent that is not in the stage fails with
+    /// `LayerNotFound` and adds no node.
+    #[test]
+    fn insert_sub_layer_missing_parent() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![sdf::Layer::new_anonymous("root.usda")], 0, Vec::new());
+
+        let err = stage
+            .insert_sub_layer(
+                "nope.usda",
+                0,
+                opinion_layer("weak.usda", 5.0)?,
+                sdf::LayerOffset::IDENTITY,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, StageAuthoringError::LayerNotFound { .. }));
+        assert_eq!(stage.layer_count(), 1, "no node added for a missing parent");
+        Ok(())
+    }
+
+    /// A dependency shared by the session and root collections appears twice in
+    /// the concatenated layer vec; the graph collapses it to one node and keeps
+    /// `all_ids` / `layer_count` / the root-session split in sync with the map.
+    #[test]
+    fn from_layers_dedups_order() {
+        let layers = vec![
+            sdf::Layer::new_anonymous("session.usda"),
+            sdf::Layer::new_anonymous("shared.usda"),
+            sdf::Layer::new_anonymous("root.usda"),
+            sdf::Layer::new_anonymous("shared.usda"),
+        ];
+        let stage = Stage::builder().make_stage(layers, 2, Vec::new());
+
+        assert_eq!(
+            stage.layer_count(),
+            3,
+            "the duplicate shared layer collapses to one node"
+        );
+        let ids = stage.layers().all_ids().to_vec();
+        let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "order carries no duplicate id");
+        assert_eq!(
+            stage.root_layer().identifier(),
+            "root.usda",
+            "the root stays the first non-session layer after dedup"
+        );
+    }
+
+    /// When the stage root shares an identifier with a session layer, the root
+    /// slot collapses onto the session node — but the root must still resolve to
+    /// that shared layer, not slip to the next dependency or vanish.
+    #[test]
+    fn from_layers_root_shared_with_session() {
+        let layers = vec![
+            sdf::Layer::new_anonymous("session.usda"),
+            sdf::Layer::new_anonymous("shared.usda"),
+            sdf::Layer::new_anonymous("shared.usda"), // root slot, same id as session layer 1
+            sdf::Layer::new_anonymous("dep.usda"),
+        ];
+        let stage = Stage::builder().make_stage(layers, 2, Vec::new());
+
+        assert_eq!(stage.layer_count(), 3, "the shared root/session layer is one node");
+        assert_eq!(
+            stage.root_layer().identifier(),
+            "shared.usda",
+            "the root resolves to the shared layer, not the next dependency"
+        );
     }
 }

@@ -1017,12 +1017,65 @@ where
     /// pre-existing `TokenVec` is migrated in place.
     pub fn add_sublayer(&mut self, path: impl Into<String>) {
         let path = path.into();
-        let mut paths: Vec<String> = match self.remove(sdf::FieldKey::SubLayers.as_str()) {
-            Some(sdf::Value::StringVec(v)) | Some(sdf::Value::TokenVec(v)) => v,
-            _ => Vec::new(),
-        };
+        let mut paths = self.take_sublayer_paths().unwrap_or_default();
         paths.push(path);
         self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
+    }
+
+    /// Insert a sublayer asset path and its layer offset at `pos` (clamped to
+    /// the current sublayer count), keeping `subLayers` and `subLayerOffsets`
+    /// index-aligned. A shorter `subLayerOffsets` is padded with
+    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so the offset at
+    /// every position matches its sublayer. Writes `subLayers` as
+    /// `sdf::Value::StringVec` so the USDA/USDC writers emit it.
+    pub fn insert_sublayer(&mut self, pos: usize, path: impl Into<String>, offset: sdf::LayerOffset) {
+        let mut paths = self.take_sublayer_paths().unwrap_or_default();
+        let mut offsets = self.take_sublayer_offsets(paths.len());
+        let pos = pos.min(paths.len());
+        paths.insert(pos, path.into());
+        offsets.insert(pos, offset);
+        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
+        self.add(sdf::FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
+    }
+
+    /// Remove the first `subLayers` entry matching `path` and its aligned
+    /// `subLayerOffsets` entry, returning whether anything was removed.
+    pub fn remove_sublayer(&mut self, path: &str) -> bool {
+        let Some(mut paths) = self.take_sublayer_paths() else {
+            return false;
+        };
+        let Some(idx) = paths.iter().position(|p| p == path) else {
+            self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
+            return false;
+        };
+        let mut offsets = self.take_sublayer_offsets(paths.len());
+        paths.remove(idx);
+        offsets.remove(idx);
+        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
+        self.add(sdf::FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
+        true
+    }
+
+    /// Removes and decodes the `subLayers` field, accepting the legacy
+    /// `TokenVec` encoding alongside `StringVec`. `None` when unauthored or
+    /// stored with an unexpected value type.
+    fn take_sublayer_paths(&mut self) -> Option<Vec<String>> {
+        match self.remove(sdf::FieldKey::SubLayers.as_str()) {
+            Some(sdf::Value::StringVec(v)) | Some(sdf::Value::TokenVec(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Removes and decodes the `subLayerOffsets` field, padded to `len` with
+    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so it stays
+    /// index-aligned with the sublayer paths.
+    fn take_sublayer_offsets(&mut self, len: usize) -> Vec<sdf::LayerOffset> {
+        let mut offsets = match self.remove(sdf::FieldKey::SubLayerOffsets.as_str()) {
+            Some(sdf::Value::LayerOffsetVec(v)) => v,
+            _ => Vec::new(),
+        };
+        offsets.resize(len, sdf::LayerOffset::IDENTITY);
+        offsets
     }
 
     /// Set the layer documentation string.
@@ -1315,5 +1368,52 @@ mod tests {
         root.set_default_prim("World");
 
         assert_eq!(root.default_prim(), Some("World"));
+    }
+
+    #[test]
+    fn insert_sublayer_aligns_offsets() {
+        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
+        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+
+        // Seed an existing sublayer with no authored offset, then insert ahead
+        // of it: the prior entry must be padded to identity so offsets stay
+        // index-aligned with paths.
+        root.set_sublayers(["b.usda"]);
+        root.insert_sublayer(0, "a.usda", sdf::LayerOffset::new(10.0, 1.0));
+
+        assert_eq!(
+            root.sublayers(),
+            Some(["a.usda".to_string(), "b.usda".to_string()].as_slice())
+        );
+        let offsets = root
+            .get(sdf::FieldKey::SubLayerOffsets.as_str())
+            .expect("offsets authored")
+            .clone()
+            .try_as_layer_offset_vec()
+            .expect("layer-offset vec");
+        assert_eq!(
+            offsets,
+            vec![sdf::LayerOffset::new(10.0, 1.0), sdf::LayerOffset::IDENTITY]
+        );
+    }
+
+    #[test]
+    fn remove_sublayer_drops_aligned() {
+        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
+        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+        root.insert_sublayer(0, "a.usda", sdf::LayerOffset::new(10.0, 1.0));
+        root.insert_sublayer(1, "b.usda", sdf::LayerOffset::IDENTITY);
+
+        assert!(root.remove_sublayer("a.usda"));
+        assert!(!root.remove_sublayer("missing.usda"));
+
+        assert_eq!(root.sublayers(), Some(["b.usda".to_string()].as_slice()));
+        let offsets = root
+            .get(sdf::FieldKey::SubLayerOffsets.as_str())
+            .expect("offsets authored")
+            .clone()
+            .try_as_layer_offset_vec()
+            .expect("layer-offset vec");
+        assert_eq!(offsets, vec![sdf::LayerOffset::IDENTITY]);
     }
 }

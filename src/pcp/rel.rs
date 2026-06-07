@@ -11,32 +11,31 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, Path, PathComponent, Value};
+use crate::sdf::{AbstractData, Path, PathComponent, Value};
 
 use super::graph::ArcType;
 use super::index::PrimIndex;
+use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
-use super::{InvalidRelocateReason, RelocateConflictReason};
+use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
-/// Per-layer authored relocate pairs `(source, target)`, keyed by layer index.
-pub(crate) type LayerRelocates = HashMap<usize, Vec<(Path, Path)>>;
+/// Per-layer authored relocate pairs `(source, target)`, keyed by layer id.
+pub(crate) type LayerRelocates = HashMap<LayerId, Vec<(Path, Path)>>;
 
 /// Composed relocates `(source, target)` for a prim, in its root namespace.
 pub(crate) type EffectiveRelocates = Vec<(Path, Path)>;
 
-/// Escaped relocation sources: each `(composed source, relocate layer index)`
+/// Escaped relocation sources: each `(composed source, relocate layer id)`
 /// whose target left the prim's namespace (see [`Relocates::effective_and_escaped`]).
-pub(crate) type EscapedSources = Vec<(Path, usize)>;
+pub(crate) type EscapedSources = Vec<(Path, LayerId)>;
 
-/// Per-layer relocates and operations for namespace remapping.
+/// Namespace-remapping query helper.
 ///
-/// Owns the `layerRelocates` data extracted at construction time. All
-/// query and mutation methods receive the composition cache's state
-/// (layer stack, indices, contexts) as explicit parameters.
-pub(super) struct Relocates {
-    /// Per-layer relocates: `layerRelocates` extracted from each layer's pseudoroot.
-    layer_relocates: LayerRelocates,
-}
+/// Holds no relocate data of its own: every query reads the validated
+/// per-layer relocates straight off the [`LayerGraph`], so there is no owned
+/// copy to keep in sync. The composition cache's state (layer graph, cached
+/// indices) is passed in through method parameters.
+pub(super) struct Relocates;
 
 /// Follows `path` to its final location through a set of relocates, applying the
 /// longest matching source prefix at each step until it reaches a fixed point.
@@ -164,24 +163,21 @@ pub(crate) fn apply_child_relocates(
     }
 }
 
-/// Extracts each layer's authored `layerRelocates` in one pass: structurally
-/// valid pairs `(source, target)` are returned keyed by layer index (layers
-/// without valid relocates are omitted), and each invalid pair becomes an
-/// [`Error::InvalidRelocate`](super::Error::InvalidRelocate) reported in authored
-/// order (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are evaluated over
-/// the precomputed sublayer stacks, matching their layer-stack scope.
-pub(crate) fn extract_layer_relocates(
-    layers: &[sdf::Layer],
-    sublayer_stacks: &super::SublayerStacks,
-    session_layer_count: usize,
-) -> (LayerRelocates, Vec<super::Error>) {
+/// Validates each layer's authored `layerRelocates` against the
+/// [`LayerGraph`]: structurally valid pairs `(source, target)` are returned
+/// keyed by layer id (layers without valid relocates are omitted), and each
+/// invalid pair becomes an [`Error::InvalidRelocate`] reported in authored order
+/// (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are scoped to a single
+/// layer stack via [`LayerGraph::relocate_conflict_scopes`].
+pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Vec<Error>) {
     let root = Path::abs_root();
     let mut errors = Vec::new();
     // Collect every structurally valid authored relocate across the layer stack,
     // recording its layer; cross-relocate conflicts are checked over the whole set
     // ("in the same layer stack"). Each structurally invalid pair is reported here.
-    let mut all: Vec<(Path, Path, usize, String)> = Vec::new();
-    for (i, layer) in layers.iter().enumerate() {
+    let mut all: Vec<(Path, Path, LayerId, String)> = Vec::new();
+    for &id in graph.all_ids() {
+        let layer = graph.layer(id);
         let Ok(Value::Relocates(pairs)) = layer
             .get(&root, FieldKey::LayerRelocates.as_str())
             .map(|v| v.into_owned())
@@ -190,22 +186,30 @@ pub(crate) fn extract_layer_relocates(
         };
         for (source, target) in pairs {
             match relocate_invalid_reason(&source, &target) {
-                None => all.push((source, target, i, layer.identifier.clone())),
-                Some(reason) => errors.push(super::Error::InvalidRelocate {
+                None => all.push((source, target, id, layer.identifier().to_string())),
+                Some(reason) => errors.push(Error::InvalidRelocate {
                     source_path: source,
                     target_path: target,
-                    layer: layer.identifier.clone(),
+                    layer: layer.identifier().to_string(),
                     reason,
                 }),
             }
         }
     }
 
-    let conflicting = detect_relocate_conflicts(&all, sublayer_stacks, session_layer_count, &mut errors);
+    let scopes = graph.relocate_conflict_scopes();
+    let same_stack = |i: usize, j: usize| {
+        let left = all[i].2;
+        let right = all[j].2;
+        scopes
+            .iter()
+            .any(|scope| scope.contains(&left) && scope.contains(&right))
+    };
+    let conflicting = detect_relocate_conflicts(&all, &same_stack, &mut errors);
     let mut out: LayerRelocates = HashMap::new();
-    for (idx, (source, target, layer_idx, _)) in all.into_iter().enumerate() {
+    for (idx, (source, target, layer_id, _)) in all.into_iter().enumerate() {
         if !conflicting.contains(&idx) {
-            out.entry(layer_idx).or_default().push((source, target));
+            out.entry(layer_id).or_default().push((source, target));
         }
     }
     (out, errors)
@@ -214,29 +218,16 @@ pub(crate) fn extract_layer_relocates(
 /// Detects cross-relocate conflicts over the layer stack's structurally valid
 /// relocates (C++ `Pcp_ComputeRelocationsForLayerStackWorkspace`'s conflict
 /// validation), returning the indices of every conflicting relocate and pushing
-/// an error for each. Grouped same-target errors come first (target-sorted), then
-/// the pairwise conflicts sorted by `(source, reason, conflict source)`. A
-/// conflicting relocate is dropped from the composed map.
+/// an error for each. `same_stack(i, j)` reports whether `all[i]` and `all[j]`
+/// were authored in the same layer stack. Grouped same-target errors come first
+/// (target-sorted), then the pairwise conflicts sorted by `(source, reason,
+/// conflict source)`. A conflicting relocate is dropped from the composed map.
 fn detect_relocate_conflicts(
-    all: &[(Path, Path, usize, String)],
-    sublayer_stacks: &super::SublayerStacks,
-    session_layer_count: usize,
-    errors: &mut Vec<super::Error>,
+    all: &[(Path, Path, LayerId, String)],
+    same_stack: &dyn Fn(usize, usize) -> bool,
+    errors: &mut Vec<Error>,
 ) -> HashSet<usize> {
     let mut conflicting = HashSet::new();
-    let root_stack = sublayer_stacks.get(&session_layer_count);
-    let same_stack = |i: usize, j: usize| {
-        let left = all[i].2;
-        let right = all[j].2;
-        let in_stage_root = |layer| {
-            layer < session_layer_count
-                || root_stack.is_some_and(|stack| stack.iter().any(|&(member, _)| member == layer))
-        };
-        (in_stage_root(left) && in_stage_root(right))
-            || sublayer_stacks.values().any(|stack| {
-                stack.iter().any(|&(layer, _)| layer == left) && stack.iter().any(|&(layer, _)| layer == right)
-            })
-    };
 
     // Multiple sources moving to the same target: all of them are invalid.
     let mut by_target: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
@@ -268,7 +259,7 @@ fn detect_relocate_conflicts(
             let mut sources: Vec<(Path, String)> =
                 group.iter().map(|&i| (all[i].0.clone(), all[i].3.clone())).collect();
             sources.sort_by(|a, b| a.0.cmp(&b.0));
-            errors.push(super::Error::SameTargetRelocations {
+            errors.push(Error::SameTargetRelocations {
                 target: target.clone(),
                 sources,
             });
@@ -313,7 +304,7 @@ fn detect_relocate_conflicts(
             .then(all[a.1].0.cmp(&all[b.1].0))
     });
     for (i, j, reason) in pairwise {
-        errors.push(super::Error::ConflictingRelocation {
+        errors.push(Error::ConflictingRelocation {
             source_path: all[i].0.clone(),
             target_path: all[i].1.clone(),
             layer: all[i].3.clone(),
@@ -358,23 +349,18 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 }
 
 impl Relocates {
-    /// Creates the query helper from the layer stack's validated relocate data.
-    pub fn new(layer_relocates: LayerRelocates) -> Self {
-        Self { layer_relocates }
-    }
-
-    /// Returns `true` if no layer has any relocates.
-    pub fn is_empty(&self) -> bool {
-        self.layer_relocates.is_empty()
-    }
-
     /// Computes effective relocates for a parent prim in composed namespace.
     ///
     /// Collects relocates from all layers reachable through any cached prim
     /// in the same root subtree, maps them to composed namespace using the
     /// layer's namespace mapping, then chains transitive relocates.
-    pub fn effective_relocates(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(Path, Path)> {
-        self.effective_and_escaped(path, indices).0
+    pub fn effective_relocates(
+        &self,
+        graph: &LayerGraph,
+        path: &Path,
+        indices: &HashMap<Path, PrimIndex>,
+    ) -> Vec<(Path, Path)> {
+        self.effective_and_escaped(graph, path, indices).0
     }
 
     /// The effective relocates AND the escaped relocation sources for a prim, from
@@ -385,10 +371,11 @@ impl Relocates {
     /// element pairs each escaped source with the layer that authored its relocate.
     pub fn effective_and_escaped(
         &self,
+        graph: &LayerGraph,
         path: &Path,
         indices: &HashMap<Path, PrimIndex>,
     ) -> (EffectiveRelocates, EscapedSources) {
-        let (mut result, escaped) = self.raw_effective_and_escaped(path, indices);
+        let (mut result, escaped) = self.raw_effective_and_escaped(graph, path, indices);
 
         // Shift each endpoint through a single ancestor rename: when an ancestor
         // prim is relocated, a relocate authored below it sits under the renamed
@@ -416,16 +403,18 @@ impl Relocates {
     /// whose (non-empty) target does not map is an escaped source.
     fn raw_effective_and_escaped(
         &self,
+        graph: &LayerGraph,
         path: &Path,
         indices: &HashMap<Path, PrimIndex>,
     ) -> (EffectiveRelocates, EscapedSources) {
-        let layer_maps = self.collect_layer_maps(path, indices);
+        let layer_maps = self.collect_layer_maps(graph, path, indices);
         let mut result: Vec<(Path, Path)> = Vec::new();
-        let mut escaped: Vec<(Path, usize)> = Vec::new();
+        let mut escaped: Vec<(Path, LayerId)> = Vec::new();
 
         for (li, map) in &layer_maps {
-            let Some(relocates) = self.layer_relocates.get(li) else {
-                continue;
+            let relocates = match graph.get(*li) {
+                Some(node) if !node.relocates.is_empty() => &node.relocates,
+                _ => continue,
             };
             for (src, tgt) in relocates {
                 let Some(composed_src) = map.map_source_to_target(src) else {
@@ -460,8 +449,13 @@ impl Relocates {
     /// Collects (layer_index, map_to_root) pairs from ancestor prims and from
     /// other cached prims in the same root subtree that have layers with
     /// relocates.
-    fn collect_layer_maps(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(usize, MapFunction)> {
-        let mut maps: Vec<(usize, MapFunction)> = Vec::new();
+    fn collect_layer_maps(
+        &self,
+        graph: &LayerGraph,
+        path: &Path,
+        indices: &HashMap<Path, PrimIndex>,
+    ) -> Vec<(LayerId, MapFunction)> {
+        let mut maps: Vec<(LayerId, MapFunction)> = Vec::new();
 
         // Walk up ancestors. A per-site node fans out into every contributing
         // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
@@ -486,7 +480,12 @@ impl Relocates {
         // Also search cached prims in the same root subtree for layers with
         // relocates that weren't found in the ancestor walk (e.g. referenced
         // layers only reachable from a sibling branch).
-        let relocate_layers: Vec<usize> = self.layer_relocates.keys().copied().collect();
+        let relocate_layers: Vec<LayerId> = graph
+            .all_ids()
+            .iter()
+            .copied()
+            .filter(|&id| graph.get(id).is_some_and(|node| !node.relocates.is_empty()))
+            .collect();
         let root_name = root_prim_name(path);
 
         // Sorted iteration: a `HashMap` walk would make the collected layer-map

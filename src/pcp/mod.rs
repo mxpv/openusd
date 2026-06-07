@@ -45,8 +45,8 @@
 //!
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
-//! | `LayerStack` | `PcpLayerStack` | Layers and precomputed sublayer stacks bundled into a single unit. |
-//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Owns a `LayerStack`. |
+//! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle, with a precomputed sublayer stack per layer. Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
+//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
 //! | `index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`), the [`CompositionContext`](index::CompositionContext) that flows parent-to-child, and the arc-composition helpers (`compose_references_in`, `collect_payloads_in`, etc.) the `builder` drives. |
 //! | `builder` | `Pcp_PrimIndexer` | Task-queue composition engine: grows the graph node-by-node by draining a priority task queue. The sole composition path. |
@@ -251,13 +251,13 @@ pub(crate) mod clip;
 pub(crate) mod deps;
 pub(crate) mod graph;
 pub(crate) mod index;
+pub(crate) mod layer_graph;
 mod mapping;
 mod rel;
 pub(crate) mod resolve;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
@@ -266,6 +266,8 @@ pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
 pub use graph::{ArcType, Node, NodeFlags, NodeId};
 pub use index::PrimIndex;
+pub(crate) use layer_graph::LayerGraph;
+pub use layer_graph::LayerId;
 pub use mapping::MapFunction;
 
 /// Maps variant set names to ordered lists of fallback selections.
@@ -314,433 +316,6 @@ impl VariantFallbackMap {
     /// Returns `true` if no fallbacks have been registered.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-/// Precomputed sublayer stacks, keyed by root layer index.
-///
-/// Each entry maps a root layer to its full sublayer stack. Each entry pairs
-/// a layer index with the effective layer offset for that layer relative to
-/// the stack's root (composed through nested sublayers per spec 10.3.1.1).
-/// The stack root itself has [`sdf::LayerOffset::IDENTITY`].
-pub(crate) type SublayerStacks = HashMap<usize, Vec<(usize, sdf::LayerOffset)>>;
-
-/// Loaded layers with precomputed sublayer ordering.
-///
-/// Bundles the layers (each carrying its own identifier and data) with the
-/// precomputed sublayer stacks into a single unit passed through the
-/// composition engine. Corresponds to a simplified C++ `PcpLayerStack`.
-pub(crate) struct LayerStack {
-    /// Layers in strength order (session layers first, then root layer).
-    /// Each [`sdf::Layer`] bundles its resolved identifier and backing data.
-    pub layers: Vec<sdf::Layer>,
-    /// Precomputed sublayer stacks keyed by root layer index.
-    pub sublayer_stacks: SublayerStacks,
-    /// Number of session layers at the front of the layer stack.
-    pub session_layer_count: usize,
-    /// Whether payload arcs should be expanded during prim index construction.
-    pub load_payloads: bool,
-    /// Whether any layer authors `layerRelocates`, precomputed once for the
-    /// stack. The builder reads this to gate its relocate passes
-    /// (`eval_node_relocations` and the prohibited-prim elision) without
-    /// rescanning every layer per prim.
-    pub(crate) has_relocates: bool,
-    /// Per-layer authored `layerRelocates` pairs `(source, target)` in that
-    /// layer's own namespace, keyed by layer index; empty when no layer
-    /// relocates. The task-queue builder reads these to compose relocate arcs in
-    /// a node's layer stack (C++ `PcpLayerStack::GetIncrementalRelocates*`).
-    pub(crate) layer_relocates: rel::LayerRelocates,
-    /// Recoverable errors detected while assembling the layer stack — sublayer
-    /// cycles and structurally invalid authored relocates (C++ errors surfaced
-    /// while computing the layer stack). The [`Cache`](cache::Cache) drains these
-    /// into its composition errors once at construction and again whenever a
-    /// `subLayers`/`layerRelocates` edit recomputes them.
-    pub(crate) layer_stack_errors: Vec<Error>,
-    /// Resolver used to anchor relative asset paths when locating layers.
-    pub(crate) resolver: Box<dyn Resolver>,
-}
-
-impl LayerStack {
-    /// Creates a new layer stack, precomputing sublayer ordering.
-    pub fn new(
-        layers: Vec<sdf::Layer>,
-        session_layer_count: usize,
-        resolver: Box<dyn Resolver>,
-        load_payloads: bool,
-    ) -> Self {
-        // Keep the sublayer-cycle errors from the stage-root build; the other
-        // per-layer builds detect their own subtrees' cycles, which would
-        // duplicate the root's, so they share one discarded `scratch` sink.
-        let mut layer_stack_errors = Vec::new();
-        let mut scratch = Vec::new();
-        let sublayer_stacks: SublayerStacks = (0..layers.len())
-            .map(|i| {
-                let errors = if i == session_layer_count {
-                    &mut layer_stack_errors
-                } else {
-                    &mut scratch
-                };
-                (i, Self::build_sublayer_stack(i, &layers, &*resolver, errors))
-            })
-            .collect();
-        let has_relocates = Self::compute_has_relocates(&layers);
-        let (layer_relocates, relocate_errors) =
-            rel::extract_layer_relocates(&layers, &sublayer_stacks, session_layer_count);
-        layer_stack_errors.extend(relocate_errors);
-        Self {
-            layers,
-            sublayer_stacks,
-            session_layer_count,
-            load_payloads,
-            has_relocates,
-            layer_relocates,
-            layer_stack_errors,
-            resolver,
-        }
-    }
-
-    /// Returns the relocation source for `target` if a layer in `ambient`
-    /// relocates a prim onto it (C++ `GetIncrementalRelocatesTargetToSource`,
-    /// the as-authored pairs without chaining). The strongest layer (earliest in
-    /// `ambient`) wins a collision; a deletion (`</Src>: <>`, empty target)
-    /// relocate has no target to key on and is skipped. The C++ memoized map is
-    /// not materialized — the layers are scanned per query.
-    // TODO(perf): memoize the incremental relocates per layer stack (C++
-    // `PcpLayerStack`) instead of rescanning per query.
-    pub(crate) fn relocation_source(&self, ambient: &[(usize, sdf::LayerOffset)], target: &Path) -> Option<Path> {
-        for &(layer, _) in ambient {
-            let Some(pairs) = self.layer_relocates.get(&layer) else {
-                continue;
-            };
-            if let Some((source, _)) = pairs.iter().find(|(_, t)| !t.is_empty() && t == target) {
-                return Some(source.clone());
-            }
-        }
-        None
-    }
-
-    /// Builds the relocation [`MapFunction`] applying at `path` in the layer
-    /// stack `ambient` (C++ `PcpLayerStack::GetExpressionForRelocatesAtPath` and
-    /// `_FilterRelocationsForPath`): every relocate whose source lies at or below
-    /// `path`, chained so a relocated prim that is itself relocated reaches its
-    /// final target, plus the `(/, /)` identity catch-all. Returns `None` when no
-    /// relocate affects `path`.
-    ///
-    /// Composition arcs fold this onto their map (C++ `_CreateMapExpressionForArc`)
-    /// so opinions brought in across the arc land at their post-relocation paths.
-    ///
-    /// `exclude_source` drops the relocate whose source is exactly that path. A
-    /// relocate-source sub-index passes its own root: the relocation that moves
-    /// the source is applied by the relocate arc node's own map when the
-    /// sub-index is grafted, not by the source's own internal arcs.
-    ///
-    // TODO(perf): the relocate chain is recomputed per arc here (via
-    // `combined_relocates`) and per query in `rel::Relocates`. C++ memoizes the
-    // combined/incremental relocates on `PcpLayerStack`; cache them per layer
-    // stack instead of rescanning on every fold.
-    pub(crate) fn relocates_expression_at(
-        &self,
-        ambient: &[(usize, sdf::LayerOffset)],
-        path: &Path,
-        exclude_source: Option<&Path>,
-    ) -> Option<MapFunction> {
-        let mut pairs: Vec<(Path, Path)> = self
-            .combined_relocates(ambient)
-            .into_iter()
-            .filter(|(source, target)| !target.is_empty() && source.has_prefix(path) && Some(source) != exclude_source)
-            .collect();
-        if pairs.is_empty() {
-            return None;
-        }
-        pairs.push((Path::abs_root(), Path::abs_root()));
-        Some(MapFunction::new(pairs))
-    }
-
-    /// The as-authored relocates of `ambient`, strongest layer first with
-    /// duplicate sources dropped (C++ `PcpLayerStack::GetIncrementalRelocates*`,
-    /// the per-layer-stack relocates keyed by their authored source). Unlike
-    /// [`combined_relocates`](Self::combined_relocates) the pairs are not chained:
-    /// each keeps its authored source and target. The unchained form is the base
-    /// `combined_relocates` chains on top of.
-    fn incremental_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
-        let mut pairs: Vec<(Path, Path)> = Vec::new();
-        for &(layer, _) in ambient {
-            let Some(layer_pairs) = self.layer_relocates.get(&layer) else {
-                continue;
-            };
-            for (source, target) in layer_pairs {
-                if !pairs.iter().any(|(s, _)| s == source) {
-                    pairs.push((source.clone(), target.clone()));
-                }
-            }
-        }
-        pairs
-    }
-
-    /// Chains the per-layer authored relocates of `ambient` into a single
-    /// source→target map (C++ `PcpLayerStack::GetRelocatesSourceToTarget`): the
-    /// strongest layer wins a duplicate source, and a target that is itself a
-    /// relocation source is followed to the final target. This is the form the
-    /// per-node child-name relocate classification consumes, so a same-parent
-    /// chain resolves to its final target in one pass.
-    pub(crate) fn combined_relocates(&self, ambient: &[(usize, sdf::LayerOffset)]) -> Vec<(Path, Path)> {
-        let mut pairs = self.incremental_relocates(ambient);
-        // Follow chains: a target that is itself relocated (at or below another
-        // relocate's source) maps onward to its final location.
-        let snapshot = pairs.clone();
-        for (source, target) in pairs.iter_mut() {
-            if target.is_empty() {
-                continue;
-            }
-            *target = rel::chain_through_relocates(target, &snapshot, Some(source));
-        }
-        pairs
-    }
-
-    /// Whether a layer in `ambient` authors a relocate whose SOURCE is `source`
-    /// (the incremental source→target direction's key test, used for the
-    /// salted-earth prohibition). Includes deletion (empty-target) relocates:
-    /// their source is still a prohibited relocation source.
-    pub(crate) fn is_relocation_source(&self, ambient: &[(usize, sdf::LayerOffset)], source: &Path) -> bool {
-        self.relocation_source_layer(ambient, source).is_some()
-    }
-
-    /// Identifier of the strongest layer in `ambient` that authors a relocate
-    /// whose SOURCE is `source`, or `None` if none does. Names the layer in the
-    /// prohibited-relocation-source diagnostic.
-    pub(crate) fn relocation_source_layer(&self, ambient: &[(usize, sdf::LayerOffset)], source: &Path) -> Option<&str> {
-        ambient.iter().find_map(|&(layer, _)| {
-            self.layer_relocates
-                .get(&layer)
-                .filter(|pairs| pairs.iter().any(|(s, _)| s == source))
-                .map(|_| self.layers[layer].identifier.as_str())
-        })
-    }
-
-    /// Re-derives the cached relocate state — [`has_relocates`](Self::has_relocates),
-    /// [`layer_relocates`](Self::layer_relocates), and the relocate-extraction
-    /// portion of [`layer_stack_errors`](Self::layer_stack_errors) — from the
-    /// current layers. Called after a `layerRelocates` edit that does not rebuild
-    /// the sublayer precomputation (which would refresh both itself); keeping
-    /// them in sync is what re-enables and re-targets the builder's relocate passes.
-    pub(crate) fn recompute_relocate_data(&mut self) {
-        self.has_relocates = Self::compute_has_relocates(&self.layers);
-        let (layer_relocates, relocate_errors) =
-            rel::extract_layer_relocates(&self.layers, &self.sublayer_stacks, self.session_layer_count);
-        self.layer_relocates = layer_relocates;
-        // Drop every error `extract_layer_relocates` can produce before re-adding
-        // the fresh set, so a resolved conflict clears and a surviving one is not
-        // duplicated across recomputes.
-        self.layer_stack_errors.retain(|e| {
-            !matches!(
-                e,
-                Error::InvalidRelocate { .. }
-                    | Error::SameTargetRelocations { .. }
-                    | Error::ConflictingRelocation { .. }
-            )
-        });
-        self.layer_stack_errors.extend(relocate_errors);
-    }
-
-    /// Whether any layer authors `layerRelocates` at its pseudo-root.
-    fn compute_has_relocates(layers: &[sdf::Layer]) -> bool {
-        let root = sdf::Path::abs_root();
-        layers.iter().any(|l| {
-            l.data()
-                .has_field(&root, sdf::schema::FieldKey::LayerRelocates.as_str())
-        })
-    }
-
-    /// Returns the number of layers.
-    pub fn len(&self) -> usize {
-        self.layers.len()
-    }
-
-    /// Returns `true` if there are no layers.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
-    }
-
-    /// Returns the layer at the given index.
-    pub fn layer(&self, index: usize) -> &sdf::Layer {
-        &self.layers[index]
-    }
-
-    /// Mutable access to a layer in the stack, for authoring writes routed
-    /// through [`Cache::layer_mut`]. Returns `None` for an out-of-range index.
-    /// Callers route invalidation through
-    /// [`change::Changes::apply`](super::change::Changes::apply) so only the
-    /// affected prim indices are dropped.
-    fn layer_mut(&mut self, index: usize) -> Option<&mut sdf::Layer> {
-        self.layers.get_mut(index)
-    }
-
-    /// Recompute the precomputed `sublayer_stacks` map from the current layers.
-    /// Used by
-    /// [`Cache::recompute_layer_stack`](super::cache::Cache::recompute_layer_stack)
-    /// after authoring touched `subLayers` / `subLayerOffsets`.
-    fn calc_precomputed(&mut self) {
-        // Refresh the sublayer-cycle errors from the stage-root build (the other
-        // builds share one discarded `scratch` sink); `recompute_relocate_data`
-        // then keeps these and re-appends the invalid-relocate errors.
-        let mut layer_stack_errors = Vec::new();
-        let mut scratch = Vec::new();
-        self.sublayer_stacks = (0..self.layers.len())
-            .map(|i| {
-                let errors = if i == self.session_layer_count {
-                    &mut layer_stack_errors
-                } else {
-                    &mut scratch
-                };
-                (i, Self::build_sublayer_stack(i, &self.layers, &*self.resolver, errors))
-            })
-            .collect();
-        self.layer_stack_errors = layer_stack_errors;
-        self.recompute_relocate_data();
-    }
-
-    /// Returns the root layer (the first non-session layer), if any.
-    ///
-    /// Per spec 12.2.7, layer metadata authored on the pseudo-root resolves
-    /// from this layer only and does not compose with sublayers or arcs.
-    pub fn root_layer(&self) -> Option<&sdf::Layer> {
-        self.layers.get(self.session_layer_count)
-    }
-
-    /// Assembles the stage's root layer stack: the session layers (identity
-    /// offset) followed by the root layer and its sublayers with their
-    /// effective offsets (spec 10.3.1). This is the set of layers a top-level
-    /// prim index scans for local opinions; referenced layer stacks are reached
-    /// only by following arcs.
-    pub(crate) fn root_layer_stack(&self) -> Vec<(usize, sdf::LayerOffset)> {
-        let mut stack = Vec::new();
-        for i in 0..self.session_layer_count {
-            stack.push((i, sdf::LayerOffset::IDENTITY));
-        }
-        let root = self.session_layer_count;
-        if let Some(sublayers) = self.sublayer_stacks.get(&root) {
-            stack.extend_from_slice(sublayers);
-        }
-        stack
-    }
-
-    /// Returns the layer identifier at the given index.
-    pub fn identifier(&self, index: usize) -> &str {
-        &self.layers[index].identifier
-    }
-
-    /// Returns the layer indices + effective offsets for a sublayer stack
-    /// rooted at `root_layer`. Each entry's offset is composed from the
-    /// root through all nested sublayers per spec 10.3.1.1.
-    ///
-    /// The walk is depth-first pre-order — a layer is emitted before its own
-    /// sublayers and before its later siblings — matching C++
-    /// `PcpLayerStack::_BuildLayerStack`, so a nested sublayer is stronger than
-    /// the next sibling at the parent level. The same layer may appear more than
-    /// once (a diamond of sublayers); only a layer that sublayers itself,
-    /// directly or transitively, is a cycle and is skipped. Cycle detection is
-    /// therefore over the current ancestor chain, not every layer seen.
-    /// The sublayer stack for `root_layer`: the stack's precomputed one when
-    /// present, else freshly built. TODO(perf): the cache hit clones the stored
-    /// `Vec`; returning a `Cow` would let callers borrow it.
-    pub(crate) fn sublayer_stack(&self, root_layer: usize) -> Vec<(usize, sdf::LayerOffset)> {
-        self.sublayer_stacks
-            .get(&root_layer)
-            .cloned()
-            .unwrap_or_else(|| Self::build_sublayer_stack(root_layer, &self.layers, &*self.resolver, &mut Vec::new()))
-    }
-
-    /// Builds the sublayer stack rooted at `root_layer`, recording any sublayer
-    /// cycle it encounters into `errors` as [`Error::SublayerCycle`]. Callers that
-    /// only need the stack pass a throwaway `errors` vec; the layer stack keeps
-    /// the errors from the stage-root build (see [`new`](Self::new)).
-    pub(crate) fn build_sublayer_stack(
-        root_layer: usize,
-        layers: &[sdf::Layer],
-        resolver: &dyn Resolver,
-        errors: &mut Vec<Error>,
-    ) -> Vec<(usize, sdf::LayerOffset)> {
-        let mut stack: Vec<(usize, sdf::LayerOffset)> = Vec::new();
-        let mut ancestors: HashSet<usize> = HashSet::new();
-        Self::collect_sublayers(
-            root_layer,
-            sdf::LayerOffset::IDENTITY,
-            layers,
-            resolver,
-            &mut stack,
-            &mut ancestors,
-            errors,
-        );
-        stack
-    }
-
-    /// Appends `idx` and its sublayer subtree to `stack` in depth-first
-    /// pre-order. `ancestors` holds the layers on the path from the root to
-    /// `idx`; a sublayer already on that path is a cycle (C++
-    /// `PcpErrorSublayerCycle`): it is skipped and recorded in `errors` (the
-    /// message pairs `idx`, the layer whose `subLayers` closes the cycle, with the
-    /// re-included `sub_idx`), while a layer reached off the path is a permitted
-    /// duplicate and is expanded again.
-    #[allow(clippy::too_many_arguments)]
-    fn collect_sublayers(
-        idx: usize,
-        effective: sdf::LayerOffset,
-        layers: &[sdf::Layer],
-        resolver: &dyn Resolver,
-        stack: &mut Vec<(usize, sdf::LayerOffset)>,
-        ancestors: &mut HashSet<usize>,
-        errors: &mut Vec<Error>,
-    ) {
-        stack.push((idx, effective));
-        ancestors.insert(idx);
-
-        let root = Path::abs_root();
-        if let Ok(Value::StringVec(sub_paths)) = layers[idx]
-            .get(&root, FieldKey::SubLayers.as_str())
-            .map(|v| v.into_owned())
-        {
-            // The parent's effective rate is fixed across its sublayers, so it
-            // is read once for the per-hop `timeCodesPerSecond` retiming below.
-            let parent_tcps = effective_time_codes_per_second(&layers[idx]);
-            // Offsets live in a parallel field; missing entries fall back to
-            // the identity offset per spec 16.2.18.3.
-            let offsets: Vec<sdf::LayerOffset> = layers[idx]
-                .get(&root, FieldKey::SubLayerOffsets.as_str())
-                .ok()
-                .and_then(|v| match v.into_owned() {
-                    Value::LayerOffsetVec(v) => Some(v),
-                    _ => None,
-                })
-                .unwrap_or_default();
-
-            for (i, sub_path) in sub_paths.into_iter().enumerate() {
-                let Some(sub_idx) = index::find_layer(&sub_path, layers, resolver) else {
-                    continue;
-                };
-                if ancestors.contains(&sub_idx) {
-                    errors.push(Error::SublayerCycle {
-                        root_layer: layers[idx].identifier.clone(),
-                        seen_layer: layers[sub_idx].identifier.clone(),
-                    });
-                    continue;
-                }
-                // Fold the time-codes-per-second retiming for this hop into the
-                // sublayer's scale (spec 12.3.2): a sublayer whose rate differs
-                // from its parent retimes by `parent / child`. Offset is unscaled.
-                let ratio = parent_tcps / effective_time_codes_per_second(&layers[sub_idx]);
-                let local = offsets
-                    .get(i)
-                    .copied()
-                    .unwrap_or_default()
-                    .sanitized()
-                    .concatenate(&sdf::LayerOffset::scale_only(ratio));
-                let child = effective.concatenate(&local);
-                Self::collect_sublayers(sub_idx, child, layers, resolver, stack, ancestors, errors);
-            }
-        }
-
-        ancestors.remove(&idx);
     }
 }
 
@@ -1105,32 +680,43 @@ mod tests {
         sdf::Layer::new(id, Box::new(crate::usda::TextReader::from_data(data)))
     }
 
-    /// `recompute_relocate_data` re-derives both the cached flag and the
-    /// per-layer relocate pairs from the current layers. A `layerRelocates` edit
-    /// reaches the stack through `Cache::recompute_relocates`, which does not
-    /// rebuild the sublayer precomputation, so both must be refreshed there or
-    /// the builder keeps reading stale relocate state.
+    fn relocate_count(graph: &LayerGraph) -> usize {
+        graph
+            .all_ids()
+            .iter()
+            .filter(|&&id| !graph.get(id).unwrap().relocates.is_empty())
+            .count()
+    }
+
+    /// `recompute_relocates` re-derives both the cached flag and the per-layer
+    /// relocate pairs from the current layer data. A `layerRelocates` edit reaches
+    /// the graph through `Cache::recompute_relocates`, so both must be refreshed
+    /// there or the builder keeps reading stale relocate state.
     #[test]
     fn recompute_relocate_data_syncs() {
         let plain = layer("root.usd", "#usda 1.0\ndef \"A\" {}\n");
-        let mut stack = LayerStack::new(vec![plain], 0, Box::new(DefaultResolver::new()), true);
-        assert!(!stack.has_relocates, "a stack with no layerRelocates starts clear");
-        assert!(stack.layer_relocates.is_empty(), "no relocate pairs to start");
+        let mut graph = LayerGraph::from_layers(vec![plain], 0, Box::new(DefaultResolver::new()), true);
+        let id = graph.root_id().expect("root layer");
+        assert!(!graph.has_relocates(), "a graph with no layerRelocates starts clear");
+        assert!(
+            graph.get(id).unwrap().relocates.is_empty(),
+            "no relocate pairs to start"
+        );
 
         // Author layerRelocates onto the layer (as an in-place edit would) and
         // refresh the state the way `recompute_relocates` now does. The source is
         // a non-root prim — a root prim cannot be a relocate source.
-        stack.layers[0] = layer(
+        graph.get_mut(id).unwrap().layer = layer(
             "root.usd",
             "#usda 1.0\n(\n    relocates = { </Grp/A>: </Grp/B> }\n)\ndef \"Grp\" {\n    def \"A\" {}\n}\n",
         );
-        stack.recompute_relocate_data();
+        graph.recompute_relocates();
         assert!(
-            stack.has_relocates,
+            graph.has_relocates(),
             "recompute picks up the newly authored layerRelocates"
         );
         assert_eq!(
-            stack.relocation_source(&[(0, sdf::LayerOffset::default())], &Path::new("/Grp/B").unwrap()),
+            graph.relocation_source(&[(id, sdf::LayerOffset::default())], &Path::new("/Grp/B").unwrap()),
             Some(Path::new("/Grp/A").unwrap()),
             "recompute re-extracts the per-layer relocate pairs the builder reads"
         );
@@ -1155,17 +741,18 @@ mod tests {
 )
 "#,
         );
-        let stack = LayerStack::new(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
 
         assert!(
-            stack
-                .layer_stack_errors
+            graph
+                .errors()
                 .iter()
                 .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
             "relocates in one sublayer stack must conflict"
         );
-        assert!(
-            stack.layer_relocates.is_empty(),
+        assert_eq!(
+            relocate_count(&graph),
+            0,
             "every relocate sharing the target is dropped"
         );
     }
@@ -1188,16 +775,16 @@ mod tests {
 )
 "#,
         );
-        let stack = LayerStack::new(vec![first, second], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![first, second], 0, Box::new(DefaultResolver::new()), true);
 
         assert!(
-            !stack
-                .layer_stack_errors
+            !graph
+                .errors()
                 .iter()
                 .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
             "relocates in unrelated layer stacks do not conflict"
         );
-        assert_eq!(stack.layer_relocates.len(), 2);
+        assert_eq!(relocate_count(&graph), 2);
     }
 
     /// `effective_time_codes_per_second` reads the authored rate but clamps a
