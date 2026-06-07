@@ -422,6 +422,52 @@ mod tests {
     }
 
     #[test]
+    fn reparents_a_prim_under_a_new_parent() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim(sdf::path("/World/A/Child")?)?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/B/A")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/B/A")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/B/A/Child")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_fixes_up_attribute_connections() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.in connected to /World/A.attr
+        stage
+            .prim_at(sdf::path("/World/B")?)
+            .create_attribute("in", "double")?
+            .set_connections([sdf::path("/World/A.attr")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        let conns = stage.prim_at(sdf::path("/World/B")?).attribute("in").connections()?;
+        assert_eq!(conns, vec![sdf::path("/World/C.attr")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_prim_convenience_applies() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.prim_at(sdf::path("/World/A")?);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.rename_prim(&prim, "Renamed");
+        editor.apply_edits()?;
+
+        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim_at(sdf::path("/World/Renamed")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
     fn delete_drops_relationship_targets() -> Result<()> {
         let stage = stage()?;
         stage
