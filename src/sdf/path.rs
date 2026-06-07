@@ -76,6 +76,14 @@ impl Path {
         self.path == "/"
     }
 
+    /// Whether this path's prim is a root prim — a direct child of the
+    /// pseudo-root (`/Foo`, or a property of one like `/Foo.attr`): it has exactly
+    /// one prim component, so its only namespace ancestor is the absolute root.
+    #[inline]
+    pub fn is_root_prim(&self) -> bool {
+        self.prim_element_count() == 1
+    }
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.path.is_empty()
@@ -545,7 +553,7 @@ impl Path {
 
     /// Appends a raw variant segment (e.g. `{set=sel}`) directly to this path.
     ///
-    /// Unlike [`append_path`], no `/` separator is inserted — variant segments
+    /// Unlike [`Self::append_path`], no `/` separator is inserted — variant segments
     /// attach directly to the prim path to produce canonical forms like
     /// `/Prim{set=sel}`.
     pub fn append_variant_segment(&self, segment: &str) -> Path {

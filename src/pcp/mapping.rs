@@ -160,7 +160,7 @@ impl MapFunction {
     /// Creates a single-pair mapping without the `(/, /)` identity catch-all.
     ///
     /// Paths outside the explicit domain return `None` from
-    /// [`map_source_to_target`]. Used for external references and payloads
+    /// [`Self::map_source_to_target`]. Used for external references and payloads
     /// where the mapping crosses layer stack boundaries and the domain is
     /// restricted to the referenced prim's namespace (spec 10.3.2.1.1).
     ///
@@ -219,7 +219,7 @@ impl MapFunction {
     /// and the time offset is identity — a non-identity offset retimes
     /// values and is not a no-op.
     ///
-    /// A weaker check than [`is_identity`]: `(/A, /A)` is a no-op but not
+    /// A weaker check than [`Self::is_identity`]: `(/A, /A)` is a no-op but not
     /// identity. Returns `false` for null (empty) mappings — a null mapping
     /// maps *nothing*, which is distinct from "maps but changes nothing".
     pub fn is_noop(&self) -> bool {
@@ -259,15 +259,30 @@ impl MapFunction {
 
     /// Maps a path from the source namespace to the target namespace.
     ///
-    /// Finds the longest source prefix that matches `path` and applies
+    /// Finds the first source prefix that matches `path` and applies
     /// [`Path::replace_prefix`] to translate it.
     pub fn map_source_to_target(&self, path: &Path) -> Option<Path> {
-        for (source, target) in self.path_map.as_slice() {
-            if let Some(mapped) = path.replace_prefix(source, target) {
-                return Some(mapped);
+        self.map_first_pair(path, false)
+    }
+
+    /// Maps a path to the target namespace through a real arc pair, ignoring the
+    /// whole-namespace root identity `(/, /)`. Returns `None` when `path` only
+    /// maps via that identity (or not at all) — i.e. it falls outside the arc's
+    /// own domain. Backs the invalid-external-target-path check (C++
+    /// `PcpBuildFilteredTargetIndex`'s in-scope translation test).
+    pub fn map_source_to_target_in_scope(&self, path: &Path) -> Option<Path> {
+        self.map_first_pair(path, true)
+    }
+
+    /// Translates `path` through the first matching `(source, target)` pair,
+    /// optionally skipping the whole-namespace root identity `(/, /)`.
+    fn map_first_pair(&self, path: &Path, skip_root_identity: bool) -> Option<Path> {
+        self.path_map.as_slice().iter().find_map(|(source, target)| {
+            if skip_root_identity && source.is_abs_root() && target.is_abs_root() {
+                return None;
             }
-        }
-        None
+            path.replace_prefix(source, target)
+        })
     }
 
     /// Maps a path from the target namespace back to the source namespace.

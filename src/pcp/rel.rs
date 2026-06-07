@@ -8,7 +8,7 @@
 //! external data (layer stack, cached indices, cached contexts) is passed
 //! in through method parameters.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, PathComponent, Value};
@@ -16,9 +16,17 @@ use crate::sdf::{self, AbstractData, Path, PathComponent, Value};
 use super::graph::ArcType;
 use super::index::PrimIndex;
 use super::mapping::MapFunction;
+use super::{InvalidRelocateReason, RelocateConflictReason};
 
 /// Per-layer authored relocate pairs `(source, target)`, keyed by layer index.
 pub(crate) type LayerRelocates = HashMap<usize, Vec<(Path, Path)>>;
+
+/// Composed relocates `(source, target)` for a prim, in its root namespace.
+pub(crate) type EffectiveRelocates = Vec<(Path, Path)>;
+
+/// Escaped relocation sources: each `(composed source, relocate layer index)`
+/// whose target left the prim's namespace (see [`Relocates::effective_and_escaped`]).
+pub(crate) type EscapedSources = Vec<(Path, usize)>;
 
 /// Per-layer relocates and operations for namespace remapping.
 ///
@@ -160,12 +168,19 @@ pub(crate) fn apply_child_relocates(
 /// valid pairs `(source, target)` are returned keyed by layer index (layers
 /// without valid relocates are omitted), and each invalid pair becomes an
 /// [`Error::InvalidRelocate`](super::Error::InvalidRelocate) reported in authored
-/// order (C++ `PcpErrorInvalidAuthoredRelocates`). Shared by [`Relocates::new`]
-/// and [`LayerStack`](super::LayerStack).
-pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> (LayerRelocates, Vec<super::Error>) {
+/// order (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are evaluated over
+/// the precomputed sublayer stacks, matching their layer-stack scope.
+pub(crate) fn extract_layer_relocates(
+    layers: &[sdf::Layer],
+    sublayer_stacks: &super::SublayerStacks,
+    session_layer_count: usize,
+) -> (LayerRelocates, Vec<super::Error>) {
     let root = Path::abs_root();
-    let mut out = HashMap::new();
     let mut errors = Vec::new();
+    // Collect every structurally valid authored relocate across the layer stack,
+    // recording its layer; cross-relocate conflicts are checked over the whole set
+    // ("in the same layer stack"). Each structurally invalid pair is reported here.
+    let mut all: Vec<(Path, Path, usize, String)> = Vec::new();
     for (i, layer) in layers.iter().enumerate() {
         let Ok(Value::Relocates(pairs)) = layer
             .get(&root, FieldKey::LayerRelocates.as_str())
@@ -173,46 +188,179 @@ pub(crate) fn extract_layer_relocates(layers: &[sdf::Layer]) -> (LayerRelocates,
         else {
             continue;
         };
-        let mut valid = Vec::new();
         for (source, target) in pairs {
-            if is_valid_relocate(&source, &target) {
-                valid.push((source, target));
-            } else {
-                errors.push(super::Error::InvalidRelocate {
+            match relocate_invalid_reason(&source, &target) {
+                None => all.push((source, target, i, layer.identifier.clone())),
+                Some(reason) => errors.push(super::Error::InvalidRelocate {
                     source_path: source,
                     target_path: target,
                     layer: layer.identifier.clone(),
-                });
+                    reason,
+                }),
             }
         }
-        if !valid.is_empty() {
-            out.insert(i, valid);
+    }
+
+    let conflicting = detect_relocate_conflicts(&all, sublayer_stacks, session_layer_count, &mut errors);
+    let mut out: LayerRelocates = HashMap::new();
+    for (idx, (source, target, layer_idx, _)) in all.into_iter().enumerate() {
+        if !conflicting.contains(&idx) {
+            out.entry(layer_idx).or_default().push((source, target));
         }
     }
     (out, errors)
 }
 
-/// Whether an authored relocate `source -> target` is structurally valid (C++
-/// `Pcp_ComputeRelocationsForLayerStack`'s authored-relocate validation). An
-/// invalid relocate is ignored rather than composed; composing one whose source
-/// and target are nested recurses without terminating (the bug-92827 hang).
+/// Detects cross-relocate conflicts over the layer stack's structurally valid
+/// relocates (C++ `Pcp_ComputeRelocationsForLayerStackWorkspace`'s conflict
+/// validation), returning the indices of every conflicting relocate and pushing
+/// an error for each. Grouped same-target errors come first (target-sorted), then
+/// the pairwise conflicts sorted by `(source, reason, conflict source)`. A
+/// conflicting relocate is dropped from the composed map.
+fn detect_relocate_conflicts(
+    all: &[(Path, Path, usize, String)],
+    sublayer_stacks: &super::SublayerStacks,
+    session_layer_count: usize,
+    errors: &mut Vec<super::Error>,
+) -> HashSet<usize> {
+    let mut conflicting = HashSet::new();
+    let root_stack = sublayer_stacks.get(&session_layer_count);
+    let same_stack = |i: usize, j: usize| {
+        let left = all[i].2;
+        let right = all[j].2;
+        let in_stage_root = |layer| {
+            layer < session_layer_count
+                || root_stack.is_some_and(|stack| stack.iter().any(|&(member, _)| member == layer))
+        };
+        (in_stage_root(left) && in_stage_root(right))
+            || sublayer_stacks.values().any(|stack| {
+                stack.iter().any(|&(layer, _)| layer == left) && stack.iter().any(|&(layer, _)| layer == right)
+            })
+    };
+
+    // Multiple sources moving to the same target: all of them are invalid.
+    let mut by_target: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
+    for (idx, (_, target, _, _)) in all.iter().enumerate() {
+        if !target.is_empty() {
+            by_target.entry(target.clone()).or_default().push(idx);
+        }
+    }
+    for (target, idxs) in &by_target {
+        let mut remaining = idxs.clone();
+        while let Some(seed) = remaining.pop() {
+            let mut group = vec![seed];
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let mut i = 0;
+                while i < remaining.len() {
+                    if group.iter().any(|&member| same_stack(member, remaining[i])) {
+                        group.push(remaining.swap_remove(i));
+                        changed = true;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            if group.len() <= 1 {
+                continue;
+            }
+            let mut sources: Vec<(Path, String)> =
+                group.iter().map(|&i| (all[i].0.clone(), all[i].3.clone())).collect();
+            sources.sort_by(|a, b| a.0.cmp(&b.0));
+            errors.push(super::Error::SameTargetRelocations {
+                target: target.clone(),
+                sources,
+            });
+            conflicting.extend(group);
+        }
+    }
+
+    // Pairwise conflicts: a relocate's target is another's source, or its source
+    // or target is a strict descendant of another's source. Emitted sorted by
+    // (source, reason, conflict source) — `RelocateConflictReason`'s declaration
+    // order is the tie-break order.
+    // TODO(perf): O(n^2) over the layer stack's relocates; runs once at extraction
+    // (not a query hot path) and n is small, but a group-by-source/prefix index
+    // would make it near-linear if a stack ever authors many relocates.
+    let mut pairwise: Vec<(usize, usize, RelocateConflictReason)> = Vec::new();
+    for i in 0..all.len() {
+        for j in 0..all.len() {
+            if i == j || !same_stack(i, j) {
+                continue;
+            }
+            let (si, ti) = (&all[i].0, &all[i].1);
+            let (sj, tj) = (&all[j].0, &all[j].1);
+            if !ti.is_empty() && ti == sj {
+                pairwise.push((i, j, RelocateConflictReason::TargetIsSource));
+            }
+            if !tj.is_empty() && si == tj {
+                pairwise.push((i, j, RelocateConflictReason::SourceIsTarget));
+            }
+            if !ti.is_empty() && ti != sj && ti.has_prefix(sj) {
+                pairwise.push((i, j, RelocateConflictReason::TargetDescendant));
+            }
+            if si != sj && si.has_prefix(sj) {
+                pairwise.push((i, j, RelocateConflictReason::SourceDescendant));
+            }
+        }
+    }
+    pairwise.sort_by(|a, b| {
+        all[a.0]
+            .0
+            .cmp(&all[b.0].0)
+            .then(a.2.cmp(&b.2))
+            .then(all[a.1].0.cmp(&all[b.1].0))
+    });
+    for (i, j, reason) in pairwise {
+        errors.push(super::Error::ConflictingRelocation {
+            source_path: all[i].0.clone(),
+            target_path: all[i].1.clone(),
+            layer: all[i].3.clone(),
+            other_source_path: all[j].0.clone(),
+            other_target_path: all[j].1.clone(),
+            other_layer: all[j].3.clone(),
+            reason,
+        });
+        conflicting.insert(i);
+    }
+
+    conflicting
+}
+
+/// The rule an authored relocate `source -> target` violates, or `None` when it
+/// is valid (C++ `Pcp_ComputeRelocationsForLayerStack`'s authored-relocate
+/// validation, whose messages this mirrors). An invalid relocate is ignored
+/// rather than composed; composing one whose source and target are nested
+/// recurses without terminating (the bug-92827 hang).
 ///
-/// A deletion relocate (empty target) is always valid. Otherwise the source and
-/// target must not be nested within one another: a relocate whose target is an
-/// ancestor of its source (or vice versa, or identical) cannot be composed
-/// because the moved prim would contain — or be contained by — its own
-/// destination.
-fn is_valid_relocate(source: &Path, target: &Path) -> bool {
-    target.is_empty() || !source.is_nested_with(target)
+/// A deletion relocate (empty target) is always valid. Otherwise: a root prim
+/// cannot be a relocate source, and the target must not equal, be an ancestor
+/// of, or be a descendant of the source — the moved prim would otherwise contain
+/// or be contained by its own destination.
+fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidRelocateReason> {
+    if target.is_empty() {
+        return None;
+    }
+    if source.is_root_prim() {
+        return Some(InvalidRelocateReason::RootPrimSource);
+    }
+    if source == target {
+        return Some(InvalidRelocateReason::SourceEqualsTarget);
+    }
+    if source.has_prefix(target) {
+        return Some(InvalidRelocateReason::TargetIsAncestor);
+    }
+    if target.has_prefix(source) {
+        return Some(InvalidRelocateReason::TargetIsDescendant);
+    }
+    None
 }
 
 impl Relocates {
-    /// Creates a new `Relocates` by extracting `layerRelocates` from every
-    /// layer's pseudoroot.
-    pub fn new(layers: &[sdf::Layer]) -> Self {
-        Self {
-            layer_relocates: extract_layer_relocates(layers).0,
-        }
+    /// Creates the query helper from the layer stack's validated relocate data.
+    pub fn new(layer_relocates: LayerRelocates) -> Self {
+        Self { layer_relocates }
     }
 
     /// Returns `true` if no layer has any relocates.
@@ -226,7 +374,21 @@ impl Relocates {
     /// in the same root subtree, maps them to composed namespace using the
     /// layer's namespace mapping, then chains transitive relocates.
     pub fn effective_relocates(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(Path, Path)> {
-        let mut result = self.raw_effective_relocates(path, indices);
+        self.effective_and_escaped(path, indices).0
+    }
+
+    /// The effective relocates AND the escaped relocation sources for a prim, from
+    /// a single namespace scan (the two share `collect_layer_maps`). An escaped
+    /// source is a relocate whose source maps into `path`'s namespace but whose
+    /// target does not — content moved *out* of an arc's scope (e.g. to a new root
+    /// prim); a relationship/connection target under one is invalid. The second
+    /// element pairs each escaped source with the layer that authored its relocate.
+    pub fn effective_and_escaped(
+        &self,
+        path: &Path,
+        indices: &HashMap<Path, PrimIndex>,
+    ) -> (EffectiveRelocates, EscapedSources) {
+        let (mut result, escaped) = self.raw_effective_and_escaped(path, indices);
 
         // Shift each endpoint through a single ancestor rename: when an ancestor
         // prim is relocated, a relocate authored below it sits under the renamed
@@ -245,14 +407,21 @@ impl Relocates {
             }
         }
 
-        result
+        (result, escaped)
     }
 
-    /// Raw (unchained) effective relocates. Each layer's relocates are mapped
-    /// through namespace mappings found in cached prims.
-    fn raw_effective_relocates(&self, path: &Path, indices: &HashMap<Path, PrimIndex>) -> Vec<(Path, Path)> {
+    /// Raw (unchained) effective relocates plus escaped sources. Each layer's
+    /// relocates are mapped through the namespace mappings found in cached prims:
+    /// a relocate whose source and target both map yields an effective pair; one
+    /// whose (non-empty) target does not map is an escaped source.
+    fn raw_effective_and_escaped(
+        &self,
+        path: &Path,
+        indices: &HashMap<Path, PrimIndex>,
+    ) -> (EffectiveRelocates, EscapedSources) {
         let layer_maps = self.collect_layer_maps(path, indices);
         let mut result: Vec<(Path, Path)> = Vec::new();
+        let mut escaped: Vec<(Path, usize)> = Vec::new();
 
         for (li, map) in &layer_maps {
             let Some(relocates) = self.layer_relocates.get(li) else {
@@ -265,20 +434,27 @@ impl Relocates {
                 let composed_tgt = if tgt.is_empty() {
                     tgt.clone()
                 } else {
-                    let Some(t) = map.map_source_to_target(tgt) else {
-                        continue;
-                    };
-                    t
+                    match map.map_source_to_target(tgt) {
+                        Some(t) => t,
+                        None => {
+                            // Target escapes the namespace: record the source.
+                            if !escaped.iter().any(|(s, _)| *s == composed_src) {
+                                escaped.push((composed_src, *li));
+                            }
+                            continue;
+                        }
+                    }
                 };
-                if !result.iter().any(|(s, t)| *s == composed_src && *t == composed_tgt) {
-                    result.push((composed_src, composed_tgt));
+                let pair = (composed_src, composed_tgt);
+                if !result.contains(&pair) {
+                    result.push(pair);
                 }
             }
         }
 
         // Sort by target length descending for longest-prefix-first matching.
         result.sort_by(|a, b| b.1.as_str().len().cmp(&a.1.as_str().len()));
-        result
+        (result, escaped)
     }
 
     /// Collects (layer_index, map_to_root) pairs from ancestor prims and from
@@ -352,16 +528,28 @@ mod tests {
     #[test]
     fn relocate_validity() {
         let p = Path::from;
+        let reason = |s, t| relocate_invalid_reason(&p(s), &p(t));
         // Target is an ancestor of the source (the bug-92827 hang).
-        assert!(!is_valid_relocate(&p("/Rig/Other/A/Instance/A"), &p("/Rig/Other/A")));
-        // Source is an ancestor of the target.
-        assert!(!is_valid_relocate(&p("/A"), &p("/A/B")));
+        assert_eq!(
+            reason("/Rig/Other/A/Instance/A", "/Rig/Other/A"),
+            Some(InvalidRelocateReason::TargetIsAncestor)
+        );
+        // Target is a descendant of the source.
+        assert_eq!(
+            reason("/Rig/A", "/Rig/A/B"),
+            Some(InvalidRelocateReason::TargetIsDescendant)
+        );
         // Identical source and target.
-        assert!(!is_valid_relocate(&p("/A/B"), &p("/A/B")));
+        assert_eq!(
+            reason("/Rig/B", "/Rig/B"),
+            Some(InvalidRelocateReason::SourceEqualsTarget)
+        );
+        // A root prim cannot be a relocate source.
+        assert_eq!(reason("/A", "/B"), Some(InvalidRelocateReason::RootPrimSource));
         // Disjoint move — the ordinary valid case.
-        assert!(is_valid_relocate(&p("/Rig/Model"), &p("/Group/Model")));
+        assert_eq!(reason("/Rig/Model", "/Group/Model"), None);
         // Deletion relocate (empty target) keeps its source as a prohibited name.
-        assert!(is_valid_relocate(&p("/Rig/Model"), &p("")));
+        assert_eq!(reason("/Rig/Model", ""), None);
     }
 
     /// Only the nearest ancestor rename shifts an endpoint; a relocate's source

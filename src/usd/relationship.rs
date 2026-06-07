@@ -187,7 +187,7 @@ impl Relationship {
     /// that authors a spec for this relationship, strongest first. Mirrors C++
     /// `UsdProperty::GetPropertyStack`.
     pub fn property_stack(&self) -> anyhow::Result<Vec<(String, sdf::Path)>> {
-        self.stage.try_or_handle(|cache| cache.property_stack(&self.path))
+        self.stage.cache_mut().property_stack(&self.path)
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's

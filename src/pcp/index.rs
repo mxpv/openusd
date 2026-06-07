@@ -15,6 +15,7 @@ use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
+use super::builder::BuildResult;
 use super::graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
 use super::mapping::MapFunction;
 use super::{Error, LayerStack, VariantFallbackMap};
@@ -310,7 +311,7 @@ impl PrimIndex {
     /// prim must instead be built through a cache holding its ancestors, since
     /// the builder seeds a child from its cached parent.
     #[cfg(test)]
-    pub(crate) fn build_with_context(path: &Path, stack: &LayerStack, ctx: &CompositionContext) -> Result<Self, Error> {
+    pub(crate) fn build_with_context(path: &Path, stack: &LayerStack, ctx: &CompositionContext) -> BuildResult<Self> {
         Self::build_with_cache(path, stack, ctx, &HashMap::new()).map(|(index, _errors)| index)
     }
 
@@ -323,7 +324,7 @@ impl PrimIndex {
         stack: &LayerStack,
         ctx: &CompositionContext,
         cached_indices: &HashMap<Path, PrimIndex>,
-    ) -> Result<(Self, Vec<Error>), Error> {
+    ) -> BuildResult<(Self, Vec<Error>)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, &stack.root_layer_stack(), true)
     }
 
@@ -342,7 +343,7 @@ impl PrimIndex {
         cached_indices: &HashMap<Path, PrimIndex>,
         ambient: &[(usize, LayerOffset)],
         ambient_is_root: bool,
-    ) -> Result<(Self, Vec<Error>), Error> {
+    ) -> BuildResult<(Self, Vec<Error>)> {
         if ambient_is_root {
             if let Some(cached) = cached_indices.get(path) {
                 return Ok((cached.clone(), Vec::new()));
@@ -625,10 +626,20 @@ fn compose_list_op_in<T, D, R, A>(
 where
     T: Default + Clone + PartialEq,
     D: Fn(Value) -> Option<ListOp<T>>,
-    R: FnMut(&mut T, LayerOffset),
-    A: FnMut(&mut T, usize),
+    R: FnMut(&mut T, LayerOffset, f64),
+    A: FnMut(&mut T, usize) -> f64,
 {
     let mut combined: Option<ListOp<T>> = None;
+    // The sublayer offset and time-codes scale to fold into each item, keyed by
+    // the item as authored (after anchoring). Recorded strongest-first and applied
+    // only after the list-op is composed: an offset-bearing item (reference/
+    // payload) is deduped by its AUTHORED value, so two items that resolve to the
+    // same composed offset but are authored differently — e.g. `(offset=45,
+    // scale=0.5)` under a layer offset `(10, 2)` versus a literal `(offset=100)` —
+    // stay distinct (C++ composes `SdfReference`s by authored value, then applies
+    // the layer offset and time-codes retiming).
+    // TODO(perf): linear scans of `folds`; fine for the short per-prim arc lists.
+    let mut folds: Vec<(T, LayerOffset, f64)> = Vec::new();
 
     for node in nodes {
         // A layer that is sublayered from more than one place (a sublayer
@@ -636,10 +647,7 @@ where
         // occurrence first. Its authored opinion at this path is identical at
         // every occurrence — only the composed offset differs — so it is read
         // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
-        // single-valued per layer). Reading every occurrence would otherwise
-        // fold a different offset into each copy of an offset-bearing item
-        // (a reference/payload), defeating the list-op dedup and leaving one
-        // arc node per occupied sublayer slot.
+        // single-valued per layer).
         let mut seen_layers: HashSet<usize> = HashSet::new();
         for &(layer, sub) in node.layer_stack() {
             if !seen_layers.insert(layer) {
@@ -651,13 +659,17 @@ where
             let Some(mut list_op) = decode(value.into_owned()) else {
                 continue;
             };
-            // Anchor each item to the layer that authored it before composing,
-            // so a relative asset path in different sublayers resolves to
-            // distinct targets and is not wrongly deduped (e.g. `@./ref.usd@`
-            // authored in `sub1/` and `sub2/` are two references, not one).
-            list_op.iter_mut().for_each(|item| anchor(item, layer));
-            if !sub.is_identity() {
-                list_op.iter_mut().for_each(|item| retime(item, sub));
+            // Anchor each item to the layer that authored it before composing, so
+            // a relative asset path in different sublayers resolves to distinct
+            // targets and is not wrongly deduped (e.g. `@./ref.usd@` authored in
+            // `sub1/` and `sub2/` are two references, not one). The anchor resolves
+            // the path and returns the time-codes scale to fold later — it does not
+            // change the offset, so dedup still compares authored values.
+            for item in list_op.iter_mut() {
+                let scale = anchor(item, layer);
+                if (!sub.is_identity() || scale != 1.0) && !folds.iter().any(|(i, _, _)| i == item) {
+                    folds.push((item.clone(), sub, scale));
+                }
             }
             combined = Some(match combined {
                 Some(stronger) => stronger.combined_with(&list_op),
@@ -666,7 +678,13 @@ where
         }
     }
 
-    Ok(combined.map(|op| op.reduced().flatten()).unwrap_or_default())
+    let mut result = combined.map(|op| op.reduced().flatten()).unwrap_or_default();
+    for item in &mut result {
+        if let Some((_, sub, scale)) = folds.iter().find(|(i, _, _)| i == item) {
+            retime(item, *sub, *scale);
+        }
+    }
+    Ok(result)
 }
 
 /// Composes an offset-free list-op field (inherits, specializes) by decoding
@@ -684,8 +702,8 @@ where
         field.as_str(),
         layers,
         |v| v.try_into().ok(),
-        |_, _| {},
-        |_, _| {},
+        |_, _, _| {},
+        |_, _| 1.0,
     )
 }
 
@@ -763,7 +781,7 @@ fn resolve_arc_asset_path(
                 expression: asset_path.clone(),
                 arc,
                 site_path: site.clone(),
-                source,
+                message: source.to_string(),
             });
             return None;
         }
@@ -791,21 +809,26 @@ pub(super) fn compose_references_in(
         FieldKey::References.as_str(),
         layers,
         |v| v.try_into().ok(),
-        |r: &mut Reference, sub| r.layer_offset = sub.concatenate(&r.layer_offset),
-        |r: &mut Reference, layer| match resolve_arc_asset_path(
-            &mut r.asset_path,
-            layer,
-            layers,
-            resolver,
-            expr_vars,
-            ArcType::Reference,
-            site,
-            errors,
-        ) {
-            Some(scale) if scale != 1.0 => {
+        |r: &mut Reference, sub, scale| {
+            if scale != 1.0 {
                 r.layer_offset = r.layer_offset.concatenate(&sdf::LayerOffset::scale_only(scale));
             }
-            _ => {}
+            if !sub.is_identity() {
+                r.layer_offset = sub.concatenate(&r.layer_offset);
+            }
+        },
+        |r: &mut Reference, layer| {
+            resolve_arc_asset_path(
+                &mut r.asset_path,
+                layer,
+                layers,
+                resolver,
+                expr_vars,
+                ArcType::Reference,
+                site,
+                errors,
+            )
+            .unwrap_or(1.0)
         },
     )?;
     // A reference whose expression failed to evaluate keeps its raw backtick
@@ -840,13 +863,22 @@ pub(super) fn collect_payloads_in(
             Value::PayloadListOp(op) => Some(op),
             _ => None,
         },
-        |p: &mut Payload, sub| p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default())),
+        // Fold the retiming only when it is not identity, so a payload with no
+        // authored offset and no rate change keeps its `layer_offset` as `None`
+        // (identity `Some` would change the serialized form without affecting
+        // composition). Applied after the list-op composes so payloads are deduped
+        // by authored value (see [`compose_list_op_in`]).
+        |p: &mut Payload, sub, scale| {
+            if scale != 1.0 {
+                let offset = p.layer_offset.unwrap_or_default();
+                p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
+            }
+            if !sub.is_identity() {
+                p.layer_offset = Some(sub.concatenate(&p.layer_offset.unwrap_or_default()));
+            }
+        },
         |p: &mut Payload, layer| {
-            // Fold the retiming only when it is not identity, so a payload with
-            // no authored offset and no rate change keeps its `layer_offset` as
-            // `None` (mirrors the sublayer-offset guard above; identity `Some`
-            // would change the serialized form without affecting composition).
-            match resolve_arc_asset_path(
+            resolve_arc_asset_path(
                 &mut p.asset_path,
                 layer,
                 layers,
@@ -855,13 +887,8 @@ pub(super) fn collect_payloads_in(
                 ArcType::Payload,
                 site,
                 errors,
-            ) {
-                Some(scale) if scale != 1.0 => {
-                    let offset = p.layer_offset.unwrap_or_default();
-                    p.layer_offset = Some(offset.concatenate(&sdf::LayerOffset::scale_only(scale)));
-                }
-                _ => {}
-            }
+            )
+            .unwrap_or(1.0)
         },
     )?;
     // A payload whose expression failed to evaluate keeps its raw backtick path
@@ -1568,7 +1595,7 @@ def "Root" (
             &HashMap::new(),
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::ArcCycle { .. })),
+            errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
             "expected a recorded ArcCycle error, got {errors:?}"
         );
         Ok(())
@@ -1615,7 +1642,7 @@ def "Outer"
             &HashMap::new(),
         )?;
         assert!(
-            errors.iter().any(|e| matches!(e, Error::ArcCycle { .. })),
+            errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
             "expected a recorded ArcCycle error for a cross-frame cycle, got {errors:?}"
         );
         Ok(())
