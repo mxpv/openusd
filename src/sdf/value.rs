@@ -392,6 +392,28 @@ impl TryFrom<Value> for String {
     }
 }
 
+impl TryFrom<Value> for AssetPath {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::AssetPath(asset) => Ok(asset),
+            other => ValueConversionError::err("AssetPath", &other),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<AssetPath> {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::AssetPathVec(assets) => Ok(assets),
+            other => ValueConversionError::err("AssetPathVec", &other),
+        }
+    }
+}
+
 // Raw array convenience conversions — extract the inner gf type then convert
 // via its Into<[T; N]> impl.
 
@@ -530,6 +552,18 @@ impl TryFrom<Value> for Vec<f64> {
 impl<'a> From<&'a str> for Value {
     fn from(value: &'a str) -> Self {
         Value::String(value.to_string())
+    }
+}
+
+impl From<AssetPath> for Value {
+    fn from(asset: AssetPath) -> Self {
+        Value::AssetPath(asset)
+    }
+}
+
+impl From<Vec<AssetPath>> for Value {
+    fn from(assets: Vec<AssetPath>) -> Self {
+        Value::AssetPathVec(assets)
     }
 }
 
@@ -790,6 +824,25 @@ mod tests {
         assert!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).is_ok());
         let v = gf::vec2d(1.0, 2.0);
         assert!(Vec::<f64>::try_from(Value::Vec2d(v)).is_ok());
+    }
+
+    #[test]
+    fn try_from_asset_path() {
+        let scalar = AssetPath::try_from(Value::AssetPath("./tex.png".into())).unwrap();
+        assert_eq!(scalar, AssetPath::new("./tex.png"));
+
+        let array = Vec::<AssetPath>::try_from(Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])).unwrap();
+        assert_eq!(array, vec![AssetPath::new("a.png"), AssetPath::new("b.png")]);
+
+        // A plain string is not an asset path.
+        assert!(AssetPath::try_from(Value::String("a.png".into())).is_err());
+
+        // Round-trips back through the authoring `From` impls.
+        assert_eq!(Value::from(scalar), Value::AssetPath("./tex.png".into()));
+        assert_eq!(
+            Value::from(array),
+            Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])
+        );
     }
 
     #[test]
