@@ -7,15 +7,15 @@
 //! the prim indices that need invalidating.
 //!
 //! Single-layer-stack equivalent of C++ `Pcp_Dependencies`. Because
-//! [`Cache`](super::Cache) owns exactly one layer stack, the outer key is
+//! [`IndexCache`](super::IndexCache) owns exactly one layer stack, the outer key is
 //! `layer_index` rather than a layer-stack reference.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::sdf::Path;
 
-use super::graph::ArcType;
-use super::index::PrimIndex;
+use super::prim_graph::ArcType;
+use super::prim_index::PrimIndex;
 use super::LayerId;
 
 #[derive(Debug, Default)]
@@ -154,10 +154,10 @@ impl Dependencies {
     //
     // TODO: back the per-layer map with an `SdfPathTable`-like trie so
     // this becomes an `O(log n + k)` subtree range query. Same primitive
-    // needed by `Cache::drop_index_subtree`.
+    // needed by `IndexCache::drop_index_subtree`.
     //
     // TODO: snapshot a `culled_dependencies` set per prim index. The
-    // `Builder` culls weaker nodes during composition; without a snapshot,
+    // `Indexer` culls weaker nodes during composition; without a snapshot,
     // an inert spec added at a culled site fails to un-cull the node on
     // next composition.
     pub(super) fn subtree_lookup(&self, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
@@ -182,8 +182,8 @@ impl Dependencies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcp::graph::Node;
     use crate::pcp::mapping::MapFunction;
+    use crate::pcp::prim_graph::Node;
 
     fn p(s: &str) -> Path {
         Path::new(s).expect("valid path")

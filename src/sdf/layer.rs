@@ -407,7 +407,7 @@ impl Layer {
     /// `/`). Modern OpenUSD (≥ 23.05) allows `defaultPrim` to address a
     /// nested prim such as `"World/Char"`; both shapes are accepted here so
     /// the write contract matches the read path in
-    /// [`crate::pcp::Cache::default_prim`].
+    /// [`crate::pcp::IndexCache::default_prim`].
     ///
     /// Mirrors C++ `SdfLayer::SetDefaultPrim`.
     ///

@@ -24,12 +24,12 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
 
 use super::layer_graph::LayerGraph;
-use super::{Cache, LayerId};
+use super::{IndexCache, LayerId};
 
 /// Plan + apply object for one author round.
 ///
 /// Internal: callers route invalidation through
-/// [`Cache::process_changes`](super::Cache::process_changes), which
+/// [`IndexCache::process_changes`](super::IndexCache::process_changes), which
 /// constructs a `Changes`, classifies via [`Changes::did_change`], and
 /// commits via [`Changes::apply`] against the same cache instance.
 #[derive(Debug, Default)]
@@ -56,10 +56,10 @@ pub struct CacheChanges {
     /// does not write to it yet either; inert spec adds land in
     /// `did_change_prims` so the cached index is dropped wholesale.
     //
-    // TODO: wire producer + consumer together when `Cache` memoizes
+    // TODO: wire producer + consumer together when `IndexCache` memoizes
     // resolved spec stacks per node. The classifier (`classify_prim_entry`
     // in this file) routes inert spec adds here instead of `did_change_prims`,
-    // and `apply` learns to call a `Cache::rescan_specs(path)` (analog of
+    // and `apply` learns to call a `IndexCache::rescan_specs(path)` (analog of
     // C++ `Pcp_RescanForSpecs`) that walks the existing graph and refreshes
     // which layers contribute opinions, without rebuilding the graph.
     #[allow(dead_code)]
@@ -105,7 +105,7 @@ impl Changes {
     /// data on every call, so a newly authored value is visible without
     /// any cache mutation. When the cache memoizes resolved property
     /// stacks, a tier-3 (`did_change_specs`) branch will land here.
-    pub fn did_change(&mut self, cache: &Cache, graph: &LayerGraph, changes: &[(LayerId, ChangeList)]) {
+    pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[(LayerId, ChangeList)]) {
         for (layer_index, cl) in changes {
             for (path, entry) in cl.entries() {
                 if path.is_abs_root() {
@@ -121,7 +121,7 @@ impl Changes {
 
     fn classify_prim_entry(
         &mut self,
-        cache: &Cache,
+        cache: &IndexCache,
         graph: &LayerGraph,
         layer: LayerId,
         path: &Path,
@@ -175,12 +175,12 @@ impl Changes {
         //   2. An inert add at a path whose node was previously culled
         //      from a dependent prim's graph — that dependent needs a
         //      tier-2 prim rebuild so the now-needed node re-enters.
-        //      Blocked on culled-node tracking: the `Builder` culls
+        //      Blocked on culled-node tracking: the `Indexer` culls
         //      weaker nodes during composition, and we keep no
         //      `culled_dependencies` snapshot to consult.
     }
 
-    fn classify_root_entry(&mut self, _cache: &Cache, _layer: LayerId, entry: &ChangeEntry) {
+    fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {
         for &key in &entry.info_changed {
             if key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
@@ -194,7 +194,7 @@ impl Changes {
         }
     }
 
-    fn fanout_significant(&mut self, cache: &Cache, layer: LayerId, path: &Path) {
+    fn fanout_significant(&mut self, cache: &IndexCache, layer: LayerId, path: &Path) {
         for dep in cache.dependencies().lookup_with_ancestors(layer, path) {
             self.cache.did_change_significantly.insert(dep);
         }
@@ -221,7 +221,7 @@ impl Changes {
             || field == FieldKey::Specifier.as_str()
             || field == FieldKey::Active.as_str()
             // `apiSchemas` is composed off the cached prim index
-            // (resolve_token_list_op in Cache::api_schemas), so any edit
+            // (resolve_token_list_op in IndexCache::api_schemas), so any edit
             // must drop the index. Once registry-driven applied schemas
             // inject composition state, this becomes load-bearing for
             // graph correctness too.
@@ -239,7 +239,7 @@ impl Changes {
     // ancestor subsumption. Once the classifier writes prim-tier entries
     // directly (today it collapses them into the significant set in
     // `classify_prim_entry`), this branch becomes load-bearing.
-    pub fn apply(self, cache: &mut Cache, graph: &mut LayerGraph) {
+    pub fn apply(self, cache: &mut IndexCache, graph: &mut LayerGraph) {
         // Any index invalidation can change which prims are instances or how
         // they compose, so the shared-prototype registry (spec 11.3.3) must be
         // rebuilt rather than left stale. It is lazily repopulated on the next
@@ -290,7 +290,7 @@ impl Changes {
             }
             cache.drop_index(path);
         }
-        // Tier 3 (spec): no-op until `Cache` memoizes per-node spec stacks.
+        // Tier 3 (spec): no-op until `IndexCache` memoizes per-node spec stacks.
     }
 }
 
@@ -310,9 +310,9 @@ mod tests {
         graph.all_ids().first().copied().unwrap_or(LayerId::INVALID)
     }
 
-    fn empty_cache() -> (LayerGraph, Cache) {
+    fn empty_cache() -> (LayerGraph, IndexCache) {
         let graph = LayerGraph::from_layers(Vec::new(), 0, Box::new(DefaultResolver::new()), true);
-        (graph, Cache::new(VariantFallbackMap::new(), Vec::new()))
+        (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
             .unwrap()
             .set_instanceable(true);
         let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
-        let cache = Cache::new(VariantFallbackMap::new(), Vec::new());
+        let cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
 
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/X")).flags = ChangeFlags::ADD_INERT_PRIM;
