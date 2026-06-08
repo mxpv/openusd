@@ -2,8 +2,6 @@ use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
-use super::{Value, ValueConversionError};
-
 /// A reference to an external asset — the value of an `asset` attribute or
 /// metadatum, authored in `@...@` syntax.
 ///
@@ -28,16 +26,21 @@ use super::{Value, ValueConversionError};
 /// it stand in for its authored path: `&asset` coerces to `&str`, and
 /// `asset == "foo.usd"` compares directly.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
 pub struct AssetPath {
     /// The path as authored in the layer, before expression evaluation or
     /// asset resolution.
     pub authored_path: String,
     /// The authored path with its variable expression evaluated, set by value
     /// resolution; `None` when the authored path is not an expression or has
-    /// not been evaluated (e.g. raw layer data).
+    /// not been evaluated (e.g. raw layer data). A derived annotation, not
+    /// serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
     evaluated_path: Option<String>,
     /// The result of asset resolution, set by value resolution; `None` for an
-    /// asset path that has not been resolved (e.g. raw layer data).
+    /// asset path that has not been resolved (e.g. raw layer data). A derived
+    /// annotation, not serialized.
+    #[cfg_attr(feature = "serde", serde(skip))]
     resolved_path: Option<String>,
 }
 
@@ -134,20 +137,6 @@ impl Ord for AssetPath {
     }
 }
 
-#[cfg(feature = "serde")]
-impl serde::Serialize for AssetPath {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.authored_path.serialize(serializer)
-    }
-}
-
-#[cfg(feature = "serde")]
-impl<'de> serde::Deserialize<'de> for AssetPath {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(AssetPath::new(String::deserialize(deserializer)?))
-    }
-}
-
 impl Deref for AssetPath {
     type Target = str;
 
@@ -228,62 +217,9 @@ impl PartialEq<AssetPath> for String {
     }
 }
 
-impl TryFrom<Value> for AssetPath {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::AssetPath(asset) => Ok(asset),
-            other => ValueConversionError::err("AssetPath", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<AssetPath> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::AssetPathVec(assets) => Ok(assets),
-            other => ValueConversionError::err("AssetPathVec", &other),
-        }
-    }
-}
-
-impl From<AssetPath> for Value {
-    fn from(asset: AssetPath) -> Self {
-        Value::AssetPath(asset)
-    }
-}
-
-impl From<Vec<AssetPath>> for Value {
-    fn from(assets: Vec<AssetPath>) -> Self {
-        Value::AssetPathVec(assets)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn try_from_value() {
-        let scalar = AssetPath::try_from(Value::AssetPath("./tex.png".into())).unwrap();
-        assert_eq!(scalar, AssetPath::new("./tex.png"));
-
-        let array = Vec::<AssetPath>::try_from(Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])).unwrap();
-        assert_eq!(array, vec![AssetPath::new("a.png"), AssetPath::new("b.png")]);
-
-        // A plain string is not an asset path.
-        assert!(AssetPath::try_from(Value::String("a.png".into())).is_err());
-
-        // Round-trips back through the authoring `From` impls.
-        assert_eq!(Value::from(scalar), Value::AssetPath("./tex.png".into()));
-        assert_eq!(
-            Value::from(array),
-            Value::AssetPathVec(vec!["a.png".into(), "b.png".into()])
-        );
-    }
 
     #[test]
     fn string_like() {
