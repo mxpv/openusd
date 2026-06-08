@@ -47,7 +47,7 @@ Add the crate to your `Cargo.toml` (or run `cargo add openusd`):
 
 ```toml
 [dependencies]
-openusd = "0.4"
+openusd = "0.5"
 ```
 
 If you need the latest unreleased changes, depend on the crate directly from the
@@ -83,7 +83,7 @@ pay for what you use:
 
 ```toml
 [dependencies]
-openusd = { version = "0.4", features = ["geom", "lux"] }
+openusd = { version = "0.5", features = ["geom", "lux"] }
 ```
 
 ## Example
