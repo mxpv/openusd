@@ -315,6 +315,16 @@ pub type PayloadListOp = ListOp<Payload>;
 
 pub type TimeSampleMap = Vec<(f64, Value)>;
 
+/// A single namespace relocation `(source, target)`: the prim at `source` is
+/// moved to `target` in composed namespace. An empty `target` is a deletion
+/// that makes `source` a prohibited (invalid) child name. Mirrors C++
+/// `SdfRelocate`, a `std::pair<SdfPath, SdfPath>`.
+pub type Relocate = (Path, Path);
+
+/// The ordered list of [`Relocate`]s authored in a layer's `relocates`
+/// metadata. Mirrors C++ `SdfRelocates`, a `std::vector<SdfRelocate>`.
+pub type RelocateList = Vec<Relocate>;
+
 /// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
 ///
 /// `AbstractData` is an anonymous container that owns scene description values.

@@ -10,7 +10,7 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 The codebase follows the same module structure as the C++ OpenUSD SDK:
 
-- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys. `Layer` (C++ `SdfLayer`) bundles a resolved identifier with a backing `AbstractData` and exposes a Layer-tier authoring surface (`create_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim` / `clear_default_prim`) plus typed spec views (`PrimSpec[Mut]`, `AttributeSpec[Mut]`, `RelationshipSpec[Mut]`, `PseudoRootSpec[Mut]`). Authoring errors flow through `AuthoringError`.
+- **`sdf/`** - Scene Description Foundations: Core data types, traits, and abstractions. Contains the `AbstractData` trait, `Value` enum (60+ variants), `Path`, `Spec`, `ListOp`, and schema field keys. `Layer` (C++ `SdfLayer`) bundles a resolved identifier with a backing `AbstractData` and exposes a Layer-tier authoring surface (`create_prim` / `override_prim` / `create_attribute` / `create_relationship` / `set_default_prim` / `clear_default_prim`, plus `relocates` / `set_relocates` / `has_relocates` / `clear_relocates` mirroring `SdfLayer::GetRelocates` and friends over the `sdf::Relocate` = `(Path, Path)` and `sdf::RelocateList` = `Vec<Relocate>` aliases) plus typed spec views (`PrimSpec[Mut]`, `AttributeSpec[Mut]`, `RelationshipSpec[Mut]`, `PseudoRootSpec[Mut]`). Authoring errors flow through `AuthoringError`.
 
 - **`usda/`** - Text format (`.usda`): Lexer (logos) + recursive descent parser. `TextReader` implements `AbstractData`; `TextWriter` emits `.usda`.
 
@@ -107,6 +107,7 @@ When implementing a new feature from the spec:
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
 - Do not use `**bold** — description` pattern in doc comments or bullet lists; use plain text or link directly to the item instead
+- A doc comment documents only its own item. Don't describe another type, module, or method inside it (e.g. don't enumerate a `Layer`'s methods in a `Relocate` type alias's doc); document each item on the item itself and use an intra-doc link (`` [`Foo`] ``) when a cross-reference is genuinely needed
 - Do not use decorative box-drawing section-divider comments (e.g. `// ── Section ──────`); group code with a plain `//` comment or rely on the item's own doc comment
 - Never remove comments during refactoring if they are still applicable
 - Comments must describe the code as it stands, not its edit history or the alternatives it didn't take. Don't justify the absence or removal of code, and don't contrast the chosen approach with a rejected one (e.g. "no separate X pre-check is needed here", "X was removed because…", "assign directly rather than through Y", "instead of calling Z", "we use A so we don't B"). Such notes only make sense to someone who saw the prior version or the alternative and are noise to a fresh reader. State what the present code does and a rationale that stands on its own, not what it no longer does or could have done.

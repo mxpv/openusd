@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
+use crate::sdf::{self, AbstractData, LayerOffset, Path, RelocateList, Value};
 
 use super::mapping::MapFunction;
 use super::prim_index::find_layer_id;
@@ -68,7 +68,7 @@ pub(crate) struct LayerNode {
     /// The validated authored `layerRelocates` pairs `(source, target)` in this
     /// layer's own namespace (conflicting and structurally invalid pairs already
     /// dropped). Empty when the layer authors none.
-    pub relocates: Vec<(Path, Path)>,
+    pub relocates: RelocateList,
 }
 
 impl LayerNode {
@@ -562,8 +562,8 @@ impl LayerGraph {
 
     /// The as-authored relocates of `ambient`, strongest layer first, duplicate
     /// sources dropped (C++ `GetIncrementalRelocates*`). Not chained.
-    fn incremental_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> Vec<(Path, Path)> {
-        let mut pairs: Vec<(Path, Path)> = Vec::new();
+    fn incremental_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> RelocateList {
+        let mut pairs: RelocateList = Vec::new();
         for &(layer, _) in ambient {
             let Some(node) = self.nodes.get(&layer) else {
                 continue;
@@ -583,7 +583,7 @@ impl LayerGraph {
     /// authored *under* another's target contributes a combined
     /// pre-relocation-source → final-target pair so a single map application
     /// reaches the final location through nested relocates.
-    pub(crate) fn combined_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> Vec<(Path, Path)> {
+    pub(crate) fn combined_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> RelocateList {
         let mut pairs = self.incremental_relocates(ambient);
         let snapshot = pairs.clone();
         for (source, target) in pairs.iter_mut() {

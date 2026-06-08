@@ -937,6 +937,14 @@ where
         }
     }
 
+    /// Namespace relocations authored in this layer's metadata.
+    pub fn relocates(&self) -> Option<&[sdf::Relocate]> {
+        match self.get(sdf::FieldKey::LayerRelocates.as_str())? {
+            sdf::Value::Relocates(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
     /// Layer documentation string.
     pub fn documentation(&self) -> Option<&str> {
         match self.get(sdf::FieldKey::Documentation.as_str())? {
@@ -1008,6 +1016,11 @@ where
     {
         let paths: Vec<String> = paths.into_iter().map(Into::into).collect();
         self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
+    }
+
+    /// Replace this layer's namespace relocations with `relocates`.
+    pub fn set_relocates(&mut self, relocates: sdf::RelocateList) {
+        self.add(sdf::FieldKey::LayerRelocates, sdf::Value::Relocates(relocates));
     }
 
     /// Append a sublayer asset path. Duplicate entries are preserved because

@@ -121,7 +121,7 @@ pub enum Value {
     Payload(Payload),
     PathVec(Vec<Path>),
     /// Layer-level relocates: `(source, target)` path pairs for namespace remapping.
-    Relocates(Vec<(Path, Path)>),
+    Relocates(RelocateList),
     VariantSelectionMap(HashMap<String, String>),
     TimeSamples(TimeSampleMap),
 

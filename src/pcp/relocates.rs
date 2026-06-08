@@ -12,8 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::sdf::schema::FieldKey;
-use crate::sdf::{element_cmp, AbstractData, Path, PathComponent, Value};
+use crate::sdf::{element_cmp, Path, PathComponent, RelocateList};
 
 use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
@@ -21,11 +20,8 @@ use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
-/// Per-layer authored relocate pairs `(source, target)`, keyed by layer id.
-pub(crate) type LayerRelocates = HashMap<LayerId, Vec<(Path, Path)>>;
-
-/// Composed relocates `(source, target)` for a prim, in its root namespace.
-pub(crate) type EffectiveRelocates = Vec<(Path, Path)>;
+/// Per-layer authored relocates, keyed by layer id.
+pub(crate) type LayerRelocates = HashMap<LayerId, RelocateList>;
 
 /// Follows `path` to its final location through a set of relocates, applying the
 /// longest matching source prefix at each step until it reaches a fixed point.
@@ -163,7 +159,6 @@ pub(crate) fn apply_child_relocates(
 /// (C++ `PcpErrorInvalidAuthoredRelocates`). Conflicts are scoped to a single
 /// layer stack via [`LayerGraph::relocate_conflict_scopes`].
 pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Vec<Error>) {
-    let root = Path::abs_root();
     let mut errors = Vec::new();
     // Collect every structurally valid authored relocate across the layer stack,
     // recording its layer; cross-relocate conflicts are checked over the whole set
@@ -171,13 +166,7 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
     let mut all: Vec<(Path, Path, LayerId, String)> = Vec::new();
     for &id in graph.all_ids() {
         let layer = graph.layer(id);
-        let Ok(Value::Relocates(pairs)) = layer
-            .get(&root, FieldKey::LayerRelocates.as_str())
-            .map(|v| v.into_owned())
-        else {
-            continue;
-        };
-        for (source, target) in pairs {
+        for (source, target) in layer.relocates() {
             match relocate_invalid_reason(&source, &target) {
                 None => all.push((source, target, id, layer.identifier().to_string())),
                 Some(reason) => errors.push(Error::InvalidRelocate {
@@ -349,13 +338,9 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 /// rename. Used to apply relocates to a relationship/connection's *deleted*
 /// target paths, which have no per-node origin to translate through (resolved
 /// targets translate through their node's own map instead).
-pub(crate) fn effective_relocates(
-    graph: &LayerGraph,
-    path: &Path,
-    indices: &HashMap<Path, PrimIndex>,
-) -> EffectiveRelocates {
+pub(crate) fn effective_relocates(graph: &LayerGraph, path: &Path, indices: &HashMap<Path, PrimIndex>) -> RelocateList {
     let layer_maps = collect_layer_maps(graph, path, indices);
-    let mut result: Vec<(Path, Path)> = Vec::new();
+    let mut result: RelocateList = Vec::new();
 
     for (li, map) in &layer_maps {
         let relocates = match graph.get(*li) {

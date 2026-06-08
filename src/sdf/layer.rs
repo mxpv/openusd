@@ -12,8 +12,8 @@ use anyhow::Result;
 use super::schema::{ChildrenKey, FieldKey};
 use super::{
     AbstractData, AttributeSpec, AttributeSpecMut, Data, LayerData, Path, PathComponent, PrimSpec, PrimSpecMut,
-    PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, Spec, SpecError, SpecType, Specifier,
-    Value, Variability,
+    PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, RelocateList, Spec, SpecError, SpecType,
+    Specifier, Value, Variability,
 };
 use crate::{usda, usdc};
 
@@ -466,9 +466,51 @@ impl Layer {
     /// `SdfLayer::ClearDefaultPrim`. No-op when no pseudo-root spec exists
     /// (clearing what isn't there must not materialize state).
     pub fn clear_default_prim(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::DefaultPrim)
+    }
+
+    /// The list of namespace relocations authored in this layer's metadata,
+    /// or an empty list when none are authored. Mirrors C++
+    /// `SdfLayer::GetRelocates`. Reads through the backing [`AbstractData`], so
+    /// it works on both in-memory and file-loaded layers.
+    pub fn relocates(&self) -> RelocateList {
+        self.data
+            .try_get(&Path::abs_root(), FieldKey::LayerRelocates.as_str())
+            .ok()
+            .flatten()
+            .and_then(|value| value.into_owned().try_as_relocates())
+            .unwrap_or_default()
+    }
+
+    /// Whether this layer's metadata carries any `relocates` opinion, including
+    /// an explicit empty list (an opinion that *there should be no* relocates).
+    /// Mirrors C++ `SdfLayer::HasRelocates`.
+    pub fn has_relocates(&self) -> bool {
+        self.data
+            .has_field(&Path::abs_root(), FieldKey::LayerRelocates.as_str())
+    }
+
+    /// Set this layer's entire list of namespace relocations to `relocates`.
+    /// An empty list authors an explicit "no relocates" opinion (see
+    /// [`Layer::has_relocates`]); use [`Layer::clear_relocates`] to remove the
+    /// opinion entirely. Mirrors C++ `SdfLayer::SetRelocates`.
+    pub fn set_relocates(&mut self, relocates: RelocateList) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_relocates(relocates);
+        Ok(())
+    }
+
+    /// Clear this layer's `relocates` opinion from its metadata. Mirrors C++
+    /// `SdfLayer::ClearRelocates`. No-op when no pseudo-root spec exists.
+    pub fn clear_relocates(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::LayerRelocates)
+    }
+
+    /// Remove a metadata field from the pseudo-root spec, if that spec exists.
+    /// No-op otherwise — clearing what isn't there must not materialize state.
+    fn clear_root_field(&mut self, key: FieldKey) -> Result<(), AuthoringError> {
         let data = self.writable_data_mut()?;
         if let Some(spec) = data.spec_mut(&Path::abs_root()) {
-            spec.remove(FieldKey::DefaultPrim.as_str());
+            spec.remove(key.as_str());
         }
         Ok(())
     }
@@ -831,4 +873,42 @@ fn split_property_path(path: &Path) -> Result<(Path, String), AuthoringError> {
         });
     }
     Ok((prim_path, suffix.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `set_relocates` / `relocates` round-trip the authored pairs, and the
+    /// pairs land under the pseudo-root's `layerRelocates` field.
+    #[test]
+    fn relocates_round_trip() {
+        let mut layer = Layer::new_anonymous("test.usda");
+        assert!(!layer.has_relocates());
+        assert!(layer.relocates().is_empty());
+
+        let pairs = vec![
+            (Path::from("/Rig/Model"), Path::from("/Group/Model")),
+            (Path::from("/Rig/Dead"), Path::from("")),
+        ];
+        layer.set_relocates(pairs.clone()).expect("in-memory layer is writable");
+
+        assert!(layer.has_relocates());
+        assert_eq!(layer.relocates(), pairs);
+    }
+
+    /// An explicit empty list is still an opinion (`HasRelocates` is true), while
+    /// `clear_relocates` removes the opinion entirely.
+    #[test]
+    fn empty_opinion_vs_cleared() {
+        let mut layer = Layer::new_anonymous("test.usda");
+
+        layer.set_relocates(RelocateList::new()).expect("writable");
+        assert!(layer.has_relocates());
+        assert!(layer.relocates().is_empty());
+
+        layer.clear_relocates().expect("writable");
+        assert!(!layer.has_relocates());
+        assert!(layer.relocates().is_empty());
+    }
 }
