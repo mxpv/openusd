@@ -924,13 +924,18 @@ impl Stage {
         &self.population_mask
     }
 
-    /// Returns the session layer identifier, if one was provided.
-    pub fn session_layer(&self) -> Option<String> {
-        let layers = self.layers();
-        layers
-            .session_layers()
-            .first()
-            .map(|&id| layers.identifier(id).to_string())
+    /// Borrows the stage's strongest session layer, if one was provided (C++
+    /// `UsdStage::GetSessionLayer`).
+    ///
+    /// Like [`root_layer`](Self::root_layer), the returned [`Ref`] borrows the
+    /// layer graph. Drop it before calling an authoring method that mutably
+    /// borrows the graph.
+    pub fn session_layer(&self) -> Option<Ref<'_, sdf::Layer>> {
+        Ref::filter_map(self.layers(), |layers| {
+            let id = *layers.session_layers().first()?;
+            Some(layers.layer(id))
+        })
+        .ok()
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -2230,7 +2235,7 @@ mod tests {
         let stage = Stage::open(&fixture_path("session_root.usda"))?;
 
         assert!(!stage.has_session_layer());
-        assert_eq!(stage.session_layer(), None);
+        assert!(stage.session_layer().is_none());
         assert_eq!(stage.layer_count(), 1);
 
         Ok(())
@@ -2243,6 +2248,11 @@ mod tests {
 
         assert!(stage.has_session_layer());
         assert_eq!(stage.layer_count(), 2);
+        assert!(stage
+            .session_layer()
+            .expect("configured session layer")
+            .identifier()
+            .ends_with("session_layer.usda"));
 
         let prop = sdf::Path::new("/World")?.append_property("radius")?;
         let value = stage.field::<f64>(&prop, sdf::FieldKey::Default)?;
