@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::ar::ResolvedPath;
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
@@ -166,14 +167,8 @@ impl IndexCache {
     ) -> Result<Option<&sdf::Layer>> {
         // Anchor the clip asset path to the authoring layer's location so
         // relative paths resolve like any other dependency.
-        let clip_id = {
-            let resolver = graph.resolver();
-            let anchor_id = graph.identifier(anchor_layer).to_owned();
-            match resolver.resolve(&anchor_id) {
-                Some(anchor) => resolver.create_identifier(asset_path, Some(&anchor)),
-                None => resolver.create_identifier(asset_path, None),
-            }
-        };
+        let anchor = graph.anchor_location(Some(anchor_layer));
+        let clip_id = graph.resolver().create_identifier(asset_path, anchor.as_ref());
 
         if !self.clip_layers.contains_key(&clip_id) {
             let resolver = graph.resolver();
@@ -217,6 +212,16 @@ impl IndexCache {
 
         self.ensure_index(graph, &prim)?;
 
+        // TODO: only the default-sourced returns below anchor their `asset`
+        // values (via `anchor_asset_paths`); values from time samples
+        // (`resolve_local_time_samples` / `resolve_time_samples`) and value
+        // clips (`resolve_clip_value`) are returned with `resolved_path` unset.
+        // To close this, those resolvers must surface the contributing layer so
+        // it can be anchored — note a clip value anchors against the *clip
+        // layer*, not a host-stack opinion, so it cannot reuse
+        // `asset_anchor` / `strongest_layer` directly. Asset-valued time samples
+        // and clips are rare in practice.
+
         // 1) Local time samples take precedence over clip data.
         if let Some(samples) = self.indices[&prim].resolve_local_time_samples(graph, Some(&suffix), &local_layers)? {
             return Ok(interp(&samples, time));
@@ -226,7 +231,7 @@ impl IndexCache {
         if let FieldValue::Authored(value) =
             self.resolve_local_field_value(graph, &prim, &suffix, FieldKey::Default.as_str(), &local_layers)?
         {
-            return Ok(value);
+            return Ok(self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), value));
         }
 
         // 3) Value clips, anchored on this prim or an ancestor. A clip set that
@@ -244,6 +249,7 @@ impl IndexCache {
 
         // 5) Fall back to the strongest authored default.
         let default = self.indices[&prim].resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
+        let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
         Ok(default.and_then(block_to_none))
     }
 
@@ -696,11 +702,85 @@ impl IndexCache {
             let prim_path = path.prim_path();
             let prop_suffix = path.property_suffix();
             self.ensure_index(graph, &prim_path)?;
-            self.indices[&prim_path].resolve_field(field, graph, Some(prop_suffix))
+            let value = self.indices[&prim_path].resolve_field(field, graph, Some(prop_suffix))?;
+            Ok(self.anchor_asset_paths(graph, &prim_path, field, Some(prop_suffix), value))
         } else {
             self.ensure_index(graph, path)?;
-            self.indices[path].resolve_field(field, graph, None)
+            let value = self.indices[path].resolve_field(field, graph, None)?;
+            Ok(self.anchor_asset_paths(graph, path, field, None, value))
         }
+    }
+
+    /// Fills the resolved path on any `asset` / `asset[]` value just resolved,
+    /// anchoring each authored path against the layer of the strongest opinion
+    /// (C++ `UsdStage::_MakeResolvedAssetPaths`). Non-asset values pass through;
+    /// asset paths nested inside a dictionary value are not recursed into, only
+    /// top-level `asset` / `asset[]` fields are resolved.
+    ///
+    /// TODO(perf): each asset read re-runs `Resolver::resolve` (a filesystem
+    /// hit); a per-(layer, path) resolution cache would avoid repeating it.
+    fn anchor_asset_paths(
+        &self,
+        graph: &LayerGraph,
+        prim_path: &Path,
+        field: &str,
+        prop_suffix: Option<&str>,
+        value: Option<Value>,
+    ) -> Option<Value> {
+        match value? {
+            Value::AssetPath(asset) => {
+                let anchor = self.asset_anchor(graph, prim_path, field, prop_suffix);
+                Some(Value::AssetPath(Self::resolve_asset_path(
+                    graph,
+                    asset,
+                    anchor.as_ref(),
+                )))
+            }
+            Value::AssetPathVec(assets) => {
+                let anchor = self.asset_anchor(graph, prim_path, field, prop_suffix);
+                let resolved = assets
+                    .into_iter()
+                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor.as_ref()))
+                    .collect();
+                Some(Value::AssetPathVec(resolved))
+            }
+            other => Some(other),
+        }
+    }
+
+    /// The location to anchor `field`'s asset value against — the resolved
+    /// location of the strongest opinion's layer, looked up on the prim's
+    /// cached index. Resolved once so every element of an `asset[]` reuses it.
+    fn asset_anchor(
+        &self,
+        graph: &LayerGraph,
+        prim_path: &Path,
+        field: &str,
+        prop_suffix: Option<&str>,
+    ) -> Option<ResolvedPath> {
+        let layer = self
+            .indices
+            .get(prim_path)
+            .and_then(|index| index.strongest_layer(field, graph, prop_suffix));
+        graph.anchor_location(layer)
+    }
+
+    /// Resolves `asset`'s authored path against `anchor` (its source layer's
+    /// resolved location) and returns it with the resolved path recorded.
+    ///
+    /// Resolution owns the derived resolved path: the result is rebuilt from
+    /// the authored path so any prior resolved path is discarded, and it is set
+    /// again only when the authored path is non-empty and resolves.
+    fn resolve_asset_path(graph: &LayerGraph, asset: sdf::AssetPath, anchor: Option<&ResolvedPath>) -> sdf::AssetPath {
+        let mut asset = sdf::AssetPath::new(asset.into_string());
+        if asset.is_empty() {
+            return asset;
+        }
+        let identifier = graph.resolver().create_identifier(asset.as_str(), anchor);
+        if let Some(resolved) = graph.resolver().resolve(&identifier) {
+            asset.set_resolved_path(resolved.to_string_lossy().into_owned());
+        }
+        asset
     }
 
     /// Returns the composed `apiSchemas` list for a prim.
