@@ -58,12 +58,20 @@ impl ClipsAPI {
 
     /// `(stageTime, clipIndex)` activation pairs for `clip_set` (`active`).
     pub fn clip_active(&self, clip_set: &str) -> anyhow::Result<Vec<(f64, f64)>> {
-        Ok(self.field(clip_set, keys::ACTIVE)?.as_ref().map(as_pairs).unwrap_or_default())
+        Ok(self
+            .field(clip_set, keys::ACTIVE)?
+            .as_ref()
+            .map(as_pairs)
+            .unwrap_or_default())
     }
 
     /// `(stageTime, clipTime)` timing pairs for `clip_set` (`times`).
     pub fn clip_times(&self, clip_set: &str) -> anyhow::Result<Vec<(f64, f64)>> {
-        Ok(self.field(clip_set, keys::TIMES)?.as_ref().map(as_pairs).unwrap_or_default())
+        Ok(self
+            .field(clip_set, keys::TIMES)?
+            .as_ref()
+            .map(as_pairs)
+            .unwrap_or_default())
     }
 
     /// Prim path queried within each clip for `clip_set` (`primPath`), if authored.
@@ -73,19 +81,28 @@ impl ClipsAPI {
 
     /// Manifest layer asset path for `clip_set` (`manifestAssetPath`), if authored.
     pub fn clip_manifest_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<String>> {
-        Ok(self.field(clip_set, keys::MANIFEST_ASSET_PATH)?.as_ref().and_then(as_asset))
+        Ok(self
+            .field(clip_set, keys::MANIFEST_ASSET_PATH)?
+            .as_ref()
+            .and_then(as_asset))
     }
 
     /// Whether gaps in `clip_set` interpolate across surrounding clips rather
     /// than falling back to the manifest default (`interpolateMissingClipValues`).
     pub fn interpolate_missing_clip_values(&self, clip_set: &str) -> anyhow::Result<Option<bool>> {
-        Ok(self.field(clip_set, keys::INTERPOLATE_MISSING)?.as_ref().and_then(as_bool))
+        Ok(self
+            .field(clip_set, keys::INTERPOLATE_MISSING)?
+            .as_ref()
+            .and_then(as_bool))
     }
 
     /// Template asset-path pattern for `clip_set` (`templateAssetPath`), if
     /// authored. Authored as `asset`, so read through the asset extractor.
     pub fn clip_template_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<String>> {
-        Ok(self.field(clip_set, keys::TEMPLATE_ASSET_PATH)?.as_ref().and_then(as_asset))
+        Ok(self
+            .field(clip_set, keys::TEMPLATE_ASSET_PATH)?
+            .as_ref()
+            .and_then(as_asset))
     }
 
     /// Template stride for `clip_set` (`templateStride`), if authored.
@@ -95,7 +112,10 @@ impl ClipsAPI {
 
     /// Template start time for `clip_set` (`templateStartTime`), if authored.
     pub fn clip_template_start_time(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
-        Ok(self.field(clip_set, keys::TEMPLATE_START_TIME)?.as_ref().and_then(as_f64))
+        Ok(self
+            .field(clip_set, keys::TEMPLATE_START_TIME)?
+            .as_ref()
+            .and_then(as_f64))
     }
 
     /// Template end time for `clip_set` (`templateEndTime`), if authored.
@@ -105,13 +125,19 @@ impl ClipsAPI {
 
     /// Template active offset for `clip_set` (`templateActiveOffset`), if authored.
     pub fn clip_template_active_offset(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
-        Ok(self.field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET)?.as_ref().and_then(as_f64))
+        Ok(self
+            .field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET)?
+            .as_ref()
+            .and_then(as_f64))
     }
 
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary, or `None` when the set (or field) is not authored.
     fn field(&self, clip_set: &str, key: &str) -> anyhow::Result<Option<Value>> {
-        let Some(Value::Dictionary(sets)) = self.prim.stage().field::<Value>(self.prim.path(), sdf::FieldKey::Clips)?
+        let Some(Value::Dictionary(sets)) = self
+            .prim
+            .stage()
+            .field::<Value>(self.prim.path(), sdf::FieldKey::Clips)?
         else {
             return Ok(None);
         };
@@ -165,5 +191,101 @@ fn as_f64(value: &Value) -> Option<f64> {
         Value::Int64(i) => Some(*i as f64),
         Value::Half(h) => Some(h.to_f32() as f64),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gf;
+    use crate::usd::Stage;
+    use std::collections::HashMap;
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/fixtures/{name}/root.usda",
+            std::env::var("CARGO_MANIFEST_DIR").unwrap()
+        )
+    }
+
+    /// `clip_asset_anchor` authors the explicit form on `/Model`:
+    /// `asset[] assetPaths`, `double2[] active`, `string primPath`.
+    #[test]
+    fn reads_explicit_clip_set_from_fixture() -> anyhow::Result<()> {
+        let stage = Stage::open(&fixture("clip_asset_anchor"))?;
+        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Model")?));
+
+        assert_eq!(clips.clip_sets()?, vec!["default".to_string()]);
+        assert_eq!(clips.clip_asset_paths("default")?, vec!["./clip.usda".to_string()]);
+        assert_eq!(clips.clip_active("default")?, vec![(0.0, 0.0)]);
+        assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Model"));
+        Ok(())
+    }
+
+    /// `clip_template` authors the template form on `/Model`:
+    /// `asset templateAssetPath`, `double templateStart/End/Stride`. The
+    /// `asset`-typed template path is the case a `String`-only extractor
+    /// would silently miss.
+    #[test]
+    fn reads_template_clip_set_from_fixture() -> anyhow::Result<()> {
+        let stage = Stage::open(&fixture("clip_template"))?;
+        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Model")?));
+
+        assert_eq!(
+            clips.clip_template_asset_path("default")?.as_deref(),
+            Some("./clip.#.usda")
+        );
+        assert_eq!(clips.clip_template_start_time("default")?, Some(1.0));
+        assert_eq!(clips.clip_template_end_time("default")?, Some(2.0));
+        assert_eq!(clips.clip_template_stride("default")?, Some(1.0));
+        // No explicit asset paths authored in the template form.
+        assert!(clips.clip_asset_paths("default")?.is_empty());
+        Ok(())
+    }
+
+    /// Fields the bundled fixtures don't exercise (`times`,
+    /// `manifestAssetPath`, `interpolateMissingClipValues`,
+    /// `templateActiveOffset`) plus the missing-set / missing-field edges,
+    /// authored in-memory with the value types the parser produces.
+    #[test]
+    fn reads_remaining_fields_and_missing_edges() -> anyhow::Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let set = Value::Dictionary(
+            [
+                (
+                    keys::TIMES.to_string(),
+                    Value::Vec2dVec(vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 5.0)]),
+                ),
+                (
+                    keys::MANIFEST_ASSET_PATH.to_string(),
+                    Value::AssetPath("manifest.usda".into()),
+                ),
+                (keys::INTERPOLATE_MISSING.to_string(), Value::Bool(true)),
+                (keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(0.5)),
+            ]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+        );
+        stage.define_prim(sdf::path("/Anim")?)?.set_metadata(
+            "clips",
+            Value::Dictionary([("default".to_string(), set)].into_iter().collect()),
+        )?;
+        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+
+        assert_eq!(clips.clip_times("default")?, vec![(0.0, 0.0), (10.0, 5.0)]);
+        assert_eq!(
+            clips.clip_manifest_asset_path("default")?.as_deref(),
+            Some("manifest.usda")
+        );
+        assert_eq!(clips.interpolate_missing_clip_values("default")?, Some(true));
+        assert_eq!(clips.clip_template_active_offset("default")?, Some(0.5));
+
+        // Missing set, missing field, and a prim with no clips at all.
+        assert!(clips.clip_asset_paths("nope")?.is_empty());
+        assert!(clips.clip_prim_path("default")?.is_none());
+        assert!(ClipsAPI::new(&stage.prim_at(sdf::path("/Absent")?))
+            .clip_sets()?
+            .is_empty());
+        Ok(())
     }
 }
