@@ -227,19 +227,24 @@ impl ClipsAPI {
     fn set_field(&self, clip_set: &str, key: &str, value: Value) -> Result<(), StageAuthoringError> {
         let clip_set = clip_set.to_string();
         let key = key.to_string();
-        self.prim.clone().update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
-            let mut sets = match current {
-                Some(Value::Dictionary(d)) => d,
-                _ => HashMap::new(),
-            };
-            match sets.entry(clip_set).or_insert_with(|| Value::Dictionary(HashMap::new())) {
-                Value::Dictionary(set) => {
-                    set.insert(key, value);
+        self.prim
+            .clone()
+            .update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
+                let mut sets = match current {
+                    Some(Value::Dictionary(d)) => d,
+                    _ => HashMap::new(),
+                };
+                match sets
+                    .entry(clip_set)
+                    .or_insert_with(|| Value::Dictionary(HashMap::new()))
+                {
+                    Value::Dictionary(set) => {
+                        set.insert(key, value);
+                    }
+                    other => *other = Value::Dictionary(HashMap::from([(key, value)])),
                 }
-                other => *other = Value::Dictionary(HashMap::from([(key, value)])),
-            }
-            Value::Dictionary(sets)
-        })?;
+                Value::Dictionary(sets)
+            })?;
         Ok(())
     }
 }
@@ -386,6 +391,48 @@ mod tests {
         assert!(ClipsAPI::new(&stage.prim_at(sdf::path("/Absent")?))
             .clip_sets()?
             .is_empty());
+        Ok(())
+    }
+
+    /// Author every field across two sets via the setters and read it all
+    /// back — also covers that the per-field read-modify-write preserves the
+    /// other sets and fields already authored.
+    #[test]
+    fn set_get_round_trip() -> anyhow::Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim(sdf::path("/Anim")?)?;
+        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+
+        clips.set_clip_asset_paths("default", vec!["a.usda".into(), "b.usda".into()])?;
+        clips.set_clip_active("default", vec![(0.0, 0.0), (10.0, 1.0)])?;
+        clips.set_clip_times("default", vec![(0.0, 0.0), (10.0, 5.0)])?;
+        clips.set_clip_prim_path("default", "/Anim")?;
+        clips.set_clip_manifest_asset_path("default", "manifest.usda")?;
+        clips.set_interpolate_missing_clip_values("default", true)?;
+        clips.set_clip_template_asset_path("tmpl", "clip.#.usda")?;
+        clips.set_clip_template_stride("tmpl", 1.0)?;
+        clips.set_clip_template_start_time("tmpl", 0.0)?;
+        clips.set_clip_template_end_time("tmpl", 10.0)?;
+        clips.set_clip_template_active_offset("tmpl", 0.5)?;
+
+        assert_eq!(clips.clip_sets()?, vec!["default".to_string(), "tmpl".to_string()]);
+        assert_eq!(
+            clips.clip_asset_paths("default")?,
+            vec!["a.usda".to_string(), "b.usda".to_string()]
+        );
+        assert_eq!(clips.clip_active("default")?, vec![(0.0, 0.0), (10.0, 1.0)]);
+        assert_eq!(clips.clip_times("default")?, vec![(0.0, 0.0), (10.0, 5.0)]);
+        assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Anim"));
+        assert_eq!(
+            clips.clip_manifest_asset_path("default")?.as_deref(),
+            Some("manifest.usda")
+        );
+        assert_eq!(clips.interpolate_missing_clip_values("default")?, Some(true));
+        assert_eq!(clips.clip_template_asset_path("tmpl")?.as_deref(), Some("clip.#.usda"));
+        assert_eq!(clips.clip_template_stride("tmpl")?, Some(1.0));
+        assert_eq!(clips.clip_template_start_time("tmpl")?, Some(0.0));
+        assert_eq!(clips.clip_template_end_time("tmpl")?, Some(10.0));
+        assert_eq!(clips.clip_template_active_offset("tmpl")?, Some(0.5));
         Ok(())
     }
 }
