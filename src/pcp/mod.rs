@@ -216,10 +216,22 @@
 //! - Finer-grained change classification: `Changes::did_change` collapses the prim
 //!   and spec tiers into the significant tier (drop the index and every
 //!   descendant); a finer split would rebuild less per local edit.
-//! - Anchoring `asset` values sourced from time samples or value clips:
-//!   `IndexCache::value_at` anchors only default-sourced asset paths (filling
-//!   their `resolved_path`); a time-sample or clip value is returned unanchored
-//!   because the resolvers do not surface the layer of the contributing sample.
+//! - Resolving `asset` values sourced from time samples or value clips:
+//!   `IndexCache::value_at` evaluates expressions and anchors only
+//!   default-sourced asset paths (filling their `evaluated_path` /
+//!   `resolved_path`); a time-sample or clip value is returned unresolved
+//!   because the resolvers do not surface the layer/node of the contributing
+//!   sample.
+//! - Surfacing asset-path expression failures during value resolution: a
+//!   malformed or non-string expression in an `asset` value is dropped silently
+//!   (`IndexCache::resolve_asset_path` returns it unevaluated), unlike a
+//!   reference/payload arc, which records [`Error::InvalidExpression`]. Value
+//!   resolution needs an error channel to report it.
+//! - Sharing composed expression variables: `PrimIndex::composed_expr_vars`
+//!   recomputes at value-resolution time what `Indexer::composed_expr_vars`
+//!   already composed during indexing. Storing the composed set on the index
+//!   (or each node) would remove the duplicate walk and the risk of the two
+//!   diverging.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

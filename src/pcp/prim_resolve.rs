@@ -430,20 +430,61 @@ impl PrimIndex {
             })
     }
 
-    /// The layer of the strongest authored opinion for `field`, used to anchor
-    /// a relative asset path against the layer the winning value came from
-    /// (mirrors C++ `UsdStage::_MakeResolvedAssetPaths` anchoring on the
-    /// strongest opinion's layer). Returns `None` if nothing authors the field.
-    pub(crate) fn strongest_layer(
+    /// The strongest authored opinion for `field`: the contributing layer (the
+    /// anchor for a relative asset path, mirroring C++
+    /// `UsdStage::_MakeResolvedAssetPaths`) and the node it came from (the scope
+    /// for composing the `expressionVariables` an asset-path expression is
+    /// evaluated against). Returns `None` if nothing authors the field.
+    pub(crate) fn strongest_opinion(
         &self,
         field: &str,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Option<LayerId> {
-        self.opinions(field, stack, prop_suffix)
-            .next()?
-            .ok()
-            .map(|opinion| opinion.layer)
+    ) -> Option<(LayerId, &Node)> {
+        // A direct walk rather than `opinions()` so the returned node borrows
+        // from `self` alone, not from the `field` / `stack` parameters. The
+        // node/layer filter must match `opinions()`'s first-yield: keep the
+        // `has_specs` / permission / `query_path` / `try_get` checks in sync.
+        for node in self.nodes() {
+            if !node.has_specs() || node.is_permission_denied() {
+                continue;
+            }
+            let Ok(query_path) = Self::query_path(node, prop_suffix) else {
+                continue;
+            };
+            for (layer, _) in node.layers() {
+                if matches!(stack.layer(layer).try_get(&query_path, field), Ok(Some(_))) {
+                    return Some((layer, node));
+                }
+            }
+        }
+        None
+    }
+
+    /// Composes the `expressionVariables` visible at `node`, a port of
+    /// `Indexer::composed_expr_vars` over the finished index. Walking node→root,
+    /// each root/reference/payload arc boundary contributes its layer stack's
+    /// authored variables, with the closer-to-root stack overriding the farther
+    /// one (C++ `PcpExpressionVariables`).
+    ///
+    /// Keep this walk in sync with `Indexer::composed_expr_vars`: both must
+    /// agree on which arcs are boundaries and how stacks compose. The
+    /// indexer's `TODO(expr-arcs)` (sub-root frames) applies here too.
+    pub(crate) fn composed_expr_vars(&self, node: &Node, stack: &LayerGraph) -> HashMap<String, Value> {
+        let mut composed = HashMap::new();
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
+                // Members are strongest-first; apply weakest-first so the strongest wins.
+                for &(layer, _) in n.layer_stack().iter().rev() {
+                    if let Ok(dict) = crate::sdf::expr::read_expression_variables(stack.layer(layer).data()) {
+                        composed.extend(dict);
+                    }
+                }
+            }
+            cur = n.parent().map(|id| self.node(id));
+        }
+        composed
     }
 
     /// Walks nodes from strongest to weakest, returning the first opinion.
