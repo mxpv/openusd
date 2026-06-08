@@ -318,7 +318,7 @@ impl Prim {
         if !self.is_active()? {
             return Ok(false);
         }
-        if self.stage.initial_load_set().load_payloads() {
+        if self.stage.load().load_payloads() {
             return Ok(true);
         }
         for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
@@ -363,7 +363,7 @@ impl Prim {
     /// true and the prim has a composition arc. Mirrors C++ `UsdPrim::IsInstance`.
     pub fn is_instance(&self) -> anyhow::Result<bool> {
         if self.path == sdf::Path::abs_root()
-            || !self.stage.population_mask().includes(&self.path)
+            || !self.stage.mask().includes(&self.path)
             || !self.stage.has_spec(&self.path)?
         {
             return Ok(false);
@@ -420,7 +420,7 @@ impl Prim {
     /// `self.path` here is the synthetic prototype root, which is never in a
     /// user population mask, so gating on it would always yield nothing.
     pub fn instances(&self) -> Vec<sdf::Path> {
-        let mask = self.stage.population_mask();
+        let mask = self.stage.mask();
         let instances = self.stage.cache().instances_of(&self.path);
         instances
             .into_iter()

@@ -17,28 +17,10 @@ For a detailed comparison with the C++ reference implementation and current prog
 ## Features
 
 - File formats — reads and writes `.usda` (text), `.usdc` (binary), and `.usdz` (archive).
-- Fully featured [composition engine](src/pcp)
-  - [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering with sublayers, inherits, variants, references, payloads, and specializes.
-  - [List-edit composition](https://openusd.org/release/glossary.html#usdglossary-listediting) across layers.
-  - Per-prim node graph with namespace mapping across composition arcs.
-  - Non-destructive namespace remapping via [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates).
-  - Permission restrictions — a direct arc to a `permission = private` prim is reported and its opinions are dropped from value resolution.
-  - [Variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html) with string interpolation and built-in functions.
-- Composed [`Stage`](src/usd/stage.rs)
-  - Recursive layer collection with cycle detection and pluggable asset resolution.
-  - Lazy per-prim composition with caching, depth-first traversal, and typed field access.
-  - Prim status, schema, and model-hierarchy queries on composed prims.
-  - Predicate-based traversal that prunes inactive, unloaded, or abstract subtrees.
-  - Working-set control via population masks and initial payload-loading rules.
-  - [Session layer](https://openusd.org/release/glossary.html#usdglossary-sessionlayer) and [variant fallback](https://openusd.org/release/glossary.html#usdglossary-variantset) selections via `StageBuilder`.
-  - Recoverable error handling via `StageBuilder::on_error` callback.
-- Authoring API
-  - Build USD scenes through [layer](src/sdf/layer.rs)- and [stage](src/usd/stage.rs)-tier APIs.
-  - Typed [spec views](src/sdf/spec.rs) for compile-time-checked per-kind editing.
-  - Composed [prim, attribute, and relationship handles](src/usd/prim.rs) with chained fluent edits.
-  - `EditTarget` routing of opinions to a specific layer; in-memory stages for anonymous-root authoring.
-  - Applied API schema authoring.
 - Domain schema readers (opt-in [feature flags](#feature-flags), layered on the composed stage) — [`UsdGeom`](src/schemas/geom), [`UsdLux`](src/schemas/lux), [`UsdPhysics`](src/schemas/physics), [`UsdRender`](src/schemas/render), [`UsdSkel`](src/schemas/skel), and [`UsdShade`](src/schemas/shade).
+- A fully featured [composition engine](src/pcp) — [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering over a per-prim node graph, with [list editing](https://openusd.org/release/glossary.html#usdglossary-listediting), scene-graph [instancing](https://openusd.org/release/glossary.html#usdglossary-instancing), non-destructive [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates), and [variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html).
+- A composed [`Stage`](src/usd/stage.rs) — lazy cached per-prim composition with typed value resolution, predicate-based traversal, and full prim/property query API over the composed scene.
+- An authoring API — build scenes through [layer](src/sdf/layer.rs)- and [stage](src/usd/stage.rs)-tier APIs, with typed [spec views](src/sdf/spec.rs), composed [prim/attribute/relationship handles](src/usd/prim.rs) with chained fluent edits, `EditTarget` routing to a specific layer, in-memory anonymous-root stages, and applied API schema authoring.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 
@@ -50,7 +32,7 @@ The [AOUSD Core Specification 1.0](https://aousd.org/blog/foundations-of-open-3d
 |------|--------|-------|
 | [Text format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text) | :white_check_mark:&nbsp;Passes | 10 tests against JSON baselines |
 | [Binary format parsing](vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary) | :white_check_mark:&nbsp;Passes | 42 tests manually backported from the reference suite's `test_binary.py` in [`tests/binary_format.rs`](tests/binary_format.rs) |
-| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | [`tests/composition.rs`](tests/composition.rs) verifies composed prim/property/child existence (text + binary). Exact `pcp.txt` result diffing (strength order, stacks) is not yet covered |
+| [Composition](vendor/core-spec-supplemental-release_dec2025/composition/tests/assets) | :white_check_mark:&nbsp;Passes | [`tests/composition.rs`](tests/composition.rs) runs the full vendor suite (138 assets) through both the text and binary parsers, regenerating each `pcp.txt` dump to validate strength ordering, prim/property stacks, and time offsets |
 | [Value resolution](vendor/core-spec-supplemental-release_dec2025/value_resolution) | :ballot_box_with_check:&nbsp;Partial | 8 tests in [`tests/value_resolution.rs`](tests/value_resolution.rs) (defaults, time samples, value clips). Excludes attribute fallbacks and splines |
 | [Combine chains](vendor/core-spec-supplemental-release_dec2025/data_types/tests/combine_chain) | :white_check_mark:&nbsp;Passes | [`ListOp::combined_with`](src/sdf/list_op.rs) and [`ListOp::reduced`](src/sdf/list_op.rs) against JSON baselines |
 
@@ -116,16 +98,16 @@ let stage = usd::Stage::open("scene.usda")?;
 let stage = usd::Stage::builder()
     // Use a custom asset resolver (default: DefaultResolver).
     .resolver(ar::DefaultResolver::new())
-    // Handle composition errors instead of failing (default: hard error).
-    .on_error(|err| {
-        eprintln!("warning: {err}");
-        Ok(()) // skip missing dependency and continue
-    })
     // Leave payload arcs unloaded (default: LoadAll).
-    .initial_load_set(usd::InitialLoadSet::LoadNone)
+    .load(usd::InitialLoadSet::LoadNone)
     // Restrict the stage to a subtree of interest.
-    .population_mask(usd::StagePopulationMask::new(["/World/Hero"]))
+    .mask(usd::StagePopulationMask::new(["/World/Hero"]))
     .open("scene.usda")?;
+
+// Inspect any recoverable composition errors collected while loading.
+for err in stage.composition_errors() {
+    eprintln!("warning: {err}");
+}
 
 // Traverse prims filtered by a predicate. DEFAULT skips inactive/unloaded/abstract
 // subtrees and stops at instances; ALL visits every composed prim.

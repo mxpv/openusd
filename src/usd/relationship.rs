@@ -178,7 +178,7 @@ impl Relationship {
     /// raw [`Self::targets`]. Mirrors C++
     /// `UsdRelationship::GetForwardedTargets`.
     pub fn forwarded_targets(&self) -> anyhow::Result<Vec<sdf::Path>> {
-        let mask = self.stage.population_mask();
+        let mask = self.stage.mask();
         self.stage.masked(&self.path, |g, cache| {
             cache.forwarded_relationship_targets(g, &self.path, &|p| mask.includes(p))
         })

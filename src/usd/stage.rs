@@ -30,9 +30,9 @@
 //! - [`StageBuilder::variant_fallbacks`] provides a
 //!   [`VariantFallbackMap`](crate::pcp::VariantFallbackMap) with preferred
 //!   selections for variant sets that have no authored opinion.
-//! - [`StageBuilder::initial_load_set`] controls whether payload arcs are
+//! - [`StageBuilder::load`] controls whether payload arcs are
 //!   loaded during stage population.
-//! - [`StageBuilder::population_mask`] limits the prim working set exposed by
+//! - [`StageBuilder::mask`] limits the prim working set exposed by
 //!   stage queries and traversal.
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
@@ -915,12 +915,12 @@ impl Stage {
     }
 
     /// Returns the stage's initial payload loading behavior.
-    pub fn initial_load_set(&self) -> InitialLoadSet {
+    pub fn load(&self) -> InitialLoadSet {
         self.initial_load_set
     }
 
     /// Returns the population mask used by this stage.
-    pub fn population_mask(&self) -> &StagePopulationMask {
+    pub fn mask(&self) -> &StagePopulationMask {
         &self.population_mask
     }
 
@@ -1041,7 +1041,7 @@ impl Stage {
     // targets / connections on `Relationship` / `Attribute` (`GetTargets` /
     // `GetConnections`). The handles reach the cache through [`Self::cache`]
     // and [`Self::masked`], with population filtering supplied by
-    // [`Self::filter_child_names`] and [`Self::population_mask`].
+    // [`Self::filter_child_names`] and [`Self::mask`].
 
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
@@ -1529,13 +1529,13 @@ impl<R: ar::Resolver> StageBuilder<R> {
     }
 
     /// Sets the initial payload loading behavior.
-    pub fn initial_load_set(mut self, load_set: InitialLoadSet) -> Self {
+    pub fn load(mut self, load_set: InitialLoadSet) -> Self {
         self.initial_load_set = load_set;
         self
     }
 
     /// Sets the stage population mask.
-    pub fn population_mask(mut self, mask: StagePopulationMask) -> Self {
+    pub fn mask(mut self, mask: StagePopulationMask) -> Self {
         self.population_mask = mask;
         self
     }
@@ -2707,7 +2707,7 @@ def "Hidden"
         )?;
 
         let stage = Stage::builder()
-            .population_mask(StagePopulationMask::new(["/Vis"]))
+            .mask(StagePopulationMask::new(["/Vis"]))
             .open(root.to_str().expect("utf-8 temp path"))?;
 
         // /Hidden is masked out: its relationship is not followed.
@@ -2911,10 +2911,8 @@ def Shader "Mat" (
         assert!(loaded.prim_at("/World").is_loaded()?);
         assert_eq!(child_names(&loaded, "/World")?, vec!["Cube"]);
 
-        let unloaded = Stage::builder()
-            .initial_load_set(InitialLoadSet::LoadNone)
-            .open(&path)?;
-        assert_eq!(unloaded.initial_load_set(), InitialLoadSet::LoadNone);
+        let unloaded = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
+        assert_eq!(unloaded.load(), InitialLoadSet::LoadNone);
         assert_eq!(unloaded.layer_count(), 1);
         assert!(!unloaded.prim_at("/World").is_loaded()?);
         assert_eq!(child_names(&unloaded, "/World")?, Vec::<String>::new());
@@ -2928,7 +2926,7 @@ def Shader "Mat" (
     #[test]
     fn mask_traverse() -> Result<()> {
         let stage = Stage::builder()
-            .population_mask(StagePopulationMask::new(["/World/ActiveParent/Child"]))
+            .mask(StagePopulationMask::new(["/World/ActiveParent/Child"]))
             .open("fixtures/stage_queries.usda")?;
 
         assert_eq!(stage.root_prims()?, vec!["World"]);
@@ -2953,7 +2951,7 @@ def Shader "Mat" (
     fn mask_skips_dependency() -> Result<()> {
         let path = composition_path("references/reference_invalid.usda");
         let stage = Stage::builder()
-            .population_mask(StagePopulationMask::new(["/World/cube"]))
+            .mask(StagePopulationMask::new(["/World/cube"]))
             .open(&path)?;
 
         assert_eq!(stage.root_prims()?, vec!["World"]);
@@ -3065,7 +3063,7 @@ def Shader "Mat" (
     #[test]
     fn prototype_queries_masked() -> Result<()> {
         let stage = Stage::builder()
-            .population_mask(StagePopulationMask::new(["/A"]))
+            .mask(StagePopulationMask::new(["/A"]))
             .open(&fixture_path("instancing_shared.usda"))?;
 
         // /A is in the mask; /B (which shares /A's prototype) is not.
@@ -3415,7 +3413,7 @@ def "I2" (
     #[test]
     fn prototype_visible_under_mask() -> Result<()> {
         let stage = Stage::builder()
-            .population_mask(StagePopulationMask::new(["/A"]))
+            .mask(StagePopulationMask::new(["/A"]))
             .open(&fixture_path("instancing_shared.usda"))?;
 
         // /A is in the mask and is an instance; its prototype is reachable.
@@ -3433,7 +3431,7 @@ def "I2" (
 
         // A prototype with no masked instance stays hidden: /B (and so the
         // prototype it would otherwise expose) is outside the mask.
-        assert!(!stage.population_mask().includes(&sdf::path("/B")?));
+        assert!(!stage.mask().includes(&sdf::path("/B")?));
         Ok(())
     }
 
