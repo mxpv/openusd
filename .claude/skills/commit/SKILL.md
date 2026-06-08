@@ -43,7 +43,25 @@ Follow these steps:
    - Show the commit message to the user and wait for confirmation before committing.
    - Do NOT enumerate the staged files in the confirmation message — the user already knows which files are staged from `git status`. Only show the commit title and body.
 
-7. **Commit**: Stage relevant files and create the commit.
+7. **Commit**: Stage the relevant files, then create the commit.
+   - The commit runs through the **Bash** tool, which is POSIX `bash` and may
+     differ from the contributor's interactive shell. Pass the message on
+     **stdin** via a quoted heredoc so shell quoting cannot corrupt it:
+
+     ```
+     git commit -F - <<'COMMIT_MSG'
+     <subject line>
+
+     <body wrapped at 72>
+     COMMIT_MSG
+     ```
+
+   - Do NOT use `git commit -m "…"` for a multiline or special-character
+     message, and do not reach for your interactive shell's own here-string or
+     quoting idioms — they may not be valid `bash` and can inject stray
+     characters into the message. The quoted delimiter (`'COMMIT_MSG'`) keeps
+     `$`, backticks, and `!` literal; UTF-8 (em-dashes, etc.) passes through
+     fine.
 
 Strictly forbidden — these restrictions are non-negotiable:
 - Do NOT add "Generated with Claude Code" or any AI generation notices.
