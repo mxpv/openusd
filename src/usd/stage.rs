@@ -3133,6 +3133,31 @@ def Shader "Mat" (
         Ok(())
     }
 
+    /// A connection on a prototype *descendant* resolves in the prototype
+    /// namespace when queried directly on the prototype, and remaps to the
+    /// queried instance when reached through a proxy (spec 11.3.3 + 12.4).
+    #[test]
+    fn prototype_descendant_target_remap() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_connections.usda"))?;
+
+        // Query an instance proxy first to register the prototype; the target
+        // remaps into that instance's namespace.
+        assert_eq!(
+            connections(&stage, &sdf::path("/I1/Dst.inputs:in")?)?,
+            vec![sdf::path("/I1/Src.outputs:out")?]
+        );
+
+        // The same connection queried directly on the prototype descendant stays
+        // in the prototype namespace (no instance to remap to).
+        let proto = stage.prim_at("/I1").prototype()?.expect("I1 is an instance");
+        let dst_in = proto.append_path("Dst")?.append_property("inputs:in")?;
+        assert_eq!(
+            connections(&stage, &dst_in)?,
+            vec![proto.append_path("Src")?.append_property("outputs:out")?]
+        );
+        Ok(())
+    }
+
     /// Forwarding through a relationship that lives inside an instance
     /// prototype resolves within the queried instance: the prototype rel is
     /// classified correctly (not mistaken for a terminal) and its targets
@@ -3290,9 +3315,9 @@ def "I2" (
         let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
         assert_eq!(proto.as_str(), "/__Prototype_0");
 
-        // The descendant now resolves the shared content: minting cleared the
-        // stale redirection, so the query redirects to the canonical instance
-        // instead of reading the stale empty synthetic index.
+        // The descendant now resolves the shared content: minting evicted the
+        // stale empty index and identity redirection under /__Prototype_0, so the
+        // query recomposes it in place from the materialized prototype root.
         assert_eq!(
             stage.value_at(proto.append_path("Child")?.append_property("size")?, 0.0)?,
             Some(sdf::Value::Double(5.0))
@@ -3409,6 +3434,38 @@ def "I2" (
         // A prototype with no masked instance stays hidden: /B (and so the
         // prototype it would otherwise expose) is outside the mask.
         assert!(!stage.population_mask().includes(&sdf::path("/B")?));
+        Ok(())
+    }
+
+    /// A prototype's namespace can contain a nested instance: that nested prim
+    /// is itself an instance and mints its own prototype, and a prim beneath it
+    /// is an instance proxy of the nested prototype rather than plain prototype
+    /// content (spec 11.3.3).
+    #[test]
+    fn nested_instance_in_prototype() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_nested_in_prototype.usda"))?;
+
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+
+        // The proxy chain through the instance namespace resolves the nested
+        // value (/A/Nested is itself an instance).
+        assert!(stage.prim_at("/A/Nested").is_instance()?);
+        assert_eq!(stage.value_at("/A/Nested/Leaf.v", 0.0)?, Some(sdf::Value::Double(3.0)));
+
+        // Inside the prototype namespace, the nested prim is an instance and
+        // mints its own, distinct prototype.
+        let nested = stage.prim_at(proto.append_path("Nested")?);
+        assert!(nested.is_instance()?);
+        let nested_proto = nested.prototype()?.expect("nested prim is an instance");
+        assert_ne!(nested_proto, proto);
+
+        // A prim beneath the nested instance (inside the prototype namespace) is
+        // an instance proxy of the nested prototype — previously this was
+        // reported as plain prototype content.
+        let leaf = stage.prim_at(proto.append_path("Nested")?.append_path("Leaf")?);
+        assert!(leaf.is_instance_proxy()?);
+        let in_proto = leaf.prim_in_prototype()?.expect("Leaf is an instance proxy");
+        assert_eq!(in_proto.path(), &nested_proto.append_path("Leaf")?);
         Ok(())
     }
 

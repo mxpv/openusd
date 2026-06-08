@@ -243,13 +243,13 @@ impl Changes {
         // Any index invalidation can change which prims are instances or how
         // they compose, so affected entries in the shared-prototype registry
         // (spec 11.3.3) must be dropped rather than left stale; they are lazily
-        // recomposed on the next instancing query. A layer-stack rebuild drops
-        // every cached index below, so it clears the whole registry; a
-        // prim-level change drops only the prototypes whose instances or shared
-        // content it touches.
-        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            cache.invalidate_all_prototypes();
-        } else if !self.cache.did_change_significantly.is_empty() || !self.cache.did_change_prims.is_empty() {
+        // recomposed on the next instancing query. A prim-level change drops only
+        // the prototypes whose instances or shared content it touches; a
+        // layer-stack rebuild clears the whole registry as part of the
+        // `clear_all_indices` below, so it needs no per-prototype work here.
+        if !self.layer_stack.contains(LayerStackChanges::SIGNIFICANT)
+            && (!self.cache.did_change_significantly.is_empty() || !self.cache.did_change_prims.is_empty())
+        {
             let changed: Vec<Path> = self
                 .cache
                 .did_change_significantly

@@ -47,7 +47,7 @@
 //! |------|---------------|-------------|
 //! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle, with a precomputed sublayer stack per layer. Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
-//! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that aliases a non-canonical instance's subtree onto its canonical instance) as a second `IndexCache` impl. |
+//! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
 //! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`), the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child, and the arc-composition helpers (`compose_references_in`, `collect_payloads_in`, etc.) the `prim_indexer` drives. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
@@ -204,10 +204,6 @@
 //!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a
 //!   value-resolution surface for target validity; `NodeFlags::PERMISSION_PRIVATE`
 //!   / `RESTRICTED` are reserved for it.
-//! - Scene-graph instancing: the prototype *root* is materialized as a dedicated
-//!   `/__Prototype_N` index, but its descendants and instance proxies are still
-//!   served by aliasing onto the canonical instance rather than composing each
-//!   prototype subtree independently.
 //! - Materialize empty inherit / specialize / variant targets as culled nodes
 //!   (only empty external reference/payload targets are materialized today).
 //! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.

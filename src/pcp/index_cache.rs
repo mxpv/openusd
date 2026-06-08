@@ -63,7 +63,7 @@ pub struct IndexCache {
     /// the cache's facade methods (`is_instance` / `prototype_of` /
     /// `is_prototype` / …), never this field. Affected entries are dropped by
     /// [`Self::invalidate_prototypes`] on a prim-level change, or the whole
-    /// registry by [`Self::invalidate_all_prototypes`] on a layer-stack rebuild.
+    /// registry by [`Self::clear_all_indices`] on a layer-stack rebuild.
     pub(super) prototypes: PrototypeRegistry,
     /// Memoized instance-proxy / prototype-descendant redirections (spec
     /// 11.3.3): a prim path mapped to the path that actually composes it
@@ -73,10 +73,10 @@ pub struct IndexCache {
     /// non-instanced case skips the walk too. An entry holds only while the
     /// prototype registry that produced it is unchanged: it is cleared wholesale
     /// when prototypes are invalidated ([`Self::invalidate_prototypes`] /
-    /// [`Self::invalidate_all_prototypes`]), and the subtree under a freshly
+    /// [`Self::clear_all_indices`]), and the subtree under a freshly
     /// minted `/__Prototype_N` is dropped at registration (a synthetic
     /// descendant queried before the mint cached an identity that must now
-    /// redirect to the canonical instance).
+    /// redirect into the prototype namespace).
     //
     // TODO(rayon): a per-prim parallel composition driver would share this map
     // read-mostly; the entries are write-once until invalidation, so a
@@ -617,16 +617,20 @@ impl IndexCache {
         self.query_errors.clear();
     }
 
-    /// Drop every cached index, context, and dependency entry without
-    /// touching the layer stack's precomputed state. Use this when the
-    /// layer-stack tier has not been touched but every cached prim must
-    /// be re-evaluated.
+    /// Drop every cached index, context, and dependency entry — plus the
+    /// shared-prototype registry and its redirection memo — without touching the
+    /// layer stack's precomputed state. Use this for a layer-stack rebuild, where
+    /// every cached prim must be re-evaluated; clearing the registry here (rather
+    /// than dropping each `/__Prototype_N` subtree first) avoids re-scanning the
+    /// cache per prototype only to wipe it wholesale.
     pub(super) fn clear_all_indices(&mut self) {
         self.indices.clear();
         self.contexts.clear();
         self.deps.clear();
         self.prim_errors.clear();
         self.query_errors.clear();
+        self.prototypes.clear();
+        self.redirected_prims.clear();
     }
 
     /// Returns `true` if any layer has a spec at the given composed path.
@@ -840,8 +844,8 @@ impl IndexCache {
     /// Composes a path-list-op property field into stage namespace. With
     /// `deleted` it returns the field's deleted entries (the `delete`-op paths);
     /// otherwise the resolved targets/connections. On an instance proxy both
-    /// resolve against the canonical instance's subtree and map the
-    /// canonical-namespace results back to the queried instance (spec 11.3.4
+    /// resolve against the shared prototype's subtree and map the
+    /// prototype-namespace results back to the queried instance (spec 11.3.4
     /// under 11.3.3).
     fn compose_property_paths(
         &mut self,
@@ -918,11 +922,11 @@ impl IndexCache {
             });
         }
 
-        // Targets resolved in the canonical instance's namespace map back to the
+        // Targets resolved in the shared prototype's namespace map back to the
         // queried instance (spec 11.3.4 under 11.3.3).
-        if let Some((origin, canonical)) = &anchor {
+        if let Some((origin, target_prefix)) = &anchor {
             for target in &mut targets {
-                if let Some(remapped) = target.replace_prefix(canonical, origin) {
+                if let Some(remapped) = target.replace_prefix(target_prefix, origin) {
                     *target = remapped;
                 }
             }
@@ -2470,27 +2474,96 @@ def "Scope"
         Ok(())
     }
 
-    /// Instances sharing a prototype compose their subtree once: a
-    /// non-canonical instance's descendant is served by the canonical one and
-    /// is never indexed (spec 11.3.3).
+    /// Instances sharing a prototype compose their subtree once: every
+    /// instance's descendants redirect into the shared prototype namespace, so
+    /// the descendant is indexed under `/__Prototype_N` and never under an
+    /// instance's own path (spec 11.3.3).
     #[test]
     fn instances_share_prototype() -> Result<()> {
         let root = format!("{}/fixtures/instancing_shared.usda", manifest_dir());
         let (graph, mut cache) = single_layer_stack(&root);
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
 
-        // Query /A first so it becomes the canonical instance for its key.
+        // Query /A first so it mints /__Prototype_0 for its key.
         let size = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
         assert_eq!(size(&mut cache, "/A/Child.size")?, Some(sdf::Value::Double(5.0)));
         assert_eq!(size(&mut cache, "/B/Child.size")?, Some(sdf::Value::Double(5.0)));
         assert_eq!(size(&mut cache, "/C/Child.size")?, Some(sdf::Value::Double(9.0)));
 
-        // /A and /B share a prototype, so /B's subtree is served by /A and
-        // /B/Child is never composed. /C uses a different prototype, so its
-        // own subtree is composed.
-        assert!(cache.is_indexed(&sdf::path("/A/Child")?));
+        // /A and /B share /__Prototype_0; /C uses /__Prototype_1. The shared
+        // subtree composes once in each prototype namespace, and no instance's
+        // own descendant path is ever indexed.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Child")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/A/Child")?));
         assert!(!cache.is_indexed(&sdf::path("/B/Child")?));
-        assert!(cache.is_indexed(&sdf::path("/C/Child")?));
+        assert!(!cache.is_indexed(&sdf::path("/C/Child")?));
+        Ok(())
+    }
+
+    /// Reading a deep instance-proxy value composes the shared prototype subtree
+    /// once: the instance-ness check on an intermediate proxy prim redirects to
+    /// the shared `/__Prototype_N` index instead of composing a throwaway literal
+    /// index per instance, so no intermediate proxy path is ever indexed (spec
+    /// 11.3.3).
+    #[test]
+    fn proxy_descendants_share_prototype() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_deep.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+
+        // Reading the deep value walks the proxy ancestors (/A/Mid, /B/Mid),
+        // testing each for instance-ness.
+        assert_eq!(v(&mut cache, "/A/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
+        assert_eq!(v(&mut cache, "/B/Mid/Leaf.v")?, Some(sdf::Value::Double(1.0)));
+
+        // The shared subtree composes once, under the prototype namespace.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid")?));
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_0/Mid/Leaf")?));
+        // No intermediate proxy prim is composed literally at an instance path.
+        for p in ["/A/Mid", "/B/Mid", "/A/Mid/Leaf", "/B/Mid/Leaf"] {
+            assert!(!cache.is_indexed(&sdf::path(p)?), "{p} must not be indexed literally");
+        }
+        Ok(())
+    }
+
+    /// A nested instance inside a prototype namespace mints its own prototype and
+    /// its descendants redirect onto it: both an outer proxy (`/A/Nested/Leaf`)
+    /// and the prototype-namespace path (`/__Prototype_0/Nested/Leaf`) resolve
+    /// through the nested prototype, so the nested descendant never composes in
+    /// place under the outer prototype (spec 11.3.3).
+    #[test]
+    fn nested_prototype_proxy_redirects() -> Result<()> {
+        let root = format!("{}/fixtures/instancing_nested_in_prototype.usda", manifest_dir());
+        let (graph, mut cache) = single_layer_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let v = |cache: &mut IndexCache, p: &str| cache.value_at(&graph, &sdf::path(p).unwrap(), 0.0, &interp);
+
+        // /A mints /__Prototype_0 (for /Outer); the nested instance mints
+        // /__Prototype_1 (for /Inner). Both the outer proxy and the
+        // prototype-namespace path resolve the nested leaf.
+        assert_eq!(v(&mut cache, "/A/Nested/Leaf.v")?, Some(sdf::Value::Double(3.0)));
+        assert_eq!(
+            v(&mut cache, "/__Prototype_0/Nested/Leaf.v")?,
+            Some(sdf::Value::Double(3.0))
+        );
+
+        // Both redirect to the nested prototype; neither the prototype-namespace
+        // nested descendant nor the outer proxy is composed in place.
+        assert!(cache.is_indexed(&sdf::path("/__Prototype_1/Leaf")?));
+        assert!(!cache.is_indexed(&sdf::path("/__Prototype_0/Nested/Leaf")?));
+        assert!(!cache.is_indexed(&sdf::path("/A/Nested/Leaf")?));
+
+        // The nested instance reached via the instance namespace (/A/Nested) and
+        // via the prototype namespace (/__Prototype_0/Nested) is the same shared
+        // composition, so both resolve to one nested prototype — exactly two
+        // prototypes total, not three.
+        assert_eq!(
+            cache.prototype_of(&graph, &sdf::path("/A/Nested")?)?,
+            cache.prototype_of(&graph, &sdf::path("/__Prototype_0/Nested")?)?,
+        );
+        assert_eq!(cache.prototypes().len(), 2);
         Ok(())
     }
 

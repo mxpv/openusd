@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    doc = """A nested instance inside a prototype's namespace (spec 11.3.3).
+
+    /A and /B are instanceable and reference /Outer, which itself contains an
+    instanceable child /Outer/Nested referencing /Inner. So /A's prototype
+    namespace contains a nested instance: /__Prototype_N/Nested is itself an
+    instance and mints its own prototype, and a prim beneath it
+    (/__Prototype_N/Nested/Leaf) is an instance proxy of that nested prototype —
+    not merely prototype content."""
+)
+
+def Scope "Inner"
+{
+    def Scope "Leaf"
+    {
+        double v = 3.0
+    }
+}
+
+def Scope "Outer"
+{
+    def Scope "Nested" (
+        instanceable = true
+        references = </Inner>
+    )
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Outer>
+)
+{
+}
+
+def Scope "B" (
+    instanceable = true
+    references = </Outer>
+)
+{
+}
