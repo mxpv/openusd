@@ -59,7 +59,8 @@ pub enum Value {
     Token(String),
     TokenVec(Vec<String>),
 
-    AssetPath(String),
+    AssetPath(AssetPath),
+    AssetPathVec(Vec<AssetPath>),
 
     Quath(gf::Quath),
     Quatf(gf::Quatf),
@@ -170,10 +171,10 @@ impl serde::Serialize for Value {
             Value::TimeCode(v) => v.serialize(serializer),
             Value::TimeCodeVec(v) => v.serialize(serializer),
 
-            Value::String(v) | Value::Token(v) | Value::AssetPath(v) | Value::PathExpression(v) => {
-                v.serialize(serializer)
-            }
+            Value::String(v) | Value::Token(v) | Value::PathExpression(v) => v.serialize(serializer),
+            Value::AssetPath(v) => v.serialize(serializer),
             Value::StringVec(v) | Value::TokenVec(v) => v.serialize(serializer),
+            Value::AssetPathVec(v) => v.serialize(serializer),
 
             Value::Vec2h(v) => v.serialize(serializer),
             Value::Vec3h(v) => v.serialize(serializer),
@@ -706,6 +707,20 @@ impl Value {
     }
     pub fn quath(w: f16, x: f16, y: f16, z: f16) -> Self {
         Self::Quath(gf::quath(w, x, y, z))
+    }
+
+    /// Borrows the inner string of a string-like scalar — `asset`, `string`,
+    /// or `token` — and `None` for any other variant.
+    ///
+    /// An asset path may be authored as a plain string or token, so reading
+    /// one coerces across all three (the borrowing counterpart to the owned
+    /// [`TryFrom<Value>`] for [`String`]).
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) | Value::Token(s) => Some(s),
+            Value::AssetPath(s) => Some(s.as_str()),
+            _ => None,
+        }
     }
 }
 

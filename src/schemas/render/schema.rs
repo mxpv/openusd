@@ -37,10 +37,12 @@ impl RenderSettings {
     /// Read-only: authoring this stage metadata needs a generic stage-metadata
     /// setter the core `Stage` API does not yet expose.
     pub fn stage_settings_path(stage: &Stage) -> Result<Option<sdf::Path>> {
-        Ok(match stage.stage_metadata(tok::META_RENDER_SETTINGS_PRIM_PATH)? {
-            Some(Value::String(s) | Value::Token(s) | Value::AssetPath(s)) => Some(sdf::Path::new(&s)?),
-            _ => None,
-        })
+        stage
+            .stage_metadata(tok::META_RENDER_SETTINGS_PRIM_PATH)?
+            .as_ref()
+            .and_then(Value::as_str)
+            .map(sdf::Path::new)
+            .transpose()
     }
 
     /// The `products` relationship — the `RenderProduct` prims to produce.
@@ -304,8 +306,7 @@ impl RenderPass {
     /// An external asset holding the pass's prims / config.
     /// C++ `UsdRenderPass::GetFileNameAttr`.
     ///
-    /// Type `uniform asset`. Fetch with `get::<sdf::Value>()?` (an
-    /// [`sdf::Value::AssetPath`]).
+    /// Type `uniform asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn file_name_attr(&self) -> Attribute {
         self.attribute(tok::A_FILE_NAME)
     }

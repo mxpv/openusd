@@ -121,6 +121,37 @@ fn compressed_int_array_roundtrips() {
 }
 
 #[test]
+fn asset_array_roundtrips() {
+    // `asset[]` is written with the `AssetPath` type code (string-table
+    // indices) and must read back as `AssetPathVec`, not `StringVec`.
+    let mut data = Data::new();
+    let root = sdf::Path::abs_root();
+    let root_spec = data.create_spec(root.clone(), SpecType::PseudoRoot);
+    root_spec.add(ChildrenKey::PrimChildren, Value::TokenVec(vec!["M".into()]));
+
+    let prim = path("/M").unwrap();
+    let prim_spec = data.create_spec(prim.clone(), SpecType::Prim);
+    prim_spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Def));
+    prim_spec.add(ChildrenKey::PropertyChildren, Value::TokenVec(vec!["files".into()]));
+
+    let files = prim.append_property("files").unwrap();
+    let files_spec = data.create_spec(files.clone(), SpecType::Attribute);
+    files_spec.add(FieldKey::TypeName, Value::Token("asset[]".into()));
+    let paths = vec![sdf::AssetPath::new("./tex_a.png"), sdf::AssetPath::new("./tex_b.png")];
+    files_spec.add(FieldKey::Default, Value::AssetPathVec(paths.clone()));
+
+    let mut buf = Vec::new();
+    CrateWriter::write(&data as &dyn AbstractData, &mut Cursor::new(&mut buf)).expect("write");
+
+    let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
+    let value = (&round as &dyn AbstractData)
+        .get(&files, "default")
+        .unwrap()
+        .into_owned();
+    assert_eq!(value, Value::AssetPathVec(paths));
+}
+
+#[test]
 fn empty_layer_roundtrips_through_crate_writer() {
     // `cross_empty` covers USDA -> USDC. Make sure a programmatically
     // constructed empty `Data` also writes and reads back successfully, as

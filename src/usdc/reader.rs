@@ -979,12 +979,11 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::AssetPath if value.is_array() => {
                 // Asset arrays (`asset[]`, e.g. value-clip `assetPaths`) are
                 // stored like string arrays — string-table indices, not direct
-                // token indices. Surface them as a `StringVec` to match the
-                // USDA parser.
+                // token indices.
                 self.set_position(value.payload())?;
-                sdf::Value::StringVec(self.read_string_vec()?)
+                sdf::Value::AssetPathVec(self.read_string_vec()?.into_iter().map(Into::into).collect())
             }
-            Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?),
+            Type::AssetPath => sdf::Value::AssetPath(self.read_asset_path(value)?.into()),
 
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;

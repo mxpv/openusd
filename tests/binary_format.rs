@@ -167,7 +167,8 @@ fn assert_strings(data: &CrateData<File>) {
 
 fn scalar_str(v: &Value) -> String {
     match v {
-        Value::String(s) | Value::Token(s) | Value::AssetPath(s) | Value::PathExpression(s) => s.clone(),
+        Value::String(s) | Value::Token(s) | Value::PathExpression(s) => s.clone(),
+        Value::AssetPath(s) => s.authored_path.clone(),
         other => panic!("not a string-like value: {other:?}"),
     }
 }
@@ -175,6 +176,7 @@ fn scalar_str(v: &Value) -> String {
 fn str_vec(v: &Value) -> Vec<String> {
     match v {
         Value::StringVec(a) | Value::TokenVec(a) => a.clone(),
+        Value::AssetPathVec(a) => a.iter().map(|p| p.authored_path.clone()).collect(),
         other => panic!("not a string-like array: {other:?}"),
     }
 }

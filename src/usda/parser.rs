@@ -1435,8 +1435,10 @@ impl<'a> Parser<'a> {
             (Type::Bool, false) => sdf::Value::Bool(self.parse_bool()?),
             (Type::Bool, true) => sdf::Value::BoolVec(self.parse_bool_array()?),
 
-            (Type::Asset, false) => sdf::Value::AssetPath(self.parse_asset_path()?),
-            (Type::Asset, true) => sdf::Value::StringVec(self.parse_asset_path_array()?),
+            (Type::Asset, false) => sdf::Value::AssetPath(self.parse_asset_path()?.into()),
+            (Type::Asset, true) => {
+                sdf::Value::AssetPathVec(self.parse_asset_path_array()?.into_iter().map(Into::into).collect())
+            }
 
             (Type::TimeCode, false) => sdf::Value::TimeCode(self.parse_token()?),
             (Type::TimeCode, true) => sdf::Value::TimeCodeVec(self.parse_array()?),

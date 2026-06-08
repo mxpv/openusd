@@ -14,8 +14,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 use crate::sdf::{
-    self, AbstractData, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType, Specifier,
-    Value, Variability,
+    self, AbstractData, AssetPath, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType,
+    Specifier, Value, Variability,
 };
 
 /// Emits `usda` text from an [`AbstractData`].
@@ -889,6 +889,7 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
         Value::TokenVec(v) => format_vec(s, v, |s, t: &String| write_quoted(s, t))?,
 
         Value::AssetPath(v) => write_asset_path(s, v)?,
+        Value::AssetPathVec(v) => format_vec(s, v, |s, p: &AssetPath| write_asset_path(s, p))?,
 
         Value::Vec2h(a) => format_tuple_half(s, &[a.x, a.y])?,
         Value::Vec3h(a) => format_tuple_half(s, &[a.x, a.y, a.z])?,
@@ -1305,6 +1306,7 @@ fn dict_value_type_name(v: &Value) -> Option<&'static str> {
         Value::Token(_) => "token",
         Value::TokenVec(_) => "token[]",
         Value::AssetPath(_) => "asset",
+        Value::AssetPathVec(_) => "asset[]",
         Value::Vec2h(_) => "half2",
         Value::Vec3h(_) => "half3",
         Value::Vec4h(_) => "half4",
@@ -1439,6 +1441,42 @@ mod tests {
 
         let text = TextWriter::write_to_string(&data as &dyn AbstractData).unwrap();
         assert!(text.contains("def Xform \"Foo\""));
+    }
+
+    /// An `asset[]` attribute keeps its type through parse → emit → re-parse,
+    /// emitting `@...@` elements rather than `string[]` quoted strings.
+    #[test]
+    fn asset_array_roundtrip() {
+        use crate::usda::{parser::Parser, TextReader};
+
+        let src = concat!(
+            "#usda 1.0\n",
+            "def Material \"M\"\n{\n",
+            "    asset[] inputs:files = [@./tex_a.png@, @./tex_b.png@]\n",
+            "}\n",
+        );
+
+        let parsed = Parser::new(src).parse().expect("parse asset[] source");
+        let files = parsed
+            .get(&path("/M.inputs:files").unwrap())
+            .and_then(|s| s.get(FieldKey::Default.as_str()))
+            .expect("inputs:files default");
+        assert!(
+            matches!(files, Value::AssetPathVec(v) if v == &["./tex_a.png", "./tex_b.png"]),
+            "parsed as {files:?}, expected AssetPathVec"
+        );
+
+        let reader = TextReader::from_data(parsed);
+        let emitted = TextWriter::write_to_string(&reader as &dyn AbstractData).unwrap();
+        assert!(emitted.contains("asset[] inputs:files"), "emitted: {emitted}");
+        assert!(emitted.contains("@./tex_a.png@"), "emitted: {emitted}");
+        assert!(!emitted.contains("string[]"), "emitted: {emitted}");
+
+        let reparsed = Parser::new(&emitted).parse().expect("re-parse emitted");
+        let files = reparsed
+            .get(&path("/M.inputs:files").unwrap())
+            .and_then(|s| s.get(FieldKey::Default.as_str()));
+        assert!(matches!(files, Some(Value::AssetPathVec(_))), "re-parsed as {files:?}");
     }
 
     /// Emit `text` via `write_quoted` then re-tokenize the output and return

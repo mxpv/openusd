@@ -9,6 +9,7 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
+mod asset_path;
 mod change;
 mod data;
 pub mod expr;
@@ -19,6 +20,7 @@ pub mod schema;
 mod spec;
 mod value;
 
+pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList};
 pub use data::Data;
 pub use expr::Expr;

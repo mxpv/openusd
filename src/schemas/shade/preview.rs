@@ -142,7 +142,7 @@ fn resolve_asset_value(stage: &Stage, attr: &Path) -> Result<Option<String>> {
         return Ok(stage
             .field::<Value>(current, FieldKey::Default.as_str())?
             .as_ref()
-            .and_then(crate::schemas::common::value_as_asset_str)
+            .and_then(Value::as_str)
             .map(str::to_owned));
     }
     Ok(None)
