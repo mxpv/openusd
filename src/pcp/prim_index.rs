@@ -214,6 +214,30 @@ impl PrimIndex {
         }
     }
 
+    /// Re-anchors this index's composed (root) namespace from `from` to `to`,
+    /// used when a prototype is materialized from a canonical instance's subtree
+    /// onto its `/__Prototype_N` root (spec 11.3.3): every node's `map_to_root` /
+    /// `map_to_parent` has its composed-namespace target side moved from `from`
+    /// to `to`, so target translation lands in the prototype namespace rather
+    /// than the seeding instance's.
+    ///
+    /// `node.path` is deliberately left untouched — it is the site path in the
+    /// node's own *layer* namespace, where value resolution reads specs (see
+    /// [`PrimIndex::opinions`]). A contributing node whose spec lives beneath the
+    /// instance's path (e.g. a selected variant at `/A{v=x}`) must keep that path
+    /// so the lookup hits the real spec; rewriting it to `/__Prototype_N{v=x}`
+    /// would query a layer location that does not exist.
+    ///
+    /// Only map targets change; node paths, arc types, namespace depths, origins,
+    /// and sibling numbers are untouched, so the strength-order projection stays
+    /// valid without re-finalizing.
+    pub(crate) fn rebase_root(&mut self, from: &Path, to: &Path) {
+        for node in &mut self.graph.nodes {
+            node.map_to_root = node.map_to_root.rebase_target(from, to);
+            node.map_to_parent = node.map_to_parent.rebase_target(from, to);
+        }
+    }
+
     /// Returns the node behind a handle.
     pub fn node(&self, id: NodeId) -> &Node {
         &self.graph.nodes[id.idx()]

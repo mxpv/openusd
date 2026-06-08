@@ -520,6 +520,32 @@ impl IndexCache {
         self.indices.len()
     }
 
+    /// Caches a fully composed `index` at `path` with its child `context` and
+    /// registers its dependencies. The single insertion point for the cache's
+    /// three per-prim maps, shared by the ordinary [`build_index`](Self::build_index)
+    /// path and the materialized-prototype path (which has no spec to build from).
+    pub(super) fn cache_index(
+        &mut self,
+        graph: &LayerGraph,
+        path: &Path,
+        index: PrimIndex,
+        context: CompositionContext,
+    ) {
+        self.deps.add(path, &index, graph.all_ids());
+        self.indices.insert(path.clone(), index);
+        self.contexts.insert(path.clone(), context);
+    }
+
+    /// The composition context for a namespace-root prim: empty except for the
+    /// stage's variant fallbacks. Used to seed the root of an ordinary build and
+    /// of a materialized prototype.
+    pub(super) fn root_parent_context(&self) -> CompositionContext {
+        CompositionContext {
+            variant_fallbacks: self.variant_fallbacks.clone(),
+            ..Default::default()
+        }
+    }
+
     /// Drop a single prim's cached index, context, dependency, and error
     /// entries. The transient query errors are cleared too — they may reference
     /// the dropped prim and are recomputed on the next query.
@@ -793,9 +819,10 @@ impl IndexCache {
 
     /// Composes a path-list-op property field into stage namespace. With
     /// `deleted` it returns the field's deleted entries (the `delete`-op paths);
-    /// otherwise the resolved targets/connections. Both resolve against the
-    /// canonical instance's subtree when shared and map prototype-namespace
-    /// results back to the queried instance (spec 11.3.4 under 11.3.3).
+    /// otherwise the resolved targets/connections. On an instance proxy both
+    /// resolve against the canonical instance's subtree and map the
+    /// canonical-namespace results back to the queried instance (spec 11.3.4
+    /// under 11.3.3).
     fn compose_property_paths(
         &mut self,
         graph: &LayerGraph,
@@ -871,6 +898,8 @@ impl IndexCache {
             });
         }
 
+        // Targets resolved in the canonical instance's namespace map back to the
+        // queried instance (spec 11.3.4 under 11.3.3).
         if let Some((origin, canonical)) = &anchor {
             for target in &mut targets {
                 if let Some(remapped) = target.replace_prefix(canonical, origin) {
@@ -1505,10 +1534,7 @@ impl IndexCache {
             .parent()
             .and_then(|p| self.contexts.get(&p))
             .cloned()
-            .unwrap_or_else(|| CompositionContext {
-                variant_fallbacks: self.variant_fallbacks.clone(),
-                ..Default::default()
-            });
+            .unwrap_or_else(|| self.root_parent_context());
 
         // TODO(rayon): `build_with_cache` is a pure function of `graph`,
         // `&parent_ctx`, and `&self.indices`, so sibling prims compose
@@ -1605,9 +1631,7 @@ impl IndexCache {
             parent_ctx.instance_depth
         };
         child_context.denied_prefixes = denied_prefixes;
-        self.deps.add(path, &index, graph.all_ids());
-        self.indices.insert(path.clone(), index);
-        self.contexts.insert(path.clone(), child_context);
+        self.cache_index(graph, path, index, child_context);
         // Report inconsistent property types once per prim composition (C++
         // `PcpErrorInconsistentPropertyType`); a later property-stack query
         // reports the conflict again, matching C++'s per-pass reporting.

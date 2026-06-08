@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    doc = """Variant-authored opinions on an instance must survive into the
+    shared prototype root (spec 11.3.3).
+
+    /A is instanceable, references /Proto, and selects variant `v=x`. The
+    property `picked` is authored inside that variant at the instance's own
+    namespace (`/A{v=x}`); it is shared content (the variant selection defines
+    the prototype), so it must resolve on the materialized prototype root."""
+)
+
+def Scope "Proto"
+{
+    double base = 1.0
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+    variants = {
+        string v = "x"
+    }
+    prepend variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "x" {
+            double picked = 5.0
+        }
+    }
+}

@@ -440,6 +440,24 @@ impl Prim {
         self.stage.cache().is_in_prototype(&self.path)
     }
 
+    /// `true` if this prim is an instance proxy — a descendant of an instance
+    /// prim, in the instance's own namespace, standing in for a prim in the
+    /// shared prototype (spec 11.3.3). Mirrors C++ `UsdPrim::IsInstanceProxy`.
+    pub fn is_instance_proxy(&self) -> anyhow::Result<bool> {
+        self.stage
+            .masked(&self.path, |g, cache| cache.is_instance_proxy(g, &self.path))
+    }
+
+    /// Returns the prim in the shared prototype this instance proxy stands in
+    /// for (a `/__Prototype_N/...` prim), or `None` when this prim is not an
+    /// instance proxy (spec 11.3.3). Mirrors C++ `UsdPrim::GetPrimInPrototype`.
+    pub fn prim_in_prototype(&self) -> anyhow::Result<Option<Prim>> {
+        let path = self
+            .stage
+            .masked(&self.path, |g, cache| cache.prim_in_prototype(g, &self.path))?;
+        Ok(path.map(|p| Prim::new(&self.stage, p)))
+    }
+
     /// The model-hierarchy `kind` for the prim — `Some("group" | "assembly" |
     /// "component")` when the prim and all ancestors form a contiguous model
     /// hierarchy, else `None`.

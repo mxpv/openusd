@@ -204,8 +204,10 @@
 //!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a
 //!   value-resolution surface for target validity; `NodeFlags::PERMISSION_PRIVATE`
 //!   / `RESTRICTED` are reserved for it.
-//! - Scene-graph instancing: compose dedicated prototype prims instead of
-//!   redirecting prototypes through aliases.
+//! - Scene-graph instancing: the prototype *root* is materialized as a dedicated
+//!   `/__Prototype_N` index, but its descendants and instance proxies are still
+//!   served by aliasing onto the canonical instance rather than composing each
+//!   prototype subtree independently.
 //! - Materialize empty inherit / specialize / variant targets as culled nodes
 //!   (only empty external reference/payload targets are materialized today).
 //! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.

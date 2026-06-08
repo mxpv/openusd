@@ -419,6 +419,27 @@ impl MapFunction {
         m
     }
 
+    /// Returns this mapping with every target-side path re-anchored from `from`
+    /// to `to` (prefix replacement); pairs whose target is outside `from` and the
+    /// root identity are left untouched.
+    ///
+    /// Used when a composed prototype graph is re-rooted from the canonical
+    /// instance's namespace onto its `/__Prototype_N` root (spec 11.3.3), so a
+    /// node's namespace map translates targets into the prototype namespace.
+    pub(crate) fn rebase_target(&self, from: &Path, to: &Path) -> MapFunction {
+        let pairs = self.path_map.as_slice();
+        // The common case has no target under `from` (an identity or unrelated
+        // map); skip the rebuild and clone then.
+        if !pairs.iter().any(|(_, t)| t.has_prefix(from)) {
+            return self.clone();
+        }
+        let rebased: Vec<(Path, Path)> = pairs
+            .iter()
+            .map(|(s, t)| (s.clone(), t.replace_prefix(from, to).unwrap_or_else(|| t.clone())))
+            .collect();
+        Self::from_parts(rebased, self.has_root_identity, self.time_offset)
+    }
+
     /// Returns this class-arc map deepened so its non-identity pairs apply at
     /// `node_path` rather than at the shallower site where the arc was
     /// introduced (used by the ancestor-seed implied-class conjugation).

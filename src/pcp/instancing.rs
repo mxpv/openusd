@@ -6,9 +6,11 @@
 //! prototype. [`PrototypeRegistry`] owns that mapping (an [`IndexCache`] holds
 //! one as a field); the composition-coupled glue stays on `IndexCache` because
 //! it needs the composed indices, and every descendant-serving query enters
-//! through [`IndexCache::effective_path`], which redirects a non-canonical
-//! instance's subtree into its canonical instance so identical instances are
-//! composed only once.
+//! through [`IndexCache::effective_path`], which redirects an instance proxy's
+//! subtree into the canonical instance's in-place composition so identical
+//! instances are composed only once. The prototype *root* itself is materialized
+//! as an independent `/__Prototype_N` index so its shared content is addressable
+//! without the canonical instance's root-level overrides leaking in.
 
 use std::collections::HashMap;
 
@@ -42,44 +44,24 @@ pub(super) struct PrototypeRegistry {
 }
 
 /// A shared prototype for a set of instances with the same [`InstanceKey`]
-/// (spec 11.3.3). Its composition is backed by the canonical instance, exposed
-/// under a synthetic `/__Prototype_N` path. The instance-namespace opinions are
-/// suppressed where they would leak into shared content: an instance's child
-/// names and every descendant compose only from the shared subtree (the
-/// instanceable arc and below, plus implied classes), with the local root and
-/// the ancestral references above the instanceable arc inerted (see
-/// [`PrimIndex::instance_local_nodes`] and [`PrimIndex::mark_instance_local_inert`]).
-///
-/// TODO(instancing): instancing is functionally correct for stage-level
-/// instance and descendant queries (the composition goldens pass byte-exact),
-/// but three gaps remain before it reaches full C++ `Pcp`/`UsdStage` parity:
-///
-/// 1. Alias-backed prototype root. The prototype is the canonical instance,
-///    not a separately composed namespace, so a query on the prototype *root*
-///    itself (`/__Prototype_N`, no tail) reflects the canonical instance's
-///    root — which keeps that instance's allowed root property overrides (spec
-///    11.3.3 permits overriding property values at an instance root). A dedicated
-///    `/__Prototype_N` composed as its own root would drop those overrides too.
-///    The descendant suppression here only fixes child names and the subtree
-///    (the spec's "overrides on descendants are ignored" rule); the prototype
-///    *root* override leak is the part `effective_path`'s aliasing cannot reach.
-///    The goldens compose the namespace prims, not the prototype root, so they
-///    do not exercise it.
-/// 2. Relationship-target / connection-target remap into the prototype is gated
-///    on §12.4 target resolution and not done for the prototype namespace.
-/// 3. Distinct prototypes compose independent subtrees and could be built in
-///    parallel (see the `TODO(rayon)` on [`IndexCache::canonical_instance`]);
-///    today they are composed serially on the `&mut self` path.
-///
-/// Closing (1) — materializing `/__Prototype_N` as an independently composed
-/// root — is the structural change that would also make (2) natural, since the
-/// prototype would then be a real prim index to resolve targets against rather
-/// than an alias.
+/// (spec 11.3.3). The prototype *root* is composed as an independent
+/// `/__Prototype_N` index, built from the canonical instance's shared subtree —
+/// the instanceable arc, its descendants, and the implied classes — with the
+/// instance-local opinions (the local root override and the ancestral references
+/// above the instanceable arc) inerted (see
+/// [`PrimIndex::mark_instance_local_inert`]) and the namespace re-anchored onto
+/// the prototype root (see [`PrimIndex::rebase_root`]). Its descendants and the
+/// instance proxies of every sharing instance are served from the canonical
+/// instance's in-place composition through [`IndexCache::redirect_anchor`], so
+/// identical instances compose once. Materializing the root is what keeps a
+/// query on `/__Prototype_N` itself free of the canonical instance's root-level
+/// overrides (spec 11.3.3 permits overriding property values at an instance
+/// root).
 struct Prototype {
     /// Registration order (the `N` in `/__Prototype_N`). Kept so prototypes can
     /// be returned in mint order without parsing the path.
     index: usize,
-    /// Instance whose composed subtree backs this prototype.
+    /// Instance whose composed subtree seeds this prototype's materialization.
     canonical: Path,
     /// Every instance sharing this prototype.
     instances: Vec<Path>,
@@ -105,15 +87,16 @@ struct InstanceArc {
 impl PrototypeRegistry {
     /// Registers `instance` against its prototype: dedups by `key`, recording
     /// the instance the first time a key is seen and minting `/__Prototype_N`.
-    /// Returns the `(canonical instance, prototype path)` pair.
-    fn register(&mut self, key: InstanceKey, instance: &Path) -> (Path, Path) {
+    /// Returns the canonical instance, the prototype path, and whether this call
+    /// minted a new prototype (so the caller knows to materialize its index).
+    fn register(&mut self, key: InstanceKey, instance: &Path) -> (Path, Path, bool) {
         if let Some(root) = self.by_key.get(&key) {
             let root = root.clone();
             let prototype = self.by_root.get_mut(&root).expect("key index points to a prototype");
             if !prototype.instances.contains(instance) {
                 prototype.instances.push(instance.clone());
             }
-            return (prototype.canonical.clone(), root);
+            return (prototype.canonical.clone(), root, false);
         }
 
         let index = self.count;
@@ -128,7 +111,7 @@ impl PrototypeRegistry {
                 instances: vec![instance.clone()],
             },
         );
-        (instance.clone(), path)
+        (instance.clone(), path, true)
     }
 
     /// The canonical instance backing the prototype at `prototype`, or `None`
@@ -221,13 +204,23 @@ fn instance_key(index: &PrimIndex, instance_depth: u16) -> InstanceKey {
 }
 
 impl IndexCache {
-    /// Clears the shared-prototype registry (spec 11.3.3) so stale
-    /// instance-to-prototype mappings do not survive a composition change.
+    /// Clears the shared-prototype registry (spec 11.3.3) and evicts every
+    /// materialized `/__Prototype_N` index so stale instance-to-prototype
+    /// mappings do not survive a composition change. Prototypes are recomposed
+    /// lazily on the next instancing query.
     ///
     /// TODO: this drops the whole registry on any invalidation; a targeted
     /// invalidation that removes only the prototypes whose instances changed
     /// would avoid recomputing unaffected keys.
     pub(crate) fn invalidate_prototypes(&mut self) {
+        // Only the prototype root is cached — its descendants and the instance
+        // proxies of every sharing instance are served from the canonical
+        // instance (see [`Self::redirect_anchor`]), so the cache holds nothing
+        // under `/__Prototype_N`. A single `drop_index` per root therefore
+        // suffices and avoids a full-cache subtree scan per prototype.
+        for root in self.prototypes.roots() {
+            self.drop_index(&root);
+        }
         self.prototypes.clear();
     }
 
@@ -250,29 +243,60 @@ impl IndexCache {
         ))
     }
 
-    /// Returns the canonical instance whose composed subtree is shared by
-    /// every instance with `instance`'s instancing key. The first instance
-    /// registered for a key becomes canonical; later instances with the same
-    /// key reuse its subtree, so it is composed only once (spec 11.3.3).
-    //
-    // TODO(rayon): distinct prototypes (distinct instancing keys) compose
-    // independent subtrees, so the canonical instances can be composed in
-    // parallel. The `Indexer` already takes only `&` references; this needs
-    // the cache to build indices off the `&mut self` path first (e.g. compose
-    // into per-prototype results, then insert), and the shared `LayerGraph`
-    // handed to workers as `&`/`Arc`.
-    fn canonical_instance(&mut self, graph: &LayerGraph, instance: &Path) -> Result<Path> {
-        Ok(self.register_prototype(graph, instance)?.0)
-    }
-
-    /// Composes `instance` and registers it against its prototype, returning the
-    /// `(canonical instance, prototype path)` pair. Composing the index here
-    /// (and computing its [`InstanceKey`]) is the cache's job; the dedup is the
-    /// [`PrototypeRegistry`]'s.
+    /// Composes `instance`, registers it against its prototype, and materializes
+    /// the prototype's index on first use, returning the `(canonical instance,
+    /// prototype path)` pair. The first instance registered for a key becomes
+    /// canonical and seeds the prototype; later instances with the same key reuse
+    /// the already-materialized prototype, so its subtree is composed only once
+    /// (spec 11.3.3). Composing the index here (and computing its [`InstanceKey`])
+    /// is the cache's job; the dedup is the [`PrototypeRegistry`]'s.
     fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
         self.ensure_index(graph, instance)?;
         let key = instance_key(&self.indices[instance], instance.prim_element_count() as u16);
-        Ok(self.prototypes.register(key, instance))
+        let (canonical, prototype, minted) = self.prototypes.register(key, instance);
+        // Materialize the prototype's index only when this call minted it. Keying
+        // off the registry's signal (not `indices.contains_key`) means a stale
+        // index cached at the synthetic path — e.g. from an earlier query on the
+        // deterministic `/__Prototype_N` before any instance composed — is
+        // overwritten with the real composition rather than mistaken for it.
+        if minted {
+            self.materialize_prototype(graph, &canonical, &prototype);
+        }
+        Ok((canonical, prototype))
+    }
+
+    /// Builds and caches the composed index for a freshly minted prototype root
+    /// (`/__Prototype_N`) from the canonical instance's shared subtree (spec
+    /// 11.3.3). The clone of the canonical index has its instance-local nodes
+    /// inerted at the instance root's own depth, so only the instanceable arc,
+    /// its descendants, and the implied classes contribute — the local root
+    /// override and the ancestral references above the instanceable arc drop out
+    /// — and its namespace is re-anchored onto the prototype root.
+    ///
+    /// The prototype root's child context is seeded as a namespace root with
+    /// `instance_depth` cleared (it is not itself an instance — its `instanceable`
+    /// opinion is inert), so a descendant built by deepening this graph composes
+    /// as prototype content rather than instance-suppressed. Ordinary queries
+    /// still serve descendants from the canonical instance via
+    /// [`Self::redirect_anchor`], so the prototype graph is rarely deepened, but
+    /// the seeded context keeps that path correct rather than silently empty.
+    //
+    // TODO(rayon): distinct prototypes (distinct instancing keys) compose
+    // independent subtrees, so they can be materialized in parallel. The
+    // `Indexer` already takes only `&` references; this needs the cache to build
+    // off the `&mut self` path first (compose into per-prototype results, then
+    // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
+    fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
+        let mut index = self.indices[canonical].clone();
+        index.mark_instance_local_inert(canonical.prim_element_count() as u16);
+        // Re-anchor the seeding instance's composed namespace onto the prototype
+        // root so the root's own target translation lands in the prototype
+        // namespace, not the canonical instance's.
+        index.rebase_root(canonical, prototype);
+
+        let mut context = index.context_for_children(graph, &self.root_parent_context());
+        context.instance_depth = None;
+        self.cache_index(graph, prototype, index, context);
     }
 
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by
@@ -307,14 +331,70 @@ impl IndexCache {
         self.prototypes.is_in_prototype(path)
     }
 
-    /// Maps a prim path to the path that actually composes it. A descendant of
-    /// a non-canonical instance is redirected into the canonical instance's
-    /// subtree, so identical instances share one composition (spec 11.3.3).
-    /// Other paths pass through unchanged.
+    /// Returns `true` if `path` is an instance proxy — a descendant of an
+    /// instance prim, in the instance's own namespace, standing in for a prim in
+    /// the shared prototype (spec 11.3.3). A prim inside a `/__Prototype_N`
+    /// namespace is in a prototype, not a proxy, so it returns `false`.
     ///
-    /// Nested instances work without special handling: the walk redirects to
-    /// the nearest enclosing instance, so a nested instance resolves to its own
-    /// shared prototype.
+    /// A proxy stands in for a real prim in the shared prototype, so a path under
+    /// an instance that composes to no prim (e.g. a misspelled child) is not a
+    /// proxy — mirroring the existence check on [`Self::is_instance`] /
+    /// `Prim::is_valid`.
+    ///
+    /// Limitation: a prim under a *nested* instance that itself lives inside a
+    /// prototype namespace (`/__Prototype_N/.../NestedInstance/child`) is
+    /// reported as in-prototype rather than as a proxy. Modeling those requires
+    /// composing each prototype subtree independently, which is the broader
+    /// descendant-aliasing gap tracked in the [`pcp`](super) module docs; proxies
+    /// in the ordinary instance namespace are unaffected.
+    pub(crate) fn is_instance_proxy(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
+        if path.is_abs_root() || self.is_prototype(path) || self.is_in_prototype(path) {
+            return Ok(false);
+        }
+        if self.enclosing_instance(graph, path)?.is_none() {
+            return Ok(false);
+        }
+        self.has_spec(graph, path)
+    }
+
+    /// Returns the prim in the shared prototype an instance proxy stands in for:
+    /// a proxy `instance/tail` maps to `/__Prototype_N/tail` (spec 11.3.3).
+    /// `None` when `path` is not an instance proxy (including a path under an
+    /// instance that composes to no prim).
+    pub(crate) fn prim_in_prototype(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>> {
+        if !self.is_instance_proxy(graph, path)? {
+            return Ok(None);
+        }
+        let instance = self
+            .enclosing_instance(graph, path)?
+            .expect("an instance proxy has an enclosing instance");
+        let (_canonical, prototype) = self.register_prototype(graph, &instance)?;
+        Ok(path.replace_prefix(&instance, &prototype))
+    }
+
+    /// Returns the nearest strict ancestor of `path` that resolves as an
+    /// instance prim (spec 11.3.3), or `None` when `path` is not inside an
+    /// instance.
+    fn enclosing_instance(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<Path>> {
+        let mut ancestor = path.parent();
+        while let Some(current) = ancestor {
+            if current.is_abs_root() {
+                break;
+            }
+            if self.is_instance(graph, &current)? {
+                return Ok(Some(current));
+            }
+            ancestor = current.parent();
+        }
+        Ok(None)
+    }
+
+    /// Maps a prim path to the path that actually composes it. An instance
+    /// proxy — a descendant of an instance prim — and a prototype descendant are
+    /// redirected into the canonical instance's in-place composition, so
+    /// identical instances share one subtree (spec 11.3.3). Other paths — the
+    /// canonical instance's own subtree, the materialized prototype root, and
+    /// non-instanced prims — pass through unchanged.
     fn redirect_prim(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Path> {
         match self.redirect_anchor(graph, prim)? {
             Some((origin, canonical)) => Ok(prim.replace_prefix(&origin, &canonical).unwrap_or_else(|| prim.clone())),
@@ -322,15 +402,29 @@ impl IndexCache {
         }
     }
 
-    /// If `prim` lies within a shared prototype's namespace, returns the
-    /// `(origin, canonical)` prefixes that map between the queried namespace
-    /// and the composed one: a `/__Prototype_N` root or a non-canonical
-    /// instance prim (`origin`) and the canonical instance backing it
-    /// (`canonical`). Returns `None` when `prim` composes in place.
+    /// Returns the `(origin, canonical)` prefixes that map `prim`'s queried
+    /// namespace onto the canonical instance's in-place composition, or `None`
+    /// when `prim` composes in place (spec 11.3.3). The shared subtree of a set
+    /// of identical instances is composed once, under the canonical instance:
+    ///
+    /// - A descendant inside a prototype's namespace (`/__Prototype_N/tail`)
+    ///   maps to the canonical instance backing that prototype. The prototype
+    ///   *root* itself (`/__Prototype_N`, no tail) composes in place from its
+    ///   materialized index, so its root-level overrides do not leak.
+    /// - An instance proxy (a descendant of a non-canonical instance) maps to
+    ///   the canonical instance. The canonical instance's own subtree, and every
+    ///   non-instanced prim, compose in place.
+    ///
+    /// Nested instances need no special handling: the walk stops at the nearest
+    /// enclosing instance, so a nested instance proxy resolves against its own
+    /// canonical instance.
     pub(super) fn redirect_anchor(&mut self, graph: &LayerGraph, prim: &Path) -> Result<Option<(Path, Path)>> {
-        // A `/__Prototype_N[/tail]` query maps into the canonical instance's
-        // subtree, so the synthetic prototype namespace is addressable.
+        // Inside a prototype's namespace, the root composes in place from its
+        // materialized index; a descendant aliases to the canonical instance.
         if let Some(root) = self.prototypes.enclosing_root(Some(prim.clone())) {
+            if *prim == root {
+                return Ok(None);
+            }
             let canonical = self
                 .prototypes
                 .canonical_of(&root)
@@ -338,27 +432,22 @@ impl IndexCache {
             return Ok(Some((root, canonical)));
         }
 
-        let mut ancestor = prim.parent();
-        while let Some(current) = ancestor {
-            if current.is_abs_root() {
-                break;
+        // An instance proxy maps to the canonical instance backing its nearest
+        // enclosing instance; the canonical instance's own subtree composes in
+        // place (it is the canonical of its own prototype).
+        if let Some(instance) = self.enclosing_instance(graph, prim)? {
+            let (canonical, _prototype) = self.register_prototype(graph, &instance)?;
+            if canonical != instance {
+                return Ok(Some((instance, canonical)));
             }
-            if self.is_instance(graph, &current)? {
-                let canonical = self.canonical_instance(graph, &current)?;
-                if canonical != current {
-                    return Ok(Some((current, canonical)));
-                }
-                // Nearest instance is canonical: compose this subtree in place.
-                break;
-            }
-            ancestor = current.parent();
         }
         Ok(None)
     }
 
     /// Redirects `path` (prim or property) through [`Self::redirect_prim`],
     /// preserving any property suffix. Applied at every descendant-serving
-    /// query entry point so non-canonical instance subtrees are never built.
+    /// query entry point so an instance proxy's subtree is served from the
+    /// shared prototype rather than recomposed per instance.
     //
     // TODO(perf): every call walks the path's ancestors to find an enclosing
     // instance. The result is stable until the prototype registry is

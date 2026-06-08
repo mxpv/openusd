@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    doc = """Prototype-root override leak guard (spec 11.3.3).
+
+    /A is instanceable and references /Proto. A property authored directly at
+    the instance root is allowed but local to the instance, so it must not
+    appear on the shared prototype: the prototype root composes only the
+    referenced (shared) opinions."""
+)
+
+def Scope "Proto"
+{
+    double shared = 1.0
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+)
+{
+    # Root-level override of a referenced property: local to the instance.
+    double shared = 7.0
+    # Root-level property authored only on the instance: local to the instance.
+    double rootOnly = 42.0
+}

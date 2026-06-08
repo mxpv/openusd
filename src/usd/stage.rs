@@ -3202,6 +3202,102 @@ def "I2" (
         Ok(())
     }
 
+    /// A property authored at an instance root is local to the instance and
+    /// does not leak onto the shared prototype root (spec 11.3.3): the prototype
+    /// composes only the referenced opinions.
+    #[test]
+    fn prototype_root_drops_instance_overrides() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
+
+        // The instance root keeps its local overrides.
+        assert_eq!(stage.value_at("/A.shared", 0.0)?, Some(sdf::Value::Double(7.0)));
+        assert_eq!(stage.value_at("/A.rootOnly", 0.0)?, Some(sdf::Value::Double(42.0)));
+
+        // The shared prototype root drops them: the overridden property falls
+        // back to the referenced value and the instance-only property is gone.
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        assert_eq!(
+            stage.value_at(proto.append_property("shared")?, 0.0)?,
+            Some(sdf::Value::Double(1.0))
+        );
+        assert_eq!(stage.value_at(proto.append_property("rootOnly")?, 0.0)?, None);
+        Ok(())
+    }
+
+    /// A query on the deterministic synthetic prototype path before any instance
+    /// composes must not leave the prototype root empty: materialization keys off
+    /// the registry's mint signal, so it overwrites any stale empty index cached
+    /// at `/__Prototype_N` (spec 11.3.3).
+    #[test]
+    fn prototype_root_survives_early_query() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
+
+        // Touch the deterministic synthetic path before any instance registers;
+        // this caches an empty index at /__Prototype_0.
+        assert_eq!(stage.value_at("/__Prototype_0.shared", 0.0)?, None);
+
+        // Composing the instance mints and materializes /__Prototype_0.
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        assert_eq!(proto.as_str(), "/__Prototype_0");
+
+        // The prototype root now holds the real composition, not the stale empty
+        // index that the guard would otherwise have mistaken for it.
+        assert_eq!(
+            stage.value_at(proto.append_property("shared")?, 0.0)?,
+            Some(sdf::Value::Double(1.0))
+        );
+        Ok(())
+    }
+
+    /// A property authored inside a variant selected on an instance is shared
+    /// content (the selection defines the prototype) and must resolve on the
+    /// materialized prototype root (spec 11.3.3).
+    #[test]
+    fn prototype_root_keeps_variant_opinions() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_variant_root.usda"))?;
+
+        // The instance resolves the variant-authored property.
+        assert_eq!(stage.value_at("/A.picked", 0.0)?, Some(sdf::Value::Double(5.0)));
+
+        // So must the prototype root: the variant opinion lives at the instance's
+        // own namespace (/A{v=x}), and rebasing must not move the spec lookup off
+        // it.
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        assert_eq!(
+            stage.value_at(proto.append_property("picked")?, 0.0)?,
+            Some(sdf::Value::Double(5.0))
+        );
+        Ok(())
+    }
+
+    /// An instance's descendant is an instance proxy that maps to a prim in the
+    /// shared prototype; the instance root and non-instanced prims are not
+    /// proxies (spec 11.3.3).
+    #[test]
+    fn instance_proxy_api() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+        assert!(!stage.prim_at("/A").is_instance_proxy()?);
+        assert!(stage.prim_at("/A/Child").is_instance_proxy()?);
+
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        let in_proto = stage
+            .prim_at("/A/Child")
+            .prim_in_prototype()?
+            .expect("Child is an instance proxy");
+        assert_eq!(in_proto.path(), &proto.append_path("Child")?);
+        assert!(in_proto.is_in_prototype());
+
+        // A prim in the prototype namespace is in a prototype, not a proxy.
+        assert!(!in_proto.is_instance_proxy()?);
+
+        // A nonexistent path under an instance is not a proxy, and has no prim in
+        // the prototype.
+        assert!(!stage.prim_at("/A/Missing").is_instance_proxy()?);
+        assert!(stage.prim_at("/A/Missing").prim_in_prototype()?.is_none());
+        Ok(())
+    }
+
     /// Local opinions on an instance's descendants are discarded; values come
     /// from the arc (spec 11.3.3).
     #[test]
