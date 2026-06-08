@@ -34,7 +34,7 @@ Follow these steps:
 
 5. **Tag**: Create tag `v<version>` on the version bump commit. Do NOT move the tag later — it must stay on this commit.
 
-6. **Update roadmap**: In ROADMAP.md, replace all occurrences of `main` in the Version column with the release version (e.g. `0.3.0`). Stage ROADMAP.md and commit with message `Update ROADMAP`. This commit comes after the tag, which is intentional.
+6. **Update roadmap**: In ROADMAP.md, replace every occurrence of the literal string `` `main` `` with `` `<version>` `` — this includes both the Version column cells and any `` `main` — `` annotations inside the Notes column. Use the Edit tool to make each replacement individually and precisely; do NOT use sed, awk, or any shell one-liner (they mangle backticks on macOS). After editing, run `grep -n '`main`' ROADMAP.md` to confirm zero matches remain, then show the full `git diff ROADMAP.md` to the user and wait for confirmation before staging or committing anything. Commit with message `Update ROADMAP` only after the user approves the diff.
 
 7. **Publish to crates.io**: Run `cargo publish`. Wait for confirmation from the user before running this step.
 
@@ -44,5 +44,6 @@ Follow these steps:
 
 Important:
 - Always wait for user confirmation before publishing to crates.io (step 7) and pushing (step 8).
+- Always wait for user confirmation before committing the ROADMAP update (step 6).
 - Do NOT use `--dry-run` unless the user explicitly asks for a dry run.
 - Do NOT add "Co-Authored-By" or "Generated with Claude Code" to commits or the release.
