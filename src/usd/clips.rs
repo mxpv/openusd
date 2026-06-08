@@ -11,10 +11,13 @@
 //! conventional default set is named `"default"`. Names are discovered via
 //! [`ClipsAPI::clip_sets`].
 
+use std::collections::HashMap;
+
+use crate::gf;
 use crate::pcp::clip::keys;
 use crate::sdf::{self, Value};
 
-use super::Prim;
+use super::{Prim, StageAuthoringError};
 
 /// Read-only view of the value-clip metadata on a prim (C++ `UsdClipsAPI`).
 ///
@@ -131,6 +134,77 @@ impl ClipsAPI {
             .and_then(as_f64))
     }
 
+    /// Author the clip asset paths for `clip_set` (`assetPaths`).
+    ///
+    /// openusd has no `asset[]` value, so these are stored as a string array
+    /// (they read back through [`clip_asset_paths`](Self::clip_asset_paths)
+    /// either way); scalar asset fields below author as `asset`.
+    pub fn set_clip_asset_paths(&self, clip_set: &str, paths: Vec<String>) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::ASSET_PATHS, Value::StringVec(paths))
+    }
+
+    /// Author the `(stageTime, clipIndex)` activation pairs for `clip_set` (`active`).
+    pub fn set_clip_active(&self, clip_set: &str, active: Vec<(f64, f64)>) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::ACTIVE, pairs_value(active))
+    }
+
+    /// Author the `(stageTime, clipTime)` timing pairs for `clip_set` (`times`).
+    pub fn set_clip_times(&self, clip_set: &str, times: Vec<(f64, f64)>) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TIMES, pairs_value(times))
+    }
+
+    /// Author the per-clip prim path for `clip_set` (`primPath`).
+    pub fn set_clip_prim_path(&self, clip_set: &str, prim_path: impl Into<String>) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::PRIM_PATH, Value::String(prim_path.into()))
+    }
+
+    /// Author the manifest asset path for `clip_set` (`manifestAssetPath`).
+    pub fn set_clip_manifest_asset_path(
+        &self,
+        clip_set: &str,
+        asset_path: impl Into<String>,
+    ) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::MANIFEST_ASSET_PATH, Value::AssetPath(asset_path.into()))
+    }
+
+    /// Author the interpolate-missing flag for `clip_set` (`interpolateMissingClipValues`).
+    pub fn set_interpolate_missing_clip_values(
+        &self,
+        clip_set: &str,
+        interpolate: bool,
+    ) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::INTERPOLATE_MISSING, Value::Bool(interpolate))
+    }
+
+    /// Author the template asset-path pattern for `clip_set` (`templateAssetPath`).
+    pub fn set_clip_template_asset_path(
+        &self,
+        clip_set: &str,
+        asset_path: impl Into<String>,
+    ) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TEMPLATE_ASSET_PATH, Value::AssetPath(asset_path.into()))
+    }
+
+    /// Author the template stride for `clip_set` (`templateStride`).
+    pub fn set_clip_template_stride(&self, clip_set: &str, stride: f64) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TEMPLATE_STRIDE, Value::Double(stride))
+    }
+
+    /// Author the template start time for `clip_set` (`templateStartTime`).
+    pub fn set_clip_template_start_time(&self, clip_set: &str, start: f64) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TEMPLATE_START_TIME, Value::Double(start))
+    }
+
+    /// Author the template end time for `clip_set` (`templateEndTime`).
+    pub fn set_clip_template_end_time(&self, clip_set: &str, end: f64) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TEMPLATE_END_TIME, Value::Double(end))
+    }
+
+    /// Author the template active offset for `clip_set` (`templateActiveOffset`).
+    pub fn set_clip_template_active_offset(&self, clip_set: &str, offset: f64) -> Result<(), StageAuthoringError> {
+        self.set_field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET, Value::Double(offset))
+    }
+
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary, or `None` when the set (or field) is not authored.
     fn field(&self, clip_set: &str, key: &str) -> anyhow::Result<Option<Value>> {
@@ -146,6 +220,32 @@ impl ClipsAPI {
             _ => None,
         })
     }
+
+    /// Read-modify-write a single field into `clip_set`'s entry of the `clips`
+    /// dictionary on the edit-target layer, preserving the other sets and
+    /// fields already authored there.
+    fn set_field(&self, clip_set: &str, key: &str, value: Value) -> Result<(), StageAuthoringError> {
+        let clip_set = clip_set.to_string();
+        let key = key.to_string();
+        self.prim.clone().update_metadata(sdf::FieldKey::Clips.as_str(), move |current| {
+            let mut sets = match current {
+                Some(Value::Dictionary(d)) => d,
+                _ => HashMap::new(),
+            };
+            match sets.entry(clip_set).or_insert_with(|| Value::Dictionary(HashMap::new())) {
+                Value::Dictionary(set) => {
+                    set.insert(key, value);
+                }
+                other => *other = Value::Dictionary(HashMap::from([(key, value)])),
+            }
+            Value::Dictionary(sets)
+        })?;
+        Ok(())
+    }
+}
+
+fn pairs_value(pairs: Vec<(f64, f64)>) -> Value {
+    Value::Vec2dVec(pairs.into_iter().map(|(x, y)| gf::vec2d(x, y)).collect())
 }
 
 fn as_string(value: &Value) -> Option<String> {
