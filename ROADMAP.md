@@ -47,7 +47,7 @@ that broader spec behavior can be considered fully covered.
 | Property paths | `8.1` | :white_check_mark: | `0.1.1` | |
 | Variant selection paths | `8.1` | :white_check_mark: | `0.2.0` | `{set=selection}` syntax |
 | Path grammar (PEG) | `8.5` | :white_check_mark: | `0.1.4` | Parsed from USDA and USDC |
-| Element ordering | `8.2` | :construction: | | Normative ordering rules for property/prim names |
+| Element ordering | `8.2` | :white_check_mark: | `main` | `sdf::element_cmp` |
 | Relative path resolution | `8.1` | :white_check_mark: | `0.2.0` | Anchoring via `make_absolute` |
 | Legacy path compatibility | `8.7` | :thinking: | | Extended grammar with `[target]` and `.mapper` paths |
 
@@ -100,7 +100,7 @@ that broader spec behavior can be considered fully covered.
 | Populating the stage | `11.3` | :white_check_mark: | `0.2.0` | Lazy per-prim composition via `pcp::Cache` |
 | [Population mask](https://openusd.org/release/api/class_usd_stage_population_mask.html) | `11.3` | :white_check_mark: | `0.4.0` | `StageBuilder::population_mask` limits stage queries, traversal, and root layer-stack dependency collection to a masked working set |
 | Prim child discovery | `11.3.1` | :white_check_mark: | `0.2.0` | Merged `primChildren` with relocate adjustment. Full normative ordering is tracked in the `primOrder` row below. |
-| Ordered prim children (`primOrder` reordering) | `11.3.1` | :construction: | | `main` — child names fold weakest-to-strongest, reapplying each layer's `primOrder` as it merges (mirrors C++ `PcpComposeSiteChildNames`)<br>Remaining — apply relocates per layer stack during the fold (relocates are still applied once after the merge) |
+| Ordered prim children (`primOrder` reordering) | `11.3.1` | :white_check_mark: | `main` | `Prim::children`; weak-to-strong fold reapplying `primOrder` and relocates per layer |
 | Ordered property children | `11.3.2` | :white_check_mark: | `0.2.0` | Merged `propertyChildren` |
 | Ordered property children (`propertyOrder` reordering) | `11.3.2` | :white_check_mark: | `main` | Property names fold weakest-to-strongest, reapplying each layer's `propertyOrder` as it merges (shares the `primChildren` fold) |
 | [Scene graph instancing](https://openusd.org/release/glossary.html#usdglossary-instancing) | `11.3.3` | :white_check_mark: | `main` | Instances share one composed prototype; child names and descendants take only the shared subtree, discarding instance-namespace opinions. Remaining — materialized `/__Prototype_N` (currently alias-backed), relationship-target remap (§12.4), parallel composition |

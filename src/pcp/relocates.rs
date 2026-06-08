@@ -10,10 +10,10 @@
 //! data (layer graph, cached indices) is passed in through parameters, and
 //! nothing references [`IndexCache`](super::index_cache::IndexCache) directly.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{AbstractData, Path, PathComponent, Value};
+use crate::sdf::{element_cmp, AbstractData, Path, PathComponent, Value};
 
 use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
@@ -88,10 +88,9 @@ fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> 
 /// place (C++ `_ComposePrimChildNamesAtNode`'s relocate classification). The
 /// `pairs` are the node layer stack's as-authored relocates; `parent` is the
 /// node's path. Renames keep the source name's position, removes drop it, and
-/// cross-hierarchy targets are appended in lexicographic name order — which, for
-/// targets sharing `parent`, matches the path order C++ folds them in from the
-/// `std::map`-backed `SdfRelocatesMap`. Every relocation source under `parent`
-/// is recorded in `prohibited`.
+/// cross-hierarchy targets are appended in the normative element order (spec
+/// 11.3.1's `path_element_sorted`, [`sdf::element_cmp`](crate::sdf::element_cmp)).
+/// Every relocation source under `parent` is recorded in `prohibited`.
 pub(crate) fn apply_child_relocates(
     parent: &Path,
     pairs: &[(Path, Path)],
@@ -102,7 +101,7 @@ pub(crate) fn apply_child_relocates(
     // A source child maps to `Some(new_name)` (renamed in place) or `None`
     // (removed — moved to a different parent or deleted).
     let mut relocations: HashMap<String, Option<String>> = HashMap::new();
-    let mut adds: BTreeSet<String> = BTreeSet::new();
+    let mut adds: Vec<String> = Vec::new();
 
     for (src, tgt) in pairs {
         let src_is_child = src.parent().as_ref() == Some(parent);
@@ -119,10 +118,14 @@ pub(crate) fn apply_child_relocates(
         // A child relocated in from a different parent is an addition.
         if tgt_is_child && !src_is_child {
             if let Some(tgt_name) = tgt.name() {
-                adds.insert(tgt_name.to_string());
+                adds.push(tgt_name.to_string());
             }
         }
     }
+    // Relocated-in children are appended in the normative element order (spec
+    // 11.3.1's `path_element_sorted`), not authored order; the `name_set` guard
+    // in the append loop below drops any duplicate target name.
+    adds.sort_by(|a, b| element_cmp(a, b));
 
     if !relocations.is_empty() {
         let mut retained: Vec<String> = Vec::with_capacity(name_order.len());
@@ -533,5 +536,28 @@ mod tests {
             shift_through_nearest_ancestor(&Path::from("/X/Y"), &renames),
             Path::from("/X/Y")
         );
+    }
+
+    /// Children relocated in from a different parent are appended in the
+    /// normative element order (spec 11.3.1's `path_element_sorted`), not the
+    /// authored or byte-lexicographic order: `B9` precedes `B10` because the
+    /// digit runs compare numerically, even though `"B10" < "B9"` byte-wise.
+    #[test]
+    fn relocated_in_children_element_ordered() {
+        let pairs = vec![
+            (Path::from("/Src/B10"), Path::from("/Dst/B10")),
+            (Path::from("/Src/B9"), Path::from("/Dst/B9")),
+        ];
+        let mut name_order = Vec::new();
+        let mut name_set = HashSet::new();
+        let mut prohibited = HashSet::new();
+        apply_child_relocates(
+            &Path::from("/Dst"),
+            &pairs,
+            &mut name_order,
+            &mut name_set,
+            &mut prohibited,
+        );
+        assert_eq!(name_order, vec!["B9".to_string(), "B10".to_string()]);
     }
 }

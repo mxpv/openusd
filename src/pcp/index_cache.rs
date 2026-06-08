@@ -1057,7 +1057,7 @@ impl IndexCache {
     /// names contributed so far (`relocates::apply_child_relocates`) — a child renamed
     /// within the same parent keeps the source's position, a child relocated to a
     /// different parent is removed, and a child relocated in from elsewhere is
-    /// appended (lexicographically) — and then the node's own `primChildren` /
+    /// appended in the normative element order (spec §8.2) — and then the node's own `primChildren` /
     /// `primOrder` compose over the running order (mirroring C++
     /// `_ComposePrimChildNamesAtNode`). Every relocation source becomes a
     /// prohibited name, removed from the final order.
@@ -1152,7 +1152,9 @@ impl IndexCache {
             name_order.retain(|name| !prohibited.contains(name));
         }
         let mut prohibited: Vec<String> = prohibited.into_iter().collect();
-        prohibited.sort();
+        // Order the prohibited set the same way as the child names (spec §8.2),
+        // so the two outputs of this function stay consistent.
+        prohibited.sort_by(|a, b| sdf::element_cmp(a, b));
         Ok((name_order, prohibited))
     }
 
