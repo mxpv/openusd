@@ -214,6 +214,10 @@
 //! - Finer-grained change classification: `Changes::did_change` collapses the prim
 //!   and spec tiers into the significant tier (drop the index and every
 //!   descendant); a finer split would rebuild less per local edit.
+//! - Anchoring `asset` values sourced from time samples or value clips:
+//!   `IndexCache::value_at` anchors only default-sourced asset paths (filling
+//!   their `resolved_path`); a time-sample or clip value is returned unanchored
+//!   because the resolvers do not surface the layer of the contributing sample.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

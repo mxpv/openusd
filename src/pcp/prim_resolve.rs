@@ -430,6 +430,22 @@ impl PrimIndex {
             })
     }
 
+    /// The layer of the strongest authored opinion for `field`, used to anchor
+    /// a relative asset path against the layer the winning value came from
+    /// (mirrors C++ `UsdStage::_MakeResolvedAssetPaths` anchoring on the
+    /// strongest opinion's layer). Returns `None` if nothing authors the field.
+    pub(crate) fn strongest_layer(
+        &self,
+        field: &str,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+    ) -> Option<LayerId> {
+        self.opinions(field, stack, prop_suffix)
+            .next()?
+            .ok()
+            .map(|opinion| opinion.layer)
+    }
+
     /// Walks nodes from strongest to weakest, returning the first opinion.
     /// A [`Value::ValueBlock`] returns `None`, blocking weaker layers. When
     /// the strongest opinion is a dictionary, weaker dictionary opinions are

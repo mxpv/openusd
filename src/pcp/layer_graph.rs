@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ar::Resolver;
+use crate::ar::{ResolvedPath, Resolver};
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, RelocateList, Value};
 
@@ -356,6 +356,15 @@ impl LayerGraph {
     /// The resolver used to anchor relative asset paths.
     pub(crate) fn resolver(&self) -> &dyn Resolver {
         self.resolver.as_ref()
+    }
+
+    /// Resolves the location of the layer `anchor`, used to anchor the relative
+    /// asset paths authored there. Returns `None` when there is no anchor layer
+    /// or it cannot itself be resolved. Resolve a layer once and reuse the
+    /// result to anchor every asset path it authors (see
+    /// [`Resolver::create_identifier`]).
+    pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
+        anchor.and_then(|layer| self.resolver().resolve(self.identifier(layer)))
     }
 
     /// Whether payload arcs should be expanded during composition.

@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
 use super::{Value, ValueConversionError};
@@ -7,26 +8,53 @@ use super::{Value, ValueConversionError};
 /// metadatum, authored in `@...@` syntax.
 ///
 /// This is the Rust analog of USD's
-/// [`SdfAssetPath`](https://openusd.org/release/api/class_sdf_asset_path.html),
-/// simplified to the authored path alone (C++ also carries the resolved path
-/// and the evaluated variable expression).
+/// [`SdfAssetPath`](https://openusd.org/release/api/class_sdf_asset_path.html).
+/// It carries the authored path always, and the resolved path once value
+/// resolution has anchored and resolved it (C++ also carries an evaluated
+/// path with `expressionVariables` substituted — see the TODO below).
+///
+/// As layer data an asset path holds only its authored path; the resolved
+/// path is filled in by value resolution ([`Attribute::get`](crate::usd::Attribute::get)),
+/// anchored to the layer of the strongest opinion. Identity — equality,
+/// hashing, and ordering — is therefore the authored path alone; the resolved
+/// path is a derived annotation that does not affect it (this differs from
+/// C++ `operator==`, which compares both).
 ///
 /// The string-like traits ([`Deref`] to `str`, [`AsRef`], [`Borrow`],
 /// [`Display`](std::fmt::Display), and `PartialEq` against string types) let
 /// it stand in for its authored path: `&asset` coerces to `&str`, and
 /// `asset == "foo.usd"` compares directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
+///
+// TODO: C++ `SdfAssetPath` also carries an evaluated path (the authored path
+// with `expressionVariables` substituted), exposed via `GetEvaluatedPath` /
+// `SetEvaluatedPath` and preferred by `GetAssetPath` as the input to
+// resolution. Add it once value resolution evaluates expressions into the
+// asset path — until then it would be an inert field with no source of truth.
+#[derive(Debug, Clone, Default)]
 pub struct AssetPath {
     /// The path as authored in the layer, before asset resolution.
     pub authored_path: String,
+    /// The result of asset resolution, set by value resolution; `None` for an
+    /// asset path that has not been resolved (e.g. raw layer data).
+    resolved_path: Option<String>,
 }
 
 impl AssetPath {
-    /// Creates an asset path from its authored path string.
+    /// Creates an asset path from its authored path string, with no resolved
+    /// path yet.
     pub fn new(authored_path: impl Into<String>) -> Self {
         Self {
             authored_path: authored_path.into(),
+            resolved_path: None,
+        }
+    }
+
+    /// Creates an asset path with both its authored and resolved paths set
+    /// (C++ `SdfAssetPath(authoredPath, resolvedPath)`).
+    pub fn with_resolved_path(authored_path: impl Into<String>, resolved_path: impl Into<String>) -> Self {
+        Self {
+            authored_path: authored_path.into(),
+            resolved_path: Some(resolved_path.into()),
         }
     }
 
@@ -35,9 +63,66 @@ impl AssetPath {
         &self.authored_path
     }
 
+    /// The resolved path if value resolution has set it, else `None`
+    /// (C++ `GetResolvedPath`).
+    pub fn resolved_path(&self) -> Option<&str> {
+        self.resolved_path.as_deref()
+    }
+
+    /// Sets the resolved path (C++ `SetResolvedPath`).
+    pub fn set_resolved_path(&mut self, resolved_path: impl Into<String>) {
+        self.resolved_path = Some(resolved_path.into());
+    }
+
+    /// Returns `true` if the authored path is empty.
+    pub fn is_empty(&self) -> bool {
+        self.authored_path.is_empty()
+    }
+
     /// Consumes the asset path, returning the owned authored path string.
     pub fn into_string(self) -> String {
         self.authored_path
+    }
+}
+
+// Identity is the authored path alone; the resolved path is a derived cache.
+impl PartialEq for AssetPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.authored_path == other.authored_path
+    }
+}
+
+impl Eq for AssetPath {}
+
+impl Hash for AssetPath {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.authored_path.hash(state);
+    }
+}
+
+impl PartialOrd for AssetPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AssetPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.authored_path.cmp(&other.authored_path)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for AssetPath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.authored_path.serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for AssetPath {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(AssetPath::new(String::deserialize(deserializer)?))
     }
 }
 
@@ -69,7 +154,7 @@ impl std::fmt::Display for AssetPath {
 
 impl From<String> for AssetPath {
     fn from(authored_path: String) -> Self {
-        Self { authored_path }
+        Self::new(authored_path)
     }
 }
 
@@ -194,5 +279,8 @@ mod tests {
 
         assert_eq!(asset.to_string(), "./tex.png");
         assert_eq!(String::from(asset), "./tex.png");
+
+        assert!(!AssetPath::new("./tex.png").is_empty());
+        assert!(AssetPath::default().is_empty());
     }
 }
