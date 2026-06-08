@@ -1,0 +1,37 @@
+#usda 1.0
+(
+    doc = """Relationship/connection targets authored at a prototype's root
+    (spec 11.3.3 + 12.4).
+
+    /A and /B are instanceable and reference /Proto. /Proto authors a
+    relationship and a connection at its own root that target a sibling
+    prim/property. On each instance the targets remap into that instance's
+    namespace; on the materialized prototype root they must resolve into the
+    prototype namespace (the root rebase is what makes the prototype-root map
+    translate targets onto /__Prototype_N rather than the canonical instance)."""
+)
+
+def Scope "Proto"
+{
+    color3f outputs:out
+    color3f inputs:in.connect = [</Proto.outputs:out>]
+    rel myrel = [</Proto/Target>]
+
+    def Scope "Target"
+    {
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}
+
+def Scope "B" (
+    instanceable = true
+    references = </Proto>
+)
+{
+}

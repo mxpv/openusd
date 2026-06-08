@@ -241,14 +241,23 @@ impl Changes {
     // `classify_prim_entry`), this branch becomes load-bearing.
     pub fn apply(self, cache: &mut IndexCache, graph: &mut LayerGraph) {
         // Any index invalidation can change which prims are instances or how
-        // they compose, so the shared-prototype registry (spec 11.3.3) must be
-        // rebuilt rather than left stale. It is lazily repopulated on the next
-        // instancing query.
-        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT)
-            || !self.cache.did_change_significantly.is_empty()
-            || !self.cache.did_change_prims.is_empty()
-        {
-            cache.invalidate_prototypes();
+        // they compose, so affected entries in the shared-prototype registry
+        // (spec 11.3.3) must be dropped rather than left stale; they are lazily
+        // recomposed on the next instancing query. A layer-stack rebuild drops
+        // every cached index below, so it clears the whole registry; a
+        // prim-level change drops only the prototypes whose instances or shared
+        // content it touches.
+        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
+            cache.invalidate_all_prototypes();
+        } else if !self.cache.did_change_significantly.is_empty() || !self.cache.did_change_prims.is_empty() {
+            let changed: Vec<Path> = self
+                .cache
+                .did_change_significantly
+                .iter()
+                .chain(self.cache.did_change_prims.iter())
+                .map(Path::prim_path)
+                .collect();
+            cache.invalidate_prototypes(&changed);
         }
 
         // Order matters: clear the index cache BEFORE rebuilding the

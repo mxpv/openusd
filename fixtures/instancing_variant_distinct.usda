@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    doc = """Variant selection participates in the instancing key (spec 11.3.3).
+
+    /Proto defines a variant set `v`. /A, /B, and /C are instanceable and all
+    reference /Proto, but select different variants: /A and /C pick `x` while
+    /B picks `y`. Two instances of one reference share a prototype iff their
+    variant selections match, so /A and /C share one prototype and /B gets a
+    distinct one — the resolved selection set is folded into the instancing key
+    explicitly, since the arc paths alone are identical across the selections."""
+)
+
+def Scope "Proto" (
+    prepend variantSets = "v"
+)
+{
+    variantSet "v" = {
+        "x" {
+            double picked = 1.0
+        }
+        "y" {
+            double picked = 2.0
+        }
+    }
+}
+
+def Scope "A" (
+    instanceable = true
+    references = </Proto>
+    variants = {
+        string v = "x"
+    }
+)
+{
+}
+
+def Scope "B" (
+    instanceable = true
+    references = </Proto>
+    variants = {
+        string v = "y"
+    }
+)
+{
+}
+
+def Scope "C" (
+    instanceable = true
+    references = </Proto>
+    variants = {
+        string v = "x"
+    }
+)
+{
+}

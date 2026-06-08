@@ -997,7 +997,7 @@ impl Stage {
     /// [`Stage::time_samples`].
     pub fn value_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
         let attr_path = attr_path.into();
-        if !self.population_mask.includes(&attr_path.prim_path()) {
+        if !self.mask_includes(&attr_path.prim_path()) {
             return Ok(None);
         }
         let interp_type = self.interpolation_type.get();
@@ -1049,7 +1049,7 @@ impl Stage {
     /// exists in any layer contributing to the owning prim's composition index.
     pub(crate) fn has_spec(&self, path: impl Into<sdf::Path>) -> Result<bool> {
         let path = path.into();
-        if !self.population_mask.includes(&path.prim_path()) {
+        if !self.mask_includes(&path.prim_path()) {
             return Ok(false);
         }
         self.with_cache(|g, c| c.has_spec(g, &path))
@@ -1058,7 +1058,7 @@ impl Stage {
     /// Returns the spec type at a composed path from the strongest contributing layer.
     pub(crate) fn spec_type(&self, path: impl Into<sdf::Path>) -> Result<Option<sdf::SpecType>> {
         let path = path.into();
-        if !self.population_mask.includes(&path.prim_path()) {
+        if !self.mask_includes(&path.prim_path()) {
             return Ok(None);
         }
         self.with_cache(|g, c| c.spec_type(g, &path))
@@ -1092,7 +1092,7 @@ impl Stage {
         T::Error: std::error::Error + Send + Sync + 'static,
     {
         let path = path.into();
-        if !self.population_mask.includes(&path.prim_path()) {
+        if !self.mask_includes(&path.prim_path()) {
             return Ok(None);
         }
         let raw = self.with_cache(|g, c| c.resolve_field(g, &path, field.as_ref()))?;
@@ -1113,10 +1113,32 @@ impl Stage {
         path: &sdf::Path,
         query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
-        if !self.population_mask.includes(&path.prim_path()) {
+        if !self.mask_includes(&path.prim_path()) {
             return Ok(T::default());
         }
         self.with_cache(query)
+    }
+
+    /// Whether `prim` is exposed by the population mask, accounting for
+    /// prototype content (spec 11.3.3). A `/__Prototype_N[/...]` path carries no
+    /// instance of its own and is never named in a user mask, so it is included
+    /// when any instance sharing that prototype is in the mask — mirroring C++,
+    /// where a prototype is populated iff at least one of its instances is.
+    /// Ordinary paths defer to [`StagePopulationMask::includes`]; instance
+    /// proxies are in their instance's namespace and so are covered by the
+    /// instance's own mask entry.
+    pub(crate) fn mask_includes(&self, prim: &sdf::Path) -> bool {
+        if self.population_mask.includes(prim) {
+            return true;
+        }
+        let cache = self.cache();
+        match cache.prototype_root_of(prim) {
+            Some(root) => cache
+                .prototype_instances(&root)
+                .iter()
+                .any(|instance| self.population_mask.includes(instance)),
+            None => false,
+        }
     }
 
     /// Returns a handle to a prim's composition index (C++
@@ -1193,7 +1215,9 @@ impl Stage {
 
     /// Filters a child-name list to the prims the population mask includes.
     /// Population-mask infrastructure shared by [`Prim::children`](super::Prim::children)
-    /// and the stage's own [`traverse`](Self::traverse) walk.
+    /// and the stage's own [`traverse`](Self::traverse) walk. Prototype children
+    /// are gated through [`Self::mask_includes`], so a prototype populated by a
+    /// masked instance stays traversable (spec 11.3.3).
     pub(crate) fn filter_child_names(&self, parent: &sdf::Path, children: Vec<String>) -> Vec<String> {
         if self.population_mask.is_all() {
             return children;
@@ -1203,7 +1227,7 @@ impl Stage {
             .filter(|name| {
                 parent
                     .append_path(name.as_str())
-                    .is_ok_and(|child| self.population_mask.includes(&child))
+                    .is_ok_and(|child| self.mask_includes(&child))
             })
             .collect()
     }
@@ -3249,6 +3273,33 @@ def "I2" (
         Ok(())
     }
 
+    /// A query on a synthetic prototype *descendant* before any instance
+    /// registers caches a stale empty index and an identity redirection; minting
+    /// the prototype must evict both so the descendant resolves the shared
+    /// content rather than the stale synthetic composition (spec 11.3.3).
+    #[test]
+    fn prototype_descendant_survives_early_query() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+        // Touch the synthetic descendant before any instance registers; this
+        // caches an empty index at /__Prototype_0/Child and memoizes its path as
+        // an identity (non-redirected) mapping.
+        assert_eq!(stage.value_at("/__Prototype_0/Child.size", 0.0)?, None);
+
+        // Composing the instance mints and materializes /__Prototype_0.
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        assert_eq!(proto.as_str(), "/__Prototype_0");
+
+        // The descendant now resolves the shared content: minting cleared the
+        // stale redirection, so the query redirects to the canonical instance
+        // instead of reading the stale empty synthetic index.
+        assert_eq!(
+            stage.value_at(proto.append_path("Child")?.append_property("size")?, 0.0)?,
+            Some(sdf::Value::Double(5.0))
+        );
+        Ok(())
+    }
+
     /// A property authored inside a variant selected on an instance is shared
     /// content (the selection defines the prototype) and must resolve on the
     /// materialized prototype root (spec 11.3.3).
@@ -3267,6 +3318,97 @@ def "I2" (
             stage.value_at(proto.append_property("picked")?, 0.0)?,
             Some(sdf::Value::Double(5.0))
         );
+        Ok(())
+    }
+
+    /// A relationship/connection target authored at a prototype's root resolves
+    /// into the prototype namespace on the materialized prototype root, and into
+    /// each instance's namespace on the instances (spec 11.3.3 + 12.4). Exercises
+    /// the root rebase (`rebase_root`) of the prototype-root map.
+    #[test]
+    fn prototype_root_target_remap() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_root_target.usda"))?;
+
+        // On the instances the targets stay in each instance's own namespace.
+        assert_eq!(
+            rel_targets(&stage, &sdf::path("/A.myrel")?)?,
+            vec![sdf::path("/A/Target")?]
+        );
+        assert_eq!(
+            connections(&stage, &sdf::path("/A.inputs:in")?)?,
+            vec![sdf::path("/A.outputs:out")?]
+        );
+        assert_eq!(
+            rel_targets(&stage, &sdf::path("/B.myrel")?)?,
+            vec![sdf::path("/B/Target")?]
+        );
+
+        // On the materialized prototype root they resolve into the prototype
+        // namespace, not the canonical instance's.
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+        assert_eq!(
+            rel_targets(&stage, &proto.append_property("myrel")?)?,
+            vec![proto.append_path("Target")?]
+        );
+        assert_eq!(
+            connections(&stage, &proto.append_property("inputs:in")?)?,
+            vec![proto.append_property("outputs:out")?]
+        );
+        Ok(())
+    }
+
+    /// The resolved variant selection is part of the instancing key: instances
+    /// of one reference share a prototype iff their selections match (spec
+    /// 11.3.3). /A and /C select `x` and share; /B selects `y` and is distinct.
+    #[test]
+    fn variant_selection_keys_prototype() -> Result<()> {
+        let stage = Stage::open(&fixture_path("instancing_variant_distinct.usda"))?;
+
+        let proto = |p: &str| -> Result<sdf::Path> {
+            stage
+                .prim_at(p)
+                .prototype()?
+                .ok_or_else(|| anyhow::anyhow!("{p} is not an instance"))
+        };
+
+        // Same selection (`x`) shares one prototype; the other selection (`y`)
+        // gets a distinct one.
+        assert_eq!(proto("/A")?, proto("/C")?);
+        assert_ne!(proto("/A")?, proto("/B")?);
+
+        // Each prototype resolves its own variant content.
+        assert_eq!(stage.value_at("/A.picked", 0.0)?, Some(sdf::Value::Double(1.0)));
+        assert_eq!(stage.value_at("/B.picked", 0.0)?, Some(sdf::Value::Double(2.0)));
+        assert_eq!(stage.value_at("/C.picked", 0.0)?, Some(sdf::Value::Double(1.0)));
+        Ok(())
+    }
+
+    /// A prototype is populated when at least one of its instances is in the
+    /// population mask (spec 11.3.3): the synthetic `/__Prototype_N` namespace is
+    /// never named in a user mask, yet its shared content stays readable through
+    /// the masked instance.
+    #[test]
+    fn prototype_visible_under_mask() -> Result<()> {
+        let stage = Stage::builder()
+            .population_mask(StagePopulationMask::new(["/A"]))
+            .open(&fixture_path("instancing_shared.usda"))?;
+
+        // /A is in the mask and is an instance; its prototype is reachable.
+        assert!(stage.prim_at("/A").is_instance()?);
+        let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
+
+        // The prototype's shared content is readable even though /__Prototype_N
+        // is never named in the mask, because instance /A is.
+        let child = proto.append_path("Child")?;
+        assert!(stage.prim_at(child.clone()).is_valid()?);
+        assert_eq!(
+            stage.value_at(child.append_property("size")?, 0.0)?,
+            Some(sdf::Value::Double(5.0))
+        );
+
+        // A prototype with no masked instance stays hidden: /B (and so the
+        // prototype it would otherwise expose) is outside the mask.
+        assert!(!stage.population_mask().includes(&sdf::path("/B")?));
         Ok(())
     }
 

@@ -61,9 +61,28 @@ pub struct IndexCache {
     /// internal machinery driven by the instancing glue in
     /// [`super::instancing`] (a second `impl IndexCache`). Callers go through
     /// the cache's facade methods (`is_instance` / `prototype_of` /
-    /// `is_prototype` / …), never this field. Cleared by
-    /// [`Self::invalidate_prototypes`] on any composition change.
+    /// `is_prototype` / …), never this field. Affected entries are dropped by
+    /// [`Self::invalidate_prototypes`] on a prim-level change, or the whole
+    /// registry by [`Self::invalidate_all_prototypes`] on a layer-stack rebuild.
     pub(super) prototypes: PrototypeRegistry,
+    /// Memoized instance-proxy / prototype-descendant redirections (spec
+    /// 11.3.3): a prim path mapped to the path that actually composes it
+    /// ([`effective_path`](Self::effective_path) walks the namespace to find an
+    /// enclosing instance, which is otherwise repeated on every descendant
+    /// query). A non-redirected prim caches an identity entry, so the common
+    /// non-instanced case skips the walk too. An entry holds only while the
+    /// prototype registry that produced it is unchanged: it is cleared wholesale
+    /// when prototypes are invalidated ([`Self::invalidate_prototypes`] /
+    /// [`Self::invalidate_all_prototypes`]), and the subtree under a freshly
+    /// minted `/__Prototype_N` is dropped at registration (a synthetic
+    /// descendant queried before the mint cached an identity that must now
+    /// redirect to the canonical instance).
+    //
+    // TODO(rayon): a per-prim parallel composition driver would share this map
+    // read-mostly; the entries are write-once until invalidation, so a
+    // concurrent reader needs only a shared snapshot rather than a lock on the
+    // hot path. Keep population off the critical section when that lands.
+    pub(super) redirected_prims: HashMap<Path, Path>,
     /// One-shot errors from layer collection that the [`LayerGraph`](super::layer_graph::LayerGraph)
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
@@ -123,6 +142,7 @@ impl IndexCache {
             variant_fallbacks,
             clip_layers: HashMap::new(),
             prototypes: PrototypeRegistry::default(),
+            redirected_prims: HashMap::new(),
             collection_errors,
             prim_errors: HashMap::new(),
             query_errors: Vec::new(),

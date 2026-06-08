@@ -12,15 +12,16 @@
 //! as an independent `/__Prototype_N` index so its shared content is addressable
 //! without the canonical instance's root-level overrides leaking in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{Path, Value};
+use crate::sdf::{Path, PathElement, Value};
 
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
+use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::LayerId;
 
@@ -70,8 +71,20 @@ struct Prototype {
 /// Identity of an instance prim's shared composition (spec 11.3.3): the
 /// arc-introduced opinions that determine its subtree, independent of the
 /// instance's own stage path. Instances with equal keys share a prototype.
+///
+/// Variant selections are folded in explicitly via [`selections`](Self::selections)
+/// rather than left implicit in the arc paths: each arc's path has its variant
+/// selections stripped (so two instances of the same reference produce the same
+/// arc path regardless of which variant they pick) and the resolved selection
+/// set is carried as a separate, path-independent list. Without the explicit
+/// list, two instances of one reference that differ only by a variant selection
+/// would collide once the selection is stripped from the path.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(super) struct InstanceKey(Vec<InstanceArc>);
+pub(super) struct InstanceKey {
+    arcs: Vec<InstanceArc>,
+    /// The resolved `(variant set, selection)` pairs, in composition order.
+    selections: Vec<(String, String)>,
+}
 
 /// One arc contribution in an [`InstanceKey`]. Floats are stored as bit
 /// patterns so the key is `Hash`/`Eq`.
@@ -124,13 +137,17 @@ impl PrototypeRegistry {
     /// path), sorted by namespace path so the result does not depend on the
     /// order instances were queried. Empty for unknown paths.
     fn instances_of(&self, prototype: &Path) -> Vec<Path> {
-        let mut instances = self
-            .by_root
-            .get(prototype)
-            .map(|prototype| prototype.instances.clone())
-            .unwrap_or_default();
+        let mut instances = self.instances_unsorted(prototype).to_vec();
         instances.sort();
         instances
+    }
+
+    /// The instances sharing the prototype at `prototype`, in registration
+    /// order, borrowed without the clone-and-sort of [`instances_of`](Self::instances_of).
+    /// Used for membership checks (e.g. population-mask gating) where order is
+    /// irrelevant. Empty for unknown paths.
+    fn instances_unsorted(&self, prototype: &Path) -> &[Path] {
+        self.by_root.get(prototype).map_or(&[], |p| &p.instances)
     }
 
     /// The registered `/__Prototype_N` roots, in registration order.
@@ -172,6 +189,38 @@ impl PrototypeRegistry {
         self.by_root.clear();
         self.by_key.clear();
     }
+
+    /// Removes every prototype the change set could have invalidated, returning
+    /// the dropped `/__Prototype_N` roots so the cache can evict their indices.
+    /// A prototype is affected when a changed prim path lies on the ancestor
+    /// chain of one of its instances (the instance's `instanceable` opinion,
+    /// arcs, or shared content may have changed) or of its prototype root.
+    /// Unaffected prototypes keep their instance-to-prototype mapping and
+    /// materialized index, so a localized edit no longer forces every key to be
+    /// recomputed (spec 11.3.3).
+    ///
+    /// `count` stays monotonic (see its doc), so a re-registered instance mints
+    /// a fresh identity rather than reusing a removed prototype's number.
+    //
+    // TODO(perf): the affectedness test scans every prototype's instance list
+    // against every changed path. A reverse `(instance prefix → prototype)`
+    // index would bound it by the change set; left simple while prototype
+    // counts are modest.
+    fn remove_affected(&mut self, changed: &[Path]) -> Vec<Path> {
+        let affected: HashSet<Path> = self
+            .by_root
+            .iter()
+            .filter(|(root, prototype)| {
+                changed.iter().any(|p| {
+                    p.is_nested_with(root) || prototype.instances.iter().any(|instance| p.is_nested_with(instance))
+                })
+            })
+            .map(|(root, _)| root.clone())
+            .collect();
+        self.by_root.retain(|root, _| !affected.contains(root));
+        self.by_key.retain(|_, root| !affected.contains(root));
+        affected.into_iter().collect()
+    }
 }
 
 /// Computes the instancing key for an already-built instance index: the
@@ -181,47 +230,72 @@ impl PrototypeRegistry {
 /// partition shared from instance-local nodes
 /// ([`PrimIndex::instance_local_nodes`]).
 ///
-/// TODO: variant selections are captured only implicitly via variant
-/// nodes' paths; fold the resolved selection set in explicitly if a case
-/// surfaces where that is insufficient.
+/// Each contributing arc's path is stripped of variant selections, and the
+/// resolved selection set is folded into the key explicitly (see
+/// [`InstanceKey`]), so two instances of one reference share a prototype iff
+/// their variant selections also match.
 fn instance_key(index: &PrimIndex, instance_depth: u16) -> InstanceKey {
     let local = index.instance_local_nodes(instance_depth);
-    let arcs = index
-        .nodes_with_ids()
-        .filter(|(id, node)| !local[id.idx()] && !node.is_culled())
-        .map(|(_, node)| {
-            let offset = node.map_to_root.time_offset();
-            InstanceArc {
-                arc: node.arc as u8,
-                layer: node.layer_id(),
-                path: node.path.to_string(),
-                offset_bits: offset.offset.to_bits(),
-                scale_bits: offset.scale.to_bits(),
+    let mut arcs = Vec::new();
+    let mut selections = Vec::new();
+    for (id, node) in index.nodes_with_ids() {
+        if local[id.idx()] || node.is_culled() {
+            continue;
+        }
+        if node.arc == ArcType::Variant {
+            if let Some(PathElement::Variant { set, selection }) = node.path.last_element() {
+                selections.push((set.to_string(), selection.to_string()));
             }
-        })
-        .collect();
-    InstanceKey(arcs)
+        }
+        let offset = node.map_to_root.time_offset();
+        arcs.push(InstanceArc {
+            arc: node.arc as u8,
+            layer: node.layer_id(),
+            path: node.path.strip_all_variant_selections().to_string(),
+            offset_bits: offset.offset.to_bits(),
+            scale_bits: offset.scale.to_bits(),
+        });
+    }
+    InstanceKey { arcs, selections }
 }
 
 impl IndexCache {
-    /// Clears the shared-prototype registry (spec 11.3.3) and evicts every
-    /// materialized `/__Prototype_N` index so stale instance-to-prototype
-    /// mappings do not survive a composition change. Prototypes are recomposed
-    /// lazily on the next instancing query.
+    /// Evicts only the prototypes a prim-level change touches (spec 11.3.3):
+    /// every prototype whose instance subtree or prototype namespace lies on the
+    /// ancestor chain of one of the `changed` prim paths is removed from the
+    /// registry and has its materialized `/__Prototype_N` index dropped.
+    /// Unaffected prototypes keep their mapping and index, so a localized edit
+    /// does not recompute every key.
     ///
-    /// TODO: this drops the whole registry on any invalidation; a targeted
-    /// invalidation that removes only the prototypes whose instances changed
-    /// would avoid recomputing unaffected keys.
-    pub(crate) fn invalidate_prototypes(&mut self) {
+    /// Pure analysis over the change list (no composition), so it stays
+    /// rayon-friendly: see [`PrototypeRegistry::remove_affected`]. A layer-stack
+    /// rebuild instead clears the whole registry through
+    /// [`Self::invalidate_all_prototypes`].
+    pub(crate) fn invalidate_prototypes(&mut self, changed: &[Path]) {
         // Only the prototype root is cached — its descendants and the instance
         // proxies of every sharing instance are served from the canonical
         // instance (see [`Self::redirect_anchor`]), so the cache holds nothing
-        // under `/__Prototype_N`. A single `drop_index` per root therefore
-        // suffices and avoids a full-cache subtree scan per prototype.
+        // under `/__Prototype_N`. A single `drop_index` per affected root
+        // therefore suffices and avoids a full-cache subtree scan per prototype.
+        for root in self.prototypes.remove_affected(changed) {
+            self.drop_index(&root);
+        }
+        // The redirection memo is keyed on instance/prototype structure that the
+        // dropped prototypes may have defined, so clear it wholesale; it is
+        // repopulated lazily on the next descendant query.
+        self.redirected_prims.clear();
+    }
+
+    /// Clears the entire shared-prototype registry (spec 11.3.3) and evicts
+    /// every materialized `/__Prototype_N` index. Used for a layer-stack
+    /// rebuild, which invalidates every cached index regardless of which prims
+    /// the change names.
+    pub(crate) fn invalidate_all_prototypes(&mut self) {
         for root in self.prototypes.roots() {
             self.drop_index(&root);
         }
         self.prototypes.clear();
+        self.redirected_prims.clear();
     }
 
     /// Returns `true` if `path` resolves as an instance prim (spec 11.3.3):
@@ -254,12 +328,18 @@ impl IndexCache {
         self.ensure_index(graph, instance)?;
         let key = instance_key(&self.indices[instance], instance.prim_element_count() as u16);
         let (canonical, prototype, minted) = self.prototypes.register(key, instance);
-        // Materialize the prototype's index only when this call minted it. Keying
-        // off the registry's signal (not `indices.contains_key`) means a stale
-        // index cached at the synthetic path — e.g. from an earlier query on the
-        // deterministic `/__Prototype_N` before any instance composed — is
-        // overwritten with the real composition rather than mistaken for it.
+        // Materialize the prototype's index only when this call minted it. Before
+        // it existed, a query on the deterministic `/__Prototype_N` namespace
+        // composed the synthetic path in place (no prototype to redirect to), so
+        // an earlier query may have cached stale empty indices and identity
+        // redirections anywhere under `/__Prototype_N`. Evict both so descendant
+        // queries now redirect to the canonical instance; `materialize_prototype`
+        // re-caches the root below. Keying off the mint signal (not
+        // `indices.contains_key`) is what makes a stale synthetic index a miss
+        // rather than a mistaken hit.
         if minted {
+            self.drop_index_subtree(&prototype);
+            self.redirected_prims.retain(|path, _| !path.has_prefix(&prototype));
             self.materialize_prototype(graph, &canonical, &prototype);
         }
         Ok((canonical, prototype))
@@ -329,6 +409,21 @@ impl IndexCache {
     /// has a `/__Prototype_N` ancestor (spec 11.3.3).
     pub(crate) fn is_in_prototype(&self, path: &Path) -> bool {
         self.prototypes.is_in_prototype(path)
+    }
+
+    /// Returns the `/__Prototype_N` root enclosing `path` (inclusive of `path`
+    /// when it is itself a root), or `None` when `path` is not in a prototype
+    /// namespace (spec 11.3.3). Used to gate prototype content against the
+    /// population mask through its instances.
+    pub(crate) fn prototype_root_of(&self, path: &Path) -> Option<Path> {
+        self.prototypes.enclosing_root(Some(path.clone()))
+    }
+
+    /// The instances sharing the prototype at `root`, borrowed in registration
+    /// order for membership checks (e.g. population-mask gating). Empty for a
+    /// path that is not a prototype root.
+    pub(crate) fn prototype_instances(&self, root: &Path) -> &[Path] {
+        self.prototypes.instances_unsorted(root)
     }
 
     /// Returns `true` if `path` is an instance proxy — a descendant of an
@@ -448,19 +543,97 @@ impl IndexCache {
     /// preserving any property suffix. Applied at every descendant-serving
     /// query entry point so an instance proxy's subtree is served from the
     /// shared prototype rather than recomposed per instance.
-    //
-    // TODO(perf): every call walks the path's ancestors to find an enclosing
-    // instance. The result is stable until the prototype registry is
-    // invalidated, so it could be memoized per prim path and cleared alongside
-    // `invalidate_prototypes`.
+    ///
+    /// The prim-level redirection is memoized in `redirected_prims` (including
+    /// the identity result for a non-redirected prim, the common case), so the
+    /// ancestor walk that finds an enclosing instance runs once per prim path
+    /// rather than once per query; the memo is cleared whenever the prototype
+    /// registry is invalidated.
     pub(super) fn effective_path(&mut self, graph: &LayerGraph, path: &Path) -> Result<Path> {
         let prim = path.prim_path();
-        let redirected = self.redirect_prim(graph, &prim)?;
+        let redirected = match self.redirected_prims.get(&prim) {
+            Some(hit) => hit.clone(),
+            None => {
+                let redirected = self.redirect_prim(graph, &prim)?;
+                self.redirected_prims.insert(prim.clone(), redirected.clone());
+                redirected
+            }
+        };
         if redirected == prim {
             return Ok(path.clone());
         }
         // Re-anchor any property suffix onto the redirected prim; for a prim
         // path this is the redirected prim itself.
         Ok(path.replace_prefix(&prim, &redirected).unwrap_or(redirected))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(s: &str) -> Path {
+        Path::new(s).expect("valid test path")
+    }
+
+    /// A key whose identity is a single tagged selection, enough to drive the
+    /// registry's dedup without composing a real index.
+    fn key(tag: &str) -> InstanceKey {
+        InstanceKey {
+            arcs: Vec::new(),
+            selections: vec![(tag.to_string(), tag.to_string())],
+        }
+    }
+
+    /// `remove_affected` drops only the prototypes whose instances or root the
+    /// change set touches, leaving the rest mapped, and re-registration mints a
+    /// fresh identity for a dropped prototype.
+    #[test]
+    fn remove_affected_targets_touched() {
+        let mut reg = PrototypeRegistry::default();
+        // /A and /B share one prototype; /C has its own.
+        let (_, p0, minted0) = reg.register(key("p"), &path("/A"));
+        reg.register(key("p"), &path("/B"));
+        let (_, p1, minted1) = reg.register(key("q"), &path("/C"));
+        assert!(minted0 && minted1);
+        assert_ne!(p0, p1);
+
+        // A change under /C touches only its prototype.
+        let dropped = reg.remove_affected(&[path("/C/Child")]);
+        assert_eq!(dropped, vec![p1.clone()]);
+        assert_eq!(reg.canonical_of(&p0), Some(path("/A")));
+        assert!(reg.canonical_of(&p1).is_none());
+
+        // Re-registering /C mints a fresh identity (count stays monotonic).
+        let (_, p1b, minted) = reg.register(key("q"), &path("/C"));
+        assert!(minted);
+        assert_ne!(p1b, p1);
+    }
+
+    /// An unrelated change leaves every prototype mapping intact.
+    #[test]
+    fn remove_affected_keeps_unrelated() {
+        let mut reg = PrototypeRegistry::default();
+        let (_, p0, _) = reg.register(key("p"), &path("/A"));
+        let (_, p1, _) = reg.register(key("q"), &path("/C"));
+
+        assert!(reg.remove_affected(&[path("/Extra")]).is_empty());
+        assert!(reg.canonical_of(&p0).is_some());
+        assert!(reg.canonical_of(&p1).is_some());
+    }
+
+    /// A change at an instance's ancestor (or the prototype root itself) is on
+    /// the chain, so it invalidates the prototype.
+    #[test]
+    fn remove_affected_ancestor_and_root() {
+        let mut reg = PrototypeRegistry::default();
+        let (_, p0, _) = reg.register(key("p"), &path("/Group/A"));
+
+        // The prototype root itself is on the chain.
+        assert_eq!(reg.remove_affected(std::slice::from_ref(&p0)), vec![p0.clone()]);
+
+        // Re-register, then touch an ancestor of the instance.
+        let (_, p0b, _) = reg.register(key("p"), &path("/Group/A"));
+        assert_eq!(reg.remove_affected(&[path("/Group")]), vec![p0b]);
     }
 }
