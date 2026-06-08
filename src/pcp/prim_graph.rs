@@ -590,7 +590,7 @@ impl PrimIndexGraph {
     /// Keys, in priority order (spec 10.3): arc type (lower discriminant
     /// stronger); namespace depth (deeper stronger); origin strength (the
     /// stronger origin wins); finally the sibling arc number at the origin (C++
-    /// `GetSiblingNumAtOrigin`, lower stronger). Two specializes use the faithful
+    /// `GetSiblingNumAtOrigin`, lower stronger). Two specializes use the
     /// specializes comparator ([`compare_specialize_siblings`]), which reads the
     /// copy-to-root structure [`propagate_node_to_root`](crate::pcp::prim_indexer)
     /// produces.
@@ -604,9 +604,8 @@ impl PrimIndexGraph {
         }
 
         // Two specializes are copied under the local root (C++
-        // `_PropagateNodeToRoot`), so they sort by the faithful specializes
-        // branch of C++ `PcpCompareSiblingNodeStrength`, which reads that
-        // copy-to-root structure.
+        // `_PropagateNodeToRoot`), so they sort by the specializes branch of C++
+        // `PcpCompareSiblingNodeStrength`, which reads that copy-to-root structure.
         if na.introduced_by_specialize() && nb.introduced_by_specialize() {
             return self.compare_specialize_siblings(a, b);
         }

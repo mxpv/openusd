@@ -579,7 +579,10 @@ impl LayerGraph {
 
     /// Chains the per-layer authored relocates of `ambient` into a single
     /// source→target map (C++ `GetRelocatesSourceToTarget`): a target that is
-    /// itself a relocation source follows on to the final target.
+    /// itself a relocation source follows on to the final target, and a relocate
+    /// authored *under* another's target contributes a combined
+    /// pre-relocation-source → final-target pair so a single map application
+    /// reaches the final location through nested relocates.
     pub(crate) fn combined_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> Vec<(Path, Path)> {
         let mut pairs = self.incremental_relocates(ambient);
         let snapshot = pairs.clone();
@@ -588,6 +591,42 @@ impl LayerGraph {
                 continue;
             }
             *target = chain_through_relocates(target, &snapshot, Some(source));
+        }
+
+        // Nested relocates: a relocate `s2 → t2` whose source `s2` lies under
+        // another's target `t1` (from `s1 → t1`) means content moved to `t1` is
+        // moved on. Express that as a pair from the pre-relocation source
+        // (`s1` + the suffix of `s2` below `t1`) straight to `t2`, so one map
+        // application covers the whole chain. Iterated to a fixpoint over chains
+        // of any depth; bounded by the relocate count.
+        // TODO(perf): this is O(relocates⁴) with the linear `.any` membership
+        // scans (a `HashSet<Path>` of seen sources would cut it); relocate counts
+        // are tiny in practice, and the per-ambient cache TODO at
+        // `IndexCache::compose_property_paths` would amortize it away.
+        for _ in 0..pairs.len() {
+            let mut added: Vec<(Path, Path)> = Vec::new();
+            for (s1, t1) in &pairs {
+                if t1.is_empty() {
+                    continue;
+                }
+                for (s2, t2) in &pairs {
+                    if s2 == s1 {
+                        continue;
+                    }
+                    let Some(combined) = s2.replace_prefix(t1, s1) else {
+                        continue;
+                    };
+                    // `combined == s2` is already excluded by the `pairs`
+                    // membership check (`s2` is in `pairs`).
+                    if !pairs.iter().any(|(s, _)| *s == combined) && !added.iter().any(|(s, _)| *s == combined) {
+                        added.push((combined, t2.clone()));
+                    }
+                }
+            }
+            if added.is_empty() {
+                break;
+            }
+            pairs.extend(added);
         }
         pairs
     }

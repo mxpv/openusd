@@ -3,9 +3,9 @@
 //! Each asset is opened via `Stage::open` through both the `.usda` text parser
 //! and the `.usdc` binary parser, and the composed result is validated against
 //! the vendor `pcp.txt` baseline by regenerating that dump byte-for-byte (see
-//! [`assert_dump_matches`] / [`pcp_txt::pcp_dump`]). Assets the dump generator cannot reproduce yet
-//! ([`SKIP_PCP_COMPLIANCE`]) fall back to the looser `pcp.json` existence checks
-//! ([`assert_prims_exist`]); that fallback retires as suppressions clear.
+//! [`assert_dump_matches`] / [`pcp_txt::pcp_dump`]). The handful of goldens that
+//! can never be reproduced byte-for-byte ([`UNREPRODUCIBLE_GOLDEN`]) fall back to
+//! the looser `pcp.json` existence checks ([`assert_prims_exist`]).
 
 use std::path::Path;
 
@@ -93,15 +93,15 @@ fn run(name: &str, format: Format) {
         return;
     }
 
-    if SKIP_PCP_COMPLIANCE.contains(&name) || UNREPRODUCIBLE_GOLDEN.contains(&name) {
+    if UNREPRODUCIBLE_GOLDEN.contains(&name) {
         assert_prims_exist(name, format, &baseline, &entry);
     } else {
         assert_dump_matches(name, format, &test_dir, &baseline, &entry);
     }
 }
 
-/// Validates a suppressed asset by checking that every baselined prim, child,
-/// and property merely *exists* in the composed stage — the original, looser
+/// Validates an [`UNREPRODUCIBLE_GOLDEN`] asset by checking that every baselined
+/// prim, child, and property merely *exists* in the composed stage — the looser
 /// `pcp.json` check. Skips error cases and assets with no composing data.
 fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline, entry: &Path) {
     if !baseline.errors.is_empty() || baseline.composing.is_empty() {
@@ -150,25 +150,10 @@ fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline,
     );
 }
 
-/// Assets whose `pcp.txt` baseline the [`assert_dump_matches`] harness cannot reproduce
-/// yet, so they fall back to the looser `pcp.json` existence checks. The one
-/// remaining gap is the instance-target-path feature
-/// (`ErrorInvalidInstanceTargetPath`): a connection/relationship authored in a
-/// class that targets a *different* instance of that class is invalid with its
-/// own "is authored in a class but refers to an instance of that class" message
-/// (the self instance keeps the generic out-of-scope message) — which needs a
-/// cross-prim check that the target inherits the class — together with a
-/// symmetric-rig relocate interaction where such a connection target stays at
-/// its pre-relocation path rather than chaining through the relocate.
-///
-/// Permanently unreproducible goldens live in [`UNREPRODUCIBLE_GOLDEN`] instead.
-/// Assets outside both lists are compared byte-for-byte; a real composition
-/// mismatch there is a bug to fix, not a reason to suppress.
-const SKIP_PCP_COMPLIANCE: &[&str] = &["ErrorInvalidInstanceTargetPath_root"];
-
 /// Assets whose `pcp.txt` golden can never be reproduced byte-for-byte, so they
-/// stay on the looser `pcp.json` existence check permanently (unlike
-/// [`SKIP_PCP_COMPLIANCE`], which retires as the engine improves).
+/// stay on the looser `pcp.json` existence check permanently. Every other
+/// compliance asset is compared byte-for-byte; a real composition mismatch is a
+/// bug to fix, not a reason to suppress.
 ///
 /// In each case the golden is a Python traceback or a pxr-internal C++
 /// `file.cpp:line` warning emitted while the reference test framework loads the
@@ -651,6 +636,29 @@ mod pcp_txt {
                         property,
                         layer_id(layer),
                         arc_root,
+                    ),
+                ))
+            }
+            pcp::Error::InvalidInstanceTargetPath {
+                is_connection,
+                target,
+                property,
+                layer,
+                composing,
+            } => {
+                let kind = if *is_connection {
+                    "attribute connection"
+                } else {
+                    "relationship target"
+                };
+                Some((
+                    Some(composing),
+                    format!(
+                        "The {kind} <{}> from <{}> in layer @{}@ is authored in a class but refers to an instance \
+                         of that class.  Ignoring.",
+                        target,
+                        property,
+                        layer_id(layer),
                     ),
                 ))
             }

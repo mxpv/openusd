@@ -3,8 +3,8 @@
 //! Stateless free functions covering all relocate logic — extracting
 //! `layerRelocates` from layer metadata ([`validate_layer_relocates`]),
 //! computing effective relocates in composed namespace
-//! ([`effective_relocates`] / [`effective_and_escaped`]), chaining transitive
-//! relocates ([`chain_through_relocates`]), and folding relocated child names
+//! ([`effective_relocates`]), chaining transitive relocates
+//! ([`chain_through_relocates`]), and folding relocated child names
 //! ([`apply_child_relocates`]). Each reads the validated per-layer relocates
 //! straight off the [`LayerGraph`], so there is no owned state; all external
 //! data (layer graph, cached indices) is passed in through parameters, and
@@ -26,10 +26,6 @@ pub(crate) type LayerRelocates = HashMap<LayerId, Vec<(Path, Path)>>;
 
 /// Composed relocates `(source, target)` for a prim, in its root namespace.
 pub(crate) type EffectiveRelocates = Vec<(Path, Path)>;
-
-/// Escaped relocation sources: each `(composed source, relocate layer id)`
-/// whose target left the prim's namespace (see [`effective_and_escaped`]).
-pub(crate) type EscapedSources = Vec<(Path, LayerId)>;
 
 /// Follows `path` to its final location through a set of relocates, applying the
 /// longest matching source prefix at each step until it reaches a fixed point.
@@ -74,8 +70,8 @@ fn root_prim_name(path: &Path) -> Option<&str> {
 /// the renamed parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
 /// `…/Rig2/SubRig/Anim` once `Rig -> Rig2`). Only the nearest applicable
 /// ancestor — the longest matching source prefix other than `endpoint` itself —
-/// is applied, and it is applied once against the original `endpoint`: faithful
-/// to C++ USD relocates, a relocate's authored source keeps its as-authored
+/// is applied, and it is applied once against the original `endpoint`: matching
+/// C++ USD relocates, a relocate's authored source keeps its as-authored
 /// depth and is never transitively re-chained (`_ConformLegacyRelocates` is a
 /// no-op in USD mode). Returns `endpoint` unchanged when no ancestor matches.
 fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> Path {
@@ -344,62 +340,19 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 
 /// Computes effective relocates for a parent prim in composed namespace.
 ///
-/// Collects relocates from all layers reachable through any cached prim
-/// in the same root subtree, maps them to composed namespace using the
-/// layer's namespace mapping, then chains transitive relocates.
+/// Collects relocates from all layers reachable through any cached prim in the
+/// same root subtree, maps them to composed namespace using the layer's
+/// namespace mapping, then folds each endpoint through the nearest ancestor
+/// rename. Used to apply relocates to a relationship/connection's *deleted*
+/// target paths, which have no per-node origin to translate through (resolved
+/// targets translate through their node's own map instead).
 pub(crate) fn effective_relocates(
     graph: &LayerGraph,
     path: &Path,
     indices: &HashMap<Path, PrimIndex>,
-) -> Vec<(Path, Path)> {
-    effective_and_escaped(graph, path, indices).0
-}
-
-/// The effective relocates AND the escaped relocation sources for a prim, from
-/// a single namespace scan (the two share `collect_layer_maps`). An escaped
-/// source is a relocate whose source maps into `path`'s namespace but whose
-/// target does not — content moved *out* of an arc's scope (e.g. to a new root
-/// prim); a relationship/connection target under one is invalid. The second
-/// element pairs each escaped source with the layer that authored its relocate.
-pub(crate) fn effective_and_escaped(
-    graph: &LayerGraph,
-    path: &Path,
-    indices: &HashMap<Path, PrimIndex>,
-) -> (EffectiveRelocates, EscapedSources) {
-    let (mut result, escaped) = raw_effective_and_escaped(graph, path, indices);
-
-    // Shift each endpoint through a single ancestor rename: when an ancestor
-    // prim is relocated, a relocate authored below it sits under the renamed
-    // parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
-    // `…/Rig2/SubRig/Anim` once `Rig` is relocated to `Rig2`). Faithful to
-    // C++ USD relocates, sources are not transitively re-chained: a
-    // relocate's authored source keeps its as-authored depth (C++
-    // `_ConformLegacyRelocates` is a no-op in USD mode), so only the nearest
-    // applicable ancestor rename is folded in. The snapshot is sorted by
-    // target length, making the fold order deterministic.
-    let snapshot = result.clone();
-    for entry in &mut result {
-        entry.0 = shift_through_nearest_ancestor(&entry.0, &snapshot);
-        if !entry.1.is_empty() {
-            entry.1 = shift_through_nearest_ancestor(&entry.1, &snapshot);
-        }
-    }
-
-    (result, escaped)
-}
-
-/// Raw (unchained) effective relocates plus escaped sources. Each layer's
-/// relocates are mapped through the namespace mappings found in cached prims:
-/// a relocate whose source and target both map yields an effective pair; one
-/// whose (non-empty) target does not map is an escaped source.
-fn raw_effective_and_escaped(
-    graph: &LayerGraph,
-    path: &Path,
-    indices: &HashMap<Path, PrimIndex>,
-) -> (EffectiveRelocates, EscapedSources) {
+) -> EffectiveRelocates {
     let layer_maps = collect_layer_maps(graph, path, indices);
     let mut result: Vec<(Path, Path)> = Vec::new();
-    let mut escaped: Vec<(Path, LayerId)> = Vec::new();
 
     for (li, map) in &layer_maps {
         let relocates = match graph.get(*li) {
@@ -415,13 +368,7 @@ fn raw_effective_and_escaped(
             } else {
                 match map.map_source_to_target(tgt) {
                     Some(t) => t,
-                    None => {
-                        // Target escapes the namespace: record the source.
-                        if !escaped.iter().any(|(s, _)| *s == composed_src) {
-                            escaped.push((composed_src, *li));
-                        }
-                        continue;
-                    }
+                    None => continue,
                 }
             };
             let pair = (composed_src, composed_tgt);
@@ -433,7 +380,24 @@ fn raw_effective_and_escaped(
 
     // Sort by target length descending for longest-prefix-first matching.
     result.sort_by(|a, b| b.1.as_str().len().cmp(&a.1.as_str().len()));
-    (result, escaped)
+
+    // Shift each endpoint through a single ancestor rename: when an ancestor
+    // prim is relocated, a relocate authored below it sits under the renamed
+    // parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
+    // `…/Rig2/SubRig/Anim` once `Rig` is relocated to `Rig2`). Matching C++
+    // USD relocates, sources are not transitively re-chained: a relocate's
+    // authored source keeps its as-authored depth (C++ `_ConformLegacyRelocates`
+    // is a no-op in USD mode), so only the nearest applicable ancestor rename is
+    // folded in.
+    let snapshot = result.clone();
+    for entry in &mut result {
+        entry.0 = shift_through_nearest_ancestor(&entry.0, &snapshot);
+        if !entry.1.is_empty() {
+            entry.1 = shift_through_nearest_ancestor(&entry.1, &snapshot);
+        }
+    }
+
+    result
 }
 
 /// Collects (layer_index, map_to_root) pairs from ancestor prims and from

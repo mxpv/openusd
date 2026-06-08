@@ -24,7 +24,8 @@ use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
 use super::prim_index::{AncestorArc, CompositionContext, PrimIndex};
-use super::relocates::{apply_child_relocates, chain_through_relocates, effective_and_escaped, effective_relocates};
+use super::prim_resolve::InvalidTargetKind;
+use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, VariantFallbackMap};
 
 /// Lazily-built composition graph.
@@ -814,29 +815,21 @@ impl IndexCache {
             None => prim.clone(),
         };
         self.ensure_index(graph, &resolved_prim)?;
-        // A target authored across an arc lands at its post-relocation location
-        // (C++ `ComputeRelationshipTargetPaths` / `ComputeAttributeConnectionPaths`
-        // apply the layer stack's relocates to composed targets). A local
-        // (root-node) target is not remapped, so the chaining is applied per node
-        // inside the resolved walk; the deleted-paths walk has no per-node origin,
-        // so it chains every entry here.
-        //
-        // TODO: `effective_relocates` discovers relocates by scanning whichever
-        // prims happen to be cached, so a relocate authored only in an as-yet-
-        // untraversed sibling branch can be missed. Route this through the
-        // layer-stack-based relocates (`LayerGraph::combined_relocates`, C++
-        // `PcpLayerStack::GetRelocatesSourceToTarget`), the same source the
-        // per-node child-name fold now uses, to make target remapping independent
-        // of traversal order.
-        // `escaped` = relocation sources whose target escapes the prim's namespace
-        // (e.g. moved to a new root); a target under one points at content moved
-        // out of scope. Both come from one namespace scan. The deleted-paths walk
-        // does not validate scope, so it only needs the effective relocates.
-        let (relocates, escaped) = match (!graph.has_relocates(), deleted) {
-            (true, _) => (Vec::new(), Vec::new()),
-            (false, true) => (effective_relocates(graph, &resolved_prim, &self.indices), Vec::new()),
-            (false, false) => effective_and_escaped(graph, &resolved_prim, &self.indices),
+        // A connection/relationship target authored in a class that translates but
+        // names a different instance of that class is dropped from that class
+        // node's contribution (C++ `_TargetInClassAndTargetsInstance`). The cache
+        // precomputes the cross-prim instance set; the per-node target walk
+        // consults it so a valid stronger opinion for the same path survives.
+        let instance_targets = if deleted {
+            HashSet::new()
+        } else {
+            self.compute_instance_targets(graph, &resolved_prim, field, &prop_suffix)?
         };
+
+        // The resolved-targets walk translates each target through its
+        // contributing node's map (relocates folded in), so it needs no separate
+        // relocate-chaining. The deleted-paths walk has no per-node origin, so it
+        // still chains every entry through the prim's effective relocates.
         let index = &self.indices[&resolved_prim];
         let (mut targets, invalid) = if deleted {
             (
@@ -844,26 +837,37 @@ impl IndexCache {
                 Vec::new(),
             )
         } else {
-            index.resolve_path_list_op_validated(field, graph, Some(&prop_suffix), &relocates, &escaped)?
+            index.resolve_path_list_op_validated(field, graph, Some(&prop_suffix), &instance_targets)?
         };
-        if deleted {
+        if deleted && graph.has_relocates() {
+            let relocates = effective_relocates(graph, &resolved_prim, &self.indices);
             for target in &mut targets {
                 *target = chain_through_relocates(target, &relocates, None);
             }
         }
 
-        // A target authored across an arc that falls outside the arc's namespace
-        // scope is dropped and reported (C++ `PcpErrorInvalidExternalTargetPath`).
+        // Targets dropped during composition are reported in authored order, the
+        // `invalid` list already honoring list-op composition (a target shadowed
+        // by a stronger explicit, or retracted by a delete, is not reported).
         let is_connection = matches!(field, FieldKey::ConnectionPaths);
         for inv in invalid {
-            self.query_errors.push(Error::InvalidExternalTargetPath {
-                is_connection,
-                target: inv.target,
-                property: inv.property,
-                layer: graph.identifier(inv.layer).to_string(),
-                arc: inv.arc,
-                arc_root: inv.arc_root,
-                composing: prim.clone(),
+            self.query_errors.push(match inv.kind {
+                InvalidTargetKind::External => Error::InvalidExternalTargetPath {
+                    is_connection,
+                    target: inv.target,
+                    property: inv.property,
+                    layer: graph.identifier(inv.layer).to_string(),
+                    arc: inv.arc,
+                    arc_root: inv.arc_root,
+                    composing: prim.clone(),
+                },
+                InvalidTargetKind::Instance => Error::InvalidInstanceTargetPath {
+                    is_connection,
+                    target: inv.target,
+                    property: inv.property,
+                    layer: graph.identifier(inv.layer).to_string(),
+                    composing: prim.clone(),
+                },
             });
         }
 
@@ -875,6 +879,84 @@ impl IndexCache {
             }
         }
         Ok(targets)
+    }
+
+    /// Computes the cross-prim set of connection/relationship targets authored in
+    /// a class (an inherit node) that name a *different* instance of that class
+    /// (C++ `_TargetInClassAndTargetsInstance`), keyed by the `(target, property)`
+    /// node-namespace pair the target walk matches on.
+    ///
+    /// This is the purely structural fact "is this class target an instance
+    /// target"; list-op composition (delete / explicit shadowing) and the actual
+    /// dropping/reporting are left to `resolve_path_list_op_validated`, which
+    /// consults this set per node contribution. A target inside the class itself
+    /// (`connectionPathInsideInheritedClass`) is never an instance target.
+    fn compute_instance_targets(
+        &mut self,
+        graph: &LayerGraph,
+        resolved_prim: &Path,
+        field: FieldKey,
+        prop_suffix: &str,
+    ) -> Result<HashSet<(Path, Path)>> {
+        // Phase 1: gather candidates that translate, releasing the index borrow
+        // before the cross-prim composition in phase 2.
+        let mut candidates: Vec<InstanceCandidate> = Vec::new();
+        let mut seen: HashSet<(Path, Path)> = HashSet::new();
+        {
+            let index = &self.indices[resolved_prim];
+            for node in index.nodes() {
+                if node.arc != ArcType::Inherit || !node.has_specs() || node.is_permission_denied() {
+                    continue;
+                }
+                let class_path = node.path_at_introduction();
+                let class_layers: Vec<LayerId> = node.layer_stack().iter().map(|(l, _)| *l).collect();
+                let map = index.map_to_root_for_targets(node);
+                let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
+                for (layer, _) in node.layers() {
+                    let Some(value) = graph.layer(layer).try_get(&property, field.as_str())? else {
+                        continue;
+                    };
+                    let list_op = match value.into_owned() {
+                        Value::PathListOp(op) => op,
+                        Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
+                        _ => continue,
+                    };
+                    for path in list_op.iter() {
+                        let target = property.make_absolute(path);
+                        // A target inside the class itself is a normal within-class
+                        // target (C++ `connectionPathInsideInheritedClass`); only a
+                        // target that translates can name an instance.
+                        if target.prim_path().has_prefix(&class_path) {
+                            continue;
+                        }
+                        if !seen.insert((target.clone(), property.clone())) {
+                            continue;
+                        }
+                        let Some(translated) = map.translate_to_target(&target) else {
+                            continue;
+                        };
+                        candidates.push(InstanceCandidate {
+                            target,
+                            property: property.clone(),
+                            translated,
+                            class_layers: class_layers.clone(),
+                            class_path: class_path.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Phase 2: compose each target prim for the cross-prim inherit check.
+        let mut instance_targets: HashSet<(Path, Path)> = HashSet::new();
+        for c in candidates {
+            let target_prim = c.translated.prim_path();
+            self.ensure_index(graph, &target_prim)?;
+            if target_prim_inherits_class(&self.indices[&target_prim], &c.class_layers, &c.class_path) {
+                instance_targets.insert((c.target, c.property));
+            }
+        }
+        Ok(instance_targets)
     }
 
     /// Composes a relationship's target paths together with the paths its
@@ -1610,6 +1692,34 @@ fn append_unseen_names(
     }
 }
 
+/// A class-node target that translates, gathered by
+/// [`IndexCache::compute_instance_targets`] for the cross-prim instance check.
+struct InstanceCandidate {
+    /// The authored target, in the authoring (class) node's namespace.
+    target: Path,
+    /// The owning property, in the authoring node's namespace.
+    property: Path,
+    /// The target translated to the root namespace (C++
+    /// `PcpTranslatePathFromNodeToRoot`).
+    translated: Path,
+    /// The class node's layer-stack layers, for the cross-prim instance check.
+    class_layers: Vec<LayerId>,
+    /// The class path, in the node's namespace (the inherit's introduction path).
+    class_path: Path,
+}
+
+/// Whether `index` (a composed target prim) inherits the class at `class_path`
+/// from the same `class_layers` layer stack (C++
+/// `_TargetInClassAndTargetsInstance`'s node scan): the target names an instance
+/// of the class.
+fn target_prim_inherits_class(index: &PrimIndex, class_layers: &[LayerId], class_path: &Path) -> bool {
+    index.all_nodes().any(|n| {
+        n.arc == ArcType::Inherit
+            && n.layer_stack().iter().map(|(l, _)| *l).eq(class_layers.iter().copied())
+            && n.path.has_prefix(class_path)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2097,6 +2207,82 @@ def "A" (
                 .iter()
                 .any(|e| matches!(e, Error::InvalidExpression { .. })),
             "the invalid asset-path expression is recorded as a recoverable error"
+        );
+        Ok(())
+    }
+
+    /// A connection authored in a class that targets another instance of the
+    /// class but is removed by a stronger `delete` must not emit a spurious
+    /// instance-target diagnostic: `classify_inherit_targets` only reports targets
+    /// that survive list-op composition, so a deleted target is neither dropped
+    /// again nor reported.
+    #[test]
+    fn class_instance_target_deleted_no_error() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Scope"
+{
+    class "LocalClass"
+    {
+        double y
+        double x
+        add double x.connect = </Scope/Instance_2.y>
+        delete double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_1" (inherits = </Scope/LocalClass>) {}
+    def "Instance_2" (inherits = </Scope/LocalClass>) {}
+}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_attribute_connection_paths(&graph, &sdf::path("/Scope/Instance_1.x")?)?;
+        assert!(targets.is_empty(), "the deleted connection target composes to nothing");
+        let errors = cache.take_composition_errors();
+        assert!(
+            !errors.iter().any(|e| matches!(
+                e,
+                Error::InvalidInstanceTargetPath { .. } | Error::InvalidExternalTargetPath { .. }
+            )),
+            "a class target removed by a stronger delete must not be reported: {errors:?}"
+        );
+        Ok(())
+    }
+
+    /// An instance-target invalid contribution from a class node drops only that
+    /// node's contribution: a stronger local opinion authoring the same target
+    /// validly keeps it, while the class's invalid opinion is still reported.
+    #[test]
+    fn class_instance_target_kept_by_stronger_local() -> Result<()> {
+        let text = r#"#usda 1.0
+def "Scope"
+{
+    class "LocalClass"
+    {
+        double y
+        double x
+        add double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_1" (inherits = </Scope/LocalClass>)
+    {
+        add double x.connect = </Scope/Instance_2.y>
+    }
+
+    def "Instance_2" (inherits = </Scope/LocalClass>) {}
+}
+"#;
+        let (graph, mut cache) = in_memory_stack(text);
+        let (targets, _) = cache.compute_attribute_connection_paths(&graph, &sdf::path("/Scope/Instance_1.x")?)?;
+        assert_eq!(
+            targets,
+            vec![sdf::path("/Scope/Instance_2.y")?],
+            "the stronger local connection keeps the target even though the class's is invalid"
+        );
+        let errors = cache.take_composition_errors();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, Error::InvalidInstanceTargetPath { .. })),
+            "the class node's instance-target contribution is still reported: {errors:?}"
         );
         Ok(())
     }

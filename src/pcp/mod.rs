@@ -141,108 +141,81 @@
 //! targets) never invalidates the prim graph: those queries read live
 //! layer data on every call.
 //!
-//! # Remaining work
+//! # Relationship and connection targets
 //!
-//! The task-queue [`Indexer`](prim_indexer) (C++ `Pcp_PrimIndexer`) is the sole
-//! composition engine: it composes LIVRPS, value resolution, relocates,
-//! variants, instancing, value clips, and surgical invalidation. The recursive
-//! indexer and the cache relocate post-pass have been removed. The remaining
-//! gaps are tracked asset-by-asset in `SKIP_PCP_COMPLIANCE`
-//! (`tests/composition.rs`).
+//! A relationship/connection target translates through the contributing node's
+//! `map_to_root` ([`MapFunction`]) — the bidirectional invertibility check
+//! ([`translate_to_target`](mapping::MapFunction::translate_to_target),
+//! C++ `PcpMapFunction::_Map` / `PcpTranslatePathFromNodeToRoot`) and the
+//! relocates folded into each arc map (C++ `_CreateMapExpressionForArc` /
+//! `GetExpressionForRelocatesAtPath`), including nested relocate chains
+//! (`LayerGraph::combined_relocates`) and the *block* a relocate to an
+//! out-of-scope prim leaves in the composed map. There is no separate
+//! relocate-chaining or escaped-source pass for resolved targets; the
+//! deleted-path walk still chains through the prim's effective relocates because
+//! it has no per-node origin.
 //!
-//! ## Composition gaps
+//! A relationship/connection authored in a class that targets a *different*
+//! instance of that class is dropped with the "is authored in a class but refers
+//! to an instance of that class" message (C++ `PcpErrorInvalidInstanceTargetPath`);
+//! the *self* instance keeps the generic out-of-scope message, and a self target
+//! reachable through the class's own relocates is kept at its pre-relocation path
+//! (the invertibility check yields all three outcomes). The cross-prim "target
+//! inherits the class" check (C++ `_TargetInClassAndTargetsInstance`) is
+//! `IndexCache::compute_instance_targets`; the per-node target walk in
+//! `resolve_path_list_op_validated` drops each invalid contribution from its own
+//! node only, so a valid stronger opinion for the same path survives.
 //!
-//! One compliance asset is still suppressed in `SKIP_PCP_COMPLIANCE`
-//! (`tests/composition.rs`):
-//!
-//! - Instance-target-path validation (`ErrorInvalidInstanceTargetPath`). A
-//!   relationship/connection authored in a class that targets a *different*
-//!   instance of that class is invalid with its own "is authored in a class but
-//!   refers to an instance of that class" message (C++
-//!   `PcpErrorInvalidInstanceTargetPath`); the *self* instance keeps the generic
-//!   out-of-scope message. This needs a cross-prim check that the target prim
-//!   inherits the class, and it depends on the faithful relocate-target
-//!   translation below (the symmetric-rig case keeps a class connection target at
-//!   its pre-relocation path). A step-by-step plan lives in
-//!   `docs/plans/error-invalid-instance-target-path.md`.
-//!
-//! Two relocate approximations remain even though their former compliance assets
-//! now reproduce byte-for-byte — they are the deeper work the suppressed asset
-//! above needs:
-//!
-//! - Relocate-target translation. A relationship/connection target naming a
-//!   pre-relocation source is remapped by a global `chain_through_relocates` over
-//!   relocates discovered by scanning whichever prims are already cached, so the
-//!   result is traversal-order-dependent (the `TODO` at
-//!   `IndexCache::compose_property_paths`), with a layer-difference proxy in
-//!   `resolve_path_list_op_validated` standing in for the exact rule. The
-//!   faithful form folds relocates into each node's arc maps, so a target is
-//!   retimed only by the Relocate arcs in its own chain (C++
-//!   `PcpBuildFilteredTargetIndex` / `PcpTranslatePathFromNodeToRoot`).
-//! - Cross-arc implied relocations (C++ `_EvalImpliedRelocations`'s graft) are
-//!   unported (`eval_implied_relocations`'s `TODO(relocates)`). The per-node
-//!   child-name fold otherwise reproduces the symmetric-rig and
-//!   multi-relocation-chain cases.
-//!
-//! Beyond the compliance assets, the instancing dump still redirects prototypes
-//! through aliases rather than composing dedicated prototype prims. Goldens that
-//! can never be reproduced byte-for-byte — pxr-internal C++ warnings or Python
-//! tracebacks emitted by the reference test framework — stay on the looser
-//! existence check in `UNREPRODUCIBLE_GOLDEN`.
-//!
-//! ## Permissions (`permission = private`)
+//! # Permissions (`permission = private`)
 //!
 //! A *direct* arc (a reference/inherit/payload/specialize authored at the prim)
 //! to a private target is denied: every node reached through it is marked
-//! [`NodeFlags::PERMISSION_DENIED`] so it stops contributing to value
-//! resolution while staying visible structurally, and the denial is reported as
+//! [`NodeFlags::PERMISSION_DENIED`] so it stops contributing to value resolution
+//! while staying visible structurally, and the denial is reported as
 //! [`Error::ArcPermissionDenied`] (C++ `_AddArc` + `_InertSubtree`). The denied
 //! target paths flow down the `CompositionContext` so descendant prims composed
-//! separately (where the arc is *extended*, not authored) are inerted too. One
-//! piece is still missing:
+//! separately (where the arc is *extended*, not authored) are inerted too.
 //!
-//! - Connection / relationship-target validity. A connection or
-//!   relationship target pointing at a site private relative to where the
-//!   target is authored is invalid and must be dropped (C++
-//!   `_EnforcePermissions` plus connection/target validation). This needs a
-//!   value-resolution surface for target validity and is its own multi-commit
-//!   effort. `NodeFlags::PERMISSION_PRIVATE` / `RESTRICTED` are reserved for it.
-//!
-//! ## Ordered prim children — relocates during the fold
+//! # Ordered prim children
 //!
 //! Child names fold weakest-to-strongest with `primOrder` reapplied per layer
 //! (mirroring C++ `PcpComposeSiteChildNames`). Relocates apply per node during
 //! that fold (`IndexCache::compute_prim_child_names` → `relocates::apply_child_relocates`,
-//! the port of C++ `_ComposePrimChildNamesAtNode`): at each node its layer stack's
-//! relocates rename, remove, or add direct children — a renamed child keeps the
-//! source's position — and every relocation source becomes a prohibited name
-//! removed from the final order, so a scene combining multi-sublayer `primOrder`
-//! with relocates orders children as C++ does.
+//! the port of C++ `_ComposePrimChildNamesAtNode`): at each node its layer
+//! stack's relocates rename, remove, or add direct children — a renamed child
+//! keeps the source's position — and every relocation source becomes a prohibited
+//! name removed from the final order.
 //!
-//! ## Structural specializes
+//! # Structural specializes
 //!
 //! Specializes global weakness (spec 10.4.1) is realized by copying specializes
 //! nodes under the local root (C++ `_PropagateNodeToRoot`, the indexer's
 //! `propagate_node_to_root`): specialize is the weakest arc, so
 //! `finalize_strength_order`'s plain DFS already places the globally-weak band
-//! last and orders it with the faithful `PcpCompareSiblingNodeStrength`.
+//! last and orders it with the C++ `PcpCompareSiblingNodeStrength` comparison.
 //!
-//! ## Lower-priority / opportunistic
+//! # Remaining work
 //!
-//! - Cross-prim parallelism. `IndexCache::ensure_index` composes prims one at a
-//!   time; each build is a pure function of `&LayerGraph`, the parent context,
-//!   and the cached indices, so sibling prims could compose in parallel (see
-//!   the `TODO(rayon)`). The blocker is the shared `indices` map that
-//!   inherit/specialize targets read mid-build — it needs a concurrent map or a
-//!   targets-first build order. The [`PrimIndex`] is already `Send + Sync`;
-//!   keep it so.
-//! - Materialize empty inherit / specialize / variant targets as culled nodes.
-//!   Only empty external reference/payload targets are materialized today; an
-//!   editor that wants those class/variant arcs visible would need the same
-//!   treatment for them.
-//! - Finer-grained change classification. `Changes::did_change` collapses the
-//!   prim and spec tiers into the significant tier (drop the index and every
-//!   descendant). A finer split would rebuild less on a local edit.
+//! - Cross-arc implied relocations — C++ `_EvalImpliedRelocations`'s grandparent
+//!   graft, currently a no-op (`prim_indexer`'s `eval_implied_relocations`,
+//!   `TODO(relocates)`).
+//! - Connection / relationship-target permission validity: a target pointing at a
+//!   site that is private relative to where the target is authored must be dropped
+//!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a
+//!   value-resolution surface for target validity; `NodeFlags::PERMISSION_PRIVATE`
+//!   / `RESTRICTED` are reserved for it.
+//! - Scene-graph instancing: compose dedicated prototype prims instead of
+//!   redirecting prototypes through aliases.
+//! - Materialize empty inherit / specialize / variant targets as culled nodes
+//!   (only empty external reference/payload targets are materialized today).
+//! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.
+//!   Each build is a pure function of `&LayerGraph`, the parent context, and the
+//!   cached indices (`TODO(rayon)`), but the shared `indices` map that
+//!   inherit/specialize targets read mid-build first needs a concurrent map or a
+//!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
+//! - Finer-grained change classification: `Changes::did_change` collapses the prim
+//!   and spec tiers into the significant tier (drop the index and every
+//!   descendant); a finer split would rebuild less per local edit.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -497,6 +470,27 @@ pub enum Error {
         arc: ArcType,
         /// The arc's root in composed namespace.
         arc_root: Path,
+        /// The prim being composed when the target was found.
+        composing: Path,
+    },
+
+    /// A relationship target or attribute connection authored in a class (an
+    /// inherit/specialize node) names an *instance* of that class rather than a
+    /// path within the class (C++ `PcpErrorInvalidInstanceTargetPath`). Pointing
+    /// at a specific instance breaks the invertibility of path translation, so
+    /// the target is dropped. The *self* instance (the one being composed) keeps
+    /// the generic [`InvalidExternalTargetPath`](Self::InvalidExternalTargetPath)
+    /// "outside scope" message instead. Reported while composing the owning prim.
+    #[error("class target {target} on {property} names an instance of the class")]
+    InvalidInstanceTargetPath {
+        /// Whether this is an attribute connection.
+        is_connection: bool,
+        /// The dropped target path, in the authoring node's namespace.
+        target: Path,
+        /// The owning property path, in the authoring node's namespace.
+        property: Path,
+        /// Identifier of the authoring (class) layer.
+        layer: String,
         /// The prim being composed when the target was found.
         composing: Path,
     },

@@ -19,7 +19,6 @@ use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
 use super::prim_index::PrimIndex;
-use super::relocates::chain_through_relocates;
 use super::{LayerGraph, LayerId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
@@ -46,11 +45,26 @@ struct Opinion<'a> {
     offset: LayerOffset,
 }
 
-/// An out-of-scope target/connection path dropped during target index
-/// composition (C++ `PcpErrorInvalidExternalTargetPath`): a target authored
-/// across an arc that does not translate through the arc's own domain. Carries
-/// the node-namespace paths and arc context the diagnostic names.
+/// Why a relationship/connection target was dropped during target composition.
+pub(crate) enum InvalidTargetKind {
+    /// The target does not translate through its arc's domain (C++
+    /// `PcpErrorInvalidExternalTargetPath`): a path outside the arc, or a class
+    /// node's own instance image.
+    External,
+    /// The target translates but, authored in a class, names a *different*
+    /// instance of that class (C++ `PcpErrorInvalidInstanceTargetPath`).
+    Instance,
+}
+
+/// A relationship/connection target dropped during target composition (C++
+/// `PcpBuildFilteredTargetIndex`'s invalid-target reporting). Carries the
+/// node-namespace paths and arc context the diagnostic names. One node's invalid
+/// contribution does not affect another's: the path is dropped from the
+/// contributing node's list-op only, so a valid stronger opinion for the same
+/// path survives.
 pub(crate) struct InvalidTarget {
+    /// Whether the drop is an out-of-scope or an instance-target error.
+    pub kind: InvalidTargetKind,
     /// The dropped target/connection path, in the contributing node's namespace.
     pub target: Path,
     /// The owning property path, in the contributing node's namespace.
@@ -58,10 +72,16 @@ pub(crate) struct InvalidTarget {
     /// Global index of the layer that authored the target.
     pub layer: LayerId,
     /// The arc the target was authored across (selects the "reference" /
-    /// "inherit" / … phrasing).
+    /// "inherit" / … phrasing in the external message).
     pub arc: ArcType,
-    /// The prim, in root namespace, where that arc is introduced.
+    /// The prim, in root namespace, where that arc is introduced (external
+    /// message's arc root).
     pub arc_root: Path,
+    /// The composed (root-namespace) target, for an `Instance` drop. A `delete`
+    /// of this composed path retracts the error (C++
+    /// `_RemoveTargetPathErrorsForPath`); `None` for an `External` drop, which a
+    /// delete never matches.
+    pub composed: Option<Path>,
 }
 
 impl PrimIndex {
@@ -136,24 +156,29 @@ impl PrimIndex {
     }
 
     /// Resolves a path-list-op field (relationship targets / attribute
-    /// connections), also returning the targets dropped for falling outside their
-    /// arc's domain (C++ `PcpBuildFilteredTargetIndex`'s invalid-target
-    /// reporting). A target on an
-    /// arc node (reference, inherit, …) that maps only through the whole-namespace
-    /// root identity — not the arc's own (source→target) translation — names a
-    /// sibling of the arc rather than a prim the arc brings in, so it is invalid:
-    /// it is dropped and returned for diagnostics. Targets on the local root node
-    /// keep their identity mapping.
+    /// connections), also returning the targets dropped during composition (C++
+    /// `PcpBuildFilteredTargetIndex` / `_PathTranslateCallback`).
+    ///
+    /// Each authored target is translated to the root namespace through its
+    /// contributing node's map (C++ `PcpTranslatePathFromNodeToRoot`). A target
+    /// that does not translate is dropped as
+    /// [`External`](InvalidTargetKind::External); a target whose
+    /// `(target, property)` is in `instance_targets` (a class target naming a
+    /// different instance of that class, precomputed cross-prim by the cache) is
+    /// dropped as [`Instance`](InvalidTargetKind::Instance). Both drops apply to
+    /// the contributing node's list-op only, so a valid stronger opinion for the
+    /// same path survives the merge. A `delete` of a composed path retracts a
+    /// matching `Instance` error (C++ `_RemoveTargetPathErrorsForPath`).
     pub(crate) fn resolve_path_list_op_validated(
         &self,
         field: FieldKey,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-        relocates: &[(Path, Path)],
-        escaped: &[(Path, LayerId)],
+        instance_targets: &HashSet<(Path, Path)>,
     ) -> Result<(Vec<Path>, Vec<InvalidTarget>)> {
         let mut ops = Vec::new();
         let mut invalid = Vec::new();
+        let mut deleted_composed: HashSet<Path> = HashSet::new();
         // An explicit opinion replaces everything weaker, so weaker opinions never
         // contribute and are not validated — only their stronger survivors are.
         let mut seen_explicit = false;
@@ -172,71 +197,67 @@ impl PrimIndex {
                 _ => continue,
             };
             let is_explicit = list_op.explicit;
-            let map = self.faithful_map_to_root(node);
-            // Only arcs that translate namespace (reference/payload/inherit/
-            // specialize) restrict a target's scope. Variant and relocate arcs
-            // keep the prim's own namespace, so their targets map through the
-            // identity legitimately and are not scope-checked.
-            let scope_checked = matches!(
-                node.arc,
-                ArcType::Reference | ArcType::Payload | ArcType::Inherit | ArcType::Specialize
-            );
-            let mut op = if !scope_checked || seen_explicit {
-                Self::map_path_list_op_to_root(list_op, &query_path, &map)
-            } else {
-                let arc = node.arc;
-                let arc_root = node.parent.map_or_else(Path::abs_root, |p| self.node(p).path.clone());
-                // A target on an arc node is invalid when it does not map through
-                // the arc's domain, or when it maps under a relocation source whose
-                // target escaped the arc's scope (the prim it names was moved out).
-                let mut report = |path: Path| {
-                    let absolute = query_path.make_absolute(&path);
-                    let mapped = map.map_source_to_target_in_scope(&absolute);
-                    // A relocate affects only targets brought in *through* an arc,
-                    // not those authored in the relocate's own layer, so the
-                    // escape applies only when the target's layer differs.
-                    // TODO: this layer-difference is a proxy for the faithful rule —
-                    // whether the target crosses a Relocate arc in this node's map
-                    // chain (C++ `PcpTranslatePathFromNodeToRoot`). Replace once
-                    // relocates are folded into the node arc maps.
-                    let out_of_scope = mapped
-                        .as_ref()
-                        .is_some_and(|m| escaped.iter().any(|(s, rl)| *rl != layer && m.has_prefix(s)));
-                    match mapped {
-                        Some(m) if !out_of_scope => Some(m),
-                        _ => {
-                            invalid.push(InvalidTarget {
-                                target: absolute,
-                                property: query_path.as_ref().clone(),
-                                layer,
-                                arc,
-                                arc_root: arc_root.clone(),
-                            });
-                            None
-                        }
+            let map = self.map_to_root_for_targets(node);
+            let arc = node.arc;
+            let arc_root = node.parent.map_or_else(Path::abs_root, |p| self.node(p).path.clone());
+            let report = !seen_explicit;
+            // Translate one authored target, dropping (and recording, when not
+            // shadowed) an out-of-scope or instance target.
+            let mut authored = |path: Path| {
+                let absolute = query_path.make_absolute(&path);
+                let mapped = map.translate_to_target(&absolute);
+                let (kind, composed) = match &mapped {
+                    Some(t) if instance_targets.contains(&(absolute.clone(), query_path.as_ref().clone())) => {
+                        (InvalidTargetKind::Instance, Some(t.clone()))
                     }
+                    Some(_) => return mapped,
+                    None => (InvalidTargetKind::External, None),
                 };
-                // Deletes and reorders map silently; only authored targets are reported.
-                let silent = |path: Path| map.map_source_to_target_in_scope(&query_path.make_absolute(&path));
-                sdf::PathListOp {
-                    explicit: list_op.explicit,
-                    explicit_items: list_op.explicit_items.into_iter().filter_map(&mut report).collect(),
-                    added_items: list_op.added_items.into_iter().filter_map(&mut report).collect(),
-                    prepended_items: list_op.prepended_items.into_iter().filter_map(&mut report).collect(),
-                    appended_items: list_op.appended_items.into_iter().filter_map(&mut report).collect(),
-                    deleted_items: list_op.deleted_items.into_iter().filter_map(silent).collect(),
-                    ordered_items: list_op.ordered_items.into_iter().filter_map(silent).collect(),
+                if report {
+                    invalid.push(InvalidTarget {
+                        kind,
+                        target: absolute,
+                        property: query_path.as_ref().clone(),
+                        layer,
+                        arc,
+                        arc_root: arc_root.clone(),
+                        composed,
+                    });
                 }
+                None
+            };
+            let op = sdf::PathListOp {
+                explicit: list_op.explicit,
+                explicit_items: list_op.explicit_items.into_iter().filter_map(&mut authored).collect(),
+                added_items: list_op.added_items.into_iter().filter_map(&mut authored).collect(),
+                prepended_items: list_op.prepended_items.into_iter().filter_map(&mut authored).collect(),
+                appended_items: list_op.appended_items.into_iter().filter_map(&mut authored).collect(),
+                // Deletes and reorders translate silently; a deleted composed path
+                // also retracts a matching instance error below.
+                deleted_items: list_op
+                    .deleted_items
+                    .into_iter()
+                    .filter_map(|p| {
+                        let mapped = map.translate_to_target(&query_path.make_absolute(&p));
+                        if let Some(d) = &mapped {
+                            deleted_composed.insert(d.clone());
+                        }
+                        mapped
+                    })
+                    .collect(),
+                ordered_items: list_op
+                    .ordered_items
+                    .into_iter()
+                    .filter_map(|p| map.translate_to_target(&query_path.make_absolute(&p)))
+                    .collect(),
             };
             seen_explicit |= is_explicit;
-            // Targets brought in through an arc land at their post-relocation paths;
-            // a local (root-node) target stays as authored — naming a pre-relocation
-            // source is then an (invalid) author error, not silently "fixed".
-            if node.arc != ArcType::Root {
-                op = chain_path_list_op_relocates(op, relocates);
-            }
             ops.push(op);
         }
+        // A delete of a composed target retracts the instance error for it (C++
+        // `_RemoveTargetPathErrorsForPath`); an external drop has no composed path
+        // and is never matched.
+        invalid.retain(|inv| inv.composed.as_ref().is_none_or(|c| !deleted_composed.contains(c)));
         Ok((compose_list_ops(&ops), invalid))
     }
 
@@ -267,47 +288,26 @@ impl PrimIndex {
                 Value::PathVec(paths) => sdf::PathListOp::explicit(paths),
                 _ => continue,
             };
-            let map = self.faithful_map_to_root(node);
+            let map = self.map_to_root_for_targets(node);
             ops.push(Self::map_path_list_op_to_root(list_op, &query_path, &map));
         }
         Ok(ops)
     }
 
-    /// Recomputes a node's map to the root namespace with the faithful function
-    /// composition ([`MapFunction::compose_to_root`]), used when mapping the
-    /// authored target/connection paths of a property.
+    /// A node's map to the root namespace, used when mapping the authored
+    /// target/connection paths of a property (C++ `PcpNodeRef::GetMapToRoot`).
     ///
-    /// The node's stored `map_to_root` is accumulated with the plain
-    /// [`compose`](MapFunction::compose), which keeps reverse lookups (variant
-    /// selection, relocates) unambiguous at the cost of dropping the identity
-    /// preimage a variant strip introduces. A connection target naming a prim
-    /// beside the arc's own subtree (e.g. `</Model.attr>` authored inside a
-    /// variant of `/Model`) only maps through that dropped pair, so target
-    /// resolution rebuilds the map faithfully from the node's arc chain. The two
-    /// agree for every injective arc; they differ only where a variant collapses
-    /// its `{set=sel}` segment.
-    ///
-    /// TODO(perf): this re-walks the arc chain and re-folds `compose_to_root` for
-    /// every contributing opinion of a target/connection field, re-doing the work
-    /// for ancestor prefixes shared across a property's node stack. It is a cold
-    /// path (target/connection resolution, not value resolution); memoize the
-    /// faithful map per node if it ever shows up in a profile.
-    fn faithful_map_to_root(&self, node: &Node) -> MapFunction {
-        // Collect the `map_to_parent` chain node-first up to the tree root.
-        let mut chain = vec![&node.map_to_parent];
-        let mut cur = node;
-        while let Some(parent) = cur.parent {
-            let p = self.node(parent);
-            chain.push(&p.map_to_parent);
-            cur = p;
-        }
-        // Fold root-first so each arc's strip composes onto the accumulated map.
-        let mut iter = chain.into_iter().rev();
-        let mut acc = iter.next().expect("chain holds at least the node itself").clone();
-        for map in iter {
-            acc = acc.compose_to_root(map);
-        }
-        acc
+    /// This is the node's stored `map_to_root` — the composition of each arc's
+    /// `map_to_parent` from the node up to the tree root. [`compose`](MapFunction::compose)
+    /// already carries every relocate the node crosses and enforces invertibility,
+    /// so target translation reads it directly.
+    pub(crate) fn map_to_root_for_targets(&self, node: &Node) -> MapFunction {
+        // Strip variant selections so the map matches C++ (whose maps never carry
+        // selections — a variant arc's map is identity). This collapses a variant
+        // node's strip pair to the identity, so a sibling connection target
+        // authored in a variant is not shadowed by the strip pair in the
+        // invertibility check.
+        node.map_to_root.without_variant_selections()
     }
 
     /// Resolves the deleted target/connection paths of a path-list-op field:
@@ -749,17 +749,6 @@ fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> V
         result = op.compose_over(&result);
     }
     result
-}
-
-/// Sends every path in a target/connection list-op through `relocates` to its
-/// post-relocation location (C++ `ComputeRelationshipTargetPaths` /
-/// `ComputeAttributeConnectionPaths` apply the layer stack's relocates to
-/// composed targets). Used only for targets authored across an arc.
-fn chain_path_list_op_relocates(mut op: sdf::PathListOp, relocates: &[(Path, Path)]) -> sdf::PathListOp {
-    for p in op.iter_mut() {
-        *p = chain_through_relocates(p, relocates, None);
-    }
-    op
 }
 
 /// Maps time sample keys from layer time to stage time through `offset`

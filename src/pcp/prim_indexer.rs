@@ -56,8 +56,8 @@
 //! root (`_PropagateNodeToRoot`); a specializes authored across a reference is
 //! carried to every namespace level by the implied-class mechanism (since
 //! specializes are class-based), and each level's placeholder is copied to the
-//! root too. The copies are ordered among themselves by the faithful
-//! `PcpCompareSiblingNodeStrength`, placing the globally-weak band after every
+//! root too. The copies are ordered among themselves by the C++
+//! `PcpCompareSiblingNodeStrength` comparison, placing the globally-weak band after every
 //! other opinion (spec 10.4.1). Propagation is add-if-absent on site, so the
 //! first placeholder to reach a root site claims the copy and fixes its origin;
 //! the copy carries the strongest origin because the seed scan
@@ -85,7 +85,7 @@
 //! re-evaluate their arcs at the deepened path); and relocates (`eval_node_relocations`
 //! composes a relocation source as a sub-index and grafts it, with the
 //! prohibited-prim elision for salted earth). Known gaps with their reasons are
-//! tracked inline and in the `SKIP_PCP_COMPLIANCE` list: variant-gated and
+//! tracked inline and in the [`pcp` module docs](super): variant-gated and
 //! cross-arc implied relocations (`eval_implied_relocations`), specializes/inherit
 //! authored inside a selected variant, and relationship/connection target
 //! remapping through relocates.

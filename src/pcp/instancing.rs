@@ -58,7 +58,7 @@ pub(super) struct PrototypeRegistry {
 ///    not a separately composed namespace, so a query on the prototype *root*
 ///    itself (`/__Prototype_N`, no tail) reflects the canonical instance's
 ///    root — which keeps that instance's allowed root property overrides (spec
-///    11.3.3 permits overriding property values at an instance root). A faithful
+///    11.3.3 permits overriding property values at an instance root). A dedicated
 ///    `/__Prototype_N` composed as its own root would drop those overrides too.
 ///    The descendant suppression here only fixes child names and the subtree
 ///    (the spec's "overrides on descendants are ignored" rule); the prototype
