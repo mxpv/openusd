@@ -77,3 +77,42 @@ fn stale_resolved_path_cleared() {
     assert_eq!(asset.as_str(), "./missing.png");
     assert_eq!(asset.resolved_path(), None);
 }
+
+/// An asset path authored as a variable expression is evaluated against the
+/// layer's `expressionVariables` before anchoring and resolution.
+#[test]
+fn expression_evaluated_and_resolved() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let tex = dir.path().join("tex.png");
+    fs::write(&tex, b"x").expect("write asset");
+    let usda = dir.path().join("scene.usda");
+    fs::write(
+        &usda,
+        concat!(
+            "#usda 1.0\n",
+            "(\n",
+            "    expressionVariables = {\n",
+            "        string NAME = \"tex\"\n",
+            "    }\n",
+            ")\n",
+            "def Material \"M\"\n{\n",
+            "    asset inputs:file = @`\"./${NAME}.png\"`@\n",
+            "}\n",
+        ),
+    )
+    .expect("write layer");
+
+    let stage = Stage::open(usda.to_str().unwrap()).expect("open stage");
+    let canonical = tex.canonicalize().unwrap().to_string_lossy().into_owned();
+
+    let asset = stage
+        .attribute_at(sdf::path("/M.inputs:file").unwrap())
+        .get::<sdf::AssetPath>()
+        .unwrap()
+        .expect("asset value");
+    // Authored path keeps the expression; evaluated path substitutes the var.
+    assert_eq!(asset.as_str(), "`\"./${NAME}.png\"`");
+    assert_eq!(asset.evaluated_path(), Some("./tex.png"));
+    assert_eq!(asset.asset_path(), "./tex.png");
+    assert_eq!(asset.resolved_path(), Some(canonical.as_str()));
+}

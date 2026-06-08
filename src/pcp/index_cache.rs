@@ -232,15 +232,15 @@ impl IndexCache {
 
         self.ensure_index(graph, &prim)?;
 
-        // TODO: only the default-sourced returns below anchor their `asset`
+        // TODO: only the default-sourced returns below resolve their `asset`
         // values (via `anchor_asset_paths`); values from time samples
         // (`resolve_local_time_samples` / `resolve_time_samples`) and value
-        // clips (`resolve_clip_value`) are returned with `resolved_path` unset.
-        // To close this, those resolvers must surface the contributing layer so
-        // it can be anchored — note a clip value anchors against the *clip
-        // layer*, not a host-stack opinion, so it cannot reuse
-        // `asset_anchor` / `strongest_layer` directly. Asset-valued time samples
-        // and clips are rare in practice.
+        // clips (`resolve_clip_value`) are returned with `evaluated_path` and
+        // `resolved_path` unset. To close this, those resolvers must surface the
+        // contributing layer/node so it can be anchored and its expression
+        // variables composed — note a clip value anchors against the *clip
+        // layer*, not a host-stack opinion, so it cannot reuse `asset_context`
+        // directly. Asset-valued time samples and clips are rare in practice.
 
         // 1) Local time samples take precedence over clip data.
         if let Some(samples) = self.indices[&prim].resolve_local_time_samples(graph, Some(&suffix), &local_layers)? {
@@ -779,18 +779,21 @@ impl IndexCache {
     ) -> Option<Value> {
         match value? {
             Value::AssetPath(asset) => {
-                let anchor = self.asset_anchor(graph, prim_path, field, prop_suffix);
+                let needs_expr = sdf::expr::is_expression(asset.as_str());
+                let (anchor, vars) = self.asset_context(graph, prim_path, field, prop_suffix, needs_expr);
                 Some(Value::AssetPath(Self::resolve_asset_path(
                     graph,
                     asset,
                     anchor.as_ref(),
+                    &vars,
                 )))
             }
             Value::AssetPathVec(assets) => {
-                let anchor = self.asset_anchor(graph, prim_path, field, prop_suffix);
+                let needs_expr = assets.iter().any(|a| sdf::expr::is_expression(a.as_str()));
+                let (anchor, vars) = self.asset_context(graph, prim_path, field, prop_suffix, needs_expr);
                 let resolved = assets
                     .into_iter()
-                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor.as_ref()))
+                    .map(|asset| Self::resolve_asset_path(graph, asset, anchor.as_ref(), &vars))
                     .collect();
                 Some(Value::AssetPathVec(resolved))
             }
@@ -798,35 +801,72 @@ impl IndexCache {
         }
     }
 
-    /// The location to anchor `field`'s asset value against — the resolved
-    /// location of the strongest opinion's layer, looked up on the prim's
-    /// cached index. Resolved once so every element of an `asset[]` reuses it.
-    fn asset_anchor(
+    /// The inputs for resolving `field`'s asset value, taken from its strongest
+    /// opinion: the resolved location of that opinion's layer (the anchor for a
+    /// relative path) and, when `needs_expr` is set, the `expressionVariables`
+    /// in scope at that opinion's node. Computed once so every element of an
+    /// `asset[]` reuses it; the variables are read only when an authored path
+    /// is actually an expression.
+    fn asset_context(
         &self,
         graph: &LayerGraph,
         prim_path: &Path,
         field: &str,
         prop_suffix: Option<&str>,
-    ) -> Option<ResolvedPath> {
-        let layer = self
-            .indices
-            .get(prim_path)
-            .and_then(|index| index.strongest_layer(field, graph, prop_suffix));
-        graph.anchor_location(layer)
+        needs_expr: bool,
+    ) -> (Option<ResolvedPath>, HashMap<String, Value>) {
+        let Some(index) = self.indices.get(prim_path) else {
+            return (None, HashMap::new());
+        };
+        let Some((layer, node)) = index.strongest_opinion(field, graph, prop_suffix) else {
+            return (None, HashMap::new());
+        };
+        let anchor = graph.anchor_location(Some(layer));
+        let vars = if needs_expr {
+            index.composed_expr_vars(node, graph)
+        } else {
+            HashMap::new()
+        };
+        (anchor, vars)
     }
 
-    /// Resolves `asset`'s authored path against `anchor` (its source layer's
-    /// resolved location) and returns it with the resolved path recorded.
+    /// Resolves `asset` against `anchor` (its source layer's resolved location)
+    /// and returns it with the evaluated and resolved paths recorded.
     ///
-    /// Resolution owns the derived resolved path: the result is rebuilt from
-    /// the authored path so any prior resolved path is discarded, and it is set
-    /// again only when the authored path is non-empty and resolves.
-    fn resolve_asset_path(graph: &LayerGraph, asset: sdf::AssetPath, anchor: Option<&ResolvedPath>) -> sdf::AssetPath {
+    /// A variable expression is evaluated against `expr_vars` to the path used
+    /// as input to resolution (C++ `SdfAssetPath::GetAssetPath`); a malformed
+    /// or non-string expression leaves both derived paths unset. Resolution
+    /// owns the derived paths: the result is rebuilt from the authored path so
+    /// any prior evaluated/resolved path is discarded.
+    ///
+    /// TODO: a failed expression is dropped silently, unlike a reference/payload
+    /// arc asset-path expression which records `Error::InvalidExpression`
+    /// (`prim_index::resolve_arc_asset_path`). Surfacing it needs an error
+    /// channel through value resolution (`value_at` returns `Result<Option>` but
+    /// this runs after the value is produced).
+    fn resolve_asset_path(
+        graph: &LayerGraph,
+        asset: sdf::AssetPath,
+        anchor: Option<&ResolvedPath>,
+        expr_vars: &HashMap<String, Value>,
+    ) -> sdf::AssetPath {
         let mut asset = sdf::AssetPath::new(asset.into_string());
         if asset.is_empty() {
             return asset;
         }
-        let identifier = graph.resolver().create_identifier(asset.as_str(), anchor);
+        // The per-element `is_expression` is load-bearing for `asset[]`: the
+        // caller's `needs_expr` is true if *any* element is an expression, so a
+        // plain element in a mixed array must still skip evaluation.
+        let identifier = if sdf::expr::is_expression(asset.as_str()) {
+            let Ok(evaluated) = sdf::expr::evaluate_asset_path(asset.as_str(), expr_vars) else {
+                return asset;
+            };
+            let identifier = graph.resolver().create_identifier(&evaluated, anchor);
+            asset.set_evaluated_path(evaluated);
+            identifier
+        } else {
+            graph.resolver().create_identifier(asset.as_str(), anchor)
+        };
         if let Some(resolved) = graph.resolver().resolve(&identifier) {
             asset.set_resolved_path(resolved.to_string_lossy().into_owned());
         }

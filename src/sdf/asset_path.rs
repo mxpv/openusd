@@ -9,31 +9,33 @@ use super::{Value, ValueConversionError};
 ///
 /// This is the Rust analog of USD's
 /// [`SdfAssetPath`](https://openusd.org/release/api/class_sdf_asset_path.html).
-/// It carries the authored path always, and the resolved path once value
-/// resolution has anchored and resolved it (C++ also carries an evaluated
-/// path with `expressionVariables` substituted — see the TODO below).
+/// It carries the authored path always, plus — once value resolution has
+/// processed it — the evaluated path (the authored path with its
+/// `expressionVariables` substituted) and the resolved path (the result of
+/// anchoring and resolving the evaluated path).
 ///
-/// As layer data an asset path holds only its authored path; the resolved
-/// path is filled in by value resolution ([`Attribute::get`](crate::usd::Attribute::get)),
-/// anchored to the layer of the strongest opinion. Identity — equality,
-/// hashing, and ordering — is therefore the authored path alone; the resolved
-/// path is a derived annotation that does not affect it (this differs from
-/// C++ `operator==`, which compares both).
+/// As layer data an asset path holds only its authored path; the evaluated and
+/// resolved paths are filled in by value resolution
+/// ([`Attribute::get`](crate::usd::Attribute::get)), which evaluates any
+/// variable expression and anchors the result to the layer of the strongest
+/// opinion. Identity — equality, hashing, and ordering — is therefore the
+/// authored path alone; the evaluated and resolved paths are derived
+/// annotations that do not affect it (this differs from C++ `operator==`,
+/// which compares all three).
 ///
 /// The string-like traits ([`Deref`] to `str`, [`AsRef`], [`Borrow`],
 /// [`Display`](std::fmt::Display), and `PartialEq` against string types) let
 /// it stand in for its authored path: `&asset` coerces to `&str`, and
 /// `asset == "foo.usd"` compares directly.
-///
-// TODO: C++ `SdfAssetPath` also carries an evaluated path (the authored path
-// with `expressionVariables` substituted), exposed via `GetEvaluatedPath` /
-// `SetEvaluatedPath` and preferred by `GetAssetPath` as the input to
-// resolution. Add it once value resolution evaluates expressions into the
-// asset path — until then it would be an inert field with no source of truth.
 #[derive(Debug, Clone, Default)]
 pub struct AssetPath {
-    /// The path as authored in the layer, before asset resolution.
+    /// The path as authored in the layer, before expression evaluation or
+    /// asset resolution.
     pub authored_path: String,
+    /// The authored path with its variable expression evaluated, set by value
+    /// resolution; `None` when the authored path is not an expression or has
+    /// not been evaluated (e.g. raw layer data).
+    evaluated_path: Option<String>,
     /// The result of asset resolution, set by value resolution; `None` for an
     /// asset path that has not been resolved (e.g. raw layer data).
     resolved_path: Option<String>,
@@ -45,6 +47,7 @@ impl AssetPath {
     pub fn new(authored_path: impl Into<String>) -> Self {
         Self {
             authored_path: authored_path.into(),
+            evaluated_path: None,
             resolved_path: None,
         }
     }
@@ -54,13 +57,32 @@ impl AssetPath {
     pub fn with_resolved_path(authored_path: impl Into<String>, resolved_path: impl Into<String>) -> Self {
         Self {
             authored_path: authored_path.into(),
+            evaluated_path: None,
             resolved_path: Some(resolved_path.into()),
         }
     }
 
-    /// Borrows the authored path, before resolution.
+    /// Borrows the authored path, before expression evaluation or resolution.
     pub fn as_str(&self) -> &str {
         &self.authored_path
+    }
+
+    /// The path used as input to asset resolution: the evaluated path if value
+    /// resolution has substituted an expression, otherwise the authored path
+    /// (C++ `GetAssetPath`).
+    pub fn asset_path(&self) -> &str {
+        self.evaluated_path.as_deref().unwrap_or(&self.authored_path)
+    }
+
+    /// The authored path with its variable expression evaluated, if value
+    /// resolution has set it, else `None` (C++ `GetEvaluatedPath`).
+    pub fn evaluated_path(&self) -> Option<&str> {
+        self.evaluated_path.as_deref()
+    }
+
+    /// Sets the evaluated path (C++ `SetEvaluatedPath`).
+    pub fn set_evaluated_path(&mut self, evaluated_path: impl Into<String>) {
+        self.evaluated_path = Some(evaluated_path.into());
     }
 
     /// The resolved path if value resolution has set it, else `None`

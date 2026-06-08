@@ -1441,6 +1441,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// authored `expressionVariables`; the closer-to-root stack overrides the
     /// farther one (the referencing layer stack wins over the referenced one).
     ///
+    /// `PrimIndex::composed_expr_vars` is the value-resolution-time twin of this
+    /// walk over the finished index; keep the two in sync.
+    ///
     /// TODO(expr-arcs): a reference authored inside a sub-root arc target is
     /// composed in a nested sub-build whose graph holds only the target's
     /// subtree, so this walk stops at the sub-build root and misses the outer
