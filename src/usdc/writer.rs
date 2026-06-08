@@ -477,7 +477,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
                 Ok(rep_inline(Type::Token, idx as u64))
             }
             Value::AssetPath(s) => {
-                let idx = self.tokens.intern(s.clone());
+                let idx = self.tokens.intern(s.authored_path.clone());
                 Ok(rep_inline(Type::AssetPath, idx as u64))
             }
             Value::String(s) => {
@@ -565,6 +565,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
             // Strings stored in their own arrays (StringVec also via token lookup).
             Value::StringVec(v) => self.write_string_vec(Type::String, v),
+            Value::AssetPathVec(v) => self.write_string_vec(Type::AssetPath, v),
             Value::TokenVec(v) => self.write_token_vec(Type::Token, v),
 
             // Complex heap types.
@@ -799,11 +800,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_string_vec(&mut self, ty: Type, v: &[String]) -> Result<ValueRep> {
+    fn write_string_vec(&mut self, ty: Type, v: &[impl AsRef<str>]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for s in v {
-            let sidx = self.intern_string(s);
+            let sidx = self.intern_string(s.as_ref());
             self.write_pod(&sidx)?;
         }
         Ok(rep_heap(ty, off, true))

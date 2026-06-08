@@ -183,8 +183,7 @@ impl NodeGraphNodeAPI {
     /// An icon image shown on the collapsed node.
     /// C++ `UsdUINodeGraphNodeAPI::GetIconAttr`.
     ///
-    /// Type `uniform asset`. Fetch with `get::<sdf::Value>()?` (an
-    /// [`sdf::Value::AssetPath`]).
+    /// Type `uniform asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn icon_attr(&self) -> Attribute {
         self.attribute(tok::A_NODE_ICON)
     }

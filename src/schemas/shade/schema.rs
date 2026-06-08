@@ -77,8 +77,7 @@ impl Shader {
     /// `.osl` file); pairs with `info:implementationSource = "sourceAsset"`.
     /// C++ `UsdShadeShader::GetSourceAssetAttr`.
     ///
-    /// Type `uniform asset`. Fetch with `get::<sdf::Value>()?` (an
-    /// [`sdf::Value::AssetPath`]).
+    /// Type `uniform asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn source_asset_attr(&self) -> Attribute {
         self.attribute(tok::A_INFO_SOURCE_ASSET)
     }

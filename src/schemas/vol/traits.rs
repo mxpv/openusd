@@ -28,7 +28,7 @@ pub trait FieldAsset: FieldBase {
     /// [`Field3DAsset`](super::Field3DAsset)). Animatable via time samples.
     /// C++ `UsdVolFieldAsset::GetFilePathAttr`.
     ///
-    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::AssetPath`]).
+    /// Type `asset`. Fetch with `get::<sdf::AssetPath>()?`.
     fn file_path_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_FILE_PATH)
     }

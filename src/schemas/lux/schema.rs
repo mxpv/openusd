@@ -150,7 +150,7 @@ impl RectLight {
     /// A color texture image mapped across the rectangle to modulate the
     /// emitted light, e.g. a softbox or gobo. C++ `UsdLuxRectLight::GetTextureFileAttr`.
     ///
-    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
+    /// Type `asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn texture_file_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FILE)
     }
@@ -362,7 +362,7 @@ impl DomeLight {
     /// The environment image lighting the scene from the surrounding sphere,
     /// typically a high-dynamic-range lat-long map. C++ `UsdLuxDomeLight::GetTextureFileAttr`.
     ///
-    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
+    /// Type `asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn texture_file_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FILE)
     }
@@ -579,7 +579,7 @@ impl ShapingAPI {
     /// An IES photometric profile (`.ies`) describing the light's real-world
     /// angular intensity distribution. C++ `UsdLuxShapingAPI::GetShapingIesFileAttr`.
     ///
-    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a `sdf::Value::AssetPath`).
+    /// Type `asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn ies_file_attr(&self) -> Attribute {
         self.attribute(tok::A_SHAPING_IES_FILE)
     }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::schemas::common::{get_typed, get_with_api, value_as_asset_str};
+use crate::schemas::common::{get_typed, get_with_api};
 use crate::sdf::{self, FieldKey, Value};
 use crate::usd::{Attribute, Prim, Stage};
 
@@ -34,7 +34,7 @@ impl SpatialAudio {
     /// Path to the audio file to play (M4A, MP3, or WAV in USDZ, by preference).
     /// C++ `UsdMediaSpatialAudio::GetFilePathAttr`.
     ///
-    /// Type `asset`. Fetch with `get::<sdf::Value>()?` (a [`sdf::Value::AssetPath`]).
+    /// Type `asset`. Fetch with `get::<sdf::AssetPath>()?`.
     pub fn file_path_attr(&self) -> Attribute {
         self.attribute(tok::A_FILE_PATH)
     }
@@ -193,7 +193,7 @@ impl AssetPreviewsAPI {
             .and_then(|d| nested_dict(d, tok::THUMBNAILS))
             .and_then(|d| nested_dict(d, tok::PREVIEW_DEFAULT))
             .and_then(|d| d.get(tok::DEFAULT_IMAGE));
-        Ok(leaf.and_then(value_as_asset_str).map(str::to_owned))
+        Ok(leaf.and_then(Value::as_str).map(str::to_owned))
     }
 
     /// Author the default thumbnail image path under the prim's `assetInfo`
@@ -215,7 +215,7 @@ impl AssetPreviewsAPI {
                 let previews = nested_dict_mut(&mut asset_info, tok::PREVIEWS);
                 let thumbnails = nested_dict_mut(previews, tok::THUMBNAILS);
                 let default = nested_dict_mut(thumbnails, tok::PREVIEW_DEFAULT);
-                default.insert(tok::DEFAULT_IMAGE.to_string(), Value::AssetPath(image));
+                default.insert(tok::DEFAULT_IMAGE.to_string(), Value::AssetPath(image.into()));
                 Value::Dictionary(asset_info)
             },
         )?;

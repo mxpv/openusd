@@ -123,7 +123,10 @@ impl ClipSet {
             .get(keys::PRIM_PATH)
             .and_then(as_string)
             .and_then(|s| Path::new(&s).ok());
-        let manifest_asset = set.get(keys::MANIFEST_ASSET_PATH).and_then(as_asset);
+        let manifest_asset = set
+            .get(keys::MANIFEST_ASSET_PATH)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
 
         // Explicit form wins; otherwise expand a template set.
         let (asset_paths, active, times) = match set.get(keys::ASSET_PATHS).and_then(as_string_vec) {
@@ -259,7 +262,10 @@ type TemplateExpansion = (Vec<String>, Vec<(f64, usize)>, Vec<(f64, f64)>);
 /// fractional `stride` accumulates without binary-float drift, matching
 /// C++ `Usd_ClipSetDefinition` template derivation.
 fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
-    let template = set.get(keys::TEMPLATE_ASSET_PATH).and_then(as_asset)?;
+    let template = set
+        .get(keys::TEMPLATE_ASSET_PATH)
+        .and_then(Value::as_str)
+        .map(str::to_owned)?;
     let start = set.get(keys::TEMPLATE_START_TIME).and_then(as_f64)?;
     let end = set.get(keys::TEMPLATE_END_TIME).and_then(as_f64)?;
     let stride = set.get(keys::TEMPLATE_STRIDE).and_then(as_f64)?;
@@ -425,18 +431,11 @@ fn as_bool(value: &Value) -> Option<bool> {
     }
 }
 
-fn as_asset(value: &Value) -> Option<String> {
-    match value {
-        Value::AssetPath(s) | Value::String(s) | Value::Token(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// Extracts a string list from an `asset[]`/`string[]`/`token[]` value. The
-/// USDA parser stores `asset[]` arrays as [`Value::StringVec`].
+/// Extracts a string list from an `asset[]`/`string[]`/`token[]` value.
 fn as_string_vec(value: &Value) -> Option<Vec<String>> {
     match value {
         Value::StringVec(v) | Value::TokenVec(v) => Some(v.clone()),
+        Value::AssetPathVec(v) => Some(v.iter().map(|a| a.authored_path.clone()).collect()),
         _ => None,
     }
 }

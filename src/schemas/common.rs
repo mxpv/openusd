@@ -2,7 +2,7 @@
 //!
 //! The view-gate helpers ([`get_typed`], [`get_typed_any`], [`get_with_api`])
 //! back the type-gated `get` lookups every trait-view family shares, and the
-//! small value readers ([`read_token`], [`value_as_asset_str`]) plus the
+//! small value reader ([`read_token`]) plus the
 //! [`impl_token_value!`] macro cover the decoding that would otherwise be
 //! duplicated verbatim. Attribute *authoring* is inlined per family via the
 //! [`Attribute`](crate::usd::Attribute) builder, so no shared authoring
@@ -29,14 +29,6 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
         Some(Value::Token(s) | Value::String(s)) => Some(s),
         _ => None,
     })
-}
-
-/// Coerce an `asset` (or `string` / `token`) value to its path string.
-pub(crate) fn value_as_asset_str(value: &Value) -> Option<&str> {
-    match value {
-        Value::AssetPath(s) | Value::String(s) | Value::Token(s) => Some(s),
-        _ => None,
-    }
 }
 
 /// Wrap `path` as a concrete view's `Prim` if its composed `typeName` equals

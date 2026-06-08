@@ -55,7 +55,7 @@ that broader spec behavior can be considered fully covered.
 
 | Feature | Spec | Status | Version | Notes |
 |---|---|---|---|---|
-| Resource identifiers (URI) | `9.2` | :white_check_mark: | `0.1.1` | Asset paths as strings |
+| Resource identifiers (URI) | `9.2` | :white_check_mark: | `0.1.1` | Asset paths via `sdf::AssetPath` (`asset` / `asset[]`) |
 | Relative resource identifiers (anchored) | `9.4.1` | :white_check_mark: | `0.2.0` | `./` and `../` resolution relative to containing layer |
 | Non-anchored identifiers (search paths) | `9.4.2` | :white_check_mark: | `0.2.0` | `DefaultResolver` with search paths |
 | Resolving identifiers to locations | `9.5` | :white_check_mark: | `0.2.0` | `Resolver` trait |
