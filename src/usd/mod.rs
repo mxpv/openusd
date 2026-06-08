@@ -5,6 +5,7 @@
 //! `Usd*` surface under `openusd::usd`.
 
 mod attribute;
+mod clips;
 mod collection;
 mod connections;
 mod interp;
@@ -14,6 +15,7 @@ mod schema;
 mod stage;
 
 pub use attribute::Attribute;
+pub use clips::ClipsAPI;
 pub use collection::{
     apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule,
     MembershipQuery, PathExpansionRuleMap, PathRule,
