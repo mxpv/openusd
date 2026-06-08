@@ -1,22 +1,24 @@
 //! Relocates: non-destructive namespace remapping.
 //!
-//! The [`Relocates`] struct encapsulates all relocate logic — extracting
-//! `layerRelocates` from layer metadata, computing effective relocates in
-//! composed namespace, finding pre-relocation source paths, and merging
-//! relocate-arc nodes into prim indices. It is an isolated object that
-//! does not reference [`Cache`](super::cache::Cache) directly; all
-//! external data (layer stack, cached indices, cached contexts) is passed
-//! in through method parameters.
+//! Stateless free functions covering all relocate logic — extracting
+//! `layerRelocates` from layer metadata ([`validate_layer_relocates`]),
+//! computing effective relocates in composed namespace
+//! ([`effective_relocates`] / [`effective_and_escaped`]), chaining transitive
+//! relocates ([`chain_through_relocates`]), and folding relocated child names
+//! ([`apply_child_relocates`]). Each reads the validated per-layer relocates
+//! straight off the [`LayerGraph`], so there is no owned state; all external
+//! data (layer graph, cached indices) is passed in through parameters, and
+//! nothing references [`IndexCache`](super::index_cache::IndexCache) directly.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{AbstractData, Path, PathComponent, Value};
 
-use super::graph::ArcType;
-use super::index::PrimIndex;
 use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
+use super::prim_graph::ArcType;
+use super::prim_index::PrimIndex;
 use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
 /// Per-layer authored relocate pairs `(source, target)`, keyed by layer id.
@@ -26,16 +28,8 @@ pub(crate) type LayerRelocates = HashMap<LayerId, Vec<(Path, Path)>>;
 pub(crate) type EffectiveRelocates = Vec<(Path, Path)>;
 
 /// Escaped relocation sources: each `(composed source, relocate layer id)`
-/// whose target left the prim's namespace (see [`Relocates::effective_and_escaped`]).
+/// whose target left the prim's namespace (see [`effective_and_escaped`]).
 pub(crate) type EscapedSources = Vec<(Path, LayerId)>;
-
-/// Namespace-remapping query helper.
-///
-/// Holds no relocate data of its own: every query reads the validated
-/// per-layer relocates straight off the [`LayerGraph`], so there is no owned
-/// copy to keep in sync. The composition cache's state (layer graph, cached
-/// indices) is passed in through method parameters.
-pub(super) struct Relocates;
 
 /// Follows `path` to its final location through a set of relocates, applying the
 /// longest matching source prefix at each step until it reaches a fixed point.
@@ -348,171 +342,165 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
     None
 }
 
-impl Relocates {
-    /// Computes effective relocates for a parent prim in composed namespace.
-    ///
-    /// Collects relocates from all layers reachable through any cached prim
-    /// in the same root subtree, maps them to composed namespace using the
-    /// layer's namespace mapping, then chains transitive relocates.
-    pub fn effective_relocates(
-        &self,
-        graph: &LayerGraph,
-        path: &Path,
-        indices: &HashMap<Path, PrimIndex>,
-    ) -> Vec<(Path, Path)> {
-        self.effective_and_escaped(graph, path, indices).0
-    }
+/// Computes effective relocates for a parent prim in composed namespace.
+///
+/// Collects relocates from all layers reachable through any cached prim
+/// in the same root subtree, maps them to composed namespace using the
+/// layer's namespace mapping, then chains transitive relocates.
+pub(crate) fn effective_relocates(
+    graph: &LayerGraph,
+    path: &Path,
+    indices: &HashMap<Path, PrimIndex>,
+) -> Vec<(Path, Path)> {
+    effective_and_escaped(graph, path, indices).0
+}
 
-    /// The effective relocates AND the escaped relocation sources for a prim, from
-    /// a single namespace scan (the two share `collect_layer_maps`). An escaped
-    /// source is a relocate whose source maps into `path`'s namespace but whose
-    /// target does not — content moved *out* of an arc's scope (e.g. to a new root
-    /// prim); a relationship/connection target under one is invalid. The second
-    /// element pairs each escaped source with the layer that authored its relocate.
-    pub fn effective_and_escaped(
-        &self,
-        graph: &LayerGraph,
-        path: &Path,
-        indices: &HashMap<Path, PrimIndex>,
-    ) -> (EffectiveRelocates, EscapedSources) {
-        let (mut result, escaped) = self.raw_effective_and_escaped(graph, path, indices);
+/// The effective relocates AND the escaped relocation sources for a prim, from
+/// a single namespace scan (the two share `collect_layer_maps`). An escaped
+/// source is a relocate whose source maps into `path`'s namespace but whose
+/// target does not — content moved *out* of an arc's scope (e.g. to a new root
+/// prim); a relationship/connection target under one is invalid. The second
+/// element pairs each escaped source with the layer that authored its relocate.
+pub(crate) fn effective_and_escaped(
+    graph: &LayerGraph,
+    path: &Path,
+    indices: &HashMap<Path, PrimIndex>,
+) -> (EffectiveRelocates, EscapedSources) {
+    let (mut result, escaped) = raw_effective_and_escaped(graph, path, indices);
 
-        // Shift each endpoint through a single ancestor rename: when an ancestor
-        // prim is relocated, a relocate authored below it sits under the renamed
-        // parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
-        // `…/Rig2/SubRig/Anim` once `Rig` is relocated to `Rig2`). Faithful to
-        // C++ USD relocates, sources are not transitively re-chained: a
-        // relocate's authored source keeps its as-authored depth (C++
-        // `_ConformLegacyRelocates` is a no-op in USD mode), so only the nearest
-        // applicable ancestor rename is folded in. The snapshot is sorted by
-        // target length, making the fold order deterministic.
-        let snapshot = result.clone();
-        for entry in &mut result {
-            entry.0 = shift_through_nearest_ancestor(&entry.0, &snapshot);
-            if !entry.1.is_empty() {
-                entry.1 = shift_through_nearest_ancestor(&entry.1, &snapshot);
-            }
+    // Shift each endpoint through a single ancestor rename: when an ancestor
+    // prim is relocated, a relocate authored below it sits under the renamed
+    // parent in composed namespace (e.g. `…/Rig/SubRig/Anim` becomes
+    // `…/Rig2/SubRig/Anim` once `Rig` is relocated to `Rig2`). Faithful to
+    // C++ USD relocates, sources are not transitively re-chained: a
+    // relocate's authored source keeps its as-authored depth (C++
+    // `_ConformLegacyRelocates` is a no-op in USD mode), so only the nearest
+    // applicable ancestor rename is folded in. The snapshot is sorted by
+    // target length, making the fold order deterministic.
+    let snapshot = result.clone();
+    for entry in &mut result {
+        entry.0 = shift_through_nearest_ancestor(&entry.0, &snapshot);
+        if !entry.1.is_empty() {
+            entry.1 = shift_through_nearest_ancestor(&entry.1, &snapshot);
         }
-
-        (result, escaped)
     }
 
-    /// Raw (unchained) effective relocates plus escaped sources. Each layer's
-    /// relocates are mapped through the namespace mappings found in cached prims:
-    /// a relocate whose source and target both map yields an effective pair; one
-    /// whose (non-empty) target does not map is an escaped source.
-    fn raw_effective_and_escaped(
-        &self,
-        graph: &LayerGraph,
-        path: &Path,
-        indices: &HashMap<Path, PrimIndex>,
-    ) -> (EffectiveRelocates, EscapedSources) {
-        let layer_maps = self.collect_layer_maps(graph, path, indices);
-        let mut result: Vec<(Path, Path)> = Vec::new();
-        let mut escaped: Vec<(Path, LayerId)> = Vec::new();
+    (result, escaped)
+}
 
-        for (li, map) in &layer_maps {
-            let relocates = match graph.get(*li) {
-                Some(node) if !node.relocates.is_empty() => &node.relocates,
-                _ => continue,
+/// Raw (unchained) effective relocates plus escaped sources. Each layer's
+/// relocates are mapped through the namespace mappings found in cached prims:
+/// a relocate whose source and target both map yields an effective pair; one
+/// whose (non-empty) target does not map is an escaped source.
+fn raw_effective_and_escaped(
+    graph: &LayerGraph,
+    path: &Path,
+    indices: &HashMap<Path, PrimIndex>,
+) -> (EffectiveRelocates, EscapedSources) {
+    let layer_maps = collect_layer_maps(graph, path, indices);
+    let mut result: Vec<(Path, Path)> = Vec::new();
+    let mut escaped: Vec<(Path, LayerId)> = Vec::new();
+
+    for (li, map) in &layer_maps {
+        let relocates = match graph.get(*li) {
+            Some(node) if !node.relocates.is_empty() => &node.relocates,
+            _ => continue,
+        };
+        for (src, tgt) in relocates {
+            let Some(composed_src) = map.map_source_to_target(src) else {
+                continue;
             };
-            for (src, tgt) in relocates {
-                let Some(composed_src) = map.map_source_to_target(src) else {
-                    continue;
-                };
-                let composed_tgt = if tgt.is_empty() {
-                    tgt.clone()
-                } else {
-                    match map.map_source_to_target(tgt) {
-                        Some(t) => t,
-                        None => {
-                            // Target escapes the namespace: record the source.
-                            if !escaped.iter().any(|(s, _)| *s == composed_src) {
-                                escaped.push((composed_src, *li));
-                            }
-                            continue;
+            let composed_tgt = if tgt.is_empty() {
+                tgt.clone()
+            } else {
+                match map.map_source_to_target(tgt) {
+                    Some(t) => t,
+                    None => {
+                        // Target escapes the namespace: record the source.
+                        if !escaped.iter().any(|(s, _)| *s == composed_src) {
+                            escaped.push((composed_src, *li));
                         }
-                    }
-                };
-                let pair = (composed_src, composed_tgt);
-                if !result.contains(&pair) {
-                    result.push(pair);
-                }
-            }
-        }
-
-        // Sort by target length descending for longest-prefix-first matching.
-        result.sort_by(|a, b| b.1.as_str().len().cmp(&a.1.as_str().len()));
-        (result, escaped)
-    }
-
-    /// Collects (layer_index, map_to_root) pairs from ancestor prims and from
-    /// other cached prims in the same root subtree that have layers with
-    /// relocates.
-    fn collect_layer_maps(
-        &self,
-        graph: &LayerGraph,
-        path: &Path,
-        indices: &HashMap<Path, PrimIndex>,
-    ) -> Vec<(LayerId, MapFunction)> {
-        let mut maps: Vec<(LayerId, MapFunction)> = Vec::new();
-
-        // Walk up ancestors. A per-site node fans out into every contributing
-        // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
-        // through this node's namespace mapping, not just the representative.
-        let mut current = Some(path.clone());
-        while let Some(p) = current {
-            if let Some(cached_index) = indices.get(&p) {
-                for node in cached_index.nodes() {
-                    if node.arc == ArcType::Relocate {
                         continue;
                     }
-                    for (layer, _) in node.layers() {
-                        if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
-                            maps.push((layer, node.map_to_root.clone()));
-                        }
-                    }
                 }
+            };
+            let pair = (composed_src, composed_tgt);
+            if !result.contains(&pair) {
+                result.push(pair);
             }
-            current = p.parent().filter(|pp| *pp != Path::abs_root());
         }
+    }
 
-        // Also search cached prims in the same root subtree for layers with
-        // relocates that weren't found in the ancestor walk (e.g. referenced
-        // layers only reachable from a sibling branch).
-        let relocate_layers: Vec<LayerId> = graph
-            .all_ids()
-            .iter()
-            .copied()
-            .filter(|&id| graph.get(id).is_some_and(|node| !node.relocates.is_empty()))
-            .collect();
-        let root_name = root_prim_name(path);
+    // Sort by target length descending for longest-prefix-first matching.
+    result.sort_by(|a, b| b.1.as_str().len().cmp(&a.1.as_str().len()));
+    (result, escaped)
+}
 
-        // Sorted iteration: a `HashMap` walk would make the collected layer-map
-        // order (and so downstream relocate composition) hash-order-dependent.
-        let mut cached_paths: Vec<&Path> = indices.keys().collect();
-        cached_paths.sort();
-        for cached_path in cached_paths {
-            let cached_index = &indices[cached_path];
-            if root_prim_name(cached_path) != root_name {
-                continue;
-            }
-            for node in cached_index.all_nodes() {
+/// Collects (layer_index, map_to_root) pairs from ancestor prims and from
+/// other cached prims in the same root subtree that have layers with
+/// relocates.
+fn collect_layer_maps(
+    graph: &LayerGraph,
+    path: &Path,
+    indices: &HashMap<Path, PrimIndex>,
+) -> Vec<(LayerId, MapFunction)> {
+    let mut maps: Vec<(LayerId, MapFunction)> = Vec::new();
+
+    // Walk up ancestors. A per-site node fans out into every contributing
+    // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
+    // through this node's namespace mapping, not just the representative.
+    let mut current = Some(path.clone());
+    while let Some(p) = current {
+        if let Some(cached_index) = indices.get(&p) {
+            for node in cached_index.nodes() {
                 if node.arc == ArcType::Relocate {
                     continue;
                 }
                 for (layer, _) in node.layers() {
-                    if relocate_layers.contains(&layer)
-                        && !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root)
-                    {
+                    if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
                         maps.push((layer, node.map_to_root.clone()));
                     }
                 }
             }
         }
-
-        maps
+        current = p.parent().filter(|pp| *pp != Path::abs_root());
     }
+
+    // Also search cached prims in the same root subtree for layers with
+    // relocates that weren't found in the ancestor walk (e.g. referenced
+    // layers only reachable from a sibling branch).
+    let relocate_layers: Vec<LayerId> = graph
+        .all_ids()
+        .iter()
+        .copied()
+        .filter(|&id| graph.get(id).is_some_and(|node| !node.relocates.is_empty()))
+        .collect();
+    let root_name = root_prim_name(path);
+
+    // Sorted iteration: a `HashMap` walk would make the collected layer-map
+    // order (and so downstream relocate composition) hash-order-dependent.
+    let mut cached_paths: Vec<&Path> = indices.keys().collect();
+    cached_paths.sort();
+    for cached_path in cached_paths {
+        let cached_index = &indices[cached_path];
+        if root_prim_name(cached_path) != root_name {
+            continue;
+        }
+        for node in cached_index.all_nodes() {
+            if node.arc == ArcType::Relocate {
+                continue;
+            }
+            for (layer, _) in node.layers() {
+                if relocate_layers.contains(&layer)
+                    && !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root)
+                {
+                    maps.push((layer, node.map_to_root.clone()));
+                }
+            }
+        }
+    }
+
+    maps
 }
 
 #[cfg(test)]

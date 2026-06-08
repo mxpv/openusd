@@ -236,7 +236,7 @@ impl MapFunction {
         self.time_offset
     }
 
-    /// Builder: returns this mapping with its time offset replaced.
+    /// Indexer: returns this mapping with its time offset replaced.
     ///
     /// Callers that want to compose a new offset atop an existing one should
     /// do the arithmetic explicitly — e.g.

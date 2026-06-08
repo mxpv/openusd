@@ -25,12 +25,12 @@
 //! Relocates are non-destructive namespace remapping authored via
 //! `relocates = { </Source>: </Target> }` in a layer's metadata. They
 //! allow moving prims in the composed namespace without modifying the
-//! underlying layers. They are split between the builder and the cache:
+//! underlying layers. They are split between the indexer and the cache:
 //!
 //! - `layerRelocates` are extracted from each layer's pseudoroot at
 //!   construction and mapped into the composed namespace through each
 //!   layer's namespace mapping.
-//! - When composing a prim that is a relocate target, the builder
+//! - When composing a prim that is a relocate target, the indexer
 //!   (`eval_node_relocations`) finds the pre-relocation source path, composes
 //!   it as a sub-index, and grafts the result as a `Relocate` arc node. Each
 //!   grafted node carries the source site's full layer stack, so a relocate
@@ -39,28 +39,30 @@
 //! - Child names are folded per composition node: each node's layer-stack
 //!   relocates (chained within the layer stack) rename, remove, or add direct
 //!   children, and every relocation source becomes a prohibited name
-//!   (`Cache::compute_prim_child_names` → `rel::apply_child_relocates`).
+//!   (`IndexCache::compute_prim_child_names` → `relocates::apply_child_relocates`).
 //!
 //! # Module structure
 //!
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
 //! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle, with a precomputed sublayer stack per layer. Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
-//! | `cache` | `PcpCache` | Lazily-built composition cache. Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
+//! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
+//! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that aliases a non-canonical instance's subtree onto its canonical instance) as a second `IndexCache` impl. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
-//! | `index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`), the [`CompositionContext`](index::CompositionContext) that flows parent-to-child, and the arc-composition helpers (`compose_references_in`, `collect_payloads_in`, etc.) the `builder` drives. |
-//! | `builder` | `Pcp_PrimIndexer` | Task-queue composition engine: grows the graph node-by-node by draining a priority task queue. The sole composition path. |
-//! | `graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
-//! | `resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
+//! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`), the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child, and the arc-composition helpers (`compose_references_in`, `collect_payloads_in`, etc.) the `prim_indexer` drives. |
+//! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
+//! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
+//! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
-//! | `rel` | — | [`Relocates`](rel::Relocates): isolated relocate state and logic. Owned by `Cache`, receives external data through parameters. |
+//! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Read the `LayerGraph`'s validated relocates directly; all data passed through parameters. |
+//! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
 //!
 //! # Architecture
 //!
-//! Each [`PrimIndex`](index::PrimIndex) is an arena-backed, single-rooted tree
+//! Each [`PrimIndex`](prim_index::PrimIndex) is an arena-backed, single-rooted tree
 //! of [`Node`]s: a synthetic, inert root owns every otherwise-parentless node,
 //! so the graph is one tree rather than a forest. Nodes carry two namespace
 //! mappings: `map_to_parent` (translates paths to the parent node's namespace)
@@ -71,7 +73,7 @@
 //! strength-ordered children followed by the globally-weak specializes band —
 //! so value resolution is a linear scan.
 //!
-//! Composition is driven by a [`CompositionContext`](index::CompositionContext)
+//! Composition is driven by a [`CompositionContext`](prim_index::CompositionContext)
 //! that flows from parent prims to children. The context carries:
 //!
 //! - Variant selections from all ancestors, so descendant prims resolve
@@ -89,8 +91,8 @@
 //! the set is used; if none match, the set stays unselected. Authored
 //! selections always take priority over fallbacks.
 //!
-//! The [`Cache`](cache::Cache) stores both the [`PrimIndex`](index::PrimIndex)
-//! and the [`CompositionContext`](index::CompositionContext) for each composed
+//! The [`IndexCache`](index_cache::IndexCache) stores both the [`PrimIndex`](prim_index::PrimIndex)
+//! and the [`CompositionContext`](prim_index::CompositionContext) for each composed
 //! prim. During depth-first traversal, parents are always composed before
 //! children, so the context chain is always populated. Each per-prim build
 //! takes only shared references, making it suitable for future parallel
@@ -128,9 +130,9 @@
 //! 3. [`Changes::apply`] surgically removes the affected entries from the
 //!    cache. Indices rebuild lazily on next access.
 //!
-//! A reverse `(layer_index, site_path) → prim_index_paths` map (the
+//! A reverse `(LayerId, site_path) → prim_index_paths` map (the
 //! `Dependencies` table internal to the cache) makes step 2 cheap: every
-//! [`PrimIndex`](index::PrimIndex) registers its observed sites when it
+//! [`PrimIndex`](prim_index::PrimIndex) registers its observed sites when it
 //! finishes building, and the classifier looks up dependents — including
 //! ancestors of the changed site, since an arc at `/Foo` makes `/Foo/Bar`'s
 //! composition transitively dependent on `/Foo`.
@@ -141,10 +143,10 @@
 //!
 //! # Remaining work
 //!
-//! The task-queue [`Builder`](builder) (C++ `Pcp_PrimIndexer`) is the sole
+//! The task-queue [`Indexer`](prim_indexer) (C++ `Pcp_PrimIndexer`) is the sole
 //! composition engine: it composes LIVRPS, value resolution, relocates,
 //! variants, instancing, value clips, and surgical invalidation. The recursive
-//! builder and the cache relocate post-pass have been removed. The remaining
+//! indexer and the cache relocate post-pass have been removed. The remaining
 //! gaps are tracked asset-by-asset in `SKIP_PCP_COMPLIANCE`
 //! (`tests/composition.rs`).
 //!
@@ -172,7 +174,7 @@
 //!   pre-relocation source is remapped by a global `chain_through_relocates` over
 //!   relocates discovered by scanning whichever prims are already cached, so the
 //!   result is traversal-order-dependent (the `TODO` at
-//!   `Cache::compose_property_paths`), with a layer-difference proxy in
+//!   `IndexCache::compose_property_paths`), with a layer-difference proxy in
 //!   `resolve_path_list_op_validated` standing in for the exact rule. The
 //!   faithful form folds relocates into each node's arc maps, so a target is
 //!   retimed only by the Relocate arcs in its own chain (C++
@@ -210,7 +212,7 @@
 //!
 //! Child names fold weakest-to-strongest with `primOrder` reapplied per layer
 //! (mirroring C++ `PcpComposeSiteChildNames`). Relocates apply per node during
-//! that fold (`Cache::compute_prim_child_names` → `rel::apply_child_relocates`,
+//! that fold (`IndexCache::compute_prim_child_names` → `relocates::apply_child_relocates`,
 //! the port of C++ `_ComposePrimChildNamesAtNode`): at each node its layer stack's
 //! relocates rename, remove, or add direct children — a renamed child keeps the
 //! source's position — and every relocation source becomes a prohibited name
@@ -220,15 +222,15 @@
 //! ## Structural specializes
 //!
 //! Specializes global weakness (spec 10.4.1) is realized by copying specializes
-//! nodes under the local root (C++ `_PropagateNodeToRoot`, the builder's
+//! nodes under the local root (C++ `_PropagateNodeToRoot`, the indexer's
 //! `propagate_node_to_root`): specialize is the weakest arc, so
 //! `finalize_strength_order`'s plain DFS already places the globally-weak band
 //! last and orders it with the faithful `PcpCompareSiblingNodeStrength`.
 //!
 //! ## Lower-priority / opportunistic
 //!
-//! - Cross-prim parallelism. `Cache::ensure_index` composes prims one at a
-//!   time; each build is a pure function of `&LayerStack`, the parent context,
+//! - Cross-prim parallelism. `IndexCache::ensure_index` composes prims one at a
+//!   time; each build is a pure function of `&LayerGraph`, the parent context,
 //!   and the cached indices, so sibling prims could compose in parallel (see
 //!   the `TODO(rayon)`). The blocker is the shared `indices` map that
 //!   inherit/specialize targets read mid-build — it needs a concurrent map or a
@@ -244,31 +246,32 @@
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
-pub(crate) mod builder;
-pub(crate) mod cache;
+use std::collections::HashMap;
+
 pub(crate) mod change;
 pub(crate) mod clip;
-pub(crate) mod deps;
-pub(crate) mod graph;
-pub(crate) mod index;
+pub(crate) mod dependencies;
+pub(crate) mod index_cache;
+pub(crate) mod instancing;
 pub(crate) mod layer_graph;
 mod mapping;
-mod rel;
-pub(crate) mod resolve;
-
-use std::collections::HashMap;
+pub(crate) mod prim_graph;
+pub(crate) mod prim_index;
+pub(crate) mod prim_indexer;
+pub(crate) mod prim_resolve;
+mod relocates;
 
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, Path, Value};
 
-pub(crate) use cache::Cache;
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
-pub use graph::{ArcType, Node, NodeFlags, NodeId};
-pub use index::PrimIndex;
+pub(crate) use index_cache::IndexCache;
 pub(crate) use layer_graph::LayerGraph;
 pub use layer_graph::LayerId;
 pub use mapping::MapFunction;
+pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
+pub use prim_index::PrimIndex;
 
 /// Maps variant set names to ordered lists of fallback selections.
 ///
@@ -351,7 +354,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     }
 }
 
-/// An error encountered while building a [`PrimIndex`](index::PrimIndex).
+/// An error encountered while building a [`PrimIndex`](prim_index::PrimIndex).
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
 /// the broken opinion and are retained by [`Stage`](crate::usd::Stage).
@@ -690,8 +693,8 @@ mod tests {
 
     /// `recompute_relocates` re-derives both the cached flag and the per-layer
     /// relocate pairs from the current layer data. A `layerRelocates` edit reaches
-    /// the graph through `Cache::recompute_relocates`, so both must be refreshed
-    /// there or the builder keeps reading stale relocate state.
+    /// the graph through `IndexCache::recompute_relocates`, so both must be refreshed
+    /// there or the indexer keeps reading stale relocate state.
     #[test]
     fn recompute_relocate_data_syncs() {
         let plain = layer("root.usd", "#usda 1.0\ndef \"A\" {}\n");
@@ -718,7 +721,7 @@ mod tests {
         assert_eq!(
             graph.relocation_source(&[(id, sdf::LayerOffset::default())], &Path::new("/Grp/B").unwrap()),
             Some(Path::new("/Grp/A").unwrap()),
-            "recompute re-extracts the per-layer relocate pairs the builder reads"
+            "recompute re-extracts the per-layer relocate pairs the indexer reads"
         );
     }
 

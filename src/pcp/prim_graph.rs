@@ -167,7 +167,7 @@ pub struct Node {
     /// there. Such a node is kept for structure (it may still introduce arcs at
     /// the deepened path) but contributes nothing to value resolution and is not
     /// counted by [`is_empty`](crate::pcp::PrimIndex::is_empty). Defaults to
-    /// `true`: the recursive builder only ever creates a node when a layer
+    /// `true`: the recursive indexer only ever creates a node when a layer
     /// authors, so its nodes always have specs.
     pub(crate) has_specs: bool,
     /// Namespace depth at which this node's spec contribution was restricted (C++
@@ -178,7 +178,7 @@ pub struct Node {
     /// ancestral opinions above it — the "spooky ancestors" a relocation pulls
     /// through — still do. A non-zero depth allows ancestral opinions only at
     /// paths shallower than it (see
-    /// [`node_can_contribute_ancestral`](crate::pcp::builder)). An inert node
+    /// [`node_can_contribute_ancestral`](crate::pcp::prim_indexer)). An inert node
     /// left at depth 0 is treated as fully restricted.
     pub(crate) restriction_depth: u16,
     /// Composition state bits (see [`NodeFlags`]).
@@ -189,7 +189,7 @@ impl Node {
     /// Builds a standalone node with no structural links.
     ///
     /// Callers that append through [`PrimIndexGraph::add_child`] have their
-    /// `parent`/`children` populated by the builder; the relocate inserts and
+    /// `parent`/`children` populated by the indexer; the relocate inserts and
     /// grafts set the links explicitly afterward.
     pub(crate) fn new(
         layer_id: LayerId,
@@ -359,7 +359,7 @@ impl Node {
 /// `parent`/`children`/`origin`. Strongest-to-weakest strength order is a
 /// separate projection, `strength_order`, holding the same handles permuted —
 /// value resolution walks it, not the arena. Dereferencing the graph yields
-/// the arena slice for the builder's structural lookups.
+/// the arena slice for the indexer's structural lookups.
 ///
 /// `root` is the synthetic, inert tree root created by
 /// [`init_root`](Self::init_root): every otherwise-parentless node attaches
@@ -516,7 +516,7 @@ impl PrimIndexGraph {
     /// The representative layer index is the root sublayer of a node's layer
     /// stack, which uniquely identifies that stack, so matching it together with
     /// the path is equivalent to C++'s `layerStack == site.layerStack` test. The
-    /// task-queue builder uses this for opt-in duplicate-node skipping by the
+    /// task-queue indexer uses this for opt-in duplicate-node skipping by the
     /// class-based arcs (inherits/specializes); reference/payload arcs keep
     /// diamonds.
     pub(crate) fn node_using_site(&self, root_layer: LayerId, path: &Path) -> Option<NodeId> {
@@ -592,7 +592,7 @@ impl PrimIndexGraph {
     /// stronger origin wins); finally the sibling arc number at the origin (C++
     /// `GetSiblingNumAtOrigin`, lower stronger). Two specializes use the faithful
     /// specializes comparator ([`compare_specialize_siblings`]), which reads the
-    /// copy-to-root structure [`propagate_node_to_root`](crate::pcp::builder)
+    /// copy-to-root structure [`propagate_node_to_root`](crate::pcp::prim_indexer)
     /// produces.
     pub(crate) fn compare_sibling_node_strength(&self, a: NodeId, b: NodeId) -> Ordering {
         let na = &self.nodes[a.idx()];
@@ -970,7 +970,7 @@ impl PrimIndexGraph {
 
 impl std::ops::Deref for PrimIndexGraph {
     /// Dereferences to the node arena in insertion (structural) order. The
-    /// builder relies on this for positional lookups while composing; strength
+    /// indexer relies on this for positional lookups while composing; strength
     /// order is reached through [`PrimIndex::nodes`].
     type Target = [Node];
     fn deref(&self) -> &[Node] {

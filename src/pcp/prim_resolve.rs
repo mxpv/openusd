@@ -16,9 +16,10 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Specifier, Value};
 
 use super::clip;
-use super::graph::{ArcType, Node};
-use super::index::PrimIndex;
 use super::mapping::MapFunction;
+use super::prim_graph::{ArcType, Node};
+use super::prim_index::PrimIndex;
+use super::relocates::chain_through_relocates;
 use super::{LayerGraph, LayerId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
@@ -30,7 +31,7 @@ struct Opinion<'a> {
     /// The contributing node, strongest-to-weakest in the walk.
     node: &'a Node,
     /// Id of the contributing layer, as yielded by
-    /// [`Node::layers`](super::graph::Node::layers) and used with
+    /// [`Node::layers`](super::prim_graph::Node::layers) and used with
     /// [`LayerGraph::layer`](super::LayerGraph::layer) — not a position within
     /// the node's layer stack.
     layer: LayerId,
@@ -756,7 +757,7 @@ fn compose_list_ops<T: Default + Clone + PartialEq>(ops: &[sdf::ListOp<T>]) -> V
 /// composed targets). Used only for targets authored across an arc.
 fn chain_path_list_op_relocates(mut op: sdf::PathListOp, relocates: &[(Path, Path)]) -> sdf::PathListOp {
     for p in op.iter_mut() {
-        *p = super::rel::chain_through_relocates(p, relocates, None);
+        *p = chain_through_relocates(p, relocates, None);
     }
     op
 }

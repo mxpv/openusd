@@ -203,7 +203,7 @@ impl Relationship {
     // opinions are still emitted here so the producer side is in place
     // when a consumer lands.
     //
-    // TODO: wire the consumer. When `Cache` starts memoizing per-attribute
+    // TODO: wire the consumer. When `IndexCache` starts memoizing per-attribute
     // composed values or per-relationship resolved-target lists:
     //   1. Add a `classify_property_entry` branch in `pcp/change.rs`
     //      mirroring `classify_prim_entry`, gated on

@@ -3,7 +3,7 @@
 //! [`LayerGraph`] owns every [`sdf::Layer`] a stage depends on and the sublayer
 //! edges between them, keyed by the stable [`LayerId`]. It is the Rust
 //! analog of C++ `PcpLayerStack` for the layer-ownership half of composition;
-//! the composition index itself lives in [`IndexCache`](super::cache::Cache).
+//! the composition index itself lives in [`IndexCache`](super::index_cache::IndexCache).
 //!
 //! Holding layers here (rather than inside the cache) lets a [`Stage`] borrow
 //! the layer data and the composition index independently. Composition reads
@@ -28,9 +28,10 @@ use crate::ar::Resolver;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
 
-use super::index::find_layer_id;
 use super::mapping::MapFunction;
-use super::{effective_time_codes_per_second, rel, Error};
+use super::prim_index::find_layer_id;
+use super::relocates::{chain_through_relocates, validate_layer_relocates};
+use super::{effective_time_codes_per_second, Error};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
 ///
@@ -116,7 +117,7 @@ pub(crate) struct LayerGraph {
     /// [`sublayer_stacks`](Self::sublayer_stacks). Every per-prim build reads it,
     /// so caching it avoids re-allocating the same Vec per prim.
     root_stack: Vec<(LayerId, LayerOffset)>,
-    /// Whether any node authors validated relocates. The builder reads this to
+    /// Whether any node authors validated relocates. The indexer reads this to
     /// gate its relocate passes without rescanning.
     has_relocates: bool,
     /// Sublayer-cycle diagnostics reachable from the root layer, replaced wholesale
@@ -489,7 +490,7 @@ impl LayerGraph {
     /// and conflict diagnostics). Run once at construction and again whenever a
     /// `subLayers`/`layerRelocates` edit lands.
     pub(crate) fn recompute_relocates(&mut self) {
-        let (validated, errors) = rel::validate_layer_relocates(self);
+        let (validated, errors) = validate_layer_relocates(self);
         self.has_relocates = false;
         for &id in &self.order {
             let pairs = validated.get(&id).cloned().unwrap_or_default();
@@ -586,7 +587,7 @@ impl LayerGraph {
             if target.is_empty() {
                 continue;
             }
-            *target = rel::chain_through_relocates(target, &snapshot, Some(source));
+            *target = chain_through_relocates(target, &snapshot, Some(source));
         }
         pairs
     }

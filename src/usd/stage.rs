@@ -282,7 +282,7 @@ impl Default for StagePopulationMask {
 // TODO: arc-based constructor (`for_node`) routing writes into a specific
 // reference / specialize arc, mirroring C++
 // `UsdEditTarget(UsdPrim, UsdEditTarget::Reference)`. Needs a narrow
-// `pcp::Cache` accessor exposing the strongest matching node's `map_to_root`
+// `pcp::IndexCache` accessor exposing the strongest matching node's `map_to_root`
 // plus the per-layer sublayer offset.
 //
 // TODO: re-map embedded relationship / connection target paths in
@@ -422,7 +422,7 @@ pub enum StageAuthoringError {
 /// Shared state behind a [`Stage`] handle.
 ///
 /// Owns the loaded layer stack and the composed-scene state. Composition
-/// indices are built lazily and cached in the [`Cache`](crate::pcp::Cache).
+/// indices are built lazily and cached in the [`IndexCache`](crate::pcp::IndexCache).
 /// Reached through [`Stage`]'s [`Deref`](std::ops::Deref); every mutation
 /// goes through a per-field cell so it works from any cloned handle.
 ///
@@ -436,7 +436,7 @@ pub struct StageInner {
     /// independently.
     layers: RefCell<pcp::LayerGraph>,
     /// Lazily-built composition cache of per-prim indices and contexts.
-    cache: RefCell<pcp::Cache>,
+    cache: RefCell<pcp::IndexCache>,
     /// Muted layer identifiers (C++ `UsdStage::MuteLayer`). A muted layer
     /// contributes no opinions while remaining in the graph.
     muted: RefCell<std::collections::HashSet<String>>,
@@ -1111,7 +1111,7 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::Cache) -> Result<T>,
+        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
         if !self.population_mask.includes(&path.prim_path()) {
             return Ok(T::default());
@@ -1215,7 +1215,7 @@ impl Stage {
     }
 
     /// Borrows the stage's composition cache.
-    pub(crate) fn cache(&self) -> Ref<'_, pcp::Cache> {
+    pub(crate) fn cache(&self) -> Ref<'_, pcp::IndexCache> {
         self.cache.borrow()
     }
 
@@ -1343,7 +1343,7 @@ impl Stage {
     /// layer data through a `&LayerGraph` while lazily building the index.
     pub(crate) fn with_cache<T>(
         &self,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::Cache) -> Result<T>,
+        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
         let graph = self.layers.borrow();
         let mut cache = self.cache.borrow_mut();
@@ -1630,7 +1630,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
         let edit_target = EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default());
         Stage(Rc::new(StageInner {
             layers: RefCell::new(graph),
-            cache: RefCell::new(pcp::Cache::new(self.variant_fallbacks, collection_errors)),
+            cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
             muted: RefCell::new(std::collections::HashSet::new()),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,

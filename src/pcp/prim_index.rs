@@ -15,9 +15,9 @@ use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
-use super::builder::BuildResult;
-use super::graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
 use super::mapping::MapFunction;
+use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
+use super::prim_indexer::BuildResult;
 use super::{Error, LayerGraph, LayerId, VariantFallbackMap};
 
 /// Composition index for a single prim.
@@ -114,7 +114,7 @@ impl PrimIndex {
         &self.graph.nodes
     }
 
-    /// Returns the underlying composition graph. The task-queue builder clones a
+    /// Returns the underlying composition graph. The task-queue indexer clones a
     /// parent prim's graph as the seed for its child's index (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
     pub(crate) fn graph(&self) -> &PrimIndexGraph {
@@ -203,8 +203,8 @@ impl PrimIndex {
     ///
     /// Each node is inerted individually, not its subtree: the implied classes a
     /// dropped reference helped derive are children in the graph yet stay shared.
-    /// (The local root is also inerted earlier by the builder via
-    /// [`CompositionContext::within_instance`](super::index::CompositionContext::within_instance).)
+    /// (The local root is also inerted earlier by the indexer via
+    /// [`CompositionContext::within_instance`](super::prim_index::CompositionContext::within_instance).)
     pub(crate) fn mark_instance_local_inert(&mut self, instance_depth: u16) {
         let local = self.instance_local_nodes(instance_depth);
         for (node, &is_local) in self.graph.nodes.iter_mut().zip(local.iter()) {
@@ -309,7 +309,7 @@ impl PrimIndex {
     /// Builds a prim index for a root prim with no cached ancestors (a test
     /// convenience over [`build_with_cache`](Self::build_with_cache)). A child
     /// prim must instead be built through a cache holding its ancestors, since
-    /// the builder seeds a child from its cached parent.
+    /// the indexer seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
         Self::build_with_cache(path, stack, ctx, &HashMap::new()).map(|(index, _errors)| index)
@@ -349,12 +349,12 @@ impl PrimIndex {
                 return Ok((cached.clone(), Vec::new()));
             }
         }
-        // The task-queue builder is the sole composition path. A genuine cycle
+        // The task-queue indexer is the sole composition path. A genuine cycle
         // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
-        let builder = super::builder::Builder::new(stack, ctx, cached_indices, ambient, ambient_is_root);
-        let super::builder::BuildOutput { graph, errors } = builder.build(path)?;
+        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, ambient_is_root);
+        let super::prim_indexer::BuildOutput { graph, errors } = indexer.build(path)?;
         Ok((
             PrimIndex {
                 graph: graph.unwrap_or_default(),
@@ -505,7 +505,7 @@ pub(crate) struct AncestorArc {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers (used by the `Builder` and Stage)
+// Shared helpers (used by the `Indexer` and Stage)
 // ---------------------------------------------------------------------------
 
 /// Resolves variant selections across a prim's composition nodes.
@@ -574,7 +574,7 @@ fn resolve_variant_selections_in<'a>(
     // For variant sets without an explicit selection, apply a configured
     // fallback if one names an existing variant. With no applicable fallback the
     // set stays unselected (C++ `_EvalNodeFallbackVariant`); there is no implicit
-    // first-variant default, matching the builder.
+    // first-variant default, matching the indexer.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
             let data = graph.layer(layer);
@@ -728,7 +728,7 @@ fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, resolver: &dyn Re
 /// `asset_path` must already be anchored to its authoring layer.
 //
 // TODO(perf): this `graph.find` re-resolves the target that
-// `builder::add_ref_or_payload_arc` resolves again moments later for the same
+// `indexer::add_ref_or_payload_arc` resolves again moments later for the same
 // anchored path. The duplicate can't be hoisted trivially — the ratio's
 // numerator is the per-member authoring rate, knowable only here inside the
 // in-place list-op fold, while the target stack is needed there — so it waits on
@@ -984,7 +984,7 @@ mod tests {
 
     /// Builds a prim index with variant fallbacks applied.
     ///
-    /// The task-queue builder seeds a child prim from its cached parent, so the
+    /// The task-queue indexer seeds a child prim from its cached parent, so the
     /// ancestors are composed top-down into a cache first (mirroring the cache's
     /// `ensure_index`), threading each prim's child context to the next.
     fn build_with_fallbacks(stack: &LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     /// Like the above but the variant set arrives through an internal reference
-    /// (same layer stack), which the builder grafts via `merge_full_index`.
+    /// (same layer stack), which the indexer grafts via `merge_full_index`.
     #[test]
     fn variant_from_internal_reference() -> Result<()> {
         let root = parse_usda(
@@ -1231,7 +1231,7 @@ mod tests {
         Ok(())
     }
 
-    /// The builder records structural parent/child links: a reference node hangs
+    /// The indexer records structural parent/child links: a reference node hangs
     /// under a root node, and every stored parent agrees with its child list.
     #[test]
     fn structural_links_consistent() -> Result<()> {
