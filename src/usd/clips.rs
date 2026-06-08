@@ -82,6 +82,32 @@ impl ClipsAPI {
         Ok(self.field(clip_set, keys::INTERPOLATE_MISSING)?.as_ref().and_then(as_bool))
     }
 
+    /// Template asset-path pattern for `clip_set` (`templateAssetPath`), if
+    /// authored. Authored as `asset`, so read through the asset extractor.
+    pub fn clip_template_asset_path(&self, clip_set: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.field(clip_set, keys::TEMPLATE_ASSET_PATH)?.as_ref().and_then(as_asset))
+    }
+
+    /// Template stride for `clip_set` (`templateStride`), if authored.
+    pub fn clip_template_stride(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+        Ok(self.field(clip_set, keys::TEMPLATE_STRIDE)?.as_ref().and_then(as_f64))
+    }
+
+    /// Template start time for `clip_set` (`templateStartTime`), if authored.
+    pub fn clip_template_start_time(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+        Ok(self.field(clip_set, keys::TEMPLATE_START_TIME)?.as_ref().and_then(as_f64))
+    }
+
+    /// Template end time for `clip_set` (`templateEndTime`), if authored.
+    pub fn clip_template_end_time(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+        Ok(self.field(clip_set, keys::TEMPLATE_END_TIME)?.as_ref().and_then(as_f64))
+    }
+
+    /// Template active offset for `clip_set` (`templateActiveOffset`), if authored.
+    pub fn clip_template_active_offset(&self, clip_set: &str) -> anyhow::Result<Option<f64>> {
+        Ok(self.field(clip_set, keys::TEMPLATE_ACTIVE_OFFSET)?.as_ref().and_then(as_f64))
+    }
+
     /// Read a single field from `clip_set`'s entry in the composed `clips`
     /// dictionary, or `None` when the set (or field) is not authored.
     fn field(&self, clip_set: &str, key: &str) -> anyhow::Result<Option<Value>> {
@@ -127,6 +153,17 @@ fn as_pairs(value: &Value) -> Vec<(f64, f64)> {
 fn as_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+fn as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Double(d) => Some(*d),
+        Value::Float(f) => Some(*f as f64),
+        Value::Int(i) => Some(*i as f64),
+        Value::Int64(i) => Some(*i as f64),
+        Value::Half(h) => Some(h.to_f32() as f64),
         _ => None,
     }
 }
