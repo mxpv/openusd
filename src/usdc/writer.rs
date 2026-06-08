@@ -800,7 +800,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_string_vec(&mut self, ty: Type, v: &[impl AsRef<str>]) -> Result<ValueRep> {
+    fn write_string_vec<S: AsRef<str>>(&mut self, ty: Type, v: &[S]) -> Result<ValueRep> {
         let off = self.pos()?;
         self.write_count(v.len() as u64)?;
         for s in v {
