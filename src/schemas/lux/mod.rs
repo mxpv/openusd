@@ -51,6 +51,7 @@ pub use schema::{
 };
 pub use traits::{BoundableLight, Light, NonboundableLight};
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the schema-trait chain for a concrete `struct $ty(Prim)` light
@@ -136,8 +137,8 @@ impl TextureFormat {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             TEXTURE_FORMAT_AUTOMATIC => TextureFormat::Automatic,
             TEXTURE_FORMAT_LATLONG => TextureFormat::Latlong,
             TEXTURE_FORMAT_MIRRORED_BALL => TextureFormat::MirroredBall,
@@ -170,8 +171,8 @@ impl PoleAxis {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             POLE_AXIS_SCENE_UP => PoleAxis::SceneUp,
             POLE_AXIS_Y => PoleAxis::Y,
             POLE_AXIS_Z => PoleAxis::Z,
@@ -202,8 +203,8 @@ impl LightListCacheBehavior {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CACHE_BEHAVIOR_CONSUME_AND_CONTINUE => LightListCacheBehavior::ConsumeAndContinue,
             CACHE_BEHAVIOR_CONSUME_AND_HALT => LightListCacheBehavior::ConsumeAndHalt,
             CACHE_BEHAVIOR_IGNORE => LightListCacheBehavior::Ignore,

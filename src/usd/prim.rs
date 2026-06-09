@@ -32,6 +32,7 @@
 //! indices observably affected by the write are dropped.
 
 use super::{Attribute, Relationship, Stage, StageAuthoringError};
+use crate::tf::Token;
 use crate::{pcp, sdf};
 
 /// Stage-composed prim handle. Mirrors C++ `UsdPrim`.
@@ -174,8 +175,13 @@ impl Prim {
     /// `UsdPrim::CreateAttribute`. Defaults `variability = Varying`,
     /// `custom = true` — override via the returned [`Attribute`] handle's
     /// fluent setters.
-    pub fn create_attribute(&self, name: &str, type_name: impl Into<String>) -> Result<Attribute, StageAuthoringError> {
-        let attr_path = self.path.append_property(name).map_err(|_| {
+    pub fn create_attribute(
+        &self,
+        name: impl Into<Token>,
+        type_name: impl Into<String>,
+    ) -> Result<Attribute, StageAuthoringError> {
+        let name = name.into();
+        let attr_path = self.path.append_property(&name).map_err(|_| {
             // Synthesize the would-be path so the error surfaces the
             // offending name rather than just the parent prim.
             StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath {
@@ -188,8 +194,9 @@ impl Prim {
 
     /// Author a relationship spec named `name` under this prim. Mirrors C++
     /// `UsdPrim::CreateRelationship`.
-    pub fn create_relationship(&self, name: &str) -> Result<Relationship, StageAuthoringError> {
-        let rel_path = self.path.append_property(name).map_err(|_| {
+    pub fn create_relationship(&self, name: impl Into<Token>) -> Result<Relationship, StageAuthoringError> {
+        let name = name.into();
+        let rel_path = self.path.append_property(&name).map_err(|_| {
             // Synthesize the would-be path so the error surfaces the
             // offending name rather than just the parent prim.
             StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath {
@@ -227,7 +234,8 @@ impl Prim {
         let value = value.into();
         let attr_path = self.path.append_property(name)?;
         let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
-            Some(sdf::Value::TokenVec(v) | sdf::Value::StringVec(v)) => v,
+            Some(sdf::Value::TokenVec(v)) => v.into_iter().map(Into::into).collect(),
+            Some(sdf::Value::StringVec(v)) => v,
             Some(sdf::Value::TokenListOp(op)) => op.flatten(),
             Some(sdf::Value::StringListOp(op)) => op.flatten(),
             _ => Vec::new(),
@@ -241,7 +249,7 @@ impl Prim {
             .create_attribute(attr_path, "token[]")?
             .set_variability(sdf::Variability::Uniform)?
             .set_custom(false)?
-            .set(sdf::Value::TokenVec(updated))?;
+            .set(sdf::Value::token_vec(updated))?;
         Ok(true)
     }
 
@@ -269,8 +277,14 @@ impl Prim {
     }
 
     /// Composed `typeName`, if set. Mirrors C++ `UsdPrim::GetTypeName`.
-    pub fn type_name(&self) -> anyhow::Result<Option<String>> {
-        self.stage.field::<String>(&self.path, sdf::FieldKey::TypeName)
+    ///
+    /// `typeName` is a token; a value of any other type is treated as untyped
+    /// (`None`), matching C++ reading the field as an empty `TfToken`.
+    pub fn type_name(&self) -> anyhow::Result<Option<Token>> {
+        Ok(self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
+            .and_then(|v| v.try_as_token()))
     }
 
     /// Composed specifier, if one resolves. Mirrors C++ `UsdPrim::GetSpecifier`.
@@ -279,8 +293,14 @@ impl Prim {
     }
 
     /// Composed `kind` metadata, if authored. Mirrors C++ `UsdPrim::GetKind`.
-    pub fn kind(&self) -> anyhow::Result<Option<String>> {
-        self.stage.field::<String>(&self.path, sdf::FieldKey::Kind)
+    ///
+    /// `kind` is a token; a value of any other type is treated as unauthored
+    /// (`None`), matching C++ reading the field as an empty `TfToken`.
+    pub fn kind(&self) -> anyhow::Result<Option<Token>> {
+        Ok(self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::Kind)?
+            .and_then(|v| v.try_as_token()))
     }
 
     /// Returns this prim's composed `customData` dictionary, if authored.
@@ -299,8 +319,9 @@ impl Prim {
 
     /// `true` when `name` is in the prim's composed `apiSchemas` (pass the full
     /// instance name for multi-apply schemas). Mirrors C++ `UsdPrim::HasAPI`.
-    pub fn has_api_schema(&self, name: &str) -> anyhow::Result<bool> {
-        Ok(self.api_schemas()?.iter().any(|s| s == name))
+    pub fn has_api_schema(&self, name: impl Into<Token>) -> anyhow::Result<bool> {
+        let name = name.into();
+        Ok(self.api_schemas()?.iter().any(|s| s.as_str() == name.as_str()))
     }
 
     /// `true` if the prim and all ancestors are active. Missing `active`
@@ -475,7 +496,10 @@ impl Prim {
             return Ok(Some(leaf));
         };
         for ancestor in Stage::prim_ancestors_inclusive(parent) {
-            let kind = self.stage.field::<String>(&ancestor, sdf::FieldKey::Kind)?;
+            let kind = self
+                .stage
+                .field::<sdf::Value>(&ancestor, sdf::FieldKey::Kind)?
+                .and_then(|v| v.try_as_token());
             if !matches!(kind.as_deref(), Some("group" | "assembly")) {
                 return Ok(None);
             }
@@ -525,21 +549,21 @@ impl Prim {
     /// neither authors a spec nor asserts the attribute is composed. An invalid
     /// property name yields a handle whose path falls back to the prim, which
     /// resolves as empty.
-    pub fn attribute(&self, name: &str) -> Attribute {
+    pub fn attribute(&self, name: impl Into<Token>) -> Attribute {
         Attribute::new(&self.stage, self.property_path(name))
     }
 
     /// Returns a [`Relationship`] handle for the property `name` under this
     /// prim. Mirrors C++ `UsdPrim::GetRelationship`. See [`Self::attribute`]
     /// for the handle's non-authoring, non-validating contract.
-    pub fn relationship(&self, name: &str) -> Relationship {
+    pub fn relationship(&self, name: impl Into<Token>) -> Relationship {
         Relationship::new(&self.stage, self.property_path(name))
     }
 
     /// Returns the composed child prim names, in strongest-layer order and
     /// filtered by the stage's population mask. The name-only counterpart of
     /// [`children`](Self::children).
-    pub fn child_names(&self) -> anyhow::Result<Vec<String>> {
+    pub fn child_names(&self) -> anyhow::Result<Vec<Token>> {
         let names = self
             .stage
             .masked(&self.path, |g, cache| cache.prim_children(g, &self.path))?;
@@ -559,7 +583,7 @@ impl Prim {
 
     /// Returns the composed property names of this prim. Mirrors C++
     /// `UsdPrim::GetPropertyNames`.
-    pub fn property_names(&self) -> anyhow::Result<Vec<String>> {
+    pub fn property_names(&self) -> anyhow::Result<Vec<Token>> {
         self.stage
             .masked(&self.path, |g, cache| cache.prim_properties(g, &self.path))
     }
@@ -607,7 +631,7 @@ impl Prim {
 
     /// Property path for `name` under this prim, falling back to the prim path
     /// for an invalid name (the handle then resolves as empty).
-    fn property_path(&self, name: &str) -> sdf::Path {
+    fn property_path(&self, name: impl Into<Token>) -> sdf::Path {
         self.path.append_property(name).unwrap_or_else(|_| self.path.clone())
     }
 
@@ -701,7 +725,7 @@ impl PrimIndexRef {
     /// — children relocated away (renamed or deleted) that cannot be
     /// re-introduced — returned as `(children, prohibited)` (C++
     /// `PcpPrimIndex::ComputePrimChildNames`).
-    pub fn child_names(&self) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    pub fn child_names(&self) -> anyhow::Result<(Vec<Token>, Vec<Token>)> {
         self.stage.with_cache(|g, c| c.compute_prim_child_names(g, &self.path))
     }
 }

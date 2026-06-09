@@ -58,6 +58,7 @@ pub use conform::{apply_aspect_ratio_policy, ConformedAperture};
 pub use schema::{RenderDenoisePass, RenderPass, RenderProduct, RenderSettings, RenderVar};
 pub use traits::RenderSettingsBase;
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the schema-trait memberships for a concrete UsdRender view. All
@@ -116,8 +117,8 @@ impl AspectRatioConformPolicy {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CONFORM_EXPAND_APERTURE => AspectRatioConformPolicy::ExpandAperture,
             CONFORM_CROP_APERTURE => AspectRatioConformPolicy::CropAperture,
             CONFORM_ADJUST_APERTURE_WIDTH => AspectRatioConformPolicy::AdjustApertureWidth,
@@ -147,8 +148,8 @@ impl ProductType {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             PRODUCT_TYPE_RASTER => ProductType::Raster,
             PRODUCT_TYPE_DEEP_RASTER => ProductType::DeepRaster,
             _ => return None,
@@ -181,8 +182,8 @@ impl SourceType {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             SOURCE_TYPE_RAW => SourceType::Raw,
             SOURCE_TYPE_PRIMVAR => SourceType::Primvar,
             SOURCE_TYPE_LPE => SourceType::Lpe,

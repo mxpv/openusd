@@ -70,6 +70,7 @@ pub use skeleton_query::SkeletonResolver;
 pub use skinning_query::SkinningResolver;
 pub use topology::{Topology, TopologyError, NO_PARENT};
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the schema-trait chain for a concrete UsdSkel view. All trait
@@ -134,8 +135,8 @@ impl SkinningMethod {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             SKINNING_METHOD_CLASSIC_LINEAR => SkinningMethod::ClassicLinear,
             SKINNING_METHOD_DUAL_QUATERNION => SkinningMethod::DualQuaternion,
             _ => return None,
@@ -162,8 +163,8 @@ impl InfluenceInterpolation {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             INTERP_CONSTANT => InfluenceInterpolation::Constant,
             INTERP_VERTEX => InfluenceInterpolation::Vertex,
             _ => return None,

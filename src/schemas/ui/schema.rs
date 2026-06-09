@@ -4,6 +4,7 @@
 use anyhow::Result;
 
 use crate::sdf::{self, Variability};
+use crate::tf;
 use crate::usd::{Attribute, Prim, Stage};
 
 use super::impl_ui_schema;
@@ -95,7 +96,7 @@ impl SceneGraphPrimAPI {
         self.uniform_token(tok::A_DISPLAY_GROUP)
     }
 
-    fn uniform_token(&self, name: &str) -> Result<Attribute> {
+    fn uniform_token(&self, name: impl Into<tf::Token>) -> Result<Attribute> {
         Ok(self
             .create_attribute(name, "token")?
             .set_custom(false)?
@@ -223,7 +224,7 @@ impl NodeGraphNodeAPI {
         self.uniform(tok::A_NODE_DOC_URI, "string")
     }
 
-    fn uniform(&self, name: &str, type_name: &str) -> Result<Attribute> {
+    fn uniform(&self, name: impl Into<tf::Token>, type_name: &str) -> Result<Attribute> {
         Ok(self
             .create_attribute(name, type_name)?
             .set_custom(false)?

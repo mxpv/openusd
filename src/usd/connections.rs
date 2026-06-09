@@ -204,10 +204,10 @@ mod tests {
         let host = stage.define_prim("/Host")?.set_type_name("Shader")?;
         const N: usize = 2_000;
         for i in 0..N - 1 {
-            host.create_attribute(&format!("inputs:n{i}"), "float")?
+            host.create_attribute(format!("inputs:n{i}"), "float")?
                 .set_connections([sdf::path(format!("/Host.inputs:n{}", i + 1))?])?;
         }
-        host.create_attribute(&format!("inputs:n{}", N - 1), "float")?;
+        host.create_attribute(format!("inputs:n{}", N - 1), "float")?;
         let graph = ConnectionGraph::from_stage(&stage)?;
         let terminals = graph.resolve_chain(&sdf::path("/Host.inputs:n0")?);
         assert_eq!(terminals, vec![sdf::path(format!("/Host.inputs:n{}", N - 1))?]);

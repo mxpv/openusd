@@ -473,7 +473,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Variability(v) => Ok(rep_inline(Type::Variability, *v as u32 as u64)),
 
             Value::Token(s) => {
-                let idx = self.tokens.intern(s.clone());
+                let idx = self.tokens.intern(s.to_string());
                 Ok(rep_inline(Type::Token, idx as u64))
             }
             Value::AssetPath(s) => {
@@ -787,14 +787,14 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_token_vec(&mut self, ty: Type, v: &[String]) -> Result<ValueRep> {
+    fn write_token_vec(&mut self, ty: Type, v: &[crate::tf::Token]) -> Result<ValueRep> {
         let off = self.pos()?;
         // Token arrays: just write the indices (no inner count for the
         // Type::Token array path — reader does `unpack_array_len` then
         // `read_vec::<u32>(count)`).
         self.write_count(v.len() as u64)?;
         for t in v {
-            let idx = self.tokens.intern(t.clone());
+            let idx = self.tokens.intern(t.to_string());
             self.write_pod(&idx)?;
         }
         Ok(rep_heap(ty, off, true))

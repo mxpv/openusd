@@ -957,13 +957,12 @@ mod tests {
         layer.create_prim("/World/Cube", sdf::Specifier::Def, "Cube")?;
 
         let root = layer.pseudo_root().expect("pseudo-root present");
-        assert_eq!(root.prim_children(), Some(["World".to_string()].as_slice()));
+        let root_children: Vec<&str> = root.prim_children().unwrap().iter().map(|t| t.as_str()).collect();
+        assert_eq!(root_children, ["World"]);
 
         let world = layer.prim("/World").expect("prim");
-        assert_eq!(
-            world.prim_children(),
-            Some(["Mesh".to_string(), "Cube".to_string()].as_slice())
-        );
+        let world_children: Vec<&str> = world.prim_children().unwrap().iter().map(|t| t.as_str()).collect();
+        assert_eq!(world_children, ["Mesh", "Cube"]);
         Ok(())
     }
 
@@ -976,17 +975,8 @@ mod tests {
         layer.create_relationship("/Mesh.material:binding", sdf::Variability::Varying, false)?;
 
         let mesh = layer.prim("/Mesh").expect("prim");
-        assert_eq!(
-            mesh.property_children(),
-            Some(
-                [
-                    "points".to_string(),
-                    "normals".to_string(),
-                    "material:binding".to_string()
-                ]
-                .as_slice()
-            )
-        );
+        let props: Vec<&str> = mesh.property_children().unwrap().iter().map(|t| t.as_str()).collect();
+        assert_eq!(props, ["points", "normals", "material:binding"]);
         Ok(())
     }
 
@@ -1309,7 +1299,7 @@ mod tests {
 
         let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
             match layer.get(&sdf::path(path)?, key.as_str())?.into_owned() {
-                sdf::Value::TokenVec(v) => Ok(v),
+                sdf::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
                 other => panic!("expected TokenVec at {path}, got {other:?}"),
             }
         };

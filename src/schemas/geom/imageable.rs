@@ -3,7 +3,8 @@
 use anyhow::Result;
 
 use crate::sdf;
-use crate::usd::{Attribute, Relationship, SchemaBase, Stage};
+use crate::tf;
+use crate::usd::{Attribute, Relationship, SchemaBase};
 
 use super::tokens as tok;
 use super::{Purpose, Visibility};
@@ -68,8 +69,8 @@ pub trait Imageable: SchemaBase {
         let stage = self.stage();
         let mut cur = self.path().clone();
         loop {
-            if direct_token(stage, &cur, tok::A_VISIBILITY)?
-                .as_deref()
+            if stage
+                .field::<tf::Token>(cur.append_property(tok::A_VISIBILITY)?, sdf::FieldKey::Default)?
                 .and_then(Visibility::from_token)
                 .unwrap_or_default()
                 == Visibility::Invisible
@@ -91,8 +92,10 @@ pub trait Imageable: SchemaBase {
         let stage = self.stage();
         let mut cur = self.path().clone();
         loop {
-            if let Some(token) = direct_token(stage, &cur, tok::A_PURPOSE)? {
-                return Ok(Purpose::from_token(&token).unwrap_or_default());
+            if let Some(token) =
+                stage.field::<tf::Token>(cur.append_property(tok::A_PURPOSE)?, sdf::FieldKey::Default)?
+            {
+                return Ok(Purpose::from_token(token).unwrap_or_default());
             }
             match cur.parent() {
                 Some(p) => cur = p,
@@ -100,15 +103,4 @@ pub trait Imageable: SchemaBase {
             }
         }
     }
-}
-
-/// Read a token (or string) attribute's authored default at `prim`,
-/// regardless of variability, used by the inheritance walks above to inspect
-/// ancestor opinions directly.
-fn direct_token(stage: &Stage, prim: &sdf::Path, name: &str) -> Result<Option<String>> {
-    let attr = prim.append_property(name)?;
-    Ok(match stage.field::<sdf::Value>(attr, sdf::FieldKey::Default)? {
-        Some(sdf::Value::Token(s)) | Some(sdf::Value::String(s)) => Some(s),
-        _ => None,
-    })
 }

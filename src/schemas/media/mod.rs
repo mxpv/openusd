@@ -48,7 +48,7 @@
 //!     .aural_mode_attr()
 //!     .get::<sdf::Value>().unwrap()
 //!     .and_then(|v| v.try_as_token())
-//!     .and_then(|t| AuralMode::from_token(&t));
+//!     .and_then(AuralMode::from_token);
 //! assert_eq!(mode, Some(AuralMode::NonSpatial));
 //! ```
 
@@ -58,6 +58,7 @@ mod schema;
 
 pub use schema::{AssetPreviewsAPI, SpatialAudio};
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the schema-trait chain for a concrete `struct $ty(Prim)` media
@@ -112,8 +113,8 @@ impl AuralMode {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             AURAL_SPATIAL => AuralMode::Spatial,
             AURAL_NON_SPATIAL => AuralMode::NonSpatial,
             _ => return None,
@@ -144,8 +145,8 @@ impl PlaybackMode {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             PLAYBACK_ONCE_FROM_START => PlaybackMode::OnceFromStart,
             PLAYBACK_ONCE_FROM_START_TO_END => PlaybackMode::OnceFromStartToEnd,
             PLAYBACK_LOOP_FROM_START => PlaybackMode::LoopFromStart,

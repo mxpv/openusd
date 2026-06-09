@@ -44,7 +44,8 @@ fn reads_render_settings() -> Result<()> {
     assert_eq!(
         s.included_purposes_attr()
             .get::<Value>()?
-            .and_then(|v| v.try_as_token_vec()),
+            .and_then(|v| v.try_as_token_vec())
+            .map(|toks| toks.into_iter().map(String::from).collect::<Vec<String>>()),
         Some(vec!["default".to_string(), "render".to_string()])
     );
     assert_eq!(

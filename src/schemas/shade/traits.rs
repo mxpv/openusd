@@ -27,7 +27,7 @@ pub trait Connectable: SchemaBase {
     /// Handle to the `inputs:<base>` attribute (C++ `GetInput`). Read its value
     /// with `get::<T>()` or its connection sources with `connections()`.
     fn input(&self, base: &str) -> Attribute {
-        self.prim().attribute(&input_name(base))
+        self.prim().attribute(input_name(base))
     }
 
     /// Author `inputs:<base>` of `type_name` (`custom = false`)
@@ -36,7 +36,7 @@ pub trait Connectable: SchemaBase {
     fn create_input(&self, base: &str, type_name: &str) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(&input_name(base), type_name)?
+            .create_attribute(input_name(base), type_name)?
             .set_custom(false)?)
     }
 
@@ -44,7 +44,7 @@ pub trait Connectable: SchemaBase {
     /// usually carries no value — it is the source endpoint a downstream input
     /// connects to.
     fn output(&self, base: &str) -> Attribute {
-        self.prim().attribute(&output_name(base))
+        self.prim().attribute(output_name(base))
     }
 
     /// Author `outputs:<base>` of `type_name` (`custom = false`)
@@ -52,7 +52,7 @@ pub trait Connectable: SchemaBase {
     fn create_output(&self, base: &str, type_name: &str) -> Result<Attribute> {
         Ok(self
             .prim()
-            .create_attribute(&output_name(base), type_name)?
+            .create_attribute(output_name(base), type_name)?
             .set_custom(false)?)
     }
 
@@ -106,7 +106,7 @@ pub trait Connectable: SchemaBase {
     /// `UsdShadeInput::SetRenderType`). The input must already exist.
     fn set_input_render_type(&self, base: &str, render_type: &str) -> Result<()> {
         self.input(base)
-            .set_metadata(META_RENDER_TYPE, Value::Token(render_type.to_string()))?;
+            .set_metadata(META_RENDER_TYPE, Value::token(render_type))?;
         Ok(())
     }
 
@@ -120,7 +120,7 @@ pub trait Connectable: SchemaBase {
     /// `UsdShadeOutput::SetRenderType`). The output must already exist.
     fn set_output_render_type(&self, base: &str, render_type: &str) -> Result<()> {
         self.output(base)
-            .set_metadata(META_RENDER_TYPE, Value::Token(render_type.to_string()))?;
+            .set_metadata(META_RENDER_TYPE, Value::token(render_type))?;
         Ok(())
     }
 }

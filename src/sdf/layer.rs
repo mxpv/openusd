@@ -234,7 +234,7 @@ impl Layer {
         spec.add(FieldKey::Specifier, Value::Specifier(specifier));
 
         if !type_name.is_empty() {
-            spec.add(FieldKey::TypeName, Value::Token(type_name));
+            spec.add(FieldKey::TypeName, Value::token(type_name));
         }
 
         Ok(spec.as_prim_mut().expect("type guaranteed by ensure_prim_chain"))
@@ -290,7 +290,7 @@ impl Layer {
         }
 
         let spec = data.spec_mut(&path).expect("just ensured");
-        spec.add(FieldKey::TypeName, Value::Token(type_name));
+        spec.add(FieldKey::TypeName, Value::token(type_name));
 
         if variability != Variability::Varying {
             spec.add(FieldKey::Variability, Value::Variability(variability));
@@ -787,8 +787,8 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
 fn add_to_token_vec(spec: &mut Spec, owner_path: &Path, key: ChildrenKey, name: &str) -> Result<(), AuthoringError> {
     match spec.get_mut(key.as_str()) {
         Some(Value::TokenVec(v)) => {
-            if !v.iter().any(|n| n == name) {
-                v.push(name.to_owned());
+            if !v.iter().any(|n| *n == name) {
+                v.push(name.into());
             }
         }
         Some(_) => {
@@ -798,7 +798,7 @@ fn add_to_token_vec(spec: &mut Spec, owner_path: &Path, key: ChildrenKey, name: 
             });
         }
         None => {
-            spec.add(key, Value::TokenVec(vec![name.to_owned()]));
+            spec.add(key, Value::TokenVec(vec![name.into()]));
         }
     }
     Ok(())

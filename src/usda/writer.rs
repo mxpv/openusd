@@ -17,6 +17,7 @@ use crate::sdf::{
     self, AbstractData, AssetPath, ChildrenKey, FieldKey, LayerOffset, ListOp, Path, Payload, Reference, SpecType,
     Specifier, Value, Variability,
 };
+use crate::tf::Token;
 
 /// Emits `usda` text from an [`AbstractData`].
 pub struct TextWriter;
@@ -104,7 +105,7 @@ impl<W: Write> Emitter<'_, W> {
 
         // Root prims
         let children = if has_root {
-            prim_children(data, &root)
+            children(data, &root, ChildrenKey::PrimChildren)
         } else {
             Vec::new()
         };
@@ -167,7 +168,7 @@ impl<W: Write> Emitter<'_, W> {
         self.emit_body_reorders(data, path)?;
 
         // Properties
-        let props = property_children(data, path);
+        let props = children(data, path, ChildrenKey::PropertyChildren);
         for name in &props {
             let prop_path = path.append_property(name)?;
             self.emit_property(data, &prop_path, name)?;
@@ -177,12 +178,12 @@ impl<W: Write> Emitter<'_, W> {
         if let Some(Value::TokenVec(vset_names)) = get_value(data, path, ChildrenKey::VariantSetChildren.as_str()) {
             for vset in &vset_names {
                 let vset_path = path.append_variant_selection(vset, "");
-                self.emit_variant_set(data, &vset_path, vset)?;
+                self.emit_variant_set(data, &vset_path, vset.as_str())?;
             }
         }
 
         // Child prims
-        let children = prim_children(data, path);
+        let children = children(data, path, ChildrenKey::PrimChildren);
         for name in &children {
             let child_path = path.append_path(name.as_str())?;
             self.emit_prim(data, &child_path, name)?;
@@ -236,7 +237,7 @@ impl<W: Write> Emitter<'_, W> {
         }
 
         let type_name = match get_value(data, path, FieldKey::TypeName.as_str()) {
-            Some(Value::Token(t)) => t,
+            Some(Value::Token(t)) => String::from(t),
             _ => anyhow::bail!("attribute {path} missing typeName"),
         };
         write!(self.out, "{type_name} {name}")?;
@@ -560,7 +561,7 @@ impl<W: Write> Emitter<'_, W> {
             let prim = vset_path.prim_path();
             for v_name in &variant_names {
                 let v_path = prim.append_variant_selection(name, v_name);
-                self.emit_variant(data, &v_path, v_name)?;
+                self.emit_variant(data, &v_path, v_name.as_str())?;
             }
         }
 
@@ -600,13 +601,13 @@ impl<W: Write> Emitter<'_, W> {
 
         self.emit_body_reorders(data, path)?;
 
-        let props = property_children(data, path);
+        let props = children(data, path, ChildrenKey::PropertyChildren);
         for prop in &props {
             let prop_path = path.append_property(prop)?;
             self.emit_property(data, &prop_path, prop)?;
         }
 
-        let children = prim_children(data, path);
+        let children = children(data, path, ChildrenKey::PrimChildren);
         for child in &children {
             let child_path = path.append_path(child.as_str())?;
             self.emit_prim(data, &child_path, child)?;
@@ -699,7 +700,7 @@ impl<W: Write> Emitter<'_, W> {
         Ok(())
     }
 
-    fn emit_reorder(&mut self, target: &str, names: &[String]) -> Result<()> {
+    fn emit_reorder(&mut self, target: &str, names: &[Token]) -> Result<()> {
         self.write_indent()?;
         write!(self.out, "reorder {target} = [")?;
         for (i, n) in names.iter().enumerate() {
@@ -707,7 +708,7 @@ impl<W: Write> Emitter<'_, W> {
                 self.out.write_all(b", ")?;
             }
             let mut buf = String::new();
-            write_quoted(&mut buf, n)?;
+            write_quoted(&mut buf, n.as_str())?;
             self.out.write_all(buf.as_bytes())?;
         }
         writeln!(self.out, "]")?;
@@ -886,7 +887,7 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
         Value::String(v) => write_quoted(s, v)?,
         Value::StringVec(v) => format_vec(s, v, |s, t: &String| write_quoted(s, t))?,
         Value::Token(v) => write_quoted(s, v)?,
-        Value::TokenVec(v) => format_vec(s, v, |s, t: &String| write_quoted(s, t))?,
+        Value::TokenVec(v) => format_vec(s, v, |s, t: &Token| write_quoted(s, t))?,
 
         Value::AssetPath(v) => write_asset_path(s, v)?,
         Value::AssetPathVec(v) => format_vec(s, v, |s, p: &AssetPath| write_asset_path(s, p))?,
@@ -1354,15 +1355,10 @@ fn get_value(data: &dyn AbstractData, path: &Path, field: &str) -> Option<Value>
     data.get(path, field).ok().map(|v| v.into_owned())
 }
 
-fn prim_children(data: &dyn AbstractData, path: &Path) -> Vec<String> {
-    match get_value(data, path, ChildrenKey::PrimChildren.as_str()) {
-        Some(Value::TokenVec(v)) => v,
-        _ => Vec::new(),
-    }
-}
-
-fn property_children(data: &dyn AbstractData, path: &Path) -> Vec<String> {
-    match get_value(data, path, ChildrenKey::PropertyChildren.as_str()) {
+/// Composed `primChildren` / `propertyChildren` name list (`key` selects which),
+/// empty when unset.
+fn children(data: &dyn AbstractData, path: &Path, key: ChildrenKey) -> Vec<Token> {
+    match get_value(data, path, key.as_str()) {
         Some(Value::TokenVec(v)) => v,
         _ => Vec::new(),
     }

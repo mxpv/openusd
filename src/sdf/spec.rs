@@ -18,6 +18,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use crate::sdf;
+use crate::tf;
 
 /// A single spec in a scene description layer — a (type, fields) entry
 /// keyed by [`sdf::Path`] within a [`Data`](crate::sdf::Data) store.
@@ -278,7 +279,7 @@ where
     }
 
     /// Names of child prims, in declared order. `None` if unset.
-    pub fn prim_children(&self) -> Option<&[String]> {
+    pub fn prim_children(&self) -> Option<&[tf::Token]> {
         match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
             sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
@@ -286,7 +287,7 @@ where
     }
 
     /// Names of child properties, in declared order. `None` if unset.
-    pub fn property_children(&self) -> Option<&[String]> {
+    pub fn property_children(&self) -> Option<&[tf::Token]> {
         match self.get(sdf::ChildrenKey::PropertyChildren.as_str())? {
             sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
@@ -310,7 +311,7 @@ where
     /// of authoring `sdf::Value::Token("")` — matching the empty-string skip in
     /// [`crate::sdf::Layer::create_prim`] so the two write paths stay in
     /// lockstep.
-    pub fn set_type_name(&mut self, name: impl Into<String>) {
+    pub fn set_type_name(&mut self, name: impl Into<tf::Token>) {
         let name = name.into();
         if name.is_empty() {
             self.remove(sdf::FieldKey::TypeName.as_str());
@@ -325,8 +326,8 @@ where
     }
 
     /// Set the `kind` metadata.
-    pub fn set_kind(&mut self, kind: impl Into<String>) {
-        self.add(sdf::FieldKey::Kind, sdf::Value::Token(kind.into()));
+    pub fn set_kind(&mut self, kind: impl Into<tf::Token>) {
+        self.add(sdf::FieldKey::Kind, sdf::Value::token(kind));
     }
 
     /// Set the `active` flag.
@@ -494,7 +495,7 @@ where
     }
 
     /// `allowedTokens` array, if authored.
-    pub fn allowed_tokens(&self) -> Option<&[String]> {
+    pub fn allowed_tokens(&self) -> Option<&[tf::Token]> {
         match self.get(sdf::FieldKey::AllowedTokens.as_str())? {
             sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
@@ -572,17 +573,17 @@ where
     }
 
     /// Set the `colorSpace` token.
-    pub fn set_color_space(&mut self, color_space: impl Into<String>) {
-        self.add(sdf::FieldKey::ColorSpace, sdf::Value::Token(color_space.into()));
+    pub fn set_color_space(&mut self, color_space: impl Into<tf::Token>) {
+        self.add(sdf::FieldKey::ColorSpace, sdf::Value::token(color_space));
     }
 
     /// Set the `allowedTokens` array.
     pub fn set_allowed_tokens<I, S>(&mut self, tokens: I)
     where
         I: IntoIterator<Item = S>,
-        S: Into<String>,
+        S: Into<tf::Token>,
     {
-        let tokens: Vec<String> = tokens.into_iter().map(Into::into).collect();
+        let tokens: Vec<tf::Token> = tokens.into_iter().map(Into::into).collect();
         self.add(sdf::FieldKey::AllowedTokens, sdf::Value::TokenVec(tokens));
     }
 
@@ -932,7 +933,7 @@ where
     /// Sublayer asset paths in strength order (strongest first).
     pub fn sublayers(&self) -> Option<&[String]> {
         match self.get(sdf::FieldKey::SubLayers.as_str())? {
-            sdf::Value::StringVec(v) | sdf::Value::TokenVec(v) => Some(v.as_slice()),
+            sdf::Value::StringVec(v) => Some(v.as_slice()),
             _ => None,
         }
     }
@@ -986,7 +987,7 @@ where
     }
 
     /// Names of root prims in declared order.
-    pub fn prim_children(&self) -> Option<&[String]> {
+    pub fn prim_children(&self) -> Option<&[tf::Token]> {
         match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
             sdf::Value::TokenVec(v) => Some(v.as_slice()),
             _ => None,
@@ -1004,8 +1005,8 @@ where
     /// validating front door is [`crate::sdf::Layer::set_default_prim`],
     /// which rejects malformed values; use this method when you need to
     /// bypass that check (e.g. round-tripping spec data verbatim).
-    pub fn set_default_prim(&mut self, name: impl Into<String>) {
-        self.add(sdf::FieldKey::DefaultPrim, sdf::Value::Token(name.into()));
+    pub fn set_default_prim(&mut self, name: impl Into<tf::Token>) {
+        self.add(sdf::FieldKey::DefaultPrim, sdf::Value::token(name));
     }
 
     /// Replace the sublayer list with the given asset paths.
@@ -1026,8 +1027,7 @@ where
     /// Append a sublayer asset path. Duplicate entries are preserved because
     /// USD layer offsets and strength ordering make repeated sublayer arcs
     /// meaningful. Always writes the field as `sdf::Value::StringVec` so the
-    /// USDA/USDC writers emit it (they match `StringVec` only); a
-    /// pre-existing `TokenVec` is migrated in place.
+    /// USDA/USDC writers emit it (they match `StringVec` only).
     pub fn add_sublayer(&mut self, path: impl Into<String>) {
         let path = path.into();
         let mut paths = self.take_sublayer_paths().unwrap_or_default();
@@ -1069,12 +1069,11 @@ where
         true
     }
 
-    /// Removes and decodes the `subLayers` field, accepting the legacy
-    /// `TokenVec` encoding alongside `StringVec`. `None` when unauthored or
-    /// stored with an unexpected value type.
+    /// Removes and decodes the `subLayers` field (a `StringVec` of asset-path
+    /// strings). `None` when unauthored or stored with an unexpected value type.
     fn take_sublayer_paths(&mut self) -> Option<Vec<String>> {
         match self.remove(sdf::FieldKey::SubLayers.as_str()) {
-            Some(sdf::Value::StringVec(v)) | Some(sdf::Value::TokenVec(v)) => Some(v),
+            Some(sdf::Value::StringVec(v)) => Some(v),
             _ => None,
         }
     }
@@ -1280,10 +1279,7 @@ mod tests {
     #[test]
     fn add_api_schema_rejects_wrong_type() {
         let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
-            sdf::Value::TokenVec(vec!["ExistingAPI".to_string()]),
-        );
+        spec.add(sdf::FieldKey::ApiSchemas, sdf::Value::token_vec(["ExistingAPI"]));
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
         assert!(matches!(

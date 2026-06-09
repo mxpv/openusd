@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::sdf::{self, element_cmp, Path, PathComponent, RelocateList};
+use crate::tf::Token;
 
 use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
@@ -90,41 +91,41 @@ fn shift_through_nearest_ancestor(endpoint: &Path, renames: &[(Path, Path)]) -> 
 pub(crate) fn apply_child_relocates(
     parent: &Path,
     pairs: &[(Path, Path)],
-    name_order: &mut Vec<String>,
-    name_set: &mut HashSet<String>,
-    prohibited: &mut HashSet<String>,
+    name_order: &mut Vec<Token>,
+    name_set: &mut HashSet<Token>,
+    prohibited: &mut HashSet<Token>,
 ) {
     // A source child maps to `Some(new_name)` (renamed in place) or `None`
     // (removed — moved to a different parent or deleted).
-    let mut relocations: HashMap<String, Option<String>> = HashMap::new();
-    let mut adds: Vec<String> = Vec::new();
+    let mut relocations: HashMap<Token, Option<Token>> = HashMap::new();
+    let mut adds: Vec<Token> = Vec::new();
 
     for (src, tgt) in pairs {
         let src_is_child = src.parent().as_ref() == Some(parent);
         let tgt_is_child = !tgt.is_empty() && tgt.parent().as_ref() == Some(parent);
         if src_is_child {
             if let Some(name) = src.name() {
-                prohibited.insert(name.to_string());
+                prohibited.insert(name.into());
                 // A target sharing the parent renames in place; anything else
                 // (a move elsewhere or a deletion) removes the child.
                 let rename = tgt_is_child.then(|| tgt.name()).flatten();
-                relocations.insert(name.to_string(), rename.map(str::to_string));
+                relocations.insert(name.into(), rename.map(Token::from));
             }
         }
         // A child relocated in from a different parent is an addition.
         if tgt_is_child && !src_is_child {
             if let Some(tgt_name) = tgt.name() {
-                adds.push(tgt_name.to_string());
+                adds.push(tgt_name.into());
             }
         }
     }
     // Relocated-in children are appended in the normative element order (spec
     // 11.3.1's `path_element_sorted`), not authored order; the `name_set` guard
     // in the append loop below drops any duplicate target name.
-    adds.sort_by(|a, b| element_cmp(a, b));
+    adds.sort_by(|a, b| element_cmp(a.as_str(), b.as_str()));
 
     if !relocations.is_empty() {
-        let mut retained: Vec<String> = Vec::with_capacity(name_order.len());
+        let mut retained: Vec<Token> = Vec::with_capacity(name_order.len());
         for name in name_order.drain(..) {
             match relocations.get(&name) {
                 Some(Some(new_name)) => {
@@ -546,6 +547,6 @@ mod tests {
             &mut name_set,
             &mut prohibited,
         );
-        assert_eq!(name_order, vec!["B9".to_string(), "B10".to_string()]);
+        assert_eq!(name_order.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["B9", "B10"]);
     }
 }

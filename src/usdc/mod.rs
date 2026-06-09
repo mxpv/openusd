@@ -168,37 +168,36 @@ mod tests {
 
         let data = read_file(path)?;
 
-        let prim_children: Vec<String> = data
+        let prim_children: Vec<_> = data
             .get(&sdf::Path::abs_root(), "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
-        assert_eq!(prim_children, vec!["SoC_ElephantWithMonochord".to_string()]);
+        assert_eq!(
+            prim_children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["SoC_ElephantWithMonochord"]
+        );
 
-        let elephant: Vec<String> = data
+        let elephant: Vec<_> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
 
         assert_eq!(
-            elephant,
-            vec![
-                "Materials".to_string(),
-                "Object".to_string(),
-                "CharacterAudioSource".to_string()
-            ]
+            elephant.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["Materials", "Object", "CharacterAudioSource"]
         );
 
-        let materials: Vec<String> = data
+        let materials: Vec<_> = data
             .get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
 
         assert_eq!(
-            materials,
-            vec!["Elefant_Mat_68050".to_string(), "Monochord_Mat_68062".to_string()]
+            materials.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["Elefant_Mat_68050", "Monochord_Mat_68062"]
         );
 
         Ok(())
@@ -777,7 +776,7 @@ mod tests {
 
         // defaultPrim = "World"
         let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;
-        assert_eq!(default_prim.try_as_token_ref().unwrap(), "World");
+        assert_eq!(default_prim.try_as_token_ref().unwrap().as_str(), "World");
 
         // float4[] clippingPlanes = []
         let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;

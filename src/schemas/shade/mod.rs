@@ -63,6 +63,7 @@ pub use preview::{read_preview_surface, Channel, ReadPreviewSurface};
 pub use schema::{Material, NodeGraph, Shader};
 pub use traits::Connectable;
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the schema-trait memberships for a concrete UsdShade view. All
@@ -119,8 +120,8 @@ impl ImplementationSource {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             IMPL_SOURCE_ID => ImplementationSource::Id,
             IMPL_SOURCE_SOURCE_ASSET => ImplementationSource::SourceAsset,
             IMPL_SOURCE_SOURCE_CODE => ImplementationSource::SourceCode,
@@ -149,8 +150,8 @@ impl Connectability {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CONNECTABILITY_FULL => Connectability::Full,
             CONNECTABILITY_INTERFACE_ONLY => Connectability::InterfaceOnly,
             _ => return None,
@@ -178,8 +179,8 @@ impl BindingStrength {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             STRENGTH_WEAKER_THAN_DESCENDANTS => BindingStrength::WeakerThanDescendants,
             STRENGTH_STRONGER_THAN_DESCENDANTS => BindingStrength::StrongerThanDescendants,
             _ => return None,

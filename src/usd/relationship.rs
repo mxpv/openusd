@@ -379,10 +379,10 @@ mod tests {
         // r0 -> r1 -> ... -> r{N-1} -> /Geom, all relationships on one prim.
         let r0 = host.create_relationship("r0")?.set_targets([sdf::path("/Host.r1")?])?;
         for i in 1..N - 1 {
-            host.create_relationship(&format!("r{i}"))?
+            host.create_relationship(format!("r{i}"))?
                 .set_targets([sdf::path(format!("/Host.r{}", i + 1))?])?;
         }
-        host.create_relationship(&format!("r{}", N - 1))?
+        host.create_relationship(format!("r{}", N - 1))?
             .set_targets([sdf::path("/Geom")?])?;
 
         assert_eq!(r0.forwarded_targets()?, vec![sdf::path("/Geom")?]);

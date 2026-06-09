@@ -10,6 +10,8 @@ This is a pure Rust implementation of OpenUSD (Universal Scene Description), Pix
 
 The codebase mirrors the C++ OpenUSD SDK's module layout. Each module's own `//!` doc comment is the source of truth for its internals; the summaries below are a navigational map — read the module docs (e.g. `pcp/mod.rs`, `usd/stage.rs`) for the detail.
 
+- **`tf/`** - Tools Foundation (C++ `Tf`): `tf::Token`, an interned-identifier string (C++ `TfToken`) holding either a `&'static str` (zero-alloc, `const fn new`) or a runtime `Arc<str>`. Backs `sdf::Value::Token` / `TokenVec` and every API that mirrors a C++ `TfToken` (prim/property names, `typeName`, `kind`, token-valued attributes). Equality/hash/ordering are by text, so static and shared tokens compare equal; it derefs to `str` and compares against `str`/`&str`.
+
 - **`sdf/`** - Scene Description Foundations (C++ `Sdf`): core data types and the central `AbstractData` trait — the unified interface the text, binary, and archive readers all implement. Key types: `Value` (60+ variants), `AssetPath` (C++ `SdfAssetPath`), `Path`, `PathTable` (namespace-keyed map, C++ `SdfPathTable`), `Spec`, `ListOp`, schema `FieldKey`s, and `Layer` (C++ `SdfLayer`: identifier + backing `AbstractData` + the layer-tier authoring surface and typed spec views). `sdf/expr.rs` is the `` `...` `` variable-expression engine (C++ `SdfVariableExpression`), re-exported as `sdf::expr` / `sdf::Expr`.
 
 - **`usda/`** - Text format `.usda`: logos lexer + recursive-descent parser. `TextReader` / `TextWriter`.

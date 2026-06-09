@@ -89,7 +89,9 @@ impl Path {
         self.path.is_empty()
     }
 
-    pub fn append_property(&self, property: &str) -> Result<Path> {
+    pub fn append_property(&self, property: impl Into<crate::tf::Token>) -> Result<Path> {
+        let property = property.into();
+        let property = property.as_str();
         // TODO: Validate property name more carefully here.
         ensure!(!property.is_empty(), "Property name cannot be empty");
         ensure!(!self.is_property_path(), "Cannot append property to property path");
@@ -547,8 +549,8 @@ impl Path {
 
     /// Appends a variant selection to a prim path, producing a path like
     /// `/MyPrim{variantSet=selection}`.
-    pub fn append_variant_selection(&self, set: &str, selection: &str) -> Path {
-        Path::from_str_unchecked(&format!("{}{{{set}={selection}}}", self.path))
+    pub fn append_variant_selection(&self, set: impl AsRef<str>, selection: impl AsRef<str>) -> Path {
+        Path::from_str_unchecked(&format!("{}{{{}={}}}", self.path, set.as_ref(), selection.as_ref()))
     }
 
     /// Appends a raw variant segment (e.g. `{set=sel}`) directly to this path.

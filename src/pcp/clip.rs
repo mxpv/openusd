@@ -404,9 +404,11 @@ impl HashPattern {
     }
 }
 
+/// Extracts a `String` from a `string`-valued field (`primPath`, a C++
+/// `std::string`).
 fn as_string(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) | Value::Token(s) => Some(s.clone()),
+        Value::String(s) => Some(s.clone()),
         _ => None,
     }
 }
@@ -431,11 +433,12 @@ fn as_bool(value: &Value) -> Option<bool> {
     }
 }
 
-/// Extracts a string list from an `asset[]`/`string[]`/`token[]` value.
+/// Extracts a string list from `assetPaths`, an `asset[]` value (C++
+/// `VtArray<SdfAssetPath>`); a `string[]` opinion is tolerated as a fallback.
 fn as_string_vec(value: &Value) -> Option<Vec<String>> {
     match value {
-        Value::StringVec(v) | Value::TokenVec(v) => Some(v.clone()),
         Value::AssetPathVec(v) => Some(v.iter().map(|a| a.authored_path.clone()).collect()),
+        Value::StringVec(v) => Some(v.clone()),
         _ => None,
     }
 }

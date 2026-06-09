@@ -609,7 +609,7 @@ fn resolve_variant_selections_in<'a>(
                 continue;
             };
             for set_name in set_names {
-                let Entry::Vacant(entry) = selections.entry(set_name) else {
+                let Entry::Vacant(entry) = selections.entry(set_name.into()) else {
                     continue;
                 };
                 let set_path = node.path.append_variant_selection(entry.key(), "");
@@ -621,7 +621,7 @@ fn resolve_variant_selections_in<'a>(
                 };
                 // Use the first configured fallback that exists in this set.
                 let fallbacks = variant_fallbacks.get(entry.key());
-                if let Some(fb) = fallbacks.iter().find(|fb| variants.contains(fb)) {
+                if let Some(fb) = fallbacks.iter().find(|fb| variants.iter().any(|v| v == fb.as_str())) {
                     entry.insert(fb.clone());
                 }
             }

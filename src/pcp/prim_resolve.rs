@@ -598,7 +598,10 @@ impl PrimIndex {
                 // Stop weaker opinions while keeping any stronger composed edits.
                 Value::ValueBlock => break,
                 Value::StringListOp(op) | Value::TokenListOp(op) => ops.push(op),
-                Value::StringVec(names) | Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(names)),
+                Value::StringVec(names) => ops.push(sdf::StringListOp::explicit(names)),
+                Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(
+                    names.into_iter().map(String::from).collect::<Vec<_>>(),
+                )),
                 _ => continue,
             }
         }

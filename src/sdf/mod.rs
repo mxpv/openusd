@@ -312,6 +312,9 @@ pub type Int64ListOp = ListOp<i64>;
 pub type Uint64ListOp = ListOp<u64>;
 
 pub type StringListOp = ListOp<String>;
+// TODO: C++ `SdfTokenListOp` is `SdfListOp<TfToken>`; make this `ListOp<Token>`
+// so `apiSchemas` / `variantSetNames` resolve as tokens end to end (today they
+// surface as `Vec<String>`, forcing a conversion at every name-list boundary).
 pub type TokenListOp = ListOp<String>;
 pub type PathListOp = ListOp<Path>;
 pub type ReferenceListOp = ListOp<Reference>;

@@ -108,7 +108,7 @@ impl MaterialBindingAPI {
     pub fn collection_binding(&self, binding_name: &str, purpose: &str) -> Result<Option<(Path, Path)>> {
         let rel = self
             .path()
-            .append_property(&collection_binding_rel(purpose, binding_name))?;
+            .append_property(collection_binding_rel(purpose, binding_name))?;
         let targets = self.stage().relationship_at(rel).targets()?;
         Ok(match targets.as_slice() {
             [collection, material] => Some((collection.clone(), material.clone())),
@@ -187,20 +187,20 @@ fn apply_binding_strength(stage: &Stage, rel: Relationship, strength: BindingStr
 /// the spec default when unauthored.
 fn composed_strength(stage: &Stage, rel: &Path) -> Result<BindingStrength> {
     Ok(match stage.field::<Value>(rel.clone(), META_BIND_MATERIAL_AS)? {
-        Some(Value::Token(t)) => BindingStrength::from_token(&t).unwrap_or_default(),
+        Some(Value::Token(t)) => BindingStrength::from_token(t).unwrap_or_default(),
         _ => BindingStrength::default(),
     })
 }
 
 /// The directly-bound Material for `purpose` on the prim at `prim`.
 fn direct_binding(stage: &Stage, prim: &Path, purpose: &str) -> Result<Option<Path>> {
-    let rel = prim.append_property(&direct_binding_rel(purpose))?;
+    let rel = prim.append_property(direct_binding_rel(purpose))?;
     Ok(stage.relationship_at(rel).targets()?.into_iter().next())
 }
 
 /// The `bindMaterialAs` strength on the direct binding for `purpose`.
 fn binding_strength(stage: &Stage, prim: &Path, purpose: &str) -> Result<BindingStrength> {
-    let rel = prim.append_property(&direct_binding_rel(purpose))?;
+    let rel = prim.append_property(direct_binding_rel(purpose))?;
     composed_strength(stage, &rel)
 }
 

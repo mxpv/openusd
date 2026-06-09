@@ -43,6 +43,7 @@ use std::rc::Rc;
 use anyhow::Result;
 use bitflags::bitflags;
 
+use crate::tf::Token;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
@@ -679,10 +680,7 @@ impl Stage {
                 .try_get(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())
                 .ok()
                 .flatten();
-            let unchanged = matches!(
-                prior.as_deref(),
-                Some(sdf::Value::Token(s) | sdf::Value::String(s)) if s == &name
-            );
+            let unchanged = prior.as_deref().and_then(sdf::Value::as_str) == Some(name.as_str());
 
             layer.set_default_prim(name)?;
             let mut cl = sdf::ChangeList::new();
@@ -942,7 +940,7 @@ impl Stage {
     ///
     /// When a session layer is present, `defaultPrim` is still read from
     /// the root layer (not the session layer), matching C++ behavior.
-    pub fn default_prim(&self) -> Option<String> {
+    pub fn default_prim(&self) -> Option<Token> {
         self.with_cache(|g, c| Ok(c.default_prim(g))).unwrap_or_default()
     }
 
@@ -1032,7 +1030,7 @@ impl Stage {
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
-    pub fn root_prims(&self) -> Result<Vec<String>> {
+    pub fn root_prims(&self) -> Result<Vec<Token>> {
         let root = sdf::Path::abs_root();
         let children = self.with_cache(|g, c| c.prim_children(g, &root))?;
         Ok(self.filter_child_names(&root, children))
@@ -1223,7 +1221,7 @@ impl Stage {
     /// and the stage's own [`traverse`](Self::traverse) walk. Prototype children
     /// are gated through [`Self::mask_includes`], so a prototype populated by a
     /// masked instance stays traversable (spec 11.3.3).
-    pub(crate) fn filter_child_names(&self, parent: &sdf::Path, children: Vec<String>) -> Vec<String> {
+    pub(crate) fn filter_child_names(&self, parent: &sdf::Path, children: Vec<Token>) -> Vec<Token> {
         if self.population_mask.is_all() {
             return children;
         }
@@ -1698,11 +1696,21 @@ mod tests {
     // Composed-scene query shims used throughout these tests: each routes
     // through the handle that now owns the query so the assertions stay terse.
     fn child_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
-        stage.prim_at(path).child_names()
+        Ok(stage
+            .prim_at(path)
+            .child_names()?
+            .into_iter()
+            .map(String::from)
+            .collect())
     }
 
     fn prop_names(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<String>> {
-        stage.prim_at(path).property_names()
+        Ok(stage
+            .prim_at(path)
+            .property_names()?
+            .into_iter()
+            .map(String::from)
+            .collect())
     }
 
     fn connections(stage: &Stage, attr: &sdf::Path) -> Result<Vec<sdf::Path>> {
@@ -1772,8 +1780,11 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         assert_eq!(stage.layer_count(), 1);
-        assert_eq!(stage.default_prim(), Some("World".to_string()));
-        assert_eq!(stage.root_prims()?, vec!["World"]);
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
+        assert_eq!(
+            stage.root_prims()?.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["World"]
+        );
 
         Ok(())
     }
@@ -1885,7 +1896,7 @@ mod tests {
         let stage = Stage::open(&path)?;
 
         assert_eq!(stage.layer_count(), 2);
-        assert_eq!(stage.default_prim(), Some("World".to_string()));
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
 
         // The weaker sublayer (_stage.usda) defines /World/Cube.
         let mut prims = Vec::new();
@@ -2290,7 +2301,7 @@ mod tests {
     #[test]
     fn session_layer_does_not_affect_default_prim() -> Result<()> {
         let stage = open_with_session()?;
-        assert_eq!(stage.default_prim(), Some("World".to_string()));
+        assert_eq!(stage.default_prim().as_deref(), Some("World"));
         Ok(())
     }
 
@@ -2883,12 +2894,12 @@ def Shader "Mat" (
     fn type_name_returns_prim_type() -> Result<()> {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         assert_eq!(
-            stage.prim_at(sdf::Path::new("/World/Geo")?).type_name()?,
-            Some("Mesh".to_string())
+            stage.prim_at(sdf::Path::new("/World/Geo")?).type_name()?.as_deref(),
+            Some("Mesh")
         );
         assert_eq!(
-            stage.prim_at(sdf::Path::new("/World")?).type_name()?,
-            Some("Xform".to_string())
+            stage.prim_at(sdf::Path::new("/World")?).type_name()?.as_deref(),
+            Some("Xform")
         );
         Ok(())
     }
@@ -2939,7 +2950,10 @@ def Shader "Mat" (
             .mask(StagePopulationMask::new(["/World/ActiveParent/Child"]))
             .open("fixtures/stage_queries.usda")?;
 
-        assert_eq!(stage.root_prims()?, vec!["World"]);
+        assert_eq!(
+            stage.root_prims()?.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["World"]
+        );
         assert_eq!(child_names(&stage, "/World")?, vec!["ActiveParent"]);
         assert_eq!(child_names(&stage, "/World/ActiveParent")?, vec!["Child"]);
 
@@ -2964,7 +2978,10 @@ def Shader "Mat" (
             .mask(StagePopulationMask::new(["/World/cube"]))
             .open(&path)?;
 
-        assert_eq!(stage.root_prims()?, vec!["World"]);
+        assert_eq!(
+            stage.root_prims()?.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["World"]
+        );
         assert_eq!(child_names(&stage, "/World")?, vec!["cube"]);
         assert!(!stage.has_spec("/World/invalid_reference")?);
         Ok(())
@@ -3540,7 +3557,7 @@ def "I2" (
     fn model_hierarchy() -> Result<()> {
         let stage = open_stage_queries_fixture()?;
 
-        assert_eq!(stage.prim_at("/World").kind()?, Some("assembly".to_string()));
+        assert_eq!(stage.prim_at("/World").kind()?.as_deref(), Some("assembly"));
         assert!(stage.prim_at("/World").is_model()?);
         assert!(stage.prim_at("/World").is_group()?);
 
@@ -3553,8 +3570,11 @@ def "I2" (
         assert!(stage.prim_at("/World/Group/Subcomponent").is_subcomponent()?);
 
         assert_eq!(
-            stage.prim_at("/World/InvalidComponentParent/Component").kind()?,
-            Some("component".to_string())
+            stage
+                .prim_at("/World/InvalidComponentParent/Component")
+                .kind()?
+                .as_deref(),
+            Some("component")
         );
         assert!(!stage.prim_at("/World/InvalidComponentParent/Component").is_model()?);
         assert!(!stage

@@ -137,7 +137,7 @@ fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline,
         // Check property names.
         let props = stage.prim_at(prim_path.as_str()).property_names().unwrap_or_default();
         for prop in &expected.property_names {
-            if !props.contains(prop) {
+            if !props.iter().any(|p| p.as_str() == prop.as_str()) {
                 failures.push(format!("missing property: {prim_path}.{prop}"));
             }
         }
@@ -266,8 +266,8 @@ mod pcp_txt {
 
     /// Python list-literal of names, e.g. `['a', 'b']` (matching the C++ dump,
     /// which prints the result of `repr(list)`).
-    fn name_list(names: &[String]) -> String {
-        let quoted: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+    fn name_list<S: AsRef<str>>(names: &[S]) -> String {
+        let quoted: Vec<String> = names.iter().map(|n| format!("'{}'", n.as_ref())).collect();
         format!("[{}]", quoted.join(", "))
     }
 
@@ -1055,7 +1055,15 @@ mod cycle_termination {
 
         // The reference diamond GroupRoot -> A -> B -> A keeps GroupA's child.
         let group_root = stage.prim_at(sdf::path("/GroupRoot").unwrap());
-        assert_eq!(group_root.child_names().unwrap(), vec!["ChildA"]);
+        assert_eq!(
+            group_root
+                .child_names()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>(),
+            ["ChildA"]
+        );
 
         // A prim inheriting its own ancestor gains no further self-named child.
         let yap_child = stage.prim_at(sdf::path("/YetAnotherParent/Child").unwrap());
@@ -1074,8 +1082,8 @@ mod cycle_termination {
         let stage = open("bug92827_root");
         let a = stage.prim_at(sdf::path("/Rig/Other/A").unwrap());
         let (children, prohibited) = a.prim_index().child_names().unwrap();
-        assert_eq!(children, vec!["Instance"]);
-        assert_eq!(prohibited, vec!["B"]);
+        assert_eq!(children.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["Instance"]);
+        assert_eq!(prohibited.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["B"]);
     }
 }
 
@@ -1091,7 +1099,10 @@ mod reorder {
     fn prim_order_reorders_named_children() {
         let stage = open_fixture();
         let children = stage.prim_at(sdf::path("/Root").unwrap()).child_names().unwrap();
-        assert_eq!(children, vec!["C", "D", "A", "B"]);
+        assert_eq!(
+            children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["C", "D", "A", "B"]
+        );
     }
 
     #[test]
@@ -1101,7 +1112,7 @@ mod reorder {
         // opinion in the fixture.
         let stage = open_fixture();
         let props = stage.prim_at(sdf::path("/Props").unwrap()).property_names().unwrap();
-        assert_eq!(props, vec!["x", "y", "z"]);
+        assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
     }
 }
 
@@ -1125,7 +1136,8 @@ mod value_resolution {
 
     fn string<'a>(dict: &'a HashMap<String, Value>, key: &str) -> &'a str {
         match dict.get(key) {
-            Some(Value::String(value) | Value::Token(value)) => value,
+            Some(Value::String(value)) => value,
+            Some(Value::Token(value)) => value.as_str(),
             other => panic!("expected string/token at {key:?}, got {other:?}"),
         }
     }

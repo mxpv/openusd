@@ -45,6 +45,7 @@ mod schema;
 
 pub use schema::{Backdrop, NodeGraphNodeAPI, SceneGraphPrimAPI};
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the `SchemaBase` membership for a concrete UsdUI view. All trait
@@ -97,8 +98,8 @@ impl ExpansionState {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             EXPANSION_OPEN => ExpansionState::Open,
             EXPANSION_CLOSED => ExpansionState::Closed,
             EXPANSION_MINIMIZED => ExpansionState::Minimized,

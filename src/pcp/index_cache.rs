@@ -18,6 +18,7 @@ use crate::ar::ResolvedPath;
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{AbstractData, Path, SpecType, Value};
+use crate::tf::Token;
 
 use super::clip::ResolvedClipSet;
 use super::dependencies::Dependencies;
@@ -1223,7 +1224,7 @@ impl IndexCache {
 
     /// Returns the composed list of child names for a prim path (C++
     /// `PcpPrimIndex::ComputePrimChildNames`'s `nameOrder` out-param).
-    pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
+    pub fn prim_children(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
         Ok(self.compute_prim_child_names(graph, path)?.0)
     }
 
@@ -1248,7 +1249,7 @@ impl IndexCache {
     /// targets with their subtrees, so a single structural walk covers class
     /// children. On an instance prim, locally-authored children are dropped (spec
     /// 11.3.3) so the children come only from the composition arcs.
-    pub fn compute_prim_child_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    pub fn compute_prim_child_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<(Vec<Token>, Vec<Token>)> {
         let path = self.effective_path(graph, path)?;
         self.ensure_index(graph, &path)?;
 
@@ -1268,9 +1269,9 @@ impl IndexCache {
         };
 
         let has_relocates = graph.has_relocates();
-        let mut name_order: Vec<String> = Vec::new();
-        let mut name_set: HashSet<String> = HashSet::new();
-        let mut prohibited: HashSet<String> = HashSet::new();
+        let mut name_order: Vec<Token> = Vec::new();
+        let mut name_set: HashSet<Token> = HashSet::new();
+        let mut prohibited: HashSet<Token> = HashSet::new();
 
         // Contributing nodes are walked in reverse strength order (weak-to-
         // strong) — the order in which C++ `_ComposePrimChildNames` finishes each
@@ -1330,10 +1331,10 @@ impl IndexCache {
         if !prohibited.is_empty() {
             name_order.retain(|name| !prohibited.contains(name));
         }
-        let mut prohibited: Vec<String> = prohibited.into_iter().collect();
+        let mut prohibited: Vec<Token> = prohibited.into_iter().collect();
         // Order the prohibited set the same way as the child names (spec §8.2),
         // so the two outputs of this function stay consistent.
-        prohibited.sort_by(|a, b| sdf::element_cmp(a, b));
+        prohibited.sort_by(|a, b| sdf::element_cmp(a.as_str(), b.as_str()));
         Ok((name_order, prohibited))
     }
 
@@ -1343,7 +1344,7 @@ impl IndexCache {
     /// applied: USD value resolution ignores `reorder properties` (C++
     /// `_ComposePrimPropertyNames` passes a null order field in USD mode), so
     /// composed property order follows authoring order alone.
-    pub fn prim_properties(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
+    pub fn prim_properties(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
         let path = &self.effective_path(graph, path)?;
         self.composed_property_names(graph, path)
     }
@@ -1354,7 +1355,7 @@ impl IndexCache {
     /// property-index composition; the dump's property-name pass (here) and
     /// property-stack pass ([`property_stack`](Self::property_stack)) each compose
     /// it, so the error surfaces once per pass.
-    fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[String]) {
+    fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[Token]) {
         let Some(index) = self.indices.get(prim_path) else {
             return;
         };
@@ -1486,13 +1487,10 @@ impl IndexCache {
     ///
     /// When session layers are present, `defaultPrim` is read from the
     /// first non-session layer (the root layer), matching C++ behavior.
-    pub fn default_prim(&self, graph: &LayerGraph) -> Option<String> {
+    pub fn default_prim(&self, graph: &LayerGraph) -> Option<Token> {
         let root = Path::abs_root();
         let value = graph.root_layer()?.get(&root, FieldKey::DefaultPrim.as_str()).ok()?;
-        match value.into_owned() {
-            Value::Token(s) | Value::String(s) => Some(s),
-            _ => None,
-        }
+        value.into_owned().try_as_token()
     }
 
     /// Collects ancestor arcs from all cached ancestors of `path`.
@@ -1820,12 +1818,12 @@ impl IndexCache {
     /// alone. The recursive build already grafts inherit/specialize/reference
     /// targets with their subtrees, so this single structural walk covers class
     /// properties with no separate target rediscovery.
-    fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
+    fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
         self.ensure_index(graph, path)?;
 
         let index = self.cached(path);
-        let mut result: Vec<String> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut result: Vec<Token> = Vec::new();
+        let mut seen: HashSet<Token> = HashSet::new();
 
         // Fold weakest-to-strongest across both nodes and, within each node, its
         // layers: contributing nodes in reverse strength order, and `layer_stack()`
@@ -1856,8 +1854,8 @@ fn append_unseen_names(
     layer: &sdf::Layer,
     path: &Path,
     field: ChildrenKey,
-    order: &mut Vec<String>,
-    seen: &mut HashSet<String>,
+    order: &mut Vec<Token>,
+    seen: &mut HashSet<Token>,
 ) {
     if let Ok(Value::TokenVec(names)) = layer.get(path, field.as_str()).map(|v| v.into_owned()) {
         for name in names {
@@ -2005,7 +2003,8 @@ def "A" (
         assert!(
             cache
                 .prim_properties(&graph, &sdf::path("/A/B/C")?)?
-                .contains(&"mark".to_string()),
+                .iter()
+                .any(|t| t.as_str() == "mark"),
             "/A/B/C must inherit the reference's `mark` via /A/B even when reached through /A's precache"
         );
         Ok(())
@@ -2027,7 +2026,8 @@ def "A" (
         assert!(
             cache
                 .prim_children(&graph, &arm_region)?
-                .contains(&"Region".to_string()),
+                .iter()
+                .any(|t| t.as_str() == "Region"),
             "deep local-class inherit chain must surface the inherited grandchild"
         );
         Ok(())
@@ -2043,7 +2043,10 @@ def "A" (
         let root = format!("{}/fixtures/child_order_fold/root.usda", manifest_dir());
         let (graph, mut cache) = collected_stack(&root);
         let children = cache.prim_children(&graph, &sdf::path("/P")?)?;
-        assert_eq!(children, vec!["c", "b", "a", "d"]);
+        assert_eq!(
+            children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+            ["c", "b", "a", "d"]
+        );
         Ok(())
     }
 
@@ -2153,7 +2156,8 @@ def "A" (
         assert!(
             cache
                 .prim_children(&graph, &sdf::path("/ViaPrivate")?)?
-                .contains(&"Child".to_string()),
+                .iter()
+                .any(|t| t.as_str() == "Child"),
             "the inherited child name stays visible"
         );
         Ok(())
@@ -2715,11 +2719,11 @@ def "Scope"
         // depth proxy dropped).
         let children = cache.prim_children(&graph, &inst)?;
         assert!(
-            children.contains(&"ProtoChild".to_string()),
+            children.iter().any(|t| t.as_str() == "ProtoChild"),
             "prototype child must appear: {children:?}"
         );
         assert!(
-            children.contains(&"OtherChild".to_string()),
+            children.iter().any(|t| t.as_str() == "OtherChild"),
             "nested-reference child must appear: {children:?}"
         );
 

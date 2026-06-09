@@ -113,19 +113,19 @@ impl Collection {
     /// The `<prim>.collection:<name>` property path — the collection's
     /// identity, used as a target when one collection includes another.
     pub fn collection_path(&self) -> Result<Path> {
-        self.prim.append_property(&format!("{NS_COLLECTION}{}", self.name))
+        self.prim.append_property(format!("{NS_COLLECTION}{}", self.name))
     }
 
     /// `collection:<name>:<suffix>` property path on the prim.
     fn prop(&self, suffix: &str) -> Result<Path> {
-        self.prim.append_property(&self.rel_name(suffix))
+        self.prim.append_property(self.rel_name(suffix))
     }
 
     /// `expansionRule` — defaults to [`ExpansionRule::ExpandPrims`].
     pub fn expansion_rule(&self, stage: &Stage) -> Result<ExpansionRule> {
         Ok(
             match stage.field::<Value>(self.prop(EXPANSION_RULE)?, FieldKey::Default)? {
-                Some(Value::Token(t) | Value::String(t)) => ExpansionRule::from_token(&t).unwrap_or_default(),
+                Some(Value::Token(t)) => ExpansionRule::from_token(t.as_str()).unwrap_or_default(),
                 _ => ExpansionRule::default(),
             },
         )
@@ -155,7 +155,8 @@ impl Collection {
     pub fn membership_expression(&self, stage: &Stage) -> Result<Option<String>> {
         Ok(
             match stage.field::<Value>(self.prop(MEMBERSHIP_EXPRESSION)?, FieldKey::Default)? {
-                Some(Value::PathExpression(s) | Value::String(s) | Value::Token(s)) => Some(s),
+                Some(Value::PathExpression(s) | Value::String(s)) => Some(s),
+                Some(Value::Token(s)) => Some(s.into()),
                 _ => None,
             },
         )
@@ -198,7 +199,7 @@ impl Collection {
     /// non-custom schema property — `includes`/`excludes` are built-in schema
     /// relationships, like the `expansionRule`/`includeRoot` attributes above.
     fn schema_rel(&self, prim: &Prim, suffix: &str) -> Result<Relationship> {
-        Ok(prim.create_relationship(&self.rel_name(suffix))?.set_custom(false)?)
+        Ok(prim.create_relationship(self.rel_name(suffix))?.set_custom(false)?)
     }
 
     /// Set `expansionRule` (`uniform token`).
@@ -207,7 +208,7 @@ impl Collection {
             .create_attribute(self.prop(EXPANSION_RULE)?, "token")?
             .set_variability(Variability::Uniform)?
             .set_custom(false)?
-            .set(Value::Token(rule.as_token().to_string()))?;
+            .set(Value::token(rule.as_token()))?;
         Ok(())
     }
 
@@ -679,7 +680,7 @@ mod tests {
         stage
             .create_attribute(coll.prop(EXPANSION_RULE)?, "token")?
             .set_variability(Variability::Uniform)?
-            .set(Value::Token(ExpansionRule::ExplicitOnly.as_token().to_string()))?;
+            .set(Value::Token(ExpansionRule::ExplicitOnly.as_token().into()))?;
         stage
             .create_attribute(coll.prop(INCLUDE_ROOT)?, "bool")?
             .set_variability(Variability::Uniform)?
@@ -833,7 +834,7 @@ mod tests {
         stage
             .create_attribute(coll.prop(EXPANSION_RULE)?, "token")?
             .set_variability(Variability::Uniform)?
-            .set(Value::Token(rule.as_token().to_string()))?;
+            .set(Value::token(rule.as_token()))?;
         if include_root {
             stage
                 .create_attribute(coll.prop(INCLUDE_ROOT)?, "bool")?

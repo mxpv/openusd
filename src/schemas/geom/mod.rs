@@ -91,6 +91,8 @@ mod xformable;
 
 use tokens::*;
 
+use crate::tf;
+
 pub use boundable::Boundable;
 pub use camera::Camera;
 pub use curves::{BasisCurves, Curves, HermiteCurves, NurbsCurves, NurbsPatch};
@@ -182,8 +184,8 @@ impl Visibility {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             VISIBILITY_INHERITED => Visibility::Inherited,
             VISIBILITY_INVISIBLE => Visibility::Invisible,
             _ => return None,
@@ -212,8 +214,8 @@ impl Purpose {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             PURPOSE_DEFAULT => Purpose::Default,
             PURPOSE_RENDER => Purpose::Render,
             PURPOSE_PROXY => Purpose::Proxy,
@@ -240,8 +242,8 @@ impl Orientation {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             ORIENTATION_RIGHT_HANDED => Orientation::RightHanded,
             ORIENTATION_LEFT_HANDED => Orientation::LeftHanded,
             _ => return None,
@@ -268,8 +270,8 @@ impl Axis {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             AXIS_X => Axis::X,
             AXIS_Y => Axis::Y,
             AXIS_Z => Axis::Z,
@@ -294,8 +296,8 @@ impl Projection {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             PROJECTION_PERSPECTIVE => Projection::Perspective,
             PROJECTION_ORTHOGRAPHIC => Projection::Orthographic,
             _ => return None,
@@ -321,8 +323,8 @@ impl StereoRole {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             STEREO_ROLE_MONO => StereoRole::Mono,
             STEREO_ROLE_LEFT => StereoRole::Left,
             STEREO_ROLE_RIGHT => StereoRole::Right,
@@ -352,8 +354,8 @@ impl SubdivisionScheme {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             SUBDIV_SCHEME_NONE => SubdivisionScheme::None,
             SUBDIV_SCHEME_CATMULL_CLARK => SubdivisionScheme::CatmullClark,
             SUBDIV_SCHEME_LOOP => SubdivisionScheme::Loop,
@@ -388,8 +390,8 @@ impl InterpolateBoundary {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             INTERPOLATE_BOUNDARY_NONE => InterpolateBoundary::None,
             INTERPOLATE_BOUNDARY_EDGE_ONLY => InterpolateBoundary::EdgeOnly,
             INTERPOLATE_BOUNDARY_EDGE_AND_CORNER => InterpolateBoundary::EdgeAndCorner,
@@ -423,8 +425,8 @@ impl FaceVaryingLinearInterpolation {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             FV_LINEAR_INTERP_NONE => FaceVaryingLinearInterpolation::None,
             FV_LINEAR_INTERP_CORNERS_ONLY => FaceVaryingLinearInterpolation::CornersOnly,
             FV_LINEAR_INTERP_CORNERS_PLUS_1 => FaceVaryingLinearInterpolation::CornersPlus1,
@@ -453,8 +455,8 @@ impl TriangleSubdivisionRule {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             TRIANGLE_SUBDIV_RULE_CATMULL_CLARK => TriangleSubdivisionRule::CatmullClark,
             TRIANGLE_SUBDIV_RULE_SMOOTH => TriangleSubdivisionRule::Smooth,
             _ => return None,
@@ -491,8 +493,8 @@ impl Interpolation {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             INTERP_CONSTANT => Interpolation::Constant,
             INTERP_UNIFORM => Interpolation::Uniform,
             INTERP_VARYING => Interpolation::Varying,
@@ -524,8 +526,8 @@ impl ElementType {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             ELEMENT_TYPE_FACE => ElementType::Face,
             ELEMENT_TYPE_POINT => ElementType::Point,
             ELEMENT_TYPE_EDGE => ElementType::Edge,
@@ -551,8 +553,8 @@ impl CurveType {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CURVE_TYPE_CUBIC => CurveType::Cubic,
             CURVE_TYPE_LINEAR => CurveType::Linear,
             _ => return None,
@@ -580,8 +582,8 @@ impl CurveBasis {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CURVE_BASIS_BEZIER => CurveBasis::Bezier,
             CURVE_BASIS_BSPLINE => CurveBasis::Bspline,
             CURVE_BASIS_CATMULL_ROM => CurveBasis::CatmullRom,
@@ -609,8 +611,8 @@ impl CurveWrap {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             CURVE_WRAP_NONPERIODIC => CurveWrap::Nonperiodic,
             CURVE_WRAP_PERIODIC => CurveWrap::Periodic,
             CURVE_WRAP_PINNED => CurveWrap::Pinned,
@@ -640,8 +642,8 @@ impl PatchForm {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             PATCH_FORM_OPEN => PatchForm::Open,
             PATCH_FORM_CLOSED => PatchForm::Closed,
             PATCH_FORM_PERIODIC => PatchForm::Periodic,
@@ -682,17 +684,14 @@ mod tests {
     fn token_value_round_trip() {
         // `From` authors a token; `TryFrom` decodes it back.
         let value = Value::from(SubdivisionScheme::Loop);
-        assert_eq!(value, Value::Token(SUBDIV_SCHEME_LOOP.to_string()));
+        assert_eq!(value, Value::Token(SUBDIV_SCHEME_LOOP.into()));
         assert_eq!(SubdivisionScheme::try_from(value).unwrap(), SubdivisionScheme::Loop);
-
-        // A `string`-typed opinion decodes the same as a `token`.
-        assert_eq!(Axis::try_from(Value::String(AXIS_X.to_string())).unwrap(), Axis::X);
     }
 
     #[test]
     fn token_value_errors() {
         // A non-token value and an unknown token both fail.
         assert!(Visibility::try_from(Value::Int(1)).is_err());
-        assert!(Purpose::try_from(Value::Token("bogus".to_string())).is_err());
+        assert!(Purpose::try_from(Value::Token("bogus".into())).is_err());
     }
 }

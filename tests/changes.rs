@@ -16,7 +16,13 @@ fn exists(stage: &usd::Stage, path: &str) -> bool {
 }
 
 fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
-    stage.prim_at(path).child_names().unwrap()
+    stage
+        .prim_at(path)
+        .child_names()
+        .unwrap()
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 /// Warm two sibling prim indices, author at one — the other must stay indexed.

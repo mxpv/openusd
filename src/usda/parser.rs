@@ -239,7 +239,7 @@ impl<'a> Parser<'a> {
         }
 
         if !root_children.is_empty() {
-            pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(root_children));
+            pseudo_root_spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(root_children));
         }
         data.insert(current_path.clone(), pseudo_root_spec);
         Ok(data)
@@ -338,7 +338,7 @@ impl<'a> Parser<'a> {
 
         let mut name_token = self.fetch_next()?;
         if let Token::Identifier(prim_type) = name_token {
-            spec.add(FieldKey::TypeName, sdf::Value::Token(prim_type.to_string()));
+            spec.add(FieldKey::TypeName, sdf::Value::token(prim_type));
             name_token = self.fetch_next()?;
         }
 
@@ -360,16 +360,16 @@ impl<'a> Parser<'a> {
 
         let (children, props, variant_sets) = self.read_prim_body(&prim_path, &mut spec, data)?;
         if !children.is_empty() {
-            spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+            spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
         }
         properties.extend(props);
 
         spec.add(FieldKey::Specifier, sdf::Value::Specifier(specifier));
         if !properties.is_empty() {
-            spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+            spec.add(ChildrenKey::PropertyChildren, sdf::Value::token_vec(properties));
         }
         if !variant_sets.is_empty() {
-            spec.add(ChildrenKey::VariantSetChildren, sdf::Value::TokenVec(variant_sets));
+            spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
         }
         data.insert(prim_path, spec);
 
@@ -450,7 +450,7 @@ impl<'a> Parser<'a> {
         self.ensure_pun('=')?;
 
         let names = self.one_or_list(|this| Ok(this.fetch_str()?.to_owned()))?;
-        owner_spec.add(field_key, sdf::Value::TokenVec(names));
+        owner_spec.add(field_key, sdf::Value::token_vec(names));
 
         Ok(())
     }
@@ -490,19 +490,19 @@ impl<'a> Parser<'a> {
             // Variant body.
             let (children, properties, variant_sets) = this.read_prim_body(&variant_path, &mut variant_spec, data)?;
             if !children.is_empty() {
-                variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::TokenVec(children));
+                variant_spec.add(ChildrenKey::PrimChildren, sdf::Value::token_vec(children));
             }
             if !properties.is_empty() {
-                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::TokenVec(properties));
+                variant_spec.add(ChildrenKey::PropertyChildren, sdf::Value::token_vec(properties));
             }
             if !variant_sets.is_empty() {
-                variant_spec.add(ChildrenKey::VariantSetChildren, sdf::Value::TokenVec(variant_sets));
+                variant_spec.add(ChildrenKey::VariantSetChildren, sdf::Value::token_vec(variant_sets));
             }
             data.insert(variant_path, variant_spec);
             Ok(())
         })?;
 
-        vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::TokenVec(variant_children));
+        vset_spec.add(ChildrenKey::VariantChildren, sdf::Value::token_vec(variant_children));
         data.insert(vset_path, vset_spec);
 
         Ok(name)
@@ -522,7 +522,7 @@ impl<'a> Parser<'a> {
     /// Create an attribute spec with the standard type/custom/variability fields.
     fn make_attribute_spec(type_info: &TypeInfo, custom: bool, variability: sdf::Variability) -> sdf::Spec {
         let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
-        spec.add(FieldKey::TypeName, sdf::Value::Token(type_info.to_string()));
+        spec.add(FieldKey::TypeName, sdf::Value::token(type_info.to_string()));
         if custom {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
         }
@@ -719,6 +719,14 @@ impl<'a> Parser<'a> {
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
 
+            // `interpolation` is a `token`-valued attribute metadata field (UsdGeom
+            // registers it as type `token` in its plugInfo); an untyped metadata value
+            // parses as a string, so retag it as a token.
+            let value = match (name.as_str(), value) {
+                ("interpolation", sdf::Value::String(s)) => sdf::Value::token(s),
+                (_, value) => value,
+            };
+
             // Wrap in a dictionary keyed by the list op name to match the baseline format.
             let value = match list_op {
                 Some(ref tok @ (Token::Prepend | Token::Append | Token::Delete | Token::Add)) => {
@@ -764,7 +772,8 @@ impl<'a> Parser<'a> {
                     values
                         .into_iter()
                         .map(|v| match v {
-                            sdf::Value::String(s) | sdf::Value::Token(s) => s,
+                            sdf::Value::String(s) => s,
+                            sdf::Value::Token(s) => s.into(),
                             other => format!("{other:?}"),
                         })
                         .collect(),
@@ -781,7 +790,7 @@ impl<'a> Parser<'a> {
         match token {
             Token::None => Ok(sdf::Value::ValueBlock),
             Token::String(value) => Ok(sdf::Value::String(value.to_owned())),
-            Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::Token(value.to_owned())),
+            Token::Identifier(value) | Token::NamespacedIdentifier(value) => Ok(sdf::Value::token(value)),
             Token::Number(raw) => {
                 if let Ok(int) = raw.parse::<i64>() {
                     Ok(sdf::Value::Int64(int))
@@ -958,7 +967,7 @@ impl<'a> Parser<'a> {
             n if n == FieldKey::Kind.as_str() => {
                 ensure!(list_op.is_none(), "kind metadata does not support list ops");
                 let value = self.parse_token::<String>().context("Unable to parse kind metadata")?;
-                spec.add(FieldKey::Kind, sdf::Value::Token(value));
+                spec.add(FieldKey::Kind, sdf::Value::token(value));
             }
             "customData" => {
                 ensure!(list_op.is_none(), "customData metadata does not support list ops");
@@ -1086,7 +1095,7 @@ impl<'a> Parser<'a> {
             0.0
         };
         Ok(sdf::Value::Dictionary(HashMap::from([
-            ("mode".to_owned(), sdf::Value::Token(mode.to_owned())),
+            ("mode".to_owned(), sdf::Value::token(mode)),
             ("slope".to_owned(), sdf::Value::Double(slope)),
         ])))
     }
@@ -1207,7 +1216,7 @@ impl<'a> Parser<'a> {
                         ("preTangentWidth".to_owned(), sdf::Value::Double(pre_width)),
                         ("postTangentSlope".to_owned(), sdf::Value::Double(post_slope)),
                         ("postTangentWidth".to_owned(), sdf::Value::Double(post_width)),
-                        ("nextInterpolationMode".to_owned(), sdf::Value::Token(interp_mode)),
+                        ("nextInterpolationMode".to_owned(), sdf::Value::token(interp_mode)),
                     ])));
                 }
                 other => bail!("Unexpected spline token: {other:?}"),
@@ -1218,7 +1227,7 @@ impl<'a> Parser<'a> {
         Ok(sdf::Value::Dictionary(HashMap::from([
             (
                 "curveType".to_owned(),
-                sdf::Value::Token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
+                sdf::Value::token(curve_type.unwrap_or_else(|| "bezier".to_owned())),
             ),
             ("preExtrapolation".to_owned(), pre_extrapolation),
             ("postExtrapolation".to_owned(), post_extrapolation),
@@ -1495,8 +1504,8 @@ impl<'a> Parser<'a> {
             (Type::Quatd, true) => sdf::Value::QuatdVec(self.parse_gf_array::<f64, _, 4>()?),
 
             (Type::String, false) => sdf::Value::String(self.fetch_str()?.to_owned()),
-            (Type::Token, false) => sdf::Value::Token(self.fetch_str()?.to_owned()),
-            (Type::String | Type::Token, true) => sdf::Value::TokenVec(self.parse_array()?),
+            (Type::Token, false) => sdf::Value::token(self.fetch_str()?),
+            (Type::String | Type::Token, true) => sdf::Value::token_vec(self.parse_array::<String>()?),
 
             (Type::Matrix2d, false) => sdf::Value::Matrix2d(gf::Mat2d(self.parse_matrix::<2, 4>()?)),
             (Type::Matrix3d, false) => sdf::Value::Matrix3d(gf::Mat3d(self.parse_matrix::<3, 9>()?)),
@@ -1558,7 +1567,8 @@ impl<'a> Parser<'a> {
             "quatd" => Type::Quatd,
             "quatf" => Type::Quatf,
             "quath" => Type::Quath,
-            "string" | "token" => Type::String,
+            "string" => Type::String,
+            "token" => Type::Token,
             "asset" => Type::Asset,
             "timecode" => Type::TimeCode,
             "dictionary" => Type::Dictionary,
@@ -1996,11 +2006,14 @@ mod tests {
             .unwrap()
             .eq("test string"));
 
-        assert!(pseudo_root
-            .get("upAxis")
-            .and_then(|v| v.try_as_token_ref())
-            .unwrap()
-            .eq("Y"));
+        assert!(
+            pseudo_root
+                .get("upAxis")
+                .and_then(|v| v.try_as_token_ref())
+                .unwrap()
+                .as_str()
+                == "Y"
+        );
     }
 
     #[test]
@@ -2096,7 +2109,7 @@ mod tests {
         let bound_camera = dict.get("boundCamera").expect("boundCamera entry");
         match bound_camera {
             sdf::Value::String(value) => assert_eq!(value, "/OmniverseKit_Persp"),
-            sdf::Value::Token(value) => assert_eq!(value, "/OmniverseKit_Persp"),
+            sdf::Value::Token(value) => assert_eq!(value.as_str(), "/OmniverseKit_Persp"),
             other => panic!("boundCamera stored as unexpected value: {other:?}"),
         }
     }
@@ -2176,7 +2189,13 @@ mod tests {
 
         let render_passes = dict.get("RENDER_PASSES").expect("RENDER_PASSES entry");
         match render_passes {
-            sdf::Value::TokenVec(values) | sdf::Value::StringVec(values) => {
+            sdf::Value::TokenVec(values) => {
+                assert_eq!(
+                    values.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+                    ["beauty", "shadow", "reflection"]
+                );
+            }
+            sdf::Value::StringVec(values) => {
                 assert_eq!(values, &["beauty", "shadow", "reflection"]);
             }
             other => panic!("RENDER_PASSES stored as unexpected value: {other:?}"),
@@ -2225,14 +2244,24 @@ def Xform "Forest_set"
         assert_eq!(pseudo_root.ty, sdf::SpecType::PseudoRoot);
         let prim_children = pseudo_root.get("primChildren").unwrap().to_owned();
         assert_eq!(
-            prim_children.try_as_token_vec().unwrap(),
+            prim_children
+                .try_as_token_vec()
+                .unwrap()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
             vec![String::from("Forest_set")]
         );
 
         let forest_set_prim = data.get(&sdf::path("/Forest_set").unwrap()).unwrap();
         let prim_children = forest_set_prim.get("primChildren").unwrap().to_owned();
         assert_eq!(
-            prim_children.try_as_token_vec().unwrap(),
+            prim_children
+                .try_as_token_vec()
+                .unwrap()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
             vec![String::from("Outskirts"), String::from("Glade")]
         );
 
@@ -2263,10 +2292,10 @@ def Mesh "M"
         let interpolation = normals
             .get("interpolation")
             .expect("missing interpolation metadata")
-            .try_as_string_ref()
-            .expect("interpolation metadata must be a string");
+            .try_as_token_ref()
+            .expect("interpolation metadata must be a token");
 
-        assert_eq!(interpolation, "faceVarying");
+        assert_eq!(interpolation.as_str(), "faceVarying");
     }
 
     #[test]
@@ -2315,7 +2344,7 @@ def Shader "Image_Texture"
         assert!(matches!(
             output_spec
                 .get(FieldKey::TypeName.as_str()),
-            Some(sdf::Value::Token(t)) if t == "token"
+            Some(sdf::Value::Token(t)) if t.as_str() == "token"
         ));
 
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
@@ -2328,7 +2357,7 @@ def Shader "Image_Texture"
         let props = shader
             .get(sdf::schema::ChildrenKey::PropertyChildren.as_str())
             .and_then(|value| match value {
-                sdf::Value::TokenVec(tokens) => Some(tokens.clone()),
+                sdf::Value::TokenVec(tokens) => Some(tokens.iter().map(|t| t.to_string()).collect::<Vec<String>>()),
                 _ => None,
             })
             .unwrap_or_default();
@@ -2436,14 +2465,14 @@ def Material "Mat"
             // Clone because try_as_token_vec consumes the Value.
             .and_then(|value| value.clone().try_as_token_vec())
             .unwrap_or_default();
-        assert!(props.contains(&"outputs:surface".to_string()));
+        assert!(props.iter().any(|t| t.as_str() == "outputs:surface"));
 
         let output = data
             .get(&sdf::path("/Mat.outputs:surface").unwrap())
             .expect("missing outputs:surface spec");
         assert!(matches!(
             output.get(FieldKey::TypeName.as_str()),
-            Some(sdf::Value::Token(t)) if t == "token"
+            Some(sdf::Value::Token(t)) if t.as_str() == "token"
         ));
 
         // Connection paths are stored on the same spec (not a separate `.connect` spec).
@@ -2570,7 +2599,7 @@ def Xform "World"
             .unwrap();
 
         assert_eq!(
-            props,
+            props.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
             [
                 "flipNormals",
                 "boolArray",
@@ -2611,7 +2640,15 @@ def Xform "World"
         let order = data.get(&sdf::path("/World.xformOpOrder").unwrap()).unwrap();
 
         assert_eq!(
-            order.get("default").unwrap().to_owned().try_as_token_vec().unwrap(),
+            order
+                .get("default")
+                .unwrap()
+                .to_owned()
+                .try_as_token_vec()
+                .unwrap()
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
             vec![String::from("xformOp:translate"), String::from("xformOp:rotateXYZ")]
         )
     }
@@ -3050,7 +3087,10 @@ def Xform "Anim"
             other => panic!("expected FloatVec for float[] sample, got {other:?}"),
         }
         match &take("/Anim.joints")[0].1 {
-            sdf::Value::TokenVec(v) => assert_eq!(v, &["Root", "Hip", "Knee"]),
+            sdf::Value::TokenVec(v) => assert_eq!(
+                v.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+                ["Root", "Hip", "Knee"]
+            ),
             other => panic!("expected TokenVec for token[] sample, got {other:?}"),
         }
         match &take("/Anim.flags")[0].1 {
@@ -3170,7 +3210,10 @@ def Xform "X"
             .clone()
             .try_as_token_vec()
             .expect("primOrder is a token vec");
-        assert_eq!(order, vec!["B".to_string(), "A".to_string()]);
+        assert_eq!(
+            order.into_iter().map(String::from).collect::<Vec<_>>(),
+            vec!["B".to_string(), "A".to_string()]
+        );
     }
 
     #[test]

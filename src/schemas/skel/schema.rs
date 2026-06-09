@@ -13,6 +13,7 @@ use anyhow::Result;
 
 use crate::gf;
 use crate::sdf::{self, Value, Variability};
+use crate::tf;
 use crate::usd::{Attribute, Prim, Relationship, Stage};
 
 use super::impl_skel_schema;
@@ -421,7 +422,7 @@ impl BlendShape {
                 _ => None,
             };
             let normal_offsets_name = format!("{}{rest}:{}", tok::NS_INBETWEENS, tok::A_NORMAL_OFFSETS);
-            let normal_offsets = if props.iter().any(|n| n == &normal_offsets_name) {
+            let normal_offsets = if props.iter().any(|n| n.as_str() == normal_offsets_name) {
                 vec3f_vec(&self.attribute(&normal_offsets_name))?
             } else {
                 Vec::new()
@@ -702,10 +703,11 @@ impl_skel_schema!(single_api SkelBindingAPI);
 /// Walk `prim` and its ancestors for the nearest authored `rel_name` target.
 /// `skel:skeleton` / `skel:animationSource` inherit down namespace regardless
 /// of where `SkelBindingAPI` is formally applied.
-fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: &str) -> Result<Option<sdf::Path>> {
+fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: impl Into<tf::Token>) -> Result<Option<sdf::Path>> {
+    let rel_name = rel_name.into();
     let mut cur = prim.clone();
     loop {
-        let rel = cur.append_property(rel_name)?;
+        let rel = cur.append_property(&rel_name)?;
         if let Some(target) = stage.relationship_at(rel).targets()?.into_iter().next() {
             return Ok(Some(target));
         }
@@ -719,7 +721,8 @@ fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: &str) -> Result<Opti
 /// Decode a `token[]` / `string[]` attribute (empty when unauthored).
 fn token_vec(attr: &Attribute) -> Result<Vec<String>> {
     Ok(match attr.get::<Value>()? {
-        Some(Value::TokenVec(v) | Value::StringVec(v)) => v,
+        Some(Value::TokenVec(v)) => v.into_iter().map(Into::into).collect(),
+        Some(Value::StringVec(v)) => v,
         _ => Vec::new(),
     })
 }

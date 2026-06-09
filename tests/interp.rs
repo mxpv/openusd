@@ -54,12 +54,12 @@ fn linear_quatf_uses_slerp() -> Result<()> {
 #[test]
 fn unsupported_type_falls_back_to_held() -> Result<()> {
     let stage = open()?;
-    // Token in linear mode → spec mandates held fallback. The USDA
-    // parser stores `token` values as `Value::String`; either way it
+    // Token in linear mode → spec mandates held fallback. A `token` value
     // isn't in §12.5.2's linear-supported set.
     let v = stage.value_at(path("/Prim.label")?, 5.0)?.unwrap();
     match v {
-        Value::Token(s) | Value::String(s) => assert_eq!(s, "alpha"),
+        Value::Token(s) => assert_eq!(s.as_str(), "alpha"),
+        Value::String(s) => assert_eq!(s, "alpha"),
         other => panic!("expected token/string `alpha`, got {other:?}"),
     }
     Ok(())

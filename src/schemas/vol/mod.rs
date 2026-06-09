@@ -54,6 +54,8 @@ pub mod tokens;
 mod schema;
 mod traits;
 
+use crate::tf;
+
 pub use schema::{Field3DAsset, OpenVDBAsset, Volume};
 pub use traits::{FieldAsset, FieldBase};
 
@@ -119,8 +121,8 @@ impl VectorDataRoleHint {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             ROLE_NONE => VectorDataRoleHint::NoRole,
             ROLE_POINT => VectorDataRoleHint::Point,
             ROLE_NORMAL => VectorDataRoleHint::Normal,

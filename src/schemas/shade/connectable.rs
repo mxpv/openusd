@@ -36,5 +36,5 @@ pub fn base_name(full_name: &str) -> &str {
 /// `/Mat/Surface.inputs:diffuseColor`. Useful as a connection source / target
 /// without materialising the attribute first.
 pub fn input_path(prim: &Path, base: &str) -> Result<Path> {
-    prim.append_property(&input_name(base))
+    prim.append_property(input_name(base))
 }

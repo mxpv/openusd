@@ -32,7 +32,7 @@ impl Volume {
     /// Handle to the `field:<name>` relationship binding the field `name` to a
     /// field prim (C++ `UsdVolVolume::GetFieldRelationship`).
     pub fn field_rel(&self, name: &str) -> Relationship {
-        self.relationship(&format!("{}{name}", tok::NS_FIELD))
+        self.relationship(format!("{}{name}", tok::NS_FIELD))
     }
 
     /// Bind field `name` to the field prim at `target`, authoring the
@@ -43,7 +43,7 @@ impl Volume {
         if name.is_empty() {
             bail!("Volume field name must not be empty");
         }
-        self.create_relationship(&format!("{}{name}", tok::NS_FIELD))?
+        self.create_relationship(format!("{}{name}", tok::NS_FIELD))?
             .set_custom(false)?
             .add_target(target.into())?;
         Ok(self)
@@ -52,7 +52,7 @@ impl Volume {
     /// `true` when a `field:<name>` relationship is authored on this volume
     /// (C++ `UsdVolVolume::HasFieldRelationship`).
     pub fn has_field_relationship(&self, name: &str) -> Result<bool> {
-        let rel = self.path().append_property(&format!("{}{name}", tok::NS_FIELD))?;
+        let rel = self.path().append_property(format!("{}{name}", tok::NS_FIELD))?;
         Ok(!self.stage().relationship_at(rel).targets()?.is_empty())
     }
 

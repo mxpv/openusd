@@ -55,7 +55,8 @@ pub trait Xformable: Imageable {
     fn xform_op_order(&self) -> Result<Option<Vec<String>>> {
         let attr = self.prim().path().append_property(tok::A_XFORM_OP_ORDER)?;
         Ok(match self.prim().stage().field::<sdf::Value>(attr, "default")? {
-            Some(sdf::Value::TokenVec(v) | sdf::Value::StringVec(v)) => Some(v),
+            Some(sdf::Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
+            Some(sdf::Value::StringVec(v)) => Some(v),
             Some(sdf::Value::TokenListOp(op)) => Some(op.flatten()),
             Some(sdf::Value::StringListOp(op)) => Some(op.flatten()),
             _ => None,
@@ -113,7 +114,7 @@ pub trait Xformable: Imageable {
             .create_attribute(tok::A_XFORM_OP_ORDER, "token[]")?
             .set_variability(sdf::Variability::Uniform)?
             .set_custom(false)?
-            .set(sdf::Value::TokenVec(tokens))?;
+            .set(sdf::Value::token_vec(tokens))?;
         Ok(self)
     }
 
@@ -268,7 +269,7 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: f64) -> Result<gf::Matrix4d
 
 /// Author a single `xformOp:<kind>` attribute (does not touch `xformOpOrder`).
 fn author_xform_op(prim: &Prim, kind: &str, type_name: &str, value: sdf::Value) -> Result<()> {
-    prim.create_attribute(&format!("{NS_XFORM_OP}{kind}"), type_name)?
+    prim.create_attribute(format!("{NS_XFORM_OP}{kind}"), type_name)?
         .set_custom(false)?
         .set(value)?;
     Ok(())

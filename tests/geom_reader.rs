@@ -300,7 +300,7 @@ fn cylinder_with_y_axis() -> Result<()> {
     let c = Cylinder::get(&stage, sdf::path("/World/Shapes/Pipe")?)?.expect("Cylinder");
     assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.25)));
     assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(2.0)));
-    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::String("Y".into())));
+    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::token("Y")));
     Ok(())
 }
 
@@ -310,7 +310,7 @@ fn capsule_with_x_axis() -> Result<()> {
     let c = Capsule::get(&stage, sdf::path("/World/Shapes/Pill")?)?.expect("Capsule");
     assert_eq!(c.radius_attr().get()?, Some(sdf::Value::Double(0.1)));
     assert_eq!(c.height_attr().get()?, Some(sdf::Value::Double(0.5)));
-    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::String("X".into())));
+    assert_eq!(c.axis_attr().get()?, Some(sdf::Value::token("X")));
     Ok(())
 }
 
@@ -330,7 +330,7 @@ fn plane_dimensions_and_axis() -> Result<()> {
     let p = Plane::get(&stage, sdf::path("/World/Shapes/Ground")?)?.expect("Plane");
     assert_eq!(p.width_attr().get()?, Some(sdf::Value::Double(10.0)));
     assert_eq!(p.length_attr().get()?, Some(sdf::Value::Double(8.0)));
-    assert_eq!(p.axis_attr().get()?, Some(sdf::Value::String("Y".into())));
+    assert_eq!(p.axis_attr().get()?, Some(sdf::Value::token("Y")));
     assert_eq!(p.double_sided_attr().get::<sdf::Value>()?, None);
     Ok(())
 }
@@ -354,11 +354,8 @@ fn camera_authored_attrs() -> Result<()> {
     let c = Camera::get(&stage, sdf::path("/World/AuthoredCam")?)?.expect("Camera");
     assert_eq!(c.focal_length_attr().get()?, Some(sdf::Value::Float(35.0)));
     assert_eq!(c.f_stop_attr().get()?, Some(sdf::Value::Float(2.8)));
-    assert_eq!(
-        c.projection_attr().get()?,
-        Some(sdf::Value::String("perspective".into()))
-    );
-    assert_eq!(c.stereo_role_attr().get()?, Some(sdf::Value::String("left".into())));
+    assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("perspective")));
+    assert_eq!(c.stereo_role_attr().get()?, Some(sdf::Value::token("left")));
     Ok(())
 }
 
@@ -378,10 +375,7 @@ fn camera_unauthored_attrs_are_none() -> Result<()> {
 fn orthographic_projection_token() -> Result<()> {
     let stage = open()?;
     let c = Camera::get(&stage, sdf::path("/World/OrthoCam")?)?.expect("Camera");
-    assert_eq!(
-        c.projection_attr().get()?,
-        Some(sdf::Value::String("orthographic".into()))
-    );
+    assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("orthographic")));
     // `Projection` decodes the authored token.
     let tok = c.projection_attr().get::<String>()?;
     assert_eq!(

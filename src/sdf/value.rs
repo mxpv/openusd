@@ -4,6 +4,7 @@ use crate::gf::f16;
 use strum::{EnumIs, EnumTryAs, IntoStaticStr};
 
 use crate::gf;
+use crate::tf::Token;
 
 use super::*;
 
@@ -56,8 +57,8 @@ pub enum Value {
     String(String),
     StringVec(Vec<String>),
 
-    Token(String),
-    TokenVec(Vec<String>),
+    Token(Token),
+    TokenVec(Vec<Token>),
 
     AssetPath(AssetPath),
     AssetPathVec(Vec<AssetPath>),
@@ -171,9 +172,11 @@ impl serde::Serialize for Value {
             Value::TimeCode(v) => v.serialize(serializer),
             Value::TimeCodeVec(v) => v.serialize(serializer),
 
-            Value::String(v) | Value::Token(v) | Value::PathExpression(v) => v.serialize(serializer),
+            Value::String(v) | Value::PathExpression(v) => v.serialize(serializer),
+            Value::Token(v) => v.serialize(serializer),
             Value::AssetPath(v) => v.serialize(serializer),
-            Value::StringVec(v) | Value::TokenVec(v) => v.serialize(serializer),
+            Value::StringVec(v) => v.serialize(serializer),
+            Value::TokenVec(v) => v.serialize(serializer),
             Value::AssetPathVec(v) => v.serialize(serializer),
 
             Value::Vec2h(v) => v.serialize(serializer),
@@ -386,8 +389,20 @@ impl TryFrom<Value> for String {
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::String(v) | Value::Token(v) => Ok(v),
+            Value::String(v) => Ok(v),
+            Value::Token(v) => Ok(v.into()),
             other => ValueConversionError::err("String or Token", &other),
+        }
+    }
+}
+
+impl TryFrom<Value> for Token {
+    type Error = ValueConversionError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Token(v) => Ok(v),
+            other => ValueConversionError::err("Token", &other),
         }
     }
 }
@@ -601,6 +616,8 @@ impl_from!(f16, Half);
 impl_from!(f32, Float);
 impl_from!(f64, Double);
 impl_from!(String, String);
+impl_from!(Token, Token);
+impl_from!(Vec<Token>, TokenVec);
 
 // gf vector and quaternion types.
 impl_from!(gf::Vec2f, Vec2f);
@@ -743,6 +760,19 @@ impl Value {
         Self::Quath(gf::quath(w, x, y, z))
     }
 
+    /// Builds a [`Value::Token`] from any string-like value, so callers need not
+    /// name [`Token`] at the construction site (`Value::token("Mesh")`).
+    pub fn token(name: impl Into<Token>) -> Self {
+        Self::Token(name.into())
+    }
+
+    /// Builds a [`Value::TokenVec`] from any iterator of string-like items —
+    /// the counterpart of [`Value::token`] for name lists such as
+    /// `primChildren` and `allowedTokens`.
+    pub fn token_vec(items: impl IntoIterator<Item = impl Into<Token>>) -> Self {
+        Self::TokenVec(items.into_iter().map(Into::into).collect())
+    }
+
     /// Borrows the inner string of a string-like scalar — `asset`, `string`,
     /// or `token` — and `None` for any other variant.
     ///
@@ -751,7 +781,8 @@ impl Value {
     /// [`TryFrom<Value>`] for [`String`]).
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::String(s) | Value::Token(s) => Some(s),
+            Value::String(s) => Some(s),
+            Value::Token(s) => Some(s.as_str()),
             Value::AssetPath(s) => Some(s.as_str()),
             _ => None,
         }

@@ -234,6 +234,7 @@ impl Material {
                         .and_then(|rest| rest.strip_suffix(&suffix))
                         .is_some_and(|ctx| !ctx.is_empty() && !ctx.contains(':'))
                 })
+                .map(String::from)
                 .collect();
             contexts.sort();
             for prop in contexts {

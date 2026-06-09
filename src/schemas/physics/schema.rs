@@ -902,14 +902,14 @@ impl DriveAPI {
     ///
     /// Type `uniform token`. Fetch with `get::<`[`DriveType`](super::DriveType)`>()?`.
     pub fn type_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_TYPE))
+        self.attribute(self.prop(tok::DRIVE_SUB_TYPE))
     }
 
     /// Author `drive:<dof>:physics:type` (`uniform token`) (C++ `CreateTypeAttr`).
     pub fn create_type_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_TYPE), "token")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_TYPE), "token")?
             .set_custom(false)?
             .set_variability(sdf::Variability::Uniform)?)
     }
@@ -919,14 +919,14 @@ impl DriveAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn target_position_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_TARGET_POSITION))
+        self.attribute(self.prop(tok::DRIVE_SUB_TARGET_POSITION))
     }
 
     /// Author `drive:<dof>:physics:targetPosition` (`float`) (C++ `CreateTargetPositionAttr`).
     pub fn create_target_position_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_TARGET_POSITION), "float")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_TARGET_POSITION), "float")?
             .set_custom(false)?)
     }
 
@@ -935,14 +935,14 @@ impl DriveAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn target_velocity_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_TARGET_VELOCITY))
+        self.attribute(self.prop(tok::DRIVE_SUB_TARGET_VELOCITY))
     }
 
     /// Author `drive:<dof>:physics:targetVelocity` (`float`) (C++ `CreateTargetVelocityAttr`).
     pub fn create_target_velocity_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_TARGET_VELOCITY), "float")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_TARGET_VELOCITY), "float")?
             .set_custom(false)?)
     }
 
@@ -951,14 +951,14 @@ impl DriveAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn damping_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_DAMPING))
+        self.attribute(self.prop(tok::DRIVE_SUB_DAMPING))
     }
 
     /// Author `drive:<dof>:physics:damping` (`float`) (C++ `CreateDampingAttr`).
     pub fn create_damping_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_DAMPING), "float")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_DAMPING), "float")?
             .set_custom(false)?)
     }
 
@@ -967,14 +967,14 @@ impl DriveAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn stiffness_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_STIFFNESS))
+        self.attribute(self.prop(tok::DRIVE_SUB_STIFFNESS))
     }
 
     /// Author `drive:<dof>:physics:stiffness` (`float`) (C++ `CreateStiffnessAttr`).
     pub fn create_stiffness_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_STIFFNESS), "float")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_STIFFNESS), "float")?
             .set_custom(false)?)
     }
 
@@ -983,14 +983,14 @@ impl DriveAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn max_force_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::DRIVE_SUB_MAX_FORCE))
+        self.attribute(self.prop(tok::DRIVE_SUB_MAX_FORCE))
     }
 
     /// Author `drive:<dof>:physics:maxForce` (`float`) (C++ `CreateMaxForceAttr`).
     pub fn create_max_force_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::DRIVE_SUB_MAX_FORCE), "float")?
+            .create_attribute(self.prop(tok::DRIVE_SUB_MAX_FORCE), "float")?
             .set_custom(false)?)
     }
 }
@@ -1062,14 +1062,14 @@ impl LimitAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn low_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::LIMIT_SUB_LOW))
+        self.attribute(self.prop(tok::LIMIT_SUB_LOW))
     }
 
     /// Author `limit:<dof>:physics:low` (`float`) (C++ `CreateLowAttr`).
     pub fn create_low_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::LIMIT_SUB_LOW), "float")?
+            .create_attribute(self.prop(tok::LIMIT_SUB_LOW), "float")?
             .set_custom(false)?)
     }
 
@@ -1078,14 +1078,14 @@ impl LimitAPI {
     ///
     /// Type `float`. Fetch with `get::<f32>()?`.
     pub fn high_attr(&self) -> Attribute {
-        self.attribute(&self.prop(tok::LIMIT_SUB_HIGH))
+        self.attribute(self.prop(tok::LIMIT_SUB_HIGH))
     }
 
     /// Author `limit:<dof>:physics:high` (`float`) (C++ `CreateHighAttr`).
     pub fn create_high_attr(&self) -> Result<Attribute> {
         Ok(self
             .prim
-            .create_attribute(&self.prop(tok::LIMIT_SUB_HIGH), "float")?
+            .create_attribute(self.prop(tok::LIMIT_SUB_HIGH), "float")?
             .set_custom(false)?)
     }
 }

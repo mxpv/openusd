@@ -62,6 +62,7 @@ pub use schema::{
 };
 pub use traits::JointBase;
 
+use crate::tf;
 use tokens::*;
 
 /// Implement the `SchemaBase` (and, for joints, [`JointBase`]) memberships for a
@@ -128,8 +129,8 @@ impl JointAxis {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             AXIS_X => JointAxis::X,
             AXIS_Y => JointAxis::Y,
             AXIS_Z => JointAxis::Z,
@@ -155,8 +156,8 @@ impl DriveType {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             DRIVE_TYPE_FORCE => DriveType::Force,
             DRIVE_TYPE_ACCELERATION => DriveType::Acceleration,
             _ => return None,
@@ -191,8 +192,8 @@ impl CollisionApprox {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             APPROX_NONE => CollisionApprox::None,
             APPROX_CONVEX_HULL => CollisionApprox::ConvexHull,
             APPROX_CONVEX_DECOMPOSITION => CollisionApprox::ConvexDecomposition,
@@ -238,8 +239,8 @@ impl Dof {
         }
     }
 
-    pub fn from_token(s: &str) -> Option<Self> {
-        Some(match s {
+    pub fn from_token(token: impl Into<tf::Token>) -> Option<Self> {
+        Some(match token.into().as_str() {
             DOF_TRANS_X => Dof::TransX,
             DOF_TRANS_Y => Dof::TransY,
             DOF_TRANS_Z => Dof::TransZ,

@@ -96,6 +96,7 @@ use std::collections::{HashMap, HashSet};
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
+use crate::tf::Token;
 
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
@@ -291,7 +292,7 @@ struct VariantTask {
     /// variant set).
     vset_path: Path,
     /// The variant set name.
-    vset_name: String,
+    vset_name: Token,
     /// The set's position in the prim's `variantSetNames`; a lower number is
     /// stronger (C++ `vsetNum`).
     vset_num: u16,
@@ -1812,7 +1813,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `node`'s layer stack (C++ `PcpComposeSiteVariantSetOptions`).
     fn compose_variant_options(&self, node: NodeId, vset_path: &Path, vset: &str) -> BuildResult<Vec<String>> {
         let set_path = vset_path.append_variant_selection(vset, "");
-        self.compose_token_children(node, &set_path, ChildrenKey::VariantChildren)
+        // Variant names compose as tokens, but they are matched against the
+        // `String`-keyed `VariantFallbackMap`, so flatten to `String` here.
+        Ok(self
+            .compose_token_children(node, &set_path, ChildrenKey::VariantChildren)?
+            .into_iter()
+            .map(String::from)
+            .collect())
     }
 
     /// Adds the selected variant `{vset=vsel}` site as a `Variant` arc node under
@@ -2615,10 +2622,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
         else {
             return Ok(None);
         };
-        match value.into_owned() {
-            Value::Token(name) | Value::String(name) => Ok(Path::new(&format!("/{name}")).ok()),
-            _ => Ok(None),
-        }
+        Ok(value
+            .into_owned()
+            .try_as_token()
+            .and_then(|name| Path::new(&format!("/{name}")).ok()))
     }
 
     /// Identifier of the layer that authored an arc on `node` — its
@@ -2868,8 +2875,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Unions a node's named children (a `TokenVec` field) at `path` across its
     /// layer stack, keeping declaration order and dropping duplicates. Used to
     /// gather a site's variant set names and a set's variant options.
-    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<String>> {
-        let mut out: Vec<String> = Vec::new();
+    fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
+        let mut out: Vec<Token> = Vec::new();
         for &(layer, _) in self.node(node).layer_stack() {
             let Some(value) = self.inputs.stack.layer(layer).try_get(path, key.as_str())? else {
                 continue;

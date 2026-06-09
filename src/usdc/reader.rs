@@ -988,11 +988,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::Token if value.is_array() => {
                 let (count, _) = self.unpack_array_len(value, ArrayKind::Other)?;
                 let indices = self.reader.read_vec::<u32>(count)?;
-                let tokens = indices.into_iter().map(|i| self.tokens[i as usize].clone()).collect();
+                let tokens = indices
+                    .into_iter()
+                    .map(|i| self.tokens[i as usize].as_str().into())
+                    .collect();
 
                 sdf::Value::TokenVec(tokens)
             }
-            Type::Token => sdf::Value::Token(self.read_token(value)?),
+            Type::Token => sdf::Value::Token(self.read_token(value)?.into()),
 
             //
             // Vectors (half, float, double, int + vec{2,3,4})
@@ -1216,7 +1219,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
                 self.set_position(value.payload())?;
 
                 let tokens = self.read_token_vec()?;
-                sdf::Value::TokenVec(tokens)
+                sdf::Value::token_vec(tokens)
             }
 
             Type::PathVector => {

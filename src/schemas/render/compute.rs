@@ -187,7 +187,7 @@ pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&st
             continue;
         }
         if let Some(value) = stage.field::<Value>(prim.append_property(&name)?, FieldKey::Default)? {
-            out.push((name, value));
+            out.push((String::from(name), value));
         }
     }
     // `prim_properties` order isn't guaranteed stable across backends/layers;
@@ -274,7 +274,8 @@ fn read_float4(attr: &Attribute) -> Result<Option<[f32; 4]>> {
 
 fn read_token_vec(attr: &Attribute) -> Result<Option<Vec<String>>> {
     Ok(match attr.get::<Value>()? {
-        Some(Value::TokenVec(v) | Value::StringVec(v)) => Some(v),
+        Some(Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
+        Some(Value::StringVec(v)) => Some(v),
         _ => None,
     })
 }

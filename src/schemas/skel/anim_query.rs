@@ -15,6 +15,7 @@ use anyhow::Result;
 
 use crate::gf;
 use crate::sdf::{Path, Value};
+use crate::tf;
 use crate::usd::{SchemaBase, Stage};
 
 use super::schema::SkelAnimation;
@@ -148,7 +149,7 @@ impl SkelAnimQuery {
     fn read_vec3f_attr_at(
         &self,
         stage: &Stage,
-        name: &str,
+        name: impl Into<tf::Token>,
         time: f64,
         n: usize,
         default: gf::Vec3f,
@@ -172,7 +173,7 @@ impl SkelAnimQuery {
     fn read_quatf_attr_at(
         &self,
         stage: &Stage,
-        name: &str,
+        name: impl Into<tf::Token>,
         time: f64,
         n: usize,
         default: gf::Quatf,
@@ -194,7 +195,7 @@ impl SkelAnimQuery {
     }
 }
 
-fn attr_authored(stage: &Stage, prim: &Path, name: &str) -> Result<bool> {
+fn attr_authored(stage: &Stage, prim: &Path, name: impl Into<tf::Token>) -> Result<bool> {
     let attr = prim.append_property(name)?;
     let default = stage.field::<Value>(attr.clone(), "default")?;
     if default.is_some() {
