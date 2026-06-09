@@ -94,7 +94,7 @@ impl CollisionGroup {
     /// An identifier that merges all groups sharing it into one logical group;
     /// empty (unauthored) means no merging. C++ `UsdPhysicsCollisionGroup::GetMergeGroupNameAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn merge_group_attr(&self) -> Attribute {
         self.attribute(tok::A_MERGE_GROUP)
     }
@@ -606,7 +606,7 @@ impl MassAPI {
     /// The orientation of the principal-axes (inertia) frame, as a quaternion.
     /// C++ `UsdPhysicsMassAPI::GetPrincipalAxesAttr`.
     ///
-    /// Type `quatf`. Fetch with `get::<[f32; 4]>()?` (a `(w, x, y, z)` quat).
+    /// Type `quatf`. Fetch with `get::<gf::Quatf>()?` (a `(w, x, y, z)` quat).
     pub fn principal_axes_attr(&self) -> Attribute {
         self.attribute(tok::A_PRINCIPAL_AXES)
     }

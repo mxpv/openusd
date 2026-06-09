@@ -22,9 +22,10 @@ use super::*;
 ///
 /// Type-safe extraction is supported via [`TryFrom<Value>`] implementations for common Rust
 /// types (e.g. `f32`, `String`, `gf::Vec3f`).
-#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr)]
+#[derive(Debug, Clone, PartialEq, EnumIs, EnumTryAs, IntoStaticStr, derive_more::From)]
 pub enum Value {
     /// None value, only produced by expressions (not directly assignable).
+    #[from(skip)]
     None,
 
     Bool(bool),
@@ -129,17 +130,22 @@ pub enum Value {
 
     LayerOffsetVec(Vec<LayerOffset>),
 
+    #[from(skip)]
     ValueBlock,
+    #[from(skip)]
     Value,
 
     /// Heterogeneous array (e.g. spline knots). Each element is a `Value`.
     ValueVec(Vec<Value>),
 
+    #[from(skip)]
     UnregisteredValue(String),
+    #[from(skip)]
     UnregisteredValueListOp(StringListOp),
 
-    TimeCode(f64),
-    TimeCodeVec(Vec<f64>),
+    TimeCode(TimeCode),
+    TimeCodeVec(Vec<TimeCode>),
+    #[from(skip)]
     PathExpression(String),
 }
 
@@ -235,7 +241,8 @@ impl serde::Serialize for Value {
             Value::Variability(v) => v.serialize(serializer),
             Value::Dictionary(v) => v.serialize(serializer),
 
-            Value::TokenListOp(v) | Value::StringListOp(v) => v.serialize(serializer),
+            Value::TokenListOp(v) => v.serialize(serializer),
+            Value::StringListOp(v) => v.serialize(serializer),
             Value::PathListOp(v) => v.serialize(serializer),
             Value::ReferenceListOp(v) => v.serialize(serializer),
             Value::IntListOp(v) => v.serialize(serializer),
@@ -308,14 +315,14 @@ impl std::fmt::Display for ValueConversionError {
 
 impl std::error::Error for ValueConversionError {}
 
-// --- Type-safe extraction (TryFrom<Value>) ---
-//
-// Owned conversions that move data out of Value without cloning.
-// Scalar types delegate to the strum-generated `try_as_*()` methods
-// (from the EnumTryAs derive). Compound types use manual match arms
-// to accept multiple variants.
+// Exact extraction: owned conversions that move data out of `Value` without
+// cloning, each requiring the exact held variant. They delegate to the
+// strum-generated `try_as_*()` methods (from the `EnumTryAs` derive);
+// cross-type coercion (`token` → `string`, numeric and vector precision) is
+// the separate, opt-in `Value::cast` tier.
 
 macro_rules! impl_try_from_value {
+    // Exact: unwrap the matching variant.
     ($target:ty, $method:ident, $label:literal) => {
         impl TryFrom<Value> for $target {
             type Error = ValueConversionError;
@@ -323,6 +330,29 @@ macro_rules! impl_try_from_value {
             fn try_from(value: Value) -> Result<Self, Self::Error> {
                 let tag: &'static str = (&value).into();
                 value.$method().ok_or(ValueConversionError {
+                    expected: $label,
+                    actual: tag,
+                })
+            }
+        }
+    };
+    // Unwrap the matching variant, then convert each element via `Into` — used
+    // by the `gf`-vector-array conversions (`Vec<Vec3f>` → `Vec<[f32; 3]>`).
+    ($target:ty, $method:ident, $label:literal, map_into) => {
+        impl_try_from_value!($target, $method, $label, |v| v
+            .into_iter()
+            .map(Into::into)
+            .collect());
+    };
+    // Unwrap the matching variant, then map it through `$transform` — used by
+    // the `gf`-vector-to-fixed-array conversions (`Vec3f` → `[f32; 3]`).
+    ($target:ty, $method:ident, $label:literal, $transform:expr) => {
+        impl TryFrom<Value> for $target {
+            type Error = ValueConversionError;
+
+            fn try_from(value: Value) -> Result<Self, Self::Error> {
+                let tag: &'static str = (&value).into();
+                value.$method().map($transform).ok_or(ValueConversionError {
                     expected: $label,
                     actual: tag,
                 })
@@ -384,182 +414,31 @@ impl_try_from_value!(Vec<gf::Mat2d>, try_as_matrix_2d_vec, "Matrix2dVec");
 impl_try_from_value!(Vec<gf::Mat3d>, try_as_matrix_3d_vec, "Matrix3dVec");
 impl_try_from_value!(Vec<gf::Matrix4d>, try_as_matrix_4d_vec, "Matrix4dVec");
 
-impl TryFrom<Value> for String {
-    type Error = ValueConversionError;
+// Single-variant string and asset extraction. Coercing `token` → `string`
+// is [`Value::cast`]'s job.
+impl_try_from_value!(String, try_as_string, "String");
+impl_try_from_value!(Token, try_as_token, "Token");
+impl_try_from_value!(AssetPath, try_as_asset_path, "AssetPath");
+impl_try_from_value!(Vec<AssetPath>, try_as_asset_path_vec, "AssetPathVec");
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::String(v) => Ok(v),
-            Value::Token(v) => Ok(v.into()),
-            other => ValueConversionError::err("String or Token", &other),
-        }
-    }
-}
+// Exact numeric arrays — `float[]` / `double[]`. Flattening a single vector
+// into a scalar array is a coercion, so it lives in [`Value::cast`].
+impl_try_from_value!(Vec<f32>, try_as_float_vec, "FloatVec");
+impl_try_from_value!(Vec<f64>, try_as_double_vec, "DoubleVec");
 
-impl TryFrom<Value> for Token {
-    type Error = ValueConversionError;
+// `gf` vector/quaternion variants as fixed-size arrays, via the type's `Into`.
+// Coercing across element precisions is [`Value::cast`]'s job.
+impl_try_from_value!([f32; 2], try_as_vec_2f, "gf::Vec2f", Into::into);
+impl_try_from_value!([f32; 3], try_as_vec_3f, "gf::Vec3f", Into::into);
+impl_try_from_value!([f32; 4], try_as_vec_4f, "gf::Vec4f", Into::into);
+impl_try_from_value!([f64; 2], try_as_vec_2d, "gf::Vec2d", Into::into);
+impl_try_from_value!([f64; 3], try_as_vec_3d, "gf::Vec3d", Into::into);
+impl_try_from_value!([f64; 4], try_as_vec_4d, "gf::Vec4d", Into::into);
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Token(v) => Ok(v),
-            other => ValueConversionError::err("Token", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for AssetPath {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::AssetPath(asset) => Ok(asset),
-            other => ValueConversionError::err("AssetPath", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<AssetPath> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::AssetPathVec(assets) => Ok(assets),
-            other => ValueConversionError::err("AssetPathVec", &other),
-        }
-    }
-}
-
-// Raw array convenience conversions — extract the inner gf type then convert
-// via its Into<[T; N]> impl.
-
-impl TryFrom<Value> for [f32; 2] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec2f(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec2f", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for [f32; 3] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec3f(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec3f", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for [f32; 4] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec4f(v) => Ok(v.into()),
-            Value::Quatf(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec4f or gf::Quatf", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for [f64; 2] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec2d(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec2d", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for [f64; 3] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec3d(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec3d", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for [f64; 4] {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec4d(v) => Ok(v.into()),
-            Value::Quatd(v) => Ok(v.into()),
-            other => ValueConversionError::err("gf::Vec4d or gf::Quatd", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<[f32; 2]> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec2fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
-            other => ValueConversionError::err("Vec2fVec", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<[f32; 3]> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec3fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
-            other => ValueConversionError::err("Vec3fVec", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<[f32; 4]> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::Vec4fVec(v) => Ok(v.into_iter().map(Into::into).collect()),
-            other => ValueConversionError::err("Vec4fVec", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<f32> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::FloatVec(v) => Ok(v),
-            Value::Vec2f(v) => Ok(<[f32; 2]>::from(v).into()),
-            Value::Vec3f(v) => Ok(<[f32; 3]>::from(v).into()),
-            Value::Vec4f(v) => Ok(<[f32; 4]>::from(v).into()),
-            other => ValueConversionError::err("FloatVec, gf::Vec2f, gf::Vec3f, or gf::Vec4f", &other),
-        }
-    }
-}
-
-impl TryFrom<Value> for Vec<f64> {
-    type Error = ValueConversionError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        match value {
-            Value::DoubleVec(v) => Ok(v),
-            Value::Vec2d(v) => Ok(<[f64; 2]>::from(v).into()),
-            Value::Vec3d(v) => Ok(<[f64; 3]>::from(v).into()),
-            Value::Vec4d(v) => Ok(<[f64; 4]>::from(v).into()),
-            other => ValueConversionError::err("DoubleVec, gf::Vec2d, gf::Vec3d, or gf::Vec4d", &other),
-        }
-    }
-}
+// `gf` vector arrays as arrays of fixed-size arrays.
+impl_try_from_value!(Vec<[f32; 2]>, try_as_vec_2f_vec, "Vec2fVec", map_into);
+impl_try_from_value!(Vec<[f32; 3]>, try_as_vec_3f_vec, "Vec3fVec", map_into);
+impl_try_from_value!(Vec<[f32; 4]>, try_as_vec_4f_vec, "Vec4fVec", map_into);
 
 /// Convert from `&str` to `Value`.
 ///
@@ -570,106 +449,6 @@ impl<'a> From<&'a str> for Value {
     }
 }
 
-impl From<AssetPath> for Value {
-    fn from(asset: AssetPath) -> Self {
-        Value::AssetPath(asset)
-    }
-}
-
-impl From<Vec<AssetPath>> for Value {
-    fn from(assets: Vec<AssetPath>) -> Self {
-        Value::AssetPathVec(assets)
-    }
-}
-
-/// Wrap a value in its `Value` variant, so `impl Into<Value>` sinks (such as
-/// [`AttributeMut::set`](crate::sdf::AttributeSpecMut) and the composed
-/// `Attribute::set`) accept the bare Rust value: `set(2.5_f64)`,
-/// `set(vec![4])`, `set(vec![gf::vec3f(0.0, 0.0, 0.0)])`.
-///
-/// Only types whose Rust representation maps to exactly one variant get a
-/// `From`. The ambiguous ones are omitted so the wrong variant is never picked
-/// silently — construct those explicitly:
-/// - `gf::Vec4f` / `gf::Vec4d` / `gf::Vec4h` ([`Value::Vec4f`] vs [`Value::Quatf`], etc.),
-/// - `Vec<String>` ([`Value::StringVec`] vs [`Value::TokenVec`]).
-///
-/// An unsuffixed float literal needs a type suffix (`2.5_f64`) to pick between
-/// [`Value::Float`] and [`Value::Double`].
-macro_rules! impl_from {
-    ($t:ty, $variant:ident) => {
-        impl From<$t> for Value {
-            fn from(v: $t) -> Self {
-                Value::$variant(v)
-            }
-        }
-    };
-}
-
-// Scalars.
-impl_from!(bool, Bool);
-impl_from!(u8, Uchar);
-impl_from!(i32, Int);
-impl_from!(u32, Uint);
-impl_from!(i64, Int64);
-impl_from!(u64, Uint64);
-impl_from!(f16, Half);
-impl_from!(f32, Float);
-impl_from!(f64, Double);
-impl_from!(String, String);
-impl_from!(Token, Token);
-impl_from!(Vec<Token>, TokenVec);
-
-// gf vector and quaternion types.
-impl_from!(gf::Vec2f, Vec2f);
-impl_from!(gf::Vec2d, Vec2d);
-impl_from!(gf::Vec2i, Vec2i);
-impl_from!(gf::Vec2h, Vec2h);
-impl_from!(gf::Vec3f, Vec3f);
-impl_from!(gf::Vec3d, Vec3d);
-impl_from!(gf::Vec3i, Vec3i);
-impl_from!(gf::Vec3h, Vec3h);
-impl_from!(gf::Vec4f, Vec4f);
-impl_from!(gf::Vec4d, Vec4d);
-impl_from!(gf::Vec4i, Vec4i);
-impl_from!(gf::Vec4h, Vec4h);
-impl_from!(gf::Quatf, Quatf);
-impl_from!(gf::Quatd, Quatd);
-impl_from!(gf::Quath, Quath);
-impl_from!(gf::Mat2d, Matrix2d);
-impl_from!(gf::Mat3d, Matrix3d);
-impl_from!(gf::Matrix4d, Matrix4d);
-
-// Flat scalar arrays.
-impl_from!(Vec<bool>, BoolVec);
-impl_from!(Vec<u8>, UcharVec);
-impl_from!(Vec<i32>, IntVec);
-impl_from!(Vec<u32>, UintVec);
-impl_from!(Vec<i64>, Int64Vec);
-impl_from!(Vec<u64>, Uint64Vec);
-impl_from!(Vec<f16>, HalfVec);
-impl_from!(Vec<f32>, FloatVec);
-impl_from!(Vec<f64>, DoubleVec);
-
-// Arrays of gf vector and quaternion types.
-impl_from!(Vec<gf::Vec2f>, Vec2fVec);
-impl_from!(Vec<gf::Vec2d>, Vec2dVec);
-impl_from!(Vec<gf::Vec2i>, Vec2iVec);
-impl_from!(Vec<gf::Vec2h>, Vec2hVec);
-impl_from!(Vec<gf::Vec3f>, Vec3fVec);
-impl_from!(Vec<gf::Vec3d>, Vec3dVec);
-impl_from!(Vec<gf::Vec3i>, Vec3iVec);
-impl_from!(Vec<gf::Vec3h>, Vec3hVec);
-impl_from!(Vec<gf::Vec4f>, Vec4fVec);
-impl_from!(Vec<gf::Vec4d>, Vec4dVec);
-impl_from!(Vec<gf::Vec4i>, Vec4iVec);
-impl_from!(Vec<gf::Vec4h>, Vec4hVec);
-impl_from!(Vec<gf::Quatf>, QuatfVec);
-impl_from!(Vec<gf::Quatd>, QuatdVec);
-impl_from!(Vec<gf::Quath>, QuathVec);
-impl_from!(Vec<gf::Matrix4d>, Matrix4dVec);
-
-// Raw array convenience conversions. Only unambiguous sizes are included:
-// [f32; 4] / [f64; 4] / [f16; 4] are omitted (Vec4 vs Quat ambiguity).
 impl From<[f32; 2]> for Value {
     fn from(v: [f32; 2]) -> Self {
         Value::Vec2f(v.into())
@@ -787,6 +566,251 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Coerces this value to `T` through the registered casts, mirroring C++
+    /// `VtValue::Cast`: numeric scalars cross-convert (range-checked), `string`
+    /// ↔ `token`, and same-dimension vectors/quaternions change precision.
+    ///
+    /// Unlike `T::try_from` / [`Attribute::get`](crate::usd::Attribute::get),
+    /// which require the exact held variant, `cast` is the coercing tier — read
+    /// the raw value and cast when the authored type may differ from the wanted
+    /// one: `attr.get::<Value>()?.map(|v| v.cast::<f32>()).transpose()?`.
+    pub fn cast<T: FromValueCast>(self) -> Result<T, CastError> {
+        T::cast_from(self)
+    }
+}
+
+/// A type that [`Value::cast`] can coerce a [`Value`] into — the Rust side of
+/// C++ `VtValue`'s registered cast set. Takes the value by move so a
+/// same-variant cast (e.g. `StringVec` to `Vec<String>`) reuses its buffer
+/// rather than cloning, matching the owned [`TryFrom<Value>`] it complements.
+///
+/// The implemented targets are demand-driven — the scalar, string/token, and
+/// the specific array/vector shapes current callers read. The set is not the
+/// full precision×dimension matrix: a missing target (e.g. `cast::<gf::Vec2f>`)
+/// is a compile error, signalling "add the impl when a caller needs it" rather
+/// than a silent gap. Add new targets here as the need arises.
+pub trait FromValueCast: Sized {
+    /// Coerces `value` to `Self`, or reports why it cannot.
+    fn cast_from(value: Value) -> Result<Self, CastError>;
+}
+
+/// Error returned by [`Value::cast`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CastError {
+    /// The held variant has no registered cast to the target type.
+    #[error("cannot cast {actual} to {target}")]
+    TypeMismatch {
+        /// The requested target type.
+        target: &'static str,
+        /// The actual held variant.
+        actual: &'static str,
+    },
+    /// The numeric value is outside the target type's representable range
+    /// (faithful to C++ `numeric_cast`).
+    #[error("{actual} value is out of range for {target}")]
+    OutOfRange {
+        /// The requested target type.
+        target: &'static str,
+        /// The actual held variant.
+        actual: &'static str,
+    },
+}
+
+impl CastError {
+    fn mismatch<T>(actual: &'static str) -> Self {
+        Self::TypeMismatch {
+            target: std::any::type_name::<T>(),
+            actual,
+        }
+    }
+
+    fn out_of_range<T>(actual: &'static str) -> Self {
+        Self::OutOfRange {
+            target: std::any::type_name::<T>(),
+            actual,
+        }
+    }
+}
+
+/// Range-checked numeric coercion shared by every scalar `FromValueCast` target.
+/// `num_traits::NumCast` is `boost::numeric_cast`: it returns `None` when an
+/// integer target overflows, which maps to [`CastError::OutOfRange`].
+///
+/// Narrowing float conversions (`f64` → `f32`/`f16`) are not range-checked by
+/// `NumCast` — they saturate to infinity instead of returning `None` — so a
+/// finite source that produces a non-finite result is reported as out of range
+/// too. An already-infinite source legitimately stays infinite.
+fn cast_numeric<T: num_traits::NumCast>(value: Value) -> Result<T, CastError> {
+    use num_traits::NumCast;
+    let actual: &'static str = (&value).into();
+    let src_finite = match &value {
+        Value::Half(v) => v.is_finite(),
+        Value::Float(v) => v.is_finite(),
+        Value::Double(v) => v.is_finite(),
+        _ => true,
+    };
+    let out: T = match value {
+        Value::Uchar(v) => NumCast::from(v),
+        Value::Int(v) => NumCast::from(v),
+        Value::Uint(v) => NumCast::from(v),
+        Value::Int64(v) => NumCast::from(v),
+        Value::Uint64(v) => NumCast::from(v),
+        Value::Half(v) => NumCast::from(v),
+        Value::Float(v) => NumCast::from(v),
+        Value::Double(v) => NumCast::from(v),
+        Value::Bool(v) => NumCast::from(v as u8),
+        _ => return Err(CastError::mismatch::<T>(actual)),
+    }
+    .ok_or_else(|| CastError::out_of_range::<T>(actual))?;
+    if src_finite && out.to_f64().is_some_and(|f| !f.is_finite()) {
+        return Err(CastError::out_of_range::<T>(actual));
+    }
+    Ok(out)
+}
+
+macro_rules! impl_cast_numeric {
+    ($($t:ty),+ $(,)?) => {$(
+        impl FromValueCast for $t {
+            fn cast_from(value: Value) -> Result<Self, CastError> {
+                cast_numeric(value)
+            }
+        }
+    )+};
+}
+
+impl_cast_numeric!(u8, i32, u32, i64, u64, f16, f32, f64);
+
+impl FromValueCast for bool {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::Bool(b) => Ok(b),
+            other => Err(CastError::mismatch::<bool>((&other).into())),
+        }
+    }
+}
+
+impl FromValueCast for String {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::String(s) => Ok(s),
+            Value::Token(t) => Ok(t.into()),
+            Value::AssetPath(a) => Ok(a.authored_path),
+            other => Err(CastError::mismatch::<String>((&other).into())),
+        }
+    }
+}
+
+impl FromValueCast for Token {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::Token(t) => Ok(t),
+            Value::String(s) => Ok(Token::from(s)),
+            other => Err(CastError::mismatch::<Token>((&other).into())),
+        }
+    }
+}
+
+impl FromValueCast for Vec<String> {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::StringVec(v) => Ok(v),
+            Value::TokenVec(v) => Ok(v.into_iter().map(String::from).collect()),
+            Value::AssetPathVec(v) => Ok(v.into_iter().map(|a| a.authored_path).collect()),
+            other => Err(CastError::mismatch::<Vec<String>>((&other).into())),
+        }
+    }
+}
+
+/// Lifts a `Value`-inspecting helper's `Option` into a cast result, reporting a
+/// type mismatch against `R` (the cast's target type) when no conversion applied.
+fn require<R, U>(value: &Value, converted: Option<U>) -> Result<U, CastError> {
+    converted.ok_or_else(|| CastError::mismatch::<R>(value.into()))
+}
+
+/// Widens a 3-component vector (`f`/`d`/`h`/`i`) to `[f64; 3]`. The `f`/`d`
+/// arms reuse gf's `Into<[f64; 3]>`; `h`/`i` have no such impl and widen here.
+fn vec3_as_f64(value: &Value) -> Option<[f64; 3]> {
+    Some(match value {
+        Value::Vec3f(v) => (*v).into(),
+        Value::Vec3d(v) => (*v).into(),
+        Value::Vec3h(v) => [f64::from(v.x), f64::from(v.y), f64::from(v.z)],
+        Value::Vec3i(v) => [v.x as f64, v.y as f64, v.z as f64],
+        _ => return None,
+    })
+}
+
+/// Widens a 4-component vector or quaternion to `[f64; 4]`. Quaternions extract
+/// in `(w, x, y, z)` order; the `Vec4d`/`Quatf`/`Quatd` arms reuse gf's
+/// `Into<[f64; 4]>` (which encodes that order), and the rest widen here.
+fn vec4_as_f64(value: &Value) -> Option<[f64; 4]> {
+    Some(match value {
+        Value::Vec4f(v) => [v.x as f64, v.y as f64, v.z as f64, v.w as f64],
+        Value::Vec4d(v) => (*v).into(),
+        Value::Vec4h(v) => [f64::from(v.x), f64::from(v.y), f64::from(v.z), f64::from(v.w)],
+        Value::Vec4i(v) => [v.x as f64, v.y as f64, v.z as f64, v.w as f64],
+        Value::Quatf(q) => (*q).into(),
+        Value::Quatd(q) => (*q).into(),
+        Value::Quath(q) => [f64::from(q.w), f64::from(q.x), f64::from(q.y), f64::from(q.z)],
+        _ => return None,
+    })
+}
+
+impl FromValueCast for [f64; 3] {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        require::<Self, _>(&value, vec3_as_f64(&value))
+    }
+}
+
+impl FromValueCast for [f64; 4] {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        require::<Self, _>(&value, vec4_as_f64(&value))
+    }
+}
+
+impl FromValueCast for [f32; 4] {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        let a = require::<Self, _>(&value, vec4_as_f64(&value))?;
+        Ok([a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32])
+    }
+}
+
+impl FromValueCast for gf::Vec3f {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        let [x, y, z] = require::<Self, _>(&value, vec3_as_f64(&value))?;
+        Ok(gf::vec3f(x as f32, y as f32, z as f32))
+    }
+}
+
+impl FromValueCast for Vec<f32> {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::FloatVec(v) => Ok(v),
+            Value::DoubleVec(v) => Ok(v.into_iter().map(|d| d as f32).collect()),
+            Value::HalfVec(v) => Ok(v.into_iter().map(f32::from).collect()),
+            Value::Vec2f(v) => Ok(vec![v.x, v.y]),
+            Value::Vec3f(v) => Ok(vec![v.x, v.y, v.z]),
+            Value::Vec4f(v) => Ok(vec![v.x, v.y, v.z, v.w]),
+            other => Err(CastError::mismatch::<Vec<f32>>((&other).into())),
+        }
+    }
+}
+
+impl FromValueCast for Vec<gf::Vec3f> {
+    fn cast_from(value: Value) -> Result<Self, CastError> {
+        match value {
+            Value::Vec3fVec(v) => Ok(v),
+            Value::Vec3dVec(v) => Ok(v
+                .into_iter()
+                .map(|d| gf::vec3f(d.x as f32, d.y as f32, d.z as f32))
+                .collect()),
+            Value::Vec3hVec(v) => Ok(v
+                .into_iter()
+                .map(|h| gf::vec3f(f32::from(h.x), f32::from(h.y), f32::from(h.z)))
+                .collect()),
+            other => Err(CastError::mismatch::<Vec<gf::Vec3f>>((&other).into())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -814,7 +838,8 @@ mod tests {
         assert_eq!(f32::try_from(Value::Float(1.5)).unwrap(), 1.5);
         assert_eq!(f64::try_from(Value::Double(2.5)).unwrap(), 2.5);
         assert_eq!(String::try_from(Value::String("hello".into())).unwrap(), "hello");
-        assert_eq!(String::try_from(Value::Token("tok".into())).unwrap(), "tok");
+        // Exact extraction does not coerce a token to a string — that is `cast`.
+        assert!(String::try_from(Value::Token("tok".into())).is_err());
     }
 
     #[test]
@@ -846,15 +871,19 @@ mod tests {
 
     #[test]
     fn try_from_vec() {
-        // Vec<f32> accepts any float vector variant.
-        assert!(Vec::<f32>::try_from(Value::FloatVec(vec![1.0])).is_ok());
-        let v = gf::vec3f(1.0, 2.0, 3.0);
-        assert!(Vec::<f32>::try_from(Value::Vec3f(v)).is_ok());
+        // Exact extraction takes the array variant only; flattening a single
+        // vector into a scalar array is `cast`, not `try_from`.
+        assert_eq!(Vec::<f32>::try_from(Value::FloatVec(vec![1.0])).unwrap(), vec![1.0]);
+        assert!(Vec::<f32>::try_from(Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0))).is_err());
 
-        // Vec<f64> accepts any double vector variant.
-        assert!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).is_ok());
-        let v = gf::vec2d(1.0, 2.0);
-        assert!(Vec::<f64>::try_from(Value::Vec2d(v)).is_ok());
+        assert_eq!(Vec::<f64>::try_from(Value::DoubleVec(vec![1.0])).unwrap(), vec![1.0]);
+        assert!(Vec::<f64>::try_from(Value::Vec2d(gf::vec2d(1.0, 2.0))).is_err());
+
+        // The coercing tier still flattens.
+        assert_eq!(
+            Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)).cast::<Vec<f32>>().unwrap(),
+            vec![1.0, 2.0, 3.0]
+        );
     }
 
     #[test]
@@ -883,6 +912,74 @@ mod tests {
 
         let err = gf::Vec3f::try_from(Value::Bool(true)).unwrap_err();
         assert_eq!(err.to_string(), "expected gf::Vec3f, got Bool");
+    }
+
+    #[test]
+    fn cast_numeric_widen_narrow() {
+        // Cross-type numeric coercion, both widening and narrowing.
+        assert_eq!(Value::Int(42).cast::<f64>().unwrap(), 42.0);
+        assert_eq!(Value::Double(2.0).cast::<i32>().unwrap(), 2);
+        assert_eq!(Value::Uchar(255).cast::<i32>().unwrap(), 255);
+        assert_eq!(Value::Half(f16::from_f32(1.5)).cast::<f32>().unwrap(), 1.5);
+    }
+
+    #[test]
+    fn cast_out_of_range() {
+        // A double beyond i32's range is a range error, not a type error.
+        assert!(matches!(
+            Value::Double(1e40).cast::<i32>(),
+            Err(CastError::OutOfRange { .. })
+        ));
+        // Narrowing a finite double past f32/f16's range saturates to infinity
+        // in `NumCast`; we report it as out of range, not a silent infinity.
+        assert!(matches!(
+            Value::Double(f64::MAX).cast::<f32>(),
+            Err(CastError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            Value::Float(f32::MAX).cast::<f16>(),
+            Err(CastError::OutOfRange { .. })
+        ));
+        // An already-infinite source stays infinite — that is not an overflow.
+        assert_eq!(Value::Double(f64::INFINITY).cast::<f32>().unwrap(), f32::INFINITY);
+        // A non-numeric variant is a type mismatch.
+        assert!(matches!(
+            Value::Bool(true).cast::<gf::Vec3f>(),
+            Err(CastError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn cast_string_token() {
+        assert_eq!(Value::Token("t".into()).cast::<String>().unwrap(), "t");
+        assert_eq!(Value::String("s".into()).cast::<Token>().unwrap(), Token::new("s"));
+        assert_eq!(
+            Value::TokenVec(vec!["a".into(), "b".into()])
+                .cast::<Vec<String>>()
+                .unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn cast_vec_precision() {
+        // Same-dimension precision cast: a double vector reads as Vec3f.
+        assert_eq!(
+            Value::Vec3d(gf::vec3d(1.0, 2.0, 3.0)).cast::<gf::Vec3f>().unwrap(),
+            gf::vec3f(1.0, 2.0, 3.0)
+        );
+        // [f64; 3] widens a float vector.
+        assert_eq!(
+            Value::Vec3f(gf::vec3f(1.0, 2.0, 3.0)).cast::<[f64; 3]>().unwrap(),
+            [1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn cast_quat_wxyz_order() {
+        // [f64; 4] from a quaternion is (w, x, y, z).
+        let q = gf::quatf(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(Value::Quatf(q).cast::<[f64; 4]>().unwrap(), [1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

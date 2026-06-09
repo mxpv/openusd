@@ -45,7 +45,7 @@ pub trait FieldAsset: FieldBase {
     /// The name of the field to read from the file; one file often holds several
     /// (`density`, `temperature`, …). C++ `UsdVolFieldAsset::GetFieldNameAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     fn field_name_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_FIELD_NAME)
     }
@@ -81,7 +81,7 @@ pub trait FieldAsset: FieldBase {
     /// (`float`, `double`, `float3`, `half`, …).
     /// C++ `UsdVolFieldAsset::GetFieldDataTypeAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     fn field_data_type_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_FIELD_DATA_TYPE)
     }

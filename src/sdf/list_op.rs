@@ -89,6 +89,21 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
     }
 
+    /// Converts every item to `U`, preserving the list-op structure. Used to
+    /// reconcile encodings that differ only in element type, e.g. a `token`
+    /// list op decoded for a field whose canonical type is `string`.
+    pub fn map<U: Default + Clone + PartialEq>(self, f: impl Fn(T) -> U) -> ListOp<U> {
+        ListOp {
+            explicit: self.explicit,
+            explicit_items: self.explicit_items.into_iter().map(&f).collect(),
+            added_items: self.added_items.into_iter().map(&f).collect(),
+            prepended_items: self.prepended_items.into_iter().map(&f).collect(),
+            appended_items: self.appended_items.into_iter().map(&f).collect(),
+            deleted_items: self.deleted_items.into_iter().map(&f).collect(),
+            ordered_items: self.ordered_items.into_iter().map(&f).collect(),
+        }
+    }
+
     /// Returns an iterator over all items that contribute opinions:
     /// explicit, prepended, appended, and added.
     ///

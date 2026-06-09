@@ -20,6 +20,7 @@ use std::fs::File;
 
 use openusd::gf::f16;
 use openusd::sdf::{self, AbstractData, LayerOffset, Payload, Permission, Specifier, Value, Variability};
+use openusd::tf;
 use openusd::usdc::CrateData;
 
 const VENDOR: &str = "vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary";
@@ -69,7 +70,7 @@ fn scalar_f64(v: &Value) -> f64 {
         Value::Half(x) => x.to_f64(),
         Value::Float(x) => *x as f64,
         Value::Double(x) => *x,
-        Value::TimeCode(x) => *x,
+        Value::TimeCode(x) => x.value(),
         other => panic!("not a scalar float: {other:?}"),
     }
 }
@@ -80,7 +81,7 @@ fn vec_f64(v: &Value) -> Vec<f64> {
         Value::HalfVec(a) => a.iter().map(|x| x.to_f64()).collect(),
         Value::FloatVec(a) => a.iter().map(|&x| x as f64).collect(),
         Value::DoubleVec(a) => a.clone(),
-        Value::TimeCodeVec(a) => a.clone(),
+        Value::TimeCodeVec(a) => a.iter().map(|t| t.value()).collect(),
         other => panic!("not a scalar float array: {other:?}"),
     }
 }
@@ -554,7 +555,7 @@ fn listops_values() {
         .try_as_token_list_op()
         .expect("apiSchemas is not a token list op");
     assert!(api.explicit);
-    assert_eq!(api.explicit_items, vec!["MaterialBindingAPI".to_string()]);
+    assert_eq!(api.explicit_items, vec![tf::Token::from("MaterialBindingAPI")]);
 
     let refs = value(&data, "/root", "references")
         .try_as_reference_list_op()

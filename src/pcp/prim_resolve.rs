@@ -14,6 +14,7 @@ use anyhow::Result;
 use crate::gf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, Specifier, Value};
+use crate::tf::Token;
 
 use super::clip;
 use super::mapping::MapFunction;
@@ -130,7 +131,7 @@ impl PrimIndex {
         field: FieldKey,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Token>> {
         let field = field.as_str();
         let mut ops = Vec::new();
 
@@ -587,17 +588,19 @@ impl PrimIndex {
     ///   delete that cancels every name); no clip sets are active.
     /// - `Some(names)` — the composed strength order.
     ///
-    /// `clipSets` is a string list op; both the `String` and `Token` list-op
-    /// encodings (and bare vecs, treated as explicit) are accepted, since USDC
-    /// backends may decode it either way. A `ValueBlock` with no stronger
-    /// opinion leaves the field unauthored (`None`), falling back to name order.
+    /// `clipSets` is a string list op (C++ `SdfStringListOp`). The `String` and
+    /// `Token` list-op encodings, and bare vecs (treated as explicit), are all
+    /// accepted, since USDC backends may decode the field either way. A
+    /// `ValueBlock` with no stronger opinion leaves the field unauthored
+    /// (`None`), falling back to name order.
     pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>> {
         let mut ops = Vec::new();
         for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
                 // Stop weaker opinions while keeping any stronger composed edits.
                 Value::ValueBlock => break,
-                Value::StringListOp(op) | Value::TokenListOp(op) => ops.push(op),
+                Value::StringListOp(op) => ops.push(op),
+                Value::TokenListOp(op) => ops.push(op.map(String::from)),
                 Value::StringVec(names) => ops.push(sdf::StringListOp::explicit(names)),
                 Value::TokenVec(names) => ops.push(sdf::StringListOp::explicit(
                     names.into_iter().map(String::from).collect::<Vec<_>>(),

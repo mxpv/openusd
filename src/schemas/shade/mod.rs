@@ -36,7 +36,7 @@
 //! let stage = usd::Stage::builder().in_memory("scene.usda").unwrap();
 //!
 //! let surface = shade::Shader::define(&stage, "/Mat/Surface").unwrap();
-//! surface.create_id_attr().unwrap().set("UsdPreviewSurface".to_string()).unwrap();
+//! surface.create_id_attr().unwrap().set(sdf::Value::token("UsdPreviewSurface")).unwrap();
 //! surface.create_input("roughness", "float").unwrap().set(0.4_f32).unwrap();
 //! surface.create_output("surface", "token").unwrap();
 //!

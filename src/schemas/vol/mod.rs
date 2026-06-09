@@ -37,7 +37,7 @@
 //! // from the `FieldAsset` interface.
 //! let field = vol::OpenVDBAsset::define(&stage, "/Smoke/density").unwrap();
 //! field.create_file_path_attr().unwrap().set(sdf::Value::AssetPath("./smoke.vdb".into())).unwrap();
-//! field.create_field_name_attr().unwrap().set("density".to_string()).unwrap();
+//! field.create_field_name_attr().unwrap().set(sdf::Value::token("density")).unwrap();
 //!
 //! // A Volume binds named fields through `field:<name>` relationships.
 //! let volume = vol::Volume::define(&stage, "/Smoke").unwrap()

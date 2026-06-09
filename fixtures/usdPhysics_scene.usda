@@ -131,6 +131,6 @@ def Xform "World"
     def PhysicsCollisionGroup "Group"
     {
         rel collection:colliders:includes = [</World/Base>, </World/Arm>]
-        string physics:mergeGroup = "default"
+        uniform token physics:mergeGroup = "default"
     }
 }

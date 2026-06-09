@@ -59,7 +59,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     /// The joint frame's orientation in `body0`'s local space, as a quaternion.
     /// C++ `UsdPhysicsJoint::GetLocalRot0Attr`.
     ///
-    /// Type `quatf`. Fetch with `get::<[f32; 4]>()?` (a `(w, x, y, z)` quat).
+    /// Type `quatf`. Fetch with `get::<gf::Quatf>()?` (a `(w, x, y, z)` quat).
     fn local_rot0_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_LOCAL_ROT_0)
     }
@@ -91,7 +91,7 @@ pub trait JointBase: crate::usd::SchemaBase {
     /// The joint frame's orientation in `body1`'s local space, as a quaternion.
     /// C++ `UsdPhysicsJoint::GetLocalRot1Attr`.
     ///
-    /// Type `quatf`. Fetch with `get::<[f32; 4]>()?` (a `(w, x, y, z)` quat).
+    /// Type `quatf`. Fetch with `get::<gf::Quatf>()?` (a `(w, x, y, z)` quat).
     fn local_rot1_attr(&self) -> Attribute {
         self.prim().attribute(tok::A_LOCAL_ROT_1)
     }

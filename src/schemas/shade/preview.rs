@@ -184,13 +184,13 @@ mod tests {
 
         // A UsdUVTexture feeding diffuseColor; roughness/metallic are scalars.
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.create_id_attr()?.set("UsdUVTexture".to_string())?;
+        tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
             .set(Value::AssetPath("./albedo.png".into()))?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
+        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
         surf.create_input("roughness", "float")?.set(Value::Float(0.4))?;
@@ -223,13 +223,13 @@ mod tests {
             .set(Value::AssetPath("./albedo.png".into()))?;
 
         let tex = Shader::define(&stage, "/Mat/DiffuseTex")?;
-        tex.create_id_attr()?.set("UsdUVTexture".to_string())?;
+        tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
         tex.create_input("file", "asset")?
             .set_connections([sdf::path("/Mat.inputs:diffuseTexFile")?])?;
         tex.create_output("rgb", "float3")?;
 
         let surf = Shader::define(&stage, "/Mat/Surface")?;
-        surf.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
+        surf.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         surf.create_input("diffuseColor", "color3f")?
             .set_connections([sdf::path("/Mat/DiffuseTex.outputs:rgb")?])?;
         surf.create_output("surface", "token")?;
@@ -246,7 +246,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let surf = Shader::define(&stage, "/Mat/Surface")?;
         surf.create_id_attr()?
-            .set("ND_standard_surface_surfaceshader".to_string())?;
+            .set(sdf::Value::token("ND_standard_surface_surfaceshader"))?;
         surf.create_output("surface", "token")?;
         Material::define(&stage, "/Mat")?
             .create_surface_output()?

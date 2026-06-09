@@ -82,7 +82,7 @@ pub fn compute_render_spec(stage: &Stage, settings_prim: &Path, namespaces: &[&s
         products.push(Product {
             render_product_path: product_path.as_str().to_string(),
             product_type: product.product_type_attr().get::<ProductType>()?.unwrap_or_default(),
-            name: product.product_name_attr().get::<String>()?.unwrap_or_default(),
+            name: product.product_name_attr().cast::<String>()?.unwrap_or_default(),
             camera_path: base.camera,
             disable_motion_blur: base.disable_motion_blur,
             disable_depth_of_field: base.disable_depth_of_field,
@@ -220,7 +220,7 @@ fn collect_var_indices(
             render_var_path: key.clone(),
             data_type: var
                 .data_type_attr()
-                .get::<String>()?
+                .cast::<String>()?
                 .unwrap_or_else(|| "color3f".to_string()),
             source_name: var.source_name_attr().get::<String>()?.unwrap_or_default(),
             source_type: var.source_type_attr().get::<SourceType>()?.unwrap_or_default(),
@@ -297,10 +297,10 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
 
         let color = RenderVar::define(&stage, "/Render/Vars/color")?;
-        color.create_data_type_attr()?.set("color3f".to_string())?;
+        color.create_data_type_attr()?.set(sdf::Value::token("color3f"))?;
         color.create_source_type_attr()?.set(SourceType::Raw)?;
         let alpha = RenderVar::define(&stage, "/Render/Vars/alpha")?;
-        alpha.create_data_type_attr()?.set("float".to_string())?;
+        alpha.create_data_type_attr()?.set(sdf::Value::token("float"))?;
         alpha.create_source_name_attr()?.set("a".to_string())?;
 
         let beauty = RenderProduct::define(&stage, "/Render/Products/beauty")?;

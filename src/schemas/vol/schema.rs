@@ -98,7 +98,7 @@ impl OpenVDBAsset {
     /// (dense data), `levelSet` (a signed-distance surface), `staggered` (a MAC
     /// grid), or `unknown`. C++ `UsdVolOpenVDBAsset::GetFieldClassAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn field_class_attr(&self) -> Attribute {
         self.attribute(tok::A_FIELD_CLASS)
     }
@@ -135,7 +135,7 @@ impl Field3DAsset {
     /// An optional token marking the field's purpose or grouping within a
     /// Field3D file. C++ `UsdVolField3DAsset::GetFieldPurposeAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn field_purpose_attr(&self) -> Attribute {
         self.attribute(tok::A_FIELD_PURPOSE)
     }
@@ -155,6 +155,7 @@ impl_vol_schema!(field_asset Field3DAsset);
 mod tests {
     use super::*;
     use crate::schemas::vol::{FieldAsset, VectorDataRoleHint};
+    use crate::tf::Token;
 
     #[test]
     fn volume_fields_roundtrip() -> Result<()> {
@@ -181,20 +182,20 @@ mod tests {
         let a = OpenVDBAsset::define(&stage, "/V/density")?;
         a.create_file_path_attr()?
             .set(sdf::Value::AssetPath("./smoke.vdb".into()))?;
-        a.create_field_name_attr()?.set("density".to_string())?;
+        a.create_field_name_attr()?.set(sdf::Value::token("density"))?;
         a.create_field_index_attr()?.set(0)?;
-        a.create_field_data_type_attr()?.set("float".to_string())?;
+        a.create_field_data_type_attr()?.set(sdf::Value::token("float"))?;
         a.create_vector_data_role_hint_attr()?.set(VectorDataRoleHint::NoRole)?;
-        a.create_field_class_attr()?.set("fogVolume".to_string())?;
+        a.create_field_class_attr()?.set(sdf::Value::token("fogVolume"))?;
 
         let a = OpenVDBAsset::get(&stage, "/V/density")?.expect("OpenVDBAsset");
-        assert_eq!(a.field_name_attr().get::<String>()?.as_deref(), Some("density"));
+        assert_eq!(a.field_name_attr().get::<Token>()?.as_deref(), Some("density"));
         assert_eq!(a.field_index_attr().get::<i32>()?, Some(0));
         assert_eq!(
             a.vector_data_role_hint_attr().get::<VectorDataRoleHint>()?,
             Some(VectorDataRoleHint::NoRole)
         );
-        assert_eq!(a.field_class_attr().get::<String>()?.as_deref(), Some("fogVolume"));
+        assert_eq!(a.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
         Ok(())
     }
 
@@ -202,16 +203,16 @@ mod tests {
     fn field3d_asset_and_type_gate() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let a = Field3DAsset::define(&stage, "/V/vel")?;
-        a.create_field_data_type_attr()?.set("float3".to_string())?;
+        a.create_field_data_type_attr()?.set(sdf::Value::token("float3"))?;
         a.create_vector_data_role_hint_attr()?.set(VectorDataRoleHint::Vector)?;
-        a.create_field_purpose_attr()?.set("motion".to_string())?;
+        a.create_field_purpose_attr()?.set(sdf::Value::token("motion"))?;
 
         let a = Field3DAsset::get(&stage, "/V/vel")?.expect("Field3DAsset");
         assert_eq!(
             a.vector_data_role_hint_attr().get::<VectorDataRoleHint>()?,
             Some(VectorDataRoleHint::Vector)
         );
-        assert_eq!(a.field_purpose_attr().get::<String>()?.as_deref(), Some("motion"));
+        assert_eq!(a.field_purpose_attr().get::<Token>()?.as_deref(), Some("motion"));
 
         // Cross-type gating: an OpenVDBAsset view rejects a Field3DAsset.
         assert!(OpenVDBAsset::get(&stage, "/V/vel")?.is_none());

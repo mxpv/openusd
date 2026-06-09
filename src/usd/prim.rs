@@ -236,7 +236,7 @@ impl Prim {
         let existing: Vec<String> = match self.stage.field::<sdf::Value>(&attr_path, sdf::FieldKey::Default)? {
             Some(sdf::Value::TokenVec(v)) => v.into_iter().map(Into::into).collect(),
             Some(sdf::Value::StringVec(v)) => v,
-            Some(sdf::Value::TokenListOp(op)) => op.flatten(),
+            Some(sdf::Value::TokenListOp(op)) => op.flatten().into_iter().map(Into::into).collect(),
             Some(sdf::Value::StringListOp(op)) => op.flatten(),
             _ => Vec::new(),
         };
@@ -312,7 +312,7 @@ impl Prim {
     /// The prim's composed applied `apiSchemas`, flattened across all
     /// contributing opinions. Mirrors C++ `UsdPrim::GetAppliedSchemas`.
     /// Multi-apply instances appear as-is (e.g. `PhysicsLimitAPI:rotZ`).
-    pub fn api_schemas(&self) -> anyhow::Result<Vec<String>> {
+    pub fn api_schemas(&self) -> anyhow::Result<Vec<Token>> {
         self.stage
             .masked(&self.path, |g, cache| cache.api_schemas(g, &self.path))
     }
@@ -765,6 +765,7 @@ impl VariantSets {
 #[cfg(test)]
 mod tests {
     use crate::sdf;
+    use crate::tf::Token;
     use crate::usd::Stage;
 
     fn stage() -> anyhow::Result<Stage> {
@@ -885,7 +886,7 @@ mod tests {
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
         assert_eq!(
             stage.prim_at(prim.path()).api_schemas()?,
-            vec!["MaterialBindingAPI".to_string()]
+            vec![Token::from("MaterialBindingAPI")]
         );
         assert!(stage.prim_at(prim.path()).has_api_schema("MaterialBindingAPI")?);
         Ok(())
@@ -903,7 +904,7 @@ mod tests {
             spec.add(
                 sdf::FieldKey::ApiSchemas,
                 sdf::Value::TokenListOp(sdf::TokenListOp {
-                    appended_items: vec!["ExistingAPI".to_string()],
+                    appended_items: vec![Token::from("ExistingAPI")],
                     ..Default::default()
                 }),
             );
@@ -923,8 +924,8 @@ mod tests {
         let Some(sdf::Value::TokenListOp(op)) = local else {
             panic!("expected apiSchemas TokenListOp");
         };
-        assert_eq!(op.appended_items, vec!["ExistingAPI".to_string()]);
-        assert_eq!(op.prepended_items, vec!["NewAPI".to_string()]);
+        assert_eq!(op.appended_items, vec![Token::from("ExistingAPI")]);
+        assert_eq!(op.prepended_items, vec![Token::from("NewAPI")]);
         Ok(())
     }
 

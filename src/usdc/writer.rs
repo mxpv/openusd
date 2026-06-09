@@ -17,6 +17,7 @@ use num_traits::{AsPrimitive, PrimInt};
 use crate::{
     gf,
     sdf::{AbstractData, LayerOffset, ListOp, Path, PathElement, Payload, Reference, Value},
+    tf,
 };
 
 use super::coding;
@@ -489,7 +490,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Int64(v) => self.write_pod_out(Type::Int64, v),
             Value::Uint64(v) => self.write_pod_out(Type::Uint64, v),
             Value::Double(v) => self.write_pod_out(Type::Double, v),
-            Value::TimeCode(v) => self.write_pod_out(Type::TimeCode, v),
+            Value::TimeCode(v) => self.write_pod_out(Type::TimeCode, &v.0),
 
             // Inline vectors when all components fit in i8.
             Value::Vec2h(a) => self.write_pod_out(Type::Vec2h, a),
@@ -541,7 +542,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Uint64Vec(v) => self.write_array_ints::<u64>(Type::Uint64, v),
             Value::HalfVec(v) => self.write_array_le_half(v),
             Value::FloatVec(v) => self.write_array_f32(v),
-            Value::DoubleVec(v) => self.write_array_f64_type(Type::Double, v),
+            Value::DoubleVec(v) => self.write_array_f64_type(Type::Double, v.len(), v.iter().copied()),
 
             Value::Vec2hVec(v) => self.write_array(Type::Vec2h, v.len(), v),
             Value::Vec3hVec(v) => self.write_array(Type::Vec3h, v.len(), v),
@@ -561,7 +562,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::Matrix2dVec(v) => self.write_array(Type::Matrix2d, v.len(), v),
             Value::Matrix3dVec(v) => self.write_array(Type::Matrix3d, v.len(), v),
             Value::Matrix4dVec(v) => self.write_array(Type::Matrix4d, v.len(), v),
-            Value::TimeCodeVec(v) => self.write_array_f64_type(Type::TimeCode, v),
+            Value::TimeCodeVec(v) => self.write_array_f64_type(Type::TimeCode, v.len(), v.iter().map(|t| t.0)),
 
             // Strings stored in their own arrays (StringVec also via token lookup).
             Value::StringVec(v) => self.write_string_vec(Type::String, v),
@@ -580,7 +581,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             Value::TokenListOp(op) => self.write_listop(Type::TokenListOp, op, |w, items| {
                 w.write_count(items.len() as u64)?;
                 for t in items {
-                    let idx = w.tokens.intern(t.clone());
+                    let idx = w.tokens.intern(t.as_str().to_string());
                     w.write_pod(&idx)?;
                 }
                 Ok(())
@@ -736,11 +737,11 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(Type::Float, off, true))
     }
 
-    fn write_array_f64_type(&mut self, ty: Type, v: &[f64]) -> Result<ValueRep> {
+    fn write_array_f64_type(&mut self, ty: Type, len: usize, values: impl Iterator<Item = f64>) -> Result<ValueRep> {
         let off = self.pos()?;
-        self.write_count(v.len() as u64)?;
-        for f in v {
-            self.write_pod(f)?;
+        self.write_count(len as u64)?;
+        for f in values {
+            self.write_pod(&f)?;
         }
         Ok(rep_heap(ty, off, true))
     }
@@ -787,7 +788,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         Ok(rep_heap(ty, off, true))
     }
 
-    fn write_token_vec(&mut self, ty: Type, v: &[crate::tf::Token]) -> Result<ValueRep> {
+    fn write_token_vec(&mut self, ty: Type, v: &[tf::Token]) -> Result<ValueRep> {
         let off = self.pos()?;
         // Token arrays: just write the indices (no inner count for the
         // Type::Token array path — reader does `unpack_array_len` then
@@ -989,8 +990,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
         self.write_pod(&0_i64)?;
 
         // Write the times array heap and capture its ValueRep.
-        let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
-        let times_rep = self.write_array_f64_type(Type::Double, &times)?;
+        let times_rep = self.write_array_f64_type(Type::Double, samples.len(), samples.iter().map(|(t, _)| *t))?;
 
         // Inline ValueRep for the times array, reachable by rel1.
         let times_rep_pos = self.pos()?;

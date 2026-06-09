@@ -32,7 +32,7 @@ impl Backdrop {
     /// The descriptive text shown inside the backdrop box.
     /// C++ `UsdUIBackdrop::GetDescriptionAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn description_attr(&self) -> Attribute {
         self.attribute(tok::A_DESCRIPTION)
     }
@@ -73,7 +73,7 @@ impl SceneGraphPrimAPI {
     /// The human-readable name an outliner shows instead of the prim name.
     /// C++ `UsdUISceneGraphPrimAPI::GetDisplayNameAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn display_name_attr(&self) -> Attribute {
         self.attribute(tok::A_DISPLAY_NAME)
     }
@@ -86,7 +86,7 @@ impl SceneGraphPrimAPI {
     /// The outliner group this prim sorts under.
     /// C++ `UsdUISceneGraphPrimAPI::GetDisplayGroupAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn display_group_attr(&self) -> Attribute {
         self.attribute(tok::A_DISPLAY_GROUP)
     }
@@ -239,6 +239,7 @@ mod tests {
     use super::*;
     use crate::gf;
     use crate::schemas::ui::ExpansionState;
+    use crate::tf::Token;
     use crate::usd::SchemaBase;
 
     #[test]
@@ -246,12 +247,12 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/World/Mesh")?)?.set_type_name("Mesh")?;
         let sg = SceneGraphPrimAPI::apply(&stage, "/World/Mesh")?;
-        sg.create_display_name_attr()?.set("Hero Mesh".to_string())?;
-        sg.create_display_group_attr()?.set("Characters".to_string())?;
+        sg.create_display_name_attr()?.set(sdf::Value::token("Hero Mesh"))?;
+        sg.create_display_group_attr()?.set(sdf::Value::token("Characters"))?;
 
         let p = SceneGraphPrimAPI::get(&stage, "/World/Mesh")?.expect("SceneGraphPrimAPI");
-        assert_eq!(p.display_name_attr().get::<String>()?.as_deref(), Some("Hero Mesh"));
-        assert_eq!(p.display_group_attr().get::<String>()?.as_deref(), Some("Characters"));
+        assert_eq!(p.display_name_attr().get::<Token>()?.as_deref(), Some("Hero Mesh"));
+        assert_eq!(p.display_group_attr().get::<Token>()?.as_deref(), Some("Characters"));
 
         // Unapplied prim → None.
         stage.define_prim(sdf::path("/Bare")?)?.set_type_name("Scope")?;
@@ -296,10 +297,10 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         Backdrop::define(&stage, "/Mat/Note")?
             .create_description_attr()?
-            .set("lighting nodes".to_string())?;
+            .set(sdf::Value::token("lighting nodes"))?;
 
         let b = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
-        assert_eq!(b.description_attr().get::<String>()?.as_deref(), Some("lighting nodes"));
+        assert_eq!(b.description_attr().get::<Token>()?.as_deref(), Some("lighting nodes"));
         assert!(b.is_concrete());
         Ok(())
     }

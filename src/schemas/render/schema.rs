@@ -95,7 +95,7 @@ impl RenderSettings {
     /// The renderer's linear working color space.
     /// C++ `UsdRenderSettings::GetRenderingColorSpaceAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn rendering_color_space_attr(&self) -> Attribute {
         self.attribute(tok::A_RENDERING_COLOR_SPACE)
     }
@@ -154,7 +154,7 @@ impl RenderProduct {
     /// C++ `UsdRenderProduct::GetProductNameAttr`. Authored varying `token`
     /// (not `uniform`), per the schema, so it can be time-sampled.
     ///
-    /// Type `token`. Fetch with `get::<String>()?`.
+    /// Type `token`. Fetch with `get::<Token>()?`.
     pub fn product_name_attr(&self) -> Attribute {
         self.attribute(tok::A_PRODUCT_NAME)
     }
@@ -198,7 +198,7 @@ impl RenderVar {
     /// The channel's USD attribute type (e.g. `color3f`, `float`).
     /// C++ `UsdRenderVar::GetDataTypeAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn data_type_attr(&self) -> Attribute {
         self.attribute(tok::A_DATA_TYPE)
     }
@@ -273,7 +273,7 @@ impl RenderPass {
     /// Categorises the pass within a custom pipeline (e.g. `prman`, `usdrender`).
     /// C++ `UsdRenderPass::GetPassTypeAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn pass_type_attr(&self) -> Attribute {
         self.attribute(tok::A_PASS_TYPE)
     }
@@ -407,6 +407,7 @@ mod tests {
     use super::*;
     use crate::gf;
     use crate::schemas::render::{AspectRatioConformPolicy, ProductType, RenderSettingsBase, SourceType};
+    use crate::tf::Token;
 
     #[test]
     fn render_settings_roundtrip() -> Result<()> {
@@ -420,7 +421,8 @@ mod tests {
             .add_target(sdf::path("/Render/Products/beauty")?)?;
         s.create_included_purposes_attr()?
             .set(Value::TokenVec(vec!["default".into(), "render".into()]))?;
-        s.create_rendering_color_space_attr()?.set("lin_rec709".to_string())?;
+        s.create_rendering_color_space_attr()?
+            .set(sdf::Value::token("lin_rec709"))?;
 
         let s = RenderSettings::get(&stage, "/Render/Settings")?.expect("RenderSettings");
         assert_eq!(
@@ -434,7 +436,7 @@ mod tests {
         assert_eq!(s.camera_rel().targets()?, vec![sdf::path("/World/Cam")?]);
         assert_eq!(s.products_rel().targets()?, vec![sdf::path("/Render/Products/beauty")?]);
         assert_eq!(
-            s.rendering_color_space_attr().get::<String>()?.as_deref(),
+            s.rendering_color_space_attr().get::<Token>()?.as_deref(),
             Some("lin_rec709")
         );
 
@@ -449,7 +451,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let p = RenderProduct::define(&stage, "/Render/Products/beauty")?;
         p.create_product_type_attr()?.set(ProductType::Raster)?;
-        p.create_product_name_attr()?.set("beauty.exr".to_string())?;
+        p.create_product_name_attr()?.set(sdf::Value::token("beauty.exr"))?;
         // A product-level override of an inherited base attribute.
         p.create_resolution_attr()?.set(gf::vec2i(512, 512))?;
         p.create_ordered_vars_rel()?
@@ -457,7 +459,7 @@ mod tests {
 
         let p = RenderProduct::get(&stage, "/Render/Products/beauty")?.expect("RenderProduct");
         assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
-        assert_eq!(p.product_name_attr().get::<String>()?.as_deref(), Some("beauty.exr"));
+        assert_eq!(p.product_name_attr().get::<Token>()?.as_deref(), Some("beauty.exr"));
         assert_eq!(
             p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
             Some(gf::vec2i(512, 512))
@@ -470,12 +472,12 @@ mod tests {
     fn render_var_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let v = RenderVar::define(&stage, "/Render/Vars/N")?;
-        v.create_data_type_attr()?.set("normal3f".to_string())?;
+        v.create_data_type_attr()?.set(sdf::Value::token("normal3f"))?;
         v.create_source_name_attr()?.set("Nworld".to_string())?;
         v.create_source_type_attr()?.set(SourceType::Primvar)?;
 
         let v = RenderVar::get(&stage, "/Render/Vars/N")?.expect("RenderVar");
-        assert_eq!(v.data_type_attr().get::<String>()?.as_deref(), Some("normal3f"));
+        assert_eq!(v.data_type_attr().get::<Token>()?.as_deref(), Some("normal3f"));
         assert_eq!(v.source_name_attr().get::<String>()?.as_deref(), Some("Nworld"));
         assert_eq!(v.source_type_attr().get::<SourceType>()?, Some(SourceType::Primvar));
         Ok(())
@@ -485,7 +487,7 @@ mod tests {
     fn render_pass_roundtrip() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let p = RenderPass::define(&stage, "/Render/Passes/beauty")?;
-        p.create_pass_type_attr()?.set("prman".to_string())?;
+        p.create_pass_type_attr()?.set(sdf::Value::token("prman"))?;
         p.create_command_attr()?.set(Value::StringVec(vec![
             "prman".into(),
             "-t:0".into(),
@@ -498,7 +500,7 @@ mod tests {
         p.create_camera_visibility_include_root_attr()?.set(false)?;
 
         let p = RenderPass::get(&stage, "/Render/Passes/beauty")?.expect("RenderPass");
-        assert_eq!(p.pass_type_attr().get::<String>()?.as_deref(), Some("prman"));
+        assert_eq!(p.pass_type_attr().get::<Token>()?.as_deref(), Some("prman"));
         assert_eq!(
             p.command_attr().get::<Value>()?.and_then(|v| v.try_as_string_vec()),
             Some(vec!["prman".to_string(), "-t:0".to_string(), "{fileName}".to_string()])

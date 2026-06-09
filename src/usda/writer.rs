@@ -719,7 +719,11 @@ impl<W: Write> Emitter<'_, W> {
     /// `Ok(Some(false))` / `Ok(None)` if caller should emit as a normal field.
     fn try_emit_listop_metadata(&mut self, name: &str, value: &Value) -> Result<Option<bool>> {
         match value {
-            Value::TokenListOp(op) | Value::StringListOp(op) => {
+            Value::TokenListOp(op) => {
+                self.emit_listop_statement(name, op, |s, t| write_quoted(s, t.as_str()))?;
+                Ok(Some(true))
+            }
+            Value::StringListOp(op) => {
                 self.emit_listop_statement(name, op, |s, t| write_quoted(s, t))?;
                 Ok(Some(true))
             }
@@ -945,9 +949,8 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
 
         Value::Dictionary(dict) => format_dictionary(s, dict)?,
 
-        Value::TokenListOp(op) | Value::StringListOp(op) => {
-            format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?
-        }
+        Value::TokenListOp(op) => format_inline_listop(s, op, |s, t: &Token| write_quoted(s, t.as_str()))?,
+        Value::StringListOp(op) => format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?,
         Value::PathListOp(op) => format_inline_listop(s, op, |s, p| {
             write!(s, "<{}>", p.as_str())?;
             Ok(())
@@ -1003,9 +1006,9 @@ fn format_value(s: &mut String, v: &Value) -> Result<()> {
         Value::UnregisteredValue(v) => write_quoted(s, v)?,
         Value::UnregisteredValueListOp(op) => format_inline_listop(s, op, |s, t: &String| write_quoted(s, t))?,
 
-        Value::TimeCode(t) => format_double(s, *t),
+        Value::TimeCode(t) => format_double(s, t.0),
         Value::TimeCodeVec(v) => format_vec(s, v, |s, t| {
-            format_double(s, *t);
+            format_double(s, t.0);
             Ok(())
         })?,
 

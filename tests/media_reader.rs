@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use openusd::schemas::media::{AssetPreviewsAPI, AuralMode, PlaybackMode, SpatialAudio};
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdMedia_scene.usda";
@@ -19,14 +20,14 @@ fn spatial_audio_from_fixture() -> Result<()> {
     );
     assert_eq!(
         a.aural_mode_attr()
-            .get::<String>()?
+            .get::<Token>()?
             .as_deref()
             .and_then(AuralMode::from_token),
         Some(AuralMode::NonSpatial)
     );
     assert_eq!(
         a.playback_mode_attr()
-            .get::<String>()?
+            .get::<Token>()?
             .as_deref()
             .and_then(PlaybackMode::from_token),
         Some(PlaybackMode::LoopFromStart)

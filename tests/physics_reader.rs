@@ -2,8 +2,10 @@
 //! that exercises every schema family.
 
 use anyhow::Result;
+use openusd::gf;
 use openusd::schemas::physics::{self, DriveType, JointAxis, JointBase};
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd;
 
 const FIXTURE: &str = "fixtures/usdPhysics_scene.usda";
@@ -46,8 +48,8 @@ fn rigid_body_mass_and_articulation() -> Result<()> {
     assert_eq!(mass.center_of_mass_attr().get::<[f32; 3]>()?, Some([0.0, 0.0, 0.0]));
     assert_eq!(mass.diagonal_inertia_attr().get::<[f32; 3]>()?, Some([0.1, 0.1, 0.1]));
     assert_eq!(
-        mass.principal_axes_attr().get::<[f32; 4]>()?,
-        Some([1.0, 0.0, 0.0, 0.0])
+        mass.principal_axes_attr().get::<gf::Quatf>()?,
+        Some(gf::quatf(1.0, 0.0, 0.0, 0.0))
     );
 
     assert!(physics::CollisionAPI::get(&stage, base.clone())?.is_some());
@@ -143,6 +145,6 @@ fn multi_apply_limits_and_drive() -> Result<()> {
 fn collision_group() -> Result<()> {
     let stage = open()?;
     let group = physics::CollisionGroup::get(&stage, sdf::path("/World/Group")?)?.expect("CollisionGroup");
-    assert_eq!(group.merge_group_attr().get::<String>()?.as_deref(), Some("default"));
+    assert_eq!(group.merge_group_attr().get::<Token>()?.as_deref(), Some("default"));
     Ok(())
 }

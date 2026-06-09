@@ -115,7 +115,7 @@ fn lerp_value(a: &Value, b: &Value, t: f64) -> Option<Value> {
         (V::Half(x), V::Half(y)) => V::Half(gf::lerp_half(*x, *y, t32)),
         (V::Float(x), V::Float(y)) => V::Float(gf::lerp(*x, *y, t32)),
         (V::Double(x), V::Double(y)) => V::Double(gf::lerp(*x, *y, t)),
-        (V::TimeCode(x), V::TimeCode(y)) => V::TimeCode(gf::lerp(*x, *y, t)),
+        (V::TimeCode(x), V::TimeCode(y)) => V::TimeCode(gf::lerp(x.0, y.0, t).into()),
 
         (V::Matrix2d(x), V::Matrix2d(y)) => V::Matrix2d(x.lerp(*y, t)),
         (V::Matrix3d(x), V::Matrix3d(y)) => V::Matrix3d(x.lerp(*y, t)),
@@ -147,7 +147,7 @@ fn lerp_value(a: &Value, b: &Value, t: f64) -> Option<Value> {
             V::DoubleVec(x.iter().zip(y).map(|(a, b)| gf::lerp(*a, *b, t)).collect())
         }
         (V::TimeCodeVec(x), V::TimeCodeVec(y)) if x.len() == y.len() => {
-            V::TimeCodeVec(x.iter().zip(y).map(|(a, b)| gf::lerp(*a, *b, t)).collect())
+            V::TimeCodeVec(x.iter().zip(y).map(|(a, b)| gf::lerp(a.0, b.0, t).into()).collect())
         }
 
         (V::Matrix2dVec(x), V::Matrix2dVec(y)) if x.len() == y.len() => {

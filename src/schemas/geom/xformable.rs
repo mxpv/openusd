@@ -57,7 +57,7 @@ pub trait Xformable: Imageable {
         Ok(match self.prim().stage().field::<sdf::Value>(attr, "default")? {
             Some(sdf::Value::TokenVec(v)) => Some(v.into_iter().map(Into::into).collect()),
             Some(sdf::Value::StringVec(v)) => Some(v),
-            Some(sdf::Value::TokenListOp(op)) => Some(op.flatten()),
+            Some(sdf::Value::TokenListOp(op)) => Some(op.flatten().into_iter().map(Into::into).collect()),
             Some(sdf::Value::StringListOp(op)) => Some(op.flatten()),
             _ => None,
         })

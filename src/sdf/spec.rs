@@ -359,7 +359,7 @@ where
     /// adding the schema, by clearing a pending delete, or both); `Ok(false)`
     /// when the call was a no-op.
     pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, SpecError> {
-        let name = name.into();
+        let name: tf::Token = name.into().into();
         match self.get_mut(sdf::FieldKey::ApiSchemas.as_str()) {
             Some(sdf::Value::TokenListOp(op)) => Ok(add_applied_schema_to_list_op(op, name)),
             Some(_) => Err(SpecError::FieldType {
@@ -377,7 +377,7 @@ where
     }
 }
 
-fn add_applied_schema_to_list_op(op: &mut sdf::TokenListOp, name: String) -> bool {
+fn add_applied_schema_to_list_op(op: &mut sdf::TokenListOp, name: tf::Token) -> bool {
     let already_applied = op.explicit_items.iter().any(|n| n == &name)
         || op.prepended_items.iter().any(|n| n == &name)
         || op.appended_items.iter().any(|n| n == &name)
@@ -1145,7 +1145,7 @@ mod tests {
         assert!(!op.explicit);
         assert_eq!(
             op.prepended_items,
-            vec!["MaterialBindingAPI".to_string(), "SkelBindingAPI".to_string()]
+            vec![tf::Token::from("MaterialBindingAPI"), tf::Token::from("SkelBindingAPI")]
         );
         Ok(())
     }
@@ -1179,7 +1179,7 @@ mod tests {
         let mut spec = Spec::new(sdf::SpecType::Prim);
         spec.add(
             sdf::FieldKey::ApiSchemas,
-            sdf::Value::TokenListOp(sdf::TokenListOp::explicit(["ExistingAPI".to_string()])),
+            sdf::Value::TokenListOp(sdf::TokenListOp::explicit([tf::Token::from("ExistingAPI")])),
         );
         let mut prim = spec.as_prim_mut().expect("prim spec");
 
@@ -1187,7 +1187,10 @@ mod tests {
 
         let op = prim.api_schemas().expect("apiSchemas");
         assert!(op.explicit);
-        assert_eq!(op.explicit_items, vec!["ExistingAPI".to_string(), "NewAPI".to_string()]);
+        assert_eq!(
+            op.explicit_items,
+            vec![tf::Token::from("ExistingAPI"), tf::Token::from("NewAPI")]
+        );
         Ok(())
     }
 
@@ -1197,7 +1200,7 @@ mod tests {
         spec.add(
             sdf::FieldKey::ApiSchemas,
             sdf::Value::TokenListOp(sdf::TokenListOp {
-                added_items: vec!["ExistingAPI".to_string()],
+                added_items: vec![tf::Token::from("ExistingAPI")],
                 ..Default::default()
             }),
         );
@@ -1206,7 +1209,7 @@ mod tests {
         assert!(!prim.add_applied_schema("ExistingAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert_eq!(op.added_items, vec!["ExistingAPI".to_string()]);
+        assert_eq!(op.added_items, vec![tf::Token::from("ExistingAPI")]);
         assert!(op.prepended_items.is_empty());
         Ok(())
     }
@@ -1217,7 +1220,7 @@ mod tests {
         spec.add(
             sdf::FieldKey::ApiSchemas,
             sdf::Value::TokenListOp(sdf::TokenListOp {
-                deleted_items: vec!["RemovedAPI".to_string()],
+                deleted_items: vec![tf::Token::from("RemovedAPI")],
                 ..Default::default()
             }),
         );
@@ -1226,7 +1229,7 @@ mod tests {
         assert!(prim.add_applied_schema("RemovedAPI")?);
 
         let op = prim.api_schemas().expect("apiSchemas");
-        assert_eq!(op.prepended_items, vec!["RemovedAPI".to_string()]);
+        assert_eq!(op.prepended_items, vec![tf::Token::from("RemovedAPI")]);
         assert!(op.deleted_items.is_empty());
         Ok(())
     }
@@ -1240,7 +1243,7 @@ mod tests {
             sdf::FieldKey::ApiSchemas,
             sdf::Value::TokenListOp(sdf::TokenListOp {
                 explicit: true,
-                added_items: vec!["StaleAPI".to_string()],
+                added_items: vec![tf::Token::from("StaleAPI")],
                 ..Default::default()
             }),
         );
@@ -1250,7 +1253,7 @@ mod tests {
 
         let op = prim.api_schemas().expect("apiSchemas");
         assert!(op.explicit);
-        assert_eq!(op.explicit_items, vec!["StaleAPI".to_string()]);
+        assert_eq!(op.explicit_items, vec![tf::Token::from("StaleAPI")]);
         Ok(())
     }
 
@@ -1262,7 +1265,7 @@ mod tests {
         spec.add(
             sdf::FieldKey::ApiSchemas,
             sdf::Value::TokenListOp(sdf::TokenListOp {
-                deleted_items: vec!["RemovedAPI".to_string(), "RemovedAPI".to_string()],
+                deleted_items: vec![tf::Token::from("RemovedAPI"), tf::Token::from("RemovedAPI")],
                 ..Default::default()
             }),
         );
@@ -1272,7 +1275,7 @@ mod tests {
 
         let op = prim.api_schemas().expect("apiSchemas");
         assert!(op.deleted_items.is_empty());
-        assert_eq!(op.prepended_items, vec!["RemovedAPI".to_string()]);
+        assert_eq!(op.prepended_items, vec![tf::Token::from("RemovedAPI")]);
         Ok(())
     }
 

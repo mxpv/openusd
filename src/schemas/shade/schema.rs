@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 use crate::sdf::{self, Variability};
+use crate::tf::Token;
 use crate::usd::{Attribute, Prim, Stage};
 
 use super::impl_shade_schema;
@@ -31,7 +32,7 @@ impl Shader {
     /// The Sdr registry identifier, e.g. `UsdPreviewSurface` or `UsdUVTexture`.
     /// C++ `UsdShadeShader::GetIdAttr` (via `UsdShadeNodeDefAPI`).
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn id_attr(&self) -> Attribute {
         self.attribute(tok::A_INFO_ID)
     }
@@ -49,7 +50,7 @@ impl Shader {
     /// The composed `info:id` as a string, if authored — the convenience
     /// behind dispatching on shader type (C++ `UsdShadeShader::GetShaderId`).
     pub fn id(&self) -> Result<Option<String>> {
-        self.id_attr().get::<String>()
+        Ok(self.id_attr().get::<Token>()?.map(Into::into))
     }
 
     /// Which `info:*` attribute carries the implementation
@@ -93,7 +94,7 @@ impl Shader {
     /// Selects one definition inside a multi-shader source asset.
     /// C++ `UsdShadeShader::GetSourceAssetSubIdentifierAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn source_asset_subidentifier_attr(&self) -> Attribute {
         self.attribute(tok::A_INFO_SOURCE_ASSET_SUBIDENTIFIER)
     }
@@ -277,7 +278,7 @@ mod tests {
     fn shader_id_and_inputs() -> Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         let shader = Shader::define(&stage, "/Mat/Surface")?;
-        shader.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
+        shader.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
         shader
             .create_input("diffuseColor", "color3f")?
             .set(Value::vec3f(0.8_f32, 0.2, 0.2))?;
@@ -312,7 +313,7 @@ mod tests {
             .set(Value::AssetPath("./OmniPBR.mdl".into()))?;
         shader
             .create_source_asset_subidentifier_attr()?
-            .set("OmniPBR".to_string())?;
+            .set(sdf::Value::token("OmniPBR"))?;
 
         let shader = Shader::get(&stage, "/Mat/MdlShader")?.expect("Shader");
         assert_eq!(
@@ -327,7 +328,7 @@ mod tests {
         let stage = Stage::builder().in_memory("anon.usda")?;
         Shader::define(&stage, "/Mat/Surface")?
             .create_id_attr()?
-            .set("UsdPreviewSurface".to_string())?;
+            .set(sdf::Value::token("UsdPreviewSurface"))?;
         Shader::get(&stage, "/Mat/Surface")?
             .expect("Shader")
             .create_output("surface", "token")?;

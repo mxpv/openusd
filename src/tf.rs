@@ -2,9 +2,11 @@
 //! crate. Currently [`Token`], the interned-identifier string (C++ `TfToken`).
 
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// An immutable identifier string.
@@ -99,6 +101,17 @@ impl From<&Token> for Token {
 impl From<Token> for String {
     fn from(token: Token) -> Self {
         token.as_str().to_owned()
+    }
+}
+
+/// Parsing a token is infallible: any string is a valid token. Lets callers
+/// that decode text generically (e.g. the USDA parser's `parse_token::<T>`)
+/// produce a `Token` without an intermediate `String`.
+impl FromStr for Token {
+    type Err = Infallible;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(Token::from(text))
     }
 }
 

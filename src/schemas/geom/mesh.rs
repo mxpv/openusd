@@ -281,7 +281,7 @@ impl GeomSubset {
     /// constrained to partition the parent geometry without overlap.
     /// C++ `UsdGeomSubset::GetFamilyNameAttr`.
     ///
-    /// Type `uniform token`. Fetch with `get::<String>()?`.
+    /// Type `uniform token`. Fetch with `get::<Token>()?`.
     pub fn family_name_attr(&self) -> Attribute {
         self.attribute(tok::A_FAMILY_NAME)
     }

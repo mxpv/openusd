@@ -13,6 +13,7 @@
 use anyhow::Result;
 
 use crate::sdf::Value;
+use crate::tf::Token;
 use crate::usd::{Attribute, SchemaBase};
 
 use super::connectable::{input_name, output_name};
@@ -99,7 +100,10 @@ pub trait Connectable: SchemaBase {
     /// The renderer-specific `renderType` hint on `inputs:<base>`
     /// (C++ `UsdShadeInput::GetRenderType`).
     fn input_render_type(&self, base: &str) -> Result<Option<String>> {
-        self.input(base).get_metadata::<String>(META_RENDER_TYPE)
+        Ok(self
+            .input(base)
+            .get_metadata::<Token>(META_RENDER_TYPE)?
+            .map(Into::into))
     }
 
     /// Author the `renderType` hint on `inputs:<base>` (C++
@@ -113,7 +117,10 @@ pub trait Connectable: SchemaBase {
     /// The renderer-specific `renderType` hint on `outputs:<base>`
     /// (C++ `UsdShadeOutput::GetRenderType`).
     fn output_render_type(&self, base: &str) -> Result<Option<String>> {
-        self.output(base).get_metadata::<String>(META_RENDER_TYPE)
+        Ok(self
+            .output(base)
+            .get_metadata::<Token>(META_RENDER_TYPE)?
+            .map(Into::into))
     }
 
     /// Author the `renderType` hint on `outputs:<base>` (C++

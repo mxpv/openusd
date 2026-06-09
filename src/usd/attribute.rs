@@ -8,6 +8,7 @@
 
 use super::{Prim, Stage, StageAuthoringError};
 use crate::sdf;
+use crate::tf;
 
 /// Stage-composed attribute handle. Mirrors C++ `UsdAttribute`.
 ///
@@ -202,7 +203,7 @@ impl Attribute {
         if !self.connections()?.iter().any(|p| p == &target) {
             return Ok(false);
         }
-        let type_name = self.stage.field::<String>(&self.path, sdf::FieldKey::TypeName)?;
+        let type_name = self.stage.field::<tf::Token>(&self.path, sdf::FieldKey::TypeName)?;
         let mut removed = false;
         self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
             let created_attr = !layer.data().has_spec(&spec_path);
@@ -346,6 +347,22 @@ impl Attribute {
         T::Error: std::error::Error + Send + Sync + 'static,
     {
         self.stage.field::<T>(&self.path, sdf::FieldKey::Default)
+    }
+
+    /// Retrieves the composed default [`sdf::Value`] and casts it to `T` via the
+    /// registered coercions ([`sdf::Value::cast`]).
+    ///
+    /// Unlike [`get`](Attribute::get) — a strict fetch that requires the exact
+    /// held variant (`get::<String>()` reads a `Value::String` but not a
+    /// `Value::Token`) — `cast` *converts* the value to `T` (numeric scalars
+    /// range-checked, `token` ↔ `string`, vector/quaternion precision) and
+    /// returns an error if no conversion to `T` applies. `None` when no layer
+    /// authored an opinion.
+    pub fn cast<T: sdf::FromValueCast>(&self) -> anyhow::Result<Option<T>> {
+        match self.get::<sdf::Value>()? {
+            Some(value) => Ok(Some(value.cast::<T>()?)),
+            None => Ok(None),
+        }
     }
 
     /// Composed value at `time` decoded to `T`, applying the stage's

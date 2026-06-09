@@ -94,13 +94,13 @@ fn author_then_read_back_roundtrip() -> Result<()> {
 
     // Texture → diffuseColor; scalar metallic/roughness.
     let tex = Shader::define(&stage, "/World/Looks/M/Albedo")?;
-    tex.create_id_attr()?.set("UsdUVTexture".to_string())?;
+    tex.create_id_attr()?.set(sdf::Value::token("UsdUVTexture"))?;
     tex.create_input("file", "asset")?
         .set(sdf::Value::AssetPath("./wood.png".into()))?;
     tex.create_output("rgb", "float3")?;
 
     let surface = Shader::define(&stage, "/World/Looks/M/Surface")?;
-    surface.create_id_attr()?.set("UsdPreviewSurface".to_string())?;
+    surface.create_id_attr()?.set(sdf::Value::token("UsdPreviewSurface"))?;
     surface
         .create_input("diffuseColor", "color3f")?
         .set_connections([sdf::path("/World/Looks/M/Albedo.outputs:rgb")?])?;

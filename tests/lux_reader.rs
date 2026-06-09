@@ -9,6 +9,7 @@ use openusd::schemas::lux::{
     LightListCacheBehavior, PortalLight, RectLight, ShadowAPI, ShapingAPI, SphereLight, TextureFormat,
 };
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdLux_scene.usda";
@@ -126,7 +127,7 @@ fn dome_light_texture_format_and_portals() -> Result<()> {
     );
     assert_eq!(
         dome.texture_format_attr()
-            .get::<String>()?
+            .get::<Token>()?
             .as_deref()
             .and_then(TextureFormat::from_token),
         Some(TextureFormat::Latlong)
@@ -169,7 +170,7 @@ fn light_list_api() -> Result<()> {
     let list = LightListAPI::get(&stage, sdf::path("/World")?)?.expect("LightListAPI");
     assert_eq!(
         list.cache_behavior_attr()
-            .get::<String>()?
+            .get::<Token>()?
             .as_deref()
             .and_then(LightListCacheBehavior::from_token),
         Some(LightListCacheBehavior::ConsumeAndContinue)

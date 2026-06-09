@@ -9,6 +9,8 @@ use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
 use strum::{Display, EnumCount, FromRepr};
 
+use crate::tf::Token;
+
 mod asset_path;
 mod change;
 mod data;
@@ -34,7 +36,7 @@ pub use spec::{
     AttributeSpec, AttributeSpecMut, PrimSpec, PrimSpecMut, PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec,
     RelationshipSpecMut, Spec, SpecError,
 };
-pub use value::{Value, ValueConversionError};
+pub use value::{CastError, FromValueCast, Value, ValueConversionError};
 
 /// An enum that specifies the type of an object.
 /// Objects are entities that have fields and are addressable by path.
@@ -107,7 +109,8 @@ pub enum Variability {
 /// (C++ `UsdTimeCode`, passed to `Attribute::get_at`). Read it with
 /// `Attribute::get::<sdf::TimeCode>()` and author it with
 /// `set(sdf::TimeCode(..))`; it round-trips through [`Value::TimeCode`].
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Default, derive_more::From)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct TimeCode(pub f64);
 
 impl TimeCode {
@@ -118,30 +121,12 @@ impl TimeCode {
     }
 }
 
-impl From<f64> for TimeCode {
-    fn from(v: f64) -> Self {
-        TimeCode(v)
-    }
-}
-
-impl From<TimeCode> for f64 {
-    fn from(t: TimeCode) -> Self {
-        t.0
-    }
-}
-
-impl From<TimeCode> for Value {
-    fn from(t: TimeCode) -> Self {
-        Value::TimeCode(t.0)
-    }
-}
-
 impl TryFrom<Value> for TimeCode {
     type Error = ValueConversionError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
-            Value::TimeCode(v) => Ok(TimeCode(v)),
+            Value::TimeCode(v) => Ok(v),
             other => ValueConversionError::err("TimeCode", &other),
         }
     }
@@ -312,10 +297,7 @@ pub type Int64ListOp = ListOp<i64>;
 pub type Uint64ListOp = ListOp<u64>;
 
 pub type StringListOp = ListOp<String>;
-// TODO: C++ `SdfTokenListOp` is `SdfListOp<TfToken>`; make this `ListOp<Token>`
-// so `apiSchemas` / `variantSetNames` resolve as tokens end to end (today they
-// surface as `Vec<String>`, forcing a conversion at every name-list boundary).
-pub type TokenListOp = ListOp<String>;
+pub type TokenListOp = ListOp<Token>;
 pub type PathListOp = ListOp<Path>;
 pub type ReferenceListOp = ListOp<Reference>;
 pub type PayloadListOp = ListOp<Payload>;

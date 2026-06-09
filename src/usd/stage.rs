@@ -2325,8 +2325,8 @@ mod tests {
         let stage = Stage::open("fixtures/api_schemas.usda")?;
         let geo = sdf::Path::new("/World/Geo")?;
         let schemas = stage.prim_at(geo.clone()).api_schemas()?;
-        assert!(schemas.contains(&"MaterialBindingAPI".to_string()));
-        assert!(schemas.contains(&"SkelBindingAPI".to_string()));
+        assert!(schemas.contains(&Token::from("MaterialBindingAPI")));
+        assert!(schemas.contains(&Token::from("SkelBindingAPI")));
         Ok(())
     }
 
@@ -2389,7 +2389,7 @@ over "World"
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let schemas = stage.prim_at(sdf::Path::new("/World/Geo")?).api_schemas()?;
-        assert_eq!(schemas, vec!["StrongAPI".to_string(), "WeakAPI".to_string()]);
+        assert_eq!(schemas, vec![Token::from("StrongAPI"), Token::from("WeakAPI")]);
         Ok(())
     }
 
@@ -2433,7 +2433,7 @@ over "World"
 
         let stage = Stage::open(root.to_str().expect("utf-8 temp path"))?;
         let schemas = stage.prim_at(sdf::Path::new("/World/Geo")?).api_schemas()?;
-        assert_eq!(schemas, vec!["C".to_string(), "A".to_string(), "B".to_string()]);
+        assert_eq!(schemas, vec![Token::from("C"), Token::from("A"), Token::from("B")]);
         Ok(())
     }
 
@@ -2470,7 +2470,7 @@ def Xform "World"
         let geo = sdf::Path::new("/World/Geo")?;
         assert_eq!(
             stage.prim_at(geo.clone()).api_schemas()?,
-            vec!["LocalAPI".to_string(), "BaseAPI".to_string()],
+            vec![Token::from("LocalAPI"), Token::from("BaseAPI")],
         );
         assert!(stage.prim_at(geo.clone()).has_api_schema("BaseAPI")?);
         assert!(stage.prim_at(geo.clone()).has_api_schema("LocalAPI")?);
@@ -2516,7 +2516,7 @@ def Xform "World"
         let geo = sdf::Path::new("/World/Geo")?;
         assert_eq!(
             stage.prim_at(geo.clone()).api_schemas()?,
-            vec!["LocalAPI".to_string(), "AssetAPI".to_string()],
+            vec![Token::from("LocalAPI"), Token::from("AssetAPI")],
         );
         Ok(())
     }
@@ -2557,11 +2557,11 @@ def Xform "World"
         let geo = sdf::Path::new("/World/Geo")?;
         let schemas = stage.prim_at(geo.clone()).api_schemas()?;
         assert!(
-            schemas.contains(&"VariantAPI".to_string()),
+            schemas.contains(&Token::from("VariantAPI")),
             "variant contribution missing: {schemas:?}",
         );
         assert!(
-            schemas.contains(&"LocalAPI".to_string()),
+            schemas.contains(&Token::from("LocalAPI")),
             "local contribution missing: {schemas:?}",
         );
         Ok(())

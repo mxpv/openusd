@@ -2,6 +2,8 @@ use std::{fmt, result, str::FromStr};
 
 use anyhow::{bail, ensure, Result};
 
+use crate::tf;
+
 #[inline]
 pub fn path(str: impl AsRef<str>) -> Result<Path> {
     let path = str.as_ref();
@@ -89,7 +91,7 @@ impl Path {
         self.path.is_empty()
     }
 
-    pub fn append_property(&self, property: impl Into<crate::tf::Token>) -> Result<Path> {
+    pub fn append_property(&self, property: impl Into<tf::Token>) -> Result<Path> {
         let property = property.into();
         let property = property.as_str();
         // TODO: Validate property name more carefully here.

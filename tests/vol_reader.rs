@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use openusd::schemas::vol::{self, FieldAsset};
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdVol_scene.usda";
@@ -26,12 +27,12 @@ fn volume_and_fields_from_fixture() -> Result<()> {
         vdb.file_path_attr().get::<sdf::Value>()?,
         Some(sdf::Value::AssetPath("./smoke.vdb".into()))
     );
-    assert_eq!(vdb.field_data_type_attr().get::<String>()?.as_deref(), Some("float"));
-    assert_eq!(vdb.field_class_attr().get::<String>()?.as_deref(), Some("fogVolume"));
+    assert_eq!(vdb.field_data_type_attr().get::<Token>()?.as_deref(), Some("float"));
+    assert_eq!(vdb.field_class_attr().get::<Token>()?.as_deref(), Some("fogVolume"));
 
     let f3d = vol::Field3DAsset::get(&stage, sdf::path("/Smoke/temperature")?)?.expect("Field3DAsset");
-    assert_eq!(f3d.field_name_attr().get::<String>()?.as_deref(), Some("temperature"));
-    assert_eq!(f3d.field_purpose_attr().get::<String>()?.as_deref(), Some("heat"));
+    assert_eq!(f3d.field_name_attr().get::<Token>()?.as_deref(), Some("temperature"));
+    assert_eq!(f3d.field_purpose_attr().get::<Token>()?.as_deref(), Some("heat"));
 
     // A Volume isn't a field asset.
     assert!(vol::OpenVDBAsset::get(&stage, sdf::path("/Smoke")?)?.is_none());

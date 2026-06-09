@@ -880,7 +880,7 @@ impl IndexCache {
     }
 
     /// Returns the composed `apiSchemas` list for a prim.
-    pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
+    pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<Token>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         self.cached(&path)

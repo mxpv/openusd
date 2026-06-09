@@ -15,6 +15,7 @@ use num_traits::{AsPrimitive, Float, PrimInt};
 use crate::{
     gf,
     sdf::{self, Value},
+    tf,
     usdc::coding,
 };
 
@@ -1160,7 +1161,9 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::TokenListOp => {
                 ensure!(!value.is_inlined());
 
-                let list = self.read_list_op(value, |file: &mut Self| file.read_token_vec())?;
+                let list = self.read_list_op(value, |file: &mut Self| {
+                    Ok(file.read_token_vec()?.into_iter().map(tf::Token::from).collect())
+                })?;
                 sdf::Value::TokenListOp(list)
             }
             Type::StringListOp => {
@@ -1372,8 +1375,13 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
             Type::ValueBlock => sdf::Value::ValueBlock,
             Type::Value => sdf::Value::Value,
 
-            Type::TimeCode if value.is_array() => sdf::Value::TimeCodeVec(self.read_floats(value)?),
-            Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?),
+            Type::TimeCode if value.is_array() => sdf::Value::TimeCodeVec(
+                self.read_floats::<f64>(value)?
+                    .into_iter()
+                    .map(sdf::TimeCode::from)
+                    .collect(),
+            ),
+            Type::TimeCode => sdf::Value::TimeCode(self.unpack_value::<f64>(value)?.into()),
 
             Type::PathExpression if value.is_array() => {
                 // Path-expression arrays are stored like string arrays

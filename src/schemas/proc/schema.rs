@@ -37,7 +37,7 @@ impl GenerativeProcedural {
     /// procedural, routing it to the right runtime engine (e.g. Houdini Engine or
     /// a RenderMan convention). C++ `UsdProcGenerativeProcedural::GetProceduralSystemAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?`.
+    /// Type `token`. Fetch with `get::<Token>()?`.
     pub fn procedural_system_attr(&self) -> Attribute {
         self.attribute(tok::A_PROCEDURAL_SYSTEM)
     }

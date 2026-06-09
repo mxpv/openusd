@@ -51,7 +51,7 @@ impl SpatialAudio {
     /// `nonSpatial` plays it independent of the prim's location (ambient or music).
     /// C++ `UsdMediaSpatialAudio::GetAuralModeAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// Type `token`. Fetch with `get::<Token>()?` and decode with
     /// [`AuralMode::from_token`](super::AuralMode::from_token).
     pub fn aural_mode_attr(&self) -> Attribute {
         self.attribute(tok::A_AURAL_MODE)
@@ -69,7 +69,7 @@ impl SpatialAudio {
     /// `onceFromStartToEnd`, `loopFromStart`, `loopFromStartToEnd`, `loopFromStage`.
     /// C++ `UsdMediaSpatialAudio::GetPlaybackModeAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// Type `token`. Fetch with `get::<Token>()?` and decode with
     /// [`PlaybackMode::from_token`](super::PlaybackMode::from_token).
     pub fn playback_mode_attr(&self) -> Attribute {
         self.attribute(tok::A_PLAYBACK_MODE)

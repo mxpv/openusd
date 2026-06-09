@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use openusd::schemas::ui::{Backdrop, ExpansionState, NodeGraphNodeAPI, SceneGraphPrimAPI};
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdUI_scene.usda";
@@ -13,8 +14,8 @@ fn ui_from_fixture() -> Result<()> {
     let stage = Stage::open(FIXTURE)?;
 
     let sg = SceneGraphPrimAPI::get(&stage, "/Mat/Surface")?.expect("SceneGraphPrimAPI");
-    assert_eq!(sg.display_name_attr().get::<String>()?.as_deref(), Some("Surface"));
-    assert_eq!(sg.display_group_attr().get::<String>()?.as_deref(), Some("Shading"));
+    assert_eq!(sg.display_name_attr().get::<Token>()?.as_deref(), Some("Surface"));
+    assert_eq!(sg.display_group_attr().get::<Token>()?.as_deref(), Some("Shading"));
 
     let node = NodeGraphNodeAPI::get(&stage, "/Mat/Surface")?.expect("NodeGraphNodeAPI");
     assert_eq!(node.pos_attr().get::<[f32; 2]>()?, Some([12.0, 34.0]));
@@ -32,7 +33,7 @@ fn ui_from_fixture() -> Result<()> {
 
     let backdrop = Backdrop::get(&stage, "/Mat/Note")?.expect("Backdrop");
     assert_eq!(
-        backdrop.description_attr().get::<String>()?.as_deref(),
+        backdrop.description_attr().get::<Token>()?.as_deref(),
         Some("lighting nodes")
     );
 

@@ -27,6 +27,7 @@
 //!
 //! ```
 //! use openusd::gf;
+//! use openusd::sdf;
 //! use openusd::schemas::render::{self, RenderSettingsBase};
 //! use openusd::usd::Stage;
 //!
@@ -38,7 +39,7 @@
 //!
 //! render::RenderProduct::define(&stage, "/Render/Products/beauty").unwrap()
 //!     .create_product_name_attr().unwrap()
-//!     .set("beauty.exr".to_string()).unwrap();
+//!     .set(sdf::Value::token("beauty.exr")).unwrap();
 //!
 //! let spec = render::compute_render_spec(&stage, &"/Render/Settings".parse().unwrap(), &[]).unwrap()
 //!     .expect("RenderSpec");

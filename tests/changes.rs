@@ -5,7 +5,7 @@
 //! still falls back to "blow the world" when the change touches the layer
 //! stack itself.
 
-use openusd::{sdf, usd};
+use openusd::{sdf, tf, usd};
 
 fn open_in_memory() -> usd::Stage {
     usd::Stage::builder().in_memory("anon.usda").expect("in-memory stage")
@@ -246,7 +246,10 @@ fn add_applied_schema_invalidates_owner() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
     // Warm the cache.
-    assert_eq!(stage.prim_at(prim.path()).api_schemas().unwrap(), Vec::<String>::new());
+    assert_eq!(
+        stage.prim_at(prim.path()).api_schemas().unwrap(),
+        Vec::<tf::Token>::new()
+    );
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     prim.add_applied_schema("MaterialBindingAPI").unwrap();
@@ -257,7 +260,7 @@ fn add_applied_schema_invalidates_owner() {
     );
     assert_eq!(
         stage.prim_at(sdf::path("/A").unwrap()).api_schemas().unwrap(),
-        vec!["MaterialBindingAPI".to_string()],
+        vec![tf::Token::from("MaterialBindingAPI")],
     );
 }
 

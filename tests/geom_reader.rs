@@ -11,6 +11,7 @@ use openusd::schemas::geom::{
     Visibility, Xform, Xformable,
 };
 use openusd::sdf;
+use openusd::tf::Token;
 use openusd::usd::{Attribute, Stage};
 
 const FIXTURE: &str = "fixtures/usdGeom_scene.usda";
@@ -28,7 +29,7 @@ fn xform(stage: &Stage, path: &str) -> Result<Xform> {
 fn direct_visibility(view: &impl Imageable) -> Result<Visibility> {
     Ok(view
         .visibility_attr()
-        .get::<String>()?
+        .get::<Token>()?
         .as_deref()
         .and_then(Visibility::from_token)
         .unwrap_or_default())
@@ -38,7 +39,7 @@ fn direct_visibility(view: &impl Imageable) -> Result<Visibility> {
 fn direct_purpose(view: &impl Imageable) -> Result<Purpose> {
     Ok(view
         .purpose_attr()
-        .get::<String>()?
+        .get::<Token>()?
         .as_deref()
         .and_then(Purpose::from_token)
         .unwrap_or_default())
@@ -377,7 +378,7 @@ fn orthographic_projection_token() -> Result<()> {
     let c = Camera::get(&stage, sdf::path("/World/OrthoCam")?)?.expect("Camera");
     assert_eq!(c.projection_attr().get()?, Some(sdf::Value::token("orthographic")));
     // `Projection` decodes the authored token.
-    let tok = c.projection_attr().get::<String>()?;
+    let tok = c.projection_attr().get::<Token>()?;
     assert_eq!(
         tok.as_deref().and_then(Projection::from_token),
         Some(Projection::Orthographic)
@@ -421,7 +422,7 @@ fn mesh_gprim_attrs_round_trip() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(m.double_sided_attr().get()?, Some(sdf::Value::Bool(true)));
-    assert_eq!(m.orientation_attr().get::<String>()?.as_deref(), Some("leftHanded"));
+    assert_eq!(m.orientation_attr().get::<Token>()?.as_deref(), Some("leftHanded"));
     assert_eq!(
         m.extent_attr().get()?,
         Some(sdf::Value::Vec3fVec(vec![
@@ -436,9 +437,9 @@ fn mesh_gprim_attrs_round_trip() -> Result<()> {
 fn mesh_subdivision_attrs() -> Result<()> {
     let stage = open()?;
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
-    assert_eq!(m.subdivision_scheme_attr().get::<String>()?.as_deref(), Some("none"));
+    assert_eq!(m.subdivision_scheme_attr().get::<Token>()?.as_deref(), Some("none"));
     assert_eq!(
-        m.interpolate_boundary_attr().get::<String>()?.as_deref(),
+        m.interpolate_boundary_attr().get::<Token>()?.as_deref(),
         Some("edgeAndCorner")
     );
     assert_eq!(m.corner_indices_attr().get()?, Some(sdf::Value::IntVec(vec![0, 2])));
@@ -464,7 +465,7 @@ fn mesh_normals_carry_interpolation() -> Result<()> {
     let m = Mesh::get(&stage, sdf::path("/World/FancyMesh")?)?.expect("Mesh");
     assert_eq!(array_len(&m.normals_attr(), vec3f_len)?, 4);
     assert_eq!(
-        m.normals_attr().get_metadata::<String>("interpolation")?.as_deref(),
+        m.normals_attr().get_metadata::<Token>("interpolation")?.as_deref(),
         Some("vertex")
     );
     Ok(())
@@ -484,7 +485,7 @@ fn mesh_uvs_face_varying() -> Result<()> {
         Some(4)
     );
     assert_eq!(
-        st.get_metadata::<String>("interpolation")?.as_deref(),
+        st.get_metadata::<Token>("interpolation")?.as_deref(),
         Some("faceVarying")
     );
     Ok(())
@@ -504,7 +505,7 @@ fn mesh_display_color() -> Result<()> {
     );
     assert_eq!(
         m.display_color_attr()
-            .get_metadata::<String>("interpolation")?
+            .get_metadata::<Token>("interpolation")?
             .as_deref(),
         Some("constant")
     );
@@ -524,8 +525,8 @@ fn mesh_velocities_pass_through() -> Result<()> {
 fn geom_subset_round_trip() -> Result<()> {
     let stage = open()?;
     let s = GeomSubset::get(&stage, sdf::path("/World/FancyMesh/Front")?)?.expect("GeomSubset");
-    assert_eq!(s.element_type_attr().get::<String>()?.as_deref(), Some("face"));
-    assert_eq!(s.family_name_attr().get::<String>()?.as_deref(), Some("materialBind"));
+    assert_eq!(s.element_type_attr().get::<Token>()?.as_deref(), Some("face"));
+    assert_eq!(s.family_name_attr().get::<Token>()?.as_deref(), Some("materialBind"));
     assert_eq!(s.indices_attr().get()?, Some(sdf::Value::IntVec(vec![0])));
     Ok(())
 }
@@ -569,8 +570,8 @@ fn basis_curves_topology_and_type() -> Result<()> {
     let c = BasisCurves::get(&stage, sdf::path("/World/Curves/Linear")?)?.expect("BasisCurves");
     assert_eq!(array_len(&c.points_attr(), vec3f_len)?, 4);
     assert_eq!(c.curve_vertex_counts_attr().get()?, Some(sdf::Value::IntVec(vec![4])));
-    assert_eq!(c.type_attr().get::<String>()?.as_deref(), Some("linear"));
-    assert_eq!(c.wrap_attr().get::<String>()?.as_deref(), Some("nonperiodic"));
+    assert_eq!(c.type_attr().get::<Token>()?.as_deref(), Some("linear"));
+    assert_eq!(c.wrap_attr().get::<Token>()?.as_deref(), Some("nonperiodic"));
     assert_eq!(
         c.widths_attr()
             .get::<sdf::Value>()?
@@ -614,7 +615,7 @@ fn nurbs_patch_grid() -> Result<()> {
     assert_eq!(array_len(&p.points_attr(), vec3f_len)?, 16);
     assert_eq!(p.u_order_attr().get()?, Some(sdf::Value::Int(4)));
     // uForm authored; vForm unauthored → reads back `None` (no fallback).
-    assert_eq!(p.u_form_attr().get::<String>()?.as_deref(), Some("periodic"));
+    assert_eq!(p.u_form_attr().get::<Token>()?.as_deref(), Some("periodic"));
     assert_eq!(p.v_form_attr().get::<sdf::Value>()?, None);
     Ok(())
 }

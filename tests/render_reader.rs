@@ -8,6 +8,7 @@ use openusd::schemas::render::{
     RenderVar, SourceType,
 };
 use openusd::sdf::{self, Value};
+use openusd::tf::Token;
 use openusd::usd::Stage;
 
 const FIXTURE: &str = "fixtures/usdRender_scene.usda";
@@ -49,7 +50,7 @@ fn reads_render_settings() -> Result<()> {
         Some(vec!["default".to_string(), "render".to_string()])
     );
     assert_eq!(
-        s.rendering_color_space_attr().get::<String>()?.as_deref(),
+        s.rendering_color_space_attr().get::<Token>()?.as_deref(),
         Some("lin_rec709")
     );
     assert_eq!(s.products_rel().targets()?, vec![sdf::path("/Render/products/beauty")?]);
@@ -61,7 +62,7 @@ fn reads_products_and_vars() -> Result<()> {
     let stage = open()?;
     let p = RenderProduct::get(&stage, "/Render/products/beauty")?.expect("RenderProduct");
     assert_eq!(p.product_type_attr().get::<ProductType>()?, Some(ProductType::Raster));
-    assert_eq!(p.product_name_attr().get::<String>()?.as_deref(), Some("beauty.exr"));
+    assert_eq!(p.product_name_attr().get::<Token>()?.as_deref(), Some("beauty.exr"));
     // Product override of the settings 1920×1080.
     assert_eq!(
         p.resolution_attr().get::<Value>()?.and_then(|v| v.try_as_vec_2i()),
@@ -73,7 +74,7 @@ fn reads_products_and_vars() -> Result<()> {
     );
 
     let color = RenderVar::get(&stage, "/Render/vars/color")?.expect("RenderVar");
-    assert_eq!(color.data_type_attr().get::<String>()?.as_deref(), Some("color3f"));
+    assert_eq!(color.data_type_attr().get::<Token>()?.as_deref(), Some("color3f"));
     assert_eq!(color.source_type_attr().get::<SourceType>()?, Some(SourceType::Raw));
     assert_eq!(color.source_name_attr().get::<String>()?.as_deref(), Some("Ci"));
     Ok(())

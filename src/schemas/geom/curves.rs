@@ -80,7 +80,7 @@ impl BasisCurves {
     /// (interpolated by the chosen `basis`).
     /// C++ `UsdGeomBasisCurves::GetTypeAttr`.
     ///
-    /// Type `token` (see [`CurveType`](super::CurveType)). Fetch with `get::<String>()?`.
+    /// Type `token` (see [`CurveType`](super::CurveType)). Fetch with `get::<Token>()?`.
     pub fn type_attr(&self) -> Attribute {
         self.attribute(tok::A_TYPE)
     }
@@ -97,7 +97,7 @@ impl BasisCurves {
     /// `bspline`, `catmullRom`, or `hermite` (ignored when `type` is `linear`).
     /// C++ `UsdGeomBasisCurves::GetBasisAttr`.
     ///
-    /// Type `token` (see [`CurveBasis`](super::CurveBasis)). Fetch with `get::<String>()?`.
+    /// Type `token` (see [`CurveBasis`](super::CurveBasis)). Fetch with `get::<Token>()?`.
     pub fn basis_attr(&self) -> Attribute {
         self.attribute(tok::A_BASIS)
     }
@@ -115,7 +115,7 @@ impl BasisCurves {
     /// first and last control points).
     /// C++ `UsdGeomBasisCurves::GetWrapAttr`.
     ///
-    /// Type `token` (see [`CurveWrap`](super::CurveWrap)). Fetch with `get::<String>()?`.
+    /// Type `token` (see [`CurveWrap`](super::CurveWrap)). Fetch with `get::<Token>()?`.
     pub fn wrap_attr(&self) -> Attribute {
         self.attribute(tok::A_WRAP)
     }
@@ -353,7 +353,7 @@ impl NurbsPatch {
     /// meets itself), or `periodic` (it wraps around smoothly).
     /// C++ `UsdGeomNurbsPatch::GetUFormAttr`.
     ///
-    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<String>()?`.
+    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<Token>()?`.
     pub fn u_form_attr(&self) -> Attribute {
         self.attribute(tok::A_U_FORM)
     }
@@ -369,7 +369,7 @@ impl NurbsPatch {
     /// The topological form of the surface in the V direction: `open`, `closed`, or `periodic`.
     /// C++ `UsdGeomNurbsPatch::GetVFormAttr`.
     ///
-    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<String>()?`.
+    /// Type `token` (see [`PatchForm`](super::PatchForm)). Fetch with `get::<Token>()?`.
     pub fn v_form_attr(&self) -> Attribute {
         self.attribute(tok::A_V_FORM)
     }

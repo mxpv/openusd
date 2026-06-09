@@ -848,14 +848,17 @@ mod tests {
             .into_owned()
             .try_as_time_code()
             .unwrap();
-        assert_eq!(time_code, 24.0);
+        assert_eq!(time_code, sdf::TimeCode(24.0));
 
         let time_code_array = data
             .get(&sdf::path("/World.timeCodeArray")?, "default")?
             .into_owned()
             .try_as_time_code_vec()
             .unwrap();
-        assert_eq!(time_code_array, vec![1.0, 12.0, 24.0]);
+        assert_eq!(
+            time_code_array,
+            vec![sdf::TimeCode(1.0), sdf::TimeCode(12.0), sdf::TimeCode(24.0)]
+        );
 
         Ok(())
     }

@@ -10,6 +10,7 @@ use crate::sdf::{
     self,
     schema::{ChildrenKey, FieldKey},
 };
+use crate::tf;
 
 use super::token::Token;
 
@@ -719,11 +720,12 @@ impl<'a> Parser<'a> {
                 .parse_property_metadata_value()
                 .with_context(|| format!("Unable to parse attribute metadata value for {name}"))?;
 
-            // `interpolation` is a `token`-valued attribute metadata field (UsdGeom
-            // registers it as type `token` in its plugInfo); an untyped metadata value
-            // parses as a string, so retag it as a token.
+            // Some attribute metadata fields are registered as `token` in their
+            // schema's plugInfo (UsdGeom's `interpolation`, UsdShade's
+            // `renderType`); an untyped metadata value parses as a string, so
+            // retag those as tokens.
             let value = match (name.as_str(), value) {
-                ("interpolation", sdf::Value::String(s)) => sdf::Value::token(s),
+                ("interpolation" | "renderType", sdf::Value::String(s)) => sdf::Value::token(s),
                 (_, value) => value,
             };
 
@@ -926,7 +928,7 @@ impl<'a> Parser<'a> {
             }
             "apiSchemas" => {
                 let values = self
-                    .one_or_list(|this| this.parse_token::<String>())
+                    .one_or_list(|this| this.parse_token::<tf::Token>())
                     .context("Unable to parse apiSchemas list")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
@@ -999,7 +1001,7 @@ impl<'a> Parser<'a> {
             }
             n if n == FieldKey::VariantSetNames.as_str() => {
                 let values = self
-                    .one_or_list(|this| this.parse_token::<String>())
+                    .one_or_list(|this| this.parse_token::<tf::Token>())
                     .context("Unable to parse variantSets")?;
                 let list_op = self
                     .apply_list_op(list_op, values)
@@ -1449,8 +1451,13 @@ impl<'a> Parser<'a> {
                 sdf::Value::AssetPathVec(self.parse_asset_path_array()?.into_iter().map(Into::into).collect())
             }
 
-            (Type::TimeCode, false) => sdf::Value::TimeCode(self.parse_token()?),
-            (Type::TimeCode, true) => sdf::Value::TimeCodeVec(self.parse_array()?),
+            (Type::TimeCode, false) => sdf::Value::TimeCode(self.parse_token::<f64>()?.into()),
+            (Type::TimeCode, true) => sdf::Value::TimeCodeVec(
+                self.parse_array::<f64>()?
+                    .into_iter()
+                    .map(sdf::TimeCode::from)
+                    .collect(),
+            ),
 
             (Type::Uchar, false) => sdf::Value::Uchar(self.parse_token()?),
             (Type::Uchar, true) => sdf::Value::UcharVec(self.parse_array()?),
@@ -2761,7 +2768,7 @@ def Mesh "Mesh_001" (
             .unwrap();
 
         assert!(api.explicit_items.is_empty());
-        assert_eq!(api.prepended_items, vec![String::from("MaterialBindingAPI")]);
+        assert_eq!(api.prepended_items, vec![tf::Token::from("MaterialBindingAPI")]);
     }
 
     #[test]
@@ -3341,11 +3348,15 @@ def "P" {
         let data = parser.parse().unwrap();
         assert_eq!(
             data.get(&sdf::path("/P.startTime").unwrap()).unwrap().get("default"),
-            Some(&sdf::Value::TimeCode(24.0)),
+            Some(&sdf::Value::TimeCode(sdf::TimeCode(24.0))),
         );
         assert_eq!(
             data.get(&sdf::path("/P.beats").unwrap()).unwrap().get("default"),
-            Some(&sdf::Value::TimeCodeVec(vec![0.0, 12.0, 24.0])),
+            Some(&sdf::Value::TimeCodeVec(vec![
+                sdf::TimeCode(0.0),
+                sdf::TimeCode(12.0),
+                sdf::TimeCode(24.0)
+            ])),
         );
     }
 
@@ -3370,8 +3381,8 @@ def "P" {
             .get(sdf::FieldKey::TimeSamples.as_str())
             .expect("cue.timeSamples present");
         let samples = cue.try_as_time_samples_ref().expect("TimeSamples");
-        assert_eq!(samples[0].1, sdf::Value::TimeCode(24.0));
-        assert_eq!(samples[1].1, sdf::Value::TimeCode(48.5));
+        assert_eq!(samples[0].1, sdf::Value::TimeCode(sdf::TimeCode(24.0)));
+        assert_eq!(samples[1].1, sdf::Value::TimeCode(sdf::TimeCode(48.5)));
     }
 
     /// Prim metadata `displayName` should be parsed as a string.

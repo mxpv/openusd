@@ -376,7 +376,7 @@ impl DomeLight {
     /// `latlong`, `mirroredBall`, `angular`, or `cubeMapVerticalCross`.
     /// C++ `UsdLuxDomeLight::GetTextureFormatAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// Type `token`. Fetch with `get::<Token>()?` and decode with
     /// [`TextureFormat::from_token`](super::TextureFormat::from_token).
     pub fn texture_format_attr(&self) -> Attribute {
         self.attribute(tok::A_TEXTURE_FORMAT)
@@ -407,7 +407,7 @@ impl DomeLight {
     /// (the stage up-axis), `Y`, or `Z`; only meaningful on `DomeLight_1`.
     /// C++ `UsdLuxDomeLight_1::GetPoleAxisAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// Type `token`. Fetch with `get::<Token>()?` and decode with
     /// [`PoleAxis::from_token`](super::PoleAxis::from_token).
     pub fn pole_axis_attr(&self) -> Attribute {
         self.attribute(tok::A_POLE_AXIS)
@@ -763,7 +763,7 @@ impl LightListAPI {
     /// `consumeAndHalt` (use it and stop descending), or `ignore` (always
     /// traverse for lights). C++ `UsdLuxLightListAPI::GetLightListCacheBehaviorAttr`.
     ///
-    /// Type `token`. Fetch with `get::<String>()?` and decode with
+    /// Type `token`. Fetch with `get::<Token>()?` and decode with
     /// [`LightListCacheBehavior::from_token`](super::LightListCacheBehavior::from_token).
     pub fn cache_behavior_attr(&self) -> Attribute {
         self.attribute(tok::A_LIGHT_LIST_CACHE_BEHAVIOR)
