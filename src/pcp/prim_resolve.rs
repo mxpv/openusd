@@ -594,7 +594,15 @@ impl PrimIndex {
     /// `ValueBlock` with no stronger opinion leaves the field unauthored
     /// (`None`), falling back to name order.
     pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>> {
-        Ok(self.clip_sets_list_op(stack)?.map(|op| op.flatten()))
+        // Fold directly into the applied order. This shares the opinion-gather
+        // (`clip_sets_ops`) with `clip_sets_list_op` but composes into a `Vec`
+        // in one pass, rather than building an intermediate list-op — value
+        // resolution reaches this per clipped-attribute read.
+        let ops = self.clip_sets_ops(stack)?;
+        if ops.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(compose_list_ops(&ops)))
     }
 
     /// Resolves the `clipSets` list-op composed across the stack (C++
