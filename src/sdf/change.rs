@@ -118,6 +118,14 @@ impl ChangeList {
         self.entries.push((path.clone(), ChangeEntry::default()));
         &mut self.entries.last_mut().expect("just pushed").1
     }
+
+    /// Record [`ChangeFlags::ADD_INERT_PRIM`] for each path: the inert `over`
+    /// prim specs an authoring call auto-created for the edited spec's chain.
+    pub fn add_inert_prims(&mut self, paths: impl IntoIterator<Item = Path>) {
+        for path in paths {
+            self.entry_mut(&path).flags |= ChangeFlags::ADD_INERT_PRIM;
+        }
+    }
 }
 
 #[cfg(test)]

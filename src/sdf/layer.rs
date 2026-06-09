@@ -256,6 +256,19 @@ impl Layer {
         Ok(spec.as_prim_mut().expect("type guaranteed by ensure_prim_chain"))
     }
 
+    /// Ensure an `over` prim spec exists at `path` (and for every missing
+    /// ancestor), returning the paths that were newly created so the caller can
+    /// record [`ChangeList::add_inert_prims`](crate::sdf::ChangeList::add_inert_prims)
+    /// entries for them. Equivalent to [`override_prim`](Self::override_prim)
+    /// paired with [`missing_prim_chain_inclusive`](Self::missing_prim_chain_inclusive),
+    /// computed before the specs exist.
+    pub fn ensure_prim_over(&mut self, path: impl Into<Path>) -> Result<Vec<Path>, AuthoringError> {
+        let path: Path = path.into();
+        let created = self.missing_prim_chain_inclusive(&path);
+        self.override_prim(path)?;
+        Ok(created)
+    }
+
     /// Create an attribute spec at `path` (a property path like
     /// `/World/Mesh.points`). The owning prim is auto-created as `over` if
     /// missing, and the prim's `propertyChildren` is updated.
