@@ -576,9 +576,7 @@ impl Stage {
                     .info_changed
                     .insert(sdf::FieldKey::Specifier.as_str());
             }
-            for anc in auto_ancestors {
-                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-            }
+            cl.add_inert_prims(auto_ancestors);
             Ok(cl)
         })?;
         Ok(super::Prim::new(self, path))
@@ -592,20 +590,8 @@ impl Stage {
     pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            // `Layer::override_prim` is idempotent at the leaf when a spec
-            // already exists. Record `ADD_INERT_PRIM` only for newly created
-            // specs; auto-created ancestors are emitted unconditionally
-            // because `missing_prim_ancestors` already filters them.
-            let had_spec = layer.data().has_spec(&layer_path);
-            let auto_ancestors = layer.missing_prim_ancestors(&layer_path);
-            layer.override_prim(layer_path.clone())?;
             let mut cl = sdf::ChangeList::new();
-            if !had_spec {
-                cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-            }
-            for anc in auto_ancestors {
-                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-            }
+            cl.add_inert_prims(layer.ensure_prim_over(layer_path)?);
             Ok(cl)
         })?;
         Ok(super::Prim::new(self, path))
@@ -631,9 +617,7 @@ impl Stage {
             layer.create_attribute(layer_path.clone(), type_name, sdf::Variability::Varying, true)?;
             let mut cl = sdf::ChangeList::new();
             cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
-            for anc in auto_ancestors {
-                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-            }
+            cl.add_inert_prims(auto_ancestors);
             Ok(cl)
         })?;
         Ok(super::Attribute::new(self, path))
@@ -651,9 +635,7 @@ impl Stage {
             layer.create_relationship(layer_path.clone(), sdf::Variability::Varying, true)?;
             let mut cl = sdf::ChangeList::new();
             cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
-            for anc in auto_ancestors {
-                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-            }
+            cl.add_inert_prims(auto_ancestors);
             Ok(cl)
         })?;
         Ok(super::Relationship::new(self, path))

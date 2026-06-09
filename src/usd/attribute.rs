@@ -235,9 +235,7 @@ impl Attribute {
                         entry.flags |= sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION;
                         entry.info_changed.insert(sdf::FieldKey::ConnectionPaths.as_str());
                     }
-                    for anc in auto_ancestors {
-                        cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
-                    }
+                    cl.add_inert_prims(auto_ancestors);
                     Ok(cl)
                 }
                 None => Err(sdf::AuthoringError::InvalidPath {
