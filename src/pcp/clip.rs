@@ -6,11 +6,12 @@
 //! dictionary-valued `clips` metadata field; the `clipSets` field orders the
 //! sets by strength. Only the explicit form is modelled here — template clips
 //! (spec 12.3.4.1.3) are resolved to explicit metadata elsewhere and are not
-//! parsed by [`ClipSet::parse_all`].
+//! parsed by [`ClipSet::parse`].
 
 use std::collections::HashMap;
 
-use crate::sdf::{LayerOffset, Path, Value};
+use crate::gf;
+use crate::sdf::{AssetPath, LayerOffset, Path, Value};
 
 use super::LayerId;
 
@@ -55,15 +56,16 @@ pub(crate) struct ClipSet {
     pub prim_path: Option<Path>,
     /// Asset path of the manifest layer (spec 12.3.4.1.1.2), if authored.
     pub manifest_asset: Option<String>,
-    /// Ordered clip asset paths holding time-varying data.
-    pub asset_paths: Vec<String>,
+    /// Ordered clip asset paths holding time-varying data (an `asset[]`,
+    /// C++ `VtArray<SdfAssetPath>`).
+    pub asset_paths: Vec<AssetPath>,
     /// `(stageTime, assetIndex)` pairs, sorted by stage time. Each entry marks
     /// the clip active from its stage time up to the next entry (spec 12.3.4.3).
     pub active: Vec<(f64, usize)>,
-    /// `(stageTime, clipTime)` pairs, sorted by stage time, forming the
-    /// timing curve (spec 12.3.4.4). Duplicate stage times encode jump
-    /// discontinuities (spec 12.3.4.8).
-    pub times: Vec<(f64, f64)>,
+    /// `(stageTime, clipTime)` knots (`gf::Vec2d`), sorted by stage time,
+    /// forming the timing curve (spec 12.3.4.4). Duplicate stage times encode
+    /// jump discontinuities (spec 12.3.4.8).
+    pub times: Vec<gf::Vec2d>,
     /// When `true`, a gap in the active clip is filled by interpolating across
     /// the nearest surrounding clips rather than by the manifest default
     /// (spec 12.3.4.6-7).
@@ -85,7 +87,7 @@ impl ClipSet {
     /// orders the returned sets strongest-first. Without it, sets are returned
     /// sorted by name for determinism. Sets lacking explicit `assetPaths`
     /// (e.g. template-only sets) are skipped.
-    pub(crate) fn parse_all(clips: &Value, clip_sets_order: Option<&[String]>) -> Vec<ClipSet> {
+    pub(crate) fn parse(clips: &Value, clip_sets_order: Option<&[String]>) -> Vec<ClipSet> {
         let Value::Dictionary(sets) = clips else {
             return Vec::new();
         };
@@ -102,7 +104,7 @@ impl ClipSet {
         ordered_names
             .into_iter()
             .filter_map(|name| match sets.get(name) {
-                Some(Value::Dictionary(set)) => Self::parse_one(name, set),
+                Some(Value::Dictionary(set)) => Self::parse_set(name, set),
                 _ => None,
             })
             .collect()
@@ -118,36 +120,36 @@ impl ClipSet {
     /// `assetPaths` / `active` / `times` form before resolution, so the rest
     /// of the pipeline only ever sees explicit clip sets. Explicit
     /// `assetPaths`, when authored, take precedence over the template form.
-    fn parse_one(name: &str, set: &HashMap<String, Value>) -> Option<ClipSet> {
+    fn parse_set(name: &str, set: &HashMap<String, Value>) -> Option<ClipSet> {
         let prim_path = set
             .get(keys::PRIM_PATH)
-            .and_then(as_string)
-            .and_then(|s| Path::new(&s).ok());
+            .and_then(Value::as_str)
+            .and_then(|s| Path::new(s).ok());
         let manifest_asset = set
             .get(keys::MANIFEST_ASSET_PATH)
             .and_then(Value::as_str)
             .map(str::to_owned);
 
-        // Explicit form wins; otherwise expand a template set.
-        let (asset_paths, active, times) = match set.get(keys::ASSET_PATHS).and_then(as_string_vec) {
+        // Explicit form wins; otherwise expand a template set. `assetPaths` is
+        // a strict `asset[]`, and `active` / `times` a strict `double2[]`, so
+        // each extracts through `get` (exact `TryFrom`) rather than `cast`.
+        let (asset_paths, active, times) = match get::<Vec<AssetPath>>(set, keys::ASSET_PATHS) {
             Some(asset_paths) => {
-                let mut active: Vec<(f64, usize)> = set
-                    .get(keys::ACTIVE)
-                    .map(as_pairs)
+                let mut active: Vec<(f64, usize)> = get::<Vec<gf::Vec2d>>(set, keys::ACTIVE)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(stage, index)| (stage, index as usize))
+                    .map(|p| (p.x, p.y as usize))
                     .collect();
                 active.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-                let mut times = set.get(keys::TIMES).map(as_pairs).unwrap_or_default();
-                times.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut times = get::<Vec<gf::Vec2d>>(set, keys::TIMES).unwrap_or_default();
+                times.sort_by(|a, b| a.x.total_cmp(&b.x));
                 (asset_paths, active, times)
             }
             None => expand_template(set)?,
         };
 
-        let interpolate_missing = set.get(keys::INTERPOLATE_MISSING).and_then(as_bool).unwrap_or(false);
+        let interpolate_missing = get::<bool>(set, keys::INTERPOLATE_MISSING).unwrap_or(false);
 
         Some(ClipSet {
             name: name.to_string(),
@@ -195,14 +197,14 @@ impl ClipSet {
         for (stage, _) in &mut self.active {
             *stage = offset.apply(*stage);
         }
-        for (stage, _) in &mut self.times {
-            *stage = offset.apply(*stage);
+        for knot in &mut self.times {
+            knot.x = offset.apply(knot.x);
         }
         // A positive scale preserves the existing stage ordering; only a
         // negative scale (time reversal) needs a re-sort.
         if offset.scale < 0.0 {
             self.active.sort_by(|a, b| a.0.total_cmp(&b.0));
-            self.times.sort_by(|a, b| a.0.total_cmp(&b.0));
+            self.times.sort_by(|a, b| a.x.total_cmp(&b.x));
         }
     }
 }
@@ -212,23 +214,24 @@ impl ClipSet {
 /// encode a jump discontinuity (spec 12.3.4.8): the earlier entry's clip time
 /// applies up to that stage time, the later entry's at and after it. Out-of-
 /// range stage times clamp to the first or last clip time.
-fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
-    let (Some(&(first_stage, first_clip)), Some(&(last_stage, last_clip))) = (times.first(), times.last()) else {
+fn map_stage_to_clip(times: &[gf::Vec2d], stage_time: f64) -> f64 {
+    let (Some(first), Some(last)) = (times.first(), times.last()) else {
         return stage_time;
     };
-    if stage_time < first_stage {
-        return first_clip;
+    if stage_time < first.x {
+        return first.y;
     }
-    if stage_time >= last_stage {
-        return last_clip;
+    if stage_time >= last.x {
+        return last.y;
     }
 
     // Index of the last entry whose stage time does not exceed `stage_time`.
     // For a duplicated stage time this lands on the right-hand entry, so a
     // query exactly at the jump uses the "at and after" clip time.
-    let lo = times.iter().rposition(|&(stage, _)| stage <= stage_time).unwrap_or(0);
-    let (stage0, clip0) = times[lo];
-    let (stage1, clip1) = times[lo + 1];
+    let lo = times.iter().rposition(|knot| knot.x <= stage_time).unwrap_or(0);
+    let (lo_knot, hi_knot) = (times[lo], times[lo + 1]);
+    let (stage0, clip0) = (lo_knot.x, lo_knot.y);
+    let (stage1, clip1) = (hi_knot.x, hi_knot.y);
 
     if stage0 == stage1 {
         return clip1;
@@ -237,11 +240,11 @@ fn map_stage_to_clip(times: &[(f64, f64)], stage_time: f64) -> f64 {
         return clip0;
     }
     let ratio = (stage_time - stage0) / (stage1 - stage0);
-    clip0 + ratio * (clip1 - clip0)
+    gf::lerp(clip0, clip1, ratio)
 }
 
 /// Derived `(assetPaths, active, times)` from a template clip set.
-type TemplateExpansion = (Vec<String>, Vec<(f64, usize)>, Vec<(f64, f64)>);
+type TemplateExpansion = (Vec<AssetPath>, Vec<(f64, usize)>, Vec<gf::Vec2d>);
 
 /// Expand a template clip set (spec 12.3.4.1.3) into explicit
 /// `(assetPaths, active, times)`.
@@ -266,10 +269,11 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
         .get(keys::TEMPLATE_ASSET_PATH)
         .and_then(Value::as_str)
         .map(str::to_owned)?;
-    let start = set.get(keys::TEMPLATE_START_TIME).and_then(as_f64)?;
-    let end = set.get(keys::TEMPLATE_END_TIME).and_then(as_f64)?;
-    let stride = set.get(keys::TEMPLATE_STRIDE).and_then(as_f64)?;
-    let active_offset = set.get(keys::TEMPLATE_ACTIVE_OFFSET).and_then(as_f64);
+    // Template timing is `double`, read strictly like C++ `IsHolding<double>`.
+    let start = get::<f64>(set, keys::TEMPLATE_START_TIME)?;
+    let end = get::<f64>(set, keys::TEMPLATE_END_TIME)?;
+    let stride = get::<f64>(set, keys::TEMPLATE_STRIDE)?;
+    let active_offset = get::<f64>(set, keys::TEMPLATE_ACTIVE_OFFSET);
 
     if stride.is_nan() || stride <= 0.0 || end < start {
         return None;
@@ -297,7 +301,7 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     // first or last clip time (spec 12.3.4.1.3, matching C++ derivation).
     if let Some(off) = active_offset {
         let front = start - off.abs();
-        times.push((front, front));
+        times.push(gf::vec2d(front, front));
     }
 
     let mut t = start * PROMOTION;
@@ -305,8 +309,8 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
     // `+ 0.5` keeps the inclusive endpoint despite residual rounding.
     while t <= end_p + 0.5 {
         let clip_time = t / PROMOTION;
-        asset_paths.push(pattern.format(clip_time));
-        times.push((clip_time, clip_time));
+        asset_paths.push(pattern.format(clip_time).into());
+        times.push(gf::vec2d(clip_time, clip_time));
         let stage_time = match active_offset {
             Some(off) => (t + off * PROMOTION) / PROMOTION,
             None => clip_time,
@@ -318,14 +322,14 @@ fn expand_template(set: &HashMap<String, Value>) -> Option<TemplateExpansion> {
 
     if let Some(off) = active_offset {
         let back = end + off.abs();
-        times.push((back, back));
+        times.push(gf::vec2d(back, back));
     }
 
     if asset_paths.is_empty() {
         return None;
     }
     active.sort_by(|a, b| a.0.total_cmp(&b.0));
-    times.sort_by(|a, b| a.0.total_cmp(&b.0));
+    times.sort_by(|a, b| a.x.total_cmp(&b.x));
     Some((asset_paths, active, times))
 }
 
@@ -404,58 +408,24 @@ impl HashPattern {
     }
 }
 
-/// Extracts a `String` from a `string`-valued field (`primPath`, a C++
-/// `std::string`).
-fn as_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// Extracts a scalar `f64` from the numeric template-timing fields,
-/// which may be authored as `double`, `float`, or integer.
-fn as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Double(d) => Some(*d),
-        Value::Float(f) => Some(*f as f64),
-        Value::Int(i) => Some(*i as f64),
-        Value::Int64(i) => Some(*i as f64),
-        Value::Half(h) => Some(h.to_f32() as f64),
-        _ => None,
-    }
-}
-
-fn as_bool(value: &Value) -> Option<bool> {
-    match value {
-        Value::Bool(b) => Some(*b),
-        _ => None,
-    }
-}
-
-/// Extracts a string list from `assetPaths`, an `asset[]` value (C++
-/// `VtArray<SdfAssetPath>`); a `string[]` opinion is tolerated as a fallback.
-fn as_string_vec(value: &Value) -> Option<Vec<String>> {
-    match value {
-        Value::AssetPathVec(v) => Some(v.iter().map(|a| a.authored_path.clone()).collect()),
-        Value::StringVec(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
-/// Extracts `(f64, f64)` pairs from a `double2[]` value (`active`, `times`).
-fn as_pairs(value: &Value) -> Vec<(f64, f64)> {
-    match value {
-        Value::Vec2dVec(pairs) => pairs.iter().map(|p| (p.x, p.y)).collect(),
-        _ => Vec::new(),
-    }
+/// Reads `key` from a clip-set dictionary and extracts it strictly as `T` — the
+/// exact-variant [`TryFrom`] tier — yielding `None` when the key is absent or
+/// the authored type does not match. Mirrors C++ `Usd_ClipSetDefinition`'s
+/// `IsHolding<T>` reads, which likewise treat a type mismatch as unauthored.
+fn get<T: TryFrom<Value>>(set: &HashMap<String, Value>, key: &str) -> Option<T> {
+    set.get(key).cloned().and_then(|v| T::try_from(v).ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Template hash substitution (clipsAPI.h doc examples) ──────────────
+    /// Builds a `double2[]` knot list (`active` / `times`) from `(x, y)` pairs.
+    fn knots(pairs: &[(f64, f64)]) -> Vec<gf::Vec2d> {
+        pairs.iter().map(|&(x, y)| gf::vec2d(x, y)).collect()
+    }
+
+    // Template hash substitution (clipsAPI.h doc examples).
 
     #[test]
     fn hash_substitution_integer() {
@@ -499,7 +469,7 @@ mod tests {
         set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(103.0));
         set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
 
-        let parsed = ClipSet::parse_one("default", &set).expect("template set");
+        let parsed = ClipSet::parse_set("default", &set).expect("template set");
         assert_eq!(
             parsed.asset_paths,
             vec![
@@ -509,7 +479,7 @@ mod tests {
             ],
         );
         assert_eq!(parsed.active, vec![(101.0, 0), (102.0, 1), (103.0, 2)]);
-        assert_eq!(parsed.times, vec![(101.0, 101.0), (102.0, 102.0), (103.0, 103.0)]);
+        assert_eq!(parsed.times, knots(&[(101.0, 101.0), (102.0, 102.0), (103.0, 103.0)]));
     }
 
     #[test]
@@ -525,13 +495,13 @@ mod tests {
         set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
         set.insert(keys::TEMPLATE_ACTIVE_OFFSET.to_string(), Value::Double(-0.5));
 
-        let parsed = ClipSet::parse_one("default", &set).expect("template set");
+        let parsed = ClipSet::parse_set("default", &set).expect("template set");
         // Active stage times shift by the offset; `times` keeps the clip-time
         // knots plus boundary knots expanded by |offset| at each end.
         assert_eq!(parsed.active, vec![(-0.5, 0), (0.5, 1), (1.5, 2)]);
         assert_eq!(
             parsed.times,
-            vec![(-0.5, -0.5), (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (2.5, 2.5)]
+            knots(&[(-0.5, -0.5), (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (2.5, 2.5)])
         );
     }
 
@@ -551,9 +521,9 @@ mod tests {
             set
         };
         // |activeOffset| > stride is rejected (spec 12.3.4.1.3).
-        assert!(ClipSet::parse_one("default", &base(2.0, 1.0)).is_none());
+        assert!(ClipSet::parse_set("default", &base(2.0, 1.0)).is_none());
         // Non-positive stride is rejected.
-        assert!(ClipSet::parse_one("default", &base(0.0, 0.0)).is_none());
+        assert!(ClipSet::parse_set("default", &base(0.0, 0.0)).is_none());
     }
 
     #[test]
@@ -562,7 +532,7 @@ mod tests {
         let mut set = HashMap::new();
         set.insert(
             keys::ASSET_PATHS.to_string(),
-            Value::StringVec(vec!["explicit.usd".into()]),
+            Value::AssetPathVec(vec!["explicit.usd".into()]),
         );
         set.insert(
             keys::TEMPLATE_ASSET_PATH.to_string(),
@@ -572,11 +542,11 @@ mod tests {
         set.insert(keys::TEMPLATE_END_TIME.to_string(), Value::Double(2.0));
         set.insert(keys::TEMPLATE_STRIDE.to_string(), Value::Double(1.0));
 
-        let parsed = ClipSet::parse_one("default", &set).expect("explicit set");
+        let parsed = ClipSet::parse_set("default", &set).expect("explicit set");
         assert_eq!(parsed.asset_paths, vec!["explicit.usd".to_string()]);
     }
 
-    fn clip_set(active: Vec<(f64, usize)>, times: Vec<(f64, f64)>) -> ClipSet {
+    fn clip_set(active: Vec<(f64, usize)>, times: Vec<gf::Vec2d>) -> ClipSet {
         ClipSet {
             name: "default".into(),
             prim_path: None,
@@ -607,7 +577,7 @@ mod tests {
     #[test]
     fn map_times_linear() {
         // times = [(0,1),(1,2),(2,3)] (spec 12.3.4.4 example).
-        let cs = clip_set(vec![], vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
+        let cs = clip_set(vec![], knots(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]));
         assert_eq!(cs.map_stage_to_clip(0.0), 1.0);
         assert_eq!(cs.map_stage_to_clip(1.0), 2.0);
         assert_eq!(cs.map_stage_to_clip(1.5), 2.5); // interpolated
@@ -625,7 +595,7 @@ mod tests {
     fn map_times_jump_discontinuity() {
         // times = [(0,0),(10,10),(10,25),(20,35)] (spec 12.3.4.8).
         // [0,10): first clip [0,10); [10,20]: second clip [25,35].
-        let cs = clip_set(vec![], vec![(0.0, 0.0), (10.0, 10.0), (10.0, 25.0), (20.0, 35.0)]);
+        let cs = clip_set(vec![], knots(&[(0.0, 0.0), (10.0, 10.0), (10.0, 25.0), (20.0, 35.0)]));
         assert_eq!(cs.map_stage_to_clip(5.0), 5.0);
         assert!((cs.map_stage_to_clip(9.999) - 9.999).abs() < 1e-6); // left of jump
         assert_eq!(cs.map_stage_to_clip(10.0), 25.0); // at jump → "at and after"
@@ -637,7 +607,7 @@ mod tests {
     fn map_times_initial_jump() {
         // At a duplicated first stage time, the right-hand entry applies
         // exactly at the jump.
-        let cs = clip_set(vec![], vec![(0.0, 0.0), (0.0, 25.0), (10.0, 35.0)]);
+        let cs = clip_set(vec![], knots(&[(0.0, 0.0), (0.0, 25.0), (10.0, 35.0)]));
         assert_eq!(cs.map_stage_to_clip(-1.0), 0.0);
         assert_eq!(cs.map_stage_to_clip(0.0), 25.0);
         assert_eq!(cs.map_stage_to_clip(5.0), 30.0);
@@ -646,7 +616,7 @@ mod tests {
     #[test]
     fn map_times_looping() {
         // times = [(0,0),(25,25),(25,0),(50,25)] — 25 frames looped twice.
-        let cs = clip_set(vec![], vec![(0.0, 0.0), (25.0, 25.0), (25.0, 0.0), (50.0, 25.0)]);
+        let cs = clip_set(vec![], knots(&[(0.0, 0.0), (25.0, 25.0), (25.0, 0.0), (50.0, 25.0)]));
         assert_eq!(cs.map_stage_to_clip(20.0), 20.0);
         assert_eq!(cs.map_stage_to_clip(45.0), 20.0); // one loop later → same clip time
     }
@@ -684,7 +654,7 @@ def Xform "Geo" (
             .expect("clips authored")
             .into_owned();
 
-        let sets = ClipSet::parse_all(&clips, None);
+        let sets = ClipSet::parse(&clips, None);
         assert_eq!(sets.len(), 1);
         let cs = &sets[0];
         assert_eq!(cs.name, "default");
@@ -692,6 +662,6 @@ def Xform "Geo" (
         assert_eq!(cs.manifest_asset.as_deref(), Some("./manifest.usda"));
         assert_eq!(cs.asset_paths, vec!["./quad_1.usda", "./quad_2.usda", "./quad_3.usda"]);
         assert_eq!(cs.active, vec![(0.0, 0), (1.0, 1), (2.0, 2)]);
-        assert_eq!(cs.times, vec![(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]);
+        assert_eq!(cs.times, knots(&[(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]));
     }
 }

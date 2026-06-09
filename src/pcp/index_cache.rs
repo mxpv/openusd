@@ -400,9 +400,14 @@ impl IndexCache {
             };
             let clip_time = set.map_stage_to_clip(time);
 
-            if let Some(value) =
-                self.clip_sample_at(graph, asset, resolved.asset_layer, &clip_path, clip_time, interp)?
-            {
+            if let Some(value) = self.clip_sample_at(
+                graph,
+                asset.as_str(),
+                resolved.asset_layer,
+                &clip_path,
+                clip_time,
+                interp,
+            )? {
                 return Ok(Some(value));
             }
 
@@ -513,7 +518,7 @@ impl IndexCache {
         for &(stage, idx) in set.active.iter().skip(active_pos + 1) {
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset, anchor, clip_path, clip_time, interp)? {
+                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
                     upper = Some((stage, value));
                     break;
                 }
@@ -525,7 +530,7 @@ impl IndexCache {
         for &(stage, idx) in set.active[..active_pos].iter().rev() {
             if let Some(asset) = set.asset_paths.get(idx) {
                 let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset, anchor, clip_path, clip_time, interp)? {
+                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
                     lower = Some((stage, value));
                     break;
                 }

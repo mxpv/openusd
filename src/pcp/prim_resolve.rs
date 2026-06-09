@@ -660,7 +660,7 @@ impl PrimIndex {
                             };
                             // Relative clip asset paths anchor on the layer that
                             // authored them. Explicit `assetPaths` win over a
-                            // template in parse_one, so they always set the
+                            // template in parse_set, so they always set the
                             // anchor, while `templateAssetPath` only sets it when
                             // no explicit `assetPaths` has been composed — else a
                             // weaker template layer would mis-anchor the explicit
@@ -691,7 +691,7 @@ impl PrimIndex {
         );
         let order = self.clip_sets_order(stack)?;
 
-        Ok(clip::ClipSet::parse_all(&clips, order.as_deref())
+        Ok(clip::ClipSet::parse(&clips, order.as_deref())
             .into_iter()
             .filter_map(|mut set| {
                 let asset_layer = asset_layers.get(&set.name).copied()?;
