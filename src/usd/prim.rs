@@ -333,6 +333,15 @@ impl Prim {
         self.all_ancestors(|stage, path| Ok(stage.field::<bool>(path, sdf::FieldKey::Active)?.unwrap_or(true)))
     }
 
+    /// Composed `instanceable` flag (spec 11.3.1). Mirrors C++
+    /// `UsdPrim::IsInstanceable`; an unauthored flag resolves to `false`.
+    pub fn is_instanceable(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .stage
+            .field::<bool>(&self.path, sdf::FieldKey::Instanceable)?
+            .unwrap_or(false))
+    }
+
     /// `true` if the prim is loaded — active, and no ancestor carries an
     /// unloaded payload. Mirrors C++ `UsdPrim::IsLoaded`.
     pub fn is_loaded(&self) -> anyhow::Result<bool> {

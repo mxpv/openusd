@@ -63,6 +63,16 @@ impl Relationship {
         })
     }
 
+    /// `true` when this relationship is composed as `custom`. Mirrors C++
+    /// `UsdProperty::IsCustom`; an unauthored `custom` field resolves to
+    /// `false`.
+    pub fn is_custom(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .stage
+            .field::<bool>(&self.path, sdf::FieldKey::Custom)?
+            .unwrap_or(false))
+    }
+
     /// Append a target path. No-op if already present.
     pub fn add_target(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
         self.edit(&[sdf::FieldKey::TargetPaths], true, |spec| spec.add_target(target))

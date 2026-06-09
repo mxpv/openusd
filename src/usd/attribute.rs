@@ -334,6 +334,18 @@ impl Attribute {
             .unwrap_or(false))
     }
 
+    /// Composed value type (the `typeName` field), if set. Mirrors C++
+    /// `UsdAttribute::GetTypeName`.
+    ///
+    /// `typeName` is a token; a value of any other type is treated as untyped
+    /// (`None`).
+    pub fn type_name(&self) -> anyhow::Result<Option<tf::Token>> {
+        Ok(self
+            .stage
+            .field::<sdf::Value>(&self.path, sdf::FieldKey::TypeName)?
+            .and_then(|v| v.try_as_token()))
+    }
+
     /// Composed default value decoded to `T`, if any layer authored one.
     /// Mirrors C++ `UsdAttribute::Get`.
     ///
