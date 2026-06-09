@@ -314,7 +314,7 @@ impl IndexCache {
         }
         let composed = self.effective_path(graph, path)?;
         self.ensure_index(graph, &composed)?;
-        let index = &self.indices[&composed];
+        let index = self.cached(&composed);
         if !index.has_composition_arc() {
             return Ok(false);
         }
@@ -333,7 +333,7 @@ impl IndexCache {
     /// is the cache's job; the dedup is the [`PrototypeRegistry`]'s.
     fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
         self.ensure_index(graph, instance)?;
-        let key = instance_key(&self.indices[instance], instance.prim_element_count() as u16);
+        let key = instance_key(self.cached(instance), instance.prim_element_count() as u16);
         let (canonical, prototype, minted) = self.prototypes.register(key, instance);
         // Materialize the prototype's index only when this call minted it. Before
         // it existed, a query on the deterministic `/__Prototype_N` namespace
@@ -374,7 +374,7 @@ impl IndexCache {
     // off the `&mut self` path first (compose into per-prototype results, then
     // insert) and the shared `LayerGraph` handed to workers as `&`/`Arc`.
     fn materialize_prototype(&mut self, graph: &LayerGraph, canonical: &Path, prototype: &Path) {
-        let mut index = self.indices[canonical].clone();
+        let mut index = self.cached(canonical).clone();
         index.mark_instance_local_inert(canonical.prim_element_count() as u16);
         // Re-anchor the seeding instance's composed namespace onto the prototype
         // root so the root's own target translation lands in the prototype

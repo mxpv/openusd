@@ -45,9 +45,11 @@ use super::{Error, LayerId, VariantFallbackMap};
 /// [`Self::composition_errors`], while operational failures are returned to the
 /// caller.
 pub struct IndexCache {
-    /// Per-prim composition indices, keyed by composed path. `pub(super)` so the
+    /// Per-prim composition indices, keyed by composed path. A
+    /// [`sdf::PathTable`] so [`Self::drop_index_subtree`] erases an invalidated
+    /// subtree by namespace walk rather than a full scan. `pub(super)` so the
     /// instancing pass ([`super::instancing`]) can read composed indices.
-    pub(super) indices: HashMap<Path, PrimIndex>,
+    pub(super) indices: sdf::PathTable<PrimIndex>,
     /// Per-prim composition contexts for child propagation.
     contexts: HashMap<Path, CompositionContext>,
     /// Reverse `(layer, site) → prim_index_paths` map for surgical invalidation.
@@ -137,7 +139,7 @@ impl IndexCache {
     /// [`LayerGraph`] and are read through [`LayerGraph::errors`].
     pub(crate) fn new(variant_fallbacks: VariantFallbackMap, collection_errors: Vec<Error>) -> Self {
         Self {
-            indices: HashMap::new(),
+            indices: sdf::PathTable::new(),
             contexts: HashMap::new(),
             deps: Dependencies::default(),
             variant_fallbacks,
@@ -243,7 +245,10 @@ impl IndexCache {
         // directly. Asset-valued time samples and clips are rare in practice.
 
         // 1) Local time samples take precedence over clip data.
-        if let Some(samples) = self.indices[&prim].resolve_local_time_samples(graph, Some(&suffix), &local_layers)? {
+        if let Some(samples) = self
+            .cached(&prim)
+            .resolve_local_time_samples(graph, Some(&suffix), &local_layers)?
+        {
             return Ok(interp(&samples, time));
         }
 
@@ -263,12 +268,14 @@ impl IndexCache {
         }
 
         // 4) Remaining time samples (reference/payload arcs), retimed.
-        if let Some(samples) = self.indices[&prim].resolve_time_samples(graph, Some(&suffix))? {
+        if let Some(samples) = self.cached(&prim).resolve_time_samples(graph, Some(&suffix))? {
             return Ok(interp(&samples, time));
         }
 
         // 5) Fall back to the strongest authored default.
-        let default = self.indices[&prim].resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
+        let default = self
+            .cached(&prim)
+            .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
         let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
         Ok(default.and_then(block_to_none))
     }
@@ -340,7 +347,7 @@ impl IndexCache {
         // clip layers can be loaded through `&mut self`.
         let sets = {
             self.ensure_index(graph, anchor_prim)?;
-            let index = &self.indices[anchor_prim];
+            let index = self.cached(anchor_prim);
             let sets = index.resolve_clip_sets(graph)?;
             if sets.is_empty() {
                 return Ok(None);
@@ -541,6 +548,18 @@ impl IndexCache {
         self.indices.contains_key(path)
     }
 
+    /// Borrows the cached index at `path`, panicking if it is absent.
+    ///
+    /// Callers use this only where composition has already guaranteed the index
+    /// is present (a prim's index is built before any query that reads it, and
+    /// children build after their parents); a miss is a logic error, not a
+    /// recoverable condition.
+    pub(super) fn cached(&self, path: &Path) -> &PrimIndex {
+        self.indices
+            .get(path)
+            .unwrap_or_else(|| panic!("no composed index cached at {path}"))
+    }
+
     /// Number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
         self.indices.len()
@@ -588,14 +607,9 @@ impl IndexCache {
     /// touches `prefix` — the topology may have changed for the entire
     /// subtree, so every dependent index is invalidated.
     ///
-    /// Uses `HashMap::retain` so the prefix scan and removal happen in a
-    /// single pass, capturing victims into a small `Vec` only to forward to
-    /// the dependency map (which has no `retain` of its own).
-    //
-    // TODO: replace the `has_prefix` scan with an `SdfPathTable`-like trie
-    // (`FindSubtreeRange` in C++). The current shape is O(n) per
-    // invalidation, fine while index counts are modest but the wrong
-    // long-term primitive.
+    /// Walking the `prefix` subtree of the [`sdf::PathTable`] yields the removed
+    /// entries, whose paths forward the cleanup to the parallel `contexts`,
+    /// `deps`, and `prim_errors` maps.
     pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
         // `Path::has_prefix("")` returns `true` for every absolute path, so
         // a default-constructed `Path` would silently wipe the entire
@@ -606,19 +620,10 @@ impl IndexCache {
             !prefix.is_empty(),
             "drop_index_subtree called with empty prefix — use Path::abs_root() to drop everything",
         );
-        let mut victims: Vec<Path> = Vec::new();
-        self.indices.retain(|p, _| {
-            if p.has_prefix(prefix) {
-                victims.push(p.clone());
-                false
-            } else {
-                true
-            }
-        });
-        for v in &victims {
-            self.contexts.remove(v);
-            self.deps.remove(v);
-            self.prim_errors.remove(v);
+        for (victim, _) in self.indices.remove_subtree(prefix) {
+            self.contexts.remove(&victim);
+            self.deps.remove(&victim);
+            self.prim_errors.remove(&victim);
         }
         self.query_errors.clear();
     }
@@ -752,11 +757,11 @@ impl IndexCache {
             let prim_path = path.prim_path();
             let prop_suffix = path.property_suffix();
             self.ensure_index(graph, &prim_path)?;
-            let value = self.indices[&prim_path].resolve_field(field, graph, Some(prop_suffix))?;
+            let value = self.cached(&prim_path).resolve_field(field, graph, Some(prop_suffix))?;
             Ok(self.anchor_asset_paths(graph, &prim_path, field, Some(prop_suffix), value))
         } else {
             self.ensure_index(graph, path)?;
-            let value = self.indices[path].resolve_field(field, graph, None)?;
+            let value = self.cached(path).resolve_field(field, graph, None)?;
             Ok(self.anchor_asset_paths(graph, path, field, None, value))
         }
     }
@@ -877,7 +882,8 @@ impl IndexCache {
     pub fn api_schemas(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        self.indices[&path].resolve_token_list_op(FieldKey::ApiSchemas, graph, None)
+        self.cached(&path)
+            .resolve_token_list_op(FieldKey::ApiSchemas, graph, None)
     }
 
     /// Returns the composed `connectionPaths` list for an attribute path,
@@ -1001,7 +1007,7 @@ impl IndexCache {
         // contributing node's map (relocates folded in), so it needs no separate
         // relocate-chaining. The deleted-paths walk has no per-node origin, so it
         // still chains every entry through the prim's effective relocates.
-        let index = &self.indices[&resolved_prim];
+        let index = self.cached(&resolved_prim);
         let (mut targets, invalid) = if deleted {
             (
                 index.resolve_path_list_op_deleted(field, graph, Some(&prop_suffix))?,
@@ -1076,7 +1082,7 @@ impl IndexCache {
         let mut candidates: Vec<InstanceCandidate> = Vec::new();
         let mut seen: HashSet<(Path, Path)> = HashSet::new();
         {
-            let index = &self.indices[resolved_prim];
+            let index = self.cached(resolved_prim);
             for node in index.nodes() {
                 if node.arc != ArcType::Inherit || !node.has_specs() || node.is_permission_denied() {
                     continue;
@@ -1125,7 +1131,7 @@ impl IndexCache {
         for c in candidates {
             let target_prim = c.translated.prim_path();
             self.ensure_index(graph, &target_prim)?;
-            if target_prim_inherits_class(&self.indices[&target_prim], &c.class_layers, &c.class_path) {
+            if target_prim_inherits_class(self.cached(&target_prim), &c.class_layers, &c.class_path) {
                 instance_targets.insert((c.target, c.property));
             }
         }
@@ -1252,7 +1258,7 @@ impl IndexCache {
         // (spec 11.3.3). The instance prim's own index is otherwise left intact.
         let drop_local = self.is_instance(graph, &path)?;
 
-        let index = &self.indices[&path];
+        let index = self.cached(&path);
         // The instance-local partition is keyed by the prim's own namespace depth
         // ([`PrimIndex::instance_local_nodes`]); empty when not dropping locals.
         let local = if drop_local {
@@ -1416,7 +1422,7 @@ impl IndexCache {
     pub fn index(&mut self, graph: &LayerGraph, path: &Path) -> Result<&PrimIndex> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        Ok(&self.indices[&path])
+        Ok(self.cached(&path))
     }
 
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
@@ -1427,7 +1433,7 @@ impl IndexCache {
     pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        let index = &self.indices[&path];
+        let index = self.cached(&path);
         let mut stack = Vec::new();
         for node in index.nodes() {
             // A node may carry its full site layer stack; only the layers that
@@ -1473,7 +1479,7 @@ impl IndexCache {
     pub fn variant_selections(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, String)>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
-        Ok(self.indices[&path].variant_selections())
+        Ok(self.cached(&path).variant_selections())
     }
 
     /// Returns the `defaultPrim` metadata from the root layer, if set.
@@ -1817,7 +1823,7 @@ impl IndexCache {
     fn composed_property_names(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<String>> {
         self.ensure_index(graph, path)?;
 
-        let index = &self.indices[path];
+        let index = self.cached(path);
         let mut result: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -2061,7 +2067,7 @@ def "A" (
         // Structural visibility is unchanged: the private class still composes
         // into the prim stack (it is inerted for value resolution, not removed).
         assert!(
-            cache.indices[&model].nodes().any(|n| n.path == private),
+            cache.cached(&model).nodes().any(|n| n.path == private),
             "private inherited class must remain in the prim stack"
         );
 
@@ -2103,7 +2109,7 @@ def "A" (
             "private inherited opinion must not contribute to value resolution"
         );
         assert!(
-            cache.indices[&via_private].nodes().any(|n| n.path == private_class),
+            cache.cached(&via_private).nodes().any(|n| n.path == private_class),
             "private class stays in the prim stack"
         );
         assert!(
@@ -2190,7 +2196,7 @@ def "A" (
         let (graph, mut cache) = collected_stack(&root);
         let path = sdf::path("/Model/Anim/Path")?;
         cache.ensure_index(&graph, &path)?;
-        let index = &cache.indices[&path];
+        let index = cache.cached(&path);
 
         // The relocate source node is composed inert (salted earth, C++
         // `rootNodeShouldContributeSpecs == false`): its own site contributes
@@ -2226,7 +2232,7 @@ def "A" (
         let (graph, mut cache) = collected_stack(&root);
         let path = sdf::path("/World/Dst")?;
         cache.ensure_index(&graph, &path)?;
-        let index = &cache.indices[&path];
+        let index = cache.cached(&path);
 
         // The relocate source node is composed inert (salted earth), so it is
         // retained in the arena but skipped by `nodes`/`all_nodes`.
@@ -2292,7 +2298,7 @@ def "A" (
         let child = sdf::path("/A/B")?;
         cache.ensure_index(&graph, &child)?;
         assert!(
-            !cache.indices[&child].is_empty(),
+            !cache.cached(&child).is_empty(),
             "child local opinion must survive the ancestor's unresolved reference"
         );
         assert!(

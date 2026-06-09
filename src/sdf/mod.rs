@@ -16,6 +16,7 @@ pub mod expr;
 mod layer;
 mod ordering;
 mod path;
+mod path_table;
 pub mod schema;
 mod spec;
 mod value;
@@ -27,6 +28,7 @@ pub use expr::Expr;
 pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
+pub use path_table::PathTable;
 pub use schema::{ChildrenKey, FieldKey};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, PrimSpec, PrimSpecMut, PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec,

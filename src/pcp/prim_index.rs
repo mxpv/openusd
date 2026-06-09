@@ -336,7 +336,7 @@ impl PrimIndex {
     /// the indexer seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
-        Self::build_with_cache(path, stack, ctx, &HashMap::new()).map(|(index, _errors)| index)
+        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new()).map(|(index, _errors)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
@@ -347,7 +347,7 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
-        cached_indices: &HashMap<Path, PrimIndex>,
+        cached_indices: &sdf::PathTable<PrimIndex>,
     ) -> BuildResult<(Self, Vec<Error>)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack(), true)
     }
@@ -364,7 +364,7 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
-        cached_indices: &HashMap<Path, PrimIndex>,
+        cached_indices: &sdf::PathTable<PrimIndex>,
         ambient: &[(LayerId, LayerOffset)],
         ambient_is_root: bool,
     ) -> BuildResult<(Self, Vec<Error>)> {
@@ -1026,7 +1026,7 @@ mod tests {
         }
         chain.reverse();
 
-        let mut cache: HashMap<Path, PrimIndex> = HashMap::new();
+        let mut cache: sdf::PathTable<PrimIndex> = sdf::PathTable::new();
         let mut parent_ctx = CompositionContext {
             variant_fallbacks: fallbacks,
             ..CompositionContext::default()
@@ -1632,7 +1632,7 @@ def "Root" (
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
-            &HashMap::new(),
+            &sdf::PathTable::new(),
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
@@ -1679,7 +1679,7 @@ def "Outer"
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
-            &HashMap::new(),
+            &sdf::PathTable::new(),
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
@@ -1710,7 +1710,7 @@ def "Prim" (
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),
-            &HashMap::new(),
+            &sdf::PathTable::new(),
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::UnresolvedLayer { .. })),
@@ -1748,7 +1748,7 @@ def "Prim" (
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),
-            &HashMap::new(),
+            &sdf::PathTable::new(),
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::MissingDefaultPrim { .. })),

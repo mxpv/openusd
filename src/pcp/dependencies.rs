@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::sdf::Path;
+use crate::sdf::{self, Path};
 
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
@@ -21,7 +21,11 @@ use super::LayerId;
 #[derive(Debug, Default)]
 pub(super) struct Dependencies {
     /// `per_layer[layer_id][site_path]` = prim index paths that read this site.
-    per_layer: HashMap<LayerId, HashMap<Path, Vec<Path>>>,
+    ///
+    /// The inner map is an [`sdf::PathTable`] so
+    /// [`subtree_lookup`](Self::subtree_lookup) is a subtree walk rather than a
+    /// full scan.
+    per_layer: HashMap<LayerId, sdf::PathTable<Vec<Path>>>,
     /// Reverse map for cheap removal: prim_index_path → list of (layer, site)
     /// it registered. Avoids re-walking the index when invalidating.
     by_prim: HashMap<Path, Vec<(LayerId, Path)>>,
@@ -61,8 +65,7 @@ impl Dependencies {
                 self.per_layer
                     .entry(layer)
                     .or_default()
-                    .entry(node.path.clone())
-                    .or_default()
+                    .get_or_insert_default(&node.path)
                     .push(prim_index_path.clone());
             }
         }
@@ -83,8 +86,7 @@ impl Dependencies {
             self.per_layer
                 .entry(li)
                 .or_default()
-                .entry(prim_index_path.clone())
-                .or_default()
+                .get_or_insert_default(prim_index_path)
                 .push(prim_index_path.clone());
         }
         self.by_prim.insert(prim_index_path.clone(), registered);
@@ -124,23 +126,10 @@ impl Dependencies {
         let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
-        let mut out: Vec<Path> = Vec::new();
-        let mut seen: HashSet<Path> = HashSet::new();
-        let mut cursor = Some(site_path.clone());
-        while let Some(p) = cursor {
-            if let Some(deps) = map.get(&p) {
-                for d in deps {
-                    if seen.insert(d.clone()) {
-                        out.push(d.clone());
-                    }
-                }
-            }
-            if p.is_abs_root() {
-                break;
-            }
-            cursor = p.parent();
-        }
-        out
+        let ancestors = std::iter::successors(Some(site_path.clone()), |p| {
+            (!p.is_abs_root()).then(|| p.parent()).flatten()
+        });
+        Self::dedup_paths(ancestors.filter_map(|p| map.get(&p)))
     }
 
     /// Find prim indices whose dependency site is at or below `prefix` in
@@ -148,13 +137,7 @@ impl Dependencies {
     ///
     /// Used to fan out an invalidation downward (a significant change at
     /// `/Foo` must drop every cached index whose graph touches `/Foo/*`).
-    /// Linear scan over the layer's dependency map — matches the cost
-    /// profile of the previous full-cache invalidation in the worst case
-    /// and is strictly cheaper on the single-prim authoring path.
-    //
-    // TODO: back the per-layer map with an `SdfPathTable`-like trie so
-    // this becomes an `O(log n + k)` subtree range query. Same primitive
-    // needed by `IndexCache::drop_index_subtree`.
+    /// Walks the `prefix` subtree of the layer's dependency [`sdf::PathTable`].
     //
     // TODO: snapshot a `culled_dependencies` set per prim index. The
     // `Indexer` culls weaker nodes during composition; without a snapshot,
@@ -164,14 +147,18 @@ impl Dependencies {
         let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
+        Self::dedup_paths(map.subtree(prefix).map(|(_, deps)| deps))
+    }
+
+    /// Collects the deduplicated union of several dependent-path lists,
+    /// preserving first-seen order.
+    fn dedup_paths<'a>(lists: impl Iterator<Item = &'a Vec<Path>>) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
         let mut seen: HashSet<Path> = HashSet::new();
-        for (site, deps) in map {
-            if site.has_prefix(prefix) {
-                for d in deps {
-                    if seen.insert(d.clone()) {
-                        out.push(d.clone());
-                    }
+        for deps in lists {
+            for d in deps {
+                if seen.insert(d.clone()) {
+                    out.push(d.clone());
                 }
             }
         }

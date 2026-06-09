@@ -95,7 +95,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{AbstractData, LayerOffset, Path, Value};
+use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
 
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
@@ -378,7 +378,7 @@ struct Inputs<'a> {
     /// Cached prim indices from the composition cache. The parent prim's index
     /// is read from here to seed this child's graph (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
-    cached_indices: &'a HashMap<Path, PrimIndex>,
+    cached_indices: &'a sdf::PathTable<PrimIndex>,
 }
 
 /// The site this build composes (C++ `PcpLayerStackSite`): the layer stack the
@@ -449,7 +449,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
         stack: &'a LayerGraph,
         ctx: &'a CompositionContext,
-        cached_indices: &'a HashMap<Path, PrimIndex>,
+        cached_indices: &'a sdf::PathTable<PrimIndex>,
         ambient: &'a [(LayerId, LayerOffset)],
         ambient_is_root: bool,
     ) -> Self {
@@ -2915,7 +2915,7 @@ mod tests {
     fn build(stack: &LayerGraph, prim: &str) -> Option<PrimIndexGraph> {
         let ctx = CompositionContext::default();
         let ambient = stack.root_layer_stack();
-        Indexer::new(stack, &ctx, &HashMap::new(), ambient, true)
+        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
             .build(&Path::from(prim))
             .expect("indexer build")
             .graph
@@ -3134,7 +3134,7 @@ mod tests {
         let ambient = s.root_layer_stack();
         // Seed the child build with the parent's composed index, as the cache does.
         let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
-        let mut cached = HashMap::new();
+        let mut cached = sdf::PathTable::new();
         cached.insert(Path::from("/Root"), root_index);
         let child = Indexer::new(&s, &ctx, &cached, ambient, true)
             .build(&Path::from("/Root/Child"))

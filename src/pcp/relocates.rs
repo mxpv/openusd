@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::sdf::{element_cmp, Path, PathComponent, RelocateList};
+use crate::sdf::{self, element_cmp, Path, PathComponent, RelocateList};
 
 use super::layer_graph::LayerGraph;
 use super::mapping::MapFunction;
@@ -338,7 +338,11 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 /// rename. Used to apply relocates to a relationship/connection's *deleted*
 /// target paths, which have no per-node origin to translate through (resolved
 /// targets translate through their node's own map instead).
-pub(crate) fn effective_relocates(graph: &LayerGraph, path: &Path, indices: &HashMap<Path, PrimIndex>) -> RelocateList {
+pub(crate) fn effective_relocates(
+    graph: &LayerGraph,
+    path: &Path,
+    indices: &sdf::PathTable<PrimIndex>,
+) -> RelocateList {
     let layer_maps = collect_layer_maps(graph, path, indices);
     let mut result: RelocateList = Vec::new();
 
@@ -394,7 +398,7 @@ pub(crate) fn effective_relocates(graph: &LayerGraph, path: &Path, indices: &Has
 fn collect_layer_maps(
     graph: &LayerGraph,
     path: &Path,
-    indices: &HashMap<Path, PrimIndex>,
+    indices: &sdf::PathTable<PrimIndex>,
 ) -> Vec<(LayerId, MapFunction)> {
     let mut maps: Vec<(LayerId, MapFunction)> = Vec::new();
 
@@ -429,12 +433,11 @@ fn collect_layer_maps(
         .collect();
     let root_name = root_prim_name(path);
 
-    // Sorted iteration: a `HashMap` walk would make the collected layer-map
-    // order (and so downstream relocate composition) hash-order-dependent.
-    let mut cached_paths: Vec<&Path> = indices.keys().collect();
-    cached_paths.sort();
-    for cached_path in cached_paths {
-        let cached_index = &indices[cached_path];
+    // Sort for deterministic iteration: the collected layer-map order feeds
+    // downstream relocate composition, so it must not depend on hash order.
+    let mut entries: Vec<(&Path, &PrimIndex)> = indices.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (cached_path, cached_index) in entries {
         if root_prim_name(cached_path) != root_name {
             continue;
         }
