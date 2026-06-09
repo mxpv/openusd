@@ -2412,6 +2412,10 @@ over "P" (
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(vec!["a".to_string()]));
+        // The list-op form (behind `ClipsAPI::clip_sets`) stays canonical, so
+        // flattening it agrees with the resolved order rather than dropping "a".
+        let list_op = index.clip_sets_list_op(&stack)?.expect("authored");
+        assert_eq!(list_op.flatten(), vec!["a".to_string()]);
         Ok(())
     }
 }

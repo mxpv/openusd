@@ -216,7 +216,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             };
         }
         // Both composable.
-        let prepended_items = self
+        let prepended_items: Vec<T> = self
             .prepended_items
             .iter()
             .filter(|e| !self.appended_items.contains(e))
@@ -226,7 +226,7 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .cloned()
             .collect();
 
-        let appended_items = weaker
+        let appended_items: Vec<T> = weaker
             .appended_items
             .iter()
             .filter(|e| {
@@ -236,16 +236,17 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
             .cloned()
             .collect();
 
+        // Keep the composed op canonical (one bucket per item), mirroring
+        // `SdfListOp::ComposeAndReduce`: an item already composed into
+        // `prepended` or `appended` must not also appear as an `add`, so every
+        // consumer (`iter`, `flatten`) sees it once. Filter both the weaker and
+        // the stronger adds against the composed prepend/append sets.
+        let in_prepend_or_append = |e: &T| prepended_items.contains(e) || appended_items.contains(e);
         let added_items = weaker
             .added_items
             .iter()
-            .filter(|e| {
-                !self.deleted_items.contains(e)
-                    && !self.prepended_items.contains(e)
-                    && !self.appended_items.contains(e)
-                    && !self.added_items.contains(e)
-            })
-            .chain(self.added_items.iter())
+            .filter(|e| !self.deleted_items.contains(e) && !self.added_items.contains(e) && !in_prepend_or_append(e))
+            .chain(self.added_items.iter().filter(|e| !in_prepend_or_append(e)))
             .cloned()
             .collect();
 
@@ -357,9 +358,15 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         let mut result = if self.explicit {
             self.explicit_items.clone()
         } else {
+            // Emit each item once, keeping the position sequential `compose_over`
+            // would give it. A prepended item keeps its front position unless it
+            // is also appended (an append moves it to the back); an item is
+            // dropped from `added` only when it already appears as a prepend or
+            // append. An item present in two buckets is therefore kept once,
+            // not dropped, even when the op is not canonical.
             self.prepended_items
                 .iter()
-                .filter(|e| !self.appended_items.contains(e) && !self.added_items.contains(e))
+                .filter(|e| !self.appended_items.contains(e))
                 .chain(self.appended_items.iter())
                 .chain(
                     self.added_items
@@ -715,6 +722,80 @@ mod tests {
         assert!(composed.explicit);
         assert_eq!(composed.ordered_items, vec![3, 1]);
         assert_eq!(composed.flatten(), vec![3, 1, 2]);
+    }
+
+    /// A stronger `add` of an item a weaker layer `prepend`s (or `append`s)
+    /// must not leave the item in two buckets — `flatten` would then drop it.
+    /// `combined_with` keeps one bucket per item, so `combined_with` + `flatten`
+    /// agrees with sequential `compose_over`.
+    #[test]
+    fn combined_add_over_prepend_canonical() {
+        let stronger = ListOp {
+            added_items: vec![1],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            prepended_items: vec![1],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        // Item 1 stays only in `prepended`, not also in `added`.
+        assert_eq!(composed.prepended_items, vec![1]);
+        assert!(composed.added_items.is_empty());
+        assert_eq!(composed.flatten(), vec![1]);
+        assert_eq!(composed.flatten(), stronger.compose_over(&weaker.compose_over(&[])));
+    }
+
+    /// The same canonicalization holds when the weaker opinion `append`s the
+    /// item the stronger op `add`s.
+    #[test]
+    fn combined_add_over_append_canonical() {
+        let stronger = ListOp {
+            added_items: vec![1],
+            ..Default::default()
+        };
+        let weaker = ListOp {
+            appended_items: vec![1],
+            ..Default::default()
+        };
+        let composed = stronger.combined_with(&weaker);
+        assert_eq!(composed.appended_items, vec![1]);
+        assert!(composed.added_items.is_empty());
+        assert_eq!(composed.flatten(), vec![1]);
+    }
+
+    /// `flatten` keeps an item once even when a (non-canonical) list op places
+    /// it in two buckets — e.g. authored as both `prepend` and `add`. It must
+    /// not drop the item, and must match what sequential `compose_over` yields.
+    #[test]
+    fn flatten_keeps_item_in_two_buckets() {
+        // prepend + add: kept at the front (compose_over: prepend places it,
+        // the redundant add is skipped).
+        let prepend_add = ListOp {
+            prepended_items: vec![1],
+            added_items: vec![1],
+            ..Default::default()
+        };
+        assert_eq!(prepend_add.flatten(), vec![1]);
+        assert_eq!(prepend_add.flatten(), prepend_add.compose_over(&[]));
+
+        // append + add: kept at the back.
+        let append_add = ListOp {
+            appended_items: vec![1],
+            added_items: vec![1],
+            ..Default::default()
+        };
+        assert_eq!(append_add.flatten(), vec![1]);
+        assert_eq!(append_add.flatten(), append_add.compose_over(&[]));
+
+        // prepend + append: the append moves it to the back.
+        let prepend_append = ListOp {
+            prepended_items: vec![1, 2],
+            appended_items: vec![1],
+            ..Default::default()
+        };
+        assert_eq!(prepend_append.flatten(), vec![2, 1]);
+        assert_eq!(prepend_append.flatten(), prepend_append.compose_over(&[]));
     }
 
     /// `reduced()` keeps `ordered_items` intact so a `reorder` opinion still
