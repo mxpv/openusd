@@ -981,4 +981,16 @@ mod tests {
         assert_eq!(read.get("b"), Some(&sdf::Value::Int(2)));
         Ok(())
     }
+
+    /// Authoring prim metadata on the pseudo-root reports an error rather than
+    /// panicking — the pseudo-root carries no prim spec to author into.
+    #[test]
+    fn update_metadata_on_pseudo_root_errors() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let result = stage
+            .prim_at(sdf::path("/")?)
+            .set_metadata("documentation", sdf::Value::String("x".into()));
+        assert!(result.is_err());
+        Ok(())
+    }
 }

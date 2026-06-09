@@ -2377,4 +2377,41 @@ def "P" (
         assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));
         Ok(())
     }
+
+    /// A stronger `add` repeating a name a weaker layer `prepend`s must keep the
+    /// set in the resolved order. Sequential list-op application (`compose_over`)
+    /// keeps one copy; folding into a single list op via `combined_with` would
+    /// leave the name in two buckets and `flatten` would drop it.
+    #[test]
+    fn clip_sets_order_overlapping_add_prepend() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+(
+    subLayers = [
+        @sub.usda@
+    ]
+)
+def "P" (
+    add clipSets = ["a"]
+)
+{
+}
+"#,
+        );
+        let sub = parse_usda(
+            r#"#usda 1.0
+over "P" (
+    prepend clipSets = ["a"]
+)
+{
+}
+"#,
+        );
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
+        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let index = build(&stack, "/P");
+
+        assert_eq!(index.clip_sets_order(&stack)?, Some(vec!["a".to_string()]));
+        Ok(())
+    }
 }
