@@ -45,14 +45,12 @@ impl From<Mat2d> for [f64; 4] {
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<[[f64; 2]; 2]> for Mat2d {
     fn from(v: [[f64; 2]; 2]) -> Self {
         Self([v[0][0], v[0][1], v[1][0], v[1][1]])
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<Mat2d> for [[f64; 2]; 2] {
     fn from(m: Mat2d) -> Self {
         [[m.0[0], m.0[1]], [m.0[2], m.0[3]]]
@@ -122,7 +120,6 @@ impl From<Mat3d> for [f64; 9] {
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<[[f64; 3]; 3]> for Mat3d {
     fn from(v: [[f64; 3]; 3]) -> Self {
         Self([
@@ -131,7 +128,6 @@ impl From<[[f64; 3]; 3]> for Mat3d {
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<Mat3d> for [[f64; 3]; 3] {
     fn from(m: Mat3d) -> Self {
         [
@@ -417,7 +413,6 @@ impl From<Matrix4d> for [f64; 16] {
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<[[f64; 4]; 4]> for Matrix4d {
     fn from(v: [[f64; 4]; 4]) -> Self {
         Self([
@@ -427,7 +422,6 @@ impl From<[[f64; 4]; 4]> for Matrix4d {
     }
 }
 
-#[cfg(feature = "serde")]
 impl From<Matrix4d> for [[f64; 4]; 4] {
     fn from(m: Matrix4d) -> Self {
         [
