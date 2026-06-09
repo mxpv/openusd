@@ -887,6 +887,15 @@ impl IndexCache {
             .resolve_token_list_op(FieldKey::ApiSchemas, graph, None)
     }
 
+    /// Resolves the `clipSets` strength-ordering list-op on the prim at `path`,
+    /// folding the list-op edits across every contributing layer (spec 12.2.6).
+    /// `None` when `clipSets` is unauthored (clip sets fall back to name order).
+    pub fn clip_sets_list_op(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<sdf::StringListOp>> {
+        let path = self.effective_path(graph, &path.prim_path())?;
+        self.ensure_index(graph, &path)?;
+        self.cached(&path).clip_sets_list_op(graph)
+    }
+
     /// Returns the composed `connectionPaths` list for an attribute path,
     /// folding list-op edits (prepend / append / add / delete) across every
     /// contributing layer. Non-property paths trivially return an empty list.

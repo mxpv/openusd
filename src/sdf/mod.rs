@@ -290,6 +290,10 @@ mod list_op;
 
 pub use list_op::ListOp;
 
+/// A USD dictionary value (C++ `VtDictionary`): the payload of
+/// [`Value::Dictionary`], keyed by name.
+pub type Dictionary = std::collections::HashMap<String, Value>;
+
 pub type IntListOp = ListOp<i32>;
 pub type UintListOp = ListOp<u32>;
 

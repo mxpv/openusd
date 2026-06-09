@@ -153,20 +153,34 @@ impl Prim {
         F: FnOnce(Option<sdf::Value>) -> sdf::Value,
     {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
-                Some(mut spec) => {
-                    let value = f(spec.get(key).cloned());
-                    spec.add(key, value);
-                    let mut cl = sdf::ChangeList::new();
-                    cl.entry_mut(&path).info_changed.insert(key);
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no prim spec at path on the edit target layer",
-                }),
+            // Author an `over` for the prim (and any missing ancestors) when the
+            // edit target has no local spec, matching C++ `UsdObject::SetMetadata`
+            // creating the spec for editing. Record `ADD_INERT_PRIM` for each
+            // newly created spec so composition reslices.
+            let had_spec = layer.data().has_spec(&path);
+            // `missing_prim_ancestors` already filters out specs that exist, so
+            // this is empty when the prim is already present.
+            let auto_ancestors = layer.missing_prim_ancestors(&path);
+            if !had_spec {
+                layer.override_prim(path.clone())?;
             }
+            let data = layer.writable_data_mut()?;
+            let mut spec = data
+                .spec_mut(&path)
+                .and_then(|s| s.as_prim_mut())
+                .expect("override_prim ensured a prim spec at the edit-target path");
+            let value = f(spec.get(key).cloned());
+            spec.add(key, value);
+
+            let mut cl = sdf::ChangeList::new();
+            if !had_spec {
+                cl.entry_mut(&path).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            for anc in auto_ancestors {
+                cl.entry_mut(&anc).flags |= sdf::ChangeFlags::ADD_INERT_PRIM;
+            }
+            cl.entry_mut(&path).info_changed.insert(key);
+            Ok(cl)
         })?;
         Ok(self)
     }

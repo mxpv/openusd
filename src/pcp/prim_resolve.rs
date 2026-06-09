@@ -594,6 +594,27 @@ impl PrimIndex {
     /// `ValueBlock` with no stronger opinion leaves the field unauthored
     /// (`None`), falling back to name order.
     pub(crate) fn clip_sets_order(&self, stack: &LayerGraph) -> Result<Option<Vec<String>>> {
+        Ok(self.clip_sets_list_op(stack)?.map(|op| op.flatten()))
+    }
+
+    /// Resolves the `clipSets` list-op composed across the stack (C++
+    /// `SdfStringListOp` folding), preserving the prepend/append/delete
+    /// structure rather than flattening to an applied order like
+    /// [`clip_sets_order`](Self::clip_sets_order). `None` when unauthored.
+    pub(crate) fn clip_sets_list_op(&self, stack: &LayerGraph) -> Result<Option<sdf::StringListOp>> {
+        // `clip_sets_ops` yields strongest first; fold each weaker op under the
+        // accumulated stronger one.
+        Ok(self
+            .clip_sets_ops(stack)?
+            .into_iter()
+            .reduce(|stronger, weaker| stronger.combined_with(&weaker)))
+    }
+
+    /// Gathers the contributing `clipSets` list-op opinions, strongest first,
+    /// stopping at a `ValueBlock`. The `String`/`Token` list-op encodings and
+    /// bare vecs (treated as explicit) are all accepted, since USDC backends may
+    /// decode the field either way (spec 12.2.6).
+    fn clip_sets_ops(&self, stack: &LayerGraph) -> Result<Vec<sdf::StringListOp>> {
         let mut ops = Vec::new();
         for opinion in self.opinions(FieldKey::ClipSets.as_str(), stack, None) {
             match opinion?.value.into_owned() {
@@ -608,10 +629,7 @@ impl PrimIndex {
                 _ => continue,
             }
         }
-        if ops.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(compose_list_ops(&ops)))
+        Ok(ops)
     }
 
     /// Resolves explicit value clip sets while preserving the layer that
