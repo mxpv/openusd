@@ -5,7 +5,7 @@
 //! authored order — that the in-memory [`Data`](crate::sdf::Data) backend keeps
 //! (the analogue of C++ `SdfData`'s private `_SpecData`). The typed views are
 //! something else entirely: thin handles holding `(data, path)` whose accessors
-//! read and write through [`sdf::AbstractData::try_get`] / [`sdf::AbstractData::set_field`],
+//! read and write through [`sdf::AbstractData::try_field`] / [`sdf::AbstractData::set_field`],
 //! exactly like C++ `SdfSpec` and its subclasses, which hold `(layer, path)` and
 //! carry no copy. Because they go through the abstract interface, a view works
 //! on any backend, not just `Data`.
@@ -35,8 +35,33 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
+use strum::{Display, EnumCount, FromRepr};
+
 use crate::sdf;
 use crate::tf;
+
+/// An enum that specifies the type of an object.
+/// Objects are entities that have fields and are addressable by path.
+#[repr(u32)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, FromRepr, EnumCount, Display)]
+pub enum SpecType {
+    // The unknown type has a value of 0 so that SdfSpecType() is unknown.
+    #[default]
+    Unknown = 0,
+
+    // Real concrete types
+    Attribute = 1,
+    Connection = 2,
+    Expression = 3,
+    Mapper = 4,
+    MapperArg = 5,
+    Prim = 6,
+    PseudoRoot = 7,
+    Relationship = 8,
+    RelationshipTarget = 9,
+    Variant = 10,
+    VariantSet = 11,
+}
 
 /// Implements `Debug` for a spec-handle newtype by delegating to its inner
 /// handle, so the data reference it holds is not required to be `Debug`.
@@ -215,7 +240,7 @@ where
     /// [`read`](Self::read); read-modify-write authoring keeps it so an
     /// undecodable field is not mistaken for "absent" and overwritten.
     pub fn field(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
-        Ok(self.data.try_get(&self.path, key)?.map(|c| c.into_owned()))
+        Ok(self.data.try_field(&self.path, key)?.map(|c| c.into_owned()))
     }
 
     /// Reads `key`, swallowing a decode failure as "absent". The read-accessor
@@ -232,7 +257,7 @@ where
 
     /// The authored field names on this spec, in authored order.
     pub fn fields(&self) -> Vec<String> {
-        self.data.list(&self.path).unwrap_or_default()
+        self.data.list_fields(&self.path).unwrap_or_default()
     }
 }
 

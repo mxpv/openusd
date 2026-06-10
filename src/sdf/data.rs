@@ -5,9 +5,87 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
-use crate::sdf::{AbstractData, Path, SpecData, SpecType, Value};
+use crate::sdf::{Path, SpecData, SpecType, Value};
+
+/// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
+///
+/// An `AbstractData` is an anonymous container of specs (keyed by [`Path`]) and
+/// their fields. Like `SdfAbstractData`, the interface is *field-level* and
+/// read+write: readers, writers, composition, and authoring all operate through
+/// the same set of `has_*` / `try_field` / `create_spec` / `set_field` methods,
+/// regardless of whether the backing store decodes eagerly (text, [`Data`]) or
+/// lazily (the binary crate reader). The typed spec views
+/// ([`PrimSpec`](crate::sdf::PrimSpec) and friends) are a higher-tier
+/// convenience layered on top of this interface, paralleling how `SdfPrimSpec`
+/// sits above `SdfAbstractData`.
+pub trait AbstractData {
+    /// Returns `true` if this data has a spec for the given path.
+    fn has_spec(&self, path: &Path) -> bool;
+
+    /// Returns `true` if this data has a field for the given path.
+    fn has_field(&self, path: &Path, field: &str) -> bool;
+
+    /// Returns the type of the spec at the given path.
+    fn spec_type(&self, path: &Path) -> Option<SpecType>;
+
+    /// Returns the value for a field, or `None` if not authored.
+    ///
+    /// The value can be either owned or borrowed depending on internals.
+    /// In the binary format, the data is typically compressed and/or encoded,
+    /// so memory allocation is required to store unpacked result, so owned
+    /// values are typically expected. With text parsers, there is a data copy
+    /// already stored, so a borrowed value is returned to avoid unnecessary copies.
+    ///
+    /// Errors propagate I/O or decoding failures; a missing spec or field is
+    /// signalled by `Ok(None)`.
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>>;
+
+    /// Returns the value for a field, erroring if not authored.
+    ///
+    /// Use [`AbstractData::try_field`] when absence is an expected condition.
+    fn get_field(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>> {
+        self.try_field(path, field)?
+            .ok_or_else(|| anyhow!("No field '{field}' at path '{path}'"))
+    }
+
+    /// Returns the field names for a given path in authored order.
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>>;
+
+    /// Returns every authored path, sorted lexicographically.
+    ///
+    /// The order is deterministic and stable across repeated calls. Emitters
+    /// rely on this for reproducible output.
+    fn spec_paths(&self) -> Vec<Path>;
+
+    /// Creates an empty spec of type `ty` at `path`, replacing any existing
+    /// spec there. Mirrors C++ `SdfAbstractData::CreateSpec`. Fields are
+    /// authored separately via [`set_field`](Self::set_field).
+    fn create_spec(&mut self, path: Path, ty: SpecType);
+
+    /// Removes the spec at `path` along with all its fields. Mirrors C++
+    /// `SdfAbstractData::EraseSpec`. No-op if no spec exists there.
+    fn erase_spec(&mut self, path: &Path);
+
+    /// Sets (or replaces) `field` on the spec at `path`, preserving authored
+    /// field order. Mirrors C++ `SdfAbstractData::Set`. The spec must already
+    /// exist (create it with [`create_spec`](Self::create_spec) first); setting
+    /// a field on an absent spec drops the write (debug builds assert).
+    ///
+    /// This *replaces* the field value; it does not merge list ops. List-op
+    /// accumulation across multiple operator statements is the reader's job
+    /// (see `SpecData::add_list_op`), so authoring a list op through this trait
+    /// overwrites rather than folds.
+    //
+    // TODO: lift list-op merge onto this trait so the in-memory and crate
+    // backends agree and the typed-view mutators stop re-implementing the fold.
+    fn set_field(&mut self, path: &Path, field: &str, value: Value);
+
+    /// Removes `field` from the spec at `path`. Mirrors C++
+    /// `SdfAbstractData::EraseField`. No-op if the spec or field is absent.
+    fn erase_field(&mut self, path: &Path, field: &str);
+}
 
 /// In-memory mutable layer data.
 #[derive(Default, Debug, Clone)]
@@ -30,14 +108,14 @@ impl Data {
     /// Copy every spec and field from `src` into a new `Data`.
     pub fn from_abstract(src: &dyn AbstractData) -> Result<Self> {
         let mut out = Self::new();
-        for path in src.paths() {
+        for path in src.spec_paths() {
             let ty = src
                 .spec_type(&path)
                 .ok_or_else(|| anyhow::anyhow!("path {path} reported by paths() has no spec"))?;
             let spec = out.create_spec(path.clone(), ty);
-            if let Some(fields) = src.list(&path) {
+            if let Some(fields) = src.list_fields(&path) {
                 for name in fields {
-                    spec.add(&name, src.get(&path, &name)?.into_owned());
+                    spec.add(&name, src.get_field(&path, &name)?.into_owned());
                 }
             }
         }
@@ -99,17 +177,17 @@ impl AbstractData for Data {
         self.specs.get(path).map(|spec| spec.ty)
     }
 
-    fn try_get(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>> {
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>> {
         Ok(self.specs.get(path).and_then(|spec| spec.get(field)).map(Cow::Borrowed))
     }
 
-    fn list(&self, path: &Path) -> Option<Vec<String>> {
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
         self.specs
             .get(path)
             .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
     }
 
-    fn paths(&self) -> Vec<Path> {
+    fn spec_paths(&self) -> Vec<Path> {
         let mut paths: Vec<Path> = self.specs.keys().cloned().collect();
         paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         paths
@@ -154,9 +232,9 @@ mod tests {
         assert!(data.has_spec(&root));
         assert_eq!(data.spec_type(&root), Some(SpecType::Prim));
         assert!(data.has_field(&root, "primChildren"));
-        assert_eq!(data.list(&root).unwrap(), vec!["primChildren".to_string()]);
+        assert_eq!(data.list_fields(&root).unwrap(), vec!["primChildren".to_string()]);
 
-        let value = data.get(&root, "primChildren").unwrap().into_owned();
+        let value = data.get_field(&root, "primChildren").unwrap().into_owned();
         assert_eq!(value, Value::TokenVec(vec!["child".into()]));
     }
 
@@ -181,7 +259,7 @@ mod tests {
         data.create_spec(path("/Apple").unwrap(), SpecType::Prim);
         data.create_spec(path("/Mango").unwrap(), SpecType::Prim);
 
-        let paths = data.paths();
+        let paths = data.spec_paths();
         let strs: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
         assert_eq!(strs, vec!["/Apple", "/Mango", "/Zebra"]);
     }
@@ -202,7 +280,7 @@ mod tests {
         let copy = Data::from_abstract(&source as &dyn AbstractData).unwrap();
 
         assert_eq!(copy.len(), 2);
-        assert_eq!(copy.list(&root).unwrap(), vec!["primChildren", "kind"]);
-        assert_eq!(copy.get(&child, "specifier").unwrap().into_owned(), Value::Int(0));
+        assert_eq!(copy.list_fields(&root).unwrap(), vec!["primChildren", "kind"]);
+        assert_eq!(copy.get_field(&child, "specifier").unwrap().into_owned(), Value::Int(0));
     }
 }

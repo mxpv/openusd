@@ -591,7 +591,7 @@ fn resolve_variant_selections_in<'a>(
             if let Ok(value) = graph
                 .layer(layer)
                 .data()
-                .get(&node.path, FieldKey::VariantSelection.as_str())
+                .get_field(&node.path, FieldKey::VariantSelection.as_str())
             {
                 if let Value::VariantSelectionMap(map) = value.into_owned() {
                     for (set_name, selection) in map {
@@ -609,7 +609,7 @@ fn resolve_variant_selections_in<'a>(
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
             let data = graph.layer(layer).data();
-            let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
+            let Ok(value) = data.get_field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
             let Value::TokenVec(set_names) = value.into_owned() else {
@@ -620,7 +620,7 @@ fn resolve_variant_selections_in<'a>(
                     continue;
                 };
                 let set_path = node.path.append_variant_selection(entry.key(), "");
-                let Ok(val) = data.get(&set_path, ChildrenKey::VariantChildren.as_str()) else {
+                let Ok(val) = data.get_field(&set_path, ChildrenKey::VariantChildren.as_str()) else {
                     continue;
                 };
                 let Value::TokenVec(variants) = val.into_owned() else {
@@ -684,7 +684,7 @@ where
             if !seen_layers.insert(layer) {
                 continue;
             }
-            let Some(value) = graph.layer(layer).data().try_get(&node.path, field)? else {
+            let Some(value) = graph.layer(layer).data().try_field(&node.path, field)? else {
                 continue;
             };
             let Some(mut list_op) = decode(value.into_owned()) else {

@@ -769,7 +769,7 @@ impl Stage {
             let had_spec = data.has_spec(&layer_path);
             let prior_specifier_matches = had_spec
                 && matches!(
-                    data.try_get(&layer_path, sdf::FieldKey::Specifier.as_str())
+                    data.try_field(&layer_path, sdf::FieldKey::Specifier.as_str())
                         .ok()
                         .flatten()
                         .as_deref(),
@@ -871,7 +871,7 @@ impl Stage {
             // `Token`, but a layer loaded from text might surface either).
             let prior = layer
                 .data()
-                .try_get(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())
+                .try_field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())
                 .ok()
                 .flatten();
             let unchanged = prior.as_deref().and_then(sdf::Value::as_str) == Some(name.as_str());

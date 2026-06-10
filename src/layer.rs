@@ -307,7 +307,7 @@ fn collect_dependencies(data: &dyn sdf::AbstractData, load_payloads: bool) -> Re
     let root = sdf::Path::abs_root();
 
     // Sublayers (layer-level).
-    if let Some(value) = data.try_get(&root, sdf::FieldKey::SubLayers.as_str())? {
+    if let Some(value) = data.try_field(&root, sdf::FieldKey::SubLayers.as_str())? {
         if let sdf::Value::StringVec(sub_paths) = value.into_owned() {
             for asset_path in sub_paths {
                 deps.push(Dependency {
@@ -323,7 +323,7 @@ fn collect_dependencies(data: &dyn sdf::AbstractData, load_payloads: bool) -> Re
     let prim_paths = collect_prim_paths(data)?;
     for prim_path in &prim_paths {
         // References.
-        if let Some(value) = data.try_get(prim_path, sdf::FieldKey::References.as_str())? {
+        if let Some(value) = data.try_field(prim_path, sdf::FieldKey::References.as_str())? {
             if let sdf::Value::ReferenceListOp(list_op) = value.as_ref() {
                 for r in list_op.iter().filter(|r| !r.asset_path.is_empty()) {
                     deps.push(Dependency {
@@ -337,7 +337,7 @@ fn collect_dependencies(data: &dyn sdf::AbstractData, load_payloads: bool) -> Re
 
         if load_payloads {
             // Payloads.
-            if let Some(value) = data.try_get(prim_path, sdf::FieldKey::Payload.as_str())? {
+            if let Some(value) = data.try_field(prim_path, sdf::FieldKey::Payload.as_str())? {
                 match value.as_ref() {
                     sdf::Value::Payload(p) if !p.asset_path.is_empty() => {
                         deps.push(Dependency {
@@ -381,7 +381,7 @@ fn collect_prim_paths(data: &dyn sdf::AbstractData) -> Result<Vec<sdf::Path>> {
         }
 
         // Regular prim children.
-        if let Some(value) = data.try_get(&path, sdf::ChildrenKey::PrimChildren.as_str())? {
+        if let Some(value) = data.try_field(&path, sdf::ChildrenKey::PrimChildren.as_str())? {
             if let sdf::Value::TokenVec(children) = value.into_owned() {
                 for name in children.iter().rev() {
                     if let Ok(child) = path.append_path(name.as_str()) {
@@ -392,12 +392,12 @@ fn collect_prim_paths(data: &dyn sdf::AbstractData) -> Result<Vec<sdf::Path>> {
         }
 
         // Variant set children (e.g. /Prim -> /Prim{setName=}).
-        if let Some(value) = data.try_get(&path, sdf::ChildrenKey::VariantSetChildren.as_str())? {
+        if let Some(value) = data.try_field(&path, sdf::ChildrenKey::VariantSetChildren.as_str())? {
             if let sdf::Value::TokenVec(set_names) = value.into_owned() {
                 for set_name in &set_names {
                     // Variant children within each set (e.g. /Prim{setName=selA}).
                     let set_path = path.append_variant_selection(set_name, "");
-                    if let Some(value) = data.try_get(&set_path, sdf::ChildrenKey::VariantChildren.as_str())? {
+                    if let Some(value) = data.try_field(&set_path, sdf::ChildrenKey::VariantChildren.as_str())? {
                         if let sdf::Value::TokenVec(variant_names) = value.into_owned() {
                             for variant_name in &variant_names {
                                 let variant_path = path.append_variant_selection(set_name, variant_name);
@@ -845,7 +845,7 @@ mod tests {
         let round = open_layer(&resolver, &resolved)?;
         assert_eq!(round.spec_type(&bar), Some(SpecType::Prim));
         assert_eq!(
-            round.get(&bar, "typeName").unwrap().into_owned(),
+            round.get_field(&bar, "typeName").unwrap().into_owned(),
             sdf::Value::Token("Cube".into())
         );
         Ok(())
@@ -896,7 +896,7 @@ mod tests {
         let round = open_layer(&resolver, &resolved)?;
         assert_eq!(round.spec_type(&prim), Some(SpecType::Prim));
         assert_eq!(
-            round.get(&prim, "typeName").unwrap().into_owned(),
+            round.get_field(&prim, "typeName").unwrap().into_owned(),
             sdf::Value::Token("Xform".into())
         );
         Ok(())
@@ -1011,7 +1011,7 @@ mod tests {
 
         let value = layer
             .data()
-            .get(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
+            .get_field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
             .unwrap()
             .into_owned();
         assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
@@ -1035,7 +1035,7 @@ mod tests {
         assert!(!layer.data().has_spec(&sdf::path("/Mesh.material:binding").unwrap()));
         let value = layer
             .data()
-            .get(
+            .get_field(
                 &sdf::path("/Mesh").unwrap(),
                 sdf::ChildrenKey::PropertyChildren.as_str(),
             )
@@ -1094,7 +1094,7 @@ mod tests {
         assert!(!layer.data().has_spec(&sdf::path("/A").unwrap()));
         assert!(layer
             .data()
-            .try_get(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
+            .try_field(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
             .unwrap()
             .is_none());
     }
@@ -1259,7 +1259,7 @@ mod tests {
         );
 
         let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
-            match layer.data().get(&sdf::path(path)?, key.as_str())?.into_owned() {
+            match layer.data().get_field(&sdf::path(path)?, key.as_str())?.into_owned() {
                 sdf::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
                 other => panic!("expected TokenVec at {path}, got {other:?}"),
             }
@@ -1335,12 +1335,12 @@ mod tests {
         );
         assert_eq!(
             parsed
-                .get(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())?
+                .get_field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())?
                 .into_owned(),
             sdf::Value::Token("World".into())
         );
         match parsed
-            .get(
+            .get_field(
                 &sdf::path("/World/Sphere.material:binding")?,
                 sdf::FieldKey::TargetPaths.as_str(),
             )?
@@ -1353,7 +1353,7 @@ mod tests {
             other => panic!("expected relationship targets as PathListOp, got {other:?}"),
         }
         match parsed
-            .get(
+            .get_field(
                 &sdf::path("/World/Sphere.inputs:surface")?,
                 sdf::FieldKey::ConnectionPaths.as_str(),
             )?

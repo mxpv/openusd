@@ -37,7 +37,7 @@ pub fn is_expression(s: &str) -> bool {
 /// collection and arc composition share.
 pub fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<HashMap<String, sdf::Value>> {
     let root = sdf::Path::abs_root();
-    if let Some(value) = data.try_get(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
+    if let Some(value) = data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
         if let sdf::Value::Dictionary(dict) = value.into_owned() {
             return Ok(dict);
         }

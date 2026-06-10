@@ -11,11 +11,11 @@ use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
     let mut out: BTreeMap<String, BTreeMap<String, sdf::Value>> = BTreeMap::new();
-    for path in data.paths() {
+    for path in data.spec_paths() {
         let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
-        if let Some(names) = data.list(&path) {
+        if let Some(names) = data.list_fields(&path) {
             for name in names {
-                let v = data.get(&path, &name).unwrap().into_owned();
+                let v = data.get_field(&path, &name).unwrap().into_owned();
                 fields.insert(name, v);
             }
         }

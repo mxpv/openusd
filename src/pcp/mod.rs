@@ -317,7 +317,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     // require the concrete in-memory `Data` backing a `Layer` may not have.
     let root = Path::abs_root();
     let read = |key: FieldKey| -> Option<f64> {
-        match layer.data().try_get(&root, key.as_str()).ok()??.into_owned() {
+        match layer.data().try_field(&root, key.as_str()).ok()??.into_owned() {
             Value::Double(v) => Some(v),
             Value::Float(v) => Some(v as f64),
             _ => None,

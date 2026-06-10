@@ -136,7 +136,7 @@ where
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn try_get(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
+    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
         let Some(field_value) = self.data.get(path).and_then(|spec| spec.get(field)) else {
             return Ok(None);
         };
@@ -150,13 +150,13 @@ where
     }
 
     #[inline]
-    fn list(&self, path: &sdf::Path) -> Option<Vec<String>> {
+    fn list_fields(&self, path: &sdf::Path) -> Option<Vec<String>> {
         self.data
             .get(path)
             .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
     }
 
-    fn paths(&self) -> Vec<sdf::Path> {
+    fn spec_paths(&self) -> Vec<sdf::Path> {
         let mut paths: Vec<sdf::Path> = self.data.keys().cloned().collect();
         paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         paths
@@ -219,7 +219,7 @@ mod tests {
         let data = read_file(path)?;
 
         let prim_children: Vec<_> = data
-            .get(&sdf::Path::abs_root(), "primChildren")?
+            .get_field(&sdf::Path::abs_root(), "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
@@ -229,7 +229,7 @@ mod tests {
         );
 
         let elephant: Vec<_> = data
-            .get(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
+            .get_field(&sdf::path("/SoC_ElephantWithMonochord")?, "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
@@ -240,7 +240,7 @@ mod tests {
         );
 
         let materials: Vec<_> = data
-            .get(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
+            .get_field(&sdf::path("/SoC_ElephantWithMonochord/Materials")?, "primChildren")?
             .into_owned()
             .try_as_token_vec()
             .unwrap();
@@ -257,7 +257,7 @@ mod tests {
     fn test_read_custom_layer_data() {
         let data = read_file("fixtures/fields.usdc").unwrap();
 
-        let custom_layer_data = data.get(&sdf::Path::abs_root(), "customLayerData").unwrap();
+        let custom_layer_data = data.get_field(&sdf::Path::abs_root(), "customLayerData").unwrap();
 
         // customLayerData = {
         //  string test = "Test string"
@@ -278,7 +278,7 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         let single = data
-            .get(&sdf::path("/World.flipNormals")?, "default")?
+            .get_field(&sdf::path("/World.flipNormals")?, "default")?
             .into_owned()
             .try_as_bool()
             .unwrap();
@@ -286,7 +286,7 @@ mod tests {
         assert!(single);
 
         let bool_array = data
-            .get(&sdf::path("/World.boolArray")?, "default")?
+            .get_field(&sdf::path("/World.boolArray")?, "default")?
             .into_owned()
             .try_as_bool_vec()
             .unwrap();
@@ -301,7 +301,7 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         let single_char = data
-            .get(&sdf::path("/World.singleChar")?, "default")?
+            .get_field(&sdf::path("/World.singleChar")?, "default")?
             .into_owned()
             .try_as_uchar()
             .unwrap();
@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(single_char, 128);
 
         let char_array = data
-            .get(&sdf::path("/World.chars")?, "default")?
+            .get_field(&sdf::path("/World.chars")?, "default")?
             .into_owned()
             .try_as_uchar_vec()
             .unwrap();
@@ -324,7 +324,7 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
-            .get(&sdf::path("/World.quatfSingle")?, "default")?
+            .get_field(&sdf::path("/World.quatfSingle")?, "default")?
             .into_owned()
             .try_as_quatf()
             .unwrap();
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(quat, gf::quatf(1.4, 2.9, 8.5, 4.6));
 
         let quat = data
-            .get(&sdf::path("/World.quatfArr")?, "default")?
+            .get_field(&sdf::path("/World.quatfArr")?, "default")?
             .into_owned()
             .try_as_quatf_vec()
             .unwrap();
@@ -356,7 +356,7 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
-            .get(&sdf::path("/World.quatdSingle")?, "default")?
+            .get_field(&sdf::path("/World.quatdSingle")?, "default")?
             .into_owned()
             .try_as_quatd()
             .unwrap();
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(quat, gf::quatd(2.4, 5.3, 6.3, 5.2));
 
         let quat = data
-            .get(&sdf::path("/World.quatdArr")?, "default")?
+            .get_field(&sdf::path("/World.quatdArr")?, "default")?
             .into_owned()
             .try_as_quatd_vec()
             .unwrap();
@@ -386,7 +386,7 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         let quat = data
-            .get(&sdf::path("/World.quathSingle")?, "default")?
+            .get_field(&sdf::path("/World.quathSingle")?, "default")?
             .into_owned()
             .try_as_quath()
             .unwrap();
@@ -403,7 +403,7 @@ mod tests {
         );
 
         let quat = data
-            .get(&sdf::path("/World.quathArr")?, "default")?
+            .get_field(&sdf::path("/World.quathArr")?, "default")?
             .into_owned()
             .try_as_quath_vec()
             .unwrap();
@@ -434,7 +434,7 @@ mod tests {
         let data = read_file("fixtures/expressions.usdc")?;
 
         let sub_layer_offsets = data
-            .get(&sdf::path("/")?, "subLayerOffsets")?
+            .get_field(&sdf::path("/")?, "subLayerOffsets")?
             .into_owned()
             .try_as_layer_offset_vec()
             .unwrap()
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(sub_layer_offsets.scale, 1.0);
 
         let sub_layers = data
-            .get(&sdf::path("/")?, "subLayers")?
+            .get_field(&sdf::path("/")?, "subLayers")?
             .into_owned()
             .try_as_string_vec()
             .unwrap();
@@ -461,14 +461,14 @@ mod tests {
 
         // prepend variantSets = "displayVariantSet"
         let variant_set_names = data
-            .get(&sdf::path("/asset1")?, "variantSetNames")?
+            .get_field(&sdf::path("/asset1")?, "variantSetNames")?
             .into_owned()
             .try_as_string_list_op()
             .unwrap();
         assert_eq!(variant_set_names.prepended_items, vec!["displayVariantSet".to_string()]);
 
         let variant_selection = data
-            .get(&sdf::path("/asset1")?, "variantSelection")?
+            .get_field(&sdf::path("/asset1")?, "variantSelection")?
             .into_owned()
             .try_as_variant_selection_map()
             .unwrap();
@@ -487,7 +487,7 @@ mod tests {
         let data = read_file("fixtures/connection.usdc")?;
 
         let conn = data
-            .get(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
+            .get_field(&sdf::path("/boardMat/stReader.inputs:varname")?, "connectionPaths")?
             .into_owned()
             .try_as_path_list_op()
             .unwrap();
@@ -499,7 +499,7 @@ mod tests {
         );
 
         let conn = data
-            .get(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?
+            .get_field(&sdf::path("/boardMat.outputs:surface")?, "connectionPaths")?
             .into_owned()
             .try_as_path_list_op()
             .unwrap();
@@ -518,7 +518,7 @@ mod tests {
         let data = read_file("fixtures/reference.usdc")?;
 
         let references = data
-            .get(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
+            .get_field(&sdf::path("/MarbleCollection/Marble_Red")?, "references")?
             .into_owned()
             .try_as_reference_list_op()
             .unwrap();
@@ -541,7 +541,7 @@ mod tests {
         let data = read_file("fixtures/payload.usdc")?;
 
         let payload = data
-            .get(&sdf::path("/MySphere1")?, "payload")?
+            .get_field(&sdf::path("/MySphere1")?, "payload")?
             .into_owned()
             .try_as_payload()
             .unwrap();
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(layer_offset.scale, 1.0);
 
         let payload_list_op = data
-            .get(&sdf::path("/MySphere2")?, "payload")?
+            .get_field(&sdf::path("/MySphere2")?, "payload")?
             .into_owned()
             .try_as_payload_list_op()
             .unwrap();
@@ -581,21 +581,21 @@ mod tests {
         let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
-            .get(&sdf::path("/PrimD.single")?, "default")?
+            .get_field(&sdf::path("/PrimD.single")?, "default")?
             .into_owned()
             .try_as_double()
             .unwrap();
         assert_eq!(single, 4.3_f64);
 
         let array = data
-            .get(&sdf::path("/PrimD.simple")?, "default")?
+            .get_field(&sdf::path("/PrimD.simple")?, "default")?
             .into_owned()
             .try_as_double_vec()
             .unwrap();
         assert_eq!(array, vec![0.5, 1.7, 2.4, 3.5, 4.9, 5.3, 6.2, 7.8, 8.6, 9.3]);
 
         let compressed = data
-            .get(&sdf::path("/PrimD.copressed")?, "default")?
+            .get_field(&sdf::path("/PrimD.copressed")?, "default")?
             .into_owned()
             .try_as_double_vec()
             .unwrap();
@@ -618,21 +618,21 @@ mod tests {
         let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
-            .get(&sdf::path("/PrimF.single")?, "default")?
+            .get_field(&sdf::path("/PrimF.single")?, "default")?
             .into_owned()
             .try_as_float()
             .unwrap();
         assert_eq!(single, 3.5);
 
         let array = data
-            .get(&sdf::path("/PrimF.simple")?, "default")?
+            .get_field(&sdf::path("/PrimF.simple")?, "default")?
             .into_owned()
             .try_as_float_vec()
             .unwrap();
         assert_eq!(array, vec![9.1, 2.3, 6.4, 7.4, 3.6, 4.3, 5.3, 5.6, 8.7, 4.7]);
 
         let compressed = data
-            .get(&sdf::path("/PrimF.copressed")?, "default")?
+            .get_field(&sdf::path("/PrimF.copressed")?, "default")?
             .into_owned()
             .try_as_float_vec()
             .unwrap();
@@ -654,7 +654,7 @@ mod tests {
         let data = read_file("fixtures/floats.usdc")?;
 
         let single = data
-            .get(&sdf::path("/PrimH.single")?, "default")?
+            .get_field(&sdf::path("/PrimH.single")?, "default")?
             .into_owned()
             .try_as_half()
             .unwrap();
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(single, f16::from_f32(2.9));
 
         let array = data
-            .get(&sdf::path("/PrimH.simple")?, "default")?
+            .get_field(&sdf::path("/PrimH.simple")?, "default")?
             .into_owned()
             .try_as_half_vec()
             .unwrap();
@@ -676,7 +676,7 @@ mod tests {
         );
 
         let compressed = data
-            .get(&sdf::path("/PrimH.copressed")?, "default")?
+            .get_field(&sdf::path("/PrimH.copressed")?, "default")?
             .into_owned()
             .try_as_half_vec()
             .unwrap();
@@ -701,7 +701,7 @@ mod tests {
         let data = read_file("fixtures/timesamples.usdc")?;
 
         let samples = data
-            .get(&sdf::path("/Prim.prop")?, "timeSamples")?
+            .get_field(&sdf::path("/Prim.prop")?, "timeSamples")?
             .into_owned()
             .try_as_time_samples()
             .unwrap();
@@ -721,7 +721,7 @@ mod tests {
         let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
-            data.get(&sdf::path("/Prim32.single")?, "default")?
+            data.get_field(&sdf::path("/Prim32.single")?, "default")?
                 .into_owned()
                 .try_as_int()
                 .unwrap(),
@@ -729,7 +729,7 @@ mod tests {
         );
 
         assert_eq!(
-            data.get(&sdf::path("/Prim32.compressed")?, "default")?
+            data.get_field(&sdf::path("/Prim32.compressed")?, "default")?
                 .into_owned()
                 .try_as_int_vec()
                 .unwrap(),
@@ -747,7 +747,7 @@ mod tests {
         let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
-            data.get(&sdf::path("/Prim64.single")?, "default")?
+            data.get_field(&sdf::path("/Prim64.single")?, "default")?
                 .into_owned()
                 .try_as_int_64()
                 .unwrap(),
@@ -755,7 +755,7 @@ mod tests {
         );
 
         assert_eq!(
-            data.get(&sdf::path("/Prim64.compressed")?, "default")?
+            data.get_field(&sdf::path("/Prim64.compressed")?, "default")?
                 .into_owned()
                 .try_as_int_64_vec()
                 .unwrap(),
@@ -773,7 +773,7 @@ mod tests {
         let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
-            data.get(&sdf::path("/PrimU32.single")?, "default")?
+            data.get_field(&sdf::path("/PrimU32.single")?, "default")?
                 .into_owned()
                 .try_as_uint()
                 .unwrap(),
@@ -781,7 +781,7 @@ mod tests {
         );
 
         assert_eq!(
-            data.get(&sdf::path("/PrimU32.compressed")?, "default")?
+            data.get_field(&sdf::path("/PrimU32.compressed")?, "default")?
                 .into_owned()
                 .try_as_uint_vec()
                 .unwrap(),
@@ -799,7 +799,7 @@ mod tests {
         let data = read_file("fixtures/ints.usdc")?;
 
         assert_eq!(
-            data.get(&sdf::path("/PrimU64.single")?, "default")?
+            data.get_field(&sdf::path("/PrimU64.single")?, "default")?
                 .into_owned()
                 .try_as_uint_64()
                 .unwrap(),
@@ -807,7 +807,7 @@ mod tests {
         );
 
         assert_eq!(
-            data.get(&sdf::path("/PrimU64.compressed")?, "default")?
+            data.get_field(&sdf::path("/PrimU64.compressed")?, "default")?
                 .into_owned()
                 .try_as_uint_64_vec()
                 .unwrap(),
@@ -825,36 +825,36 @@ mod tests {
         let data = read_file("fixtures/fields.usdc")?;
 
         // defaultPrim = "World"
-        let default_prim = data.get(&sdf::Path::abs_root(), "defaultPrim")?;
+        let default_prim = data.get_field(&sdf::Path::abs_root(), "defaultPrim")?;
         assert_eq!(default_prim.try_as_token_ref().unwrap().as_str(), "World");
 
         // float4[] clippingPlanes = []
-        let clipping_planes = data.get(&sdf::path("/World.clippingPlanes")?, "default")?;
+        let clipping_planes = data.get_field(&sdf::path("/World.clippingPlanes")?, "default")?;
         assert!(clipping_planes.into_owned().try_as_vec_4f_vec().unwrap().is_empty());
 
         // float2 clippingRange = (1, 10000000)
-        let clipping_range = data.get(&sdf::path("/World.clippingRange")?, "default")?;
+        let clipping_range = data.get_field(&sdf::path("/World.clippingRange")?, "default")?;
         assert_eq!(
             clipping_range.into_owned().try_as_vec_2f().unwrap(),
             gf::vec2f(1.0, 10000000.0)
         );
 
         // float3 diffuseColor = (0.18, 0.18, 0.18)
-        let diffuse_color = data.get(&sdf::path("/World.diffuseColor")?, "default")?;
+        let diffuse_color = data.get_field(&sdf::path("/World.diffuseColor")?, "default")?;
         assert_eq!(
             diffuse_color.into_owned().try_as_vec_3f().unwrap(),
             gf::vec3f(0.18, 0.18, 0.18)
         );
 
         // int[] faceVertexCounts = [1, 2, 3, 4, 5, 6]
-        let face_vertex_counts = data.get(&sdf::path("/World.faceVertexCounts")?, "default")?;
+        let face_vertex_counts = data.get_field(&sdf::path("/World.faceVertexCounts")?, "default")?;
         assert_eq!(
             &face_vertex_counts.into_owned().try_as_int_vec().unwrap(),
             &[1, 2, 3, 4, 5, 6]
         );
 
         // normal3f[] normals = [(0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 1, 0), (0, 0, 1), (1, 0, 0)]
-        let normals = data.get(&sdf::path("/World.normals")?, "default")?;
+        let normals = data.get_field(&sdf::path("/World.normals")?, "default")?;
         assert_eq!(
             normals.try_as_vec_3f_vec_ref().unwrap(),
             &[
@@ -869,18 +869,18 @@ mod tests {
         );
 
         // double3 xformOp:rotateXYZ = (0, 0, 0)
-        let xform_op_rotate_xyz = data.get(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
+        let xform_op_rotate_xyz = data.get_field(&sdf::path("/World.xformOp:rotateXYZ")?, "default")?;
         assert_eq!(
             *xform_op_rotate_xyz.try_as_vec_3d_ref().unwrap(),
             gf::vec3d(0.0, 0.0, 0.0)
         );
 
         // double3 xformOp:scale = (1, 1, 1)
-        let xform_op_scale = data.get(&sdf::path("/World.xformOp:scale")?, "default")?;
+        let xform_op_scale = data.get_field(&sdf::path("/World.xformOp:scale")?, "default")?;
         assert_eq!(*xform_op_scale.try_as_vec_3d_ref().unwrap(), gf::vec3d(1.0, 1.0, 1.0));
 
         // double3 xformOp:translate = (0, 1, 0)
-        let xform_op_translate = data.get(&sdf::path("/World.xformOp:translate")?, "default")?;
+        let xform_op_translate = data.get_field(&sdf::path("/World.xformOp:translate")?, "default")?;
         assert_eq!(
             *xform_op_translate.try_as_vec_3d_ref().unwrap(),
             gf::vec3d(0.0, 1.0, 0.0)
@@ -894,14 +894,14 @@ mod tests {
         let data = read_file("fixtures/sdf_types.usdc")?;
 
         let time_code = data
-            .get(&sdf::path("/World.timeCodeValue")?, "default")?
+            .get_field(&sdf::path("/World.timeCodeValue")?, "default")?
             .into_owned()
             .try_as_time_code()
             .unwrap();
         assert_eq!(time_code, sdf::TimeCode(24.0));
 
         let time_code_array = data
-            .get(&sdf::path("/World.timeCodeArray")?, "default")?
+            .get_field(&sdf::path("/World.timeCodeArray")?, "default")?
             .into_owned()
             .try_as_time_code_vec()
             .unwrap();
@@ -918,7 +918,7 @@ mod tests {
         let data = read_file("fixtures/sdf_types.usdc")?;
 
         let targets = data
-            .get(&sdf::path("/World.targets")?, "targetPaths")?
+            .get_field(&sdf::path("/World.targets")?, "targetPaths")?
             .into_owned()
             .try_as_path_list_op()
             .unwrap();
@@ -940,7 +940,7 @@ mod tests {
         )?;
 
         let array = data
-            .get(&sdf::path("/root.array")?, "default")?
+            .get_field(&sdf::path("/root.array")?, "default")?
             .into_owned()
             .try_as_string_vec()
             .unwrap();
@@ -957,7 +957,7 @@ mod tests {
             read_file("vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/binary/gen_vec2h.usdc")?;
 
         let single = data
-            .get(&sdf::path("/root.single")?, "default")?
+            .get_field(&sdf::path("/root.single")?, "default")?
             .into_owned()
             .try_as_vec_2h()
             .unwrap();
@@ -969,7 +969,7 @@ mod tests {
 
         // Inlined value should also read correctly.
         let inlined = data
-            .get(&sdf::path("/root.inlined")?, "default")?
+            .get_field(&sdf::path("/root.inlined")?, "default")?
             .into_owned()
             .try_as_vec_2h()
             .unwrap();

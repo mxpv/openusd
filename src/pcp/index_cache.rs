@@ -299,7 +299,7 @@ impl IndexCache {
                 if !local_layers.contains(&layer) {
                     continue;
                 }
-                let Some(value) = graph.layer(layer).data().try_get(&query_path, field)? else {
+                let Some(value) = graph.layer(layer).data().try_field(&query_path, field)? else {
                     continue;
                 };
                 return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
@@ -458,7 +458,7 @@ impl IndexCache {
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
         let samples = match self.clip_layer(graph, asset, anchor_layer)? {
-            Some(layer) => match layer.data().try_get(clip_path, FieldKey::TimeSamples.as_str())? {
+            Some(layer) => match layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str())? {
                 Some(value) => match value.into_owned() {
                     Value::TimeSamples(samples) => Some(samples),
                     _ => None,
@@ -484,7 +484,7 @@ impl IndexCache {
         let value = match self.clip_layer(graph, manifest, manifest_layer)? {
             Some(layer) => layer
                 .data()
-                .try_get(clip_path, FieldKey::Default.as_str())?
+                .try_field(clip_path, FieldKey::Default.as_str())?
                 .map(|value| value.into_owned()),
             None => None,
         };
@@ -1143,7 +1143,7 @@ impl IndexCache {
                 let map = index.map_to_root_for_targets(node);
                 let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
                 for (layer, _) in node.layers() {
-                    let Some(value) = graph.layer(layer).data().try_get(&property, field.as_str())? else {
+                    let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
                         continue;
                     };
                     let list_op = match value.into_owned() {
@@ -1245,7 +1245,7 @@ impl IndexCache {
             .collect::<Vec<_>>();
         for id in layer_ids {
             let layer = graph.layer(id);
-            match layer.data().try_get(&root, field)? {
+            match layer.data().try_field(&root, field)? {
                 Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
                 Some(value) => return Ok(Some(value.into_owned())),
                 None => {}
@@ -1263,7 +1263,7 @@ impl IndexCache {
         let Some(root_layer) = graph.root_layer() else {
             return Ok(None);
         };
-        let Some(value) = root_layer.data().try_get(&root, field)? else {
+        let Some(value) = root_layer.data().try_field(&root, field)? else {
             return Ok(None);
         };
         if matches!(value.as_ref(), Value::ValueBlock) {
@@ -1372,7 +1372,7 @@ impl IndexCache {
                 );
                 if let Ok(Value::TokenVec(order)) = layer_data
                     .data()
-                    .get(&node.path, FieldKey::PrimOrder.as_str())
+                    .get_field(&node.path, FieldKey::PrimOrder.as_str())
                     .map(|v| v.into_owned())
                 {
                     sdf::apply_ordering(&mut name_order, &order);
@@ -1546,7 +1546,7 @@ impl IndexCache {
         let value = graph
             .root_layer()?
             .data()
-            .get(&root, FieldKey::DefaultPrim.as_str())
+            .get_field(&root, FieldKey::DefaultPrim.as_str())
             .ok()?;
         value.into_owned().try_as_token()
     }
@@ -1601,7 +1601,7 @@ impl IndexCache {
         let mut targets_to_cache = Vec::new();
         for (scan_path, scan_layer) in &nodes_to_scan {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = graph.layer(*scan_layer).data().get(scan_path, field.as_str()) else {
+                let Ok(val) = graph.layer(*scan_layer).data().get_field(scan_path, field.as_str()) else {
                     continue;
                 };
                 let Value::PathListOp(list_op) = val.into_owned() else {
@@ -1677,7 +1677,7 @@ impl IndexCache {
             if let Ok(Some(value)) = graph
                 .layer(layer)
                 .data()
-                .try_get(&node.path, FieldKey::Permission.as_str())
+                .try_field(&node.path, FieldKey::Permission.as_str())
             {
                 return matches!(value.as_ref(), Value::Permission(sdf::Permission::Private));
             }
@@ -1919,7 +1919,7 @@ fn append_unseen_names(
     order: &mut Vec<Token>,
     seen: &mut HashSet<Token>,
 ) {
-    if let Ok(Value::TokenVec(names)) = layer.data().get(path, field.as_str()).map(|v| v.into_owned()) {
+    if let Ok(Value::TokenVec(names)) = layer.data().get_field(path, field.as_str()).map(|v| v.into_owned()) {
         for name in names {
             if seen.insert(name.clone()) {
                 order.push(name);

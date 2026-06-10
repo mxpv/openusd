@@ -650,8 +650,8 @@ def Xform "Geo" (
         let data = sdf::Data::from_specs(parsed);
 
         let clips = data
-            .try_get(&Path::new("/Geo").unwrap(), "clips")
-            .expect("try_get")
+            .try_field(&Path::new("/Geo").unwrap(), "clips")
+            .expect("try_field")
             .expect("clips authored")
             .into_owned();
 

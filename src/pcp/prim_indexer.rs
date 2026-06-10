@@ -1803,7 +1803,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     .stack
                     .layer(layer)
                     .data()
-                    .try_get(&site, FieldKey::VariantSelection.as_str())?
+                    .try_field(&site, FieldKey::VariantSelection.as_str())?
                 else {
                     continue;
                 };
@@ -2694,7 +2694,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .stack
             .layer(root_layer)
             .data()
-            .try_get(&Path::abs_root(), FieldKey::DefaultPrim.as_str())?
+            .try_field(&Path::abs_root(), FieldKey::DefaultPrim.as_str())?
         else {
             return Ok(None);
         };
@@ -2956,7 +2956,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
         let mut out: Vec<Token> = Vec::new();
         for &(layer, _) in self.node(node).layer_stack() {
-            let Some(value) = self.inputs.stack.layer(layer).data().try_get(path, key.as_str())? else {
+            let Some(value) = self.inputs.stack.layer(layer).data().try_field(path, key.as_str())? else {
                 continue;
             };
             if let Value::TokenVec(names) = value.into_owned() {

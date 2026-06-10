@@ -3,11 +3,11 @@
 //! This module contains common data types used by parsers.
 //! Roughly this correspond to C++ SDF module <https://openusd.org/dev/api/sdf_page_front.html>
 
-use std::{borrow::Cow, collections::HashMap, fmt::Debug};
+use std::{collections::HashMap, fmt::Debug};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytemuck::{Pod, Zeroable};
-use strum::{Display, EnumCount, FromRepr};
+use strum::FromRepr;
 
 use crate::tf::Token;
 
@@ -25,7 +25,7 @@ mod value;
 
 pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList};
-pub use data::Data;
+pub use data::{AbstractData, Data};
 pub use expr::Expr;
 pub use layer::{AuthoringError, Layer, LayerFormat};
 pub use ordering::{apply_ordering, element_cmp};
@@ -35,32 +35,9 @@ pub use schema::{ChildrenKey, FieldKey};
 pub use spec::{
     AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
     PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
-    RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef,
+    RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef, SpecType,
 };
 pub use value::{CastError, FromValueCast, Value, ValueConversionError};
-
-/// An enum that specifies the type of an object.
-/// Objects are entities that have fields and are addressable by path.
-#[repr(u32)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, FromRepr, EnumCount, Display)]
-pub enum SpecType {
-    // The unknown type has a value of 0 so that SdfSpecType() is unknown.
-    #[default]
-    Unknown = 0,
-
-    // Real concrete types
-    Attribute = 1,
-    Connection = 2,
-    Expression = 3,
-    Mapper = 4,
-    MapperArg = 5,
-    Prim = 6,
-    PseudoRoot = 7,
-    Relationship = 8,
-    RelationshipTarget = 9,
-    Variant = 10,
-    VariantSet = 11,
-}
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromRepr)]
@@ -333,84 +310,6 @@ pub type Relocate = (Path, Path);
 /// The ordered list of [`Relocate`]s authored in a layer's `relocates`
 /// metadata. Mirrors C++ `SdfRelocates`, a `std::vector<SdfRelocate>`.
 pub type RelocateList = Vec<Relocate>;
-
-/// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
-///
-/// An `AbstractData` is an anonymous container of specs (keyed by [`Path`]) and
-/// their fields. Like `SdfAbstractData`, the interface is *field-level* and
-/// read+write: readers, writers, composition, and authoring all operate through
-/// the same set of `has_*` / `try_get` / `create_spec` / `set_field` methods,
-/// regardless of whether the backing store decodes eagerly (text, [`Data`]) or
-/// lazily (the binary crate reader). The typed spec views
-/// ([`PrimSpec`](crate::sdf::PrimSpec) and friends) are a higher-tier
-/// convenience layered on top of this interface, paralleling how `SdfPrimSpec`
-/// sits above `SdfAbstractData`.
-pub trait AbstractData {
-    /// Returns `true` if this data has a spec for the given path.
-    fn has_spec(&self, path: &Path) -> bool;
-
-    /// Returns `true` if this data has a field for the given path.
-    fn has_field(&self, path: &Path, field: &str) -> bool;
-
-    /// Returns the type of the spec at the given path.
-    fn spec_type(&self, path: &Path) -> Option<SpecType>;
-
-    /// Returns the value for a field, or `None` if not authored.
-    ///
-    /// The value can be either owned or borrowed depending on internals.
-    /// In the binary format, the data is typically compressed and/or encoded,
-    /// so memory allocation is required to store unpacked result, so owned
-    /// values are typically expected. With text parsers, there is a data copy
-    /// already stored, so a borrowed value is returned to avoid unnecessary copies.
-    ///
-    /// Errors propagate I/O or decoding failures; a missing spec or field is
-    /// signalled by `Ok(None)`.
-    fn try_get(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>>;
-
-    /// Returns the value for a field, erroring if not authored.
-    ///
-    /// Use [`AbstractData::try_get`] when absence is an expected condition.
-    fn get(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>> {
-        self.try_get(path, field)?
-            .ok_or_else(|| anyhow!("No field '{field}' at path '{path}'"))
-    }
-
-    /// Returns the field names for a given path in authored order.
-    fn list(&self, path: &Path) -> Option<Vec<String>>;
-
-    /// Returns every authored path, sorted lexicographically.
-    ///
-    /// The order is deterministic and stable across repeated calls. Emitters
-    /// rely on this for reproducible output.
-    fn paths(&self) -> Vec<Path>;
-
-    /// Creates an empty spec of type `ty` at `path`, replacing any existing
-    /// spec there. Mirrors C++ `SdfAbstractData::CreateSpec`. Fields are
-    /// authored separately via [`set_field`](Self::set_field).
-    fn create_spec(&mut self, path: Path, ty: SpecType);
-
-    /// Removes the spec at `path` along with all its fields. Mirrors C++
-    /// `SdfAbstractData::EraseSpec`. No-op if no spec exists there.
-    fn erase_spec(&mut self, path: &Path);
-
-    /// Sets (or replaces) `field` on the spec at `path`, preserving authored
-    /// field order. Mirrors C++ `SdfAbstractData::Set`. The spec must already
-    /// exist (create it with [`create_spec`](Self::create_spec) first); setting
-    /// a field on an absent spec drops the write (debug builds assert).
-    ///
-    /// This *replaces* the field value; it does not merge list ops. List-op
-    /// accumulation across multiple operator statements is the reader's job
-    /// (see `SpecData::add_list_op`), so authoring a list op through this trait
-    /// overwrites rather than folds.
-    //
-    // TODO: lift list-op merge onto this trait so the in-memory and crate
-    // backends agree and the typed-view mutators stop re-implementing the fold.
-    fn set_field(&mut self, path: &Path, field: &str, value: Value);
-
-    /// Removes `field` from the spec at `path`. Mirrors C++
-    /// `SdfAbstractData::EraseField`. No-op if the spec or field is absent.
-    fn erase_field(&mut self, path: &Path, field: &str);
-}
 
 /// A boxed layer data source, used throughout the layer stack.
 pub type LayerData = Box<dyn AbstractData>;

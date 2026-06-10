@@ -12,11 +12,11 @@ use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
     let mut out: BTreeMap<String, BTreeMap<String, sdf::Value>> = BTreeMap::new();
-    for path in data.paths() {
+    for path in data.spec_paths() {
         let mut fields: BTreeMap<String, sdf::Value> = BTreeMap::new();
-        if let Some(names) = data.list(&path) {
+        if let Some(names) = data.list_fields(&path) {
             for name in names {
-                let v = data.get(&path, &name).unwrap().into_owned();
+                let v = data.get_field(&path, &name).unwrap().into_owned();
                 fields.insert(name, v);
             }
         }
@@ -109,11 +109,11 @@ fn compressed_int_array_roundtrips() {
 
     let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
     let round_short = (&round as &dyn AbstractData)
-        .get(&short_prop, "default")
+        .get_field(&short_prop, "default")
         .unwrap()
         .into_owned();
     let round_long = (&round as &dyn AbstractData)
-        .get(&long_prop, "default")
+        .get_field(&long_prop, "default")
         .unwrap()
         .into_owned();
     assert_eq!(round_short, Value::IntVec(vec![1, 2, 3]));
@@ -145,7 +145,7 @@ fn asset_array_roundtrips() {
 
     let round = CrateData::open(Cursor::new(&buf), true).expect("re-parse");
     let value = (&round as &dyn AbstractData)
-        .get(&files, "default")
+        .get_field(&files, "default")
         .unwrap()
         .into_owned();
     assert_eq!(value, Value::AssetPathVec(paths));
@@ -162,8 +162,8 @@ fn empty_layer_roundtrips_through_crate_writer() {
 
     let round = CrateData::open(Cursor::new(&buf), true).expect("empty layer re-parse");
 
-    let orig_paths = (&data as &dyn AbstractData).paths();
-    let round_paths = (&round as &dyn AbstractData).paths();
+    let orig_paths = (&data as &dyn AbstractData).spec_paths();
+    let round_paths = (&round as &dyn AbstractData).spec_paths();
     assert_eq!(orig_paths, round_paths);
 
     let orig_json = snapshot(&data as &dyn AbstractData);
@@ -271,7 +271,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatf quatfSingle = (1.4, 2.9, 8.5, 4.6)
     let scalar = round
-        .get(&sdf::path("/World.quatfSingle").unwrap(), "default")
+        .get_field(&sdf::path("/World.quatfSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -286,7 +286,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatf[] quatfArr = [(4.2, 3.5, 2.6, 3.6), (2.4, 5.3, 6.3, 5.2), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
-        .get(&sdf::path("/World.quatfArr").unwrap(), "default")
+        .get_field(&sdf::path("/World.quatfArr").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -315,7 +315,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatd quatdSingle = (2.4, 5.3, 6.3, 5.2)
     let scalar = round
-        .get(&sdf::path("/World.quatdSingle").unwrap(), "default")
+        .get_field(&sdf::path("/World.quatdSingle").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(
@@ -330,7 +330,7 @@ fn quat_write_read_preserves_wxyz_convention() {
 
     // fields.usda: quatd[] quatdArr = [(4.2, 3.5, 2.6, 3.6), (7.1, 4.3, 2.4, 6.4)]
     let arr = round
-        .get(&sdf::path("/World.quatdArr").unwrap(), "default")
+        .get_field(&sdf::path("/World.quatdArr").unwrap(), "default")
         .unwrap()
         .into_owned();
     assert_eq!(

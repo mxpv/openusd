@@ -40,7 +40,7 @@ fn scene(name: &str) -> CrateData<File> {
 /// Fetch an authored field value, panicking if it is absent.
 fn value(data: &CrateData<File>, path: &str, field: &str) -> Value {
     let p = sdf::path(path).unwrap();
-    data.get(&p, field)
+    data.get_field(&p, field)
         .unwrap_or_else(|e| panic!("get {path}.{field}: {e:#}"))
         .into_owned()
 }
@@ -251,7 +251,7 @@ fn assert_math(name: &str, dim: usize, integer: bool, places: i32) {
 #[test]
 fn scene_strat() {
     let data = read("fender_stratocaster.usdc");
-    assert_eq!(data.paths().len(), 432);
+    assert_eq!(data.spec_paths().len(), 432);
     assert_eq!(
         value(&data, "/", "defaultPrim"),
         Value::Token("fender_stratocaster".into())
@@ -261,7 +261,7 @@ fn scene_strat() {
 #[test]
 fn scene_plane() {
     let data = read("toy_biplane_idle.usdc");
-    assert_eq!(data.paths().len(), 425);
+    assert_eq!(data.spec_paths().len(), 425);
     assert_eq!(
         value(&data, "/", "defaultPrim"),
         Value::Token("toy_biplane_idle".into())

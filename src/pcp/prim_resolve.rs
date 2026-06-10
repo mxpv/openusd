@@ -385,7 +385,7 @@ impl PrimIndex {
 
     /// Iterates the authored opinions for `field` across the composition graph,
     /// strongest to weakest, skipping nodes with no opinion. Centralizes the
-    /// query-path / layer / `try_get` walk shared by every `resolve_*` field
+    /// query-path / layer / `try_field` walk shared by every `resolve_*` field
     /// resolver.
     fn opinions<'a>(
         &'a self,
@@ -400,7 +400,7 @@ impl PrimIndex {
         // permission-denied node (a direct arc to a private site, spec 10.3.3),
         // and a node authoring no spec at its path (`has_specs == false`, a
         // full-stack ancestral site deepened to a child with no local opinion).
-        // Skipping the spec-less node avoids a `try_get` per field on a site
+        // Skipping the spec-less node avoids a `try_field` per field on a site
         // that cannot author one, and guards against a backend that would return
         // a field where no spec exists.
         //
@@ -415,7 +415,7 @@ impl PrimIndex {
                 };
                 let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
                 for (layer, offset) in node.layers() {
-                    match stack.layer(layer).data().try_get(&query_path, field) {
+                    match stack.layer(layer).data().try_field(&query_path, field) {
                         Ok(Some(value)) => out.push(Ok(Opinion {
                             node,
                             layer,
@@ -445,7 +445,7 @@ impl PrimIndex {
         // A direct walk rather than `opinions()` so the returned node borrows
         // from `self` alone, not from the `field` / `stack` parameters. The
         // node/layer filter must match `opinions()`'s first-yield: keep the
-        // `has_specs` / permission / `query_path` / `try_get` checks in sync.
+        // `has_specs` / permission / `query_path` / `try_field` checks in sync.
         for node in self.nodes() {
             if !node.has_specs() || node.is_permission_denied() {
                 continue;
@@ -454,7 +454,7 @@ impl PrimIndex {
                 continue;
             };
             for (layer, _) in node.layers() {
-                if matches!(stack.layer(layer).data().try_get(&query_path, field), Ok(Some(_))) {
+                if matches!(stack.layer(layer).data().try_field(&query_path, field), Ok(Some(_))) {
                     return Some((layer, node));
                 }
             }

@@ -140,7 +140,7 @@ fn emitted_archive_roundtrips_through_openusd() {
     assert!(layer.has_spec(&root));
     assert_eq!(layer.spec_type(&foo), Some(sdf::SpecType::Prim));
     assert_eq!(
-        layer.get(&foo, "typeName").unwrap().into_owned(),
+        layer.get_field(&foo, "typeName").unwrap().into_owned(),
         sdf::Value::Token("Xform".into())
     );
 }

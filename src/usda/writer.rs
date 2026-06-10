@@ -70,7 +70,7 @@ impl<W: Write> Emitter<'_, W> {
         // Layer metadata: every field except primChildren is metadata.
         // subLayerOffsets is merged into subLayers at emit time.
         let meta_fields: Vec<String> = if has_root {
-            data.list(&root)
+            data.list_fields(&root)
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|n| !is_prim_structural_field(n) && n != FieldKey::SubLayerOffsets.as_str())
@@ -87,7 +87,7 @@ impl<W: Write> Emitter<'_, W> {
                     self.emit_sub_layers(data, &root)?;
                     continue;
                 }
-                let value = data.get(&root, name)?;
+                let value = data.get_field(&root, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -142,7 +142,7 @@ impl<W: Write> Emitter<'_, W> {
         write!(self.out, " {quoted}")?;
 
         let meta_fields: Vec<String> = data
-            .list(path)
+            .list_fields(path)
             .unwrap_or_default()
             .into_iter()
             .filter(|n| !is_prim_structural_field(n))
@@ -152,7 +152,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get(path, name)?;
+                let value = data.get_field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -252,7 +252,7 @@ impl<W: Write> Emitter<'_, W> {
         }
 
         let meta_fields: Vec<String> = data
-            .list(path)
+            .list_fields(path)
             .unwrap_or_default()
             .into_iter()
             .filter(|n| !is_attribute_structural_field(n))
@@ -263,7 +263,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out)?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get(path, name)?;
+                let value = data.get_field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -490,7 +490,7 @@ impl<W: Write> Emitter<'_, W> {
 
         let targets = get_value(data, path, FieldKey::TargetPaths.as_str());
         let meta_fields: Vec<String> = data
-            .list(path)
+            .list_fields(path)
             .unwrap_or_default()
             .into_iter()
             .filter(|n| !is_relationship_structural_field(n))
@@ -524,7 +524,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get(path, name)?;
+                let value = data.get_field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -578,7 +578,7 @@ impl<W: Write> Emitter<'_, W> {
         self.out.write_all(quoted.as_bytes())?;
 
         let meta_fields: Vec<String> = data
-            .list(path)
+            .list_fields(path)
             .unwrap_or_default()
             .into_iter()
             .filter(|n| !is_prim_structural_field(n))
@@ -588,7 +588,7 @@ impl<W: Write> Emitter<'_, W> {
             writeln!(self.out, " (")?;
             self.indent += 1;
             for name in &meta_fields {
-                let value = data.get(path, name)?;
+                let value = data.get_field(path, name)?;
                 self.emit_metadata_entry(name, &value)?;
             }
             self.indent -= 1;
@@ -1355,7 +1355,7 @@ fn dict_value_type_name(v: &Value) -> Option<&'static str> {
 }
 
 fn get_value(data: &dyn AbstractData, path: &Path, field: &str) -> Option<Value> {
-    data.get(path, field).ok().map(|v| v.into_owned())
+    data.get_field(path, field).ok().map(|v| v.into_owned())
 }
 
 /// Composed `primChildren` / `propertyChildren` name list (`key` selects which),

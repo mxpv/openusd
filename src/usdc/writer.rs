@@ -99,7 +99,7 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
 
         // Intern every path referenced by the data in one sweep. This seeds
         // `paths` before any field that may reference paths is serialized.
-        let paths = data.paths();
+        let paths = data.spec_paths();
         for path in &paths {
             self.intern_path(path.clone());
         }
@@ -112,9 +112,9 @@ impl<'w, W: Write + Seek> Packer<'w, W> {
             let path_idx = self.intern_path(path.clone());
 
             let fieldset_idx = self.fieldsets.len() as u32;
-            if let Some(field_names) = data.list(path) {
+            if let Some(field_names) = data.list_fields(path) {
                 for name in field_names {
-                    let value = data.get(path, &name)?.into_owned();
+                    let value = data.get_field(path, &name)?.into_owned();
                     let token = if name == crate::sdf::ChildrenKey::PropertyChildren.as_str() {
                         super::CRATE_PROPERTY_CHILDREN.to_owned()
                     } else {

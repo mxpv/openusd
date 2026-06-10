@@ -49,6 +49,9 @@ mod tests {
 
         let size = root.append_property("size").unwrap();
         assert_eq!(data.spec_type(&size), Some(SpecType::Attribute));
-        assert_eq!(data.get(&size, "default").unwrap().into_owned(), sdf::Value::Float(2.5));
+        assert_eq!(
+            data.get_field(&size, "default").unwrap().into_owned(),
+            sdf::Value::Float(2.5)
+        );
     }
 }

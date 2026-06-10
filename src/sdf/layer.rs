@@ -780,7 +780,7 @@ fn validate_token_vec(data: &dyn AbstractData, path: &Path, key: ChildrenKey) ->
 /// an [`AuthoringError`] rather than swallowing it to "absent".
 fn read_child_field(data: &dyn AbstractData, path: &Path, key: ChildrenKey) -> Result<Option<Value>, AuthoringError> {
     let value = data
-        .try_get(path, key.as_str())
+        .try_field(path, key.as_str())
         .map_err(|_| AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "child-list field could not be read",

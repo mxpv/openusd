@@ -254,7 +254,7 @@ impl LayerGraph {
             let Ok(Value::StringVec(sub_paths)) = node
                 .layer
                 .data()
-                .get(&root_path, FieldKey::SubLayers.as_str())
+                .get_field(&root_path, FieldKey::SubLayers.as_str())
                 .map(|v| v.into_owned())
             else {
                 continue;
@@ -262,7 +262,7 @@ impl LayerGraph {
             let offsets: Vec<LayerOffset> = node
                 .layer
                 .data()
-                .get(&root_path, FieldKey::SubLayerOffsets.as_str())
+                .get_field(&root_path, FieldKey::SubLayerOffsets.as_str())
                 .ok()
                 .and_then(|v| match v.into_owned() {
                     Value::LayerOffsetVec(v) => Some(v),
