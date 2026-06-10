@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ar::{self, ResolvedPath, Resolver};
+use crate::ar::{ResolvedPath, Resolver};
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, AbstractData, LayerOffset, Path, RelocateList, Value};
 
@@ -61,18 +61,20 @@ impl LayerId {
 ///
 /// The Rust analog of C++ `PcpLayerStackIdentifier`, which keys a
 /// `PcpLayerStack` by `(rootLayer, sessionLayer, pathResolverContext)`. Two
-/// stages opened from the same root and session under the same resolver context
-/// are the same composition input, so their identifiers compare equal. Used to
-/// tag a stage-bound [`EditTarget`](crate::usd::EditTarget) so one built against
-/// a stage's composition is rejected by an unrelated stage.
+/// stages opened from the same root and session under a resolver with the same
+/// [`identity`](crate::ar::Resolver::identity) are the same composition input,
+/// so their identifiers compare equal. Used to tag a stage-bound
+/// [`EditTarget`](crate::usd::EditTarget) so one built against a stage's
+/// composition is rejected by an unrelated stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerStackIdentifier {
     /// Canonical identifier of the root layer.
     pub root_layer: String,
     /// Canonical identifier of the strongest session layer, if any.
     pub session_layer: Option<String>,
-    /// Asset-resolution context the stack was composed under.
-    pub context: ar::ResolverContext,
+    /// The resolver's [`identity`](crate::ar::Resolver::identity) token — the
+    /// configuration the stack's asset paths resolve under.
+    pub resolver: String,
 }
 
 /// A single layer in the [`LayerGraph`].
@@ -148,12 +150,10 @@ pub(crate) struct LayerGraph {
     /// rebuild. Independent of [`cycle_errors`](Self::cycle_errors): a
     /// relocate-only edit refreshes these alone.
     relocate_errors: Vec<Error>,
-    /// Resolver used to anchor relative asset paths when locating layers.
+    /// Resolver used to locate and anchor relative asset paths. Its
+    /// [`identity`](Resolver::identity) is the resolver component of the stack's
+    /// [`layer_stack_id`](Self::layer_stack_id).
     resolver: Box<dyn Resolver>,
-    /// Asset-resolution context the resolver was bound to when the stage was
-    /// opened, captured once so the stack's identity
-    /// ([`layer_stack_id`](Self::layer_stack_id)) is stable for the graph's life.
-    context: ar::ResolverContext,
     /// Whether payload arcs should be expanded during composition.
     load_payloads: bool,
 }
@@ -169,15 +169,6 @@ impl LayerGraph {
         resolver: Box<dyn Resolver>,
         load_payloads: bool,
     ) -> Self {
-        // TODO: bind a per-asset resolver context before composing (C++
-        // anchors the root layer's directory via
-        // `CreateDefaultContextForAsset`). `StageBuilder` never calls
-        // `bind_context`, so for the default resolver this captures the empty
-        // context and the `context` component of `layer_stack_id` is inert;
-        // it is only populated when a caller supplies a resolver with a
-        // pre-bound context. `(root, session)` alone is already a sound
-        // cross-stage key, so the identity stays correct meanwhile.
-        let context = resolver.context();
         let mut graph = Self {
             nodes: HashMap::new(),
             by_identifier: HashMap::new(),
@@ -191,7 +182,6 @@ impl LayerGraph {
             cycle_errors: Vec::new(),
             relocate_errors: Vec::new(),
             resolver,
-            context,
             load_payloads,
         };
 
@@ -442,7 +432,7 @@ impl LayerGraph {
     }
 
     /// This stage's root layer stack identity, built from the root layer, the
-    /// strongest session layer, and the resolver context. An empty graph (no
+    /// strongest session layer, and the resolver's identity. An empty graph (no
     /// root layer) yields an empty `root_layer`.
     pub(crate) fn layer_stack_id(&self) -> LayerStackIdentifier {
         LayerStackIdentifier {
@@ -451,7 +441,7 @@ impl LayerGraph {
                 .map(|l| l.identifier().to_string())
                 .unwrap_or_default(),
             session_layer: self.session_layers().first().map(|&id| self.identifier(id).to_string()),
-            context: self.context.clone(),
+            resolver: self.resolver.identity(),
         }
     }
 

@@ -568,8 +568,8 @@ pub struct StageInner {
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
     /// This stage's root layer stack identity (root + session + resolver
-    /// context). Computed once at open and stable for the stage's life — the
-    /// root and session layers and the resolver context never change after
+    /// identity). Computed once at open and stable for the stage's life — the
+    /// root and session layers and the resolver never change after
     /// construction. Stamped onto stage-bound edit targets and read by the
     /// cross-stage guard, both without recomputing.
     layer_stack_id: pcp::LayerStackIdentifier,
@@ -1895,6 +1895,30 @@ mod tests {
 
     fn composition_path(relative: &str) -> String {
         format!("{}/{VENDOR_COMPOSITION}/{relative}", manifest_dir())
+    }
+
+    /// The resolver's identity is the resolver component of the stack identity:
+    /// two stages opened from the same root under resolvers with different
+    /// search paths reject each other's edit targets; an identical config
+    /// accepts.
+    #[test]
+    fn layer_stack_id_keys_on_resolver() -> Result<()> {
+        let path = composition_path("active.usda");
+        let open_with = |dir: &str| {
+            Stage::builder()
+                .resolver(ar::DefaultResolver::with_search_paths([dir]))
+                .open(&path)
+        };
+        let stage_a = open_with("/assets/a")?;
+        let stage_b = open_with("/assets/b")?;
+        assert!(matches!(
+            stage_b.set_edit_target(stage_a.edit_target_root()),
+            Err(StageAuthoringError::EditTargetWrongStage)
+        ));
+
+        let stage_c = open_with("/assets/a")?;
+        assert!(stage_c.set_edit_target(stage_a.edit_target_root()).is_ok());
+        Ok(())
     }
 
     /// Querying a field that isn't authored should return None.

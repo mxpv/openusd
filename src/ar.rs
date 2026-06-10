@@ -32,7 +32,6 @@ use std::fs;
 use std::io::{self, Read, Seek};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 use std::time::SystemTime;
 
 /// A resolved asset path representing the physical location of an asset.
@@ -119,48 +118,6 @@ impl Asset for io::Cursor<Vec<u8>> {
     }
 }
 
-/// Context object that influences how asset paths are resolved.
-///
-/// A resolver context carries configuration (such as search paths) that
-/// affects resolution behavior. Contexts are typically bound per-stage
-/// and can vary between different parts of a pipeline.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ResolverContext {
-    /// Directories to search when resolving relative asset paths.
-    search_paths: Vec<PathBuf>,
-}
-
-impl ResolverContext {
-    /// Creates an empty resolver context.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates a resolver context with the given search paths.
-    ///
-    /// Relative search paths are resolved against the current working directory.
-    pub fn with_search_paths(paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        let search_paths = paths
-            .into_iter()
-            .map(|p| {
-                let p = p.into();
-                if p.is_relative() {
-                    std::env::current_dir().unwrap_or_default().join(p)
-                } else {
-                    p
-                }
-            })
-            .collect();
-
-        Self { search_paths }
-    }
-
-    /// Returns the search paths in this context.
-    pub fn search_paths(&self) -> &[PathBuf] {
-        &self.search_paths
-    }
-}
-
 /// Interface for resolving asset paths to physical locations.
 ///
 /// Implementations of this trait map logical asset paths (as authored in USD
@@ -211,46 +168,24 @@ pub trait Resolver {
         fs::metadata(&**resolved_path).and_then(|m| m.modified()).ok()
     }
 
-    /// Returns `true` if resolving this path may produce different results
-    /// depending on the currently bound resolver context.
-    fn is_context_dependent_path(&self, asset_path: &str) -> bool {
-        Path::new(asset_path).is_relative()
-    }
-
-    /// Returns the resolver's currently bound context.
+    /// A stable token identifying this resolver's configuration, used as the
+    /// resolver component of a composed stack's
+    /// [`LayerStackIdentifier`](crate::pcp::LayerStackIdentifier).
     ///
-    /// Keys a composed layer stack's identity: C++ `PcpLayerStackIdentifier`
-    /// carries the `ArResolverContext` the stack was composed under, so two
-    /// stacks built under different contexts are distinct. The base trait
-    /// reports the default (empty) context; a resolver that binds per-stage
-    /// context overrides this.
-    fn context(&self) -> ResolverContext {
-        ResolverContext::default()
-    }
-
-    /// Creates a default resolver context.
-    fn create_default_context(&self) -> ResolverContext {
-        ResolverContext::new()
-    }
-
-    /// Creates a resolver context appropriate for the given asset.
+    /// Two resolvers that resolve every asset path identically must return the
+    /// same token, and two that may resolve some path differently must return
+    /// different tokens — so two stages opened under different resolver
+    /// configurations are distinguished (the cross-stage edit-target guard).
     ///
-    /// The returned context includes the directory containing the asset
-    /// as a search path, so that relative references from within that
-    /// asset can be resolved.
-    fn create_default_context_for_asset(&self, asset_path: &str) -> ResolverContext {
-        let path = Path::new(asset_path);
-        match path.parent() {
-            Some(dir) if dir.exists() => {
-                let abs_dir = if dir.is_relative() {
-                    std::env::current_dir().unwrap_or_default().join(dir)
-                } else {
-                    dir.to_path_buf()
-                };
-                ResolverContext::with_search_paths([abs_dir])
-            }
-            _ => ResolverContext::new(),
-        }
+    /// The base trait reports an empty token, meaning "indistinguishable from
+    /// any other unconfigured resolver". Any implementation whose resolution can
+    /// differ from another's — a different backend, or configuration such as
+    /// search paths, a base URL, or a repository revision — must override this
+    /// to render that distinguishing identity; otherwise it collides with the
+    /// empty default and the guard treats the two as the same composition input.
+    /// It is read once per stage, so computing it on demand is fine.
+    fn identity(&self) -> String {
+        String::new()
     }
 }
 
@@ -260,48 +195,39 @@ pub trait Resolver {
 /// list of search directories. Resolution proceeds in order:
 ///
 /// 1. If the path is absolute and the file exists, return it directly.
-/// 2. Search directories from the bound [`ResolverContext`].
-/// 3. Search directories from the resolver's default search paths.
-/// 4. Search relative to the current working directory.
+/// 2. Search the resolver's configured search directories.
+/// 3. Search relative to the current working directory.
 ///
 /// # Correspondence
 ///
 /// This corresponds to `ArDefaultResolver` in the C++ USD API:
 /// <https://openusd.org/dev/api/class_ar_default_resolver.html>
 pub struct DefaultResolver {
-    context: RwLock<ResolverContext>,
-    default_search_paths: Vec<PathBuf>,
+    search_paths: Vec<PathBuf>,
 }
 
 impl DefaultResolver {
     /// Creates a new default resolver with no search paths.
     pub fn new() -> Self {
         Self {
-            context: RwLock::new(ResolverContext::new()),
-            default_search_paths: Vec::new(),
+            search_paths: Vec::new(),
         }
     }
 
     /// Creates a new default resolver with the given search paths.
+    ///
+    /// Each path is canonicalized to a stable spelling — relative paths are
+    /// anchored to the current working directory and lexical noise (`.`
+    /// components, redundant and trailing separators) is collapsed — so that
+    /// directories named equivalently resolve, and render via
+    /// [`identity`](Self::identity), identically.
     pub fn with_search_paths(paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        let default_search_paths = paths.into_iter().map(Into::into).collect();
-        Self {
-            context: RwLock::new(ResolverContext::new()),
-            default_search_paths,
-        }
+        let search_paths = paths.into_iter().map(|p| normalize_search_path(p.into())).collect();
+        Self { search_paths }
     }
 
-    /// Sets the resolver context, which provides additional search paths.
-    pub fn bind_context(&self, context: ResolverContext) {
-        *self.context.write().unwrap() = context;
-    }
-
-    /// Returns the currently bound resolver context.
-    pub fn current_context(&self) -> ResolverContext {
-        self.context.read().unwrap().clone()
-    }
-
-    /// Searches for an asset by trying the path against each search directory.
+    /// Searches for an asset by trying the path against the resolver's search
+    /// directories, then the current working directory.
     fn resolve_with_search_paths(&self, asset_path: &str) -> Option<ResolvedPath> {
         let rel_path = Path::new(asset_path);
 
@@ -314,11 +240,7 @@ impl DefaultResolver {
             };
         }
 
-        // Search through context paths, then default search paths.
-        let context = self.context.read().unwrap();
-        let search_dirs = context.search_paths.iter().chain(self.default_search_paths.iter());
-
-        for dir in search_dirs {
+        for dir in &self.search_paths {
             let candidate = dir.join(rel_path);
             if candidate.exists() {
                 return Some(ResolvedPath::new(candidate.canonicalize().ok()?));
@@ -344,10 +266,6 @@ impl Default for DefaultResolver {
 }
 
 impl Resolver for DefaultResolver {
-    fn context(&self) -> ResolverContext {
-        self.current_context()
-    }
-
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
         if asset_path.is_empty() {
             return String::new();
@@ -420,6 +338,18 @@ impl Resolver for DefaultResolver {
             .map(|cwd| ResolvedPath::new(cwd.join(path)))
     }
 
+    /// Renders the canonicalized search paths as the resolver's identity token,
+    /// so two `DefaultResolver`s with different search roots key distinct stacks.
+    ///
+    /// Each path is rendered via [`Debug`](std::fmt::Debug), which escapes
+    /// losslessly — including newlines and non-UTF-8 bytes that
+    /// [`to_string_lossy`](std::path::Path::to_string_lossy) would flatten — and
+    /// wraps each segment in quotes. The concatenation is therefore injective:
+    /// distinct path lists never collapse to the same token.
+    fn identity(&self) -> String {
+        self.search_paths.iter().map(|p| format!("{p:?}")).collect()
+    }
+
     fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn Asset>> {
         let path_str = resolved_path.to_str().unwrap_or_default();
 
@@ -445,6 +375,22 @@ impl Resolver for DefaultResolver {
         let file = fs::File::open(&**resolved_path)?;
         Ok(Box::new(file))
     }
+}
+
+/// Canonicalizes a search-path spelling for [`DefaultResolver`].
+///
+/// Relative paths are anchored to the current working directory; lexical noise
+/// (`.` components, redundant and trailing separators) is collapsed. The result
+/// resolves candidates identically to the input while giving equivalent
+/// directories one canonical rendering. `..` is preserved, since collapsing it
+/// lexically would change meaning across symlinks.
+fn normalize_search_path(path: PathBuf) -> PathBuf {
+    let path = if path.is_relative() {
+        std::env::current_dir().unwrap_or_default().join(path)
+    } else {
+        path
+    };
+    path.components().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -565,20 +511,35 @@ mod tests {
         assert_eq!(p.file_name().unwrap(), "model.usda");
     }
 
-    // -----------------------------------------------------------------------
-    // ResolverContext
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn context_default_is_empty() {
-        let ctx = ResolverContext::new();
-        assert!(ctx.search_paths().is_empty());
-    }
+    fn resolver_identity_renders_search_paths() {
+        // No search paths → empty identity (no distinguishing configuration).
+        assert!(DefaultResolver::new().identity().is_empty());
 
-    #[test]
-    fn context_with_search_paths() {
-        let ctx = ResolverContext::with_search_paths(["/usr/share/usd", "/opt/assets"]);
-        assert_eq!(ctx.search_paths().len(), 2);
+        // Same search paths → equal identity; different → distinct.
+        let a = DefaultResolver::with_search_paths(["/show/assets", "/lib"]);
+        let b = DefaultResolver::with_search_paths(["/show/assets", "/lib"]);
+        let c = DefaultResolver::with_search_paths(["/other"]);
+        assert_eq!(a.identity(), b.identity());
+        assert_ne!(a.identity(), c.identity());
+
+        // Equivalent spellings canonicalize to one identity: a relative path
+        // anchors to the cwd, and `.` lexical noise is collapsed.
+        let cwd = std::env::current_dir().unwrap();
+        let rel = DefaultResolver::with_search_paths(["assets"]);
+        let abs = DefaultResolver::with_search_paths([cwd.join("assets")]);
+        assert_eq!(rel.identity(), abs.identity());
+
+        let plain = DefaultResolver::with_search_paths([cwd.join("lib")]);
+        let noisy = DefaultResolver::with_search_paths([cwd.join("lib").join(".")]);
+        assert_eq!(plain.identity(), noisy.identity());
+
+        // The encoding is injective: a single path embedding a separator must
+        // not collide with two distinct paths. `["a\nb"]` and `["a", "b"]` key
+        // different stacks, keeping the cross-stage guard sound.
+        let embedded = DefaultResolver::with_search_paths([cwd.join("a\nb")]);
+        let split = DefaultResolver::with_search_paths([cwd.join("a"), cwd.join("b")]);
+        assert_ne!(embedded.identity(), split.identity());
     }
 
     // -----------------------------------------------------------------------
@@ -661,14 +622,6 @@ mod tests {
     }
 
     #[test]
-    fn resolver_context_binding() {
-        let resolver = DefaultResolver::new();
-        let ctx = ResolverContext::with_search_paths(["/some/path"]);
-        resolver.bind_context(ctx.clone());
-        assert_eq!(resolver.current_context(), ctx);
-    }
-
-    #[test]
     fn resolver_resolve_existing_file() {
         // Use Cargo.toml as a known existing file.
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -743,26 +696,6 @@ mod tests {
         let resolved = resolver.resolve("Cargo.toml").unwrap();
         let ts = resolver.get_modification_timestamp("Cargo.toml", &resolved);
         assert!(ts.is_some());
-    }
-
-    #[test]
-    fn resolver_context_dependent_path() {
-        let resolver = DefaultResolver::new();
-        assert!(resolver.is_context_dependent_path("relative/path.usda"));
-
-        // Use a real absolute path for cross-platform compatibility.
-        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        assert!(!resolver.is_context_dependent_path(&manifest));
-    }
-
-    #[test]
-    fn resolver_default_context_for_asset() {
-        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let asset_path = format!("{}/Cargo.toml", manifest);
-
-        let resolver = DefaultResolver::new();
-        let ctx = resolver.create_default_context_for_asset(&asset_path);
-        assert!(!ctx.search_paths().is_empty());
     }
 
     #[test]
