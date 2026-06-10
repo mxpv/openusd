@@ -278,26 +278,13 @@ impl Default for StagePopulationMask {
 /// using the composed path verbatim. A variant target (see
 /// [`for_local_direct_variant`](Self::for_local_direct_variant)) carries a
 /// mapping that inserts the `{set=sel}` segment so child opinions land inside
-/// the variant.
+/// the variant. An arc target (see
+/// [`Stage::edit_target_for_node`](Stage::edit_target_for_node)) carries the
+/// referencing/inheriting arc's `map_to_root`, so authoring writes into the
+/// arc's source layer.
 //
-// TODO: arc-based constructor (`for_node`) routing writes into a specific
-// reference / specialize arc, mirroring C++
-// `UsdEditTarget(UsdPrim, UsdEditTarget::Reference)`. Needs a narrow
-// `pcp::IndexCache` accessor exposing the strongest matching node's `map_to_root`
-// plus the per-layer sublayer offset.
-//
-// TODO: re-map embedded relationship / connection target paths in
-// `map_to_spec_path` (C++ `MapToSpecPath` step 2), rejecting paths whose
-// embedded targets fall outside the mapping's co-domain.
-//
-// TODO: validate target by `pcp::LayerStackIdentifier` instead of a bare
-// `usize` so an `EditTarget` constructed against one stage can't be applied
-// to another, and so layer reordering (when supported) doesn't silently
-// retarget writes.
-//
-// TODO: add convenience constructors like `EditTarget::root(&stage)` /
-// `EditTarget::session(&stage)` so callers don't have to do
-// `session_layer_count`-arithmetic to address common slots.
+// TODO: key the target by a real `pcp::LayerStackIdentifier` once one exists;
+// cross-stage misuse is caught today only by the coarser `stage_id` tag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditTarget {
     /// Canonical identifier of the layer this target writes to. Stored as a
@@ -311,6 +298,43 @@ pub struct EditTarget {
     /// [`map_to_spec_path`](Self::map_to_spec_path). Identity for a local
     /// target, so the default authoring path is unchanged.
     mapping: pcp::MapFunction,
+    /// Identity of the stage this target was constructed against, or `None` for
+    /// a stage-agnostic target ([`for_layer`](Self::for_layer) /
+    /// [`for_local_direct_variant`](Self::for_local_direct_variant)). A
+    /// `Some` target applied to a different stage is rejected by
+    /// [`set_edit_target`](Stage::set_edit_target), so an arc target built
+    /// against one stage's composition can't silently retarget another's.
+    stage_id: Option<u64>,
+}
+
+/// Composition arc kind selecting which arc on a prim an arc-based
+/// [`EditTarget`] writes into (C++ `UsdEditTarget::Reference` / `Inherit` /
+/// `Specialize` / `Payload`). Built via
+/// [`Stage::edit_target_for_node`](Stage::edit_target_for_node) or
+/// [`Prim::edit_target_for_arc`](super::Prim::edit_target_for_arc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditTargetArc {
+    /// A reference arc.
+    Reference,
+    /// A payload arc (the payload must be loaded to contribute a node).
+    Payload,
+    /// An inherit arc.
+    Inherit,
+    /// A specialize arc.
+    Specialize,
+}
+
+impl EditTargetArc {
+    /// Whether this selector matches a composed node's arc type.
+    fn matches(self, arc: pcp::ArcType) -> bool {
+        matches!(
+            (self, arc),
+            (EditTargetArc::Reference, pcp::ArcType::Reference)
+                | (EditTargetArc::Payload, pcp::ArcType::Payload)
+                | (EditTargetArc::Inherit, pcp::ArcType::Inherit)
+                | (EditTargetArc::Specialize, pcp::ArcType::Specialize)
+        )
+    }
 }
 
 impl EditTarget {
@@ -320,6 +344,7 @@ impl EditTarget {
         Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::identity(),
+            stage_id: None,
         }
     }
 
@@ -335,6 +360,7 @@ impl EditTarget {
         Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
+            stage_id: None,
         }
     }
 
@@ -347,10 +373,75 @@ impl EditTarget {
     /// authoring should write at. Returns `None` when `scene_path` falls
     /// outside the mapping's co-domain (C++ returns an empty `SdfPath`).
     ///
-    /// Mirrors C++ `UsdEditTarget::MapToSpecPath`, which queries the mapping in
-    /// the target-to-source direction.
+    /// Mirrors C++ `UsdEditTarget::MapToSpecPath`. First the path is mapped in
+    /// the target-to-source direction. Then any relationship/connection target
+    /// path embedded in a `[..]` bracket is re-mapped the same way, and the
+    /// whole result is rejected (`None`) when that embedded target falls outside
+    /// the co-domain — for a restricted arc mapping, a target naming a prim the
+    /// arc does not reach cannot be authored. The re-mapped target is stripped of
+    /// variant selections, which a target path never carries.
     pub fn map_to_spec_path(&self, scene_path: &sdf::Path) -> Option<sdf::Path> {
-        self.mapping.map_target_to_source(scene_path)
+        let mapped = self.mapping.map_target_to_source(scene_path)?;
+        match scene_path.embedded_target_path() {
+            None => Some(mapped),
+            Some(target) => {
+                let mapped_target = self
+                    .mapping
+                    .map_target_to_source(&target)?
+                    .strip_all_variant_selections();
+                mapped.replace_embedded_target(&mapped_target)
+            }
+        }
+    }
+
+    /// Whether this target names no layer, so it can author nothing (C++
+    /// `UsdEditTarget::IsNull`). The default target of a stage with no layers.
+    pub fn is_null(&self) -> bool {
+        self.layer_identifier.is_empty()
+    }
+
+    /// Whether this target names a layer and carries a mapping that maps
+    /// something (C++ `UsdEditTarget::IsValid`). Validity does not guarantee the
+    /// layer is present in any particular stage — [`Stage::set_edit_target`]
+    /// performs that check.
+    pub fn is_valid(&self) -> bool {
+        !self.is_null() && !self.mapping.is_null()
+    }
+
+    /// Composes this (stronger) target over a `weaker` one, returning a target
+    /// on this target's layer whose mapping routes a scene path through the
+    /// weaker context first, then this refinement (C++
+    /// `UsdEditTarget::ComposeOver`). A null target composes to the other.
+    ///
+    /// This expresses a deeper edit relative to a broader one — e.g. a variant
+    /// refinement (`/Source{set=sel}`) over a reference target
+    /// (`/Source ↔ /World/MyPrim`) yields a target that authors a stage write at
+    /// `/World/MyPrim/Child` into `/Source{set=sel}Child`.
+    ///
+    /// Both targets should belong to the same stage (or be stage-agnostic); the
+    /// result carries that shared stage identity. Composing targets bound to
+    /// different stages would mix unrelated namespaces, so it yields a null
+    /// target instead — keeping the cross-stage guard intact rather than
+    /// producing a target one stage would wrongly accept.
+    pub fn compose_over(&self, weaker: &EditTarget) -> EditTarget {
+        if self.is_null() {
+            return weaker.clone();
+        }
+        if weaker.is_null() {
+            return self.clone();
+        }
+        if matches!((self.stage_id, weaker.stage_id), (Some(a), Some(b)) if a != b) {
+            return EditTarget {
+                layer_identifier: String::new(),
+                mapping: pcp::MapFunction::null(),
+                stage_id: None,
+            };
+        }
+        EditTarget {
+            layer_identifier: self.layer_identifier.clone(),
+            mapping: weaker.mapping.compose(&self.mapping),
+            stage_id: self.stage_id.or(weaker.stage_id),
+        }
     }
 }
 
@@ -407,6 +498,21 @@ pub enum StageAuthoringError {
         layer: String,
     },
 
+    /// No composition arc of the requested kind authors a spec on the prim, so
+    /// no arc-based edit target can be built for it.
+    #[error("prim {path} has no {arc:?} arc to author into")]
+    NoArcNode {
+        /// The prim path the arc target was requested for.
+        path: sdf::Path,
+        /// The arc kind that was requested.
+        arc: EditTargetArc,
+    },
+
+    /// The edit target was built against a different stage's composition and
+    /// cannot be applied here.
+    #[error("edit target belongs to a different stage")]
+    EditTargetWrongStage,
+
     /// The path being authored falls outside the current edit target's
     /// mapping co-domain, so it cannot be translated to a layer-local spec
     /// path. The local and variant edit targets map every path (their mapping
@@ -451,7 +557,13 @@ pub struct StageInner {
     interpolation_type: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
+    /// Process-unique identity, stamped onto arc-based edit targets so one built
+    /// against this stage's composition can't be applied to another stage.
+    stage_id: u64,
 }
+
+/// Source of [`StageInner::stage_id`] values, monotonic for the process.
+static NEXT_STAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A composed USD stage.
 ///
@@ -513,12 +625,85 @@ impl Stage {
         self.edit_target.borrow().clone()
     }
 
+    /// An [`EditTarget`] tagged with this stage's identity, so it is rejected by
+    /// another stage's [`set_edit_target`](Self::set_edit_target).
+    fn bound_target(&self, layer_identifier: String, mapping: pcp::MapFunction) -> EditTarget {
+        EditTarget {
+            layer_identifier,
+            mapping,
+            stage_id: Some(self.stage_id),
+        }
+    }
+
+    /// Edit target for the stage's root layer, with an identity mapping. The
+    /// target installed by default when a stage is opened.
+    pub fn edit_target_root(&self) -> EditTarget {
+        let identifier = self
+            .layers()
+            .root_layer()
+            .map(|l| l.identifier().to_string())
+            .unwrap_or_default();
+        self.bound_target(identifier, pcp::MapFunction::identity())
+    }
+
+    /// Edit target for the stage's strongest session layer, or `None` when the
+    /// stage has no session layer.
+    pub fn edit_target_session(&self) -> Option<EditTarget> {
+        let layers = self.layers();
+        let &id = layers.session_layers().first()?;
+        Some(self.bound_target(layers.identifier(id).to_string(), pcp::MapFunction::identity()))
+    }
+
+    /// Edit target that authors into the source layer of the strongest `arc`
+    /// composition arc on `prim_path` (C++ `UsdEditTarget(UsdPrim, ...)`).
+    ///
+    /// Builds (or reuses) the prim's composition index, finds the strongest node
+    /// of the requested arc kind that authors a spec, and captures that node's
+    /// target layer and namespace mapping, so authoring a composed path lands at
+    /// the corresponding spec path in the arc's source layer. Returns
+    /// [`StageAuthoringError::NoArcNode`] when `prim_path` has no such arc (an
+    /// unloaded payload contributes no node).
+    ///
+    /// When `prim_path` is an instance proxy, the target addresses the shared
+    /// prototype: its mapping is expressed in the `/__Prototype_N` namespace
+    /// (not the proxy's), so authoring goes through prototype-namespace paths and
+    /// affects every instance. A proxy-namespace path does not reach the arc
+    /// source — it falls outside the mapping's explicit domain — so author
+    /// through the prototype path obtained from
+    /// [`Prim::prototype`](super::Prim::prototype).
+    //
+    // TODO: apply the captured mapping's `time_offset` when authoring time
+    // samples through an arc target with a non-identity layer offset; today
+    // `map_to_spec_path` maps namespace only, so samples land at the composed
+    // (stage) time rather than the inverse-mapped source time.
+    pub fn edit_target_for_node(
+        &self,
+        prim_path: &sdf::Path,
+        arc: EditTargetArc,
+    ) -> Result<EditTarget, StageAuthoringError> {
+        let info = {
+            let graph = self.layers.borrow();
+            let mut cache = self.cache.borrow_mut();
+            cache.edit_target_node_info(&graph, prim_path, |a| arc.matches(a))?
+        };
+        let (layer_identifier, mapping) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
+            path: prim_path.clone(),
+            arc,
+        })?;
+        Ok(self.bound_target(layer_identifier, mapping))
+    }
+
     /// Replace the current edit target. Subsequent authoring calls write to
     /// the new target's layer.
     ///
     /// Validates that `target.layer_identifier()` names a layer in this stage so
     /// a bad target surfaces here, not on some later unrelated authoring call.
+    /// An arc target built against a different stage is rejected with
+    /// [`StageAuthoringError::EditTargetWrongStage`].
     pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
+        if target.stage_id.is_some_and(|id| id != self.stage_id) {
+            return Err(StageAuthoringError::EditTargetWrongStage);
+        }
         if self.layers().id_of(target.layer_identifier()).is_none() {
             return Err(StageAuthoringError::LayerNotFound {
                 layer: target.layer_identifier().to_string(),
@@ -1649,10 +1834,15 @@ impl<R: ar::Resolver> StageBuilder<R> {
         // invalid relocates); the cache holds only the one-shot collection
         // errors. `Stage::composition_errors` concatenates the two.
         let graph = pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        let stage_id = NEXT_STAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The root layer is the strongest authoring target by default; an
         // empty graph (no layers) has none, so the target names no layer and
-        // resolves to nothing at author time.
-        let edit_target = EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default());
+        // resolves to nothing at author time. Tagged with `stage_id` so it
+        // matches [`Stage::edit_target_root`].
+        let edit_target = EditTarget {
+            stage_id: Some(stage_id),
+            ..EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default())
+        };
         Stage(Rc::new(StageInner {
             layers: RefCell::new(graph),
             cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
@@ -1661,6 +1851,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
+            stage_id,
         }))
     }
 }

@@ -31,7 +31,7 @@
 //! routes invalidation through [`crate::pcp::Changes`], so only the prim
 //! indices observably affected by the write are dropped.
 
-use super::{Attribute, Relationship, Stage, StageAuthoringError};
+use super::{Attribute, EditTarget, EditTargetArc, Relationship, Stage, StageAuthoringError};
 use crate::tf::Token;
 use crate::{pcp, sdf};
 
@@ -58,6 +58,13 @@ impl Prim {
     /// The stage this handle is anchored to.
     pub fn stage(&self) -> &Stage {
         &self.stage
+    }
+
+    /// Edit target that authors into the source layer of this prim's strongest
+    /// `arc` composition arc (C++ `UsdEditTarget(UsdPrim, ...)`). Delegates to
+    /// [`Stage::edit_target_for_node`](Stage::edit_target_for_node).
+    pub fn edit_target_for_arc(&self, arc: EditTargetArc) -> Result<EditTarget, StageAuthoringError> {
+        self.stage.edit_target_for_node(&self.path, arc)
     }
 
     /// Set the prim's `typeName` field on the edit target's layer.

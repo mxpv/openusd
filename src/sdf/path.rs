@@ -249,6 +249,57 @@ impl Path {
         Some((prim, name))
     }
 
+    /// Returns the relationship/connection target path embedded in this path's
+    /// first `[..]` bracket, or `None` when there is none.
+    ///
+    /// ```text
+    /// "/A.rel[/T].attr" -> Some("/T")
+    /// "/A.attr[/T.x]"   -> Some("/T.x")
+    /// "/A/B"            -> None
+    /// ```
+    ///
+    /// The closing `]` is the one balanced with the first `[`, so a target that
+    /// itself carries relational-target syntax (`/A.rel[/B.rel2[/C]]`) is
+    /// extracted whole. A later, separate bracket pair (e.g. a connection
+    /// `.mapper[..]`) is left untouched.
+    pub fn embedded_target_path(&self) -> Option<Path> {
+        let (open, close) = self.target_brackets()?;
+        Some(Path::from_str_unchecked(&self.path[open + 1..close]))
+    }
+
+    /// Returns this path with the target path in its first `[..]` bracket
+    /// replaced by `new_target`, or `None` when there is no bracket. The
+    /// inverse of [`embedded_target_path`](Self::embedded_target_path).
+    pub fn replace_embedded_target(&self, new_target: &Path) -> Option<Path> {
+        let (open, close) = self.target_brackets()?;
+        let mut replaced = String::with_capacity(self.path.len() + new_target.as_str().len());
+        replaced.push_str(&self.path[..=open]);
+        replaced.push_str(new_target.as_str());
+        replaced.push_str(&self.path[close..]);
+        Some(Path::from_str_unchecked(&replaced))
+    }
+
+    /// Byte positions of the first `[` and the `]` balanced with it, or `None`
+    /// when there is no bracket or it is unclosed. Nested brackets are tracked by
+    /// depth so a target carrying its own `[..]` is matched whole.
+    fn target_brackets(&self) -> Option<(usize, usize)> {
+        let open = self.path.find('[')?;
+        let mut depth = 0u32;
+        for (i, byte) in self.path.bytes().enumerate().skip(open) {
+            match byte {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((open, i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Returns the final namespace element of this path and its kind, or `None`
     /// for the pseudo-root `/` and empty paths. The inverse of the
     /// `append_property` / `append_variant_selection` / child-`append_path`
@@ -769,6 +820,48 @@ mod tests {
         assert_eq!(Path::new("/A{x=y}B").unwrap().prim_element_count(), 2);
         assert_eq!(Path::new("/A{x=y}").unwrap().prim_element_count(), 1);
         assert_eq!(Path::abs_root().prim_element_count(), 0);
+    }
+
+    #[test]
+    fn embedded_target_get() {
+        assert_eq!(
+            Path::new("/A.rel[/T].attr").unwrap().embedded_target_path(),
+            Some(Path::new("/T").unwrap())
+        );
+        assert_eq!(
+            Path::new("/A.attr[/T.x]").unwrap().embedded_target_path(),
+            Some(Path::new("/T.x").unwrap())
+        );
+        // A nested target bracket is matched whole, not truncated at the inner `]`.
+        assert_eq!(
+            Path::new("/A.rel[/B.rel2[/C]].attr").unwrap().embedded_target_path(),
+            Some(Path::new("/B.rel2[/C]").unwrap())
+        );
+        // An unclosed bracket has no balanced close.
+        assert_eq!(Path::new("/A.rel[/T").unwrap().embedded_target_path(), None);
+        assert_eq!(Path::new("/A/B").unwrap().embedded_target_path(), None);
+    }
+
+    #[test]
+    fn embedded_target_replace() {
+        let t = Path::new("/Source/Child").unwrap();
+        assert_eq!(
+            Path::new("/A.rel[/T].attr")
+                .unwrap()
+                .replace_embedded_target(&t)
+                .unwrap()
+                .as_str(),
+            "/A.rel[/Source/Child].attr"
+        );
+        assert_eq!(
+            Path::new("/A.attr[/T.x]")
+                .unwrap()
+                .replace_embedded_target(&t)
+                .unwrap()
+                .as_str(),
+            "/A.attr[/Source/Child]"
+        );
+        assert!(Path::new("/A/B").unwrap().replace_embedded_target(&t).is_none());
     }
 
     #[test]

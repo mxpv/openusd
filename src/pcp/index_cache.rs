@@ -28,7 +28,7 @@ use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
 use super::prim_index::{AncestorArc, CompositionContext, PrimIndex};
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
-use super::{Error, LayerId, VariantFallbackMap};
+use super::{Error, LayerId, MapFunction, VariantFallbackMap};
 
 /// Lazily-built composition graph.
 ///
@@ -745,6 +745,42 @@ impl IndexCache {
     pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         self.ensure_index(graph, path)?;
         Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
+    }
+
+    /// Captures the target layer identifier and namespace mapping of the
+    /// strongest node on `prim_path` whose arc satisfies `matches`, for building
+    /// an arc-based edit target (C++ `UsdEditTarget(UsdPrim, ...)`).
+    ///
+    /// Considers only nodes that author a spec and are not permission-denied, in
+    /// strength order. Returns `None` when none match. The mapping is the node's
+    /// `map_to_root` with variant selections stripped (the
+    /// [`map_to_root_for_targets`](PrimIndex::map_to_root_for_targets) form), so
+    /// it is oriented spec → scene and ready to query in reverse for authoring.
+    ///
+    /// An instance-proxy path redirects to its shared prototype (the same
+    /// [`effective_path`](Self::effective_path) redirection value resolution
+    /// uses), so the arc captured is the prototype's, not an instance-local
+    /// opinion that composition discards. The returned mapping is therefore
+    /// oriented in the prototype's namespace, not the proxy's.
+    pub(crate) fn edit_target_node_info(
+        &mut self,
+        graph: &LayerGraph,
+        prim_path: &Path,
+        matches: impl Fn(ArcType) -> bool,
+    ) -> Result<Option<(String, MapFunction)>> {
+        let prim_path = self.effective_path(graph, prim_path)?.prim_path();
+        self.ensure_index(graph, &prim_path)?;
+        let Some(index) = self.indices.get(&prim_path) else {
+            return Ok(None);
+        };
+        Ok(index.nodes().find_map(|node| {
+            (matches(node.arc) && node.has_specs() && !node.is_permission_denied()).then(|| {
+                (
+                    graph.identifier(node.layer_id()).to_string(),
+                    index.map_to_root_for_targets(node),
+                )
+            })
+        }))
     }
 
     /// Resolves a field value from the strongest opinion across all composition nodes.

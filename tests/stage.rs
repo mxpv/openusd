@@ -5,7 +5,8 @@
 
 use anyhow::Result;
 use openusd::usd::{
-    EditTarget, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError, StagePopulationMask,
+    EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    StagePopulationMask,
 };
 use openusd::{gf, pcp, sdf, tf, usd};
 
@@ -1601,6 +1602,233 @@ fn define_prim_at_variant_leaf_errors() -> Result<()> {
         stage.define_prim("/Prim"),
         Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
     ));
+    Ok(())
+}
+
+/// In-memory stage with `/Prim` inheriting a local class `/_Class`, so the
+/// inherit arc's source layer is the writable root.
+fn inherit_stage() -> Result<Stage> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/_Class")?;
+    stage.define_prim("/Prim")?.set_metadata(
+        sdf::FieldKey::InheritPaths.as_str(),
+        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/_Class")?])),
+    )?;
+    Ok(stage)
+}
+
+/// An arc target on a reference captures the referenced layer and maps composed
+/// paths down into its namespace.
+#[test]
+fn edit_target_for_reference_node() -> Result<()> {
+    let stage = Stage::open(&fixture_path("ref_external.usda"))?;
+    let target = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+    assert!(target.layer_identifier().ends_with("ref_target.usda"));
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/World/MyPrim/Child")?),
+        Some(sdf::path("/Source/Child")?)
+    );
+    Ok(())
+}
+
+/// An inherit arc target captures the class-owning layer and maps the composed
+/// path to the class path.
+#[test]
+fn edit_target_for_inherit_node() -> Result<()> {
+    let stage = inherit_stage()?;
+    let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Inherit)?;
+    assert_eq!(target.layer_identifier(), stage.root_layer().identifier());
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/Prim/Child")?),
+        Some(sdf::path("/_Class/Child")?)
+    );
+    Ok(())
+}
+
+/// A prim with no arc of the requested kind has no arc target.
+#[test]
+fn edit_target_no_matching_arc() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Prim")?;
+    assert!(matches!(
+        stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference),
+        Err(StageAuthoringError::NoArcNode { .. })
+    ));
+    Ok(())
+}
+
+/// Authoring through an inherit arc target lands the opinion at the class path
+/// in the source layer, not at the composed path, and it composes back.
+#[test]
+fn edit_target_authors_into_class() -> Result<()> {
+    use openusd::sdf::AbstractData;
+
+    let stage = inherit_stage()?;
+    let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Inherit)?;
+    {
+        let _ctx = stage.edit_context(target)?;
+        stage.define_prim("/Prim/Child")?;
+    }
+    assert!(stage.prim_at("/Prim/Child").is_valid()?);
+    assert!(stage.root_layer().has_spec(&sdf::path("/_Class/Child")?));
+    assert!(!stage.root_layer().has_spec(&sdf::path("/Prim/Child")?));
+    Ok(())
+}
+
+/// `map_to_spec_path` re-maps an embedded relationship target through the same
+/// arc mapping (C++ `MapToSpecPath` step 2).
+#[test]
+fn map_spec_path_remaps_embedded_target() -> Result<()> {
+    let stage = Stage::open(&fixture_path("ref_external.usda"))?;
+    let target = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/World/MyPrim.rel[/World/MyPrim/Child]")?),
+        Some(sdf::path("/Source.rel[/Source/Child]")?)
+    );
+    Ok(())
+}
+
+/// An embedded target outside the arc's co-domain rejects the whole path.
+#[test]
+fn map_spec_path_rejects_outside_target() -> Result<()> {
+    let stage = Stage::open(&fixture_path("ref_external.usda"))?;
+    let target = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/World/MyPrim.rel[/Elsewhere]")?),
+        None
+    );
+    Ok(())
+}
+
+/// A local target's identity mapping leaves an embedded target untouched.
+#[test]
+fn map_spec_path_local_keeps_target() -> Result<()> {
+    let target = EditTarget::for_layer("test");
+    let path = sdf::path("/A.rel[/B].attr")?;
+    assert_eq!(target.map_to_spec_path(&path), Some(path));
+    Ok(())
+}
+
+/// A variant target maps an embedded target without leaving a variant
+/// selection on the target path (target paths never carry selections).
+#[test]
+fn map_spec_path_variant_strips_target() -> Result<()> {
+    let target = EditTarget::for_local_direct_variant("test", sdf::path("/Prim{set=sel}")?);
+    assert_eq!(
+        target.map_to_spec_path(&sdf::path("/Prim.rel[/Prim/T]")?),
+        Some(sdf::path("/Prim{set=sel}.rel[/Prim/T]")?)
+    );
+    Ok(())
+}
+
+/// `edit_target_root` names the root layer with an identity mapping and equals
+/// the default target installed at open.
+#[test]
+fn edit_target_root_matches_default() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let target = stage.edit_target_root();
+    assert_eq!(target.layer_identifier(), stage.root_layer().identifier());
+    assert_eq!(target.map_to_spec_path(&sdf::path("/A/B")?), Some(sdf::path("/A/B")?));
+    assert_eq!(stage.edit_target(), target);
+    Ok(())
+}
+
+/// `edit_target_session` names the strongest session layer, or is `None` when
+/// the stage has no session layer.
+#[test]
+fn edit_target_session() -> Result<()> {
+    let stage = open_with_session()?;
+    let target = stage.edit_target_session().expect("session layer");
+    assert_eq!(
+        target.layer_identifier(),
+        stage.session_layer().expect("session layer").identifier()
+    );
+
+    assert!(in_memory_stage()?.edit_target_session().is_none());
+    Ok(())
+}
+
+/// A stage-bound target is rejected by a different stage; a stage-agnostic
+/// `for_layer` target is still accepted.
+#[test]
+fn edit_target_wrong_stage_rejected() -> Result<()> {
+    let stage_a = in_memory_stage()?;
+    let stage_b = in_memory_stage()?;
+    let bound = stage_a.edit_target_root();
+    assert!(matches!(
+        stage_b.set_edit_target(bound),
+        Err(StageAuthoringError::EditTargetWrongStage)
+    ));
+    let root_b = stage_b.root_layer().identifier().to_string();
+    assert!(stage_b.set_edit_target(EditTarget::for_layer(root_b)).is_ok());
+    Ok(())
+}
+
+/// A target naming a layer is valid; one naming no layer is null and invalid.
+#[test]
+fn edit_target_null_and_valid() -> Result<()> {
+    let valid = EditTarget::for_layer("layer");
+    assert!(!valid.is_null());
+    assert!(valid.is_valid());
+
+    let null = EditTarget::for_layer("");
+    assert!(null.is_null());
+    assert!(!null.is_valid());
+    Ok(())
+}
+
+/// `compose_over` layers a variant refinement onto a reference target, so a
+/// stage write resolves through both into the nested spec path; a null target
+/// composes to the other.
+#[test]
+fn edit_target_compose_over() -> Result<()> {
+    let stage = Stage::open(&fixture_path("ref_external.usda"))?;
+    let weaker = stage.edit_target_for_node(&sdf::path("/World/MyPrim")?, EditTargetArc::Reference)?;
+    let stronger = EditTarget::for_local_direct_variant(weaker.layer_identifier(), sdf::path("/Source{set=sel}")?);
+
+    let composed = stronger.compose_over(&weaker);
+    assert_eq!(composed.layer_identifier(), weaker.layer_identifier());
+    assert_eq!(
+        composed.map_to_spec_path(&sdf::path("/World/MyPrim/Child")?),
+        Some(sdf::path("/Source{set=sel}Child")?)
+    );
+
+    assert_eq!(EditTarget::for_layer("").compose_over(&weaker), weaker);
+    Ok(())
+}
+
+/// Composing targets bound to different stages yields a null target, keeping
+/// the cross-stage guard intact.
+#[test]
+fn compose_over_cross_stage_null() -> Result<()> {
+    let stage_a = in_memory_stage()?;
+    let stage_b = in_memory_stage()?;
+    let composed = stage_a.edit_target_root().compose_over(&stage_b.edit_target_root());
+    assert!(composed.is_null());
+    Ok(())
+}
+
+/// An arc target on an instance-proxy path redirects to the shared prototype:
+/// it finds the arc authored inside the prototype and maps in the prototype's
+/// namespace, so a prototype path remaps to the arc source while the proxy
+/// path does not reach it.
+#[test]
+fn edit_target_for_instance_proxy() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_nested_reference.usda"))?;
+    let proxy = sdf::path("/World/Inst/OtherChild")?;
+    let target = stage.edit_target_for_node(&proxy, EditTargetArc::Reference)?;
+    assert!(target.layer_identifier().ends_with("instancing_nested_reference.usda"));
+
+    // The prototype-namespace path remaps to the shared arc source; the proxy
+    // path falls outside the mapping's domain, so it does not reach that source.
+    let proto = stage
+        .prim_at("/World/Inst")
+        .prototype()?
+        .expect("instance has a prototype");
+    let proto_child = proto.append_path(sdf::path("OtherChild")?)?;
+    let source = target.map_to_spec_path(&proto_child).expect("prototype path maps");
+    assert_ne!(source, proto_child, "prototype path remaps to the arc source");
+    assert_ne!(target.map_to_spec_path(&proxy), Some(source));
     Ok(())
 }
 
