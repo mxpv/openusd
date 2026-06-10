@@ -84,11 +84,11 @@
 //! child inherits through the seed-deepened parent graph, whose propagated copies
 //! re-evaluate their arcs at the deepened path); and relocates (`eval_node_relocations`
 //! composes a relocation source as a sub-index and grafts it, with the
-//! prohibited-prim elision for salted earth). Known gaps with their reasons are
-//! tracked inline and in the [`pcp` module docs](super): variant-gated and
-//! cross-arc implied relocations (`eval_implied_relocations`), specializes/inherit
-//! authored inside a selected variant, and relationship/connection target
-//! remapping through relocates.
+//! prohibited-prim elision for salted earth, and `eval_implied_relocations`
+//! grafts the implied relocate up to the grandparent). Known gaps with their
+//! reasons are tracked inline and in the [`pcp` module docs](super):
+//! specializes/inherit authored inside a selected variant, and
+//! relationship/connection target remapping through relocates.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -1276,18 +1276,94 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Carries a non-ancestral relocate up to the grandparent (C++
     /// `_EvalImpliedRelocations`): when the relocation source maps through the
-    /// parent's arc into the grandparent's namespace, C++ adds an inert `Relocate`
-    /// arc on the grandparent so a sub-root reference to it still sees the
-    /// relocation. Currently a no-op: the common stage-level case maps to nothing,
-    /// and the cross-arc graft is not yet ported.
+    /// parent's arc into the grandparent's namespace, an inert `Relocate`
+    /// placeholder is added on the grandparent so the class-based arcs implied up
+    /// the graph still cross the relocation, and a sub-root reference to the
+    /// grandparent still sees the relocated prim.
     ///
-    // TODO(relocates): port the grandparent graft together with the spooky
-    // implied-inherit-across-relocate machinery it feeds (C++ `_AddArc` for the
-    // gp relocate, `_EvalImpliedClassTree`'s relocate branch, and
-    // `_FindMatchingChild`'s relocate-arc comparison). The graft alone composes
-    // no new opinion, so it lands with that cluster (TrickySpookyInherits*,
-    // TrickyConnectionToRelocatedAttribute, TrickyMultipleRelocationsAndClasses2).
-    fn eval_implied_relocations(&mut self, _node: NodeId) -> BuildResult<()> {
+    /// The placeholder contributes no specs itself (C++ `_AddArc` with
+    /// `directNodeShouldContributeSpecs = false`); its purpose is to give
+    /// [`eval_implied_class_tree`](Self::eval_implied_class_tree)'s relocate
+    /// branch a node to fold the relocation into, and to record the dependency on
+    /// the source site. The grandparent mapping can fail — a sub-root reference
+    /// whose domain excludes the source has no corresponding site there — and
+    /// then there is no implied relocation (C++ `gpRelocSource.IsEmpty()`, the
+    /// `SubrootReferenceAndRelocates` case).
+    fn eval_implied_relocations(&mut self, node: NodeId) -> BuildResult<()> {
+        // The task is enqueued solely from `eval_node_relocations` for a
+        // freshly-grafted relocate node, so `node` is always a direct (non-
+        // ancestral) relocate here (C++ `node.GetArcType() == PcpArcTypeRelocate
+        // && !node.IsDueToAncestor()`).
+        debug_assert_eq!(
+            self.node(node).arc,
+            ArcType::Relocate,
+            "EvalImpliedRelocations is enqueued only for relocate nodes"
+        );
+        let Some(parent) = self.node(node).parent() else {
+            return Ok(());
+        };
+        let Some(gp) = self.node(parent).parent() else {
+            return Ok(());
+        };
+        // The synthetic tree root stands in for C++'s parentless root node: when
+        // the relocate's parent is the local root, C++ sees no grandparent and
+        // grafts nothing (a stage-level relocate onto a root-level prim).
+        if gp == self.output.root {
+            return Ok(());
+        }
+
+        // Map the relocation source (the relocate node's own path) up through the
+        // parent's arc into the grandparent's namespace.
+        let Some(gp_reloc_source) = self
+            .node(parent)
+            .map_to_parent
+            .map_source_to_target(&self.node(node).path)
+        else {
+            return Ok(());
+        };
+
+        // Skip if the grandparent already carries this implied relocate, which
+        // happens when the same relocation rides up several arcs (C++ scans the
+        // grandparent's `Relocate` children for one at `gpRelocSource`).
+        let already = self.node(gp).children().iter().any(|&c| {
+            let cn = self.node(c);
+            cn.arc == ArcType::Relocate && cn.path == gp_reloc_source
+        });
+        if already {
+            return Ok(());
+        }
+
+        // Add the inert placeholder with an identity map and the relocate node as
+        // its origin. Its site is exactly `(gp_layers, gp_reloc_source)`, so
+        // `has_specs` is composed from those before they move into the node.
+        let gp_layers = self.node(gp).layer_stack().to_vec();
+        let has_specs = self.stack_has_spec(&gp_layers, &gp_reloc_source);
+        let new_node = self.output.add_site_child(
+            gp,
+            gp_layers,
+            gp_reloc_source,
+            ArcType::Relocate,
+            MapFunction::identity(),
+            false,
+        );
+        let n = &mut self.output.nodes[new_node.idx()];
+        n.origin = Some(node);
+        // Inert for value resolution, but its site is a relocation source, so
+        // `RELOCATE_SOURCE` keeps it in `dependency_nodes`: an edit at the source
+        // must recompose the prim reached through the relocation.
+        n.flags |= NodeFlags::INERT | NodeFlags::RELOCATE_SOURCE;
+        // The placeholder contributes neither directly nor ancestrally (C++
+        // `SetSpecContributionRestrictedDepth(1)`).
+        n.restriction_depth = 1;
+        n.has_specs = has_specs;
+        // Cascade: the placeholder is itself a relocate node, so the relocation
+        // keeps propagating up the next ancestor arc (C++ `AddTasksForNode` keeps
+        // `EvalImpliedRelocations` for a relocate arc; `_ScanArcs` strips the
+        // expressed-arc and `EvalNodeRelocations` tasks on this inert node). The
+        // chain climbs one ancestor per step and stops at the `gp == root` guard,
+        // so it terminates in the finite graph depth; the `already` dedup keeps
+        // two relocations that converge on one grandparent from grafting twice.
+        self.tasks.push(Task::new(TaskKind::EvalImpliedRelocations, new_node));
         Ok(())
     }
 
@@ -2331,9 +2407,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Whether `node` is only a placeholder implied under a relocate node (C++
     /// `_IsRelocatesPlaceholderImpliedArc`): its parent is a relocate at the same
     /// site and is not its origin. Such placeholders are not valid opinion
-    /// sources, so specializes propagation skips them. Returns false until
-    /// `TODO(relocates)` composes relocate nodes; the guard mirrors C++ so the
-    /// propagation stays correct once they exist.
+    /// sources, so specializes propagation skips them.
     fn is_relocates_placeholder_implied_arc(&self, node: NodeId) -> bool {
         let n = self.node(node);
         let Some(parent) = n.parent() else {
@@ -3153,6 +3227,97 @@ mod tests {
                 .iter()
                 .any(|n| n.path.as_str() == "/A/Child" && n.arc == ArcType::Reference && n.has_specs()),
             "the ancestral reference contributes the child's opinion at the deepened site"
+        );
+    }
+
+    /// Composes `path` and every namespace ancestor as the cache does, returning
+    /// the target prim's composition graph — a graph-returning wrapper over the
+    /// shared [`build_with_fallbacks`](crate::pcp::prim_index::tests::build_with_fallbacks).
+    fn compose_chain(s: &LayerGraph, path: &str) -> PrimIndexGraph {
+        crate::pcp::prim_index::tests::build_with_fallbacks(s, path, crate::pcp::VariantFallbackMap::new())
+            .graph()
+            .clone()
+    }
+
+    /// The implied relocate placeholder grafted by `eval_implied_relocations`: a
+    /// `Relocate` node whose origin is itself a `Relocate` node (the relocate it
+    /// was implied from), which tells it apart from a real relocate node (whose
+    /// origin is the relocation target). Searches the whole graph, since the
+    /// placeholder is grafted onto the relocate's grandparent — the local root in
+    /// these tests, but any ancestor in the general case.
+    fn implied_placeholder(graph: &PrimIndexGraph) -> Option<NodeId> {
+        graph.iter().enumerate().find_map(|(i, n)| {
+            (n.arc == ArcType::Relocate && n.origin().is_some_and(|o| graph[o.idx()].arc == ArcType::Relocate))
+                .then_some(NodeId(i as u32))
+        })
+    }
+
+    /// A relocate composed beneath a reference grafts an inert relocate
+    /// placeholder onto the grandparent at the source mapped into the
+    /// grandparent's namespace, so implied class arcs keep crossing the
+    /// relocation (C++ `_EvalImpliedRelocations`).
+    #[test]
+    fn implied_relocation_grafts_placeholder() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n",
+            ),
+            (
+                "model.usd",
+                "#usda 1.0\n(\n    relocates = { </Model/Rig>: </Model/Scope> }\n)\ndef \"Model\" {\n  def \"Rig\" { custom double x = 1 }\n}\n",
+            ),
+        ]);
+        let graph = compose_chain(&s, "/Ref/Scope");
+        let id = implied_placeholder(&graph).expect("an implied relocate placeholder is grafted onto the grandparent");
+        let placeholder = &graph[id.idx()];
+        assert_eq!(
+            placeholder.path.as_str(),
+            "/Ref/Rig",
+            "the source maps through the reference into the grandparent's namespace"
+        );
+        assert!(placeholder.is_inert(), "the placeholder contributes no specs");
+        assert!(
+            placeholder.is_relocate_source(),
+            "the placeholder records the source-site dependency"
+        );
+    }
+
+    /// When the relocation source lies outside a sub-root reference's domain it
+    /// has no image in the grandparent's namespace, so no implied relocate is
+    /// grafted (C++ `gpRelocSource.IsEmpty()`, the `SubrootReferenceAndRelocates`
+    /// case).
+    #[test]
+    fn implied_relocation_skips_outside_domain() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\ndef \"P\" (\n    references = @groups.usd@</Group/Dst>\n) {}\n",
+            ),
+            (
+                "groups.usd",
+                "#usda 1.0\n(\n    relocates = { </Group/Src/Child>: </Group/Dst/Child> }\n)\ndef \"Group\" {\n  def \"Src\" {\n    def \"Child\" { custom double x = 1 }\n  }\n  def \"Dst\" {}\n}\n",
+            ),
+        ]);
+        let graph = compose_chain(&s, "/P/Child");
+        assert!(
+            implied_placeholder(&graph).is_none(),
+            "no implied relocate is grafted when the source is outside the reference domain"
+        );
+    }
+
+    /// A stage-level relocate onto a root-level prim has no grandparent above the
+    /// local root (C++'s root node is parentless), so no implied relocate is
+    /// grafted onto the synthetic tree root.
+    #[test]
+    fn implied_relocation_skips_root_prim() {
+        let s = stack(
+            "#usda 1.0\n(\n    relocates = { </Group/Rig>: </Group/Scope> }\n)\ndef \"Group\" {\n  def \"Rig\" { custom double x = 1 }\n}\n",
+        );
+        let graph = compose_chain(&s, "/Group/Scope");
+        assert!(
+            implied_placeholder(&graph).is_none(),
+            "a relocate whose target sits directly under the local root grafts no implied relocate"
         );
     }
 }

@@ -48,13 +48,16 @@ impl PrimIndex {
     }
 
     /// Returns `true` if any node that contributes opinions was introduced by a
-    /// composition arc. Culled arc nodes (empty targets) and spec-less full-stack
-    /// nodes do not count: they add no shared content, so a prim that only
-    /// references an empty target is not treated as composed for instancing.
+    /// composition arc. Inert placeholders (the synthetic root, class
+    /// placeholders, and the inert relocation-source / implied-relocate nodes),
+    /// culled arc nodes (empty targets), and spec-less full-stack nodes do not
+    /// count: they add no shared content, so a prim that only references an empty
+    /// target — or only carries an inert relocate placeholder — is not treated as
+    /// composed for instancing.
     pub(crate) fn has_composition_arc(&self) -> bool {
         self.arena()
             .iter()
-            .any(|node| node.arc != ArcType::Root && !node.is_culled() && node.has_specs())
+            .any(|node| node.arc != ArcType::Root && !node.is_inert() && !node.is_culled() && node.has_specs())
     }
 
     /// Iterates the nodes in strength order (strongest first).
@@ -962,7 +965,7 @@ pub(super) fn find_layer_id<'a>(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cmp::Ordering;
 
     use super::*;
@@ -1006,12 +1009,13 @@ mod tests {
         build_with_fallbacks(stack, prim, VariantFallbackMap::new())
     }
 
-    /// Builds a prim index with variant fallbacks applied.
-    ///
+    /// Composes `prim` and every namespace ancestor top-down into a cache,
+    /// applying `fallbacks`, and returns the target prim's fully-composed index.
     /// The task-queue indexer seeds a child prim from its cached parent, so the
-    /// ancestors are composed top-down into a cache first (mirroring the cache's
-    /// `ensure_index`), threading each prim's child context to the next.
-    fn build_with_fallbacks(stack: &LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
+    /// ancestors are composed first (mirroring the cache's `ensure_index`),
+    /// threading each prim's child context to the next. Shared with the
+    /// `prim_indexer` test suite.
+    pub(crate) fn build_with_fallbacks(stack: &LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
         let path = Path::from(prim);
 
         // Namespace chain from the topmost prim down to `path`.

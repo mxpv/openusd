@@ -196,9 +196,6 @@
 //!
 //! # Remaining work
 //!
-//! - Cross-arc implied relocations — C++ `_EvalImpliedRelocations`'s grandparent
-//!   graft, currently a no-op (`prim_indexer`'s `eval_implied_relocations`,
-//!   `TODO(relocates)`).
 //! - Connection / relationship-target permission validity: a target pointing at a
 //!   site that is private relative to where the target is authored must be dropped
 //!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a

@@ -1289,10 +1289,13 @@ impl IndexCache {
 
         // Contributing nodes are walked in reverse strength order (weak-to-
         // strong) — the order in which C++ `_ComposePrimChildNames` finishes each
-        // node, visiting every descendant before its ancestor.
+        // node, visiting every descendant before its ancestor. A non-contributing
+        // node (inert or culled) is skipped (C++ `_ComposePrimChildNamesAtNode`'s
+        // `CanContributeSpecs` guard): an inert relocate placeholder or salted-
+        // earth source must not inject names or relocates at its site.
         let nodes = index
             .nodes_with_ids()
-            .filter(|(id, node)| !(node.is_culled() || drop_local && local[id.idx()]))
+            .filter(|(id, node)| !(node.is_inert() || node.is_culled() || drop_local && local[id.idx()]))
             .map(|(_, node)| node)
             .rev();
 
