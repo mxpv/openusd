@@ -237,17 +237,19 @@ where
     /// Reads `key` as an owned value, propagating a decode failure. `Ok(None)`
     /// means the field (or spec) is unauthored; `Err` means a present field
     /// could not be decoded. Read accessors swallow the error via
-    /// [`read`](Self::read); read-modify-write authoring keeps it so an
+    /// [`get`](Self::get); read-modify-write authoring keeps it so an
     /// undecodable field is not mistaken for "absent" and overwritten.
     pub fn field(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
         Ok(self.data.try_field(&self.path, key)?.map(|c| c.into_owned()))
     }
 
-    /// Reads `key`, swallowing a decode failure as "absent". The read-accessor
-    /// counterpart to [`field`](Self::field); authoring keeps `field` so an
-    /// undecodable field is not mistaken for absent and overwritten.
-    fn read(&self, key: &str) -> Option<sdf::Value> {
-        self.field(key).ok().flatten()
+    /// Reads `key` as `T`, treating a missing field, a decode failure, and a
+    /// type mismatch all as `None`. The typed read accessor; `T = sdf::Value`
+    /// returns the raw value. Read-modify-write authoring uses
+    /// [`field`](Self::field) instead, which keeps the decode error so an
+    /// undecodable field is never mistaken for absent and overwritten.
+    pub fn get<T: TryFrom<sdf::Value>>(&self, key: impl AsRef<str>) -> Option<T> {
+        self.field(key.as_ref()).ok().flatten()?.get()
     }
 
     /// Whether `key` is authored on this spec.
@@ -266,8 +268,8 @@ where
     B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Sets (or replaces) `key`.
-    pub fn set(&mut self, key: &str, value: sdf::Value) {
-        self.data.set_field(&self.path, key, value);
+    pub fn set(&mut self, key: impl AsRef<str>, value: impl Into<sdf::Value>) {
+        self.data.set_field(&self.path, key.as_ref(), value.into());
     }
 
     /// Removes `key` if authored.
@@ -311,48 +313,47 @@ where
 {
     /// Authored `typeName` (e.g. `"Xform"`, `"Mesh"`). `None` if unset.
     pub fn type_name(&self) -> Option<tf::Token> {
-        self.read(sdf::FieldKey::TypeName.as_str())?.try_as_token()
+        self.get(sdf::FieldKey::TypeName)
     }
 
     /// Authored `specifier` (`def`, `over`, `class`). `None` if unset.
     pub fn specifier(&self) -> Option<sdf::Specifier> {
-        self.read(sdf::FieldKey::Specifier.as_str())?.try_as_specifier()
+        self.get(sdf::FieldKey::Specifier)
     }
 
     /// Authored `kind` metadata (e.g. `"component"`, `"group"`).
     pub fn kind(&self) -> Option<tf::Token> {
-        self.read(sdf::FieldKey::Kind.as_str())?.try_as_token()
+        self.get(sdf::FieldKey::Kind)
     }
 
     /// Authored `active` flag. `None` if unset (USD defaults to active).
     pub fn is_active(&self) -> Option<bool> {
-        self.read(sdf::FieldKey::Active.as_str())?.try_as_bool()
+        self.get(sdf::FieldKey::Active)
     }
 
     /// Authored `hidden` flag.
     pub fn is_hidden(&self) -> Option<bool> {
-        self.read(sdf::FieldKey::Hidden.as_str())?.try_as_bool()
+        self.get(sdf::FieldKey::Hidden)
     }
 
     /// Authored `instanceable` flag.
     pub fn is_instanceable(&self) -> Option<bool> {
-        self.read(sdf::FieldKey::Instanceable.as_str())?.try_as_bool()
+        self.get(sdf::FieldKey::Instanceable)
     }
 
     /// Names of child prims, in declared order. `None` if unset.
     pub fn prim_children(&self) -> Option<Vec<tf::Token>> {
-        self.read(sdf::ChildrenKey::PrimChildren.as_str())?.try_as_token_vec()
+        self.get(sdf::ChildrenKey::PrimChildren)
     }
 
     /// Names of child properties, in declared order. `None` if unset.
     pub fn property_children(&self) -> Option<Vec<tf::Token>> {
-        self.read(sdf::ChildrenKey::PropertyChildren.as_str())?
-            .try_as_token_vec()
+        self.get(sdf::ChildrenKey::PropertyChildren)
     }
 
     /// Authored `apiSchemas` list op, if present.
     pub fn api_schemas(&self) -> Option<sdf::TokenListOp> {
-        self.read(sdf::FieldKey::ApiSchemas.as_str())?.try_as_token_list_op()
+        self.get(sdf::FieldKey::ApiSchemas)
     }
 }
 
@@ -502,47 +503,47 @@ where
 {
     /// `defaultPrim` token, if authored.
     pub fn default_prim(&self) -> Option<tf::Token> {
-        self.read(sdf::FieldKey::DefaultPrim.as_str())?.try_as_token()
+        self.get(sdf::FieldKey::DefaultPrim)
     }
 
     /// Sublayer asset paths in strength order (strongest first).
     pub fn sublayers(&self) -> Option<Vec<String>> {
-        self.read(sdf::FieldKey::SubLayers.as_str())?.try_as_string_vec()
+        self.get(sdf::FieldKey::SubLayers)
     }
 
     /// Namespace relocations authored in this layer's metadata.
     pub fn relocates(&self) -> Option<sdf::RelocateList> {
-        self.read(sdf::FieldKey::LayerRelocates.as_str())?.try_as_relocates()
+        self.get(sdf::FieldKey::LayerRelocates)
     }
 
     /// Layer documentation string.
     pub fn documentation(&self) -> Option<String> {
-        self.read(sdf::FieldKey::Documentation.as_str())?.try_as_string()
+        self.get(sdf::FieldKey::Documentation)
     }
 
     /// Layer start time code.
     pub fn start_time_code(&self) -> Option<f64> {
-        self.read(sdf::FieldKey::StartTimeCode.as_str())?.try_as_double()
+        self.get(sdf::FieldKey::StartTimeCode)
     }
 
     /// Layer end time code.
     pub fn end_time_code(&self) -> Option<f64> {
-        self.read(sdf::FieldKey::EndTimeCode.as_str())?.try_as_double()
+        self.get(sdf::FieldKey::EndTimeCode)
     }
 
     /// Time codes per second.
     pub fn time_codes_per_second(&self) -> Option<f64> {
-        self.read(sdf::FieldKey::TimeCodesPerSecond.as_str())?.try_as_double()
+        self.get(sdf::FieldKey::TimeCodesPerSecond)
     }
 
     /// Frames per second.
     pub fn frames_per_second(&self) -> Option<f64> {
-        self.read(sdf::FieldKey::FramesPerSecond.as_str())?.try_as_double()
+        self.get(sdf::FieldKey::FramesPerSecond)
     }
 
     /// Names of root prims in declared order.
     pub fn prim_children(&self) -> Option<Vec<tf::Token>> {
-        self.read(sdf::ChildrenKey::PrimChildren.as_str())?.try_as_token_vec()
+        self.get(sdf::ChildrenKey::PrimChildren)
     }
 }
 
@@ -630,20 +631,16 @@ where
     /// Read-only: every caller rewrites the field with its own `set`, so this
     /// must not erase it (an erase-then-bail would drop a malformed value).
     fn sublayer_paths(&self) -> Option<Vec<String>> {
-        match self.read(sdf::FieldKey::SubLayers.as_str()) {
-            Some(sdf::Value::StringVec(v)) => Some(v),
-            _ => None,
-        }
+        self.get(sdf::FieldKey::SubLayers)
     }
 
     /// Reads and decodes the `subLayerOffsets` field, padded to `len` with
     /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so it stays
     /// index-aligned with the sublayer paths.
     fn sublayer_offsets(&self, len: usize) -> Vec<sdf::LayerOffset> {
-        let mut offsets = match self.read(sdf::FieldKey::SubLayerOffsets.as_str()) {
-            Some(sdf::Value::LayerOffsetVec(v)) => v,
-            _ => Vec::new(),
-        };
+        let mut offsets = self
+            .get::<Vec<sdf::LayerOffset>>(sdf::FieldKey::SubLayerOffsets)
+            .unwrap_or_default();
         offsets.resize(len, sdf::LayerOffset::IDENTITY);
         offsets
     }
@@ -695,16 +692,13 @@ where
 {
     /// Property variability. Defaults to [`sdf::Variability::Varying`] if unset.
     pub fn variability(&self) -> sdf::Variability {
-        self.read(sdf::FieldKey::Variability.as_str())
-            .and_then(sdf::Value::try_as_variability)
+        self.get(sdf::FieldKey::Variability)
             .unwrap_or(sdf::Variability::Varying)
     }
 
     /// Whether the property is `custom`. Defaults to `false` if unset.
     pub fn is_custom(&self) -> bool {
-        self.read(sdf::FieldKey::Custom.as_str())
-            .and_then(sdf::Value::try_as_bool)
-            .unwrap_or(false)
+        self.get(sdf::FieldKey::Custom).unwrap_or(false)
     }
 }
 
@@ -756,35 +750,34 @@ where
 {
     /// Attribute value type name (e.g. `"double"`, `"float3[]"`).
     pub fn type_name(&self) -> Option<tf::Token> {
-        self.read(sdf::FieldKey::TypeName.as_str())?.try_as_token()
+        self.get(sdf::FieldKey::TypeName)
     }
 
     /// Default value, if authored.
     pub fn default(&self) -> Option<sdf::Value> {
-        self.read(sdf::FieldKey::Default.as_str())
+        self.get(sdf::FieldKey::Default)
     }
 
     /// Time-sample map, if authored, in storage order. Samples authored
     /// through [`AttributeSpecMut::set_time_sample`] are kept sorted by time;
     /// samples loaded from a parsed layer reflect on-disk ordering.
     pub fn time_samples(&self) -> Option<Vec<(f64, sdf::Value)>> {
-        self.read(sdf::FieldKey::TimeSamples.as_str())?.try_as_time_samples()
+        self.get(sdf::FieldKey::TimeSamples)
     }
 
     /// Color-space token, if authored.
     pub fn color_space(&self) -> Option<tf::Token> {
-        self.read(sdf::FieldKey::ColorSpace.as_str())?.try_as_token()
+        self.get(sdf::FieldKey::ColorSpace)
     }
 
     /// `allowedTokens` array, if authored.
     pub fn allowed_tokens(&self) -> Option<Vec<tf::Token>> {
-        self.read(sdf::FieldKey::AllowedTokens.as_str())?.try_as_token_vec()
+        self.get(sdf::FieldKey::AllowedTokens)
     }
 
     /// Authored `connectionPaths` list op, if present.
     pub fn connection_path_list(&self) -> Option<sdf::PathListOp> {
-        self.read(sdf::FieldKey::ConnectionPaths.as_str())?
-            .try_as_path_list_op()
+        self.get(sdf::FieldKey::ConnectionPaths)
     }
 }
 
@@ -944,7 +937,7 @@ where
     /// Remove a single connection path. Returns `true` if it was present.
     pub fn remove_connection_path(&mut self, path: &sdf::Path) -> bool {
         let key = sdf::FieldKey::ConnectionPaths.as_str();
-        let Some(sdf::Value::PathListOp(mut op)) = self.read(key) else {
+        let Some(mut op) = self.get::<sdf::PathListOp>(key) else {
             return false;
         };
         let removed = remove_path(&mut op.explicit_items, path)
@@ -1051,7 +1044,7 @@ where
 {
     /// Authored `targetPaths` list op, if present.
     pub fn target_path_list(&self) -> Option<sdf::PathListOp> {
-        self.read(sdf::FieldKey::TargetPaths.as_str())?.try_as_path_list_op()
+        self.get(sdf::FieldKey::TargetPaths)
     }
 }
 

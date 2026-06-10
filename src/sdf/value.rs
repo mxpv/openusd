@@ -315,6 +315,16 @@ impl std::fmt::Display for ValueConversionError {
 
 impl std::error::Error for ValueConversionError {}
 
+impl Value {
+    /// Extracts the payload as `T` if this holds the matching variant, else
+    /// `None`. A typed view over the `try_as_*` accessors and the
+    /// [`TryFrom<Value>`] impls — e.g. `value.get::<tf::Token>()`. `T = Value`
+    /// returns the value unchanged.
+    pub fn get<T: TryFrom<Value>>(self) -> Option<T> {
+        T::try_from(self).ok()
+    }
+}
+
 // Exact extraction: owned conversions that move data out of `Value` without
 // cloning, each requiring the exact held variant. They delegate to the
 // strum-generated `try_as_*()` methods (from the `EnumTryAs` derive);
@@ -418,8 +428,17 @@ impl_try_from_value!(Vec<gf::Matrix4d>, try_as_matrix_4d_vec, "Matrix4dVec");
 // is [`Value::cast`]'s job.
 impl_try_from_value!(String, try_as_string, "String");
 impl_try_from_value!(Token, try_as_token, "Token");
+impl_try_from_value!(Vec<Token>, try_as_token_vec, "TokenVec");
+impl_try_from_value!(Vec<String>, try_as_string_vec, "StringVec");
 impl_try_from_value!(AssetPath, try_as_asset_path, "AssetPath");
 impl_try_from_value!(Vec<AssetPath>, try_as_asset_path_vec, "AssetPathVec");
+
+// List ops, relocations, time samples, and layer offsets — composite payloads
+// read through the typed spec accessors.
+impl_try_from_value!(TokenListOp, try_as_token_list_op, "TokenListOp");
+impl_try_from_value!(RelocateList, try_as_relocates, "Relocates");
+impl_try_from_value!(TimeSampleMap, try_as_time_samples, "TimeSamples");
+impl_try_from_value!(Vec<LayerOffset>, try_as_layer_offset_vec, "LayerOffsetVec");
 
 // Exact numeric arrays — `float[]` / `double[]`. Flattening a single vector
 // into a scalar array is a coercion, so it lives in [`Value::cast`].
