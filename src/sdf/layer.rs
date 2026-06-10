@@ -6,6 +6,7 @@
 //! payloads) live separately in [`crate::layer`].
 
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 
@@ -16,6 +17,15 @@ use super::{
     Specifier, Value, Variability,
 };
 use crate::{usda, usdc};
+
+/// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
+/// source of truth shared by minting and [`Layer::is_anonymous`].
+const ANONYMOUS_PREFIX: &str = "anon:";
+
+/// Monotonic source of unique anonymous-layer identifiers (the `<n>` in
+/// `anon:<n>:<tag>`). Process-global so that anonymous layers created anywhere
+/// in the process never collide.
+static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A single loaded layer in the composition.
 pub struct Layer {
@@ -199,25 +209,36 @@ pub enum AuthoringError {
 // `AbstractData::as_data`) so the typed views work uniformly across in-memory
 // and file-loaded layers, matching C++ `SdfLayer::GetPrimAtPath`.
 impl Layer {
-    /// Create a blank in-memory writable layer with the given identifier.
+    /// Create a blank in-memory writable layer with a unique anonymous
+    /// identifier of the form `anon:<n>:<tag>`, mirroring C++
+    /// `SdfLayer::CreateAnonymous`. `tag` is a human-readable hint, not an
+    /// address: two calls with the same tag get distinct identifiers, so
+    /// independent anonymous layers never alias (see [`Layer::is_anonymous`]).
     ///
     /// The layer's pseudo-root spec is pre-populated so layer-level metadata
     /// (`defaultPrim`, `subLayers`, time codes, …) can be authored via
     /// [`Layer::pseudo_root_mut`] immediately.
-    //
-    // TODO: uniquify anonymous identifiers (C++ `SdfLayer::CreateAnonymous`
-    // mints `anon:<addr>:<tag>`) so two independent anonymous layers given the
-    // same tag get distinct identifiers. Today the tag is the identifier
-    // verbatim, so two such layers alias by identifier — which makes their
-    // owning stages compare equal under
-    // [`pcp::LayerStackIdentifier`](crate::pcp::LayerStackIdentifier) and
-    // weakens the edit-target cross-stage guard. Callers currently look layers
-    // up by the tag they passed, so uniquifying needs those sites to address
-    // layers by the returned identifier instead.
-    pub fn new_anonymous(identifier: impl Into<String>) -> Self {
+    pub fn new_anonymous(tag: impl std::fmt::Display) -> Self {
+        let n = ANONYMOUS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self::new_in_memory(format!("{ANONYMOUS_PREFIX}{n}:{tag}"))
+    }
+
+    /// Create a blank in-memory writable layer with the given verbatim
+    /// identifier and a pre-populated pseudo-root spec. Backs
+    /// [`new_anonymous`](Self::new_anonymous) and, within the crate, composes
+    /// layers whose identifiers must match an authored `subLayers` entry.
+    pub(crate) fn new_in_memory(identifier: impl Into<String>) -> Self {
         let mut data = Data::new();
         data.create_spec(Path::abs_root(), SpecType::PseudoRoot);
         Self::new(identifier, Box::new(data))
+    }
+
+    /// Whether this layer's identifier is anonymous (the `anon:` prefix minted
+    /// by [`new_anonymous`](Self::new_anonymous)). Mirrors C++
+    /// `SdfLayer::IsAnonymous`; an anonymous layer has no asset-resolvable
+    /// location.
+    pub fn is_anonymous(&self) -> bool {
+        self.identifier.starts_with(ANONYMOUS_PREFIX)
     }
 
     /// Create or upgrade a prim spec at `path` with the given specifier and
@@ -901,6 +922,19 @@ fn split_property_path(path: &Path) -> Result<(Path, String), AuthoringError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `new_anonymous` mints a unique `anon:<n>:<tag>` identifier each call, so
+    /// two layers given the same tag never alias; `is_anonymous` recognizes them
+    /// while a verbatim `new_in_memory` layer is not anonymous.
+    #[test]
+    fn anonymous_identifiers_unique() {
+        let a = Layer::new_anonymous("scene.usda");
+        let b = Layer::new_anonymous("scene.usda");
+        assert_ne!(a.identifier(), b.identifier());
+        assert!(a.identifier().ends_with(":scene.usda"));
+        assert!(a.is_anonymous() && b.is_anonymous());
+        assert!(!Layer::new_in_memory("scene.usda").is_anonymous());
+    }
 
     /// `set_relocates` / `relocates` round-trip the authored pairs, and the
     /// pairs land under the pseudo-root's `layerRelocates` field.

@@ -1770,6 +1770,21 @@ fn layer_stack_id_distinguishes_stages() -> Result<()> {
     Ok(())
 }
 
+/// Anonymous root layers are unique per stage even when opened with the same
+/// tag, so two such stages have distinct layer stack identities and reject each
+/// other's edit targets.
+#[test]
+fn anonymous_stages_are_distinct() -> Result<()> {
+    let stage_a = Stage::builder().in_memory("same.usda")?;
+    let stage_b = Stage::builder().in_memory("same.usda")?;
+    assert_ne!(stage_a.root_layer().identifier(), stage_b.root_layer().identifier());
+    assert!(matches!(
+        stage_b.set_edit_target(stage_a.edit_target_root()),
+        Err(StageAuthoringError::EditTargetWrongStage)
+    ));
+    Ok(())
+}
+
 /// A target naming a layer is valid; one naming no layer is null and invalid.
 #[test]
 fn edit_target_null_and_valid() -> Result<()> {
@@ -2259,56 +2274,14 @@ fn authored_sublayers(stage: &Stage) -> Vec<String> {
 #[test]
 fn insert_sub_layer_authors_metadata() -> Result<()> {
     let stage = Stage::builder().in_memory("root.usda")?;
+    let root_id = stage.root_layer().identifier().to_string();
 
-    stage.insert_sub_layer(
-        "root.usda",
-        0,
-        opinion_layer("weak.usda", 5.0)?,
-        sdf::LayerOffset::IDENTITY,
-    )?;
+    let weak = opinion_layer("weak.usda", 5.0)?;
+    let weak_id = weak.identifier().to_string();
+    stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
-    assert_eq!(authored_sublayers(&stage), vec!["weak.usda".to_string()]);
-    Ok(())
-}
-
-/// `ensure_layer` must not clobber an already-loaded node: re-inserting a
-/// layer whose identifier is already in the graph keeps the existing node's
-/// data (and therefore its derived sublayer children), not the fresh empty
-/// layer passed in.
-#[test]
-fn insert_sub_layer_keeps_loaded_node() -> Result<()> {
-    // Build root → mid → leaf incrementally so `mid` is a loaded node with a
-    // derived child edge to `leaf`, and `leaf`'s opinion composes.
-    let stage = Stage::builder().in_memory("root.usda")?;
-    stage.insert_sub_layer(
-        "root.usda",
-        0,
-        sdf::Layer::new_anonymous("mid.usda"),
-        sdf::LayerOffset::IDENTITY,
-    )?;
-    stage.insert_sub_layer(
-        "mid.usda",
-        0,
-        opinion_layer("leaf.usda", 5.0)?,
-        sdf::LayerOffset::IDENTITY,
-    )?;
-    assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
-
-    // Re-insert `mid` by identifier, passing a fresh empty layer. The graph
-    // must keep the loaded `mid` (whose `subLayers` still names `leaf`), so
-    // `leaf`'s opinion survives the rebuild.
-    stage.insert_sub_layer(
-        "root.usda",
-        0,
-        sdf::Layer::new_anonymous("mid.usda"),
-        sdf::LayerOffset::IDENTITY,
-    )?;
-    assert_eq!(
-        stage.value_at("/A.x", 0.0)?,
-        Some(sdf::Value::Double(5.0)),
-        "the already-loaded mid layer's child edge to leaf must survive re-insertion"
-    );
+    assert_eq!(authored_sublayers(&stage), vec![weak_id]);
     Ok(())
 }
 
@@ -2317,18 +2290,13 @@ fn insert_sub_layer_keeps_loaded_node() -> Result<()> {
 #[test]
 fn remove_sub_layer_clears_metadata() -> Result<()> {
     let stage = Stage::builder().in_memory("root.usda")?;
-    stage.insert_sub_layer(
-        "root.usda",
-        0,
-        opinion_layer("weak.usda", 5.0)?,
-        sdf::LayerOffset::IDENTITY,
-    )?;
+    let root_id = stage.root_layer().identifier().to_string();
+    let weak = opinion_layer("weak.usda", 5.0)?;
+    let weak_id = weak.identifier().to_string();
+    stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
     assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
 
-    assert!(
-        stage.remove_sub_layer("root.usda", "weak.usda")?,
-        "a sublayer was removed"
-    );
+    assert!(stage.remove_sub_layer(&root_id, &weak_id)?, "a sublayer was removed");
 
     assert_eq!(
         stage.value_at("/A.x", 0.0)?,

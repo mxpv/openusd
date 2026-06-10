@@ -1938,10 +1938,10 @@ mod tests {
         let target = sdf::Path::new("/Mat.outputs:out")?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
-        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        let mut strong = sdf::Layer::new_in_memory("root.usda");
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
-        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        let mut weak = sdf::Layer::new_in_memory("weak.usda");
         weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
         weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
@@ -1968,10 +1968,10 @@ mod tests {
         let target = sdf::Path::new("/Mat.outputs:out")?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
-        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        let mut strong = sdf::Layer::new_in_memory("root.usda");
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
-        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        let mut weak = sdf::Layer::new_in_memory("weak.usda");
         weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
         weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
@@ -1997,10 +1997,10 @@ mod tests {
         let target = sdf::Path::new("/Mat.outputs:out")?;
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
-        let mut strong = sdf::Layer::new_anonymous("root.usda");
+        let mut strong = sdf::Layer::new_in_memory("root.usda");
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
-        let mut weak = sdf::Layer::new_anonymous("weak.usda");
+        let mut weak = sdf::Layer::new_in_memory("weak.usda");
         weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
         weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
         weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
@@ -2075,8 +2075,10 @@ mod tests {
     }
 
     /// A weak sublayer carrying one opinion, for the sublayer-mutation tests.
+    /// Uses a verbatim identifier so an authored `subLayers` entry naming it
+    /// resolves by exact or suffix match.
     fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
-        let mut layer = sdf::Layer::new_anonymous(identifier);
+        let mut layer = sdf::Layer::new_in_memory(identifier);
         layer
             .create_attribute("/A.x", "double", sdf::Variability::Varying, true)?
             .set_default(sdf::Value::Double(value));
@@ -2091,6 +2093,40 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// `ensure_layer` must not clobber an already-loaded node: re-inserting a
+    /// layer whose identifier is already in the graph keeps the existing node's
+    /// data (and therefore its derived sublayer children), not the fresh empty
+    /// layer passed in. Anonymous layers are unique, so the colliding identifier
+    /// is fabricated with [`sdf::Layer::new_in_memory`].
+    #[test]
+    fn insert_sub_layer_keeps_loaded_node() -> Result<()> {
+        // Build root → mid → leaf incrementally so `mid` is a loaded node with a
+        // derived child edge to `leaf`, and `leaf`'s opinion composes.
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+        let mid = sdf::Layer::new_in_memory("mid.usda");
+        let mid_id = mid.identifier().to_string();
+        stage.insert_sub_layer(&root_id, 0, mid, sdf::LayerOffset::IDENTITY)?;
+        stage.insert_sub_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
+        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+
+        // Re-insert `mid` by its identifier, passing a fresh empty layer with the
+        // same identifier. The graph must keep the loaded `mid` (whose
+        // `subLayers` still names `leaf`), so `leaf`'s opinion survives.
+        stage.insert_sub_layer(
+            &root_id,
+            0,
+            sdf::Layer::new_in_memory(&mid_id),
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        assert_eq!(
+            stage.value_at("/A.x", 0.0)?,
+            Some(sdf::Value::Double(5.0)),
+            "the already-loaded mid layer's child edge to leaf must survive re-insertion"
+        );
+        Ok(())
+    }
+
     /// `remove_sub_layer` resolves `child` to a layer before matching, so a
     /// sublayer authored with a relative path (whose canonical identifier
     /// differs from the authored entry) is still removed when named by the
@@ -2100,7 +2136,7 @@ mod tests {
         // root authors `subLayers = ["sub.usda"]`, but the child layer's
         // canonical identifier is `dir/sub.usda` (find() resolves the relative
         // entry to it by suffix).
-        let mut root = sdf::Layer::new_anonymous("root.usda");
+        let mut root = sdf::Layer::new_in_memory("root.usda");
         root.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
         let child = opinion_layer("dir/sub.usda", 5.0)?;
         let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
