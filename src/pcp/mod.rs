@@ -252,7 +252,7 @@ pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
 pub(crate) use index_cache::IndexCache;
 pub(crate) use layer_graph::LayerGraph;
-pub use layer_graph::LayerId;
+pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub use prim_index::PrimIndex;

@@ -204,6 +204,16 @@ impl Layer {
     /// The layer's pseudo-root spec is pre-populated so layer-level metadata
     /// (`defaultPrim`, `subLayers`, time codes, …) can be authored via
     /// [`Layer::pseudo_root_mut`] immediately.
+    //
+    // TODO: uniquify anonymous identifiers (C++ `SdfLayer::CreateAnonymous`
+    // mints `anon:<addr>:<tag>`) so two independent anonymous layers given the
+    // same tag get distinct identifiers. Today the tag is the identifier
+    // verbatim, so two such layers alias by identifier — which makes their
+    // owning stages compare equal under
+    // [`pcp::LayerStackIdentifier`](crate::pcp::LayerStackIdentifier) and
+    // weakens the edit-target cross-stage guard. Callers currently look layers
+    // up by the tag they passed, so uniquifying needs those sites to address
+    // layers by the returned identifier instead.
     pub fn new_anonymous(identifier: impl Into<String>) -> Self {
         let mut data = Data::new();
         data.create_spec(Path::abs_root(), SpecType::PseudoRoot);

@@ -282,9 +282,6 @@ impl Default for StagePopulationMask {
 /// [`Stage::edit_target_for_node`](Stage::edit_target_for_node)) carries the
 /// referencing/inheriting arc's `map_to_root`, so authoring writes into the
 /// arc's source layer.
-//
-// TODO: key the target by a real `pcp::LayerStackIdentifier` once one exists;
-// cross-stage misuse is caught today only by the coarser `stage_id` tag.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditTarget {
     /// Canonical identifier of the layer this target writes to. Stored as a
@@ -298,13 +295,14 @@ pub struct EditTarget {
     /// [`map_to_spec_path`](Self::map_to_spec_path). Identity for a local
     /// target, so the default authoring path is unchanged.
     mapping: pcp::MapFunction,
-    /// Identity of the stage this target was constructed against, or `None` for
-    /// a stage-agnostic target ([`for_layer`](Self::for_layer) /
-    /// [`for_local_direct_variant`](Self::for_local_direct_variant)). A
-    /// `Some` target applied to a different stage is rejected by
+    /// Identity of the stage's root layer stack this target was constructed
+    /// against, or `None` for a stage-agnostic target
+    /// ([`for_layer`](Self::for_layer) /
+    /// [`for_local_direct_variant`](Self::for_local_direct_variant)). A `Some`
+    /// target applied to a stage with a different identity is rejected by
     /// [`set_edit_target`](Stage::set_edit_target), so an arc target built
     /// against one stage's composition can't silently retarget another's.
-    stage_id: Option<u64>,
+    layer_stack: Option<pcp::LayerStackIdentifier>,
 }
 
 /// Composition arc kind selecting which arc on a prim an arc-based
@@ -344,7 +342,7 @@ impl EditTarget {
         Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::identity(),
-            stage_id: None,
+            layer_stack: None,
         }
     }
 
@@ -360,7 +358,7 @@ impl EditTarget {
         Self {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
-            stage_id: None,
+            layer_stack: None,
         }
     }
 
@@ -392,6 +390,18 @@ impl EditTarget {
                 mapped.replace_embedded_target(&mapped_target)
             }
         }
+    }
+
+    /// Maps a stage (scene) time to the source (layer) time a time sample
+    /// authored through this target should be keyed at.
+    ///
+    /// An arc target captures the arc's composed time offset (e.g. a reference
+    /// with `(offset = 10)`), which maps a source-layer time to the composed
+    /// stage time. Authoring keys the sample in the source layer, so the stage
+    /// time is run through the inverse offset. A local or variant target carries
+    /// the identity offset, so this is a no-op there.
+    pub fn map_to_spec_time(&self, stage_time: f64) -> f64 {
+        self.mapping.time_offset().inverse().apply(stage_time)
     }
 
     /// Whether this target names no layer, so it can author nothing (C++
@@ -430,17 +440,17 @@ impl EditTarget {
         if weaker.is_null() {
             return self.clone();
         }
-        if matches!((self.stage_id, weaker.stage_id), (Some(a), Some(b)) if a != b) {
+        if matches!((&self.layer_stack, &weaker.layer_stack), (Some(a), Some(b)) if a != b) {
             return EditTarget {
                 layer_identifier: String::new(),
                 mapping: pcp::MapFunction::null(),
-                stage_id: None,
+                layer_stack: None,
             };
         }
         EditTarget {
             layer_identifier: self.layer_identifier.clone(),
             mapping: weaker.mapping.compose(&self.mapping),
-            stage_id: self.stage_id.or(weaker.stage_id),
+            layer_stack: self.layer_stack.clone().or_else(|| weaker.layer_stack.clone()),
         }
     }
 }
@@ -557,13 +567,13 @@ pub struct StageInner {
     interpolation_type: Cell<InterpolationType>,
     /// Where authored opinions land. Defaults to the root layer.
     edit_target: RefCell<EditTarget>,
-    /// Process-unique identity, stamped onto arc-based edit targets so one built
-    /// against this stage's composition can't be applied to another stage.
-    stage_id: u64,
+    /// This stage's root layer stack identity (root + session + resolver
+    /// context). Computed once at open and stable for the stage's life — the
+    /// root and session layers and the resolver context never change after
+    /// construction. Stamped onto stage-bound edit targets and read by the
+    /// cross-stage guard, both without recomputing.
+    layer_stack_id: pcp::LayerStackIdentifier,
 }
-
-/// Source of [`StageInner::stage_id`] values, monotonic for the process.
-static NEXT_STAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A composed USD stage.
 ///
@@ -625,13 +635,27 @@ impl Stage {
         self.edit_target.borrow().clone()
     }
 
+    /// Maps a stage time to the spec time the current edit target writes a
+    /// time sample at, borrowing the target rather than cloning it. See
+    /// [`EditTarget::map_to_spec_time`].
+    pub(super) fn map_to_spec_time(&self, stage_time: f64) -> f64 {
+        self.edit_target.borrow().map_to_spec_time(stage_time)
+    }
+
+    /// This stage's cached root layer stack identity, stamped onto stage-bound
+    /// edit targets so one built against this stage's composition is rejected by
+    /// an unrelated stage.
+    fn layer_stack_id(&self) -> &pcp::LayerStackIdentifier {
+        &self.layer_stack_id
+    }
+
     /// An [`EditTarget`] tagged with this stage's identity, so it is rejected by
     /// another stage's [`set_edit_target`](Self::set_edit_target).
     fn bound_target(&self, layer_identifier: String, mapping: pcp::MapFunction) -> EditTarget {
         EditTarget {
             layer_identifier,
             mapping,
-            stage_id: Some(self.stage_id),
+            layer_stack: Some(self.layer_stack_id().clone()),
         }
     }
 
@@ -671,11 +695,10 @@ impl Stage {
     /// source — it falls outside the mapping's explicit domain — so author
     /// through the prototype path obtained from
     /// [`Prim::prototype`](super::Prim::prototype).
-    //
-    // TODO: apply the captured mapping's `time_offset` when authoring time
-    // samples through an arc target with a non-identity layer offset; today
-    // `map_to_spec_path` maps namespace only, so samples land at the composed
-    // (stage) time rather than the inverse-mapped source time.
+    ///
+    /// The captured mapping carries the arc's composed time offset, so a time
+    /// sample authored through the target is retimed into the source layer by
+    /// [`EditTarget::map_to_spec_time`].
     pub fn edit_target_for_node(
         &self,
         prim_path: &sdf::Path,
@@ -701,7 +724,11 @@ impl Stage {
     /// An arc target built against a different stage is rejected with
     /// [`StageAuthoringError::EditTargetWrongStage`].
     pub fn set_edit_target(&self, target: EditTarget) -> Result<(), StageAuthoringError> {
-        if target.stage_id.is_some_and(|id| id != self.stage_id) {
+        if target
+            .layer_stack
+            .as_ref()
+            .is_some_and(|id| id != self.layer_stack_id())
+        {
             return Err(StageAuthoringError::EditTargetWrongStage);
         }
         if self.layers().id_of(target.layer_identifier()).is_none() {
@@ -1834,13 +1861,13 @@ impl<R: ar::Resolver> StageBuilder<R> {
         // invalid relocates); the cache holds only the one-shot collection
         // errors. `Stage::composition_errors` concatenates the two.
         let graph = pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
-        let stage_id = NEXT_STAGE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let layer_stack_id = graph.layer_stack_id();
         // The root layer is the strongest authoring target by default; an
         // empty graph (no layers) has none, so the target names no layer and
-        // resolves to nothing at author time. Tagged with `stage_id` so it
-        // matches [`Stage::edit_target_root`].
+        // resolves to nothing at author time. Tagged with the stack identity so
+        // it matches [`Stage::edit_target_root`].
         let edit_target = EditTarget {
-            stage_id: Some(stage_id),
+            layer_stack: Some(layer_stack_id.clone()),
             ..EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default())
         };
         Stage(Rc::new(StageInner {
@@ -1851,7 +1878,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
-            stage_id,
+            layer_stack_id,
         }))
     }
 }

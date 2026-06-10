@@ -217,6 +217,17 @@ pub trait Resolver {
         Path::new(asset_path).is_relative()
     }
 
+    /// Returns the resolver's currently bound context.
+    ///
+    /// Keys a composed layer stack's identity: C++ `PcpLayerStackIdentifier`
+    /// carries the `ArResolverContext` the stack was composed under, so two
+    /// stacks built under different contexts are distinct. The base trait
+    /// reports the default (empty) context; a resolver that binds per-stage
+    /// context overrides this.
+    fn context(&self) -> ResolverContext {
+        ResolverContext::default()
+    }
+
     /// Creates a default resolver context.
     fn create_default_context(&self) -> ResolverContext {
         ResolverContext::new()
@@ -333,6 +344,10 @@ impl Default for DefaultResolver {
 }
 
 impl Resolver for DefaultResolver {
+    fn context(&self) -> ResolverContext {
+        self.current_context()
+    }
+
     fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
         if asset_path.is_empty() {
             return String::new();

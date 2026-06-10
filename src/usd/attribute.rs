@@ -70,9 +70,17 @@ impl Attribute {
 
     /// Set a value at a specific time. Mirrors C++
     /// `UsdAttribute::Set(value, time)`.
+    ///
+    /// `time` is in stage (composed) time. When the current edit target is an
+    /// arc with a non-identity layer offset, the sample is keyed at the
+    /// inverse-mapped source-layer time (C++ `UsdEditTarget::MapToSpecTime`),
+    /// so it reads back at `time` once composition re-applies the offset.
     pub fn set_at(self, time: f64, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(&[sdf::FieldKey::TimeSamples], |spec| spec.set_time_sample(time, value))
+        let spec_time = self.stage.map_to_spec_time(time);
+        self.edit(&[sdf::FieldKey::TimeSamples], |spec| {
+            spec.set_time_sample(spec_time, value)
+        })
     }
 
     /// Block opinions from weaker layers by authoring a value block on the

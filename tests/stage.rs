@@ -1748,19 +1748,25 @@ fn edit_target_session() -> Result<()> {
     Ok(())
 }
 
-/// A stage-bound target is rejected by a different stage; a stage-agnostic
-/// `for_layer` target is still accepted.
+/// A stage-bound target is rejected by a stage with a different root layer
+/// stack identity; a stage-agnostic `for_layer` target is still accepted, and a
+/// cloned handle to the same stage accepts its sibling's bound target.
 #[test]
-fn edit_target_wrong_stage_rejected() -> Result<()> {
-    let stage_a = in_memory_stage()?;
-    let stage_b = in_memory_stage()?;
+fn layer_stack_id_distinguishes_stages() -> Result<()> {
+    let stage_a = Stage::builder().in_memory("anon_a.usda")?;
+    let stage_b = Stage::builder().in_memory("anon_b.usda")?;
     let bound = stage_a.edit_target_root();
     assert!(matches!(
-        stage_b.set_edit_target(bound),
+        stage_b.set_edit_target(bound.clone()),
         Err(StageAuthoringError::EditTargetWrongStage)
     ));
     let root_b = stage_b.root_layer().identifier().to_string();
     assert!(stage_b.set_edit_target(EditTarget::for_layer(root_b)).is_ok());
+
+    // A cloned handle shares the same `StageInner`, so it has the same root
+    // layer stack identity and accepts the target built against its sibling.
+    let stage_a_clone = stage_a.clone();
+    assert!(stage_a_clone.set_edit_target(bound).is_ok());
     Ok(())
 }
 
@@ -1797,14 +1803,60 @@ fn edit_target_compose_over() -> Result<()> {
     Ok(())
 }
 
-/// Composing targets bound to different stages yields a null target, keeping
-/// the cross-stage guard intact.
+/// Composing targets bound to stages with different layer stack identities
+/// yields a null target, keeping the cross-stage guard intact.
 #[test]
-fn compose_over_cross_stage_null() -> Result<()> {
-    let stage_a = in_memory_stage()?;
-    let stage_b = in_memory_stage()?;
+fn compose_over_cross_stack_null() -> Result<()> {
+    let stage_a = Stage::builder().in_memory("anon_a.usda")?;
+    let stage_b = Stage::builder().in_memory("anon_b.usda")?;
     let composed = stage_a.edit_target_root().compose_over(&stage_b.edit_target_root());
     assert!(composed.is_null());
+    Ok(())
+}
+
+/// A stage-bound target is accepted by a freshly opened stage with the same
+/// root layer, session, and resolver context: layer-stack identity is by
+/// composition input, not by stage instance.
+#[test]
+fn layer_stack_id_same_inputs() -> Result<()> {
+    let path = fixture_path("ref_external.usda");
+    let stage_a = Stage::open(&path)?;
+    let stage_b = Stage::open(&path)?;
+    assert!(stage_b.set_edit_target(stage_a.edit_target_root()).is_ok());
+    Ok(())
+}
+
+/// Authoring a time sample through an arc target with a non-identity layer
+/// offset keys the sample at the inverse-mapped source time, so it reads back
+/// at the original stage time once composition re-applies the offset.
+#[test]
+fn arc_target_retimes_time_sample() -> Result<()> {
+    let stage = in_memory_stage()?;
+    // `/Prim` references `/Source` with a (offset = 10) layer offset, so a
+    // source-layer time `t` composes to stage time `t + 10`.
+    stage.define_prim("/Source")?.create_attribute("x", "double")?;
+    stage.define_prim("/Prim")?.set_metadata(
+        sdf::FieldKey::References.as_str(),
+        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            prim_path: sdf::path("/Source")?,
+            layer_offset: sdf::LayerOffset::new(10.0, 1.0),
+            ..Default::default()
+        }])),
+    )?;
+
+    let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Reference)?;
+    // Stage time 15 inverse-maps to source time 5.
+    assert_eq!(target.map_to_spec_time(15.0), 5.0);
+    {
+        let _ctx = stage.edit_context(target)?;
+        stage.attribute_at("/Prim.x").set_at(15.0, sdf::Value::Double(42.0))?;
+    }
+
+    // The sample landed at source time 5 in the root layer...
+    let samples = stage.attribute_at("/Source.x").time_samples()?.expect("samples");
+    assert_eq!(samples, vec![(5.0, sdf::Value::Double(42.0))]);
+    // ...and reads back at stage time 15 through the offset reference.
+    assert_eq!(stage.attribute_at("/Prim.x").get_at::<f64>(15.0)?, Some(42.0));
     Ok(())
 }
 

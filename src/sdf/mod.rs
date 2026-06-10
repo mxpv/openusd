@@ -191,6 +191,21 @@ impl LayerOffset {
         self.offset + self.scale * time
     }
 
+    /// Returns the inverse offset, undoing [`apply`](Self::apply): if `self`
+    /// maps a source time `t` to `offset + scale * t`, the inverse maps that
+    /// result back to `t`. The identity inverts to itself; a `scale == 0`
+    /// offset has no inverse and yields the identity.
+    #[inline]
+    pub fn inverse(&self) -> LayerOffset {
+        if self.scale == 0.0 {
+            return LayerOffset::IDENTITY;
+        }
+        LayerOffset {
+            offset: -self.offset / self.scale,
+            scale: 1.0 / self.scale,
+        }
+    }
+
     /// Returns `true` if this offset is well-formed for composition:
     /// finite `offset` and a strictly positive, finite `scale`.
     ///
@@ -437,5 +452,20 @@ mod tests {
         let a = LayerOffset::new(10.0, 2.0);
         assert_eq!(a.concatenate(&LayerOffset::IDENTITY), a);
         assert_eq!(LayerOffset::IDENTITY.concatenate(&a), a);
+    }
+
+    #[test]
+    fn layer_offset_inverse_undoes_apply() {
+        // A dyadic scale round-trips exactly.
+        let a = LayerOffset::new(10.0, 2.0);
+        assert_eq!(a.inverse(), LayerOffset::new(-5.0, 0.5));
+        assert_eq!(a.inverse().apply(a.apply(7.0)), 7.0);
+        // A non-dyadic scale (e.g. a 1/3 retiming ratio) round-trips only to
+        // within float rounding, not exactly.
+        let b = LayerOffset::new(1.0, 3.0);
+        assert!((b.inverse().apply(b.apply(7.0)) - 7.0).abs() < 1e-9);
+        // The identity inverts to itself; a zero scale has no inverse.
+        assert_eq!(LayerOffset::IDENTITY.inverse(), LayerOffset::IDENTITY);
+        assert_eq!(LayerOffset::new(3.0, 0.0).inverse(), LayerOffset::IDENTITY);
     }
 }
