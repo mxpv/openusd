@@ -5,6 +5,7 @@
 //! Cross-layer composition concerns (resolving sublayers, references,
 //! payloads) live separately in [`crate::layer`].
 
+use std::borrow::Cow;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,8 +13,8 @@ use anyhow::Result;
 
 use super::schema::{ChildrenKey, FieldKey};
 use super::{
-    AbstractData, AttributeSpec, AttributeSpecMut, Data, LayerData, Path, PathComponent, PrimSpec, PrimSpecMut,
-    PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec, RelationshipSpecMut, RelocateList, Spec, SpecError, SpecType,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, Data, LayerData, Path, PathComponent, PrimSpecMut, PrimSpecRef,
+    PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef, RelocateList, SpecError, SpecType,
     Specifier, Value, Variability,
 };
 use crate::{usda, usdc};
@@ -31,11 +32,11 @@ static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.
     pub identifier: String,
-    /// The parsed scene description data. Kept crate-private so external
+    /// The parsed scene description data. Private so external
     /// callers cannot swap the backing box or write to it directly,
     /// bypassing the authoring API's bookkeeping invariants
     /// (`primChildren`, `propertyChildren`, ancestor specifiers, …).
-    pub(crate) data: LayerData,
+    data: LayerData,
 }
 
 impl Layer {
@@ -164,14 +165,6 @@ pub enum AuthoringError {
     #[error(transparent)]
     Spec(#[from] SpecError),
 
-    /// The layer's backend is not an in-memory [`Data`] store. Layers loaded
-    /// from files via [`crate::layer::Collector`] are read-only.
-    #[error("layer {identifier} is read-only; authoring is not supported")]
-    ReadOnly {
-        /// The layer's resolved identifier.
-        identifier: String,
-    },
-
     /// The given path is not valid for the requested authoring operation.
     /// Prim authoring requires an absolute, non-root, non-property path;
     /// property authoring requires a property path.
@@ -184,30 +177,18 @@ pub enum AuthoringError {
     },
 }
 
-/// Authoring methods. These require the layer's backend to be a writable
-/// in-memory [`Data`] store (created via [`Layer::new_anonymous`]).
-/// File-loaded layers return [`AuthoringError::ReadOnly`].
-///
-/// Mirrors `SdfLayer`'s authoring surface: [`Layer::create_prim`],
-/// [`Layer::override_prim`], [`Layer::create_attribute`], and
-/// [`Layer::create_relationship`] parallel `SdfCreatePrimInLayer` /
-/// `SdfAttributeSpec::New` / `SdfRelationshipSpec::New`. `primChildren`
-/// and `propertyChildren` ordering is maintained automatically: ancestor
-/// prim specs are auto-created as `over` when missing.
-///
-/// # Reading file-loaded layers
+/// Authoring methods. Mirrors `SdfLayer`'s authoring surface:
+/// [`Layer::create_prim`], [`Layer::override_prim`], [`Layer::create_attribute`],
+/// and [`Layer::create_relationship`] parallel `SdfCreatePrimInLayer` /
+/// `SdfAttributeSpec::New` / `SdfRelationshipSpec::New`. `primChildren` and
+/// `propertyChildren` ordering is maintained automatically: ancestor prim specs
+/// are auto-created as `over` when missing.
 ///
 /// The typed-view lookups ([`Layer::prim`], [`Layer::attribute`],
-/// [`Layer::relationship`], [`Layer::pseudo_root`]) currently borrow an
-/// underlying [`Data`] directly. Layers loaded by `usda::TextReader` or
-/// `usdc::CrateData` keep their own internal spec storage and do not yet
-/// expose a `Data` view, so the lookup methods return `None` on file-loaded
-/// layers. Use [`crate::usd::Stage`]'s path-keyed query API for inspection
-/// in the meantime.
-//
-// TODO: materialize `TextReader` / `CrateData` into `Data` (or expose one via
-// `AbstractData::as_data`) so the typed views work uniformly across in-memory
-// and file-loaded layers, matching C++ `SdfLayer::GetPrimAtPath`.
+/// [`Layer::relationship`], [`Layer::pseudo_root`]) and all authoring operate
+/// through the [`AbstractData`] field interface, so they work uniformly on any
+/// backend — in-memory [`Data`] or a file-loaded reader — matching C++
+/// `SdfLayer::GetPrimAtPath`.
 impl Layer {
     /// Create a blank in-memory writable layer with a unique anonymous
     /// identifier of the form `anon:<n>:<tag>`, mirroring C++
@@ -258,17 +239,15 @@ impl Layer {
         let type_name: String = type_name.into();
 
         require_prim_leaf(&path)?;
-        let data = self.writable_data_mut()?;
+        let data = self.data_mut();
         ensure_prim_chain(data, &path)?;
 
-        let spec = data.spec_mut(&path).expect("just ensured");
-        spec.add(FieldKey::Specifier, Value::Specifier(specifier));
-
+        data.set_field(&path, FieldKey::Specifier.as_str(), Value::Specifier(specifier));
         if !type_name.is_empty() {
-            spec.add(FieldKey::TypeName, Value::token(type_name));
+            data.set_field(&path, FieldKey::TypeName.as_str(), Value::token(type_name));
         }
 
-        Ok(spec.as_prim_mut().expect("type guaranteed by ensure_prim_chain"))
+        Ok(PrimSpecMut::get(data, path).expect("ensure_prim_chain created a prim spec"))
     }
 
     /// Ensure a prim spec exists at `path` with specifier `over`. Existing
@@ -280,11 +259,10 @@ impl Layer {
         let path: Path = path.into();
 
         require_prim_leaf(&path)?;
-        let data = self.writable_data_mut()?;
+        let data = self.data_mut();
         ensure_prim_chain(data, &path)?;
 
-        let spec = data.spec_mut(&path).expect("just ensured");
-        Ok(spec.as_prim_mut().expect("type guaranteed by ensure_prim_chain"))
+        Ok(PrimSpecMut::get(data, path).expect("ensure_prim_chain created a prim spec"))
     }
 
     /// Ensure an `over` prim spec exists at `path` (and for every missing
@@ -317,40 +295,32 @@ impl Layer {
         let type_name: String = type_name.into();
 
         let (prim_path, property_name) = split_property_path(&path)?;
-        let data = self.writable_data_mut()?;
+        let data = self.data_mut();
         require_spec_type_or_absent(data, &path, SpecType::Attribute)?;
         validate_token_vec(data, &prim_path, ChildrenKey::PropertyChildren)?;
         ensure_prim_chain(data, &prim_path)?;
 
-        add_to_token_vec(
-            data.spec_mut(&prim_path).expect("ensure_prim_chain created it"),
-            &prim_path,
-            ChildrenKey::PropertyChildren,
-            &property_name,
-        )?;
+        add_to_token_vec(data, &prim_path, ChildrenKey::PropertyChildren, &property_name)?;
 
         if !data.has_spec(&path) {
             data.create_spec(path.clone(), SpecType::Attribute);
         }
 
-        let spec = data.spec_mut(&path).expect("just ensured");
-        spec.add(FieldKey::TypeName, Value::token(type_name));
+        data.set_field(&path, FieldKey::TypeName.as_str(), Value::token(type_name));
 
         if variability != Variability::Varying {
-            spec.add(FieldKey::Variability, Value::Variability(variability));
+            data.set_field(&path, FieldKey::Variability.as_str(), Value::Variability(variability));
         } else {
-            spec.remove(FieldKey::Variability.as_str());
+            data.erase_field(&path, FieldKey::Variability.as_str());
         }
 
         if custom {
-            spec.add(FieldKey::Custom, Value::Bool(true));
+            data.set_field(&path, FieldKey::Custom.as_str(), Value::Bool(true));
         } else {
-            spec.remove(FieldKey::Custom.as_str());
+            data.erase_field(&path, FieldKey::Custom.as_str());
         }
 
-        Ok(spec
-            .as_attr_mut()
-            .expect("type guaranteed by require_spec_type_or_absent"))
+        Ok(AttributeSpecMut::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
     }
 
     /// Create a relationship spec at `path`. The owning prim is auto-created
@@ -367,82 +337,67 @@ impl Layer {
         let path: Path = path.into();
 
         let (prim_path, property_name) = split_property_path(&path)?;
-        let data = self.writable_data_mut()?;
+        let data = self.data_mut();
         require_spec_type_or_absent(data, &path, SpecType::Relationship)?;
         validate_token_vec(data, &prim_path, ChildrenKey::PropertyChildren)?;
         ensure_prim_chain(data, &prim_path)?;
 
-        add_to_token_vec(
-            data.spec_mut(&prim_path).expect("ensure_prim_chain created it"),
-            &prim_path,
-            ChildrenKey::PropertyChildren,
-            &property_name,
-        )?;
+        add_to_token_vec(data, &prim_path, ChildrenKey::PropertyChildren, &property_name)?;
 
         if !data.has_spec(&path) {
             data.create_spec(path.clone(), SpecType::Relationship);
         }
 
-        let spec = data.spec_mut(&path).expect("just ensured");
-
         if variability != Variability::Varying {
-            spec.add(FieldKey::Variability, Value::Variability(variability));
+            data.set_field(&path, FieldKey::Variability.as_str(), Value::Variability(variability));
         } else {
-            spec.remove(FieldKey::Variability.as_str());
+            data.erase_field(&path, FieldKey::Variability.as_str());
         }
 
         if custom {
-            spec.add(FieldKey::Custom, Value::Bool(true));
+            data.set_field(&path, FieldKey::Custom.as_str(), Value::Bool(true));
         } else {
-            spec.remove(FieldKey::Custom.as_str());
+            data.erase_field(&path, FieldKey::Custom.as_str());
         }
 
-        Ok(spec
-            .as_relationship_mut()
-            .expect("type guaranteed by require_spec_type_or_absent"))
+        Ok(RelationshipSpecMut::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
     }
 
-    /// Look up a prim spec at `path`. Returns `None` if no spec exists, the
-    /// spec is not a prim, or the backend is not in-memory writable.
-    pub fn prim(&self, path: impl Into<Path>) -> Option<PrimSpec<'_>> {
-        let path: Path = path.into();
-        self.data.as_data()?.spec(&path)?.as_prim()
+    /// Look up a prim spec at `path`. Returns `None` if no spec exists or the
+    /// spec is not a prim.
+    pub fn prim(&self, path: impl Into<Path>) -> Option<PrimSpecRef<'_>> {
+        PrimSpecRef::get(self.data.as_ref(), path.into())
     }
 
     /// Mutably look up a prim spec at `path`.
     pub fn prim_mut(&mut self, path: impl Into<Path>) -> Option<PrimSpecMut<'_>> {
-        let path: Path = path.into();
-        self.data.as_data_mut()?.spec_mut(&path)?.as_prim_mut()
+        PrimSpecMut::get(self.data.as_mut(), path.into())
     }
 
     /// Look up an attribute spec at a property path.
-    pub fn attribute(&self, path: impl Into<Path>) -> Option<AttributeSpec<'_>> {
-        let path: Path = path.into();
-        self.data.as_data()?.spec(&path)?.as_attr()
+    pub fn attribute(&self, path: impl Into<Path>) -> Option<AttributeSpecRef<'_>> {
+        AttributeSpecRef::get(self.data.as_ref(), path.into())
     }
 
     /// Mutably look up an attribute spec at a property path.
     pub fn attribute_mut(&mut self, path: impl Into<Path>) -> Option<AttributeSpecMut<'_>> {
-        let path: Path = path.into();
-        self.data.as_data_mut()?.spec_mut(&path)?.as_attr_mut()
+        AttributeSpecMut::get(self.data.as_mut(), path.into())
     }
 
     /// Look up a relationship spec at a property path.
-    pub fn relationship(&self, path: impl Into<Path>) -> Option<RelationshipSpec<'_>> {
-        let path: Path = path.into();
-        self.data.as_data()?.spec(&path)?.as_relationship()
+    pub fn relationship(&self, path: impl Into<Path>) -> Option<RelationshipSpecRef<'_>> {
+        RelationshipSpecRef::get(self.data.as_ref(), path.into())
     }
 
     /// Mutably look up a relationship spec at a property path.
     pub fn relationship_mut(&mut self, path: impl Into<Path>) -> Option<RelationshipSpecMut<'_>> {
-        let path: Path = path.into();
-        self.data.as_data_mut()?.spec_mut(&path)?.as_relationship_mut()
+        RelationshipSpecMut::get(self.data.as_mut(), path.into())
     }
 
     /// View this layer's root pseudo-spec, which carries layer-wide metadata
     /// (`defaultPrim`, `subLayers`, time codes, …).
-    pub fn pseudo_root(&self) -> Option<PseudoRootSpec<'_>> {
-        self.data.as_data()?.spec(&Path::abs_root())?.as_pseudo_root()
+    pub fn pseudo_root(&self) -> Option<PseudoRootSpecRef<'_>> {
+        PseudoRootSpecRef::get(self.data.as_ref())
     }
 
     /// Set the layer's `defaultPrim` metadata to `name`.
@@ -518,12 +473,7 @@ impl Layer {
     /// `SdfLayer::GetRelocates`. Reads through the backing [`AbstractData`], so
     /// it works on both in-memory and file-loaded layers.
     pub fn relocates(&self) -> RelocateList {
-        self.data
-            .try_get(&Path::abs_root(), FieldKey::LayerRelocates.as_str())
-            .ok()
-            .flatten()
-            .and_then(|value| value.into_owned().try_as_relocates())
-            .unwrap_or_default()
+        self.pseudo_root().and_then(|root| root.relocates()).unwrap_or_default()
     }
 
     /// Whether this layer's metadata carries any `relocates` opinion, including
@@ -552,20 +502,16 @@ impl Layer {
     /// Remove a metadata field from the pseudo-root spec, if that spec exists.
     /// No-op otherwise — clearing what isn't there must not materialize state.
     fn clear_root_field(&mut self, key: FieldKey) -> Result<(), AuthoringError> {
-        let data = self.writable_data_mut()?;
-        if let Some(spec) = data.spec_mut(&Path::abs_root()) {
-            spec.remove(key.as_str());
-        }
+        // `erase_field` is a no-op when the pseudo-root spec is absent.
+        self.data.erase_field(&Path::abs_root(), key.as_str());
         Ok(())
     }
 
     /// Mutably view this layer's root pseudo-spec. The spec is created on
-    /// first access if missing. Returns [`AuthoringError::ReadOnly`] for
-    /// file-loaded layers.
+    /// first access if missing.
     pub fn pseudo_root_mut(&mut self) -> Result<PseudoRootSpecMut<'_>, AuthoringError> {
-        let data = self.writable_data_mut()?;
         let root = Path::abs_root();
-        match data.spec_type(&root) {
+        match self.data.spec_type(&root) {
             Some(SpecType::PseudoRoot) => {}
             Some(_) => {
                 return Err(AuthoringError::InvalidPath {
@@ -573,26 +519,17 @@ impl Layer {
                     reason: "root spec exists with non-PseudoRoot SpecType",
                 })
             }
-            None => {
-                data.create_spec(root.clone(), SpecType::PseudoRoot);
-            }
+            None => self.data.create_spec(root, SpecType::PseudoRoot),
         }
-        Ok(data
-            .spec_mut(&root)
-            .expect("just ensured")
-            .as_pseudo_root_mut()
-            .expect("type guaranteed above"))
+        Ok(PseudoRootSpecMut::get(self.data.as_mut()).expect("just ensured a pseudo-root spec"))
     }
 
-    /// Borrow the layer's writable in-memory store, or return
-    /// [`AuthoringError::ReadOnly`] when the backend is a file-loaded
-    /// reader. Useful for higher-level authoring helpers (e.g.
-    /// [`crate::usd::Prim`]) that need to surface `ReadOnly` precisely
-    /// rather than misreporting a generic `InvalidPath` from a failed
-    /// mutable lookup.
-    pub(crate) fn writable_data_mut(&mut self) -> Result<&mut Data, AuthoringError> {
-        let identifier = self.identifier.clone();
-        self.data.as_data_mut().ok_or(AuthoringError::ReadOnly { identifier })
+    /// Borrow the layer's backing data as a mutable [`AbstractData`] for
+    /// authoring. Every backend is writable (the field-level write API lives on
+    /// the trait), so this is infallible — used by higher-level authoring
+    /// helpers (e.g. [`crate::usd::Prim`]) to reach the write surface.
+    pub(crate) fn data_mut(&mut self) -> &mut dyn AbstractData {
+        self.data.as_mut()
     }
 }
 
@@ -601,43 +538,6 @@ impl std::fmt::Debug for Layer {
         f.debug_struct("Layer")
             .field("identifier", &self.identifier)
             .finish_non_exhaustive()
-    }
-}
-
-/// `Layer` forwards every [`AbstractData`] method to its backing storage so
-/// `&Layer` can stand in wherever `&dyn AbstractData` was used. Mirrors C++
-/// `SdfLayer : SdfAbstractData`.
-impl AbstractData for Layer {
-    fn has_spec(&self, path: &Path) -> bool {
-        self.data.has_spec(path)
-    }
-
-    fn has_field(&self, path: &Path, field: &str) -> bool {
-        self.data.has_field(path, field)
-    }
-
-    fn spec_type(&self, path: &Path) -> Option<SpecType> {
-        self.data.spec_type(path)
-    }
-
-    fn try_get(&self, path: &Path, field: &str) -> Result<Option<std::borrow::Cow<'_, Value>>> {
-        self.data.try_get(path, field)
-    }
-
-    fn list(&self, path: &Path) -> Option<Vec<String>> {
-        self.data.list(path)
-    }
-
-    fn paths(&self) -> Vec<Path> {
-        self.data.paths()
-    }
-
-    fn as_data(&self) -> Option<&Data> {
-        self.data.as_data()
-    }
-
-    fn as_data_mut(&mut self) -> Option<&mut Data> {
-        None
     }
 }
 
@@ -661,7 +561,7 @@ impl AbstractData for Layer {
 // again here. The chain is independent of the layer mutation, so it could be
 // built once and threaded through (e.g. `create_*` could accept a prevalidated
 // chain) instead of re-parsing the path two or three times per write.
-fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringError> {
+fn ensure_prim_chain(data: &mut dyn AbstractData, target: &Path) -> Result<(), AuthoringError> {
     let chain = namespace_chain(target)?;
     let abs_root = Path::abs_root();
 
@@ -705,16 +605,18 @@ fn ensure_prim_chain(data: &mut Data, target: &Path) -> Result<(), AuthoringErro
 
     // Second pass: register each child name on its parent and create the spec.
     for (i, elem) in chain.iter().enumerate() {
-        let parent = parent_of(i);
-        let parent_spec = data.spec_mut(parent).expect("parent created by an earlier element");
-        add_to_token_vec(parent_spec, parent, elem.child_key, &elem.child_name)?;
+        add_to_token_vec(data, parent_of(i), elem.child_key, &elem.child_name)?;
 
         if data.spec_type(&elem.path).is_none() {
-            let spec = data.create_spec(elem.path.clone(), elem.spec_type);
+            data.create_spec(elem.path.clone(), elem.spec_type);
             // Only prim specs carry a specifier; variant set / variant specs
             // are pure scaffolding.
             if elem.spec_type == SpecType::Prim {
-                spec.add(FieldKey::Specifier, Value::Specifier(Specifier::Over));
+                data.set_field(
+                    &elem.path,
+                    FieldKey::Specifier.as_str(),
+                    Value::Specifier(Specifier::Over),
+                );
             }
         }
     }
@@ -826,13 +728,28 @@ fn namespace_chain(target: &Path) -> Result<Vec<ChainElement>, AuthoringError> {
     Ok(elems)
 }
 
-/// Insert `name` into the `TokenVec` field at `key` on `spec`, creating the
-/// field if absent. No-op if the name is already present.
-fn add_to_token_vec(spec: &mut Spec, owner_path: &Path, key: ChildrenKey, name: &str) -> Result<(), AuthoringError> {
-    match spec.get_mut(key.as_str()) {
-        Some(Value::TokenVec(v)) => {
+/// Insert `name` into the `TokenVec` field at `key` on the spec at `owner_path`,
+/// creating the field if absent. No-op if the name is already present.
+///
+// TODO(perf): this clones the parent's whole child-name `TokenVec` per insert
+// (read-into-owned → push → write back), so registering N siblings is O(N^2).
+// An in-place `AbstractData` append hook (default clone-set, overridden by
+// `Data` to `spec_mut` + `Vec::push`) would make each registration O(1).
+fn add_to_token_vec(
+    data: &mut dyn AbstractData,
+    owner_path: &Path,
+    key: ChildrenKey,
+    name: &str,
+) -> Result<(), AuthoringError> {
+    // A decode error must surface, not be mistaken for an absent field — the
+    // `None` arm overwrites, which would silently drop an undecodable child
+    // list on a lazy backend.
+    let existing = read_child_field(data, owner_path, key)?;
+    match existing {
+        Some(Value::TokenVec(mut v)) => {
             if !v.iter().any(|n| *n == name) {
                 v.push(name.into());
+                data.set_field(owner_path, key.as_str(), Value::TokenVec(v));
             }
         }
         Some(_) => {
@@ -842,25 +759,37 @@ fn add_to_token_vec(spec: &mut Spec, owner_path: &Path, key: ChildrenKey, name: 
             });
         }
         None => {
-            spec.add(key, Value::TokenVec(vec![name.into()]));
+            data.set_field(owner_path, key.as_str(), Value::TokenVec(vec![name.into()]));
         }
     }
     Ok(())
 }
 
 /// Verify that an authored child-list field is either absent or a `TokenVec`.
-fn validate_token_vec(data: &Data, path: &Path, key: ChildrenKey) -> Result<(), AuthoringError> {
-    match data.spec(path).and_then(|spec| spec.get(key.as_str())) {
-        Some(Value::TokenVec(_)) | None => Ok(()),
-        Some(_) => Err(AuthoringError::InvalidPath {
+fn validate_token_vec(data: &dyn AbstractData, path: &Path, key: ChildrenKey) -> Result<(), AuthoringError> {
+    match read_child_field(data, path, key)? {
+        Some(value) if !matches!(value, Value::TokenVec(_)) => Err(AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "child-list field exists with non-TokenVec value",
         }),
+        _ => Ok(()),
     }
 }
 
+/// Read a child-list field as an owned [`Value`], surfacing a decode failure as
+/// an [`AuthoringError`] rather than swallowing it to "absent".
+fn read_child_field(data: &dyn AbstractData, path: &Path, key: ChildrenKey) -> Result<Option<Value>, AuthoringError> {
+    let value = data
+        .try_get(path, key.as_str())
+        .map_err(|_| AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "child-list field could not be read",
+        })?;
+    Ok(value.map(Cow::into_owned))
+}
+
 /// Verify that `path` either holds no spec or holds one of type `expected`.
-fn require_spec_type_or_absent(data: &Data, path: &Path, expected: SpecType) -> Result<(), AuthoringError> {
+fn require_spec_type_or_absent(data: &dyn AbstractData, path: &Path, expected: SpecType) -> Result<(), AuthoringError> {
     match data.spec_type(path) {
         Some(existing) if existing != expected => Err(AuthoringError::InvalidPath {
             path: path.clone(),

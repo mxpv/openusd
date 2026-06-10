@@ -222,7 +222,7 @@ impl<'a> Parser<'a> {
 
     /// Parse tokens to specs.
     /// Walks the entire token stream, seeding the pseudo root and recursing through every prim.
-    pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::Spec>> {
+    pub fn parse(&mut self) -> Result<HashMap<sdf::Path, sdf::SpecData>> {
         let mut data = HashMap::new();
         let current_path = sdf::Path::abs_root();
 
@@ -247,7 +247,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse the file header/pseudo-root to populate layer-level metadata before prim traversal.
-    fn read_pseudo_root(&mut self) -> Result<sdf::Spec> {
+    fn read_pseudo_root(&mut self) -> Result<sdf::SpecData> {
         // Make sure text file starts with #usda...
         let version = self
             .fetch_next()?
@@ -255,7 +255,7 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| anyhow!("Text file must start with magic token, got {:?}", self.peek_next()))?;
         ensure!(version.starts_with("1.0"), "Unsupported USDA version: {version:?}");
 
-        let mut root = sdf::Spec::new(sdf::SpecType::PseudoRoot);
+        let mut root = sdf::SpecData::new(sdf::SpecType::PseudoRoot);
 
         if !self.is_next(Token::Punctuation('(')) {
             return Ok(root);
@@ -323,9 +323,9 @@ impl<'a> Parser<'a> {
         &mut self,
         current_path: &sdf::Path,
         parent_children: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::Spec>,
+        data: &mut HashMap<sdf::Path, sdf::SpecData>,
     ) -> Result<()> {
-        let mut spec = sdf::Spec::new(sdf::SpecType::Prim);
+        let mut spec = sdf::SpecData::new(sdf::SpecType::Prim);
 
         let specifier = {
             let specifier_token = self.fetch_next().context("Unable to read prim specifier")?;
@@ -385,8 +385,8 @@ impl<'a> Parser<'a> {
     fn read_prim_body(
         &mut self,
         path: &sdf::Path,
-        owner_spec: &mut sdf::Spec,
-        data: &mut HashMap<sdf::Path, sdf::Spec>,
+        owner_spec: &mut sdf::SpecData,
+        data: &mut HashMap<sdf::Path, sdf::SpecData>,
     ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
         let mut children = Vec::new();
         let mut properties = Vec::new();
@@ -436,7 +436,7 @@ impl<'a> Parser<'a> {
     /// These statements set the `primOrder` or `propertyOrder` fields on the
     /// owning prim/variant spec, controlling child/property display order;
     /// `rootPrims` sets `primOrder` on the pseudo-root.
-    fn read_reorder(&mut self, owner_spec: &mut sdf::Spec) -> Result<()> {
+    fn read_reorder(&mut self, owner_spec: &mut sdf::SpecData) -> Result<()> {
         self.fetch_next()?; // consume `reorder`
 
         let token = self
@@ -460,7 +460,11 @@ impl<'a> Parser<'a> {
     ///
     /// Each variant inside the set is represented as a child prim under a variant set
     /// spec in the scene hierarchy: `/{prim}{vset=name}{variant}`.
-    fn read_variant_set(&mut self, prim_path: &sdf::Path, data: &mut HashMap<sdf::Path, sdf::Spec>) -> Result<String> {
+    fn read_variant_set(
+        &mut self,
+        prim_path: &sdf::Path,
+        data: &mut HashMap<sdf::Path, sdf::SpecData>,
+    ) -> Result<String> {
         self.fetch_next()?; // consume `variantSet`
 
         let name = self.fetch_str().context("Expected variant set name")?.to_string();
@@ -468,7 +472,7 @@ impl<'a> Parser<'a> {
 
         // Create the variant set spec.
         let vset_path = prim_path.append_variant_selection(&name, "");
-        let mut vset_spec = sdf::Spec::new(sdf::SpecType::VariantSet);
+        let mut vset_spec = sdf::SpecData::new(sdf::SpecType::VariantSet);
         let mut variant_children = Vec::new();
 
         // Parse each variant: "VariantName" (...) { ... }
@@ -478,7 +482,7 @@ impl<'a> Parser<'a> {
             variant_children.push(variant_name.clone());
 
             let variant_path = prim_path.append_variant_selection(&name, &variant_name);
-            let mut variant_spec = sdf::Spec::new(sdf::SpecType::Variant);
+            let mut variant_spec = sdf::SpecData::new(sdf::SpecType::Variant);
 
             // Optional metadata block.
             if this.is_next(Token::Punctuation('(')) {
@@ -510,7 +514,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Merge a spec's fields into an existing spec at the given path, or insert it.
-    fn merge_spec(data: &mut HashMap<sdf::Path, sdf::Spec>, path: sdf::Path, spec: sdf::Spec) {
+    fn merge_spec(data: &mut HashMap<sdf::Path, sdf::SpecData>, path: sdf::Path, spec: sdf::SpecData) {
         use std::collections::hash_map::Entry;
         match data.entry(path) {
             Entry::Occupied(mut e) => e.get_mut().extend_from(spec),
@@ -521,8 +525,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Create an attribute spec with the standard type/custom/variability fields.
-    fn make_attribute_spec(type_info: &TypeInfo, custom: bool, variability: sdf::Variability) -> sdf::Spec {
-        let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
+    fn make_attribute_spec(type_info: &TypeInfo, custom: bool, variability: sdf::Variability) -> sdf::SpecData {
+        let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
         spec.add(FieldKey::TypeName, sdf::Value::token(type_info.to_string()));
         if custom {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
@@ -539,7 +543,7 @@ impl<'a> Parser<'a> {
         current_path: &sdf::Path,
         properties: &mut Vec<String>,
         suffixed_properties: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::Spec>,
+        data: &mut HashMap<sdf::Path, sdf::SpecData>,
     ) -> Result<()> {
         let mut custom = false;
         let list_op = self.try_list_op();
@@ -555,7 +559,7 @@ impl<'a> Parser<'a> {
             return self.read_relationship(current_path, false, properties, data, list_op);
         }
 
-        let mut spec = sdf::Spec::new(sdf::SpecType::Attribute);
+        let mut spec = sdf::SpecData::new(sdf::SpecType::Attribute);
         let mut variability = sdf::Variability::Varying;
         if self.try_consume(Token::Varying) {
             // default
@@ -695,7 +699,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse the metadata block attached to a property and stash entries on the spec.
-    fn parse_property_metadata(&mut self, spec: &mut sdf::Spec) -> Result<()> {
+    fn parse_property_metadata(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
         self.parse_block('(', ')', |this| {
             let list_op = this.try_list_op();
 
@@ -842,12 +846,12 @@ impl<'a> Parser<'a> {
         current_path: &sdf::Path,
         custom: bool,
         properties: &mut Vec<String>,
-        data: &mut HashMap<sdf::Path, sdf::Spec>,
+        data: &mut HashMap<sdf::Path, sdf::SpecData>,
         outer_list_op: Option<Token<'a>>,
     ) -> Result<()> {
         let name = self.expect_name().context("relationship name expected")?;
 
-        let mut spec = sdf::Spec::new(sdf::SpecType::Relationship);
+        let mut spec = sdf::SpecData::new(sdf::SpecType::Relationship);
         if custom {
             spec.add(FieldKey::Custom, sdf::Value::Bool(true));
         }
@@ -894,7 +898,7 @@ impl<'a> Parser<'a> {
     /// Parse prim metadata contained either within parentheses or directly after the prim
     /// declaration (until `{` is encountered).
     /// Parse a single prim metadata assignment, honoring list ops for supported fields.
-    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::Spec) -> Result<()> {
+    fn read_prim_metadata_entry(&mut self, spec: &mut sdf::SpecData) -> Result<()> {
         let list_op = self.try_list_op();
         let name_token = self.fetch_next()?;
 

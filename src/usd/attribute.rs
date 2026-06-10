@@ -50,7 +50,7 @@ impl Attribute {
     /// local opinion entirely.
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
         self.edit(&[sdf::FieldKey::Variability], |spec| {
-            spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v))
+            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v))
         })
     }
 
@@ -58,7 +58,7 @@ impl Attribute {
     /// opinion (see [`Attribute::set_variability`] for the rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
         self.edit(&[sdf::FieldKey::Custom], |spec| {
-            spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom))
+            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom))
         })
     }
 
@@ -91,10 +91,11 @@ impl Attribute {
             spec.set_default(sdf::Value::ValueBlock);
             // Block every authored time sample too — otherwise `get_at` would
             // still resolve weaker opinions through the cached samples.
-            if let Some(sdf::Value::TimeSamples(samples)) = spec.get_mut(sdf::FieldKey::TimeSamples.as_str()) {
+            if let Some(mut samples) = spec.time_samples() {
                 for (_, value) in samples.iter_mut() {
                     *value = sdf::Value::ValueBlock;
                 }
+                spec.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(samples));
             }
         })
     }
@@ -121,10 +122,10 @@ impl Attribute {
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+            let data = layer.data_mut();
+            match sdf::AttributeSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
-                    spec.add(key, value);
+                    spec.set(key, value);
                     let mut cl = sdf::ChangeList::new();
                     cl.entry_mut(&path).info_changed.insert(key);
                     Ok(cl)
@@ -230,8 +231,8 @@ impl Attribute {
                 layer.create_attribute(spec_path.clone(), type_name, sdf::Variability::Varying, false)?;
                 auto_ancestors
             };
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&spec_path).and_then(|s| s.as_attr_mut()) {
+            let data = layer.data_mut();
+            match sdf::AttributeSpecMut::get(data, spec_path.clone()) {
                 Some(mut spec) => {
                     removed = spec.delete_connection_path(&target);
                     let mut cl = sdf::ChangeList::new();
@@ -271,8 +272,8 @@ impl Attribute {
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> bool,
     {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+            let data = layer.data_mut();
+            match sdf::AttributeSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     let mut cl = sdf::ChangeList::new();
                     if f(&mut spec) {
@@ -426,16 +427,16 @@ impl Attribute {
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
     /// apply `f`, and return `self` for chaining. `fields` names the metadata
     /// keys the closure intends to author so the cache invalidator can
-    /// classify them. See [`Prim::edit`] for the `ReadOnly` vs `InvalidPath`
-    /// discrimination.
+    /// classify them. Returns `InvalidPath` if no attribute spec exists at the
+    /// path.
     fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
     {
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_attr_mut()) {
+            let data = layer.data_mut();
+            match sdf::AttributeSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     f(&mut spec);
                     let mut cl = sdf::ChangeList::new();

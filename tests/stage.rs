@@ -1514,25 +1514,14 @@ fn default_prim_accepts_nested() -> Result<()> {
     Ok(())
 }
 
+/// A stage opened from a file is editable — every backend implements the
+/// field-level write API — so authoring into its root layer succeeds.
 #[test]
-fn read_only_rejects_authoring() -> Result<()> {
+fn file_loaded_stage_is_editable() -> Result<()> {
     let stage = Stage::open(&composition_path("subLayer/sublayer_same_folder.usda"))?;
-    let err = stage.define_prim("/X").err().expect("expected ReadOnly error");
-    assert!(matches!(
-        err,
-        StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
-    ));
-    Ok(())
-}
-
-#[test]
-fn read_only_default_prim() -> Result<()> {
-    let stage = Stage::open(&composition_path("subLayer/sublayer_same_folder.usda"))?;
-    let err = stage.set_default_prim("World").unwrap_err();
-    assert!(matches!(
-        err,
-        StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
-    ));
+    stage.define_prim("/X")?;
+    stage.set_default_prim("World")?;
+    assert_eq!(stage.default_prim().as_deref(), Some("World"));
     Ok(())
 }
 
@@ -1661,8 +1650,6 @@ fn edit_target_no_matching_arc() -> Result<()> {
 /// in the source layer, not at the composed path, and it composes back.
 #[test]
 fn edit_target_authors_into_class() -> Result<()> {
-    use openusd::sdf::AbstractData;
-
     let stage = inherit_stage()?;
     let target = stage.edit_target_for_node(&sdf::path("/Prim")?, EditTargetArc::Inherit)?;
     {
@@ -1670,8 +1657,8 @@ fn edit_target_authors_into_class() -> Result<()> {
         stage.define_prim("/Prim/Child")?;
     }
     assert!(stage.prim_at("/Prim/Child").is_valid()?);
-    assert!(stage.root_layer().has_spec(&sdf::path("/_Class/Child")?));
-    assert!(!stage.root_layer().has_spec(&sdf::path("/Prim/Child")?));
+    assert!(stage.root_layer().data().has_spec(&sdf::path("/_Class/Child")?));
+    assert!(!stage.root_layer().data().has_spec(&sdf::path("/Prim/Child")?));
     Ok(())
 }
 
@@ -2264,9 +2251,7 @@ fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
 /// The parent layer's authored `subLayers` asset paths.
 fn authored_sublayers(stage: &Stage) -> Vec<String> {
     let root = stage.root_layer();
-    root.pseudo_root()
-        .and_then(|pr| pr.sublayers().map(<[String]>::to_vec))
-        .unwrap_or_default()
+    root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
 }
 
 /// `insert_sub_layer` both composes the new layer's opinion and authors the
@@ -2310,11 +2295,10 @@ fn remove_sub_layer_clears_metadata() -> Result<()> {
     Ok(())
 }
 
-/// Inserting under a read-only parent fails with `ReadOnly` and leaves the
-/// graph untouched — no orphan node for the would-be sublayer.
+/// Inserting a sublayer under a file-loaded (and thus editable) parent
+/// succeeds and adds exactly one node to the graph.
 #[test]
-fn insert_sub_layer_read_only_parent() -> Result<()> {
-    // A layer loaded from disk is read-only.
+fn insert_sub_layer_into_file_loaded_parent() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     std::fs::write(&root, "#usda 1.0\n")?;
@@ -2322,23 +2306,17 @@ fn insert_sub_layer_read_only_parent() -> Result<()> {
     let root_id = stage.root_layer().identifier().to_string();
     let before = stage.layer_count();
 
-    let err = stage
-        .insert_sub_layer(
-            &root_id,
-            0,
-            opinion_layer("weak.usda", 5.0)?,
-            sdf::LayerOffset::IDENTITY,
-        )
-        .unwrap_err();
+    stage.insert_sub_layer(
+        &root_id,
+        0,
+        opinion_layer("weak.usda", 5.0)?,
+        sdf::LayerOffset::IDENTITY,
+    )?;
 
-    assert!(matches!(
-        err,
-        StageAuthoringError::Layer(sdf::AuthoringError::ReadOnly { .. })
-    ));
     assert_eq!(
         stage.layer_count(),
-        before,
-        "a failed insert must not leave an orphan node"
+        before + 1,
+        "the inserted sublayer adds exactly one node"
     );
     Ok(())
 }
@@ -2985,9 +2963,9 @@ fn edit_context_restores_on_error() -> Result<()> {
     assert_eq!(stage.edit_target().layer_identifier(), root_id);
     let authored: std::result::Result<(), StageAuthoringError> = (|| {
         let _ctx = stage.edit_context(EditTarget::for_layer(session_id))?;
-        // The session layer is read-only; the write fails and `?` returns
-        // from this closure with the guard still in scope.
-        stage.define_prim("/X")?;
+        // Authoring a prim at a property path is invalid; the write fails and
+        // `?` returns from this closure with the guard still in scope.
+        stage.define_prim("/A.x")?;
         Ok(())
     })();
     assert!(authored.is_err());

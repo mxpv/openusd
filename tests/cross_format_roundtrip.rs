@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use openusd::sdf::{self, AbstractData};
-use openusd::usda::TextReader;
+use openusd::usda;
 use openusd::usdc::{CrateData, CrateWriter};
 
 fn snapshot(data: &dyn AbstractData) -> serde_json::Value {
@@ -70,7 +70,7 @@ fn normalize(v: &mut serde_json::Value) {
 }
 
 fn assert_cross(name: &str, usda_path: &Path) {
-    let text = TextReader::read(usda_path).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda_path.display()));
+    let text = usda::read_file(usda_path).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda_path.display()));
 
     let mut buf = Vec::new();
     {

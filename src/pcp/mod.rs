@@ -246,7 +246,7 @@ pub(crate) mod prim_resolve;
 mod relocates;
 
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, Path, Value};
+use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
@@ -317,7 +317,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
     // require the concrete in-memory `Data` backing a `Layer` may not have.
     let root = Path::abs_root();
     let read = |key: FieldKey| -> Option<f64> {
-        match layer.try_get(&root, key.as_str()).ok()??.into_owned() {
+        match layer.data().try_get(&root, key.as_str()).ok()??.into_owned() {
             Value::Double(v) => Some(v),
             Value::Float(v) => Some(v as f64),
             _ => None,
@@ -685,7 +685,7 @@ mod tests {
 
     fn layer(id: &str, text: &str) -> sdf::Layer {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        sdf::Layer::new(id, Box::new(crate::usda::TextReader::from_data(data)))
+        sdf::Layer::new(id, Box::new(sdf::Data::from_specs(data)))
     }
 
     fn relocate_count(graph: &LayerGraph) -> usize {

@@ -95,7 +95,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, AbstractData, LayerOffset, Path, Value};
+use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
 use super::mapping::MapFunction;
@@ -1184,7 +1184,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         } else {
             node_ambient
                 .iter()
-                .find(|&&(li, _)| self.inputs.stack.layer(li).has_spec(&source))
+                .find(|&&(li, _)| self.inputs.stack.layer(li).data().has_spec(&source))
                 .map(|&(li, _)| self.inputs.stack.layer(li).identifier.clone())
         };
 
@@ -1802,6 +1802,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     .inputs
                     .stack
                     .layer(layer)
+                    .data()
                     .try_get(&site, FieldKey::VariantSelection.as_str())?
                 else {
                     continue;
@@ -2692,6 +2693,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .inputs
             .stack
             .layer(root_layer)
+            .data()
             .try_get(&Path::abs_root(), FieldKey::DefaultPrim.as_str())?
         else {
             return Ok(None);
@@ -2882,7 +2884,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Whether any layer in `stack` authors a spec at `path`.
     fn stack_has_spec(&self, stack: &[(LayerId, LayerOffset)], path: &Path) -> bool {
-        stack.iter().any(|&(li, _)| self.inputs.stack.layer(li).has_spec(path))
+        stack
+            .iter()
+            .any(|&(li, _)| self.inputs.stack.layer(li).data().has_spec(path))
     }
 
     /// Whether `node` can contribute opinions (C++ `PcpNodeRef::CanContributeSpecs`):
@@ -2952,7 +2956,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
         let mut out: Vec<Token> = Vec::new();
         for &(layer, _) in self.node(node).layer_stack() {
-            let Some(value) = self.inputs.stack.layer(layer).try_get(path, key.as_str())? else {
+            let Some(value) = self.inputs.stack.layer(layer).data().try_get(path, key.as_str())? else {
                 continue;
             };
             if let Value::TokenVec(names) = value.into_owned() {
@@ -2985,7 +2989,7 @@ mod tests {
 
     fn stack(text: &str) -> LayerGraph {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        let layer = crate::sdf::Layer::new("root.usd", Box::new(crate::usda::TextReader::from_data(data)));
+        let layer = sdf::Layer::new("root.usd", Box::new(sdf::Data::from_specs(data)));
         LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true)
     }
 
@@ -3008,7 +3012,7 @@ mod tests {
             .iter()
             .map(|(id, text)| {
                 let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-                crate::sdf::Layer::new(*id, Box::new(crate::usda::TextReader::from_data(data)))
+                sdf::Layer::new(*id, Box::new(sdf::Data::from_specs(data)))
             })
             .collect();
         LayerGraph::from_layers(layers, session, Box::new(DefaultResolver::new()), true)

@@ -33,8 +33,9 @@ pub use path::{path, Path, PathComponent, PathComponents, PathElement};
 pub use path_table::PathTable;
 pub use schema::{ChildrenKey, FieldKey};
 pub use spec::{
-    AttributeSpec, AttributeSpecMut, PrimSpec, PrimSpecMut, PseudoRootSpec, PseudoRootSpecMut, RelationshipSpec,
-    RelationshipSpecMut, Spec, SpecError,
+    AttributeSpec, AttributeSpecMut, AttributeSpecRef, PrimSpec, PrimSpecMut, PrimSpecRef, PropertySpec,
+    PropertySpecMut, PropertySpecRef, PseudoRootSpec, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpec,
+    RelationshipSpecMut, RelationshipSpecRef, Spec, SpecData, SpecError, SpecMut, SpecRef,
 };
 pub use value::{CastError, FromValueCast, Value, ValueConversionError};
 
@@ -333,11 +334,17 @@ pub type Relocate = (Path, Path);
 /// metadata. Mirrors C++ `SdfRelocates`, a `std::vector<SdfRelocate>`.
 pub type RelocateList = Vec<Relocate>;
 
-/// Interface to access scene description data similar to `SdfAbstractData` in C++ version of USD.
+/// The scene-description storage interface, mirroring C++ `SdfAbstractData`.
 ///
-/// `AbstractData` is an anonymous container that owns scene description values.
-///
-/// For now holds read-only portion of the API.
+/// An `AbstractData` is an anonymous container of specs (keyed by [`Path`]) and
+/// their fields. Like `SdfAbstractData`, the interface is *field-level* and
+/// read+write: readers, writers, composition, and authoring all operate through
+/// the same set of `has_*` / `try_get` / `create_spec` / `set_field` methods,
+/// regardless of whether the backing store decodes eagerly (text, [`Data`]) or
+/// lazily (the binary crate reader). The typed spec views
+/// ([`PrimSpec`](crate::sdf::PrimSpec) and friends) are a higher-tier
+/// convenience layered on top of this interface, paralleling how `SdfPrimSpec`
+/// sits above `SdfAbstractData`.
 pub trait AbstractData {
     /// Returns `true` if this data has a spec for the given path.
     fn has_spec(&self, path: &Path) -> bool;
@@ -377,24 +384,32 @@ pub trait AbstractData {
     /// rely on this for reproducible output.
     fn paths(&self) -> Vec<Path>;
 
-    /// Returns a reference to the underlying [`Data`] backend, if this impl
-    /// is a writable in-memory store. Read-only file-backed impls return
-    /// `None`. The default implementation returns `None`, so adding a new
-    /// `AbstractData` impl does not require opting in.
-    fn as_data(&self) -> Option<&Data> {
-        None
-    }
+    /// Creates an empty spec of type `ty` at `path`, replacing any existing
+    /// spec there. Mirrors C++ `SdfAbstractData::CreateSpec`. Fields are
+    /// authored separately via [`set_field`](Self::set_field).
+    fn create_spec(&mut self, path: Path, ty: SpecType);
 
-    /// Returns a mutable reference to the underlying [`Data`] backend, if this
-    /// impl is a writable in-memory store.
+    /// Removes the spec at `path` along with all its fields. Mirrors C++
+    /// `SdfAbstractData::EraseSpec`. No-op if no spec exists there.
+    fn erase_spec(&mut self, path: &Path);
+
+    /// Sets (or replaces) `field` on the spec at `path`, preserving authored
+    /// field order. Mirrors C++ `SdfAbstractData::Set`. The spec must already
+    /// exist (create it with [`create_spec`](Self::create_spec) first); setting
+    /// a field on an absent spec drops the write (debug builds assert).
     ///
-    /// Read-only backends (USDA text readers, USDC binary readers) return
-    /// `None`. The default implementation returns `None`, so adding a new
-    /// `AbstractData` impl does not require opting in. Authoring code that
-    /// needs to mutate a layer uses this hook to reach the writable store.
-    fn as_data_mut(&mut self) -> Option<&mut Data> {
-        None
-    }
+    /// This *replaces* the field value; it does not merge list ops. List-op
+    /// accumulation across multiple operator statements is the reader's job
+    /// (see `SpecData::add_list_op`), so authoring a list op through this trait
+    /// overwrites rather than folds.
+    //
+    // TODO: lift list-op merge onto this trait so the in-memory and crate
+    // backends agree and the typed-view mutators stop re-implementing the fold.
+    fn set_field(&mut self, path: &Path, field: &str, value: Value);
+
+    /// Removes `field` from the spec at `path`. Mirrors C++
+    /// `SdfAbstractData::EraseField`. No-op if the spec or field is absent.
+    fn erase_field(&mut self, path: &Path, field: &str);
 }
 
 /// A boxed layer data source, used throughout the layer stack.

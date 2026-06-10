@@ -1,47 +1,64 @@
-//! [`Spec`] — the flat per-path field container — and its typed views
-//! ([`PrimSpec`], [`AttributeSpec`], [`RelationshipSpec`], [`PseudoRootSpec`]
-//! and their `*Mut` aliases).
+//! Spec handles over the [`sdf::AbstractData`] field API, plus the [`SpecData`]
+//! storage record they read and write.
 //!
-//! `Spec` parallels C++ `SdfData`'s per-spec entry; the typed views parallel
-//! the C++ `Sdf*Spec` subclasses (`SdfPrimSpec`, `SdfAttributeSpec`, …).
-//! Where C++ models per-spec-type APIs through inheritance, we use a tagged
-//! container plus typed views: the storage stays uniform for readers,
-//! writers, and composition, while the views give compile-time guarantees
-//! that variant-specific accessors won't be called on the wrong spec kind.
+//! [`SpecData`] is the per-path storage record — a spec type plus its fields in
+//! authored order — that the in-memory [`Data`](crate::sdf::Data) backend keeps
+//! (the analogue of C++ `SdfData`'s private `_SpecData`). The typed views are
+//! something else entirely: thin handles holding `(data, path)` whose accessors
+//! read and write through [`sdf::AbstractData::try_get`] / [`sdf::AbstractData::set_field`],
+//! exactly like C++ `SdfSpec` and its subclasses, which hold `(layer, path)` and
+//! carry no copy. Because they go through the abstract interface, a view works
+//! on any backend, not just `Data`.
 //!
-//! The primary entry points for authoring and inspection are
-//! [`Layer::create_prim`](crate::sdf::Layer::create_prim) and friends;
-//! the `Spec::as_*` downcasts here are the low-level building block
-//! equivalent to C++'s `TfDynamic_cast<SdfPrimSpec>(spec)`.
+//! The hierarchy mirrors C++ (`SdfSpec` → `SdfPropertySpec` → `SdfAttributeSpec`
+//! / `SdfRelationshipSpec`):
+//!
+//! ```text
+//! Spec ── PrimSpec
+//!     ├── PseudoRootSpec
+//!     └── PropertySpec ── AttributeSpec
+//!                     └── RelationshipSpec
+//! ```
+//!
+//! Each typed view newtype-wraps the one above it and uses `Deref`/`DerefMut`
+//! so the base accessors are reachable. A view is generic over its borrow `B`
+//! — `&'a dyn sdf::AbstractData` for reads (the default) or `&'a mut dyn sdf::AbstractData`
+//! for writes (the `*Mut` aliases) — so one type serves both modes while the
+//! generic stays out of the public surface.
+//!
+//! The primary entry points are the path-keyed methods on
+//! [`Layer`](crate::sdf::Layer) (e.g. `Layer::create_prim`, `Layer::prim`),
+//! which return these views and handle the write-side bookkeeping
+//! (`primChildren` / `propertyChildren` ordering, ancestor specifiers).
 
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use crate::sdf;
 use crate::tf;
 
-/// A single spec in a scene description layer — a (type, fields) entry
-/// keyed by [`sdf::Path`] within a [`Data`](crate::sdf::Data) store.
+/// Implements `Debug` for a spec-handle newtype by delegating to its inner
+/// handle, so the data reference it holds is not required to be `Debug`.
+macro_rules! impl_spec_debug {
+    ($($ty:ident),+ $(,)?) => {$(
+        impl<'a, B: Deref<Target = dyn sdf::AbstractData + 'a>> fmt::Debug for $ty<'a, B> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Debug::fmt(&self.0, f)
+            }
+        }
+    )+};
+}
+
+/// Per-path storage record kept by the in-memory [`Data`](crate::sdf::Data)
+/// backend: a [`SpecType`](sdf::SpecType) plus the spec's fields in authored
+/// order. The analogue of C++ `SdfData`'s private `_SpecData`.
 ///
-/// See [SdfSpec](https://openusd.org/dev/api/class_sdf_spec.html) in the
-/// USD documentation.
-///
-/// Fields are stored in authored order. This mirrors the C++ `SdfData`
-/// representation and is required for faithful text round-tripping.
-///
-/// Per-spec-type APIs (typeName setters, time samples, target paths, …)
-/// live on the [`PrimSpec`] / [`AttributeSpec`] / [`RelationshipSpec`] /
-/// [`PseudoRootSpec`] typed views and their `*Mut` aliases. C++ does this
-/// through inheritance (`SdfPrimSpec : SdfSpec`); we use a tagged container
-/// plus typed views. `Spec::as_prim` / `as_attr` / `as_relationship` /
-/// `as_pseudo_root` (and their `_mut` variants) are the Rust equivalent of
-/// `TfDynamic_cast<SdfPrimSpec>(spec)` — a low-level downcast. The intended
-/// primary entry points are the path-keyed methods on
-/// [`Layer`](crate::sdf::Layer) (e.g. `Layer::create_prim`,
-/// `Layer::prim_mut`), which mirror `SdfLayer::CreatePrimSpec` /
-/// `SdfLayer::GetPrimAtPath` and handle the write-side bookkeeping.
+/// This is backend storage, distinct from the [`Spec`] handle that reads and
+/// writes it through the [`sdf::AbstractData`] interface. Fields are stored in
+/// authored order, which is required for faithful text round-tripping.
 #[derive(Debug, Clone)]
-pub struct Spec {
+pub struct SpecData {
     /// The type of this spec (prim, attribute, relationship, etc.).
     pub ty: sdf::SpecType,
     /// The fields stored on this spec, in authored order.
@@ -62,8 +79,8 @@ pub enum SpecError {
     },
 }
 
-impl Spec {
-    /// Creates a new empty spec of the given type.
+impl SpecData {
+    /// Creates a new empty spec record of the given type.
     pub fn new(ty: sdf::SpecType) -> Self {
         Self { ty, fields: Vec::new() }
     }
@@ -130,182 +147,193 @@ impl Spec {
     }
 
     /// Merge fields from `other` into `self`, upserting each by name.
-    pub fn extend_from(&mut self, other: Spec) {
+    pub fn extend_from(&mut self, other: SpecData) {
         for (k, v) in other.fields {
             self.add(k, v);
         }
     }
-
-    /// Returns a read-only [`PrimSpec`] view if this spec is of type
-    /// [`sdf::SpecType::Prim`].
-    pub fn as_prim(&self) -> Option<PrimSpec<'_>> {
-        (self.ty == sdf::SpecType::Prim).then_some(PrimSpec::new(self))
-    }
-
-    /// Returns a mutable [`PrimSpecMut`] view if this spec is of type
-    /// [`sdf::SpecType::Prim`].
-    pub fn as_prim_mut(&mut self) -> Option<PrimSpecMut<'_>> {
-        (self.ty == sdf::SpecType::Prim).then_some(PrimSpec::new(self))
-    }
-
-    /// Returns a read-only [`AttributeSpec`] view if this spec is of type
-    /// [`sdf::SpecType::Attribute`].
-    pub fn as_attr(&self) -> Option<AttributeSpec<'_>> {
-        (self.ty == sdf::SpecType::Attribute).then_some(AttributeSpec::new(self))
-    }
-
-    /// Returns a mutable [`AttributeSpecMut`] view if this spec is of type
-    /// [`sdf::SpecType::Attribute`].
-    pub fn as_attr_mut(&mut self) -> Option<AttributeSpecMut<'_>> {
-        (self.ty == sdf::SpecType::Attribute).then_some(AttributeSpec::new(self))
-    }
-
-    /// Returns a read-only [`RelationshipSpec`] view if this spec is of type
-    /// [`sdf::SpecType::Relationship`].
-    pub fn as_relationship(&self) -> Option<RelationshipSpec<'_>> {
-        (self.ty == sdf::SpecType::Relationship).then_some(RelationshipSpec::new(self))
-    }
-
-    /// Returns a mutable [`RelationshipSpecMut`] view if this spec is of type
-    /// [`sdf::SpecType::Relationship`].
-    pub fn as_relationship_mut(&mut self) -> Option<RelationshipSpecMut<'_>> {
-        (self.ty == sdf::SpecType::Relationship).then_some(RelationshipSpec::new(self))
-    }
-
-    /// Returns a read-only [`PseudoRootSpec`] view if this spec is of type
-    /// [`sdf::SpecType::PseudoRoot`].
-    pub fn as_pseudo_root(&self) -> Option<PseudoRootSpec<'_>> {
-        (self.ty == sdf::SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
-    }
-
-    /// Returns a mutable [`PseudoRootSpecMut`] view if this spec is of type
-    /// [`sdf::SpecType::PseudoRoot`].
-    pub fn as_pseudo_root_mut(&mut self) -> Option<PseudoRootSpecMut<'_>> {
-        (self.ty == sdf::SpecType::PseudoRoot).then_some(PseudoRootSpec::new(self))
-    }
 }
 
-/// Typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
+/// Base spec handle — a `(data, path)` reference into an [`sdf::AbstractData`],
+/// paralleling C++ `SdfSpec`. Field accessors read and write through the
+/// abstract interface; the handle holds no copy of the spec.
 ///
-/// The default borrow mode is read-only. [`PrimSpecMut`] aliases this same
-/// wrapper with an exclusive borrow, so it has both read and write methods.
-#[derive(Debug)]
-pub struct PrimSpec<'a, B = &'a Spec> {
-    spec: B,
-    _marker: PhantomData<&'a Spec>,
+/// `B` is the borrow: `&'a dyn sdf::AbstractData` for reads (the default) or
+/// `&'a mut dyn sdf::AbstractData` for writes ([`SpecMut`]). The typed views
+/// ([`PrimSpec`], [`AttributeSpec`], …) wrap this and reach its accessors
+/// through `Deref`.
+pub struct Spec<'a, B> {
+    data: B,
+    path: sdf::Path,
+    _marker: PhantomData<&'a ()>,
 }
 
-/// Mutable typed view of a prim [`Spec`]. Parallel to C++ `SdfPrimSpec`.
-pub type PrimSpecMut<'a> = PrimSpec<'a, &'a mut Spec>;
+impl<'a, B: Deref<Target = dyn sdf::AbstractData + 'a>> fmt::Debug for Spec<'a, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Spec")
+            .field("path", &self.path)
+            .field("type", &self.spec_type())
+            .finish()
+    }
+}
 
-impl<'a, B> PrimSpec<'a, B> {
-    fn new(spec: B) -> Self {
+impl_spec_debug!(PrimSpec, PseudoRootSpec, PropertySpec, AttributeSpec, RelationshipSpec);
+
+/// A read-only base spec handle (`Spec` over a shared borrow).
+pub type SpecRef<'a> = Spec<'a, &'a dyn sdf::AbstractData>;
+
+/// A mutable base spec handle (`Spec` over an exclusive borrow).
+pub type SpecMut<'a> = Spec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a, B> Spec<'a, B> {
+    pub(crate) fn wrap(data: B, path: sdf::Path) -> Self {
         Self {
-            spec,
+            data,
+            path,
             _marker: PhantomData,
         }
     }
 }
 
-impl<'a, B> Deref for PrimSpec<'a, B>
+impl<'a, B> Spec<'a, B>
 where
-    B: Deref<Target = Spec>,
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.spec.deref()
+    /// The path this handle refers to.
+    pub fn path(&self) -> &sdf::Path {
+        &self.path
+    }
+
+    /// The type of the spec at this path, if any.
+    pub fn spec_type(&self) -> Option<sdf::SpecType> {
+        self.data.spec_type(&self.path)
+    }
+
+    /// Reads `key` as an owned value, propagating a decode failure. `Ok(None)`
+    /// means the field (or spec) is unauthored; `Err` means a present field
+    /// could not be decoded. Read accessors swallow the error via
+    /// [`read`](Self::read); read-modify-write authoring keeps it so an
+    /// undecodable field is not mistaken for "absent" and overwritten.
+    pub fn field(&self, key: &str) -> anyhow::Result<Option<sdf::Value>> {
+        Ok(self.data.try_get(&self.path, key)?.map(|c| c.into_owned()))
+    }
+
+    /// Reads `key`, swallowing a decode failure as "absent". The read-accessor
+    /// counterpart to [`field`](Self::field); authoring keeps `field` so an
+    /// undecodable field is not mistaken for absent and overwritten.
+    fn read(&self, key: &str) -> Option<sdf::Value> {
+        self.field(key).ok().flatten()
+    }
+
+    /// Whether `key` is authored on this spec.
+    pub fn has_field(&self, key: &str) -> bool {
+        self.data.has_field(&self.path, key)
+    }
+
+    /// The authored field names on this spec, in authored order.
+    pub fn fields(&self) -> Vec<String> {
+        self.data.list(&self.path).unwrap_or_default()
     }
 }
 
-impl<'a, B> DerefMut for PrimSpec<'a, B>
+impl<'a, B> Spec<'a, B>
 where
-    B: DerefMut<Target = Spec>,
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.spec.deref_mut()
+    /// Sets (or replaces) `key`.
+    pub fn set(&mut self, key: &str, value: sdf::Value) {
+        self.data.set_field(&self.path, key, value);
+    }
+
+    /// Removes `key` if authored.
+    pub fn erase(&mut self, key: &str) {
+        self.data.erase_field(&self.path, key);
+    }
+}
+
+/// Typed view of a prim spec. Parallel to C++ `SdfPrimSpec`.
+///
+/// Read-only over a shared borrow. [`PrimSpecMut`] aliases this same
+/// handle with an exclusive borrow, so it has both read and write methods.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct PrimSpec<'a, B>(Spec<'a, B>);
+
+/// Read-only typed view of a prim spec.
+pub type PrimSpecRef<'a> = PrimSpec<'a, &'a dyn sdf::AbstractData>;
+
+/// Mutable typed view of a prim spec. Parallel to C++ `SdfPrimSpec`.
+pub type PrimSpecMut<'a> = PrimSpec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a> PrimSpecRef<'a> {
+    /// Returns a read-only view of the prim spec at `path`, or `None` if no
+    /// prim spec exists there.
+    pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Prim)).then(|| Self(Spec::wrap(data, path)))
+    }
+}
+
+impl<'a> PrimSpecMut<'a> {
+    /// Returns a mutable view of the prim spec at `path`, or `None` if no prim
+    /// spec exists there.
+    pub(crate) fn get(data: &'a mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Prim)).then(|| Self(Spec::wrap(data, path)))
     }
 }
 
 impl<'a, B> PrimSpec<'a, B>
 where
-    B: Deref<Target = Spec>,
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Authored `typeName` (e.g. `"Xform"`, `"Mesh"`). `None` if unset.
-    pub fn type_name(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::TypeName.as_str())? {
-            sdf::Value::Token(t) => Some(t.as_str()),
-            _ => None,
-        }
+    pub fn type_name(&self) -> Option<tf::Token> {
+        self.read(sdf::FieldKey::TypeName.as_str())?.try_as_token()
     }
 
     /// Authored `specifier` (`def`, `over`, `class`). `None` if unset.
     pub fn specifier(&self) -> Option<sdf::Specifier> {
-        match self.get(sdf::FieldKey::Specifier.as_str())? {
-            sdf::Value::Specifier(s) => Some(*s),
-            _ => None,
-        }
+        self.read(sdf::FieldKey::Specifier.as_str())?.try_as_specifier()
     }
 
     /// Authored `kind` metadata (e.g. `"component"`, `"group"`).
-    pub fn kind(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::Kind.as_str())? {
-            sdf::Value::Token(t) => Some(t.as_str()),
-            _ => None,
-        }
+    pub fn kind(&self) -> Option<tf::Token> {
+        self.read(sdf::FieldKey::Kind.as_str())?.try_as_token()
     }
 
     /// Authored `active` flag. `None` if unset (USD defaults to active).
     pub fn is_active(&self) -> Option<bool> {
-        match self.get(sdf::FieldKey::Active.as_str())? {
-            sdf::Value::Bool(b) => Some(*b),
-            _ => None,
-        }
+        self.read(sdf::FieldKey::Active.as_str())?.try_as_bool()
     }
 
     /// Authored `hidden` flag.
     pub fn is_hidden(&self) -> Option<bool> {
-        match self.get(sdf::FieldKey::Hidden.as_str())? {
-            sdf::Value::Bool(b) => Some(*b),
-            _ => None,
-        }
+        self.read(sdf::FieldKey::Hidden.as_str())?.try_as_bool()
     }
 
     /// Authored `instanceable` flag.
     pub fn is_instanceable(&self) -> Option<bool> {
-        match self.get(sdf::FieldKey::Instanceable.as_str())? {
-            sdf::Value::Bool(b) => Some(*b),
-            _ => None,
-        }
+        self.read(sdf::FieldKey::Instanceable.as_str())?.try_as_bool()
     }
 
     /// Names of child prims, in declared order. `None` if unset.
-    pub fn prim_children(&self) -> Option<&[tf::Token]> {
-        match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
-            sdf::Value::TokenVec(v) => Some(v.as_slice()),
-            _ => None,
-        }
+    pub fn prim_children(&self) -> Option<Vec<tf::Token>> {
+        self.read(sdf::ChildrenKey::PrimChildren.as_str())?.try_as_token_vec()
     }
 
     /// Names of child properties, in declared order. `None` if unset.
-    pub fn property_children(&self) -> Option<&[tf::Token]> {
-        match self.get(sdf::ChildrenKey::PropertyChildren.as_str())? {
-            sdf::Value::TokenVec(v) => Some(v.as_slice()),
-            _ => None,
-        }
+    pub fn property_children(&self) -> Option<Vec<tf::Token>> {
+        self.read(sdf::ChildrenKey::PropertyChildren.as_str())?
+            .try_as_token_vec()
     }
 
     /// Authored `apiSchemas` list op, if present.
-    pub fn api_schemas(&self) -> Option<&sdf::TokenListOp> {
-        match self.get(sdf::FieldKey::ApiSchemas.as_str())? {
-            sdf::Value::TokenListOp(op) => Some(op),
-            _ => None,
-        }
+    pub fn api_schemas(&self) -> Option<sdf::TokenListOp> {
+        self.read(sdf::FieldKey::ApiSchemas.as_str())?.try_as_token_list_op()
     }
 }
 
 impl<'a, B> PrimSpec<'a, B>
 where
-    B: DerefMut<Target = Spec>,
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Set the `typeName` field. An empty `name` clears the field instead
     /// of authoring `sdf::Value::Token("")` — matching the empty-string skip in
@@ -314,35 +342,35 @@ where
     pub fn set_type_name(&mut self, name: impl Into<tf::Token>) {
         let name = name.into();
         if name.is_empty() {
-            self.remove(sdf::FieldKey::TypeName.as_str());
+            self.erase(sdf::FieldKey::TypeName.as_str());
         } else {
-            self.add(sdf::FieldKey::TypeName, sdf::Value::Token(name));
+            self.set(sdf::FieldKey::TypeName.as_str(), sdf::Value::Token(name));
         }
     }
 
     /// Set the `specifier` field.
     pub fn set_specifier(&mut self, specifier: sdf::Specifier) {
-        self.add(sdf::FieldKey::Specifier, sdf::Value::Specifier(specifier));
+        self.set(sdf::FieldKey::Specifier.as_str(), sdf::Value::Specifier(specifier));
     }
 
     /// Set the `kind` metadata.
     pub fn set_kind(&mut self, kind: impl Into<tf::Token>) {
-        self.add(sdf::FieldKey::Kind, sdf::Value::token(kind));
+        self.set(sdf::FieldKey::Kind.as_str(), sdf::Value::token(kind));
     }
 
     /// Set the `active` flag.
     pub fn set_active(&mut self, active: bool) {
-        self.add(sdf::FieldKey::Active, sdf::Value::Bool(active));
+        self.set(sdf::FieldKey::Active.as_str(), sdf::Value::Bool(active));
     }
 
     /// Set the `hidden` flag.
     pub fn set_hidden(&mut self, hidden: bool) {
-        self.add(sdf::FieldKey::Hidden, sdf::Value::Bool(hidden));
+        self.set(sdf::FieldKey::Hidden.as_str(), sdf::Value::Bool(hidden));
     }
 
     /// Set the `instanceable` flag.
     pub fn set_instanceable(&mut self, instanceable: bool) {
-        self.add(sdf::FieldKey::Instanceable, sdf::Value::Bool(instanceable));
+        self.set(sdf::FieldKey::Instanceable.as_str(), sdf::Value::Bool(instanceable));
     }
 
     /// Add an applied API schema token to this prim's `apiSchemas` list op.
@@ -360,15 +388,23 @@ where
     /// when the call was a no-op.
     pub fn add_applied_schema(&mut self, name: impl Into<String>) -> Result<bool, SpecError> {
         let name: tf::Token = name.into().into();
-        match self.get_mut(sdf::FieldKey::ApiSchemas.as_str()) {
-            Some(sdf::Value::TokenListOp(op)) => Ok(add_applied_schema_to_list_op(op, name)),
+        // An undecodable `apiSchemas` must not be silently overwritten.
+        let Ok(existing) = self.field(sdf::FieldKey::ApiSchemas.as_str()) else {
+            return Ok(false);
+        };
+        match existing {
+            Some(sdf::Value::TokenListOp(mut op)) => {
+                let changed = add_applied_schema_to_list_op(&mut op, name);
+                self.set(sdf::FieldKey::ApiSchemas.as_str(), sdf::Value::TokenListOp(op));
+                Ok(changed)
+            }
             Some(_) => Err(SpecError::FieldType {
                 field: sdf::FieldKey::ApiSchemas.as_str(),
                 expected: "sdf::TokenListOp",
             }),
             None => {
-                self.add(
-                    sdf::FieldKey::ApiSchemas,
+                self.set(
+                    sdf::FieldKey::ApiSchemas.as_str(),
                     sdf::Value::TokenListOp(sdf::TokenListOp::prepended([name])),
                 );
                 Ok(true)
@@ -402,127 +438,343 @@ fn add_applied_schema_to_list_op(op: &mut sdf::TokenListOp, name: tf::Token) -> 
     changed
 }
 
-/// Typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
+/// Typed view of the layer's root pseudo-spec. Parallel to C++
+/// `SdfPseudoRootSpec`; carries layer-wide metadata (`defaultPrim`,
+/// `subLayers`, time codes, etc.).
 ///
-/// The default borrow mode is read-only. [`AttributeSpecMut`] aliases this
-/// same wrapper with an exclusive borrow, so it has both read and write methods.
-#[derive(Debug)]
-pub struct AttributeSpec<'a, B = &'a Spec> {
-    spec: B,
-    _marker: PhantomData<&'a Spec>,
+/// Read-only over a shared borrow. [`PseudoRootSpecMut`] aliases this
+/// same handle with an exclusive borrow, so it has both read and write methods.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct PseudoRootSpec<'a, B>(Spec<'a, B>);
+
+/// Read-only typed view of the layer's root pseudo-spec.
+pub type PseudoRootSpecRef<'a> = PseudoRootSpec<'a, &'a dyn sdf::AbstractData>;
+
+/// Mutable typed view of the layer's root pseudo-spec. Parallel to C++ `SdfPseudoRootSpec`.
+pub type PseudoRootSpecMut<'a> = PseudoRootSpec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a> PseudoRootSpecRef<'a> {
+    /// Returns a read-only view of the pseudo-root spec, or `None` if the
+    /// layer has no pseudo-root spec.
+    pub(crate) fn get(data: &'a dyn sdf::AbstractData) -> Option<Self> {
+        let path = sdf::Path::abs_root();
+        matches!(data.spec_type(&path), Some(sdf::SpecType::PseudoRoot)).then(|| Self(Spec::wrap(data, path)))
+    }
 }
 
-/// Mutable typed view of an attribute [`Spec`]. Parallel to C++ `SdfAttributeSpec`.
-pub type AttributeSpecMut<'a> = AttributeSpec<'a, &'a mut Spec>;
+impl<'a> PseudoRootSpecMut<'a> {
+    /// Returns a mutable view of the pseudo-root spec, or `None` if the layer
+    /// has no pseudo-root spec.
+    pub(crate) fn get(data: &'a mut dyn sdf::AbstractData) -> Option<Self> {
+        let path = sdf::Path::abs_root();
+        matches!(data.spec_type(&path), Some(sdf::SpecType::PseudoRoot)).then(|| Self(Spec::wrap(data, path)))
+    }
+}
 
-impl<'a, B> AttributeSpec<'a, B> {
-    fn new(spec: B) -> Self {
-        Self {
-            spec,
-            _marker: PhantomData,
+impl<'a, B> PseudoRootSpec<'a, B>
+where
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
+{
+    /// `defaultPrim` token, if authored.
+    pub fn default_prim(&self) -> Option<tf::Token> {
+        self.read(sdf::FieldKey::DefaultPrim.as_str())?.try_as_token()
+    }
+
+    /// Sublayer asset paths in strength order (strongest first).
+    pub fn sublayers(&self) -> Option<Vec<String>> {
+        self.read(sdf::FieldKey::SubLayers.as_str())?.try_as_string_vec()
+    }
+
+    /// Namespace relocations authored in this layer's metadata.
+    pub fn relocates(&self) -> Option<sdf::RelocateList> {
+        self.read(sdf::FieldKey::LayerRelocates.as_str())?.try_as_relocates()
+    }
+
+    /// Layer documentation string.
+    pub fn documentation(&self) -> Option<String> {
+        self.read(sdf::FieldKey::Documentation.as_str())?.try_as_string()
+    }
+
+    /// Layer start time code.
+    pub fn start_time_code(&self) -> Option<f64> {
+        self.read(sdf::FieldKey::StartTimeCode.as_str())?.try_as_double()
+    }
+
+    /// Layer end time code.
+    pub fn end_time_code(&self) -> Option<f64> {
+        self.read(sdf::FieldKey::EndTimeCode.as_str())?.try_as_double()
+    }
+
+    /// Time codes per second.
+    pub fn time_codes_per_second(&self) -> Option<f64> {
+        self.read(sdf::FieldKey::TimeCodesPerSecond.as_str())?.try_as_double()
+    }
+
+    /// Frames per second.
+    pub fn frames_per_second(&self) -> Option<f64> {
+        self.read(sdf::FieldKey::FramesPerSecond.as_str())?.try_as_double()
+    }
+
+    /// Names of root prims in declared order.
+    pub fn prim_children(&self) -> Option<Vec<tf::Token>> {
+        self.read(sdf::ChildrenKey::PrimChildren.as_str())?.try_as_token_vec()
+    }
+}
+
+impl<'a, B> PseudoRootSpec<'a, B>
+where
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
+{
+    /// Set the `defaultPrim` token without validation.
+    ///
+    /// This spec-tier setter writes whatever token it is given. The
+    /// validating front door is [`crate::sdf::Layer::set_default_prim`],
+    /// which rejects malformed values; use this method when you need to
+    /// bypass that check (e.g. round-tripping spec data verbatim).
+    pub fn set_default_prim(&mut self, name: impl Into<tf::Token>) {
+        self.set(sdf::FieldKey::DefaultPrim.as_str(), sdf::Value::token(name));
+    }
+
+    /// Replace the sublayer list with the given asset paths.
+    pub fn set_sublayers<I, S>(&mut self, paths: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let paths: Vec<String> = paths.into_iter().map(Into::into).collect();
+        self.set(sdf::FieldKey::SubLayers.as_str(), sdf::Value::StringVec(paths));
+    }
+
+    /// Replace this layer's namespace relocations with `relocates`.
+    pub fn set_relocates(&mut self, relocates: sdf::RelocateList) {
+        self.set(sdf::FieldKey::LayerRelocates.as_str(), sdf::Value::Relocates(relocates));
+    }
+
+    /// Append a sublayer asset path. Duplicate entries are preserved because
+    /// USD layer offsets and strength ordering make repeated sublayer arcs
+    /// meaningful. Always writes the field as `sdf::Value::StringVec` so the
+    /// USDA/USDC writers emit it (they match `StringVec` only).
+    pub fn add_sublayer(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        let mut paths = self.sublayer_paths().unwrap_or_default();
+        paths.push(path);
+        self.set(sdf::FieldKey::SubLayers.as_str(), sdf::Value::StringVec(paths));
+    }
+
+    /// Insert a sublayer asset path and its layer offset at `pos` (clamped to
+    /// the current sublayer count), keeping `subLayers` and `subLayerOffsets`
+    /// index-aligned. A shorter `subLayerOffsets` is padded with
+    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so the offset at
+    /// every position matches its sublayer. Writes `subLayers` as
+    /// `sdf::Value::StringVec` so the USDA/USDC writers emit it.
+    pub fn insert_sublayer(&mut self, pos: usize, path: impl Into<String>, offset: sdf::LayerOffset) {
+        let mut paths = self.sublayer_paths().unwrap_or_default();
+        let mut offsets = self.sublayer_offsets(paths.len());
+        let pos = pos.min(paths.len());
+        paths.insert(pos, path.into());
+        offsets.insert(pos, offset);
+        self.set(sdf::FieldKey::SubLayers.as_str(), sdf::Value::StringVec(paths));
+        self.set(
+            sdf::FieldKey::SubLayerOffsets.as_str(),
+            sdf::Value::LayerOffsetVec(offsets),
+        );
+    }
+
+    /// Remove the first `subLayers` entry matching `path` and its aligned
+    /// `subLayerOffsets` entry, returning whether anything was removed.
+    pub fn remove_sublayer(&mut self, path: &str) -> bool {
+        let Some(mut paths) = self.sublayer_paths() else {
+            return false;
+        };
+        let Some(idx) = paths.iter().position(|p| p == path) else {
+            return false;
+        };
+        let mut offsets = self.sublayer_offsets(paths.len());
+        paths.remove(idx);
+        offsets.remove(idx);
+        self.set(sdf::FieldKey::SubLayers.as_str(), sdf::Value::StringVec(paths));
+        self.set(
+            sdf::FieldKey::SubLayerOffsets.as_str(),
+            sdf::Value::LayerOffsetVec(offsets),
+        );
+        true
+    }
+
+    /// Reads and decodes the `subLayers` field (a `StringVec` of asset-path
+    /// strings). `None` when unauthored or stored with an unexpected value type.
+    /// Read-only: every caller rewrites the field with its own `set`, so this
+    /// must not erase it (an erase-then-bail would drop a malformed value).
+    fn sublayer_paths(&self) -> Option<Vec<String>> {
+        match self.read(sdf::FieldKey::SubLayers.as_str()) {
+            Some(sdf::Value::StringVec(v)) => Some(v),
+            _ => None,
         }
     }
-}
 
-impl<'a, B> Deref for AttributeSpec<'a, B>
-where
-    B: Deref<Target = Spec>,
-{
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.spec.deref()
+    /// Reads and decodes the `subLayerOffsets` field, padded to `len` with
+    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so it stays
+    /// index-aligned with the sublayer paths.
+    fn sublayer_offsets(&self, len: usize) -> Vec<sdf::LayerOffset> {
+        let mut offsets = match self.read(sdf::FieldKey::SubLayerOffsets.as_str()) {
+            Some(sdf::Value::LayerOffsetVec(v)) => v,
+            _ => Vec::new(),
+        };
+        offsets.resize(len, sdf::LayerOffset::IDENTITY);
+        offsets
+    }
+
+    /// Set the layer documentation string.
+    pub fn set_documentation(&mut self, doc: impl Into<String>) {
+        self.set(sdf::FieldKey::Documentation.as_str(), sdf::Value::String(doc.into()));
+    }
+
+    /// Set the layer start time code.
+    pub fn set_start_time_code(&mut self, time: f64) {
+        self.set(sdf::FieldKey::StartTimeCode.as_str(), sdf::Value::Double(time));
+    }
+
+    /// Set the layer end time code.
+    pub fn set_end_time_code(&mut self, time: f64) {
+        self.set(sdf::FieldKey::EndTimeCode.as_str(), sdf::Value::Double(time));
+    }
+
+    /// Set the time codes per second.
+    pub fn set_time_codes_per_second(&mut self, rate: f64) {
+        self.set(sdf::FieldKey::TimeCodesPerSecond.as_str(), sdf::Value::Double(rate));
+    }
+
+    /// Set the frames per second.
+    pub fn set_frames_per_second(&mut self, rate: f64) {
+        self.set(sdf::FieldKey::FramesPerSecond.as_str(), sdf::Value::Double(rate));
     }
 }
 
-impl<'a, B> DerefMut for AttributeSpec<'a, B>
+/// Typed view shared by attributes and relationships. Parallel to C++
+/// `SdfPropertySpec`; carries the `variability` / `custom` metadata common to
+/// both property kinds.
+///
+/// [`AttributeSpec`] and [`RelationshipSpec`] wrap this, so its accessors are
+/// reachable on them through `Deref`.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct PropertySpec<'a, B>(Spec<'a, B>);
+
+/// Read-only typed view of a property spec.
+pub type PropertySpecRef<'a> = PropertySpec<'a, &'a dyn sdf::AbstractData>;
+
+/// Mutable typed view of a property spec. Parallel to C++ `SdfPropertySpec`.
+pub type PropertySpecMut<'a> = PropertySpec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a, B> PropertySpec<'a, B>
 where
-    B: DerefMut<Target = Spec>,
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.spec.deref_mut()
+    /// Property variability. Defaults to [`sdf::Variability::Varying`] if unset.
+    pub fn variability(&self) -> sdf::Variability {
+        self.read(sdf::FieldKey::Variability.as_str())
+            .and_then(sdf::Value::try_as_variability)
+            .unwrap_or(sdf::Variability::Varying)
+    }
+
+    /// Whether the property is `custom`. Defaults to `false` if unset.
+    pub fn is_custom(&self) -> bool {
+        self.read(sdf::FieldKey::Custom.as_str())
+            .and_then(sdf::Value::try_as_bool)
+            .unwrap_or(false)
+    }
+}
+
+impl<'a, B> PropertySpec<'a, B>
+where
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
+{
+    /// Set the `custom` flag.
+    pub fn set_custom(&mut self, custom: bool) {
+        self.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom));
+    }
+}
+
+/// Typed view of an attribute spec. Parallel to C++ `SdfAttributeSpec`
+/// (a `SdfPropertySpec`).
+///
+/// Read-only over a shared borrow. [`AttributeSpecMut`] aliases this
+/// same handle with an exclusive borrow, so it has both read and write methods.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct AttributeSpec<'a, B>(PropertySpec<'a, B>);
+
+/// Read-only typed view of an attribute spec.
+pub type AttributeSpecRef<'a> = AttributeSpec<'a, &'a dyn sdf::AbstractData>;
+
+/// Mutable typed view of an attribute spec. Parallel to C++ `SdfAttributeSpec`.
+pub type AttributeSpecMut<'a> = AttributeSpec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a> AttributeSpecRef<'a> {
+    /// Returns a read-only view of the attribute spec at `path`, or `None` if
+    /// no attribute spec exists there.
+    pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Attribute))
+            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
+    }
+}
+
+impl<'a> AttributeSpecMut<'a> {
+    /// Returns a mutable view of the attribute spec at `path`, or `None` if no
+    /// attribute spec exists there.
+    pub(crate) fn get(data: &'a mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Attribute))
+            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
     }
 }
 
 impl<'a, B> AttributeSpec<'a, B>
 where
-    B: Deref<Target = Spec>,
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Attribute value type name (e.g. `"double"`, `"float3[]"`).
-    pub fn type_name(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::TypeName.as_str())? {
-            sdf::Value::Token(t) => Some(t.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Attribute variability. Defaults to [`sdf::Variability::Varying`] if unset.
-    pub fn variability(&self) -> sdf::Variability {
-        match self.get(sdf::FieldKey::Variability.as_str()) {
-            Some(sdf::Value::Variability(v)) => *v,
-            _ => sdf::Variability::Varying,
-        }
-    }
-
-    /// Whether the attribute is `custom`. Defaults to `false` if unset.
-    pub fn is_custom(&self) -> bool {
-        match self.get(sdf::FieldKey::Custom.as_str()) {
-            Some(sdf::Value::Bool(b)) => *b,
-            _ => false,
-        }
+    pub fn type_name(&self) -> Option<tf::Token> {
+        self.read(sdf::FieldKey::TypeName.as_str())?.try_as_token()
     }
 
     /// Default value, if authored.
-    pub fn default(&self) -> Option<&sdf::Value> {
-        self.get(sdf::FieldKey::Default.as_str())
+    pub fn default(&self) -> Option<sdf::Value> {
+        self.read(sdf::FieldKey::Default.as_str())
     }
 
     /// Time-sample map, if authored, in storage order. Samples authored
     /// through [`AttributeSpecMut::set_time_sample`] are kept sorted by time;
     /// samples loaded from a parsed layer reflect on-disk ordering.
-    pub fn time_samples(&self) -> Option<&[(f64, sdf::Value)]> {
-        match self.get(sdf::FieldKey::TimeSamples.as_str())? {
-            sdf::Value::TimeSamples(map) => Some(map.as_slice()),
-            _ => None,
-        }
+    pub fn time_samples(&self) -> Option<Vec<(f64, sdf::Value)>> {
+        self.read(sdf::FieldKey::TimeSamples.as_str())?.try_as_time_samples()
     }
 
     /// Color-space token, if authored.
-    pub fn color_space(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::ColorSpace.as_str())? {
-            sdf::Value::Token(t) => Some(t.as_str()),
-            _ => None,
-        }
+    pub fn color_space(&self) -> Option<tf::Token> {
+        self.read(sdf::FieldKey::ColorSpace.as_str())?.try_as_token()
     }
 
     /// `allowedTokens` array, if authored.
-    pub fn allowed_tokens(&self) -> Option<&[tf::Token]> {
-        match self.get(sdf::FieldKey::AllowedTokens.as_str())? {
-            sdf::Value::TokenVec(v) => Some(v.as_slice()),
-            _ => None,
-        }
+    pub fn allowed_tokens(&self) -> Option<Vec<tf::Token>> {
+        self.read(sdf::FieldKey::AllowedTokens.as_str())?.try_as_token_vec()
     }
 
     /// Authored `connectionPaths` list op, if present.
-    pub fn connection_path_list(&self) -> Option<&sdf::PathListOp> {
-        match self.get(sdf::FieldKey::ConnectionPaths.as_str())? {
-            sdf::Value::PathListOp(op) => Some(op),
-            _ => None,
-        }
+    pub fn connection_path_list(&self) -> Option<sdf::PathListOp> {
+        self.read(sdf::FieldKey::ConnectionPaths.as_str())?
+            .try_as_path_list_op()
     }
 }
 
 impl<'a, B> AttributeSpec<'a, B>
 where
-    B: DerefMut<Target = Spec>,
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Set the `default` value.
     pub fn set_default(&mut self, value: impl Into<sdf::Value>) {
-        self.add(sdf::FieldKey::Default, value.into());
+        self.set(sdf::FieldKey::Default.as_str(), value.into());
     }
 
     /// Clear any authored `default`.
     pub fn clear_default(&mut self) {
-        self.remove(sdf::FieldKey::Default.as_str());
+        self.erase(sdf::FieldKey::Default.as_str());
     }
 
     /// Insert or replace a time sample at `time`. Samples are kept sorted
@@ -530,28 +782,27 @@ where
     /// non-`TimeSamples` variant is overwritten — debug builds assert.
     pub fn set_time_sample(&mut self, time: f64, value: impl Into<sdf::Value>) {
         let value = value.into();
-        match self.get_mut(sdf::FieldKey::TimeSamples.as_str()) {
-            Some(sdf::Value::TimeSamples(map)) => upsert_time_sample(map, time, value),
+        // An undecodable `timeSamples` must not be silently overwritten.
+        let Ok(existing) = self.field(sdf::FieldKey::TimeSamples.as_str()) else {
+            return;
+        };
+        let mut map = match existing {
+            Some(sdf::Value::TimeSamples(map)) => map,
+            None => Vec::new(),
             Some(other) => {
                 debug_assert!(false, "timeSamples field is not a TimeSamples (got {other:?})");
-                let mut map = Vec::new();
-                upsert_time_sample(&mut map, time, value);
-                self.add(sdf::FieldKey::TimeSamples, sdf::Value::TimeSamples(map));
+                Vec::new()
             }
-            None => {
-                let mut map = Vec::new();
-                upsert_time_sample(&mut map, time, value);
-                self.add(sdf::FieldKey::TimeSamples, sdf::Value::TimeSamples(map));
-            }
-        }
+        };
+        upsert_time_sample(&mut map, time, value);
+        self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
     }
 
     /// Erase the time sample at `time`. Returns `true` if a sample was removed.
     /// If this was the last sample, the `timeSamples` field is cleared entirely
     /// so the spec round-trips identically to one that never authored samples.
     pub fn erase_time_sample(&mut self, time: f64) -> bool {
-        let key = sdf::FieldKey::TimeSamples.as_str();
-        let Some(sdf::Value::TimeSamples(map)) = self.get_mut(key) else {
+        let Some(mut map) = self.time_samples() else {
             return false;
         };
         // `total_cmp` gives a deterministic total ordering for `f64` (including
@@ -562,19 +813,16 @@ where
         };
         map.remove(idx);
         if map.is_empty() {
-            self.remove(key);
+            self.erase(sdf::FieldKey::TimeSamples.as_str());
+        } else {
+            self.set(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::TimeSamples(map));
         }
         true
     }
 
-    /// Set the `custom` flag.
-    pub fn set_custom(&mut self, custom: bool) {
-        self.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom));
-    }
-
     /// Set the `colorSpace` token.
     pub fn set_color_space(&mut self, color_space: impl Into<tf::Token>) {
-        self.add(sdf::FieldKey::ColorSpace, sdf::Value::token(color_space));
+        self.set(sdf::FieldKey::ColorSpace.as_str(), sdf::Value::token(color_space));
     }
 
     /// Set the `allowedTokens` array.
@@ -584,7 +832,7 @@ where
         S: Into<tf::Token>,
     {
         let tokens: Vec<tf::Token> = tokens.into_iter().map(Into::into).collect();
-        self.add(sdf::FieldKey::AllowedTokens, sdf::Value::TokenVec(tokens));
+        self.set(sdf::FieldKey::AllowedTokens.as_str(), sdf::Value::TokenVec(tokens));
     }
 
     /// Set the `connectionPaths` (explicit list op, replacing any prior).
@@ -593,8 +841,8 @@ where
         I: IntoIterator<Item = sdf::Path>,
     {
         let paths: Vec<sdf::Path> = paths.into_iter().collect();
-        self.add(
-            sdf::FieldKey::ConnectionPaths,
+        self.set(
+            sdf::FieldKey::ConnectionPaths.as_str(),
             sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
         );
     }
@@ -611,13 +859,21 @@ where
     /// pre-existing non-`PathListOp` value is overwritten — debug
     /// builds assert.
     pub fn add_connection_path(&mut self, path: sdf::Path, prepend: bool) -> bool {
-        match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => {
+        let key = sdf::FieldKey::ConnectionPaths.as_str();
+        // An undecodable `connectionPaths` must not be silently overwritten.
+        let Ok(existing) = self.field(key) else {
+            return false;
+        };
+        match existing {
+            Some(sdf::Value::PathListOp(mut op)) => {
                 // Re-adding a previously deleted target must first clear the
                 // delete bucket; otherwise the newly authored connection can
                 // still be removed during list-op application.
                 let mut changed = remove_path(&mut op.deleted_items, &path);
                 if op.iter().any(|p| p == &path) {
+                    if changed {
+                        self.set(key, sdf::Value::PathListOp(op));
+                    }
                     return changed;
                 }
                 if op.explicit {
@@ -633,6 +889,7 @@ where
                     op.appended_items.push(path);
                 }
                 changed = true;
+                self.set(key, sdf::Value::PathListOp(op));
                 changed
             }
             Some(other) => {
@@ -642,7 +899,7 @@ where
                 } else {
                     sdf::PathListOp::appended([path])
                 };
-                self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+                self.set(key, sdf::Value::PathListOp(op));
                 true
             }
             None => {
@@ -653,7 +910,7 @@ where
                 } else {
                     sdf::PathListOp::appended([path])
                 };
-                self.add(sdf::FieldKey::ConnectionPaths, sdf::Value::PathListOp(op));
+                self.set(key, sdf::Value::PathListOp(op));
                 true
             }
         }
@@ -661,44 +918,48 @@ where
 
     /// Remove a single connection path. Returns `true` if it was present.
     pub fn remove_connection_path(&mut self, path: &sdf::Path) -> bool {
-        if let Some(sdf::Value::PathListOp(op)) = self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
-            return remove_path(&mut op.explicit_items, path)
-                | remove_path(&mut op.added_items, path)
-                | remove_path(&mut op.prepended_items, path)
-                | remove_path(&mut op.appended_items, path);
-        }
-        false
+        let key = sdf::FieldKey::ConnectionPaths.as_str();
+        let Some(sdf::Value::PathListOp(mut op)) = self.read(key) else {
+            return false;
+        };
+        let removed = remove_path(&mut op.explicit_items, path)
+            | remove_path(&mut op.added_items, path)
+            | remove_path(&mut op.prepended_items, path)
+            | remove_path(&mut op.appended_items, path);
+        self.set(key, sdf::Value::PathListOp(op));
+        removed
     }
 
     /// Author a removal for a connection path. Local contributions are
     /// stripped first; non-explicit list ops also get a delete opinion so
     /// weaker-layer contributions stay removed in the composed result.
     pub fn delete_connection_path(&mut self, path: &sdf::Path) -> bool {
-        match self.get_mut(sdf::FieldKey::ConnectionPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => {
+        let key = sdf::FieldKey::ConnectionPaths.as_str();
+        // An undecodable `connectionPaths` must not be silently overwritten.
+        let Ok(existing) = self.field(key) else {
+            return false;
+        };
+        match existing {
+            Some(sdf::Value::PathListOp(mut op)) => {
                 let removed = remove_path(&mut op.explicit_items, path)
                     | remove_path(&mut op.added_items, path)
                     | remove_path(&mut op.prepended_items, path)
                     | remove_path(&mut op.appended_items, path);
                 if op.explicit || op.deleted_items.iter().any(|p| p == path) {
+                    self.set(key, sdf::Value::PathListOp(op));
                     return removed;
                 }
                 op.deleted_items.push(path.clone());
+                self.set(key, sdf::Value::PathListOp(op));
                 true
             }
             Some(other) => {
                 debug_assert!(false, "connectionPaths field is not a sdf::PathListOp (got {other:?})");
-                self.add(
-                    sdf::FieldKey::ConnectionPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
-                );
+                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
                 true
             }
             None => {
-                self.add(
-                    sdf::FieldKey::ConnectionPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
-                );
+                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
                 true
             }
         }
@@ -707,7 +968,12 @@ where
     /// Clear all authored `connectionPaths`. Returns `true` if an
     /// opinion was actually removed.
     pub fn clear_connection_paths(&mut self) -> bool {
-        self.remove(sdf::FieldKey::ConnectionPaths.as_str()).is_some()
+        let key = sdf::FieldKey::ConnectionPaths.as_str();
+        let present = self.has_field(key);
+        if present {
+            self.erase(key);
+        }
+        present
     }
 }
 
@@ -722,79 +988,51 @@ fn upsert_time_sample(map: &mut Vec<(f64, sdf::Value)>, time: f64, value: sdf::V
     }
 }
 
-/// Typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
+/// Typed view of a relationship spec. Parallel to C++ `SdfRelationshipSpec`
+/// (a `SdfPropertySpec`).
 ///
-/// The default borrow mode is read-only. [`RelationshipSpecMut`] aliases this
-/// same wrapper with an exclusive borrow, so it has both read and write methods.
-#[derive(Debug)]
-pub struct RelationshipSpec<'a, B = &'a Spec> {
-    spec: B,
-    _marker: PhantomData<&'a Spec>,
-}
+/// Read-only over a shared borrow. [`RelationshipSpecMut`] aliases this
+/// same handle with an exclusive borrow, so it has both read and write methods.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct RelationshipSpec<'a, B>(PropertySpec<'a, B>);
 
-/// Mutable typed view of a relationship [`Spec`]. Parallel to C++ `SdfRelationshipSpec`.
-pub type RelationshipSpecMut<'a> = RelationshipSpec<'a, &'a mut Spec>;
+/// Read-only typed view of a relationship spec.
+pub type RelationshipSpecRef<'a> = RelationshipSpec<'a, &'a dyn sdf::AbstractData>;
 
-impl<'a, B> RelationshipSpec<'a, B> {
-    fn new(spec: B) -> Self {
-        Self {
-            spec,
-            _marker: PhantomData,
-        }
+/// Mutable typed view of a relationship spec. Parallel to C++ `SdfRelationshipSpec`.
+pub type RelationshipSpecMut<'a> = RelationshipSpec<'a, &'a mut dyn sdf::AbstractData>;
+
+impl<'a> RelationshipSpecRef<'a> {
+    /// Returns a read-only view of the relationship spec at `path`, or `None`
+    /// if no relationship spec exists there.
+    pub(crate) fn get(data: &'a dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Relationship))
+            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
     }
 }
 
-impl<'a, B> Deref for RelationshipSpec<'a, B>
-where
-    B: Deref<Target = Spec>,
-{
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.spec.deref()
-    }
-}
-
-impl<'a, B> DerefMut for RelationshipSpec<'a, B>
-where
-    B: DerefMut<Target = Spec>,
-{
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.spec.deref_mut()
+impl<'a> RelationshipSpecMut<'a> {
+    /// Returns a mutable view of the relationship spec at `path`, or `None` if
+    /// no relationship spec exists there.
+    pub(crate) fn get(data: &'a mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
+        matches!(data.spec_type(&path), Some(sdf::SpecType::Relationship))
+            .then(|| Self(PropertySpec(Spec::wrap(data, path))))
     }
 }
 
 impl<'a, B> RelationshipSpec<'a, B>
 where
-    B: Deref<Target = Spec>,
+    B: Deref<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Authored `targetPaths` list op, if present.
-    pub fn target_path_list(&self) -> Option<&sdf::PathListOp> {
-        match self.get(sdf::FieldKey::TargetPaths.as_str())? {
-            sdf::Value::PathListOp(op) => Some(op),
-            _ => None,
-        }
-    }
-
-    /// Whether the relationship is `custom`.
-    pub fn is_custom(&self) -> bool {
-        match self.get(sdf::FieldKey::Custom.as_str()) {
-            Some(sdf::Value::Bool(b)) => *b,
-            _ => false,
-        }
-    }
-
-    /// Relationship variability. Defaults to [`sdf::Variability::Varying`].
-    pub fn variability(&self) -> sdf::Variability {
-        match self.get(sdf::FieldKey::Variability.as_str()) {
-            Some(sdf::Value::Variability(v)) => *v,
-            _ => sdf::Variability::Varying,
-        }
+    pub fn target_path_list(&self) -> Option<sdf::PathListOp> {
+        self.read(sdf::FieldKey::TargetPaths.as_str())?.try_as_path_list_op()
     }
 }
 
 impl<'a, B> RelationshipSpec<'a, B>
 where
-    B: DerefMut<Target = Spec>,
+    B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
     /// Replace `targetPaths` with the given list.
     pub fn set_target_paths<I>(&mut self, paths: I)
@@ -802,8 +1040,8 @@ where
         I: IntoIterator<Item = sdf::Path>,
     {
         let paths: Vec<sdf::Path> = paths.into_iter().collect();
-        self.add(
-            sdf::FieldKey::TargetPaths,
+        self.set(
+            sdf::FieldKey::TargetPaths.as_str(),
             sdf::Value::PathListOp(sdf::PathListOp::explicit(paths)),
         );
     }
@@ -811,8 +1049,13 @@ where
     /// Append a single target path. No-op if already present. A pre-existing
     /// value of a non-`sdf::PathListOp` variant is overwritten — debug builds assert.
     pub fn add_target(&mut self, path: sdf::Path) {
-        match self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => {
+        let key = sdf::FieldKey::TargetPaths.as_str();
+        // An undecodable `targetPaths` must not be silently overwritten.
+        let Ok(existing) = self.field(key) else {
+            return;
+        };
+        match existing {
+            Some(sdf::Value::PathListOp(mut op)) => {
                 if !op.iter().any(|p| p == &path) {
                     if op.explicit {
                         op.explicit_items.push(path);
@@ -820,19 +1063,14 @@ where
                         op.added_items.push(path);
                     }
                 }
+                self.set(key, sdf::Value::PathListOp(op));
             }
             Some(other) => {
                 debug_assert!(false, "targetPaths field is not a sdf::PathListOp (got {other:?})");
-                self.add(
-                    sdf::FieldKey::TargetPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
-                );
+                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
             }
             None => {
-                self.add(
-                    sdf::FieldKey::TargetPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::explicit([path])),
-                );
+                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::explicit([path])));
             }
         }
     }
@@ -846,24 +1084,25 @@ where
     ///
     /// [`ListOp::remove`]: sdf::ListOp::remove
     pub fn remove_target(&mut self, path: &sdf::Path) -> bool {
-        match self.get_mut(sdf::FieldKey::TargetPaths.as_str()) {
-            Some(sdf::Value::PathListOp(op)) => op.remove(path),
+        let key = sdf::FieldKey::TargetPaths.as_str();
+        // An undecodable `targetPaths` must not be silently overwritten.
+        let Ok(existing) = self.field(key) else {
+            return false;
+        };
+        match existing {
+            Some(sdf::Value::PathListOp(mut op)) => {
+                let changed = op.remove(path);
+                self.set(key, sdf::Value::PathListOp(op));
+                changed
+            }
             Some(_) => false,
             None => {
                 // No authored targets here yet: record a deletion so the same
                 // target from a weaker layer is suppressed through composition.
-                self.add(
-                    sdf::FieldKey::TargetPaths,
-                    sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])),
-                );
+                self.set(key, sdf::Value::PathListOp(sdf::PathListOp::deleted([path.clone()])));
                 true
             }
         }
-    }
-
-    /// Set the `custom` flag.
-    pub fn set_custom(&mut self, custom: bool) {
-        self.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom));
     }
 }
 
@@ -875,267 +1114,36 @@ fn remove_path(paths: &mut Vec<sdf::Path>, path: &sdf::Path) -> bool {
     true
 }
 
-/// Typed view of the layer's root pseudo-spec. Parallel to C++
-/// `SdfPseudoRootSpec`; carries layer-wide metadata (`defaultPrim`,
-/// `subLayers`, time codes, etc.).
-///
-/// The default borrow mode is read-only. [`PseudoRootSpecMut`] aliases this
-/// same wrapper with an exclusive borrow, so it has both read and write methods.
-#[derive(Debug)]
-pub struct PseudoRootSpec<'a, B = &'a Spec> {
-    spec: B,
-    _marker: PhantomData<&'a Spec>,
-}
-
-/// Mutable typed view of the layer's root pseudo-spec. Parallel to C++ `SdfPseudoRootSpec`.
-pub type PseudoRootSpecMut<'a> = PseudoRootSpec<'a, &'a mut Spec>;
-
-impl<'a, B> PseudoRootSpec<'a, B> {
-    fn new(spec: B) -> Self {
-        Self {
-            spec,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<'a, B> Deref for PseudoRootSpec<'a, B>
-where
-    B: Deref<Target = Spec>,
-{
-    type Target = Spec;
-    fn deref(&self) -> &Spec {
-        self.spec.deref()
-    }
-}
-
-impl<'a, B> DerefMut for PseudoRootSpec<'a, B>
-where
-    B: DerefMut<Target = Spec>,
-{
-    fn deref_mut(&mut self) -> &mut Spec {
-        self.spec.deref_mut()
-    }
-}
-
-impl<'a, B> PseudoRootSpec<'a, B>
-where
-    B: Deref<Target = Spec>,
-{
-    /// `defaultPrim` token, if authored.
-    pub fn default_prim(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::DefaultPrim.as_str())? {
-            sdf::Value::Token(t) => Some(t.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Sublayer asset paths in strength order (strongest first).
-    pub fn sublayers(&self) -> Option<&[String]> {
-        match self.get(sdf::FieldKey::SubLayers.as_str())? {
-            sdf::Value::StringVec(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-
-    /// Namespace relocations authored in this layer's metadata.
-    pub fn relocates(&self) -> Option<&[sdf::Relocate]> {
-        match self.get(sdf::FieldKey::LayerRelocates.as_str())? {
-            sdf::Value::Relocates(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-
-    /// Layer documentation string.
-    pub fn documentation(&self) -> Option<&str> {
-        match self.get(sdf::FieldKey::Documentation.as_str())? {
-            sdf::Value::String(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Layer start time code.
-    pub fn start_time_code(&self) -> Option<f64> {
-        match self.get(sdf::FieldKey::StartTimeCode.as_str())? {
-            sdf::Value::Double(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Layer end time code.
-    pub fn end_time_code(&self) -> Option<f64> {
-        match self.get(sdf::FieldKey::EndTimeCode.as_str())? {
-            sdf::Value::Double(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Time codes per second.
-    pub fn time_codes_per_second(&self) -> Option<f64> {
-        match self.get(sdf::FieldKey::TimeCodesPerSecond.as_str())? {
-            sdf::Value::Double(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Frames per second.
-    pub fn frames_per_second(&self) -> Option<f64> {
-        match self.get(sdf::FieldKey::FramesPerSecond.as_str())? {
-            sdf::Value::Double(v) => Some(*v),
-            _ => None,
-        }
-    }
-
-    /// Names of root prims in declared order.
-    pub fn prim_children(&self) -> Option<&[tf::Token]> {
-        match self.get(sdf::ChildrenKey::PrimChildren.as_str())? {
-            sdf::Value::TokenVec(v) => Some(v.as_slice()),
-            _ => None,
-        }
-    }
-}
-
-impl<'a, B> PseudoRootSpec<'a, B>
-where
-    B: DerefMut<Target = Spec>,
-{
-    /// Set the `defaultPrim` token without validation.
-    ///
-    /// This spec-tier setter writes whatever token it is given. The
-    /// validating front door is [`crate::sdf::Layer::set_default_prim`],
-    /// which rejects malformed values; use this method when you need to
-    /// bypass that check (e.g. round-tripping spec data verbatim).
-    pub fn set_default_prim(&mut self, name: impl Into<tf::Token>) {
-        self.add(sdf::FieldKey::DefaultPrim, sdf::Value::token(name));
-    }
-
-    /// Replace the sublayer list with the given asset paths.
-    pub fn set_sublayers<I, S>(&mut self, paths: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let paths: Vec<String> = paths.into_iter().map(Into::into).collect();
-        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
-    }
-
-    /// Replace this layer's namespace relocations with `relocates`.
-    pub fn set_relocates(&mut self, relocates: sdf::RelocateList) {
-        self.add(sdf::FieldKey::LayerRelocates, sdf::Value::Relocates(relocates));
-    }
-
-    /// Append a sublayer asset path. Duplicate entries are preserved because
-    /// USD layer offsets and strength ordering make repeated sublayer arcs
-    /// meaningful. Always writes the field as `sdf::Value::StringVec` so the
-    /// USDA/USDC writers emit it (they match `StringVec` only).
-    pub fn add_sublayer(&mut self, path: impl Into<String>) {
-        let path = path.into();
-        let mut paths = self.take_sublayer_paths().unwrap_or_default();
-        paths.push(path);
-        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
-    }
-
-    /// Insert a sublayer asset path and its layer offset at `pos` (clamped to
-    /// the current sublayer count), keeping `subLayers` and `subLayerOffsets`
-    /// index-aligned. A shorter `subLayerOffsets` is padded with
-    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so the offset at
-    /// every position matches its sublayer. Writes `subLayers` as
-    /// `sdf::Value::StringVec` so the USDA/USDC writers emit it.
-    pub fn insert_sublayer(&mut self, pos: usize, path: impl Into<String>, offset: sdf::LayerOffset) {
-        let mut paths = self.take_sublayer_paths().unwrap_or_default();
-        let mut offsets = self.take_sublayer_offsets(paths.len());
-        let pos = pos.min(paths.len());
-        paths.insert(pos, path.into());
-        offsets.insert(pos, offset);
-        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
-        self.add(sdf::FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
-    }
-
-    /// Remove the first `subLayers` entry matching `path` and its aligned
-    /// `subLayerOffsets` entry, returning whether anything was removed.
-    pub fn remove_sublayer(&mut self, path: &str) -> bool {
-        let Some(mut paths) = self.take_sublayer_paths() else {
-            return false;
-        };
-        let Some(idx) = paths.iter().position(|p| p == path) else {
-            self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
-            return false;
-        };
-        let mut offsets = self.take_sublayer_offsets(paths.len());
-        paths.remove(idx);
-        offsets.remove(idx);
-        self.add(sdf::FieldKey::SubLayers, sdf::Value::StringVec(paths));
-        self.add(sdf::FieldKey::SubLayerOffsets, sdf::Value::LayerOffsetVec(offsets));
-        true
-    }
-
-    /// Removes and decodes the `subLayers` field (a `StringVec` of asset-path
-    /// strings). `None` when unauthored or stored with an unexpected value type.
-    fn take_sublayer_paths(&mut self) -> Option<Vec<String>> {
-        match self.remove(sdf::FieldKey::SubLayers.as_str()) {
-            Some(sdf::Value::StringVec(v)) => Some(v),
-            _ => None,
-        }
-    }
-
-    /// Removes and decodes the `subLayerOffsets` field, padded to `len` with
-    /// [`LayerOffset::IDENTITY`](sdf::LayerOffset::IDENTITY) so it stays
-    /// index-aligned with the sublayer paths.
-    fn take_sublayer_offsets(&mut self, len: usize) -> Vec<sdf::LayerOffset> {
-        let mut offsets = match self.remove(sdf::FieldKey::SubLayerOffsets.as_str()) {
-            Some(sdf::Value::LayerOffsetVec(v)) => v,
-            _ => Vec::new(),
-        };
-        offsets.resize(len, sdf::LayerOffset::IDENTITY);
-        offsets
-    }
-
-    /// Set the layer documentation string.
-    pub fn set_documentation(&mut self, doc: impl Into<String>) {
-        self.add(sdf::FieldKey::Documentation, sdf::Value::String(doc.into()));
-    }
-
-    /// Set the layer start time code.
-    pub fn set_start_time_code(&mut self, time: f64) {
-        self.add(sdf::FieldKey::StartTimeCode, sdf::Value::Double(time));
-    }
-
-    /// Set the layer end time code.
-    pub fn set_end_time_code(&mut self, time: f64) {
-        self.add(sdf::FieldKey::EndTimeCode, sdf::Value::Double(time));
-    }
-
-    /// Set the time codes per second.
-    pub fn set_time_codes_per_second(&mut self, rate: f64) {
-        self.add(sdf::FieldKey::TimeCodesPerSecond, sdf::Value::Double(rate));
-    }
-
-    /// Set the frames per second.
-    pub fn set_frames_per_second(&mut self, rate: f64) {
-        self.add(sdf::FieldKey::FramesPerSecond, sdf::Value::Double(rate));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdf::{AbstractData, Data};
+
+    /// Builds a [`Data`] with an empty spec of `ty` at `path` and returns both
+    /// so tests can construct a typed view over the abstract data.
+    fn data_with_spec(path: &str, ty: sdf::SpecType) -> (Data, sdf::Path) {
+        let path = sdf::path(path).expect("valid path");
+        let mut data = Data::new();
+        data.create_spec(path.clone(), ty);
+        (data, path)
+    }
 
     #[test]
     fn prim_mut_reads() {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        let mut prim = PrimSpecMut::get(&mut data, path.clone()).expect("prim spec");
 
         prim.set_type_name("Xform");
         prim.set_specifier(sdf::Specifier::Def);
 
-        assert_eq!(prim.type_name(), Some("Xform"));
+        assert_eq!(prim.type_name(), Some(tf::Token::from("Xform")));
         assert_eq!(prim.specifier(), Some(sdf::Specifier::Def));
     }
 
     #[test]
     fn add_api_schema_prepends() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("MaterialBindingAPI")?);
         assert!(prim.add_applied_schema("SkelBindingAPI")?);
@@ -1152,19 +1160,19 @@ mod tests {
 
     #[test]
     fn add_connection_path_dedups() {
-        let mut spec = Spec::new(sdf::SpecType::Attribute);
-        let mut attr = spec.as_attr_mut().expect("attr spec");
-        let path = sdf::Path::new("/A.out").expect("path");
+        let (mut data, path) = data_with_spec("/A.in", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
+        let target = sdf::Path::new("/A.out").expect("path");
 
-        assert!(attr.add_connection_path(path.clone(), false));
+        assert!(attr.add_connection_path(target.clone(), false));
         // Duplicate — must not mutate, must not trip the change tracker.
-        assert!(!attr.add_connection_path(path, false));
+        assert!(!attr.add_connection_path(target, false));
     }
 
     #[test]
     fn clear_connection_paths_noop() {
-        let mut spec = Spec::new(sdf::SpecType::Attribute);
-        let mut attr = spec.as_attr_mut().expect("attr spec");
+        let (mut data, path) = data_with_spec("/A.in", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attr spec");
 
         // Nothing authored — clear is a no-op.
         assert!(!attr.clear_connection_paths());
@@ -1176,12 +1184,13 @@ mod tests {
 
     #[test]
     fn add_api_schema_explicit() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
             sdf::Value::TokenListOp(sdf::TokenListOp::explicit([tf::Token::from("ExistingAPI")])),
         );
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("NewAPI")?);
 
@@ -1196,15 +1205,16 @@ mod tests {
 
     #[test]
     fn add_api_schema_keeps_add() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
             sdf::Value::TokenListOp(sdf::TokenListOp {
                 added_items: vec![tf::Token::from("ExistingAPI")],
                 ..Default::default()
             }),
         );
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(!prim.add_applied_schema("ExistingAPI")?);
 
@@ -1216,15 +1226,16 @@ mod tests {
 
     #[test]
     fn add_api_schema_clears_delete() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
             sdf::Value::TokenListOp(sdf::TokenListOp {
                 deleted_items: vec![tf::Token::from("RemovedAPI")],
                 ..Default::default()
             }),
         );
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("RemovedAPI")?);
 
@@ -1238,16 +1249,17 @@ mod tests {
     /// already_applied stays false, so the schema lands in `explicit_items`.
     #[test]
     fn add_api_schema_stale_added() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
             sdf::Value::TokenListOp(sdf::TokenListOp {
                 explicit: true,
                 added_items: vec![tf::Token::from("StaleAPI")],
                 ..Default::default()
             }),
         );
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("StaleAPI")?);
 
@@ -1261,15 +1273,16 @@ mod tests {
     /// first occurrence).
     #[test]
     fn add_api_schema_dup_delete() -> Result<(), SpecError> {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(
-            sdf::FieldKey::ApiSchemas,
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
             sdf::Value::TokenListOp(sdf::TokenListOp {
                 deleted_items: vec![tf::Token::from("RemovedAPI"), tf::Token::from("RemovedAPI")],
                 ..Default::default()
             }),
         );
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(prim.add_applied_schema("RemovedAPI")?);
 
@@ -1281,9 +1294,13 @@ mod tests {
 
     #[test]
     fn add_api_schema_rejects_wrong_type() {
-        let mut spec = Spec::new(sdf::SpecType::Prim);
-        spec.add(sdf::FieldKey::ApiSchemas, sdf::Value::token_vec(["ExistingAPI"]));
-        let mut prim = spec.as_prim_mut().expect("prim spec");
+        let (mut data, path) = data_with_spec("/p", sdf::SpecType::Prim);
+        data.set_field(
+            &path,
+            sdf::FieldKey::ApiSchemas.as_str(),
+            sdf::Value::token_vec(["ExistingAPI"]),
+        );
+        let mut prim = PrimSpecMut::get(&mut data, path).expect("prim spec");
 
         assert!(matches!(
             prim.add_applied_schema("NewAPI"),
@@ -1296,25 +1313,28 @@ mod tests {
 
     #[test]
     fn attribute_mut_reads() {
-        let mut spec = Spec::new(sdf::SpecType::Attribute);
-        let mut attr = spec.as_attr_mut().expect("attribute spec");
+        let (mut data, path) = data_with_spec("/A.x", sdf::SpecType::Attribute);
+        let mut attr = AttributeSpecMut::get(&mut data, path).expect("attribute spec");
 
         attr.set_default(sdf::Value::Int(42));
         attr.set_custom(true);
 
-        assert_eq!(attr.default(), Some(&sdf::Value::Int(42)));
+        assert_eq!(attr.default(), Some(sdf::Value::Int(42)));
         assert!(attr.is_custom());
     }
 
     #[test]
     fn relationship_mut_reads() {
-        let mut spec = Spec::new(sdf::SpecType::Relationship);
-        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
+        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let target = sdf::Path::new("/Target").expect("valid path");
 
         rel.add_target(target.clone());
 
-        assert_eq!(rel.target_path_list().and_then(|op| op.iter().next()), Some(&target));
+        assert_eq!(
+            rel.target_path_list().and_then(|op| op.iter().next().cloned()),
+            Some(target)
+        );
     }
 
     #[test]
@@ -1322,12 +1342,12 @@ mod tests {
         // Removing a target from a relationship with no local targets must
         // author a deletion (not no-op), so a target authored in a weaker
         // layer is suppressed through composition.
-        let mut spec = Spec::new(sdf::SpecType::Relationship);
-        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
+        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let target = sdf::Path::new("/Target").expect("valid path");
         assert!(rel.remove_target(&target));
 
-        let stronger = rel.target_path_list().expect("target list op").clone();
+        let stronger = rel.target_path_list().expect("target list op");
         assert!(stronger.deleted_items.contains(&target));
 
         // A weaker layer adds /Target and /Keep; composition drops /Target.
@@ -1340,8 +1360,8 @@ mod tests {
     fn remove_target_explicit_drops_entry() {
         // In explicit mode the explicit list is the whole value, so removal
         // just drops the entry without authoring a deletion.
-        let mut spec = Spec::new(sdf::SpecType::Relationship);
-        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
+        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         let a = sdf::Path::new("/A").unwrap();
         let b = sdf::Path::new("/B").unwrap();
         rel.add_target(a.clone());
@@ -1362,10 +1382,10 @@ mod tests {
         let x = sdf::Path::new("/X").unwrap();
         let mut op = sdf::PathListOp::added([x.clone()]);
         op.deleted_items.push(x.clone());
-        let mut spec = Spec::new(sdf::SpecType::Relationship);
-        spec.add(sdf::FieldKey::TargetPaths, sdf::Value::PathListOp(op));
+        let (mut data, path) = data_with_spec("/A.rel", sdf::SpecType::Relationship);
+        data.set_field(&path, sdf::FieldKey::TargetPaths.as_str(), sdf::Value::PathListOp(op));
 
-        let mut rel = spec.as_relationship_mut().expect("relationship spec");
+        let mut rel = RelationshipSpecMut::get(&mut data, path).expect("relationship spec");
         assert!(rel.remove_target(&x));
         let op = rel.target_path_list().expect("target list op");
         assert!(op.added_items.is_empty());
@@ -1374,18 +1394,20 @@ mod tests {
 
     #[test]
     fn pseudo_root_mut_reads() {
-        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
-        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+        let mut data = Data::new();
+        data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let mut root = PseudoRootSpecMut::get(&mut data).expect("pseudo-root spec");
 
         root.set_default_prim("World");
 
-        assert_eq!(root.default_prim(), Some("World"));
+        assert_eq!(root.default_prim(), Some(tf::Token::from("World")));
     }
 
     #[test]
     fn insert_sublayer_aligns_offsets() {
-        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
-        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+        let mut data = Data::new();
+        data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let mut root = PseudoRootSpecMut::get(&mut data).expect("pseudo-root spec");
 
         // Seed an existing sublayer with no authored offset, then insert ahead
         // of it: the prior entry must be padded to identity so offsets stay
@@ -1393,14 +1415,12 @@ mod tests {
         root.set_sublayers(["b.usda"]);
         root.insert_sublayer(0, "a.usda", sdf::LayerOffset::new(10.0, 1.0));
 
-        assert_eq!(
-            root.sublayers(),
-            Some(["a.usda".to_string(), "b.usda".to_string()].as_slice())
-        );
+        assert_eq!(root.sublayers(), Some(vec!["a.usda".to_string(), "b.usda".to_string()]));
         let offsets = root
-            .get(sdf::FieldKey::SubLayerOffsets.as_str())
+            .field(sdf::FieldKey::SubLayerOffsets.as_str())
+            .ok()
+            .flatten()
             .expect("offsets authored")
-            .clone()
             .try_as_layer_offset_vec()
             .expect("layer-offset vec");
         assert_eq!(
@@ -1411,19 +1431,21 @@ mod tests {
 
     #[test]
     fn remove_sublayer_drops_aligned() {
-        let mut spec = Spec::new(sdf::SpecType::PseudoRoot);
-        let mut root = spec.as_pseudo_root_mut().expect("pseudo-root spec");
+        let mut data = Data::new();
+        data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+        let mut root = PseudoRootSpecMut::get(&mut data).expect("pseudo-root spec");
         root.insert_sublayer(0, "a.usda", sdf::LayerOffset::new(10.0, 1.0));
         root.insert_sublayer(1, "b.usda", sdf::LayerOffset::IDENTITY);
 
         assert!(root.remove_sublayer("a.usda"));
         assert!(!root.remove_sublayer("missing.usda"));
 
-        assert_eq!(root.sublayers(), Some(["b.usda".to_string()].as_slice()));
+        assert_eq!(root.sublayers(), Some(vec!["b.usda".to_string()]));
         let offsets = root
-            .get(sdf::FieldKey::SubLayerOffsets.as_str())
+            .field(sdf::FieldKey::SubLayerOffsets.as_str())
+            .ok()
+            .flatten()
             .expect("offsets authored")
-            .clone()
             .try_as_layer_offset_vec()
             .expect("layer-offset vec");
         assert_eq!(offsets, vec![sdf::LayerOffset::IDENTITY]);

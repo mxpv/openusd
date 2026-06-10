@@ -13,7 +13,7 @@ use anyhow::Result;
 use crate::ar::Resolver;
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, AbstractData, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
+use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
@@ -588,7 +588,11 @@ fn resolve_variant_selections_in<'a>(
     // node fans out into its layer stack, strongest sublayer first.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
-            if let Ok(value) = graph.layer(layer).get(&node.path, FieldKey::VariantSelection.as_str()) {
+            if let Ok(value) = graph
+                .layer(layer)
+                .data()
+                .get(&node.path, FieldKey::VariantSelection.as_str())
+            {
                 if let Value::VariantSelectionMap(map) = value.into_owned() {
                     for (set_name, selection) in map {
                         selections.entry(set_name).or_insert(selection);
@@ -604,7 +608,7 @@ fn resolve_variant_selections_in<'a>(
     // first-variant default, matching the indexer.
     for node in &ordered {
         for &(layer, _) in node.layer_stack() {
-            let data = graph.layer(layer);
+            let data = graph.layer(layer).data();
             let Ok(value) = data.get(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
             };
@@ -680,7 +684,7 @@ where
             if !seen_layers.insert(layer) {
                 continue;
             }
-            let Some(value) = graph.layer(layer).try_get(&node.path, field)? else {
+            let Some(value) = graph.layer(layer).data().try_get(&node.path, field)? else {
                 continue;
             };
             let Some(mut list_op) = decode(value.into_owned()) else {
@@ -1517,7 +1521,7 @@ pub(crate) mod tests {
         let a_idx = stack.find("A.usd").unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
-            stack.layer(a_idx).has_spec(&a_attr_path),
+            stack.layer(a_idx).data().has_spec(&a_attr_path),
             "A.usd should have spec at /A.A_attr"
         );
         Ok(())
@@ -1596,7 +1600,7 @@ pub(crate) mod tests {
 
     fn parse_usda(text: &str) -> Box<dyn sdf::AbstractData> {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        Box::new(crate::usda::TextReader::from_data(data))
+        Box::new(sdf::Data::from_specs(data))
     }
 
     /// A reference cycle is recorded as a recoverable `Error::ArcCycle` and the

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use openusd::sdf;
-use openusd::usda::TextReader;
+use openusd::usda;
 
 const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text";
 
@@ -20,7 +20,7 @@ fn assert_text_format(name: &str) {
     let usda = assets.join("usda").join(format!("{name}.usda"));
     let baseline = assets.join("baseline").join(format!("{name}.json"));
 
-    let reader = TextReader::read(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
+    let reader = usda::read_file(&usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
 
     // Build actual output as a sorted map of path → fields.
     let mut actual: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();

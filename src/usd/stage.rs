@@ -894,7 +894,9 @@ impl Stage {
     pub fn set_custom_layer_data(&self, value: impl Into<sdf::Value>) -> Result<(), StageAuthoringError> {
         let value = value.into();
         self.with_root_layer(|layer| {
-            layer.pseudo_root_mut()?.add(sdf::FieldKey::CustomLayerData, value);
+            layer
+                .pseudo_root_mut()?
+                .set(sdf::FieldKey::CustomLayerData.as_str(), value);
             let mut cl = sdf::ChangeList::new();
             cl.entry_mut(&sdf::Path::abs_root())
                 .info_changed
@@ -920,8 +922,6 @@ impl Stage {
     /// happened" and skips invalidation.
     ///
     /// On any post-mutation error the cache falls back to "blow the world".
-    /// The one error we can short-circuit is [`sdf::AuthoringError::ReadOnly`],
-    /// which is detected before any layer state changes.
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
@@ -1006,18 +1006,16 @@ impl Stage {
                 Ok(true)
             }
             Err(e) => {
-                if !matches!(e, sdf::AuthoringError::ReadOnly { .. }) {
-                    // Conservatively drop every cached index on post-mutation
-                    // failure (the layer may be in a partial state). `SIGNIFICANT`
-                    // alone is enough — `apply` routes it through
-                    // `clear_all_indices` and the layer graph cannot have been
-                    // affected by a failing prim/property edit.
-                    let mut changes = pcp::Changes::new();
-                    changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
-                    let mut graph = self.layers.borrow_mut();
-                    let mut cache = self.cache.borrow_mut();
-                    changes.apply(&mut cache, &mut graph);
-                }
+                // Conservatively drop every cached index on post-mutation
+                // failure (the layer may be in a partial state). `SIGNIFICANT`
+                // alone is enough — `apply` routes it through `clear_all_indices`
+                // and the layer graph cannot have been affected by a failing
+                // prim/property edit.
+                let mut changes = pcp::Changes::new();
+                changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
+                let mut graph = self.layers.borrow_mut();
+                let mut cache = self.cache.borrow_mut();
+                changes.apply(&mut cache, &mut graph);
                 Err(StageAuthoringError::Layer(e))
             }
         }
@@ -2042,10 +2040,12 @@ mod tests {
         stage.define_prim("/Prim/child")?;
 
         let landed = {
-            use sdf::AbstractData;
             let layers = stage.layers();
             let root_id = layers.id_of(&root).unwrap();
-            layers.layer(root_id).spec_type(&sdf::path("/Prim{set=sel}child")?)
+            layers
+                .layer(root_id)
+                .data()
+                .spec_type(&sdf::path("/Prim{set=sel}child")?)
         };
         assert_eq!(landed, Some(sdf::SpecType::Prim));
         Ok(())
@@ -2065,10 +2065,12 @@ mod tests {
         stage.create_attribute("/Prim.size", "double")?;
 
         let landed = {
-            use sdf::AbstractData;
             let layers = stage.layers();
             let root_id = layers.id_of(&root).unwrap();
-            layers.layer(root_id).spec_type(&sdf::path("/Prim{set=sel}.size")?)
+            layers
+                .layer(root_id)
+                .data()
+                .spec_type(&sdf::path("/Prim{set=sel}.size")?)
         };
         assert_eq!(landed, Some(sdf::SpecType::Attribute));
         Ok(())
@@ -2088,9 +2090,7 @@ mod tests {
     /// The parent layer's authored `subLayers` asset paths.
     fn authored_sublayers(stage: &Stage) -> Vec<String> {
         let root = stage.root_layer();
-        root.pseudo_root()
-            .and_then(|pr| pr.sublayers().map(<[String]>::to_vec))
-            .unwrap_or_default()
+        root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
     }
 
     /// `ensure_layer` must not clobber an already-loaded node: re-inserting a

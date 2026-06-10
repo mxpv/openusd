@@ -83,12 +83,10 @@ impl<R: Read + Seek> Archive<R> {
             let content =
                 String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
 
-            let mut parser = usda::parser::Parser::new(&content);
-            let data = parser
-                .parse()
-                .with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
+            let data =
+                usda::parse(&content).with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
 
-            Ok(Box::new(usda::TextReader::from_data(data)))
+            Ok(Box::new(data))
         } else if file_path.ends_with(".usdz") {
             // TODO: Implement nested USDZ files support.
             bail!("Nested USDZ files are not yet supported: '{}'", file_path)

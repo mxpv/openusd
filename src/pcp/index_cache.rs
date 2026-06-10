@@ -17,7 +17,7 @@ use anyhow::Result;
 use crate::ar::ResolvedPath;
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{AbstractData, Path, SpecType, Value};
+use crate::sdf::{Path, SpecType, Value};
 use crate::tf::Token;
 
 use super::clip::ResolvedClipSet;
@@ -299,7 +299,7 @@ impl IndexCache {
                 if !local_layers.contains(&layer) {
                     continue;
                 }
-                let Some(value) = graph.layer(layer).try_get(&query_path, field)? else {
+                let Some(value) = graph.layer(layer).data().try_get(&query_path, field)? else {
                     continue;
                 };
                 return Ok(FieldValue::Authored(block_to_none(value.into_owned())));
@@ -699,7 +699,7 @@ impl IndexCache {
     fn has_spec_at(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         if path.is_property_path() {
             return Ok(self
-                .find_property_node(graph, path, |layer, p| layer.has_spec(p).then_some(()))?
+                .find_property_node(graph, path, |layer, p| layer.data().has_spec(p).then_some(()))?
                 .is_some());
         }
         self.ensure_index(graph, path)?;
@@ -715,7 +715,7 @@ impl IndexCache {
     pub fn spec_type(&mut self, graph: &LayerGraph, path: &Path) -> Result<Option<SpecType>> {
         let path = &self.effective_path(graph, path)?;
         if path.is_property_path() {
-            return self.find_property_node(graph, path, |layer, p| layer.spec_type(p));
+            return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
         }
         self.ensure_index(graph, path)?;
         let Some(index) = self.indices.get(path) else {
@@ -723,7 +723,7 @@ impl IndexCache {
         };
         for node in index.nodes() {
             for (layer, _) in node.layers() {
-                if let Some(ty) = graph.layer(layer).spec_type(&node.path) {
+                if let Some(ty) = graph.layer(layer).data().spec_type(&node.path) {
                     return Ok(Some(ty));
                 }
             }
@@ -1143,7 +1143,7 @@ impl IndexCache {
                 let map = index.map_to_root_for_targets(node);
                 let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
                 for (layer, _) in node.layers() {
-                    let Some(value) = graph.layer(layer).try_get(&property, field.as_str())? else {
+                    let Some(value) = graph.layer(layer).data().try_get(&property, field.as_str())? else {
                         continue;
                     };
                     let list_op = match value.into_owned() {
@@ -1245,7 +1245,7 @@ impl IndexCache {
             .collect::<Vec<_>>();
         for id in layer_ids {
             let layer = graph.layer(id);
-            match layer.try_get(&root, field)? {
+            match layer.data().try_get(&root, field)? {
                 Some(value) if matches!(value.as_ref(), Value::ValueBlock) => return Ok(None),
                 Some(value) => return Ok(Some(value.into_owned())),
                 None => {}
@@ -1263,7 +1263,7 @@ impl IndexCache {
         let Some(root_layer) = graph.root_layer() else {
             return Ok(None);
         };
-        let Some(value) = root_layer.try_get(&root, field)? else {
+        let Some(value) = root_layer.data().try_get(&root, field)? else {
             return Ok(None);
         };
         if matches!(value.as_ref(), Value::ValueBlock) {
@@ -1371,6 +1371,7 @@ impl IndexCache {
                     &mut name_set,
                 );
                 if let Ok(Value::TokenVec(order)) = layer_data
+                    .data()
                     .get(&node.path, FieldKey::PrimOrder.as_str())
                     .map(|v| v.into_owned())
                 {
@@ -1443,7 +1444,7 @@ impl IndexCache {
                 continue;
             };
             for (layer, _) in node.layers() {
-                let Some(spec_type) = graph.layer(layer).spec_type(&p) else {
+                let Some(spec_type) = graph.layer(layer).data().spec_type(&p) else {
                     continue;
                 };
                 match &defining {
@@ -1493,7 +1494,7 @@ impl IndexCache {
             // A node may carry its full site layer stack; only the layers that
             // author a spec at its path belong in the prim stack.
             for (layer, _) in node.layers() {
-                if graph.layer(layer).has_spec(&node.path) {
+                if graph.layer(layer).data().has_spec(&node.path) {
                     stack.push((graph.identifier(layer).to_string(), node.path.clone()));
                 }
             }
@@ -1542,7 +1543,11 @@ impl IndexCache {
     /// first non-session layer (the root layer), matching C++ behavior.
     pub fn default_prim(&self, graph: &LayerGraph) -> Option<Token> {
         let root = Path::abs_root();
-        let value = graph.root_layer()?.get(&root, FieldKey::DefaultPrim.as_str()).ok()?;
+        let value = graph
+            .root_layer()?
+            .data()
+            .get(&root, FieldKey::DefaultPrim.as_str())
+            .ok()?;
         value.into_owned().try_as_token()
     }
 
@@ -1596,7 +1601,7 @@ impl IndexCache {
         let mut targets_to_cache = Vec::new();
         for (scan_path, scan_layer) in &nodes_to_scan {
             for field in [FieldKey::InheritPaths, FieldKey::Specializes] {
-                let Ok(val) = graph.layer(*scan_layer).get(scan_path, field.as_str()) else {
+                let Ok(val) = graph.layer(*scan_layer).data().get(scan_path, field.as_str()) else {
                     continue;
                 };
                 let Value::PathListOp(list_op) = val.into_owned() else {
@@ -1669,7 +1674,11 @@ impl IndexCache {
     /// target site (read across the node's contributing layers) is `private`.
     fn target_is_private(&self, graph: &LayerGraph, node: &Node) -> bool {
         for (layer, _) in node.layers() {
-            if let Ok(Some(value)) = graph.layer(layer).try_get(&node.path, FieldKey::Permission.as_str()) {
+            if let Ok(Some(value)) = graph
+                .layer(layer)
+                .data()
+                .try_get(&node.path, FieldKey::Permission.as_str())
+            {
                 return matches!(value.as_ref(), Value::Permission(sdf::Permission::Private));
             }
         }
@@ -1910,7 +1919,7 @@ fn append_unseen_names(
     order: &mut Vec<Token>,
     seen: &mut HashSet<Token>,
 ) {
-    if let Ok(Value::TokenVec(names)) = layer.get(path, field.as_str()).map(|v| v.into_owned()) {
+    if let Ok(Value::TokenVec(names)) = layer.data().get(path, field.as_str()).map(|v| v.into_owned()) {
         for name in names {
             if seen.insert(name.clone()) {
                 order.push(name);
@@ -1971,7 +1980,7 @@ mod tests {
     /// Parses in-memory USDA text into a single `root.usda` layer.
     fn parse_layer(text: &str) -> sdf::Layer {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)))
+        sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)))
     }
 
     /// Builds a one-layer graph + cache from in-memory USDA text, for
@@ -2348,7 +2357,7 @@ def "A" (
 }
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
         let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
 
@@ -2422,7 +2431,7 @@ def "A" (
 }
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        let layer = sdf::Layer::new("root.usda", Box::new(crate::usda::TextReader::from_data(data)));
+        let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
         let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
 

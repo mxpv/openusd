@@ -19,21 +19,45 @@ use crate::sdf;
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
 
+/// A field's value, either still encoded in the file (decoded lazily on first
+/// read) or authored in memory after load. Mirrors how C++ `Usd_CrateData`
+/// keeps each field as either a `ValueRep` into the crate file or an in-memory
+/// `VtValue`, so the binary backend is both lazy and writable.
+#[derive(Debug)]
+enum FieldValue {
+    /// Encoded in the crate file; decoded on demand via [`CrateFile::value`].
+    Lazy(ValueRep),
+    /// Authored in memory (e.g. via [`sdf::AbstractData::set_field`]).
+    Authored(sdf::Value),
+}
+
 #[derive(Default, Debug)]
 struct Spec {
     /// Specifies the type of an object.
     ty: sdf::SpecType,
     /// Spec properties, in authored order.
-    fields: Vec<(String, ValueRep)>,
+    fields: Vec<(String, FieldValue)>,
 }
 
 impl Spec {
-    fn get(&self, field: &str) -> Option<&ValueRep> {
+    fn get(&self, field: &str) -> Option<&FieldValue> {
         self.fields.iter().find(|(k, _)| k == field).map(|(_, v)| v)
     }
 
     fn contains(&self, field: &str) -> bool {
         self.fields.iter().any(|(k, _)| k == field)
+    }
+
+    fn set(&mut self, field: &str, value: FieldValue) {
+        if let Some(slot) = self.fields.iter_mut().find(|(k, _)| k == field) {
+            slot.1 = value;
+        } else {
+            self.fields.push((field.to_owned(), value));
+        }
+    }
+
+    fn remove(&mut self, field: &str) {
+        self.fields.retain(|(k, _)| k != field);
     }
 }
 
@@ -80,7 +104,7 @@ where
                     raw.clone()
                 };
 
-                fields.push((name, field.value_rep));
+                fields.push((name, FieldValue::Lazy(field.value_rep)));
             }
 
             data.insert(path, Spec { ty, fields });
@@ -113,11 +137,16 @@ where
     }
 
     fn try_get(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
-        let Some(value_rep) = self.data.get(path).and_then(|spec| spec.get(field).copied()) else {
+        let Some(field_value) = self.data.get(path).and_then(|spec| spec.get(field)) else {
             return Ok(None);
         };
-        let value = self.file.borrow_mut().value(value_rep)?;
-        Ok(Some(Cow::Owned(value)))
+        match field_value {
+            FieldValue::Authored(value) => Ok(Some(Cow::Borrowed(value))),
+            FieldValue::Lazy(rep) => {
+                let value = self.file.borrow_mut().value(*rep)?;
+                Ok(Some(Cow::Owned(value)))
+            }
+        }
     }
 
     #[inline]
@@ -131,6 +160,27 @@ where
         let mut paths: Vec<sdf::Path> = self.data.keys().cloned().collect();
         paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         paths
+    }
+
+    fn create_spec(&mut self, path: sdf::Path, ty: sdf::SpecType) {
+        self.data.insert(path, Spec { ty, fields: Vec::new() });
+    }
+
+    fn erase_spec(&mut self, path: &sdf::Path) {
+        self.data.remove(path);
+    }
+
+    fn set_field(&mut self, path: &sdf::Path, field: &str, value: sdf::Value) {
+        match self.data.get_mut(path) {
+            Some(spec) => spec.set(field, FieldValue::Authored(value)),
+            None => debug_assert!(false, "set_field on absent spec at {path}"),
+        }
+    }
+
+    fn erase_field(&mut self, path: &sdf::Path, field: &str) {
+        if let Some(spec) = self.data.get_mut(path) {
+            spec.remove(field);
+        }
     }
 }
 

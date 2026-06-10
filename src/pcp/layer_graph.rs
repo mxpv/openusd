@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ar::{ResolvedPath, Resolver};
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, LayerOffset, Path, RelocateList, Value};
+use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
 use super::mapping::MapFunction;
 use super::prim_index::find_layer_id;
@@ -253,6 +253,7 @@ impl LayerGraph {
             let parent_tcps = effective_time_codes_per_second(&node.layer);
             let Ok(Value::StringVec(sub_paths)) = node
                 .layer
+                .data()
                 .get(&root_path, FieldKey::SubLayers.as_str())
                 .map(|v| v.into_owned())
             else {
@@ -260,6 +261,7 @@ impl LayerGraph {
             };
             let offsets: Vec<LayerOffset> = node
                 .layer
+                .data()
                 .get(&root_path, FieldKey::SubLayerOffsets.as_str())
                 .ok()
                 .and_then(|v| match v.into_owned() {

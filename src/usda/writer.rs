@@ -2,7 +2,7 @@
 //!
 //! Walks an [`AbstractData`] layer and emits a `usda` representation. The
 //! output aims for semantic round-trip: parsing the emitted text with
-//! [`TextReader`](super::TextReader) must reproduce the original specs
+//! [`usda::parse`](super::parse) must reproduce the original specs
 //! opinion-for-opinion.
 
 use std::{
@@ -1446,7 +1446,7 @@ mod tests {
     /// emitting `@...@` elements rather than `string[]` quoted strings.
     #[test]
     fn asset_array_roundtrip() {
-        use crate::usda::{parser::Parser, TextReader};
+        use crate::usda::parser::Parser;
 
         let src = concat!(
             "#usda 1.0\n",
@@ -1465,7 +1465,7 @@ mod tests {
             "parsed as {files:?}, expected AssetPathVec"
         );
 
-        let reader = TextReader::from_data(parsed);
+        let reader = Data::from_specs(parsed);
         let emitted = TextWriter::write_to_string(&reader as &dyn AbstractData).unwrap();
         assert!(emitted.contains("asset[] inputs:files"), "emitted: {emitted}");
         assert!(emitted.contains("@./tex_a.png@"), "emitted: {emitted}");

@@ -439,9 +439,8 @@ pub fn open_layer(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> R
         Ok(Box::new(data))
     } else {
         let content = String::from_utf8(bytes).context("layer is not valid UTF-8")?;
-        let mut parser = usda::parser::Parser::new(&content);
-        let data = parser.parse().context("failed to parse USDA layer")?;
-        Ok(Box::new(usda::TextReader::from_data(data)))
+        let data = usda::parse(&content).context("failed to parse USDA layer")?;
+        Ok(Box::new(data))
     }
 }
 
@@ -925,9 +924,9 @@ mod tests {
         prim.set_kind("group");
 
         let world = layer.prim("/World").expect("prim authored");
-        assert_eq!(world.type_name(), Some("Xform"));
+        assert_eq!(world.type_name().as_deref(), Some("Xform"));
         assert_eq!(world.specifier(), Some(sdf::Specifier::Def));
-        assert_eq!(world.kind(), Some("group"));
+        assert_eq!(world.kind().as_deref(), Some("group"));
         Ok(())
     }
 
@@ -957,11 +956,13 @@ mod tests {
         layer.create_prim("/World/Cube", sdf::Specifier::Def, "Cube")?;
 
         let root = layer.pseudo_root().expect("pseudo-root present");
-        let root_children: Vec<&str> = root.prim_children().unwrap().iter().map(|t| t.as_str()).collect();
+        let root_children = root.prim_children().unwrap();
+        let root_children: Vec<&str> = root_children.iter().map(|t| t.as_str()).collect();
         assert_eq!(root_children, ["World"]);
 
         let world = layer.prim("/World").expect("prim");
-        let world_children: Vec<&str> = world.prim_children().unwrap().iter().map(|t| t.as_str()).collect();
+        let world_children = world.prim_children().unwrap();
+        let world_children: Vec<&str> = world_children.iter().map(|t| t.as_str()).collect();
         assert_eq!(world_children, ["Mesh", "Cube"]);
         Ok(())
     }
@@ -975,7 +976,8 @@ mod tests {
         layer.create_relationship("/Mesh.material:binding", sdf::Variability::Varying, false)?;
 
         let mesh = layer.prim("/Mesh").expect("prim");
-        let props: Vec<&str> = mesh.property_children().unwrap().iter().map(|t| t.as_str()).collect();
+        let props = mesh.property_children().unwrap();
+        let props: Vec<&str> = props.iter().map(|t| t.as_str()).collect();
         assert_eq!(props, ["points", "normals", "material:binding"]);
         Ok(())
     }
@@ -991,60 +993,55 @@ mod tests {
         layer.create_relationship("/Mesh.material:binding", sdf::Variability::Varying, false)?;
         let rel = layer.relationship("/Mesh.material:binding").expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Varying);
-        assert!(rel.get(sdf::FieldKey::Variability.as_str()).is_none());
+        assert!(rel.field(sdf::FieldKey::Variability.as_str()).ok().flatten().is_none());
         Ok(())
     }
 
     #[test]
     fn bad_prim_children_errors() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        layer
-            .data
-            .as_data_mut()
-            .unwrap()
-            .spec_mut(&sdf::Path::abs_root())
-            .unwrap()
-            .add(sdf::ChildrenKey::PrimChildren, sdf::Value::String("bad".into()));
+        layer.data_mut().set_field(
+            &sdf::Path::abs_root(),
+            sdf::ChildrenKey::PrimChildren.as_str(),
+            sdf::Value::String("bad".into()),
+        );
 
         let err = layer.create_prim("/A", sdf::Specifier::Def, "Xform").unwrap_err();
         assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
 
-        let root = layer
-            .data
-            .as_data()
+        let value = layer
+            .data()
+            .get(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
             .unwrap()
-            .spec(&sdf::Path::abs_root())
-            .expect("pseudo-root present");
-        assert!(matches!(
-            root.get(sdf::ChildrenKey::PrimChildren.as_str()),
-            Some(sdf::Value::String(value)) if value == "bad"
-        ));
+            .into_owned();
+        assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
     }
 
     #[test]
     fn bad_property_children_errors() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         layer.create_prim("/Mesh", sdf::Specifier::Def, "Mesh")?;
-        layer
-            .data
-            .as_data_mut()
-            .unwrap()
-            .spec_mut(&sdf::path("/Mesh").unwrap())
-            .unwrap()
-            .add(sdf::ChildrenKey::PropertyChildren, sdf::Value::String("bad".into()));
+        layer.data_mut().set_field(
+            &sdf::path("/Mesh").unwrap(),
+            sdf::ChildrenKey::PropertyChildren.as_str(),
+            sdf::Value::String("bad".into()),
+        );
 
         let err = layer
             .create_relationship("/Mesh.material:binding", sdf::Variability::Varying, false)
             .unwrap_err();
         assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
 
-        let data = layer.data.as_data().unwrap();
-        assert!(data.spec(&sdf::path("/Mesh.material:binding").unwrap()).is_none());
-        let mesh = data.spec(&sdf::path("/Mesh").unwrap()).expect("prim present");
-        assert!(matches!(
-            mesh.get(sdf::ChildrenKey::PropertyChildren.as_str()),
-            Some(sdf::Value::String(value)) if value == "bad"
-        ));
+        assert!(!layer.data().has_spec(&sdf::path("/Mesh.material:binding").unwrap()));
+        let value = layer
+            .data()
+            .get(
+                &sdf::path("/Mesh").unwrap(),
+                sdf::ChildrenKey::PropertyChildren.as_str(),
+            )
+            .unwrap()
+            .into_owned();
+        assert!(matches!(value, sdf::Value::String(value) if value == "bad"));
         Ok(())
     }
 
@@ -1061,8 +1058,8 @@ mod tests {
         radius.set_time_sample(5.0, sdf::Value::Double(2.0));
 
         let read = layer.attribute("/Sphere.radius").expect("attr");
-        assert_eq!(read.type_name(), Some("double"));
-        assert_eq!(read.default(), Some(&sdf::Value::Double(2.5)));
+        assert_eq!(read.type_name().as_deref(), Some("double"));
+        assert_eq!(read.default(), Some(sdf::Value::Double(2.5)));
         let samples = read.time_samples().expect("samples authored");
         let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
         assert_eq!(times, vec![0.0, 5.0, 10.0]);
@@ -1074,9 +1071,7 @@ mod tests {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         // Plant a non-Prim spec at a prim-shaped path through the public data API.
         layer
-            .data
-            .as_data_mut()
-            .unwrap()
+            .data_mut()
             .create_spec(sdf::path("/A").unwrap(), sdf::SpecType::Attribute);
 
         let err = layer.create_prim("/A/B", sdf::Specifier::Def, "Xform").unwrap_err();
@@ -1091,19 +1086,17 @@ mod tests {
     fn failed_prim_chain_creation_is_atomic() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         let bad_child = sdf::path("/A/B").unwrap();
-        layer
-            .data
-            .as_data_mut()
-            .unwrap()
-            .create_spec(bad_child, sdf::SpecType::Attribute);
+        layer.data_mut().create_spec(bad_child, sdf::SpecType::Attribute);
 
         let err = layer.create_prim("/A/B", sdf::Specifier::Def, "Xform").unwrap_err();
         assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
 
-        let data = layer.data.as_data().unwrap();
-        assert!(data.spec(&sdf::path("/A").unwrap()).is_none());
-        let root = data.spec(&sdf::Path::abs_root()).expect("pseudo-root present");
-        assert!(root.get(sdf::ChildrenKey::PrimChildren.as_str()).is_none());
+        assert!(!layer.data().has_spec(&sdf::path("/A").unwrap()));
+        assert!(layer
+            .data()
+            .try_get(&sdf::Path::abs_root(), sdf::ChildrenKey::PrimChildren.as_str())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1176,47 +1169,15 @@ mod tests {
             root.add_sublayer("./over.usda");
         }
         let root = layer.pseudo_root().expect("present");
-        assert_eq!(root.default_prim(), Some("World"));
-        assert_eq!(root.documentation(), Some("auto-generated"));
+        assert_eq!(root.default_prim().as_deref(), Some("World"));
+        assert_eq!(root.documentation().as_deref(), Some("auto-generated"));
         assert_eq!(root.start_time_code(), Some(1.0));
         assert_eq!(root.end_time_code(), Some(24.0));
         assert_eq!(
             root.sublayers(),
-            Some(["./over.usda".to_string(), "./over.usda".to_string()].as_slice())
+            Some(vec!["./over.usda".to_string(), "./over.usda".to_string()])
         );
         Ok(())
-    }
-
-    #[test]
-    fn read_only_layer() {
-        // A layer wrapping an empty Data via the public sdf::AbstractData trait but
-        // *without* the writable hook would normally come from a file reader.
-        // We simulate by wrapping a custom no-op sdf::AbstractData.
-        struct ReadOnly;
-        impl sdf::AbstractData for ReadOnly {
-            fn has_spec(&self, _: &sdf::Path) -> bool {
-                false
-            }
-            fn has_field(&self, _: &sdf::Path, _: &str) -> bool {
-                false
-            }
-            fn spec_type(&self, _: &sdf::Path) -> Option<sdf::SpecType> {
-                None
-            }
-            fn try_get(&self, _: &sdf::Path, _: &str) -> Result<Option<std::borrow::Cow<'_, sdf::Value>>> {
-                Ok(None)
-            }
-            fn list(&self, _: &sdf::Path) -> Option<Vec<String>> {
-                None
-            }
-            fn paths(&self) -> Vec<sdf::Path> {
-                Vec::new()
-            }
-        }
-
-        let mut layer = sdf::Layer::new("file.usda", Box::new(ReadOnly));
-        let err = layer.create_prim("/World", sdf::Specifier::Def, "Xform").unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::ReadOnly { .. }));
     }
 
     #[test]
@@ -1283,22 +1244,22 @@ mod tests {
         layer.create_prim("/Prim", sdf::Specifier::Def, "Xform")?;
         layer.create_prim("/Prim{set=sel}child", sdf::Specifier::Def, "Scope")?;
 
-        assert_eq!(layer.spec_type(&sdf::path("/Prim")?), Some(sdf::SpecType::Prim));
+        assert_eq!(layer.data().spec_type(&sdf::path("/Prim")?), Some(sdf::SpecType::Prim));
         assert_eq!(
-            layer.spec_type(&sdf::path("/Prim{set=}")?),
+            layer.data().spec_type(&sdf::path("/Prim{set=}")?),
             Some(sdf::SpecType::VariantSet)
         );
         assert_eq!(
-            layer.spec_type(&sdf::path("/Prim{set=sel}")?),
+            layer.data().spec_type(&sdf::path("/Prim{set=sel}")?),
             Some(sdf::SpecType::Variant)
         );
         assert_eq!(
-            layer.spec_type(&sdf::path("/Prim{set=sel}child")?),
+            layer.data().spec_type(&sdf::path("/Prim{set=sel}child")?),
             Some(sdf::SpecType::Prim)
         );
 
         let token_vec = |path: &str, key: sdf::ChildrenKey| -> Result<Vec<String>> {
-            match layer.get(&sdf::path(path)?, key.as_str())?.into_owned() {
+            match layer.data().get(&sdf::path(path)?, key.as_str())?.into_owned() {
                 sdf::Value::TokenVec(v) => Ok(v.into_iter().map(Into::into).collect()),
                 other => panic!("expected TokenVec at {path}, got {other:?}"),
             }
@@ -1333,7 +1294,7 @@ mod tests {
             sdf::AuthoringError::InvalidPath { .. }
         ));
         // The rejected calls must not have authored a variant spec.
-        assert_eq!(layer.spec_type(&sdf::path("/Prim{set=sel}")?), None);
+        assert_eq!(layer.data().spec_type(&sdf::path("/Prim{set=sel}")?), None);
         Ok(())
     }
 
@@ -1362,7 +1323,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("openusd_authoring_roundtrip.usda");
         layer.save_as(&tmp, sdf::LayerFormat::Usda)?;
 
-        let parsed = usda::TextReader::read(&tmp)?;
+        let parsed = usda::read_file(&tmp)?;
         assert_eq!(parsed.spec_type(&sdf::path("/World")?), Some(sdf::SpecType::Prim));
         assert_eq!(
             parsed.spec_type(&sdf::path("/World/Sphere")?),

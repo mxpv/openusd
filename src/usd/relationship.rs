@@ -49,7 +49,7 @@ impl Relationship {
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
         self.edit(&[sdf::FieldKey::Variability], false, |spec| {
-            spec.add(sdf::FieldKey::Variability, sdf::Value::Variability(v))
+            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v))
         })
     }
 
@@ -59,7 +59,7 @@ impl Relationship {
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
         self.edit(&[sdf::FieldKey::Custom], false, |spec| {
-            spec.add(sdf::FieldKey::Custom, sdf::Value::Bool(custom))
+            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom))
         })
     }
 
@@ -100,10 +100,10 @@ impl Relationship {
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
+            let data = layer.data_mut();
+            match sdf::RelationshipSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
-                    spec.add(key, value);
+                    spec.set(key, value);
                     let mut cl = sdf::ChangeList::new();
                     cl.entry_mut(&path).info_changed.insert(key);
                     Ok(cl)
@@ -125,8 +125,8 @@ impl Relationship {
         let target = target.clone();
         let mut removed = false;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
+            let data = layer.data_mut();
+            match sdf::RelationshipSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     removed = spec.remove_target(&target);
                     let mut cl = sdf::ChangeList::new();
@@ -204,8 +204,8 @@ impl Relationship {
     /// Borrow the relationship spec at `self.path` on the edit target's
     /// layer, apply `f`, and return `self` for chaining. `fields` names the
     /// authored metadata keys; `targets_changed` sets the target-list flag
-    /// in the change list. See [`Prim::edit`] for the `ReadOnly` vs
-    /// `InvalidPath` discrimination.
+    /// in the change list. Returns `InvalidPath` if no relationship spec exists
+    /// at the path.
     //
     // The change-list entry is recorded at the relationship's property
     // path, which `pcp::Changes::did_change` currently skips (no consumer
@@ -242,8 +242,8 @@ impl Relationship {
     {
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_relationship_mut()) {
+            let data = layer.data_mut();
+            match sdf::RelationshipSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     f(&mut spec);
                     let mut cl = sdf::ChangeList::new();

@@ -13,7 +13,7 @@
 //! | Module | Purpose |
 //! |--------|---------|
 //! | [`sdf`] | Core data model — [`Value`](sdf::Value), [`Path`](sdf::Path), [`Spec`](sdf::Spec), [`AbstractData`](sdf::AbstractData) trait, mutable [`Data`](sdf::Data), and schema field keys. |
-//! | [`usda`] | Text format. [`TextReader`](usda::TextReader) parses and [`TextWriter`](usda::TextWriter) emits `.usda` files. |
+//! | [`usda`] | Text format. [`usda::parse`] / [`usda::read_file`] parse and [`TextWriter`](usda::TextWriter) emits `.usda` files. |
 //! | [`usdc`] | Binary format. [`CrateData`](usdc::CrateData) parses and [`CrateWriter`](usdc::CrateWriter) emits `.usdc` files. |
 //! | [`usdz`] | Archive format. [`Archive`](usdz::Archive) reads and [`ArchiveWriter`](usdz::ArchiveWriter) emits `.usdz` packages. |
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |

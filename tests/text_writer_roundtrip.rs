@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use openusd::sdf;
-use openusd::usda::{TextReader, TextWriter};
+use openusd::usda::{self, TextWriter};
 
 const ASSETS: &str = "vendor/core-spec-supplemental-release_dec2025/file_formats/tests/assets/text";
 
@@ -22,7 +22,7 @@ fn assert_fixture_roundtrip(name: &str) {
 }
 
 fn assert_roundtrip_path(usda: &Path, name: &str) {
-    let reader = TextReader::read(usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
+    let reader = usda::read_file(usda).unwrap_or_else(|e| panic!("failed to parse {}: {e:#}", usda.display()));
 
     let emitted =
         TextWriter::write_to_string(&reader as &dyn sdf::AbstractData).unwrap_or_else(|e| panic!("emit failed: {e:#}"));
@@ -31,7 +31,7 @@ fn assert_roundtrip_path(usda: &Path, name: &str) {
     let tmp_path = tmp_dir.path().join(format!("{name}.usda"));
     std::fs::write(&tmp_path, &emitted).expect("write temp file");
 
-    let re_reader = TextReader::read(&tmp_path)
+    let re_reader = usda::read_file(&tmp_path)
         .unwrap_or_else(|e| panic!("re-parse failed for {name}:\n---emitted---\n{emitted}\n---end---\n{e:#}"));
 
     // Compare both readers via the same JSON snapshot pipeline tests/text_format.rs uses.
@@ -81,7 +81,7 @@ fn normalize_json(v: &mut serde_json::Value) {
     }
 }
 
-fn snapshot(reader: &TextReader) -> serde_json::Value {
+fn snapshot(reader: &sdf::Data) -> serde_json::Value {
     let mut out: BTreeMap<String, BTreeMap<&str, &sdf::Value>> = BTreeMap::new();
     for (path, spec) in reader.iter() {
         let fields: BTreeMap<&str, &sdf::Value> = spec.fields.iter().map(|(k, v)| (k.as_str(), v)).collect();

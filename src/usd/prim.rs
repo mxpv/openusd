@@ -113,8 +113,8 @@ impl Prim {
     pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
+            let data = layer.data_mut();
+            match sdf::PrimSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     spec.add_applied_schema(name)?;
                     let mut cl = sdf::ChangeList::new();
@@ -164,13 +164,11 @@ impl Prim {
             // edit target has no local spec, matching C++ `UsdObject::SetMetadata`
             // creating the spec for editing.
             let created = layer.ensure_prim_over(path.clone())?;
-            let data = layer.writable_data_mut()?;
-            let mut spec = data
-                .spec_mut(&path)
-                .and_then(|s| s.as_prim_mut())
+            let data = layer.data_mut();
+            let mut spec = sdf::PrimSpecMut::get(data, path.clone())
                 .expect("ensure_prim_over guaranteed a prim spec at the edit-target path");
-            let value = f(spec.get(key).cloned());
-            spec.add(key, value);
+            let value = f(spec.field(key).ok().flatten());
+            spec.set(key, value);
 
             let mut cl = sdf::ChangeList::new();
             cl.add_inert_prims(created);
@@ -662,19 +660,16 @@ impl Prim {
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
     /// `f`, and return `self` for chaining. `fields` names the metadata keys
     /// the closure intends to author so the cache invalidator can classify
-    /// them. Surfaces `ReadOnly` if the layer can't be mutated, or
-    /// `InvalidPath` if no prim spec exists at the path.
+    /// them. Returns `InvalidPath` if no prim spec exists at the path.
     fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),
     {
         let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            // Detect the read-only case explicitly — otherwise `prim_mut`
-            // returns `None` for both "no spec" and "layer not writable"
-            // and we'd mask `ReadOnly` as `InvalidPath`.
-            let data = layer.writable_data_mut()?;
-            match data.spec_mut(&path).and_then(|s| s.as_prim_mut()) {
+            // A `None` view means no prim spec exists at the path.
+            let data = layer.data_mut();
+            match sdf::PrimSpecMut::get(data, path.clone()) {
                 Some(mut spec) => {
                     f(&mut spec);
                     let mut cl = sdf::ChangeList::new();
@@ -915,19 +910,17 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/World")?;
         stage.with_target_layer_at(&sdf::Path::new("/World").expect("valid path"), |layer, _path| {
-            let data = layer.writable_data_mut()?;
-            let spec = data
-                .spec_mut(&sdf::Path::new("/World").expect("valid path"))
-                .expect("prim spec");
-            spec.add(
-                sdf::FieldKey::ApiSchemas,
+            let path = sdf::Path::new("/World").expect("valid path");
+            layer.data_mut().set_field(
+                &path,
+                sdf::FieldKey::ApiSchemas.as_str(),
                 sdf::Value::TokenListOp(sdf::TokenListOp {
                     appended_items: vec![Token::from("ExistingAPI")],
                     ..Default::default()
                 }),
             );
             let mut cl = sdf::ChangeList::new();
-            cl.entry_mut(&sdf::Path::new("/World").expect("valid path"))
+            cl.entry_mut(&path)
                 .info_changed
                 .insert(sdf::FieldKey::ApiSchemas.as_str());
             Ok(cl)

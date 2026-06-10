@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use crate::gf;
 use crate::sdf::schema::FieldKey;
-use crate::sdf::{self, AbstractData, LayerOffset, Path, Specifier, Value};
+use crate::sdf::{self, LayerOffset, Path, Specifier, Value};
 use crate::tf::Token;
 
 use super::clip;
@@ -415,7 +415,7 @@ impl PrimIndex {
                 };
                 let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
                 for (layer, offset) in node.layers() {
-                    match stack.layer(layer).try_get(&query_path, field) {
+                    match stack.layer(layer).data().try_get(&query_path, field) {
                         Ok(Some(value)) => out.push(Ok(Opinion {
                             node,
                             layer,
@@ -454,7 +454,7 @@ impl PrimIndex {
                 continue;
             };
             for (layer, _) in node.layers() {
-                if matches!(stack.layer(layer).try_get(&query_path, field), Ok(Some(_))) {
+                if matches!(stack.layer(layer).data().try_get(&query_path, field), Ok(Some(_))) {
                     return Some((layer, node));
                 }
             }

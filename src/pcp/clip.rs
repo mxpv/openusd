@@ -419,6 +419,7 @@ fn get<T: TryFrom<Value>>(set: &HashMap<String, Value>, key: &str) -> Option<T> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdf;
 
     /// Builds a `double2[]` knot list (`active` / `times`) from `(x, y)` pairs.
     fn knots(pairs: &[(f64, f64)]) -> Vec<gf::Vec2d> {
@@ -646,7 +647,7 @@ def Xform "Geo" (
         )
         .parse()
         .expect("parse usda");
-        let data = crate::usda::TextReader::from_data(parsed);
+        let data = sdf::Data::from_specs(parsed);
 
         let clips = data
             .try_get(&Path::new("/Geo").unwrap(), "clips")
