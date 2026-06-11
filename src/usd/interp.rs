@@ -86,6 +86,30 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
     }
 }
 
+/// The pair of authored sample times bracketing `time`, or `None` when
+/// `samples` is empty. Mirrors C++ `UsdAttribute::GetBracketingTimeSamples`:
+/// the pair collapses to a single repeated time when `time` is at or beyond an
+/// end sample, or lands exactly on a sample; otherwise `lower < time < upper`.
+///
+/// `samples` MUST be sorted ascending by time code.
+pub fn bracketing_time_samples(samples: &[(f64, Value)], time: f64) -> Option<(f64, f64)> {
+    if samples.is_empty() {
+        return None;
+    }
+    let first = samples[0].0;
+    if time <= first {
+        return Some((first, first));
+    }
+    let last = samples[samples.len() - 1].0;
+    if time >= last {
+        return Some((last, last));
+    }
+    match samples.binary_search_by(|(t, _)| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal)) {
+        Ok(i) => Some((samples[i].0, samples[i].0)),
+        Err(i) => Some((samples[i - 1].0, samples[i].0)),
+    }
+}
+
 fn is_blocked(v: &Value) -> bool {
     matches!(v, Value::ValueBlock | Value::None)
 }

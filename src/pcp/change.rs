@@ -404,7 +404,7 @@ mod tests {
                 .info_changed
                 .insert(field.as_str().into());
             let mut changes = Changes::new();
-            changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+            changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
             assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         }
     }
