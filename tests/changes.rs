@@ -53,9 +53,10 @@ fn has_flag(cl: &sdf::ChangeList, path: &str, flag: sdf::ChangeFlags) -> bool {
 }
 
 /// A freshly created `def` prim records a non-inert add at the leaf, inert
-/// adds for the auto-created ancestors, and a property add for an attribute —
-/// and the fresh specs' own field writes (`specifier`, `typeName`) fold into
-/// the add rather than leaking as `info_changed`.
+/// adds for the auto-created ancestors, and a property add for an attribute.
+/// The auto-stamped `specifier` folds into the add, while an explicit opinion
+/// like `typeName` is surfaced in `info_changed` so the classifier can see the
+/// structural fields a fresh spec carries.
 #[test]
 fn records_prim_tree_adds() {
     let mut p = proxy();
@@ -67,9 +68,11 @@ fn records_prim_tree_adds() {
     assert!(has_flag(&cl, "/A/B", sdf::ChangeFlags::ADD_INERT_PRIM));
     assert!(has_flag(&cl, "/A/B/C", sdf::ChangeFlags::ADD_NON_INERT_PRIM));
     assert!(has_flag(&cl, "/A/B/C.size", sdf::ChangeFlags::ADD_PROPERTY));
-    // The leaf's specifier/typeName writes are part of its add, not a separate
-    // metadata change.
-    assert!(entry(&cl, "/A/B/C").unwrap().info_changed.is_empty());
+    // The auto-stamped specifier folds into the add; the explicit typeName is
+    // surfaced, but never a spurious specifier change.
+    let leaf = &entry(&cl, "/A/B/C").unwrap().info_changed;
+    assert!(leaf.iter().any(|t| t == sdf::FieldKey::TypeName.as_str()));
+    assert!(!leaf.iter().any(|t| t == sdf::FieldKey::Specifier.as_str()));
 }
 
 /// `over` creates missing specs as `over`, recording inert adds.

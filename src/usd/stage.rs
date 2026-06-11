@@ -970,9 +970,8 @@ impl Stage {
                 let mut changes = pcp::Changes::new();
                 let edits = [(layer_id, &*scratch)];
                 {
-                    let graph = self.layers.borrow();
                     let cache = self.cache.borrow();
-                    changes.did_change(&cache, &graph, &edits);
+                    changes.did_change(&cache, &edits);
                 }
                 let mut graph = self.layers.borrow_mut();
                 let mut cache = self.cache.borrow_mut();

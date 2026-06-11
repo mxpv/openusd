@@ -51,7 +51,12 @@ pub struct ChangeEntry {
     /// Names of fields whose value was authored at this path. Interned as
     /// [`tf::Token`] so the recording delegate ([`EditProxy`]) can note any
     /// field name — schema `FieldKey`s and custom metadata alike — from the
-    /// borrowed `&str` it sees on a write.
+    /// borrowed `&str` it sees on a write. This is the raw set of touched
+    /// fields (including non-composition metadata like `customData` and the
+    /// child-name lists); deciding which are significant is the consumer's job
+    /// — [`pcp::Changes`](crate::pcp::Changes) filters it against its own
+    /// structural-field list, so presence here does not by itself imply a
+    /// composition change.
     pub info_changed: BTreeSet<tf::Token>,
 }
 
@@ -132,6 +137,13 @@ impl ChangeList {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Remove the entry at `path`, if present. The recording delegate
+    /// ([`EditProxy`]) uses this to drop a spec's partial record when a creation
+    /// is cancelled — the spec is created and erased before draining.
+    pub(crate) fn discard(&mut self, path: &Path) {
+        self.entries.retain(|(p, _)| p != path);
+    }
 }
 
 /// A write-recording wrapper around a layer's backing [`AbstractData`].
@@ -143,10 +155,12 @@ impl ChangeList {
 ///
 /// Idempotence is enforced at the source: a `set_field` that does not change
 /// the stored value records nothing, and re-creating an existing spec records
-/// no add. Field writes on a spec created within the current (undrained)
-/// window are folded into that spec's add rather than recorded separately, so
-/// the `over` specifier auto-stamped on an auto-created ancestor does not leak
-/// out as a spurious `specifier` change.
+/// no add. For a spec created within the current (undrained) window the add
+/// flag already covers it, so only its `specifier` write is suppressed — that
+/// field is auto-stamped on every created spec (including auto-created
+/// ancestors) and would otherwise leak as a spurious `specifier` change; its
+/// other field writes are still recorded so the classifier sees the
+/// composition-arc / instancing / activation opinions an `over` carries.
 pub struct EditProxy {
     /// Changes accumulated since the last drain.
     changes: ChangeList,
@@ -229,6 +243,26 @@ impl EditProxy {
         entry.info_changed.insert(tf::Token::from(field));
         entry.flags |= flag_for_field(field);
     }
+
+    /// Note every field currently authored at `path` except the auto-stamped
+    /// `specifier`, so a spec removal carries the same `info_changed` signal an
+    /// add does. `list_fields` returns owned names, so the inner borrow is
+    /// released before the recording writes.
+    //
+    // TODO(perf): `list_fields` allocates a `Vec<String>` and clones every field
+    // name on the `Data` backend, and `note_field` re-interns each survivor; a
+    // borrowing field-name iterator on `AbstractData` would drop the Vec and the
+    // clones (the token intern stays, since the backend keys are `String`).
+    fn note_existing_fields(&mut self, path: &Path) {
+        let Some(fields) = self.inner.list_fields(path) else {
+            return;
+        };
+        for field in fields {
+            if field != FieldKey::Specifier.as_str() {
+                self.note_field(path, &field);
+            }
+        }
+    }
 }
 
 impl AbstractData for EditProxy {
@@ -257,16 +291,22 @@ impl AbstractData for EditProxy {
     }
 
     fn create_spec(&mut self, path: Path, ty: SpecType) {
-        // Creating over an existing spec replaces it, clearing its fields:
-        // record the removal of the old spec so the change isn't dropped.
+        // Creating over an existing spec replaces it, clearing its fields: record
+        // the removal of the old spec, and — for a prim — surface its authored
+        // fields the way `erase_spec` does, so a structural opinion the replace
+        // tears down still reaches the classifier.
         if let Some(flag) = remove_flag(&*self.inner, &path) {
             self.changes.entry_mut(&path).flags |= flag;
+            if flag.intersects(ChangeFlags::REMOVE_INERT_PRIM | ChangeFlags::REMOVE_NON_INERT_PRIM) {
+                self.note_existing_fields(&path);
+            }
         }
         // Only specs that `finalize` classifies into an add flag are tracked, so
-        // their own field writes fold into that add. Scaffolding specs (the
-        // pseudo-root, variant sets/variants) get no add flag, so suppressing
-        // their field writes would drop them — a root-metadata edit that also
-        // materializes the pseudo-root must still record `defaultPrim` etc.
+        // `set_field` knows to suppress their auto-stamped `specifier`. Scaffolding
+        // specs (the pseudo-root, variant sets/variants) get no add flag and are
+        // left untracked, so every field write on them is recorded — a
+        // root-metadata edit that also materializes the pseudo-root must still
+        // record `defaultPrim` etc.
         if matches!(ty, SpecType::Prim | SpecType::Attribute | SpecType::Relationship) {
             self.created.insert(path.clone());
         }
@@ -274,26 +314,62 @@ impl AbstractData for EditProxy {
     }
 
     fn erase_spec(&mut self, path: &Path) {
-        // A spec created and erased within one window never existed before it,
-        // so it cancels out rather than recording a removal.
+        // A spec created and erased within one window cancels out. A fresh
+        // create recorded no removal, so the field writes its `set_field`s
+        // accumulated are a net no-op — drop that partial record rather than let
+        // it linger as a spurious change. A removal flag means `create_spec`
+        // replaced a pre-existing spec, whose removal must outlive the cancel.
         if self.created.remove(path) {
+            let replaced = self
+                .changes
+                .entries()
+                .iter()
+                .find(|(p, _)| p == path)
+                .is_some_and(|(_, e)| {
+                    e.flags.intersects(
+                        ChangeFlags::REMOVE_INERT_PRIM
+                            | ChangeFlags::REMOVE_NON_INERT_PRIM
+                            | ChangeFlags::REMOVE_PROPERTY,
+                    )
+                });
+            if !replaced {
+                self.changes.discard(path);
+            }
             self.inner.erase_spec(path);
             return;
         }
         if let Some(flag) = remove_flag(&*self.inner, path) {
             self.changes.entry_mut(path).flags |= flag;
+            // A removed prim spec surfaces its authored fields (except the
+            // always-present `specifier`) so the classifier can tell a structural
+            // removal — an `over` that carried `references`, `active`, … — from a
+            // plain one, symmetric with an add. The flag already distinguishes a
+            // prim removal from a property one, whose field signal the classifier
+            // ignores.
+            if flag.intersects(ChangeFlags::REMOVE_INERT_PRIM | ChangeFlags::REMOVE_NON_INERT_PRIM) {
+                self.note_existing_fields(path);
+            }
         }
         self.inner.erase_spec(path);
     }
 
     fn set_field(&mut self, path: &Path, field: &str, value: Value) {
-        // A write to a spec created this window folds into its add; skip the
-        // value-diff read entirely for it.
-        if !self.created.contains(path) {
-            let changed = self.inner.try_field(path, field).ok().flatten().as_deref() != Some(&value);
-            if changed {
+        if self.created.contains(path) {
+            // The spec was created this window, so its shape is already carried
+            // by the add flag. Record every field except `specifier`: a created
+            // `over` may carry a composition-arc / instancing / activation
+            // opinion the classifier must see, whereas `specifier` is both
+            // already implied by the add flag and itself a significant field
+            // stamped on every created spec — recording it would force every
+            // created `over` into the significant tier. (Other auto-stamped
+            // fields such as `typeName` and the child-name lists are recorded too
+            // but are harmless: they do not promote to significant.) A created
+            // spec's field is always new, so no value diff is needed.
+            if field != FieldKey::Specifier.as_str() {
                 self.note_field(path, field);
             }
+        } else if self.inner.try_field(path, field).ok().flatten().as_deref() != Some(&value) {
+            self.note_field(path, field);
         }
         self.inner.set_field(path, field, value);
     }
@@ -341,5 +417,172 @@ fn flag_for_field(field: &str) -> ChangeFlags {
         ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION
     } else {
         ChangeFlags::empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sdf::{Data, ReferenceListOp};
+
+    fn p(s: &str) -> Path {
+        Path::new(s).expect("valid path")
+    }
+
+    fn references(field: &str) -> bool {
+        field == FieldKey::References.as_str()
+    }
+
+    fn specifier(field: &str) -> bool {
+        field == FieldKey::Specifier.as_str()
+    }
+
+    /// Authors an `over` carrying a `references` opinion through `proxy` in one
+    /// window, the way `define_prim` / `override_prim` + `add_reference` do.
+    fn create_over_with_reference(proxy: &mut EditProxy, path: &Path) {
+        proxy.create_spec(path.clone(), SpecType::Prim);
+        proxy.set_field(path, FieldKey::Specifier.as_str(), Value::Specifier(Specifier::Over));
+        proxy.set_field(
+            path,
+            FieldKey::References.as_str(),
+            Value::ReferenceListOp(ReferenceListOp::default()),
+        );
+    }
+
+    /// A created `over` surfaces its composition-arc field in `info_changed` so
+    /// the classifier sees the structural opinion, but not the auto-stamped
+    /// `specifier`.
+    #[test]
+    fn created_over_records_arc_not_specifier() {
+        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        create_over_with_reference(&mut proxy, &p("/X"));
+
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        let entry = &cl.entries()[0].1;
+        assert!(entry.flags.contains(ChangeFlags::ADD_INERT_PRIM));
+        assert!(entry.info_changed.iter().any(|t| references(t)));
+        assert!(!entry.info_changed.iter().any(|t| specifier(t)));
+    }
+
+    /// A created `over` with only its auto-stamped `specifier` records the add
+    /// and no spurious `specifier` change — the auto-created-ancestor case.
+    #[test]
+    fn created_over_suppresses_specifier() {
+        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        proxy.create_spec(p("/X"), SpecType::Prim);
+        proxy.set_field(
+            &p("/X"),
+            FieldKey::Specifier.as_str(),
+            Value::Specifier(Specifier::Over),
+        );
+
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        let entry = &cl.entries()[0].1;
+        assert!(entry.flags.contains(ChangeFlags::ADD_INERT_PRIM));
+        assert!(entry.info_changed.is_empty());
+    }
+
+    /// Erasing an `over` surfaces its authored fields (except `specifier`), so a
+    /// structural removal carries the same signal as the matching add.
+    #[test]
+    fn erased_over_records_fields() {
+        // Populate the spec outside a proxy window so the erase sees it as
+        // pre-existing rather than created-this-window.
+        let mut data = Data::new();
+        data.create_spec(p("/X"), SpecType::Prim);
+        data.set_field(
+            &p("/X"),
+            FieldKey::Specifier.as_str(),
+            Value::Specifier(Specifier::Over),
+        );
+        data.set_field(
+            &p("/X"),
+            FieldKey::References.as_str(),
+            Value::ReferenceListOp(ReferenceListOp::default()),
+        );
+
+        let mut proxy = EditProxy::new(Box::new(data));
+        proxy.erase_spec(&p("/X"));
+
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        let entry = &cl.entries()[0].1;
+        assert!(entry.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
+        assert!(entry.info_changed.iter().any(|t| references(t)));
+        assert!(!entry.info_changed.iter().any(|t| specifier(t)));
+    }
+
+    /// Replacing an existing `over` (which carried a composition arc) by
+    /// re-creating it as a plain `over` surfaces the dropped `references` field,
+    /// so the teardown is not lost — `create_spec`-as-replace is symmetric with
+    /// `erase_spec`.
+    #[test]
+    fn recreated_over_records_dropped_field() {
+        let mut data = Data::new();
+        data.create_spec(p("/X"), SpecType::Prim);
+        data.set_field(
+            &p("/X"),
+            FieldKey::Specifier.as_str(),
+            Value::Specifier(Specifier::Over),
+        );
+        data.set_field(
+            &p("/X"),
+            FieldKey::References.as_str(),
+            Value::ReferenceListOp(ReferenceListOp::default()),
+        );
+
+        let mut proxy = EditProxy::new(Box::new(data));
+        // Re-create /X as a plain `over` with no references, in one window.
+        proxy.create_spec(p("/X"), SpecType::Prim);
+        proxy.set_field(
+            &p("/X"),
+            FieldKey::Specifier.as_str(),
+            Value::Specifier(Specifier::Over),
+        );
+
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        let entry = &cl.entries()[0].1;
+        assert!(entry.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
+        assert!(entry.info_changed.iter().any(|t| references(t)));
+    }
+
+    /// A spec freshly created (with field writes) and erased before draining
+    /// cancels out completely — the partial record does not linger as a spurious
+    /// change.
+    #[test]
+    fn created_then_erased_cancels() {
+        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        create_over_with_reference(&mut proxy, &p("/X"));
+        proxy.erase_spec(&p("/X"));
+
+        assert!(!proxy.is_dirty());
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        assert!(cl.is_empty());
+    }
+
+    /// Re-creating (replacing) a pre-existing spec and then erasing it in one
+    /// window still records the removal: the replace's removal flag outlives the
+    /// cancelled re-creation, unlike a fresh create+erase.
+    #[test]
+    fn recreated_then_erased_records_removal() {
+        let mut data = Data::new();
+        data.create_spec(p("/X"), SpecType::Prim);
+        data.set_field(
+            &p("/X"),
+            FieldKey::Specifier.as_str(),
+            Value::Specifier(Specifier::Over),
+        );
+
+        let mut proxy = EditProxy::new(Box::new(data));
+        proxy.create_spec(p("/X"), SpecType::Prim);
+        proxy.erase_spec(&p("/X"));
+
+        let mut cl = ChangeList::new();
+        proxy.take(&mut cl);
+        assert!(cl.entries()[0].1.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
     }
 }

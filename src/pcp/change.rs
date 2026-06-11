@@ -29,29 +29,6 @@ use crate::sdf::{ChangeEntry, ChangeList, Path};
 use super::layer_graph::LayerGraph;
 use super::{IndexCache, LayerId};
 
-/// Fields whose presence on an `over` makes it structural despite its inert
-/// specifier: the composition-arc, instancing, and activation opinions that
-/// reshape the graph. A created spec folds its field writes into the inert add
-/// flag, so these never reach [`ChangeEntry::info_changed`]; the classifier
-/// reads them off the spec instead. `specifier` is deliberately absent — every
-/// prim authors one, so it cannot single out a structural `over`.
-const STRUCTURAL_INERT_FIELDS: [FieldKey; 10] = [
-    FieldKey::References,
-    FieldKey::Payload,
-    FieldKey::InheritPaths,
-    FieldKey::Specializes,
-    FieldKey::VariantSetNames,
-    FieldKey::VariantSelection,
-    FieldKey::Instanceable,
-    FieldKey::Active,
-    // `apiSchemas` composes off the cached prim index (IndexCache::api_schemas);
-    // `relocates` reshapes composition (see `pcp::relocates`). Both are listed
-    // for parity with the C++ classifier even though no Stage-tier producer
-    // authors `relocates` on a prim yet.
-    FieldKey::ApiSchemas,
-    FieldKey::Relocates,
-];
-
 /// Plan + apply object for one author round.
 ///
 /// Internal: callers construct a `Changes`, classify the drained
@@ -117,9 +94,10 @@ impl Changes {
     /// Property-path entries (attribute values, time samples, relationship
     /// targets) are intentionally ignored: those queries read live layer
     /// data on every call, so a newly authored value is visible without
-    /// any cache mutation. When the cache memoizes resolved property
-    /// stacks, a tier-3 (`did_change_specs`) branch will land here.
-    pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[(LayerId, &ChangeList)]) {
+    /// any cache mutation. When the cache memoizes resolved property or
+    /// target stacks, a property-tier branch (keyed by property path) will
+    /// land here.
+    pub fn did_change(&mut self, cache: &IndexCache, changes: &[(LayerId, &ChangeList)]) {
         for (layer_index, cl) in changes {
             for (path, entry) in cl.entries() {
                 if path.is_abs_root() {
@@ -127,20 +105,13 @@ impl Changes {
                 } else if path.is_property_path() {
                     continue;
                 } else {
-                    self.classify_prim_entry(cache, graph, *layer_index, path, entry);
+                    self.classify_prim_entry(cache, *layer_index, path, entry);
                 }
             }
         }
     }
 
-    fn classify_prim_entry(
-        &mut self,
-        cache: &IndexCache,
-        graph: &LayerGraph,
-        layer: LayerId,
-        path: &Path,
-        entry: &ChangeEntry,
-    ) {
+    fn classify_prim_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
         let significant = entry.flags.intersects(sdf::ChangeFlags::NON_INERT_PRIM)
             || entry
                 .info_changed
@@ -160,24 +131,17 @@ impl Changes {
                 self.fanout_significant(cache, layer, &stripped);
             }
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
-            if self.inert_change_is_structural(cache, graph, layer, path, entry) {
-                // An `over` carries no significant field in `info_changed` — a
-                // created spec folds its field writes into the inert add flag —
-                // yet it may still author (or, when removed, have authored) a
-                // composition-arc, instancing, or activation opinion that
-                // reshapes the graph despite the inert specifier; recompose the
-                // subtree as for any significant change.
-                self.fanout_significant(cache, layer, path);
-            } else {
-                // A non-structural inert add or remove flips only whether
-                // `(layer, path)` contributes an opinion; the graph structure is
-                // untouched. The spec-tier rescan refreshes the affected nodes'
-                // `has_specs` flag in place — across the local prim and every
-                // dependent that already reads the site — and drops the local
-                // index only when it holds no node there (a brand-new spec needs
-                // a fresh build).
-                self.cache.did_change_specs.insert((layer, path.clone()));
-            }
+            // An inert add or remove with no significant field flips only whether
+            // `(layer, path)` contributes an opinion; the graph structure is
+            // untouched. The `EditProxy` surfaces the structural fields an `over`
+            // carries into `info_changed`, so an arc / instancing / activation
+            // opinion is already caught by the significant branch above; what
+            // reaches here is a genuinely inert change. The spec-tier rescan
+            // refreshes the affected nodes' `has_specs` flag in place — across the
+            // local prim and every dependent that already reads the site — and
+            // drops the local index only when it holds no node there (a brand-new
+            // spec needs a fresh build).
+            self.cache.did_change_specs.insert((layer, path.clone()));
         }
 
         // TODO: an inert add at a path whose node a dependent prim culled from
@@ -186,50 +150,6 @@ impl Changes {
         // `Indexer` culls weaker nodes during composition, and we keep no
         // `culled_dependencies` snapshot to consult, so the spec-tier rescan
         // refreshes only nodes still present in the dependent's graph.
-    }
-
-    /// Whether an inert prim add or remove actually reshapes the graph.
-    ///
-    /// A created spec's field writes fold into its inert add flag (see
-    /// [`EditProxy`](crate::sdf::change)), so the significant fields an `over`
-    /// carries never reach [`ChangeEntry::info_changed`] for the classifier to
-    /// catch. An add is inspected on the spec itself; a remove cannot be (the
-    /// spec is gone), so it is treated as structural whenever the cached index
-    /// composes any arc the removed spec might have introduced.
-    ///
-    /// Inferring a removal from arc presence alone is sufficient because the
-    /// arc-bearing fields (references / payload / inherits / specializes, and
-    /// variantSelection — its selected branch is a `Variant` node) are the only
-    /// members of [`STRUCTURAL_INERT_FIELDS`] whose effect is *cached* in the
-    /// graph, and all produce a non-`Root` node detected by
-    /// [`IndexCache::cached_has_composition_arc`]. The rest resolve live and
-    /// need no rebuild on removal: `active` (re-read by `UsdPrim::is_active` /
-    /// stage traversal) and `apiSchemas` (re-read by
-    /// `PrimIndex::resolve_token_list_op`); `instanceable` is covered separately
-    /// because [`Changes::apply`] drops affected prototypes for every spec-tier
-    /// path. A future field whose removal mutates cached graph state would have
-    /// to extend this check (the principled fix is to record a removed spec's
-    /// significant fields at erase time, making the remove path symmetric with
-    /// the add).
-    fn inert_change_is_structural(
-        &self,
-        cache: &IndexCache,
-        graph: &LayerGraph,
-        layer: LayerId,
-        path: &Path,
-        entry: &ChangeEntry,
-    ) -> bool {
-        // TODO(perf): each `layer_authors_field` re-resolves the same layer and
-        // spec before probing one field; resolving the spec once and testing the
-        // fields against it would replace these per-field lookups with one fetch.
-        if entry.flags.contains(sdf::ChangeFlags::ADD_INERT_PRIM)
-            && STRUCTURAL_INERT_FIELDS
-                .iter()
-                .any(|k| cache.layer_authors_field(graph, layer, path, k.as_str()))
-        {
-            return true;
-        }
-        entry.flags.contains(sdf::ChangeFlags::REMOVE_INERT_PRIM) && cache.cached_has_composition_arc(path)
     }
 
     fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {
@@ -261,15 +181,29 @@ impl Changes {
 
     /// Authoring this field on a prim path forces a graph rebuild.
     ///
-    /// Mirrors C++ `Pcp_EntryRequiresPrimIndexChange` (changes.cpp:264-298).
-    /// All of [`STRUCTURAL_INERT_FIELDS`] qualify — the composition-arc,
-    /// instancing, and activation opinions an `over` may carry — plus
-    /// `specifier`, whose def↔over↔class transitions change whether the prim
-    /// and its subtree compose. (`specifier` is excluded from
-    /// [`STRUCTURAL_INERT_FIELDS`] because every prim authors one, so its mere
-    /// presence cannot distinguish a structural `over`.)
+    /// Mirrors C++ `Pcp_EntryRequiresPrimIndexChange` (changes.cpp:264-298): the
+    /// composition-arc, instancing, and activation opinions plus `specifier`,
+    /// whose def↔over↔class transitions change whether the prim and its subtree
+    /// compose.
     fn field_promotes_to_significant(field: &str) -> bool {
-        field == FieldKey::Specifier.as_str() || STRUCTURAL_INERT_FIELDS.iter().any(|k| field == k.as_str())
+        field == FieldKey::References.as_str()
+            || field == FieldKey::Payload.as_str()
+            || field == FieldKey::InheritPaths.as_str()
+            || field == FieldKey::Specializes.as_str()
+            || field == FieldKey::VariantSetNames.as_str()
+            || field == FieldKey::VariantSelection.as_str()
+            || field == FieldKey::Instanceable.as_str()
+            || field == FieldKey::Specifier.as_str()
+            || field == FieldKey::Active.as_str()
+            // `apiSchemas` is composed off the cached prim index
+            // (resolve_token_list_op in IndexCache::api_schemas), so any edit
+            // must drop the index. Once registry-driven applied schemas inject
+            // composition state, this becomes load-bearing for graph correctness.
+            || field == FieldKey::ApiSchemas.as_str()
+            // Per-prim `relocates` reshape composition (see `pcp::relocates`). No
+            // Stage-tier producer authors this yet, but it matches the C++
+            // classifier and forecloses a latent gap.
+            || field == FieldKey::Relocates.as_str()
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.
@@ -375,7 +309,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -387,26 +321,23 @@ mod tests {
             .info_changed
             .insert(FieldKey::VariantSelection.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
     /// An inert prim add whose spec authors `instanceable` flips the prim's
-    /// instancing composition, so it must be promoted to significant even
-    /// though the add itself is inert (spec 11.3.3).
+    /// instancing composition (spec 11.3.3); the `EditProxy` surfaces
+    /// `instanceable` in `info_changed`, so the classifier promotes it to
+    /// significant despite the inert add flag.
     #[test]
     fn inert_add_with_instanceable_is_significant() {
-        let mut layer = crate::sdf::Layer::new_anonymous("root.usda");
-        crate::sdf::PrimSpec::new(layer.data_mut(), "/X", crate::sdf::Specifier::Over, "")
-            .unwrap()
-            .set_instanceable(true);
-        let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
-        let cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
-
+        let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
-        cl.entry_mut(&p("/X")).flags = ChangeFlags::ADD_INERT_PRIM;
+        let entry = cl.entry_mut(&p("/X"));
+        entry.flags = ChangeFlags::ADD_INERT_PRIM;
+        entry.info_changed.insert(FieldKey::Instanceable.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
 
         assert!(changes.cache.did_change_significantly.contains(&p("/X")));
     }
@@ -418,7 +349,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(layer, &cl)]);
+        changes.did_change(&cache, &[(layer, &cl)]);
         // An inert add reshapes no graph, so it stays out of the significant
         // tier and lands in the spec tier keyed by its authoring layer.
         assert!(!changes.cache.did_change_significantly.contains(&p("/Foo")));
@@ -431,7 +362,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -443,7 +374,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::SubLayers.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         assert!(changes.layer_stack.contains(LayerStackChanges::LAYERS));
     }
@@ -456,7 +387,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::DefaultPrim.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -469,7 +400,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::LayerRelocates.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -480,7 +411,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.is_empty());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));

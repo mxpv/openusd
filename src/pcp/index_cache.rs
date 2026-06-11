@@ -763,28 +763,10 @@ impl IndexCache {
         Ok(None)
     }
 
-    /// Returns `true` if the layer at `layer` authors `field` at `path`. Used
-    /// by change classification to detect, for an inert spec add, whether the
-    /// new spec carries a field (e.g. `instanceable`) that reshapes
-    /// composition.
-    pub(super) fn layer_authors_field(&self, graph: &LayerGraph, layer: LayerId, path: &Path, field: &str) -> bool {
-        graph
-            .get(layer)
-            .is_some_and(|node| node.layer.data().has_field(path, field))
-    }
-
     /// Returns `true` if the composed prim index contains any non-local arc.
     pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         self.ensure_index(graph, path)?;
         Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
-    }
-
-    /// Returns `true` if an already-cached index at `path` composes any
-    /// composition arc, without building one. Spec-tier change classification
-    /// uses this to recompose a prim whose inert spec removal — whose fields it
-    /// can no longer inspect — may have torn down an arc.
-    pub(super) fn cached_has_composition_arc(&self, path: &Path) -> bool {
-        self.indices.get(path).is_some_and(PrimIndex::has_composition_arc)
     }
 
     /// Captures the target layer identifier and namespace mapping of the
@@ -2883,7 +2865,7 @@ def "Scope"
             .info_changed
             .insert(sdf::FieldKey::Instanceable.as_str().into());
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.prototypes().is_empty());
@@ -2914,7 +2896,7 @@ def "Scope"
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/Foo")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The spec-tier rescan made the new opinion visible.
@@ -2922,61 +2904,76 @@ def "Scope"
         Ok(())
     }
 
-    /// An inert `over` authored together with a composition arc must recompose
-    /// despite the inert specifier: the arc field folds into the inert add flag
-    /// and never reaches `info_changed`, so the classifier inspects the spec and
-    /// promotes the change to significant rather than refreshing in place.
+    /// An `over` authored together with a composition arc recomposes despite
+    /// the inert specifier: the `EditProxy` surfaces `references` in
+    /// `info_changed` (only the auto-stamped `specifier` folds into the add), so
+    /// the classifier treats the inert add as significant.
     #[test]
     fn inert_add_with_arc_recomposes() -> Result<()> {
         let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\n");
         let root_id = graph.root_id().unwrap();
+        let inst = sdf::path("/Inst")?;
 
         // Query /Inst before it exists: cached as empty, composing no arc.
-        assert!(!cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        assert!(!cache.has_composition_arc(&graph, &inst)?);
 
-        // Author `over "Inst" ( references = </Class> )` into the root layer.
-        graph.get_mut(root_id).unwrap().layer =
-            parse_layer("#usda 1.0\ndef \"Class\" { int x = 5 }\nover \"Inst\" ( references = </Class> ) {}\n");
+        // Author `over "Inst" ( references = </Class> )` through the recording proxy.
+        {
+            let data = graph.get_mut(root_id).unwrap().layer.data_mut();
+            data.create_spec(inst.clone(), sdf::SpecType::Prim);
+            data.set_field(
+                &inst,
+                sdf::FieldKey::Specifier.as_str(),
+                Value::Specifier(sdf::Specifier::Over),
+            );
+            let refs = sdf::ReferenceListOp::explicit([sdf::Reference {
+                prim_path: sdf::path("/Class")?,
+                ..Default::default()
+            }]);
+            data.set_field(&inst, sdf::FieldKey::References.as_str(), Value::ReferenceListOp(refs));
+        }
         let mut cl = sdf::ChangeList::new();
-        cl.entry_mut(&sdf::path("/Inst")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
+        graph.get_mut(root_id).unwrap().layer.drain_changes(&mut cl);
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The reference is composed, not skipped by an in-place spec refresh.
-        assert!(cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        assert!(cache.has_composition_arc(&graph, &inst)?);
         Ok(())
     }
 
-    /// Erasing an `over` that carried a composition arc must recompose: the
-    /// removed spec's fields are gone, so the classifier promotes the change to
-    /// significant when the cached index still composes an arc.
+    /// Erasing an `over` that carried a composition arc recomposes: the
+    /// `EditProxy` records the removed `references` field, so the classifier
+    /// treats the inert removal as significant and the arc is torn down.
     #[test]
     fn inert_remove_of_arc_recomposes() -> Result<()> {
         let (mut graph, mut cache) =
             in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\nover \"Inst\" ( references = </Class> ) {}\n");
         let root_id = graph.root_id().unwrap();
+        let inst = sdf::path("/Inst")?;
 
         // The reference composes initially.
-        assert!(cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        assert!(cache.has_composition_arc(&graph, &inst)?);
 
-        // Erase the /Inst spec and drive the inert removal.
-        graph.get_mut(root_id).unwrap().layer = parse_layer("#usda 1.0\ndef \"Class\" { int x = 5 }\n");
+        // Erase the /Inst spec through the recording proxy and drive the removal.
+        graph.get_mut(root_id).unwrap().layer.data_mut().erase_spec(&inst);
         let mut cl = sdf::ChangeList::new();
-        cl.entry_mut(&sdf::path("/Inst")?).flags = sdf::ChangeFlags::REMOVE_INERT_PRIM;
+        graph.get_mut(root_id).unwrap().layer.drain_changes(&mut cl);
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The arc is gone, not left dangling by an in-place spec refresh.
-        assert!(!cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        assert!(!cache.has_composition_arc(&graph, &inst)?);
         Ok(())
     }
 
-    /// Removing an inert `over` carrying `active = false` (and no composition
-    /// arc) reactivates the prim through the spec tier: the rescan keeps the
-    /// weaker `def` composed and the `active` opinion resolves live to its
-    /// default, so the subtree is not left inactive after the opinion is gone.
+    /// Removing an inert `over` carrying `active = false` reactivates the prim:
+    /// the `EditProxy` records the removed `active` field, so the classifier
+    /// treats the removal as significant, the subtree recomposes from the weaker
+    /// `def`, and `active` resolves to its default — the subtree is not left
+    /// inactive after the opinion is gone.
     #[test]
     fn inert_remove_of_active_reactivates() -> Result<()> {
         // A strong layer deactivates /World with an inert over; the weak layer
@@ -3005,12 +3002,13 @@ def "Scope"
         );
         assert!(has_child(&mut cache, &graph)?);
 
-        // Erase the over spec on the strong layer and drive the inert removal.
+        // Erase the over spec on the strong layer through the recording proxy
+        // and drive the change the EditProxy recorded.
         graph.get_mut(strong_id).unwrap().layer.data_mut().erase_spec(&world);
         let mut cl = sdf::ChangeList::new();
-        cl.entry_mut(&world).flags = sdf::ChangeFlags::REMOVE_INERT_PRIM;
+        graph.get_mut(strong_id).unwrap().layer.drain_changes(&mut cl);
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(strong_id, &cl)]);
+        changes.did_change(&cache, &[(strong_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         // The active=false opinion is gone — the prim reactivates by default —
@@ -3034,7 +3032,7 @@ def "Scope"
             .info_changed
             .insert(sdf::FieldKey::LayerRelocates.as_str().into());
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(cache, graph, &[(root_id, &cl)]);
+        changes.did_change(cache, &[(root_id, &cl)]);
         changes.apply(cache, graph);
         graph.errors()
     }
