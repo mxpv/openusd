@@ -9,7 +9,7 @@
 //! wraps a layer's backing [`AbstractData`](super::AbstractData), forwards every
 //! read and write to it, and appends an entry for every write — so any author,
 //! not just `Stage`, yields an authoritative record. Drain it with
-//! [`Layer::take_changes`](super::Layer::take_changes).
+//! [`Layer::drain_changes`](super::Layer::drain_changes).
 //
 // TODO: add `old_path: Option<Path>` and a `RenameChanges` channel for
 // namespace edits once `Layer` exposes a rename API. C++

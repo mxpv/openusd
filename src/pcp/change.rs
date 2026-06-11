@@ -105,7 +105,7 @@ impl Changes {
     /// data on every call, so a newly authored value is visible without
     /// any cache mutation. When the cache memoizes resolved property
     /// stacks, a tier-3 (`did_change_specs`) branch will land here.
-    pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[(LayerId, ChangeList)]) {
+    pub fn did_change(&mut self, cache: &IndexCache, graph: &LayerGraph, changes: &[(LayerId, &ChangeList)]) {
         for (layer_index, cl) in changes {
             for (path, entry) in cl.entries() {
                 if path.is_abs_root() {
@@ -332,7 +332,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -344,7 +344,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::VariantSelection.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -363,7 +363,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/X")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
 
         assert!(changes.cache.did_change_significantly.contains(&p("/X")));
     }
@@ -374,7 +374,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         // No dependent indices exist on an empty cache, so nothing fans out
         // to the spec tier — but the prim itself is NOT in the significant
         // tier either (inert adds don't blow the graph).
@@ -388,7 +388,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_NON_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
@@ -400,7 +400,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::SubLayers.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         assert!(changes.layer_stack.contains(LayerStackChanges::LAYERS));
     }
@@ -413,7 +413,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::DefaultPrim.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -426,7 +426,7 @@ mod tests {
             .info_changed
             .insert(FieldKey::LayerRelocates.as_str().into());
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
@@ -437,7 +437,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo.attr")).flags = ChangeFlags::ADD_PROPERTY;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
+        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.is_empty());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));

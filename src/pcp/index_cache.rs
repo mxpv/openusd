@@ -2837,7 +2837,7 @@ def "Scope"
             .info_changed
             .insert(sdf::FieldKey::Instanceable.as_str().into());
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(&cache, &graph, &[(root_id, cl)]);
+        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.prototypes().is_empty());
@@ -2854,7 +2854,7 @@ def "Scope"
             .info_changed
             .insert(sdf::FieldKey::LayerRelocates.as_str().into());
         let mut changes = crate::pcp::Changes::new();
-        changes.did_change(cache, graph, &[(root_id, cl)]);
+        changes.did_change(cache, graph, &[(root_id, &cl)]);
         changes.apply(cache, graph);
         graph.errors()
     }

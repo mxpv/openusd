@@ -573,6 +573,10 @@ pub struct StageInner {
     /// construction. Stamped onto stage-bound edit targets and read by the
     /// cross-stage guard, both without recomputing.
     layer_stack_id: pcp::LayerStackIdentifier,
+    /// Reusable buffer that each authoring op drains its layer's recorded
+    /// [`sdf::ChangeList`] into, so classification doesn't allocate a fresh
+    /// list per edit. Cleared at the start of every [`StageInner::finalize_layer`].
+    change_scratch: RefCell<sdf::ChangeList>,
 }
 
 /// A composed USD stage.
@@ -929,11 +933,6 @@ impl Stage {
     /// failure the partial record is discarded and the cache falls back to a
     /// stage-wide blow-out, because the layer may be in a partial state.
     //
-    // TODO(perf): `take_changes` allocates a fresh `ChangeList` per authoring
-    // op. A stage-owned scratch buffer drained through the proxy's
-    // `EditProxy::take(out)`, paired with a borrowing `pcp::Changes::did_change`,
-    // would let both the proxy and the stage reuse their allocations across edits.
-    //
     // TODO: the error-path fallback to layer-stack-wide reset is
     // conservative. Once `Layer` authoring methods either complete
     // atomically or return a "partial mutation up to here" marker, the
@@ -944,15 +943,21 @@ impl Stage {
         layer_id: pcp::LayerId,
         authored: Result<(), sdf::AuthoringError>,
     ) -> Result<bool, StageAuthoringError> {
-        // Drain (or discard a partial record) under a short layer borrow, before
-        // re-borrowing the graph and cache for classification.
+        // Drain the layer's record into the stage scratch buffer (reusing its
+        // allocation across edits) — or discard a partial record — under a short
+        // layer borrow, before re-borrowing the graph and cache for classification.
+        let mut scratch = self.change_scratch.borrow_mut();
+        scratch.clear();
         let drained = {
             let mut layers = self.layers.borrow_mut();
             let node = layers
                 .get_mut(layer_id)
                 .expect("finalize_layer called with a live layer id");
             match authored {
-                Ok(()) => Ok(node.layer.take_changes()),
+                Ok(()) => {
+                    node.layer.drain_changes(&mut scratch);
+                    Ok(())
+                }
                 Err(e) => {
                     node.layer.discard_changes();
                     Err(e)
@@ -960,10 +965,10 @@ impl Stage {
             }
         };
         match drained {
-            Ok(cl) if cl.is_empty() => Ok(false),
-            Ok(cl) => {
+            Ok(()) if scratch.is_empty() => Ok(false),
+            Ok(()) => {
                 let mut changes = pcp::Changes::new();
-                let edits = [(layer_id, cl)];
+                let edits = [(layer_id, &*scratch)];
                 {
                     let graph = self.layers.borrow();
                     let cache = self.cache.borrow();
@@ -1832,6 +1837,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
+            change_scratch: RefCell::new(sdf::ChangeList::new()),
         }))
     }
 }

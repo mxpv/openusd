@@ -1444,7 +1444,7 @@ fn add_to_token_vec(
     // A decode error must surface, not be mistaken for an absent field — the
     // `None` arm overwrites, which would silently drop an undecodable child
     // list on a lazy backend.
-    let existing = read_child_field(data, owner_path, key)?;
+    let existing = try_child_field(data, owner_path, key)?.map(Cow::into_owned);
     match existing {
         Some(sdf::Value::TokenVec(mut v)) => {
             if !v.iter().any(|n| *n == name) {
@@ -1472,13 +1472,7 @@ fn validate_token_vec(
     path: &sdf::Path,
     key: sdf::ChildrenKey,
 ) -> Result<(), sdf::AuthoringError> {
-    let value = data
-        .try_field(path, key.as_str())
-        .map_err(|_| sdf::AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "child-list field could not be read",
-        })?;
-    match value {
+    match try_child_field(data, path, key)? {
         Some(value) if !matches!(&*value, sdf::Value::TokenVec(_)) => Err(sdf::AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "child-list field exists with non-TokenVec value",
@@ -1487,20 +1481,18 @@ fn validate_token_vec(
     }
 }
 
-/// Read a child-list field as an owned [`sdf::Value`], surfacing a decode
-/// failure as an [`sdf::AuthoringError`] rather than swallowing it to "absent".
-fn read_child_field(
-    data: &dyn sdf::AbstractData,
+/// Read a child-list field, surfacing a decode failure as an
+/// [`sdf::AuthoringError`] rather than swallowing it to "absent".
+fn try_child_field<'a>(
+    data: &'a dyn sdf::AbstractData,
     path: &sdf::Path,
     key: sdf::ChildrenKey,
-) -> Result<Option<sdf::Value>, sdf::AuthoringError> {
-    let value = data
-        .try_field(path, key.as_str())
+) -> Result<Option<Cow<'a, sdf::Value>>, sdf::AuthoringError> {
+    data.try_field(path, key.as_str())
         .map_err(|_| sdf::AuthoringError::InvalidPath {
             path: path.clone(),
             reason: "child-list field could not be read",
-        })?;
-    Ok(value.map(Cow::into_owned))
+        })
 }
 
 /// Verify that `path` either holds no spec or holds one of type `expected`.

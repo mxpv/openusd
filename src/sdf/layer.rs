@@ -63,13 +63,12 @@ impl Layer {
         &mut self.data
     }
 
-    /// Drain the changes recorded since the last call, leaving the layer's
-    /// recording buffer empty. `Stage` calls this after each authoring op to
-    /// feed composition invalidation.
-    pub fn take_changes(&mut self) -> ChangeList {
-        let mut changes = ChangeList::new();
-        self.data.take(&mut changes);
-        changes
+    /// Drain the changes recorded since the last call into `out` (appending),
+    /// leaving the layer's recording buffer empty. Reuses `out`'s allocation
+    /// across edits — a stage drains into one scratch [`ChangeList`] this way to
+    /// feed composition invalidation without a per-op allocation.
+    pub fn drain_changes(&mut self, out: &mut ChangeList) {
+        self.data.take(out);
     }
 
     /// Whether the layer has recorded any change since the last drain. Mirrors
