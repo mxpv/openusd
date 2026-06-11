@@ -91,22 +91,22 @@ pub fn evaluate(samples: &[(f64, Value)], time: f64, mode: InterpolationType) ->
 /// the pair collapses to a single repeated time when `time` is at or beyond an
 /// end sample, or lands exactly on a sample; otherwise `lower < time < upper`.
 ///
-/// `samples` MUST be sorted ascending by time code.
-pub fn bracketing_time_samples(samples: &[(f64, Value)], time: f64) -> Option<(f64, f64)> {
-    if samples.is_empty() {
+/// `times` MUST be sorted ascending.
+pub fn bracketing_time_samples(times: &[f64], time: f64) -> Option<(f64, f64)> {
+    if times.is_empty() {
         return None;
     }
-    let first = samples[0].0;
+    let first = times[0];
     if time <= first {
         return Some((first, first));
     }
-    let last = samples[samples.len() - 1].0;
+    let last = times[times.len() - 1];
     if time >= last {
         return Some((last, last));
     }
-    match samples.binary_search_by(|(t, _)| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal)) {
-        Ok(i) => Some((samples[i].0, samples[i].0)),
-        Err(i) => Some((samples[i - 1].0, samples[i].0)),
+    match times.binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal)) {
+        Ok(i) => Some((times[i], times[i])),
+        Err(i) => Some((times[i - 1], times[i])),
     }
 }
 

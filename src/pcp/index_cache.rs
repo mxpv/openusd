@@ -224,16 +224,10 @@ impl IndexCache {
         time: f64,
         interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
     ) -> Result<Option<Value>> {
-        let attr_path = &self.effective_path(graph, attr_path)?;
-        if !self.has_spec_at(graph, attr_path)? {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
             return Ok(None);
-        }
-
-        let prim = attr_path.prim_path();
-        let suffix = attr_path.property_suffix().to_owned();
+        };
         let local_layers = graph.local_layers();
-
-        self.ensure_index(graph, &prim)?;
 
         // TODO: only the default-sourced returns below resolve their `asset`
         // values (via `anchor_asset_paths`); values from time samples
@@ -279,6 +273,45 @@ impl IndexCache {
             .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
         let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
         Ok(default.and_then(block_to_none))
+    }
+
+    /// Resolves an attribute's composed `timeSamples` sample times without
+    /// cloning the sample values, retimed by the contributing layer offsets to
+    /// match [`Self::value_at`]. Returns `None` when the attribute has no
+    /// authored samples or its prim is masked out.
+    pub(crate) fn time_sample_times(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<Option<Vec<f64>>> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(None);
+        };
+        self.cached(&prim).resolve_time_sample_times(graph, Some(&suffix))
+    }
+
+    /// Resolves the number of composed `timeSamples` for an attribute without
+    /// cloning the sample values. Zero when the attribute has no authored
+    /// samples or its prim is masked out.
+    pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(0);
+        };
+        Ok(self
+            .cached(&prim)
+            .resolve_time_sample_count(graph, Some(&suffix))?
+            .unwrap_or(0))
+    }
+
+    /// Redirects `attr_path` through [`Self::effective_path`] and ensures the
+    /// owning prim's index is composed, returning the owned prim path and
+    /// property suffix for a subsequent [`Self::cached`] lookup. `None` when no
+    /// spec exists at the path (absent or masked out).
+    fn ensure_attr_index(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<Option<(Path, String)>> {
+        let attr_path = &self.effective_path(graph, attr_path)?;
+        if !self.has_spec_at(graph, attr_path)? {
+            return Ok(None);
+        }
+        let prim = attr_path.prim_path();
+        let suffix = attr_path.property_suffix().to_owned();
+        self.ensure_index(graph, &prim)?;
+        Ok(Some((prim, suffix)))
     }
 
     fn resolve_local_field_value(

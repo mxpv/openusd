@@ -1952,6 +1952,59 @@ fn arc_target_retimes_time_sample() -> Result<()> {
     Ok(())
 }
 
+/// `time_sample_times` retimes samples brought in through a non-identity arc
+/// offset identically to the full `time_samples()` map and to `value_at`.
+#[test]
+fn time_sample_times_retimed() -> Result<()> {
+    let stage = in_memory_stage()?;
+    // `/Prim` references `/Source` with offset 10, scale 1: a source time `t`
+    // composes to stage time `t + 10`.
+    stage
+        .define_prim("/Source")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+    stage.define_prim("/Prim")?.set_metadata(
+        sdf::FieldKey::References.as_str(),
+        sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+            prim_path: sdf::path("/Source")?,
+            layer_offset: sdf::LayerOffset::new(10.0, 1.0),
+            ..Default::default()
+        }])),
+    )?;
+
+    let attr = stage.attribute("/Prim.x");
+    let map = attr.time_samples()?.expect("samples");
+    let retimed_keys: Vec<f64> = map.iter().map(|(t, _)| *t).collect();
+    assert_eq!(retimed_keys, vec![10.0, 20.0]);
+    assert_eq!(attr.time_sample_times()?, retimed_keys);
+    assert_eq!(attr.num_time_samples()?, 2);
+    // The retimed times read back as live samples through the offset arc.
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(10.0))?, Some(1.0));
+    assert_eq!(attr.get_at::<f64>(usd::TimeCode::new(20.0))?, Some(3.0));
+    Ok(())
+}
+
+/// A prim outside the population mask reports no sample times and a zero count,
+/// matching the masked behavior of value resolution.
+#[test]
+fn time_sample_times_masked() -> Result<()> {
+    let stage = Stage::builder()
+        .mask(StagePopulationMask::new(["/B"]))
+        .in_memory("anon.usda")?;
+    stage
+        .define_prim("/A")?
+        .create_attribute("x", "double")?
+        .set_at(sdf::Value::Double(1.0), usd::TimeCode::new(0.0))?
+        .set_at(sdf::Value::Double(3.0), usd::TimeCode::new(10.0))?;
+    stage.define_prim("/B")?.create_attribute("y", "double")?;
+
+    let masked = stage.attribute("/A.x");
+    assert!(masked.time_sample_times()?.is_empty());
+    assert_eq!(masked.num_time_samples()?, 0);
+    Ok(())
+}
+
 /// An arc target on an instance-proxy path redirects to the shared prototype:
 /// it finds the arc authored inside the prototype and maps in the prototype's
 /// namespace, so a prototype path remaps to the arc source while the proxy

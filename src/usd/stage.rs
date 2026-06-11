@@ -1287,6 +1287,22 @@ impl Stage {
         })
     }
 
+    /// Returns the composed `timeSamples` sample times for an attribute, or
+    /// `None` when none are authored. Resolves the times without cloning the
+    /// sample values, retimed by the contributing layer offsets to match
+    /// [`Self::time_samples`].
+    pub fn time_sample_times(&self, attr_path: impl Into<sdf::Path>) -> Result<Option<Vec<f64>>> {
+        let attr_path = attr_path.into();
+        self.masked(&attr_path, |g, c| c.time_sample_times(g, &attr_path))
+    }
+
+    /// Returns the number of composed `timeSamples` for an attribute, zero when
+    /// none are authored. Resolves the count without cloning the sample values.
+    pub fn num_time_samples(&self, attr_path: impl Into<sdf::Path>) -> Result<usize> {
+        let attr_path = attr_path.into();
+        self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))
+    }
+
     /// Evaluate an attribute's value at `time` under the stage's current
     /// [`InterpolationType`]. The crate-internal resolution engine behind
     /// [`Attribute::get`](super::Attribute::get) with a numeric time code.

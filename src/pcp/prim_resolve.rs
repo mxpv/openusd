@@ -547,13 +547,57 @@ impl PrimIndex {
 
     /// Shared `timeSamples` walk. When `local_layers` is `Some`, opinions
     /// whose contributing layer is outside that set are skipped so only
-    /// root-layer-stack opinions contribute.
+    /// root-layer-stack opinions contribute. Clones the strongest authored map
+    /// and retimes it; the introspection accessors below avoid the value clone
+    /// via [`Self::first_time_samples`].
     fn time_samples_in(
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| {
+            retime_samples(map.clone(), offset)
+        })
+    }
+
+    /// Resolves only the retimed sample times of the strongest authored
+    /// `timeSamples` opinion, without cloning the sample values. Mirrors
+    /// [`Self::resolve_time_samples`] for callers that introspect the times.
+    pub(crate) fn resolve_time_sample_times(
+        &self,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+    ) -> Result<Option<Vec<f64>>> {
+        self.first_time_samples(stack, prop_suffix, None, |map, offset| {
+            map.iter().map(|(t, _)| offset.apply(*t)).collect()
+        })
+    }
+
+    /// Resolves only the count of the strongest authored `timeSamples`
+    /// opinion, without cloning the sample values. The layer offset does not
+    /// change the count.
+    pub(crate) fn resolve_time_sample_count(
+        &self,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+    ) -> Result<Option<usize>> {
+        self.first_time_samples(stack, prop_suffix, None, |map, _| map.len())
+    }
+
+    /// Walks `timeSamples` opinions strongest-to-weakest and applies `extract`
+    /// to the first authored map, borrowed rather than cloned, paired with its
+    /// layer `offset`. A `ValueBlock` blocks weaker layers and yields
+    /// `Ok(None)`, as does the absence of any opinion. When `local_layers` is
+    /// `Some`, opinions whose contributing layer is outside that set are
+    /// skipped so only root-layer-stack opinions contribute.
+    fn first_time_samples<R>(
+        &self,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+        local_layers: Option<&HashSet<LayerId>>,
+        extract: impl FnOnce(&sdf::TimeSampleMap, LayerOffset) -> R,
+    ) -> Result<Option<R>> {
         let field = FieldKey::TimeSamples.as_str();
         for opinion in self.opinions(field, stack, prop_suffix) {
             let Opinion {
@@ -562,11 +606,9 @@ impl PrimIndex {
             if local_layers.is_some_and(|local| !local.contains(&layer)) {
                 continue;
             }
-            match value.into_owned() {
+            match value.as_ref() {
                 Value::ValueBlock => return Ok(None),
-                Value::TimeSamples(samples) => {
-                    return Ok(Some(retime_samples(samples, offset)));
-                }
+                Value::TimeSamples(map) => return Ok(Some(extract(map, offset))),
                 _ => continue,
             }
         }

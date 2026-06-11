@@ -410,35 +410,13 @@ impl Attribute {
         self.stage.time_samples(&self.path)
     }
 
-    // TODO(perf): the time-sample accessors below compose `time_samples()`,
-    // which resolves `FieldKey::TimeSamples` into a full `sdf::TimeSampleMap`
-    // (`Vec<(f64, Value)>`), cloning every sample value — including large
-    // per-sample arrays — only to read the sample times or their count. The
-    // values are then dropped immediately.
-    //
-    // The seam is `pcp::prim_resolve::resolve_time_samples` (via
-    // `Stage::time_samples`): it folds the layer offset into each sample's
-    // time, so the times depend on composition and can't be read from a single
-    // layer. A sibling that resolves the same opinion but returns just the
-    // retimed `Vec<f64>` (or, for `num_time_samples` /
-    // `value_might_be_time_varying`, only the count) would skip the value
-    // clones. `bracketing_time_samples` needs only the two straddling times,
-    // so it could resolve times-only and binary-search those.
-    //
-    // Until that lands, prefer `time_samples()` once and derive locally when a
-    // caller needs several of these for the same attribute, rather than calling
-    // each accessor (each recomposes and re-clones the whole map).
-
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttribute::GetTimeSamples`.
     ///
     /// Reflects the composed `timeSamples` field only; sample times
     /// contributed by value clips are not yet gathered here.
     pub fn time_sample_times(&self) -> anyhow::Result<Vec<f64>> {
-        Ok(self
-            .time_samples()?
-            .map(|samples| samples.into_iter().map(|(t, _)| t).collect())
-            .unwrap_or_default())
+        Ok(self.stage.time_sample_times(&self.path)?.unwrap_or_default())
     }
 
     /// The authored sample times within the closed interval `interval`, in
@@ -449,21 +427,16 @@ impl Attribute {
     /// while `time_samples_in_interval(0.0..=5.0)` returns `[0.0, 5.0]`.
     pub fn time_samples_in_interval(&self, interval: std::ops::RangeInclusive<f64>) -> anyhow::Result<Vec<f64>> {
         Ok(self
-            .time_samples()?
-            .map(|samples| {
-                samples
-                    .into_iter()
-                    .map(|(t, _)| t)
-                    .filter(|t| interval.contains(t))
-                    .collect()
-            })
-            .unwrap_or_default())
+            .time_sample_times()?
+            .into_iter()
+            .filter(|t| interval.contains(t))
+            .collect())
     }
 
     /// The number of authored time samples, zero when none. Mirrors C++
     /// `UsdAttribute::GetNumTimeSamples`.
     pub fn num_time_samples(&self) -> anyhow::Result<usize> {
-        Ok(self.time_samples()?.map_or(0, |samples| samples.len()))
+        self.stage.num_time_samples(&self.path)
     }
 
     /// The pair of authored sample times bracketing `time`, or `None` when no
@@ -474,9 +447,8 @@ impl Attribute {
     /// behind motion-blur and shutter sampling.
     pub fn bracketing_time_samples(&self, time: impl Into<super::TimeCode>) -> anyhow::Result<Option<(f64, f64)>> {
         let time = time.into();
-        Ok(self
-            .time_samples()?
-            .and_then(|samples| interp::bracketing_time_samples(&samples, time.value())))
+        let times = self.time_sample_times()?;
+        Ok(interp::bracketing_time_samples(&times, time.value()))
     }
 
     /// `true` when more than one time sample is authored, the fast check for
@@ -612,6 +584,45 @@ mod tests {
         assert!(plain.time_sample_times()?.is_empty());
         assert!(!plain.value_might_be_time_varying()?);
         assert_eq!(plain.bracketing_time_samples(0.0)?, None);
+        Ok(())
+    }
+
+    /// The times-only / count-only accessors match the keys and length of the
+    /// full `time_samples()` map (identity offset).
+    #[test]
+    fn time_sample_times_parity() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(2.0), TimeCode::new(5.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+
+        let map = attr.time_samples()?.expect("samples");
+        let keys: Vec<f64> = map.iter().map(|(t, _)| *t).collect();
+        assert_eq!(attr.time_sample_times()?, keys);
+        assert_eq!(attr.num_time_samples()?, map.len());
+        Ok(())
+    }
+
+    /// A `ValueBlock` authored on the `timeSamples` field resolves to no
+    /// samples on the times-only path, matching `time_samples()`.
+    #[test]
+    fn time_sample_times_blocked() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?
+            .set_metadata(sdf::FieldKey::TimeSamples.as_str(), sdf::Value::ValueBlock)?;
+        assert!(attr.time_samples()?.is_none());
+        assert!(attr.time_sample_times()?.is_empty());
+        assert_eq!(attr.num_time_samples()?, 0);
+        assert!(!attr.value_might_be_time_varying()?);
         Ok(())
     }
 
