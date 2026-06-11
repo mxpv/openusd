@@ -13,7 +13,7 @@ use parser::Parser;
 
 pub use writer::TextWriter;
 
-use crate::sdf;
+use crate::{ar, sdf, tf};
 
 /// Parse `usda` text into an in-memory [`sdf::Data`] store.
 pub fn parse(text: &str) -> Result<sdf::Data> {
@@ -33,6 +33,30 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<sdf::Data> {
         None => e.context(format!("{}: parse error", path.display())),
     })?;
     Ok(sdf::Data::from_specs(specs))
+}
+
+/// Text format (`.usda`) as an [`sdf::FileFormat`], wrapping [`parse`] and
+/// [`TextWriter`].
+pub struct UsdaFileFormat;
+
+impl sdf::FileFormat for UsdaFileFormat {
+    fn format_id(&self) -> tf::Token {
+        tf::Token::new("usda")
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["usda"]
+    }
+
+    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        let text = String::from_utf8(bytes).context("layer is not valid UTF-8")?;
+        Ok(Box::new(parse(&text).context("failed to parse USDA layer")?))
+    }
+
+    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
+        TextWriter::write(data, &mut sink)
+    }
 }
 
 #[cfg(test)]

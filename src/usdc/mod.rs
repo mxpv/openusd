@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, cell::RefCell, collections::HashMap, fmt::Debug, io, mem, path::Path};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use layout::ValueRep;
 
 mod coding;
@@ -14,7 +14,7 @@ pub use layout::{version, Version};
 pub use reader::{CrateFile, ReadExt};
 pub use writer::CrateWriter;
 
-use crate::sdf;
+use crate::{ar, sdf, tf};
 
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
@@ -190,6 +190,31 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Box<dyn sdf::AbstractData>> {
     let data = CrateData::open(file, true)?;
 
     Ok(Box::new(data))
+}
+
+/// Binary crate format (`.usdc`) as an [`sdf::FileFormat`], wrapping
+/// [`CrateData`] and [`CrateWriter`]. Also the default writer for the ambiguous
+/// `.usd` extension (C++ `USD_WRITE_NEW_USD_FILES_AS_BINARY`).
+pub struct UsdcFileFormat;
+
+impl sdf::FileFormat for UsdcFileFormat {
+    fn format_id(&self) -> tf::Token {
+        tf::Token::new("usdc")
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["usdc", "usd"]
+    }
+
+    fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
+        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        let data = CrateData::open(io::Cursor::new(bytes), true).context("failed to parse USDC layer")?;
+        Ok(Box::new(data))
+    }
+
+    fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
+        CrateWriter::write(data, &mut sink)
+    }
 }
 
 /// The crate (binary) format names the property-children field "properties",

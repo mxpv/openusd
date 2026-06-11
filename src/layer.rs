@@ -8,7 +8,7 @@
 //! detected and skipped automatically.
 //!
 //! The [`sdf::Layer`] type itself, along with its authoring surface and
-//! persistence (`save`/`save_as`), lives in [`crate::sdf`] — the Rust
+//! persistence (`export`/`save`), lives in [`crate::sdf`] — the Rust
 //! equivalent of C++ `SdfLayer`.
 
 use std::collections::{HashMap, HashSet};
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn save_dispatches_on_extension() -> Result<()> {
+    fn export_dispatches_on_extension() -> Result<()> {
         use crate::sdf::{self, SpecType};
 
         let mut data = sdf::Data::new();
@@ -798,9 +798,9 @@ mod tests {
         let usdc_path = dir.path().join("layer-save.usdc");
         let usdz_path = dir.path().join("layer-save.usdz");
 
-        layer.save(&usda_path)?;
-        layer.save(&usdc_path)?;
-        layer.save(&usdz_path)?;
+        layer.export(usda_path.to_str().unwrap())?;
+        layer.export(usdc_path.to_str().unwrap())?;
+        layer.export(usdz_path.to_str().unwrap())?;
 
         assert!(std::fs::metadata(&usda_path)?.len() > 0);
         assert!(std::fs::metadata(&usdc_path)?.len() > 0);
@@ -814,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn save_as_usd_writes_binary_and_roundtrips() -> Result<()> {
+    fn export_usd_writes_binary() -> Result<()> {
         use crate::sdf::{self, SpecType};
 
         let mut data = sdf::Data::new();
@@ -829,7 +829,7 @@ mod tests {
         let layer = sdf::Layer::new("test://layer-usd", Box::new(data));
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("layer-save.usd");
-        layer.save(&path)?;
+        layer.export(path.to_str().unwrap())?;
 
         // Writer chose binary for `.usd` — first bytes must be the USDC magic.
         let bytes = std::fs::read(&path)?;
@@ -852,65 +852,84 @@ mod tests {
     }
 
     #[test]
-    fn save_rejects_unknown_extension() {
+    fn export_rejects_unknown_ext() {
         use crate::sdf::{self, SpecType};
         let mut data = sdf::Data::new();
         data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
         let layer = sdf::Layer::new("test://layer", Box::new(data));
-        let err = layer.save("/tmp/openusd-bad.xyz").unwrap_err();
+        let err = layer.export("/tmp/openusd-bad.xyz").unwrap_err();
         assert!(err.to_string().contains("unsupported"));
     }
 
-    /// Per spec §16.2, `.usd` is a valid extension for text layers. Verify we
-    /// can force-write text to a `.usd` file and the reader correctly
-    /// auto-detects it as text via the absence of the USDC magic.
     #[test]
-    fn save_as_forces_text_to_usd_extension() -> Result<()> {
+    fn save_writes_identifier() -> Result<()> {
         use crate::sdf::{self, SpecType};
 
         let mut data = sdf::Data::new();
-        let root = sdf::Path::abs_root();
-        let ps = data.create_spec(root, SpecType::PseudoRoot);
-        ps.add("primChildren", sdf::Value::TokenVec(vec!["Text".into()]));
-        let prim = sdf::path("/Text")?;
-        let sp = data.create_spec(prim.clone(), SpecType::Prim);
-        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
-        sp.add("typeName", sdf::Value::Token("Xform".into()));
+        data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
 
-        let layer = sdf::Layer::new("test://text-as-usd", Box::new(data));
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("text-as-usd.usd");
-        layer.save_as(&path, sdf::LayerFormat::Usda)?;
+        let path = dir.path().join("by-identifier.usda");
+        let layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
+        layer.save()?;
 
-        // Emitted bytes must NOT start with the binary magic — they're text.
         let bytes = std::fs::read(&path)?;
         assert!(
-            !bytes.starts_with(crate::usdc::MAGIC),
-            "save_as(Usda) should produce text, but output begins with USDC magic",
-        );
-        assert!(bytes.starts_with(b"#usda"), "text output must start with #usda header");
-
-        // Reader auto-detect (magic-byte sniff) accepts it as text.
-        let resolver = DefaultResolver::new();
-        let resolved = resolver.resolve(path.to_str().unwrap()).unwrap();
-        let round = open_layer(&resolver, &resolved)?;
-        assert_eq!(round.spec_type(&prim), Some(SpecType::Prim));
-        assert_eq!(
-            round.get_field(&prim, "typeName").unwrap().into_owned(),
-            sdf::Value::Token("Xform".into())
+            bytes.starts_with(b"#usda"),
+            "save() should write text to a .usda identifier"
         );
         Ok(())
     }
 
     #[test]
-    fn layer_format_from_extension_matches_spec() {
-        assert_eq!(sdf::LayerFormat::from_extension("usda"), Some(sdf::LayerFormat::Usda));
-        assert_eq!(sdf::LayerFormat::from_extension("usdc"), Some(sdf::LayerFormat::Usdc));
-        assert_eq!(sdf::LayerFormat::from_extension("usd"), Some(sdf::LayerFormat::Usdc));
-        assert_eq!(sdf::LayerFormat::from_extension("USDA"), Some(sdf::LayerFormat::Usda));
-        assert_eq!(sdf::LayerFormat::from_extension("usdz"), Some(sdf::LayerFormat::Usdz));
-        assert_eq!(sdf::LayerFormat::from_extension("xyz"), None);
-        assert_eq!(sdf::LayerFormat::from_extension(""), None);
+    fn save_rejects_anonymous() {
+        let layer = sdf::Layer::new_anonymous("scratch");
+        let err = layer.save().unwrap_err();
+        assert!(err.to_string().contains("anonymous"));
+    }
+
+    #[test]
+    fn save_rejects_non_file_identifier() {
+        use crate::sdf::{self, SpecType};
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
+        // A non-anonymous layer whose identifier is not an absolute file path
+        // (a scheme-style asset identifier) cannot be saved to its identifier.
+        let layer = sdf::Layer::new("scheme://host/x.usda", Box::new(data));
+        let err = layer.save().unwrap_err();
+        assert!(err.to_string().contains("absolute file path"));
+    }
+
+    #[test]
+    fn save_rejects_usdz_in_place() {
+        use crate::sdf::{self, SpecType};
+        let mut data = sdf::Data::new();
+        data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
+        // usdz is writable as a new copy but not editable in place: saving over
+        // a package would discard its other assets, so save() must refuse it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pkg.usdz");
+        let layer = sdf::Layer::new(path.to_str().unwrap(), Box::new(data));
+        let err = layer.save().unwrap_err();
+        assert!(err.to_string().contains("not editable"));
+    }
+
+    #[test]
+    fn export_to_string_is_usda() -> Result<()> {
+        use crate::sdf::{self, SpecType};
+
+        let mut data = sdf::Data::new();
+        let ps = data.create_spec(sdf::Path::abs_root(), SpecType::PseudoRoot);
+        ps.add("primChildren", sdf::Value::TokenVec(vec!["Foo".into()]));
+        let sp = data.create_spec(sdf::path("/Foo")?, SpecType::Prim);
+        sp.add("specifier", sdf::Value::Specifier(sdf::Specifier::Def));
+
+        // A binary identifier must not influence the textual form.
+        let layer = sdf::Layer::new("scratch.usdc", Box::new(data));
+        let text = layer.export_to_string()?;
+        assert!(text.starts_with("#usda"), "export_to_string must emit usda text");
+        assert!(text.contains("\"Foo\""), "export_to_string must include the prim");
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1367,7 +1386,7 @@ mod tests {
         surface.set_connection_paths([sdf::path("/World/Material.outputs:surface")?]);
 
         let tmp = std::env::temp_dir().join("openusd_authoring_roundtrip.usda");
-        layer.save_as(&tmp, sdf::LayerFormat::Usda)?;
+        layer.export(tmp.to_str().unwrap())?;
 
         let parsed = usda::read_file(&tmp)?;
         assert_eq!(parsed.spec_type(&sdf::path("/World")?), Some(sdf::SpecType::Prim));

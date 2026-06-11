@@ -9,7 +9,7 @@
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::schema::FieldKey;
 use super::{
@@ -17,7 +17,6 @@ use super::{
     PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef, RelocateList,
     SpecError, SpecType,
 };
-use crate::{usda, usdc};
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
 /// source of truth shared by minting and [`Layer::is_anonymous`].
@@ -91,96 +90,87 @@ impl Layer {
     }
 }
 
-/// Persistent format for a saved layer.
-///
-/// Used by [`Layer::save_as`] and [`LayerFormat::from_extension`] to make
-/// the writer's format choice explicit. For `.usd` — which the AOUSD Core
-/// Spec permits to be either text (§16.2) or binary (§16.3) — this lets the
-/// caller pick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerFormat {
-    /// Text format (`.usda`).
-    Usda,
-    /// Binary crate format (`.usdc`).
-    Usdc,
-    /// Archive/package format (`.usdz`).
-    Usdz,
-}
-
-impl LayerFormat {
-    /// Infer the most likely format from a file extension.
-    ///
-    /// `.usda` → [`LayerFormat::Usda`], `.usdc` → [`LayerFormat::Usdc`],
-    /// `.usdz` → [`LayerFormat::Usdz`]. The ambiguous `.usd` extension defaults
-    /// to [`LayerFormat::Usdc`], matching the C++ reference implementation
-    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). Unknown or missing
-    /// extensions return `None`.
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext.to_ascii_lowercase().as_str() {
-            "usda" => Some(Self::Usda),
-            "usdc" | "usd" => Some(Self::Usdc),
-            "usdz" => Some(Self::Usdz),
-            _ => None,
-        }
-    }
-}
-
 impl Layer {
-    /// Save the layer to disk, dispatching on the destination's extension.
+    /// Write this layer to `filename`, choosing the format from the filename's
+    /// extension (C++ `SdfLayer::Export`). This writes a copy; the layer's own
+    /// identifier is unchanged.
     ///
-    /// - `.usda` → text writer
-    /// - `.usdc` → binary crate writer
-    /// - `.usd` → binary crate writer (see below)
-    /// - `.usdz` → archive containing one `.usdc` entry named after the layer's
-    ///   final path component (with the extension swapped to `.usdc`)
-    ///
-    /// # `.usd` format choice
-    ///
-    /// Per the AOUSD Core Specification, `.usd` is valid for **either** text
-    /// (§16.2: "stored with the .usda or .usd extension") **or** binary
-    /// (§16.3: "represented with the .usdc or .usd extension"). The reader
-    /// side auto-detects via magic-byte sniffing.
-    ///
-    /// `save()` defaults to binary for `.usd`, matching Pixar's C++ USD default
-    /// (`USD_WRITE_NEW_USD_FILES_AS_BINARY=true`). To force a specific format
-    /// — for example, to save text to a `.usd` path — use [`Layer::save_as`].
-    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        let path = path.as_ref();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-        let format = LayerFormat::from_extension(ext).ok_or_else(|| match ext {
-            "" => anyhow::anyhow!("layer path {} has no extension; cannot choose format", path.display()),
-            other => anyhow::anyhow!("unsupported layer extension {other:?} for save (expected usda/usdc/usd/usdz)"),
+    /// `.usda` writes text, `.usdc` writes the binary crate, `.usd` writes
+    /// binary (the C++ `USD_WRITE_NEW_USD_FILES_AS_BINARY` default), and
+    /// `.usdz` writes an archive wrapping one crate-encoded layer. The reader
+    /// auto-detects the format regardless of extension, so text written to a
+    /// `.usd` path still reads back correctly.
+    pub fn export(&self, filename: impl AsRef<str>) -> Result<()> {
+        let filename = filename.as_ref();
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let format = super::find_by_extension(ext).ok_or_else(|| match ext {
+            "" => anyhow::anyhow!("layer path {filename} has no extension; cannot choose format"),
+            other => anyhow::anyhow!("unsupported layer extension {other:?} (expected usda/usdc/usd/usdz)"),
         })?;
-        self.save_as(path, format)
+        if !format.caps().can_write() {
+            anyhow::bail!("file format {} does not support writing", format.format_id());
+        }
+        let mut file = std::fs::File::create(filename).with_context(|| format!("failed to create {filename}"))?;
+        format.write(self.data(), &mut file)
     }
 
-    /// Save the layer to disk using an explicit format.
+    /// Serialize this layer to a `usda` text string (C++ `ExportToString`).
     ///
-    /// Unlike [`Layer::save`], the destination path's extension is not
-    /// consulted — the writer strictly uses `format`. This is the path for:
+    /// Always emits text, the canonical human-readable form, regardless of the
+    /// layer's on-disk format. Named to avoid confusion with the infallible
+    /// [`ToString::to_string`].
+    pub fn export_to_string(&self) -> Result<String> {
+        let format = super::find_by_id("usda").expect("usda is a built-in format");
+        let mut buf = Cursor::new(Vec::new());
+        format.write(self.data(), &mut buf)?;
+        String::from_utf8(buf.into_inner()).context("usda writer produced invalid UTF-8")
+    }
+
+    /// Write this layer to its own [`identifier`](Self::identifier), choosing
+    /// the format from the identifier's extension (C++ `SdfLayer::Save`).
     ///
-    /// - Writing text to a `.usd` file: `save_as(path, LayerFormat::Usda)`
-    /// - Writing binary to a `.usd` file (explicit, not just default):
-    ///   `save_as(path, LayerFormat::Usdc)`
-    /// - Emitting an atypical extension in general.
-    ///
-    /// Note that the reader's magic-byte auto-detection will still read the
-    /// result correctly regardless of the filename extension.
-    pub fn save_as(&self, path: impl AsRef<std::path::Path>, format: LayerFormat) -> Result<()> {
-        let path = path.as_ref();
-        match format {
-            LayerFormat::Usda => usda::TextWriter::write_to_file(self.data(), path),
-            LayerFormat::Usdc => usdc::CrateWriter::write_to_file(self.data(), path),
-            LayerFormat::Usdz => {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("layer");
-                let mut buf = Vec::new();
-                usdc::CrateWriter::write(self.data(), &mut Cursor::new(&mut buf))?;
-                let mut archive = crate::usdz::ArchiveWriter::create(path)?;
-                archive.add_layer(&format!("{stem}.usdc"), &buf)?;
-                archive.finish()?;
-                Ok(())
-            }
+    /// The identifier must be an absolute filesystem path — the form
+    /// [`Collector`](crate::layer::Collector) produces for loaded layers.
+    /// Anonymous layers ([`is_anonymous`](Self::is_anonymous)) and layers whose
+    /// identifier is a relative path or a non-filesystem asset identifier (e.g.
+    /// `scheme://…`) have no persistent location here; save them with
+    /// [`export`](Self::export) and an explicit destination instead.
+    pub fn save(&self) -> Result<()> {
+        anyhow::ensure!(!self.is_anonymous(), "cannot save anonymous layer {}", self.identifier);
+        let path = std::path::Path::new(&self.identifier);
+        anyhow::ensure!(
+            path.is_absolute(),
+            "cannot save layer {}: identifier is not an absolute file path; use Layer::export(path) to choose a destination",
+            self.identifier
+        );
+        // Saving overwrites the layer's own file in place, so the format must
+        // support in-place editing — unlike `export`, which only writes a copy.
+        // A package format (usdz) is writable as a fresh archive but not
+        // editable in place: a loaded package's other assets (textures, sibling
+        // layers) are not held by the layer, so saving over it would discard
+        // them. An unknown extension is left for `export` to reject.
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if let Some(format) = super::find_by_extension(ext) {
+            anyhow::ensure!(
+                format.caps().can_edit(),
+                "cannot save layer {} in place: the {} format is not editable; use Layer::export(path) to write a new copy",
+                self.identifier,
+                format.format_id()
+            );
         }
+        // TODO(layer-registry): save writes to `identifier` as a literal
+        // filesystem path. A layer loaded through a custom resolver may carry a
+        // logical identifier (e.g. `scheme://…`); save should resolve it through
+        // the owning resolver and write via a resolver write API. The
+        // absolute-path guard above refuses such identifiers for now.
+        // TODO(layer-registry): save re-selects the format from the identifier's
+        // extension, so a textual `.usd` layer is rewritten as binary. Once the
+        // load path records the FileFormat a layer was read with (C++
+        // `_fileFormat`), save should reuse it to preserve the original encoding.
+        self.export(&self.identifier)
     }
 }
 
