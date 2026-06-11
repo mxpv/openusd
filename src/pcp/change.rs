@@ -9,11 +9,14 @@
 //!
 //! - Significant: graph topology may be wrong — drop the index AND every
 //!   namespace descendant.
-//! - Prim: this index's graph is wrong but descendants survive. Currently
-//!   collapsed into significant for safety; the field is reserved for the
-//!   future split.
-//! - Spec: graph is fine; only which specs contribute changed. No-op while
-//!   the cache does not yet memoize per-node spec stacks.
+//! - Prim: this index's graph is wrong but descendants survive — drop only
+//!   this index.
+//! - Spec: the graph is fine; only whether a site contributes an opinion
+//!   changed. An inert spec add or remove authors no arc and no significant
+//!   field, so [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)
+//!   (C++ `Pcp_RescanForSpecs`) refreshes the affected nodes' `has_specs`
+//!   flag in place instead of rebuilding, dropping the local index only when
+//!   it holds no node at the site (a brand-new spec needs a fresh build).
 
 use std::collections::BTreeSet;
 
@@ -26,12 +29,34 @@ use crate::sdf::{ChangeEntry, ChangeList, Path};
 use super::layer_graph::LayerGraph;
 use super::{IndexCache, LayerId};
 
+/// Fields whose presence on an `over` makes it structural despite its inert
+/// specifier: the composition-arc, instancing, and activation opinions that
+/// reshape the graph. A created spec folds its field writes into the inert add
+/// flag, so these never reach [`ChangeEntry::info_changed`]; the classifier
+/// reads them off the spec instead. `specifier` is deliberately absent — every
+/// prim authors one, so it cannot single out a structural `over`.
+const STRUCTURAL_INERT_FIELDS: [FieldKey; 10] = [
+    FieldKey::References,
+    FieldKey::Payload,
+    FieldKey::InheritPaths,
+    FieldKey::Specializes,
+    FieldKey::VariantSetNames,
+    FieldKey::VariantSelection,
+    FieldKey::Instanceable,
+    FieldKey::Active,
+    // `apiSchemas` composes off the cached prim index (IndexCache::api_schemas);
+    // `relocates` reshapes composition (see `pcp::relocates`). Both are listed
+    // for parity with the C++ classifier even though no Stage-tier producer
+    // authors `relocates` on a prim yet.
+    FieldKey::ApiSchemas,
+    FieldKey::Relocates,
+];
+
 /// Plan + apply object for one author round.
 ///
-/// Internal: callers route invalidation through
-/// [`IndexCache::process_changes`](super::IndexCache::process_changes), which
-/// constructs a `Changes`, classifies via [`Changes::did_change`], and
-/// commits via [`Changes::apply`] against the same cache instance.
+/// Internal: callers construct a `Changes`, classify the drained
+/// [`ChangeList`]s via [`Changes::did_change`], and commit via
+/// [`Changes::apply`] against the same cache instance.
 #[derive(Debug, Default)]
 pub(crate) struct Changes {
     /// Per-cache invalidation path-sets.
@@ -45,25 +70,14 @@ pub(crate) struct Changes {
 pub struct CacheChanges {
     /// Drop the index AND every namespace descendant.
     pub(crate) did_change_significantly: BTreeSet<Path>,
-    /// Drop only this index; descendants survive. Inert spec adds land
-    /// here so a cached miss can't stay sticky after `override_prim` /
-    /// auto-ancestor creation, without paying the cost of a subtree-wide
-    /// invalidation.
+    /// Drop only this index; descendants survive — for a change that reshapes
+    /// this prim's own graph but cannot restructure its namespace children.
     pub(crate) did_change_prims: BTreeSet<Path>,
-    /// Reserved — currently NOT consumed by [`Changes::apply`]. A future
-    /// tier-3 implementation that refreshes per-node spec stacks (instead
-    /// of dropping the prim index) will read this set. The classifier
-    /// does not write to it yet either; inert spec adds land in
-    /// `did_change_prims` so the cached index is dropped wholesale.
-    //
-    // TODO: wire producer + consumer together when `IndexCache` memoizes
-    // resolved spec stacks per node. The classifier (`classify_prim_entry`
-    // in this file) routes inert spec adds here instead of `did_change_prims`,
-    // and `apply` learns to call a `IndexCache::rescan_specs(path)` (analog of
-    // C++ `Pcp_RescanForSpecs`) that walks the existing graph and refreshes
-    // which layers contribute opinions, without rebuilding the graph.
-    #[allow(dead_code)]
-    pub(crate) did_change_specs: BTreeSet<Path>,
+    /// Refresh `has_specs` at site `(layer, path)` rather than rebuild — for an
+    /// inert spec add or remove, which flips only whether a site contributes an
+    /// opinion. [`Changes::apply`] feeds each entry to
+    /// [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs).
+    pub(crate) did_change_specs: BTreeSet<(LayerId, Path)>,
 }
 
 bitflags! {
@@ -146,38 +160,76 @@ impl Changes {
                 self.fanout_significant(cache, layer, &stripped);
             }
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
-            if cache.layer_authors_field(graph, layer, path, FieldKey::Instanceable.as_str()) {
-                // An inert add whose spec carries `instanceable` flips the
-                // prim's instancing composition (spec 11.3.3) even though the
-                // add itself is inert; recompose the subtree.
+            if self.inert_change_is_structural(cache, graph, layer, path, entry) {
+                // An `over` carries no significant field in `info_changed` — a
+                // created spec folds its field writes into the inert add flag —
+                // yet it may still author (or, when removed, have authored) a
+                // composition-arc, instancing, or activation opinion that
+                // reshapes the graph despite the inert specifier; recompose the
+                // subtree as for any significant change.
                 self.fanout_significant(cache, layer, path);
             } else {
-                // Drop the local index so a cached "no spec here" miss can't
-                // stay sticky after an inert add. Dependents that already
-                // touch `(layer, path)` see the new opinion live through their
-                // existing nodes — no rebuild needed for them.
-                //
-                // The classifier ideally lands this in the spec tier
-                // (`did_change_specs`), but apply() can't refresh per-node
-                // spec stacks until they're memoized, so dropping is the
-                // safe substitute. When the spec tier becomes real, this
-                // moves over and the local drop falls out.
-                self.cache.did_change_prims.insert(path.clone());
+                // A non-structural inert add or remove flips only whether
+                // `(layer, path)` contributes an opinion; the graph structure is
+                // untouched. The spec-tier rescan refreshes the affected nodes'
+                // `has_specs` flag in place — across the local prim and every
+                // dependent that already reads the site — and drops the local
+                // index only when it holds no node there (a brand-new spec needs
+                // a fresh build).
+                self.cache.did_change_specs.insert((layer, path.clone()));
             }
         }
 
-        // TODO: silent promotions of inert spec adds, per C++
-        // `Pcp_EntryRequires{Prim,Specs}Change`:
-        //   1. Removing the last spec at `path` — promote to significant
-        //      because the prim no longer composes anything. Needs a
-        //      "does any layer still spec this path?" check, which means
-        //      walking every layer for `path` after the mutation.
-        //   2. An inert add at a path whose node was previously culled
-        //      from a dependent prim's graph — that dependent needs a
-        //      tier-2 prim rebuild so the now-needed node re-enters.
-        //      Blocked on culled-node tracking: the `Indexer` culls
-        //      weaker nodes during composition, and we keep no
-        //      `culled_dependencies` snapshot to consult.
+        // TODO: an inert add at a path whose node a dependent prim culled from
+        // its graph (an empty arc target) needs that dependent rebuilt so the
+        // now-needed node re-enters. Blocked on culled-node tracking: the
+        // `Indexer` culls weaker nodes during composition, and we keep no
+        // `culled_dependencies` snapshot to consult, so the spec-tier rescan
+        // refreshes only nodes still present in the dependent's graph.
+    }
+
+    /// Whether an inert prim add or remove actually reshapes the graph.
+    ///
+    /// A created spec's field writes fold into its inert add flag (see
+    /// [`EditProxy`](crate::sdf::change)), so the significant fields an `over`
+    /// carries never reach [`ChangeEntry::info_changed`] for the classifier to
+    /// catch. An add is inspected on the spec itself; a remove cannot be (the
+    /// spec is gone), so it is treated as structural whenever the cached index
+    /// composes any arc the removed spec might have introduced.
+    ///
+    /// Inferring a removal from arc presence alone is sufficient because the
+    /// arc-bearing fields (references / payload / inherits / specializes, and
+    /// variantSelection — its selected branch is a `Variant` node) are the only
+    /// members of [`STRUCTURAL_INERT_FIELDS`] whose effect is *cached* in the
+    /// graph, and all produce a non-`Root` node detected by
+    /// [`IndexCache::cached_has_composition_arc`]. The rest resolve live and
+    /// need no rebuild on removal: `active` (re-read by `UsdPrim::is_active` /
+    /// stage traversal) and `apiSchemas` (re-read by
+    /// `PrimIndex::resolve_token_list_op`); `instanceable` is covered separately
+    /// because [`Changes::apply`] drops affected prototypes for every spec-tier
+    /// path. A future field whose removal mutates cached graph state would have
+    /// to extend this check (the principled fix is to record a removed spec's
+    /// significant fields at erase time, making the remove path symmetric with
+    /// the add).
+    fn inert_change_is_structural(
+        &self,
+        cache: &IndexCache,
+        graph: &LayerGraph,
+        layer: LayerId,
+        path: &Path,
+        entry: &ChangeEntry,
+    ) -> bool {
+        // TODO(perf): each `layer_authors_field` re-resolves the same layer and
+        // spec before probing one field; resolving the spec once and testing the
+        // fields against it would replace these per-field lookups with one fetch.
+        if entry.flags.contains(sdf::ChangeFlags::ADD_INERT_PRIM)
+            && STRUCTURAL_INERT_FIELDS
+                .iter()
+                .any(|k| cache.layer_authors_field(graph, layer, path, k.as_str()))
+        {
+            return true;
+        }
+        entry.flags.contains(sdf::ChangeFlags::REMOVE_INERT_PRIM) && cache.cached_has_composition_arc(path)
     }
 
     fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {
@@ -210,35 +262,17 @@ impl Changes {
     /// Authoring this field on a prim path forces a graph rebuild.
     ///
     /// Mirrors C++ `Pcp_EntryRequiresPrimIndexChange` (changes.cpp:264-298).
+    /// All of [`STRUCTURAL_INERT_FIELDS`] qualify — the composition-arc,
+    /// instancing, and activation opinions an `over` may carry — plus
+    /// `specifier`, whose def↔over↔class transitions change whether the prim
+    /// and its subtree compose. (`specifier` is excluded from
+    /// [`STRUCTURAL_INERT_FIELDS`] because every prim authors one, so its mere
+    /// presence cannot distinguish a structural `over`.)
     fn field_promotes_to_significant(field: &str) -> bool {
-        field == FieldKey::References.as_str()
-            || field == FieldKey::Payload.as_str()
-            || field == FieldKey::InheritPaths.as_str()
-            || field == FieldKey::Specializes.as_str()
-            || field == FieldKey::VariantSetNames.as_str()
-            || field == FieldKey::VariantSelection.as_str()
-            || field == FieldKey::Instanceable.as_str()
-            || field == FieldKey::Specifier.as_str()
-            || field == FieldKey::Active.as_str()
-            // `apiSchemas` is composed off the cached prim index
-            // (resolve_token_list_op in IndexCache::api_schemas), so any edit
-            // must drop the index. Once registry-driven applied schemas
-            // inject composition state, this becomes load-bearing for
-            // graph correctness too.
-            || field == FieldKey::ApiSchemas.as_str()
-            // Per-prim `relocates` reshape composition (see `pcp::rel`).
-            // No Stage-tier producer authors this yet, but adding it now
-            // matches the C++ classifier and forecloses a latent gap.
-            || field == FieldKey::Relocates.as_str()
+        field == FieldKey::Specifier.as_str() || STRUCTURAL_INERT_FIELDS.iter().any(|k| field == k.as_str())
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.
-    //
-    // TODO: tier-2 (`did_change_prims`) currently falls through to
-    // `drop_index` per path with no descendant-aware optimization beyond
-    // ancestor subsumption. Once the classifier writes prim-tier entries
-    // directly (today it collapses them into the significant set in
-    // `classify_prim_entry`), this branch becomes load-bearing.
     pub fn apply(self, cache: &mut IndexCache, graph: &mut LayerGraph) {
         // Any index invalidation can change which prims are instances or how
         // they compose, so affected entries in the shared-prototype registry
@@ -248,7 +282,9 @@ impl Changes {
         // layer-stack rebuild clears the whole registry as part of the
         // `clear_all_indices` below, so it needs no per-prototype work here.
         if !self.layer_stack.contains(LayerStackChanges::SIGNIFICANT)
-            && (!self.cache.did_change_significantly.is_empty() || !self.cache.did_change_prims.is_empty())
+            && (!self.cache.did_change_significantly.is_empty()
+                || !self.cache.did_change_prims.is_empty()
+                || !self.cache.did_change_specs.is_empty())
         {
             let changed: Vec<Path> = self
                 .cache
@@ -256,6 +292,7 @@ impl Changes {
                 .iter()
                 .chain(self.cache.did_change_prims.iter())
                 .map(Path::prim_path)
+                .chain(self.cache.did_change_specs.iter().map(|(_, path)| path.prim_path()))
                 .collect();
             cache.invalidate_prototypes(&changed);
         }
@@ -299,7 +336,13 @@ impl Changes {
             }
             cache.drop_index(path);
         }
-        // Tier 3 (spec): no-op until `IndexCache` memoizes per-node spec stacks.
+        for (layer, path) in &self.cache.did_change_specs {
+            // Subsumed by an ancestor whose subtree was already dropped.
+            if self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)) {
+                continue;
+            }
+            cache.rescan_specs(graph, *layer, path);
+        }
     }
 }
 
@@ -371,15 +414,15 @@ mod tests {
     #[test]
     fn inert_add_lands_on_spec_tier() {
         let (graph, cache) = empty_cache();
+        let layer = first_layer(&graph);
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo")).flags = ChangeFlags::ADD_INERT_PRIM;
         let mut changes = Changes::new();
-        changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
-        // No dependent indices exist on an empty cache, so nothing fans out
-        // to the spec tier — but the prim itself is NOT in the significant
-        // tier either (inert adds don't blow the graph).
+        changes.did_change(&cache, &graph, &[(layer, &cl)]);
+        // An inert add reshapes no graph, so it stays out of the significant
+        // tier and lands in the spec tier keyed by its authoring layer.
         assert!(!changes.cache.did_change_significantly.contains(&p("/Foo")));
-        assert!(changes.cache.did_change_specs.is_empty());
+        assert!(changes.cache.did_change_specs.contains(&(layer, p("/Foo"))));
     }
 
     #[test]

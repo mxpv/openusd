@@ -608,6 +608,38 @@ impl IndexCache {
         self.query_errors.clear();
     }
 
+    /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`): refresh, in place,
+    /// which sites contribute opinions after an inert spec add or remove at
+    /// `(layer, path)`.
+    ///
+    /// Such an edit authors no arc and no significant field, so it cannot
+    /// reshape composition — only each node's `has_specs` flag at the site can
+    /// flip. Every cached index that already reads the site (the local prim and
+    /// every dependent, found through the reverse dependency map) has the flag
+    /// recomputed from live layer data; no graph is rebuilt. The local prim's
+    /// index is dropped only when it holds no node at the site — a prior "no
+    /// spec here" result that an in-place refresh cannot turn into a
+    /// contributing node, so a fresh build on the next query is needed.
+    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) {
+        let mut local_has_node = false;
+        for prim in self.deps.exact_lookup(layer, path) {
+            if let Some(index) = self.indices.get_mut(&prim) {
+                let found = index.refresh_has_specs_at(layer, path, graph);
+                // The local prim is one of its own dependents (it reads its own
+                // site), so the loop refreshes it like any other; record whether
+                // it actually carries a node there.
+                if prim == *path {
+                    local_has_node = found;
+                }
+            }
+        }
+        if local_has_node {
+            self.query_errors.clear();
+        } else {
+            self.drop_index(path);
+        }
+    }
+
     /// Drop a prim's cached index and every namespace descendant. Used by
     /// [`change::Changes`](super::change::Changes) when a significant change
     /// touches `prefix` — the topology may have changed for the entire
@@ -745,6 +777,14 @@ impl IndexCache {
     pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         self.ensure_index(graph, path)?;
         Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
+    }
+
+    /// Returns `true` if an already-cached index at `path` composes any
+    /// composition arc, without building one. Spec-tier change classification
+    /// uses this to recompose a prim whose inert spec removal — whose fields it
+    /// can no longer inspect — may have torn down an arc.
+    pub(super) fn cached_has_composition_arc(&self, path: &Path) -> bool {
+        self.indices.get(path).is_some_and(PrimIndex::has_composition_arc)
     }
 
     /// Captures the target layer identifier and namespace mapping of the
@@ -1979,8 +2019,14 @@ mod tests {
 
     /// Parses in-memory USDA text into a single `root.usda` layer.
     fn parse_layer(text: &str) -> sdf::Layer {
+        parse_named_layer("root.usda", text)
+    }
+
+    /// Parses in-memory USDA text into a layer with the given identifier, so a
+    /// test can build a multi-layer stack whose `subLayers` resolve by name.
+    fn parse_named_layer(identifier: &str, text: &str) -> sdf::Layer {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
-        sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)))
+        sdf::Layer::new(identifier, Box::new(sdf::Data::from_specs(data)))
     }
 
     /// Builds a one-layer graph + cache from in-memory USDA text, for
@@ -2841,6 +2887,140 @@ def "Scope"
         changes.apply(&mut cache, &mut graph);
 
         assert!(cache.prototypes().is_empty());
+        Ok(())
+    }
+
+    /// A plain inert `over` authored after a prim was queried as empty must
+    /// become visible: the spec-tier rescan refreshes the cached site's
+    /// `has_specs` in place (or drops a nodeless stale index), so the next
+    /// query sees the spec without a significant subtree rebuild.
+    #[test]
+    fn inert_add_recomposes() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"A\" {}\n");
+        let root_id = graph.root_id().unwrap();
+
+        // Query a prim no layer authors: cached as an empty index.
+        assert!(!cache.has_spec(&graph, &sdf::path("/Foo")?)?);
+
+        // Author an inert `over "Foo"` into the root layer.
+        sdf::PrimSpec::new(
+            graph.get_mut(root_id).unwrap().layer.data_mut(),
+            "/Foo",
+            sdf::Specifier::Over,
+            "",
+        )?;
+
+        // Drive the inert add through the change pipeline.
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Foo")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The spec-tier rescan made the new opinion visible.
+        assert!(cache.has_spec(&graph, &sdf::path("/Foo")?)?);
+        Ok(())
+    }
+
+    /// An inert `over` authored together with a composition arc must recompose
+    /// despite the inert specifier: the arc field folds into the inert add flag
+    /// and never reaches `info_changed`, so the classifier inspects the spec and
+    /// promotes the change to significant rather than refreshing in place.
+    #[test]
+    fn inert_add_with_arc_recomposes() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\n");
+        let root_id = graph.root_id().unwrap();
+
+        // Query /Inst before it exists: cached as empty, composing no arc.
+        assert!(!cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+
+        // Author `over "Inst" ( references = </Class> )` into the root layer.
+        graph.get_mut(root_id).unwrap().layer =
+            parse_layer("#usda 1.0\ndef \"Class\" { int x = 5 }\nover \"Inst\" ( references = </Class> ) {}\n");
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Inst")?).flags = sdf::ChangeFlags::ADD_INERT_PRIM;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The reference is composed, not skipped by an in-place spec refresh.
+        assert!(cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        Ok(())
+    }
+
+    /// Erasing an `over` that carried a composition arc must recompose: the
+    /// removed spec's fields are gone, so the classifier promotes the change to
+    /// significant when the cached index still composes an arc.
+    #[test]
+    fn inert_remove_of_arc_recomposes() -> Result<()> {
+        let (mut graph, mut cache) =
+            in_memory_stack("#usda 1.0\ndef \"Class\" { int x = 5 }\nover \"Inst\" ( references = </Class> ) {}\n");
+        let root_id = graph.root_id().unwrap();
+
+        // The reference composes initially.
+        assert!(cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+
+        // Erase the /Inst spec and drive the inert removal.
+        graph.get_mut(root_id).unwrap().layer = parse_layer("#usda 1.0\ndef \"Class\" { int x = 5 }\n");
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&sdf::path("/Inst")?).flags = sdf::ChangeFlags::REMOVE_INERT_PRIM;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &graph, &[(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The arc is gone, not left dangling by an in-place spec refresh.
+        assert!(!cache.has_composition_arc(&graph, &sdf::path("/Inst")?)?);
+        Ok(())
+    }
+
+    /// Removing an inert `over` carrying `active = false` (and no composition
+    /// arc) reactivates the prim through the spec tier: the rescan keeps the
+    /// weaker `def` composed and the `active` opinion resolves live to its
+    /// default, so the subtree is not left inactive after the opinion is gone.
+    #[test]
+    fn inert_remove_of_active_reactivates() -> Result<()> {
+        // A strong layer deactivates /World with an inert over; the weak layer
+        // it sublayers defines /World and its child.
+        let strong = parse_named_layer(
+            "strong.usda",
+            "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\nover \"World\" ( active = false ) {}\n",
+        );
+        let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
+        let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, Box::new(DefaultResolver::new()), true);
+        let strong_id = graph.root_id().unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+
+        let world = sdf::path("/World")?;
+        let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {
+            Ok(cache
+                .prim_children(graph, &world)?
+                .iter()
+                .any(|c| c.as_str() == "Child"))
+        };
+
+        // The over is in effect: `active` resolves false, the child still composes.
+        assert_eq!(
+            cache.resolve_field(&graph, &world, sdf::FieldKey::Active.as_str())?,
+            Some(Value::Bool(false))
+        );
+        assert!(has_child(&mut cache, &graph)?);
+
+        // Erase the over spec on the strong layer and drive the inert removal.
+        graph.get_mut(strong_id).unwrap().layer.data_mut().erase_spec(&world);
+        let mut cl = sdf::ChangeList::new();
+        cl.entry_mut(&world).flags = sdf::ChangeFlags::REMOVE_INERT_PRIM;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &graph, &[(strong_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // The active=false opinion is gone — the prim reactivates by default —
+        // and the def-composed subtree survives.
+        assert_eq!(
+            cache.resolve_field(&graph, &world, sdf::FieldKey::Active.as_str())?,
+            None
+        );
+        assert!(cache.has_spec(&graph, &world)?);
+        assert!(has_child(&mut cache, &graph)?);
         Ok(())
     }
 

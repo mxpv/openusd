@@ -208,9 +208,13 @@
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
 //!   inherit/specialize targets read mid-build first needs a concurrent map or a
 //!   targets-first build order. [`PrimIndex`] is already `Send + Sync`.
-//! - Finer-grained change classification: `Changes::did_change` collapses the prim
-//!   and spec tiers into the significant tier (drop the index and every
-//!   descendant); a finer split would rebuild less per local edit.
+//! - Finer-grained change classification: an inert spec add at a site a
+//!   dependent prim culled from its graph (an empty arc target) still needs a
+//!   prim rebuild to re-admit the node, but the indexer keeps no
+//!   `culled_dependencies` snapshot to consult, so such a dependent is not
+//!   invalidated. The significant, prim, and spec tiers are otherwise split
+//!   ([`Changes`]): an inert add/remove refreshes `has_specs` in place
+//!   ([`IndexCache::rescan_specs`]) rather than rebuilding.
 //! - Resolving `asset` values sourced from time samples or value clips:
 //!   `IndexCache::value_at` evaluates expressions and anchors only
 //!   default-sourced asset paths (filling their `evaluated_path` /

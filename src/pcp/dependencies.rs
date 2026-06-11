@@ -132,6 +132,18 @@ impl Dependencies {
         Self::dedup_paths(ancestors.filter_map(|p| map.get(&p)))
     }
 
+    /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
+    /// with no ancestor or subtree walk. The spec-tier rescan uses this to
+    /// reach the nodes sitting at that precise site whose `has_specs` flag an
+    /// inert spec add or remove can flip.
+    pub(super) fn exact_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
+        self.per_layer
+            .get(&layer_id)
+            .and_then(|map| map.get(site_path))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Find prim indices whose dependency site is at or below `prefix` in
     /// `layer_index`.
     ///

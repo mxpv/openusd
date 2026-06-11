@@ -206,14 +206,12 @@ impl Relationship {
     //   2. Decide tier: relationship/connection target list changes
     //      are conceptually tier-3 (spec-stack refresh) — they don't
     //      reshape the prim graph but they do invalidate composed
-    //      target resolution. Insert the owning prim path into
-    //      `did_change_specs` (or a new `did_change_targets` set keyed
-    //      by property path).
+    //      target resolution. They need a new set keyed by property
+    //      path (e.g. `did_change_targets`); `did_change_specs` already
+    //      carries inert prim spec rescans, keyed by `(layer, prim path)`.
     //   3. Extend `Changes::apply` to consume the new set by either
     //      dropping the owner's resolved-target cache or refreshing it
-    //      in place. The current `did_change_specs` field is already
-    //      reserved for this; right now the entry is dropped on the
-    //      floor (see CacheChanges docs).
+    //      in place, once such a cache exists.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),

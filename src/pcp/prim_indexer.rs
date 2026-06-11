@@ -101,7 +101,7 @@ use crate::tf::Token;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{
-    collect_payloads_in, compose_arc_list_in, compose_references_in, CompositionContext, PrimIndex,
+    collect_payloads_in, compose_arc_list_in, compose_references_in, stack_has_spec, CompositionContext, PrimIndex,
 };
 use super::{CycleChain, CycleHop, Error, LayerGraph, LayerId};
 
@@ -2884,9 +2884,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Whether any layer in `stack` authors a spec at `path`.
     fn stack_has_spec(&self, stack: &[(LayerId, LayerOffset)], path: &Path) -> bool {
-        stack
-            .iter()
-            .any(|&(li, _)| self.inputs.stack.layer(li).data().has_spec(path))
+        stack_has_spec(self.inputs.stack, stack, path)
     }
 
     /// Whether `node` can contribute opinions (C++ `PcpNodeRef::CanContributeSpecs`):

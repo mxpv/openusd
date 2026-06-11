@@ -150,6 +150,31 @@ impl PrimIndex {
         }
     }
 
+    /// Recomputes `has_specs` from live layer data for every node sitting at
+    /// site `(layer, path)`, returning whether any such node was found.
+    ///
+    /// The spec-tier change rescan (C++ `Pcp_RescanForSpecs`) calls this after
+    /// an inert spec add or remove, which flips only whether a site contributes
+    /// an opinion — never the graph structure — so the flag is refreshed in
+    /// place without rebuilding or re-finalizing strength order. A node matches
+    /// when its site path is `path` and `layer` is one of its contributing
+    /// layers; its refreshed flag reflects whether any layer in its stack still
+    /// authors a spec there.
+    //
+    // TODO(perf): scans the whole node arena per call, and the caller
+    // (`IndexCache::rescan_specs`) invokes it once per dependent index; a
+    // site→node index keyed by `(layer, path)` would make this O(matching nodes).
+    pub(crate) fn refresh_has_specs_at(&mut self, layer: LayerId, path: &Path, graph: &LayerGraph) -> bool {
+        let mut found = false;
+        for node in &mut self.graph.nodes {
+            if node.path == *path && node.layer_stack.iter().any(|&(li, _)| li == layer) {
+                found = true;
+                node.has_specs = stack_has_spec(graph, &node.layer_stack, path);
+            }
+        }
+        found
+    }
+
     /// Classifies each node as instance-local (`true`) or shared (`false`) for an
     /// enclosing instance at `instance_depth` (spec 11.3.3), indexed by
     /// [`NodeId`] arena position. The shared nodes are the prototype subtree; the
@@ -534,6 +559,14 @@ pub(crate) struct AncestorArc {
 // ---------------------------------------------------------------------------
 // Shared helpers (used by the `Indexer` and Stage)
 // ---------------------------------------------------------------------------
+
+/// Whether any layer in `stack` authors a spec at `path` (C++
+/// `PcpNode::HasSpecs`). The canonical definition of a node's `has_specs`, used
+/// both when the indexer builds a node and when [`PrimIndex::refresh_has_specs_at`]
+/// refreshes one after an inert spec edit, so the two never drift.
+pub(super) fn stack_has_spec(graph: &LayerGraph, stack: &[(LayerId, LayerOffset)], path: &Path) -> bool {
+    stack.iter().any(|&(li, _)| graph.layer(li).data().has_spec(path))
+}
 
 /// Resolves variant selections across a prim's composition nodes.
 ///
