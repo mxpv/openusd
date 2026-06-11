@@ -525,39 +525,41 @@ impl PrimIndex {
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
     ) -> Result<Option<sdf::TimeSampleMap>> {
-        self.time_samples_in(stack, prop_suffix, None)
+        self.first_time_samples(stack, prop_suffix, None, |map, offset| {
+            retime_samples(map.clone(), offset)
+        })
     }
 
-    /// Resolves `timeSamples` considering only opinions from the root layer
-    /// stack (`local_layers`). Used by value-clip resolution, where clip data
-    /// is weaker than the anchoring layer's local opinions but stronger than
-    /// data introduced across reference/payload arcs (spec 12.3.4.5).
+    /// Interpolates the strongest authored `timeSamples` at stage `time`
+    /// without cloning the sample map. The matched map is borrowed and
+    /// interpolated in its own layer-time frame: `time` is mapped back through
+    /// the node's inverse layer offset, which yields the same result as
+    /// retiming every sample to stage time (the lerp fraction is invariant
+    /// under the affine offset) but clones only the value `interp` returns,
+    /// not the whole map.
     ///
-    /// Membership is by layer index, not arc type: a referenced layer stack
-    /// also contributes `Root`-arc nodes, so only the stage's own root layer
-    /// stack counts as local.
-    pub(crate) fn resolve_local_time_samples(
-        &self,
-        stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-        local_layers: &HashSet<LayerId>,
-    ) -> Result<Option<sdf::TimeSampleMap>> {
-        self.time_samples_in(stack, prop_suffix, Some(local_layers))
-    }
-
-    /// Shared `timeSamples` walk. When `local_layers` is `Some`, opinions
-    /// whose contributing layer is outside that set are skipped so only
-    /// root-layer-stack opinions contribute. Clones the strongest authored map
-    /// and retimes it; the introspection accessors below avoid the value clone
-    /// via [`Self::first_time_samples`].
-    fn time_samples_in(
+    /// When `local_layers` is `Some`, only opinions from those layers
+    /// contribute, giving the root-layer-stack precedence that value-clip
+    /// resolution relies on (clip data is weaker than the anchoring layer's
+    /// local opinions but stronger than data across reference/payload arcs,
+    /// spec 12.3.4.5). Membership is by layer index, not arc type: a referenced
+    /// layer stack also contributes `Root`-arc nodes, so only the stage's own
+    /// root layer stack counts as local.
+    ///
+    /// The outer `Option` distinguishes a matched `timeSamples` opinion
+    /// (`Some`, so value resolution stops here) from no authored or blocked
+    /// opinion (`None`, fall through to weaker sources); the inner `Option` is
+    /// the interpolated value, `None` for an empty or blocked-bracket result.
+    pub(crate) fn resolve_value_at(
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
         local_layers: Option<&HashSet<LayerId>>,
-    ) -> Result<Option<sdf::TimeSampleMap>> {
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Option<Value>>> {
         self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| {
-            retime_samples(map.clone(), offset)
+            interp(map, offset.inverse().apply(time))
         })
     }
 

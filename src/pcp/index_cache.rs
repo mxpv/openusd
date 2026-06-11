@@ -231,20 +231,20 @@ impl IndexCache {
 
         // TODO: only the default-sourced returns below resolve their `asset`
         // values (via `anchor_asset_paths`); values from time samples
-        // (`resolve_local_time_samples` / `resolve_time_samples`) and value
-        // clips (`resolve_clip_value`) are returned with `evaluated_path` and
-        // `resolved_path` unset. To close this, those resolvers must surface the
-        // contributing layer/node so it can be anchored and its expression
-        // variables composed — note a clip value anchors against the *clip
-        // layer*, not a host-stack opinion, so it cannot reuse `asset_context`
-        // directly. Asset-valued time samples and clips are rare in practice.
+        // (`resolve_value_at`) and value clips (`resolve_clip_value`) are
+        // returned with `evaluated_path` and `resolved_path` unset. To close
+        // this, those resolvers must surface the contributing layer/node so it
+        // can be anchored and its expression variables composed — note a clip
+        // value anchors against the *clip layer*, not a host-stack opinion, so
+        // it cannot reuse `asset_context` directly. Asset-valued time samples
+        // and clips are rare in practice.
 
         // 1) Local time samples take precedence over clip data.
-        if let Some(samples) = self
-            .cached(&prim)
-            .resolve_local_time_samples(graph, Some(&suffix), &local_layers)?
+        if let Some(value) =
+            self.cached(&prim)
+                .resolve_value_at(graph, Some(&suffix), Some(&local_layers), time, interp)?
         {
-            return Ok(interp(&samples, time));
+            return Ok(value);
         }
 
         // 2) Local defaults also take precedence over clip data.
@@ -263,8 +263,11 @@ impl IndexCache {
         }
 
         // 4) Remaining time samples (reference/payload arcs), retimed.
-        if let Some(samples) = self.cached(&prim).resolve_time_samples(graph, Some(&suffix))? {
-            return Ok(interp(&samples, time));
+        if let Some(value) = self
+            .cached(&prim)
+            .resolve_value_at(graph, Some(&suffix), None, time, interp)?
+        {
+            return Ok(value);
         }
 
         // 5) Fall back to the strongest authored default.
