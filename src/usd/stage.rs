@@ -534,6 +534,18 @@ pub enum StageAuthoringError {
         /// The scene-namespace path that could not be mapped.
         path: sdf::Path,
     },
+
+    /// Stage-level metadata (the time-code range and rates) resolves only from
+    /// the root and session layers (session over root), so it can be authored
+    /// only when the current edit target is one of them. Mirrors C++
+    /// `UsdStage`, which authors into the edit-target layer when it is the root
+    /// or session layer and warns otherwise — authoring elsewhere would write
+    /// an opinion stage-metadata resolution never reads.
+    #[error("stage metadata can only be authored on the root or session layer, not edit-target layer {layer:?}")]
+    StageMetadataTarget {
+        /// The current edit target's layer identifier.
+        layer: String,
+    },
 }
 
 /// Shared state behind a [`Stage`] handle.
@@ -857,28 +869,32 @@ impl Stage {
         })
     }
 
-    /// Authors `startTimeCode` on the stage's root layer, regardless of the
-    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetStartTimeCode`.
+    /// Authors `startTimeCode` on the current edit target's layer when it is
+    /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Mirrors C++ `UsdStage::SetStartTimeCode`.
     pub fn set_start_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
-        self.with_root_layer(|layer| layer.set_start_time_code(time))
+        self.with_stage_metadata_layer(|layer| layer.set_start_time_code(time))
     }
 
-    /// Authors `endTimeCode` on the stage's root layer, regardless of the
-    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetEndTimeCode`.
+    /// Authors `endTimeCode` on the current edit target's layer when it is the
+    /// root or session layer (see [`Self::with_stage_metadata_layer`]). Mirrors
+    /// C++ `UsdStage::SetEndTimeCode`.
     pub fn set_end_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
-        self.with_root_layer(|layer| layer.set_end_time_code(time))
+        self.with_stage_metadata_layer(|layer| layer.set_end_time_code(time))
     }
 
-    /// Authors `timeCodesPerSecond` on the stage's root layer, regardless of
-    /// the current [`EditTarget`]. Mirrors C++ `UsdStage::SetTimeCodesPerSecond`.
+    /// Authors `timeCodesPerSecond` on the current edit target's layer when it
+    /// is the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Mirrors C++ `UsdStage::SetTimeCodesPerSecond`.
     pub fn set_time_codes_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
-        self.with_root_layer(|layer| layer.set_time_codes_per_second(rate))
+        self.with_stage_metadata_layer(|layer| layer.set_time_codes_per_second(rate))
     }
 
-    /// Authors `framesPerSecond` on the stage's root layer, regardless of the
-    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetFramesPerSecond`.
+    /// Authors `framesPerSecond` on the current edit target's layer when it is
+    /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// Mirrors C++ `UsdStage::SetFramesPerSecond`.
     pub fn set_frames_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
-        self.with_root_layer(|layer| layer.set_frames_per_second(rate))
+        self.with_stage_metadata_layer(|layer| layer.set_frames_per_second(rate))
     }
 
     /// Map `scene_path` through the current edit target, borrow the target's
@@ -942,9 +958,48 @@ impl Stage {
             .ok_or(StageAuthoringError::OutsideEditTarget {
                 path: sdf::Path::abs_root(),
             })?;
+        self.author_on_layer(layer_id, f)
+    }
+
+    /// Author stage-level metadata on the current edit target's layer, but only
+    /// when that layer is the stage's root or session layer — the layers stage
+    /// metadata resolves from (session over root). Mirrors C++ `UsdStage`'s
+    /// edit-target-aware stage-metadata authoring; returns
+    /// [`StageAuthoringError::StageMetadataTarget`] when the edit target is any
+    /// other layer, where the opinion would never resolve.
+    ///
+    /// The closure authors at `abs_root` verbatim; the edit target's namespace
+    /// mapping is irrelevant for layer-wide metadata.
+    fn with_stage_metadata_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+    {
+        let identifier = self.edit_target.borrow().layer_identifier.clone();
+        let layer_id = {
+            let layers = self.layers.borrow();
+            let id = layers
+                .id_of(&identifier)
+                .ok_or_else(|| StageAuthoringError::LayerNotFound {
+                    layer: identifier.clone(),
+                })?;
+            if layers.root_id() != Some(id) && !layers.session_layers().contains(&id) {
+                return Err(StageAuthoringError::StageMetadataTarget { layer: identifier });
+            }
+            id
+        };
+        self.author_on_layer(layer_id, f)
+    }
+
+    /// Borrow the layer identified by `layer_id` mutably, run `f`, then drive
+    /// cache invalidation from the change list it records. The shared tail of
+    /// [`Self::with_root_layer`] and [`Self::with_stage_metadata_layer`].
+    fn author_on_layer<F>(&self, layer_id: pcp::LayerId, f: F) -> Result<(), StageAuthoringError>
+    where
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+    {
         let authored = {
             let mut layers = self.layers.borrow_mut();
-            let node = layers.get_mut(layer_id).expect("root_id refers to a live layer");
+            let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
             f(&mut node.layer)
         };
         self.finalize_layer(layer_id, authored).map(|_| ())
@@ -2284,6 +2339,29 @@ mod tests {
         assert!(!stage.has_authored_time_code_range());
         stage.set_end_time_code(10.0)?;
         assert!(stage.has_authored_time_code_range());
+        Ok(())
+    }
+
+    /// Stage metadata resolves only from the root and session layers, so the
+    /// time-code setters reject an edit target on any other layer (a sublayer
+    /// here) and author successfully once it is back on the root.
+    #[test]
+    fn time_code_target_rejects() -> Result<()> {
+        let stage = in_memory_stage()?;
+        let root = stage.root_layer().identifier().to_string();
+        let sub = sdf::Layer::new_anonymous("sub.usda");
+        let sub_id = sub.identifier().to_string();
+        stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+
+        stage.set_edit_target(EditTarget::for_layer(sub_id.clone()))?;
+        let err = stage
+            .set_start_time_code(1.0)
+            .expect_err("sublayer target must be rejected");
+        assert!(matches!(err, StageAuthoringError::StageMetadataTarget { layer } if layer == sub_id));
+
+        stage.set_edit_target(EditTarget::for_layer(root))?;
+        stage.set_start_time_code(1.0)?;
+        assert_eq!(stage.start_time_code(), 1.0);
         Ok(())
     }
 }
