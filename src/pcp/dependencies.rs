@@ -150,11 +150,6 @@ impl Dependencies {
     /// Used to fan out an invalidation downward (a significant change at
     /// `/Foo` must drop every cached index whose graph touches `/Foo/*`).
     /// Walks the `prefix` subtree of the layer's dependency [`sdf::PathTable`].
-    //
-    // TODO: snapshot a `culled_dependencies` set per prim index. The
-    // `Indexer` culls weaker nodes during composition; without a snapshot,
-    // an inert spec added at a culled site fails to un-cull the node on
-    // next composition.
     pub(super) fn subtree_lookup(&self, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
         let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();

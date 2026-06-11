@@ -166,9 +166,11 @@ pub struct Node {
     /// path — a cloned ancestral site deepened to a child that has no opinion
     /// there. Such a node is kept for structure (it may still introduce arcs at
     /// the deepened path) but contributes nothing to value resolution and is not
-    /// counted by [`is_empty`](crate::pcp::PrimIndex::is_empty). Defaults to
-    /// `true`: the recursive indexer only ever creates a node when a layer
-    /// authors, so its nodes always have specs.
+    /// counted by [`is_empty`](crate::pcp::PrimIndex::is_empty). A culled node
+    /// standing in for an empty arc target likewise carries `false`. Defaults to
+    /// `true` for the common spec-bearing node; the indexer overwrites it (during
+    /// its `has_specs` pass and at the empty-target cull) where a site authors
+    /// nothing.
     pub(crate) has_specs: bool,
     /// Namespace depth at which this node's spec contribution was restricted (C++
     /// `PcpNode::GetSpecContributionRestrictedDepth`), or 0 when unrestricted.

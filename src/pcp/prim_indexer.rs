@@ -2666,7 +2666,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .output
             .add_site_child(parent, target_stack, source, arc, map, false);
         if empty {
-            self.output.nodes[new_node.idx()].flags |= NodeFlags::CULLED;
+            let node = &mut self.output.nodes[new_node.idx()];
+            node.flags |= NodeFlags::CULLED;
+            // The target authors no spec, so the node contributes nothing; record
+            // that so a later spec at the site (which must un-cull and graft the
+            // target) is detected as a `has_specs` flip by the spec-tier rescan.
+            node.has_specs = false;
             return Ok(());
         }
 

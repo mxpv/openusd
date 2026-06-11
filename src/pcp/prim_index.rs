@@ -32,6 +32,17 @@ pub struct PrimIndex {
     graph: PrimIndexGraph,
 }
 
+/// Outcome of [`PrimIndex::refresh_has_specs_at`]: what the spec-tier rescan
+/// must do with the index after refreshing the affected nodes' `has_specs`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SpecRefresh {
+    /// A contributing (non-culled) node at the site was refreshed in place.
+    pub contributing: bool,
+    /// A culled node at the site gained a spec; the index must be rebuilt so the
+    /// arc un-culls and grafts the target's subtree.
+    pub needs_rebuild: bool,
+}
+
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     ///
@@ -151,28 +162,38 @@ impl PrimIndex {
     }
 
     /// Recomputes `has_specs` from live layer data for every node sitting at
-    /// site `(layer, path)`, returning whether any such node was found.
+    /// site `(layer, path)`, reporting what the caller must do next.
     ///
     /// The spec-tier change rescan (C++ `Pcp_RescanForSpecs`) calls this after
     /// an inert spec add or remove, which flips only whether a site contributes
-    /// an opinion — never the graph structure — so the flag is refreshed in
-    /// place without rebuilding or re-finalizing strength order. A node matches
-    /// when its site path is `path` and `layer` is one of its contributing
-    /// layers; its refreshed flag reflects whether any layer in its stack still
-    /// authors a spec there.
+    /// an opinion — never the graph structure — so a contributing node's flag is
+    /// refreshed in place without rebuilding or re-finalizing strength order. A
+    /// node matches when its site path is `path` and `layer` is one of its
+    /// contributing layers; its refreshed flag reflects whether any layer in its
+    /// stack still authors a spec there.
+    ///
+    /// A *culled* node that gains a spec (an empty arc target the spec fills in)
+    /// is the exception: un-culling it would graft the target's subtree, which an
+    /// in-place flip cannot do, so [`SpecRefresh::needs_rebuild`] tells the caller
+    /// to drop and rebuild the index instead.
     //
     // TODO(perf): scans the whole node arena per call, and the caller
     // (`IndexCache::rescan_specs`) invokes it once per dependent index; a
     // site→node index keyed by `(layer, path)` would make this O(matching nodes).
-    pub(crate) fn refresh_has_specs_at(&mut self, layer: LayerId, path: &Path, graph: &LayerGraph) -> bool {
-        let mut found = false;
+    pub(crate) fn refresh_has_specs_at(&mut self, layer: LayerId, path: &Path, graph: &LayerGraph) -> SpecRefresh {
+        let mut refresh = SpecRefresh::default();
         for node in &mut self.graph.nodes {
             if node.path == *path && node.layer_stack.iter().any(|&(li, _)| li == layer) {
-                found = true;
-                node.has_specs = stack_has_spec(graph, &node.layer_stack, path);
+                let has_specs = stack_has_spec(graph, &node.layer_stack, path);
+                if node.is_culled() {
+                    refresh.needs_rebuild |= has_specs && !node.has_specs;
+                } else {
+                    refresh.contributing = true;
+                }
+                node.has_specs = has_specs;
             }
         }
-        found
+        refresh
     }
 
     /// Classifies each node as instance-local (`true`) or shared (`false`) for an

@@ -137,19 +137,12 @@ impl Changes {
             // carries into `info_changed`, so an arc / instancing / activation
             // opinion is already caught by the significant branch above; what
             // reaches here is a genuinely inert change. The spec-tier rescan
-            // refreshes the affected nodes' `has_specs` flag in place — across the
-            // local prim and every dependent that already reads the site — and
-            // drops the local index only when it holds no node there (a brand-new
-            // spec needs a fresh build).
+            // refreshes the affected nodes' `has_specs` flag across the local prim
+            // and every dependent that reads the site, rebuilding only the
+            // indices an in-place refresh cannot make current (see
+            // [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)).
             self.cache.did_change_specs.insert((layer, path.clone()));
         }
-
-        // TODO: an inert add at a path whose node a dependent prim culled from
-        // its graph (an empty arc target) needs that dependent rebuilt so the
-        // now-needed node re-enters. Blocked on culled-node tracking: the
-        // `Indexer` culls weaker nodes during composition, and we keep no
-        // `culled_dependencies` snapshot to consult, so the spec-tier rescan
-        // refreshes only nodes still present in the dependent's graph.
     }
 
     fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {

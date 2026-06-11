@@ -612,32 +612,31 @@ impl IndexCache {
     /// which sites contribute opinions after an inert spec add or remove at
     /// `(layer, path)`.
     ///
-    /// Such an edit authors no arc and no significant field, so it cannot
-    /// reshape composition — only each node's `has_specs` flag at the site can
-    /// flip. Every cached index that already reads the site (the local prim and
-    /// every dependent, found through the reverse dependency map) has the flag
-    /// recomputed from live layer data; no graph is rebuilt. The local prim's
-    /// index is dropped only when it holds no node at the site — a prior "no
-    /// spec here" result that an in-place refresh cannot turn into a
-    /// contributing node, so a fresh build on the next query is needed.
+    /// Such an edit authors no arc and no significant field, so it usually only
+    /// flips each node's `has_specs` flag at the site. Every cached index that
+    /// reads the site (the local prim and every dependent, found through the
+    /// reverse dependency map) has the flag recomputed from live layer data with
+    /// no rebuild. An index is dropped — to be rebuilt on the next query — only
+    /// when an in-place refresh cannot make it current: the local prim holds no
+    /// node at the site (a prior "no spec here" result), or a dependent had
+    /// *culled* the site as an empty arc target that the spec now fills in, which
+    /// must un-cull and graft the target's subtree.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) {
-        let mut local_has_node = false;
         for prim in self.deps.exact_lookup(layer, path) {
-            if let Some(index) = self.indices.get_mut(&prim) {
-                let found = index.refresh_has_specs_at(layer, path, graph);
+            let rebuild = if let Some(index) = self.indices.get_mut(&prim) {
+                let refresh = index.refresh_has_specs_at(layer, path, graph);
                 // The local prim is one of its own dependents (it reads its own
-                // site), so the loop refreshes it like any other; record whether
-                // it actually carries a node there.
-                if prim == *path {
-                    local_has_node = found;
-                }
+                // site). Drop it when it carries no contributing node there; drop
+                // any index whose culled site the spec just filled in.
+                refresh.needs_rebuild || (prim == *path && !refresh.contributing)
+            } else {
+                false
+            };
+            if rebuild {
+                self.drop_index(&prim);
             }
         }
-        if local_has_node {
-            self.query_errors.clear();
-        } else {
-            self.drop_index(path);
-        }
+        self.query_errors.clear();
     }
 
     /// Drop a prim's cached index and every namespace descendant. Used by
@@ -2966,6 +2965,90 @@ def "Scope"
 
         // The arc is gone, not left dangling by an in-place spec refresh.
         assert!(!cache.has_composition_arc(&graph, &inst)?);
+        Ok(())
+    }
+
+    /// Authoring a spec at a previously-empty arc target recomposes a dependent
+    /// that had culled the arc: the spec-tier rescan drops the dependent so its
+    /// rebuild un-culls the reference, which an in-place `has_specs` flip cannot.
+    #[test]
+    fn inert_add_unculls_dependent() -> Result<()> {
+        // /A references a prim the base layer does not define, so the reference
+        // is culled until the target is authored.
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {}\n",
+        );
+        let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, Box::new(DefaultResolver::new()), true);
+        let base_id = graph.id_of("base.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let a = sdf::path("/A")?;
+
+        // The empty target makes /A's reference culled — no composition arc.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author `over "Empty"` into the base layer so the target now exists.
+        {
+            let data = graph.get_mut(base_id).unwrap().layer.data_mut();
+            data.create_spec(sdf::path("/Empty")?, sdf::SpecType::Prim);
+            data.set_field(
+                &sdf::path("/Empty")?,
+                sdf::FieldKey::Specifier.as_str(),
+                Value::Specifier(sdf::Specifier::Over),
+            );
+        }
+        let mut cl = sdf::ChangeList::new();
+        graph.get_mut(base_id).unwrap().layer.drain_changes(&mut cl);
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(base_id, &cl)]);
+        // The inert add routes through the spec tier (not a significant fanout),
+        // so the rescan's un-cull path is what recomposes /A.
+        assert!(changes
+            .cache
+            .did_change_specs
+            .contains(&(base_id, sdf::path("/Empty")?)));
+        changes.apply(&mut cache, &mut graph);
+
+        // The reference un-culled: /A now composes the arc.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// A reference to a *nested* missing target also recomposes when the target
+    /// is authored. A sub-root target is grafted as a non-culled spec-less node
+    /// (not the root case's culled node), so the spec-tier rescan refreshes its
+    /// `has_specs` in place — no separate empty-target cull is needed.
+    #[test]
+    fn inert_add_recomposes_subroot_target() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usd",
+            "#usda 1.0\ndef \"A\" ( references = @base.usd@</Parent/Empty> ) {}\n",
+        );
+        let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, Box::new(DefaultResolver::new()), true);
+        let base_id = graph.id_of("base.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let a = sdf::path("/A")?;
+
+        // The missing nested target makes /A's reference contribute nothing.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author the nested target through the recording proxy.
+        graph
+            .get_mut(base_id)
+            .unwrap()
+            .layer
+            .data_mut()
+            .create_spec(sdf::path("/Parent/Empty")?, sdf::SpecType::Prim);
+        let mut cl = sdf::ChangeList::new();
+        graph.get_mut(base_id).unwrap().layer.drain_changes(&mut cl);
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(base_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        // /A now composes the reference.
+        assert!(cache.has_composition_arc(&graph, &a)?);
         Ok(())
     }
 
