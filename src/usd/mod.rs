@@ -29,3 +29,22 @@ pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask,
 };
+
+use crate::sdf;
+
+/// Run `f` on the typed spec at `path` on the edit-target layer, or return
+/// [`sdf::AuthoringError::InvalidPath`] when no such spec exists. `get` is the
+/// spec view's constructor (e.g. `sdf::PrimSpecMut::get`); `reason` names the
+/// missing spec. The shared body of the `usd`-tier authoring closures.
+fn edit_spec<'a, S>(
+    data: &'a mut dyn sdf::AbstractData,
+    path: sdf::Path,
+    reason: &'static str,
+    get: impl FnOnce(&'a mut dyn sdf::AbstractData, sdf::Path) -> Option<S>,
+    f: impl FnOnce(&mut S) -> Result<(), sdf::AuthoringError>,
+) -> Result<(), sdf::AuthoringError> {
+    match get(data, path.clone()) {
+        Some(mut spec) => f(&mut spec),
+        None => Err(sdf::AuthoringError::InvalidPath { path, reason }),
+    }
+}

@@ -49,23 +49,19 @@ impl Attribute {
     /// the Sdf-tier `Spec::remove` directly if you instead want to clear the
     /// local opinion entirely.
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Variability], |spec| {
-            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v))
-        })
+        self.edit(|spec| spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v)))
     }
 
     /// Set the attribute's `custom` flag. Always authors an explicit
     /// opinion (see [`Attribute::set_variability`] for the rationale).
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Custom], |spec| {
-            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom))
-        })
+        self.edit(|spec| spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom)))
     }
 
     /// Set the default value. Mirrors C++ `UsdAttribute::Set(value)`.
     pub fn set(self, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        self.edit(&[sdf::FieldKey::Default], |spec| spec.set_default(value))
+        self.edit(|spec| spec.set_default(value))
     }
 
     /// Set a value at a specific time. Mirrors C++
@@ -78,16 +74,14 @@ impl Attribute {
     pub fn set_at(self, time: f64, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         let spec_time = self.stage.map_to_spec_time(time);
-        self.edit(&[sdf::FieldKey::TimeSamples], |spec| {
-            spec.set_time_sample(spec_time, value)
-        })
+        self.edit(|spec| spec.set_time_sample(spec_time, value))
     }
 
     /// Block opinions from weaker layers by authoring a value block on the
     /// default and every authored time sample. Mirrors C++
     /// `UsdAttribute::Block()`.
     pub fn block(self) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Default, sdf::FieldKey::TimeSamples], |spec| {
+        self.edit(|spec| {
             spec.set_default(sdf::Value::ValueBlock);
             // Block every authored time sample too — otherwise `get_at` would
             // still resolve weaker opinions through the cached samples.
@@ -103,7 +97,7 @@ impl Attribute {
     /// Set the `colorSpace` token.
     pub fn set_color_space(self, color_space: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let color_space = color_space.into();
-        self.edit(&[sdf::FieldKey::ColorSpace], |spec| spec.set_color_space(color_space))
+        self.edit(|spec| spec.set_color_space(color_space))
     }
 
     /// Author a generic metadata field on the attribute spec. Mirrors C++
@@ -122,19 +116,16 @@ impl Attribute {
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::AttributeSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no attribute spec at path on the edit target layer",
+                sdf::AttributeSpecMut::get,
+                |spec| {
                     spec.set(key, value);
-                    let mut cl = sdf::ChangeList::new();
-                    cl.entry_mut(&path).info_changed.insert(key);
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no attribute spec at path on the edit target layer",
-                }),
-            }
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }
@@ -153,9 +144,7 @@ impl Attribute {
         I: IntoIterator<Item = sdf::Path>,
     {
         let targets: Vec<sdf::Path> = targets.into_iter().collect();
-        self.edit(&[sdf::FieldKey::ConnectionPaths], |spec| {
-            spec.set_connection_paths(targets)
-        })
+        self.edit(|spec| spec.set_connection_paths(targets))
     }
 
     /// Wire this attribute to a single `source` property, replacing any
@@ -215,10 +204,7 @@ impl Attribute {
         let type_name = self.stage.field::<tf::Token>(&self.path, sdf::FieldKey::TypeName)?;
         let mut removed = false;
         self.stage.with_target_layer_at(&self.path, |layer, spec_path| {
-            let created_attr = !layer.data().has_spec(&spec_path);
-            let auto_ancestors = if !created_attr {
-                Vec::new()
-            } else {
+            if !layer.data().has_spec(&spec_path) {
                 // A delete list-op still needs a property spec to carry it.
                 // Use the composed type name and leave `custom` unauthored so
                 // the spec is only as strong as needed for the connection edit.
@@ -226,32 +212,24 @@ impl Attribute {
                     path: spec_path.clone(),
                     reason: "cannot author connection delete for typeless composed attribute",
                 })?;
-                let owning_prim = spec_path.prim_path();
-                let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
-                layer.create_attribute(spec_path.clone(), type_name, sdf::Variability::Varying, false)?;
-                auto_ancestors
-            };
-            let data = layer.data_mut();
-            match sdf::AttributeSpecMut::get(data, spec_path.clone()) {
-                Some(mut spec) => {
-                    removed = spec.delete_connection_path(&target);
-                    let mut cl = sdf::ChangeList::new();
-                    if removed {
-                        let entry = cl.entry_mut(&spec_path);
-                        if created_attr {
-                            entry.flags |= sdf::ChangeFlags::ADD_PROPERTY;
-                        }
-                        entry.flags |= sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION;
-                        entry.info_changed.insert(sdf::FieldKey::ConnectionPaths.as_str());
-                    }
-                    cl.add_inert_prims(auto_ancestors);
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: spec_path.clone(),
-                    reason: "no attribute spec at path on the edit target layer",
-                }),
+                sdf::AttributeSpec::new(
+                    layer.data_mut(),
+                    spec_path.clone(),
+                    type_name,
+                    sdf::Variability::Varying,
+                    false,
+                )?;
             }
+            super::edit_spec(
+                layer.data_mut(),
+                spec_path,
+                "no attribute spec at path on the edit target layer",
+                sdf::AttributeSpecMut::get,
+                |spec| {
+                    removed = spec.delete_connection_path(&target);
+                    Ok(())
+                },
+            )
         })?;
         Ok(removed)
     }
@@ -263,31 +241,25 @@ impl Attribute {
         self.edit_connection(|spec| spec.clear_connection_paths())
     }
 
-    /// Run `f` on the attribute spec at the edit target's layer, and only
-    /// record a `ChangeList` entry (driving cache invalidation) when `f`
-    /// reports an actual mutation. The shared helper for the connection
-    /// authoring methods above.
+    /// Run `f` on the attribute spec at the edit target's layer. The layer's
+    /// `EditProxy` records a `connectionPaths` change (driving cache
+    /// invalidation) only when `f` actually mutates the field. The shared
+    /// helper for the connection authoring methods above.
     fn edit_connection<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>) -> bool,
     {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::AttributeSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
-                    let mut cl = sdf::ChangeList::new();
-                    if f(&mut spec) {
-                        let entry = cl.entry_mut(&path);
-                        entry.flags |= sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION;
-                        entry.info_changed.insert(sdf::FieldKey::ConnectionPaths.as_str());
-                    }
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no attribute spec at path on the edit target layer",
-                }),
-            }
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no attribute spec at path on the edit target layer",
+                sdf::AttributeSpecMut::get,
+                |spec| {
+                    f(spec);
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }
@@ -425,32 +397,24 @@ impl Attribute {
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
-    /// apply `f`, and return `self` for chaining. `fields` names the metadata
-    /// keys the closure intends to author so the cache invalidator can
-    /// classify them. Returns `InvalidPath` if no attribute spec exists at the
-    /// path.
-    fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
+    /// apply `f`, and return `self` for chaining. The layer's `EditProxy`
+    /// records whatever fields `f` writes. Returns `InvalidPath` if no
+    /// attribute spec exists at the path.
+    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>),
     {
-        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::AttributeSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
-                    f(&mut spec);
-                    let mut cl = sdf::ChangeList::new();
-                    let entry = cl.entry_mut(&path);
-                    for name in &info_changed {
-                        entry.info_changed.insert(name);
-                    }
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no attribute spec at path on the edit target layer",
-                }),
-            }
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no attribute spec at path on the edit target layer",
+                sdf::AttributeSpecMut::get,
+                |spec| {
+                    f(spec);
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }

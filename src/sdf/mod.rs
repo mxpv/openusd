@@ -24,7 +24,7 @@ mod spec;
 mod value;
 
 pub use asset_path::AssetPath;
-pub use change::{ChangeEntry, ChangeFlags, ChangeList};
+pub use change::{ChangeEntry, ChangeFlags, ChangeList, EditProxy};
 pub use data::{AbstractData, Data};
 pub use expr::Expr;
 pub use layer::{AuthoringError, Layer, LayerFormat};

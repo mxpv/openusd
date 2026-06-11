@@ -2835,7 +2835,7 @@ def "Scope"
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&sdf::path("/A")?)
             .info_changed
-            .insert(sdf::FieldKey::Instanceable.as_str());
+            .insert(sdf::FieldKey::Instanceable.as_str().into());
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &graph, &[(root_id, cl)]);
         changes.apply(&mut cache, &mut graph);
@@ -2852,7 +2852,7 @@ def "Scope"
         let mut cl = sdf::ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
-            .insert(sdf::FieldKey::LayerRelocates.as_str());
+            .insert(sdf::FieldKey::LayerRelocates.as_str().into());
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(cache, graph, &[(root_id, cl)]);
         changes.apply(cache, graph);

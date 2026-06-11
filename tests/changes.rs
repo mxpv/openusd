@@ -1,11 +1,177 @@
-//! Integration tests for the [`pcp::Changes`] / `sdf::ChangeList` pipeline.
+//! Change-recording and composition-invalidation tests.
 //!
-//! Verifies surgical cache invalidation: that an authoring call drops only
-//! the affected prim indices, not the whole cache, and that the classifier
-//! still falls back to "blow the world" when the change touches the layer
-//! stack itself.
+//! Covers the `EditProxy` recording delegate — the `sdf::ChangeList` it
+//! produces from layer mutations — and the surgical cache invalidation that
+//! `pcp::Changes` drives from that list: an authoring call drops only the
+//! affected prim indices, with a "blow the world" fallback for layer-stack
+//! edits.
 
+use openusd::sdf::AbstractData;
 use openusd::{sdf, tf, usd};
+
+#[test]
+fn change_list_entry_dedups() {
+    let mut cl = sdf::ChangeList::new();
+    let p = sdf::Path::abs_root();
+    cl.entry_mut(&p).flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
+    cl.entry_mut(&p).info_changed.insert(tf::Token::new("specifier"));
+    assert_eq!(cl.entries().len(), 1);
+    assert!(cl.entries()[0].1.flags.contains(sdf::ChangeFlags::ADD_NON_INERT_PRIM));
+    assert!(cl.entries()[0].1.info_changed.contains(&tf::Token::new("specifier")));
+}
+
+#[test]
+fn change_list_empty_until_entry() {
+    let mut cl = sdf::ChangeList::new();
+    assert!(cl.is_empty());
+    cl.entry_mut(&sdf::Path::abs_root());
+    assert!(!cl.is_empty());
+}
+
+/// A blank in-memory backend with a pseudo-root, wrapped fresh in a proxy.
+fn proxy() -> sdf::EditProxy {
+    let mut data = sdf::Data::new();
+    data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+    sdf::EditProxy::new(Box::new(data))
+}
+
+/// Drain a proxy into a fresh list.
+fn drained(p: &mut sdf::EditProxy) -> sdf::ChangeList {
+    let mut cl = sdf::ChangeList::new();
+    p.take(&mut cl);
+    cl
+}
+
+fn entry<'a>(cl: &'a sdf::ChangeList, path: &str) -> Option<&'a sdf::ChangeEntry> {
+    let path = sdf::path(path).unwrap();
+    cl.iter().find(|(p, _)| *p == path).map(|(_, e)| e)
+}
+
+/// Whether the recorded entry at `path` carries `flag`.
+fn has_flag(cl: &sdf::ChangeList, path: &str, flag: sdf::ChangeFlags) -> bool {
+    entry(cl, path).is_some_and(|e| e.flags.contains(flag))
+}
+
+/// A freshly created `def` prim records a non-inert add at the leaf, inert
+/// adds for the auto-created ancestors, and a property add for an attribute —
+/// and the fresh specs' own field writes (`specifier`, `typeName`) fold into
+/// the add rather than leaking as `info_changed`.
+#[test]
+fn records_prim_tree_adds() {
+    let mut p = proxy();
+    sdf::PrimSpec::new(&mut p, "/A/B/C", sdf::Specifier::Def, "Xform").unwrap();
+    sdf::AttributeSpec::new(&mut p, "/A/B/C.size", "double", sdf::Variability::Varying, true).unwrap();
+    let cl = drained(&mut p);
+
+    assert!(has_flag(&cl, "/A", sdf::ChangeFlags::ADD_INERT_PRIM));
+    assert!(has_flag(&cl, "/A/B", sdf::ChangeFlags::ADD_INERT_PRIM));
+    assert!(has_flag(&cl, "/A/B/C", sdf::ChangeFlags::ADD_NON_INERT_PRIM));
+    assert!(has_flag(&cl, "/A/B/C.size", sdf::ChangeFlags::ADD_PROPERTY));
+    // The leaf's specifier/typeName writes are part of its add, not a separate
+    // metadata change.
+    assert!(entry(&cl, "/A/B/C").unwrap().info_changed.is_empty());
+}
+
+/// `over` creates missing specs as `over`, recording inert adds.
+#[test]
+fn over_records_inert() {
+    let mut p = proxy();
+    sdf::PrimSpec::over(&mut p, "/X/Y").unwrap();
+    let cl = drained(&mut p);
+    assert!(has_flag(&cl, "/X", sdf::ChangeFlags::ADD_INERT_PRIM));
+    assert!(has_flag(&cl, "/X/Y", sdf::ChangeFlags::ADD_INERT_PRIM));
+}
+
+/// A metadata write on a pre-existing prim records `info_changed` for the
+/// field — without any add flag.
+#[test]
+fn records_metadata_on_existing() {
+    let mut p = proxy();
+    sdf::PrimSpec::new(&mut p, "/A", sdf::Specifier::Def, "").unwrap();
+    let _ = drained(&mut p);
+
+    p.set_field(
+        &sdf::path("/A").unwrap(),
+        sdf::FieldKey::Kind.as_str(),
+        sdf::Value::token("component"),
+    );
+    let cl = drained(&mut p);
+    let e = entry(&cl, "/A").unwrap();
+    assert!(e.flags.is_empty());
+    assert!(e.info_changed.contains(&tf::Token::new("kind")));
+}
+
+/// Creating a spec over an existing one replaces it (clearing its fields); the
+/// proxy must record that as a change rather than silently dropping it.
+#[test]
+fn replacing_existing_spec_records() {
+    let mut p = proxy();
+    sdf::PrimSpec::new(&mut p, "/A", sdf::Specifier::Def, "Xform").unwrap();
+    let _ = drained(&mut p);
+    assert!(!p.is_dirty());
+
+    p.create_spec(sdf::path("/A").unwrap(), sdf::SpecType::Prim);
+    assert!(p.is_dirty(), "replacing an existing spec must record a change");
+    assert!(entry(&drained(&mut p), "/A").is_some());
+}
+
+/// A root-metadata edit that also materializes the pseudo-root spec (a backend
+/// with no pre-stamped `/`) must still record the field change — creating the
+/// pseudo-root must not swallow the `defaultPrim` write that follows.
+#[test]
+fn metadata_creating_pseudo_root_records() {
+    let mut p = sdf::EditProxy::new(Box::new(sdf::Data::new()));
+    p.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
+    p.set_field(
+        &sdf::Path::abs_root(),
+        sdf::FieldKey::DefaultPrim.as_str(),
+        sdf::Value::token("World"),
+    );
+    let cl = drained(&mut p);
+
+    let root = sdf::Path::abs_root();
+    let e = cl
+        .iter()
+        .find(|(pp, _)| *pp == root)
+        .map(|(_, e)| e)
+        .expect("root metadata change recorded");
+    assert!(e.info_changed.contains(&tf::Token::new("defaultPrim")));
+}
+
+/// Re-authoring an unchanged value records nothing (value-diff idempotence),
+/// and a freshly wrapped (populated) backend starts clean (wrap-last).
+#[test]
+fn noop_and_wrap_last() {
+    let mut p = proxy();
+    assert!(!p.is_dirty(), "wrapping a populated backend records nothing");
+
+    sdf::PrimSpec::new(&mut p, "/A", sdf::Specifier::Def, "Xform").unwrap();
+    let _ = drained(&mut p);
+
+    // Re-define the same def with the same type — no value changes.
+    sdf::PrimSpec::new(&mut p, "/A", sdf::Specifier::Def, "Xform").unwrap();
+    assert!(!p.is_dirty(), "redundant re-author records nothing");
+    assert!(drained(&mut p).is_empty());
+}
+
+/// `take` moves entries into the caller's buffer, leaving the proxy empty and
+/// ready to record the next op into a reused buffer.
+#[test]
+fn take_reuses_buffer() {
+    let mut p = proxy();
+    let mut scratch = sdf::ChangeList::new();
+
+    sdf::PrimSpec::new(&mut p, "/A", sdf::Specifier::Def, "").unwrap();
+    p.take(&mut scratch);
+    assert!(has_flag(&scratch, "/A", sdf::ChangeFlags::ADD_NON_INERT_PRIM));
+    assert!(!p.is_dirty());
+
+    scratch.clear();
+    sdf::PrimSpec::new(&mut p, "/B", sdf::Specifier::Def, "").unwrap();
+    p.take(&mut scratch);
+    assert!(has_flag(&scratch, "/B", sdf::ChangeFlags::ADD_NON_INERT_PRIM));
+    assert!(entry(&scratch, "/A").is_none());
+}
 
 fn open_in_memory() -> usd::Stage {
     usd::Stage::builder().in_memory("anon.usda").expect("in-memory stage")
@@ -27,18 +193,16 @@ fn child_names(stage: &usd::Stage, path: &str) -> Vec<String> {
 
 /// Warm two sibling prim indices, author at one — the other must stay indexed.
 #[test]
-fn author_at_one_prim_keeps_sibling_indexed() {
+fn author_keeps_sibling_indexed() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Bar").unwrap().set_type_name("Xform").unwrap();
 
-    // Force both indices into the cache.
     let _ = stage.prim_at(sdf::path("/Foo").unwrap()).type_name().unwrap();
     let _ = stage.prim_at(sdf::path("/Bar").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
     assert!(stage.is_indexed(&sdf::path("/Bar").unwrap()));
 
-    // Author at /Foo only — /Bar's cached index must survive.
     stage.override_prim("/Foo").unwrap().set_kind("component").unwrap();
 
     assert!(
@@ -47,10 +211,9 @@ fn author_at_one_prim_keeps_sibling_indexed() {
     );
 }
 
-/// Attribute value writes never invalidate the owning prim's graph —
-/// they are read through to live layer data.
+/// Attribute value writes never invalidate the owning prim's graph.
 #[test]
-fn attribute_value_write_keeps_owner_indexed() {
+fn attribute_value_keeps_owner_indexed() {
     let stage = open_in_memory();
     let attr = stage
         .define_prim("/A")
@@ -65,8 +228,6 @@ fn attribute_value_write_keeps_owner_indexed() {
     let _ = stage.prim_at(sdf::path("/A").unwrap()).type_name().unwrap();
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
-    // Set a different value — owner's graph must stay cached, and the new
-    // value must be visible.
     let attr = attr.set(sdf::Value::Double(2.0)).unwrap();
     assert!(
         stage.is_indexed(&sdf::path("/A").unwrap()),
@@ -75,8 +236,7 @@ fn attribute_value_write_keeps_owner_indexed() {
     assert_eq!(attr.get().unwrap(), Some(sdf::Value::Double(2.0)));
 }
 
-/// `instanceable` is on the significant-promoter list — authoring it must
-/// drop the owner's cached index.
+/// `instanceable` is a significant-promoter — authoring it drops the index.
 #[test]
 fn set_instanceable_invalidates_owner() {
     let stage = open_in_memory();
@@ -98,10 +258,8 @@ fn set_instanceable_invalidates_owner() {
     );
 }
 
-/// `kind` is a metadata change on a path whose prim already has a spec —
-/// not in the significant-promoter set, no spec adds/removes. The cached
-/// index must survive, and the new opinion must still be visible because
-/// field resolution walks live layer data.
+/// `kind` is a spec-only metadata change on an existing prim — the cached
+/// index survives, and the new opinion is still visible (live read).
 #[test]
 fn kind_change_no_op_for_cache() {
     let stage = open_in_memory();
@@ -118,23 +276,19 @@ fn kind_change_no_op_for_cache() {
     assert_eq!(stage.prim_at("/A").kind().unwrap().as_deref(), Some("group"));
 }
 
-/// `set_default_prim` writes `defaultPrim` at the root, which the
-/// classifier promotes to significant-at-root — every cached index drops.
+/// `set_default_prim` is significant-at-root — every cached index drops.
 #[test]
-fn default_prim_change_clears_root_cache() {
+fn default_prim_clears_root_cache() {
     let stage = open_in_memory();
     stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Other").unwrap().set_type_name("Xform").unwrap();
 
     let _ = stage.prim_at(sdf::path("/World").unwrap()).type_name().unwrap();
     let _ = stage.prim_at(sdf::path("/Other").unwrap()).type_name().unwrap();
-    let pre = stage.indexed_count();
-    assert!(pre >= 2);
+    assert!(stage.indexed_count() >= 2);
 
     stage.set_default_prim("World").unwrap();
 
-    // `defaultPrim` triggers a significant change at `/`, which clears
-    // every cached index (drop_index_subtree("/") matches all).
     assert_eq!(
         stage.indexed_count(),
         0,
@@ -143,49 +297,38 @@ fn default_prim_change_clears_root_cache() {
     assert_eq!(stage.default_prim().as_deref(), Some("World"));
 }
 
-/// `has_spec` against a path with no opinions caches an empty prim index.
-/// `override_prim` on that path must invalidate the cached miss so the
-/// subsequent `has_spec` reflects the freshly authored over.
+/// `override_prim` on a cached miss invalidates so the over becomes visible.
 #[test]
-fn override_prim_after_cached_miss_invalidates() {
+fn override_after_cached_miss() {
     let stage = open_in_memory();
-    // Cached miss: warms an empty index at /A.
     assert!(!exists(&stage, "/A"));
     assert!(stage.is_indexed(&sdf::path("/A").unwrap()));
 
     stage.override_prim("/A").unwrap();
 
-    assert!(
-        exists(&stage, "/A"),
-        "inert add must invalidate cached empty index — otherwise has_spec keeps returning the pre-author miss",
-    );
+    assert!(exists(&stage, "/A"), "inert add must invalidate cached empty index");
 }
 
-/// `Layer::create_prim` auto-creates missing ancestor over specs. The
-/// change list must record those ancestors so a cached miss on the
-/// ancestor path gets invalidated alongside the new leaf.
+/// Auto-created ancestor `over`s are recorded so a cached miss on the ancestor
+/// path gets invalidated alongside the new leaf.
 #[test]
-fn define_prim_invalidates_auto_created_ancestors() {
+fn define_invalidates_ancestors() {
     let stage = open_in_memory();
-    // Warm cached misses at /A and /A/B.
     assert!(!exists(&stage, "/A"));
     assert!(!exists(&stage, "/A/B"));
 
     stage.define_prim("/A/B/C").unwrap().set_type_name("Xform").unwrap();
 
-    assert!(
-        exists(&stage, "/A"),
-        "auto-created /A ancestor must be visible after define_prim('/A/B/C')",
-    );
-    assert!(exists(&stage, "/A/B"), "auto-created /A/B ancestor must be visible",);
+    assert!(exists(&stage, "/A"), "auto-created /A must be visible");
+    assert!(exists(&stage, "/A/B"), "auto-created /A/B must be visible");
     assert!(child_names(&stage, "/A").contains(&"B".to_string()));
     assert!(child_names(&stage, "/A/B").contains(&"C".to_string()));
 }
 
-/// `create_attribute` auto-creates the owning prim (and its ancestors) as
-/// `over` specs if missing. Ancestor invalidation must propagate.
+/// `create_attribute` auto-creates the owning prim; the ancestor add must
+/// invalidate the cached miss.
 #[test]
-fn create_attribute_invalidates_auto_created_owner() {
+fn create_attribute_invalidates_owner() {
     let stage = open_in_memory();
     assert!(!exists(&stage, "/Mesh"));
 
@@ -197,10 +340,9 @@ fn create_attribute_invalidates_auto_created_owner() {
     );
 }
 
-/// A second `define_prim` with the same specifier on an existing prim
-/// must be a no-op for the composition cache.
+/// A redundant `define_prim` on an existing prim is a no-op for the cache.
 #[test]
-fn idempotent_define_prim_preserves_cache() {
+fn idempotent_define_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
     stage.define_prim("/Foo/Child").unwrap();
@@ -211,20 +353,13 @@ fn idempotent_define_prim_preserves_cache() {
 
     stage.define_prim("/Foo").unwrap();
 
-    assert!(
-        stage.is_indexed(&sdf::path("/Foo").unwrap()),
-        "redundant define_prim with matching specifier must not drop the cached index",
-    );
-    assert!(
-        stage.is_indexed(&sdf::path("/Foo/Child").unwrap()),
-        "redundant define_prim must not invalidate descendant indices",
-    );
+    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
+    assert!(stage.is_indexed(&sdf::path("/Foo/Child").unwrap()));
 }
 
-/// `override_prim` on a path that already has a spec is a layer-level
-/// no-op and must not invalidate the cached index.
+/// A redundant `override_prim` on an existing spec is a no-op for the cache.
 #[test]
-fn idempotent_override_prim_preserves_cache() {
+fn idempotent_override_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/Foo").unwrap();
     let _ = stage.prim_at(sdf::path("/Foo").unwrap()).type_name().unwrap();
@@ -232,20 +367,15 @@ fn idempotent_override_prim_preserves_cache() {
 
     stage.override_prim("/Foo").unwrap();
 
-    assert!(
-        stage.is_indexed(&sdf::path("/Foo").unwrap()),
-        "redundant override_prim on existing spec must not drop the cached index",
-    );
+    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
 }
 
-/// `add_applied_schema` writes `apiSchemas`, which `Cache::api_schemas`
-/// resolves off the cached prim index. The classifier must drop the
-/// owner's index so the next `api_schemas` query sees the new opinion.
+/// `add_applied_schema` writes `apiSchemas`, which is resolved off the cached
+/// prim index — the owner's index must drop.
 #[test]
 fn add_applied_schema_invalidates_owner() {
     let stage = open_in_memory();
     let prim = stage.define_prim("/A").unwrap().set_type_name("Xform").unwrap();
-    // Warm the cache.
     assert_eq!(
         stage.prim_at(prim.path()).api_schemas().unwrap(),
         Vec::<tf::Token>::new()
@@ -264,10 +394,9 @@ fn add_applied_schema_invalidates_owner() {
     );
 }
 
-/// `set_default_prim` with the value that's already set must not blow
-/// the cache.
+/// Re-setting `defaultPrim` to the current value must not blow the cache.
 #[test]
-fn idempotent_set_default_prim_preserves_cache() {
+fn idempotent_default_prim_preserves_cache() {
     let stage = open_in_memory();
     stage.define_prim("/World").unwrap();
     stage.set_default_prim("World").unwrap();
@@ -280,26 +409,20 @@ fn idempotent_set_default_prim_preserves_cache() {
     assert_eq!(
         stage.indexed_count(),
         pre,
-        "redundant set_default_prim must not clear cached indices",
+        "redundant set_default_prim must not clear cached indices"
     );
 }
 
-/// Verify the basic Dependencies plumbing by opening a fixture with a
-/// reference arc and observing through `prim_children` that composition
-/// still produces correct results after the new dependency-aware cache.
+/// A reference fixture still composes correctly through the dependency-aware
+/// cache after the change-recording rework.
 #[test]
-fn reference_fixture_composes_correctly() {
+fn reference_fixture_composes() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let path = format!("{manifest}/fixtures/sublayer_override.usda");
     let stage = usd::Stage::open(&path).expect("open sublayer fixture");
 
-    // Reading children warms the cache via the new dependency-tracking
-    // ensure_index path. The composed result is the union of both layers.
     let children = child_names(&stage, "/World");
     assert!(children.contains(&"Cube".to_string()));
     assert!(children.contains(&"Sphere".to_string()));
-    assert!(
-        stage.is_indexed(&sdf::path("/World").unwrap()),
-        "/World index must be cached after prim_children query",
-    );
+    assert!(stage.is_indexed(&sdf::path("/World").unwrap()));
 }

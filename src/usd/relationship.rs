@@ -48,9 +48,7 @@ impl Relationship {
     ///
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_variability(self, v: sdf::Variability) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Variability], false, |spec| {
-            spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v))
-        })
+        self.edit(|spec| spec.set(sdf::FieldKey::Variability.as_str(), sdf::Value::Variability(v)))
     }
 
     /// Set the relationship's `custom` flag. Always authors an explicit
@@ -58,9 +56,7 @@ impl Relationship {
     ///
     /// [`Attribute::set_variability`]: crate::usd::Attribute::set_variability
     pub fn set_custom(self, custom: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Custom], false, |spec| {
-            spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom))
-        })
+        self.edit(|spec| spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom)))
     }
 
     /// `true` when this relationship is composed as `custom`. Mirrors C++
@@ -75,15 +71,13 @@ impl Relationship {
 
     /// Append a target path. No-op if already present.
     pub fn add_target(self, target: sdf::Path) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::TargetPaths], true, |spec| spec.add_target(target))
+        self.edit(|spec| spec.add_target(target))
     }
 
     /// Replace the entire target list.
     pub fn set_targets<I: IntoIterator<Item = sdf::Path>>(self, targets: I) -> Result<Self, StageAuthoringError> {
         let targets: Vec<sdf::Path> = targets.into_iter().collect();
-        self.edit(&[sdf::FieldKey::TargetPaths], true, |spec| {
-            spec.set_target_paths(targets)
-        })
+        self.edit(|spec| spec.set_target_paths(targets))
     }
 
     /// Author a generic metadata field on the relationship spec.
@@ -100,19 +94,16 @@ impl Relationship {
     pub fn set_metadata(self, key: &'static str, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
         let value = value.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::RelationshipSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no relationship spec at path on the edit target layer",
+                sdf::RelationshipSpecMut::get,
+                |spec| {
                     spec.set(key, value);
-                    let mut cl = sdf::ChangeList::new();
-                    cl.entry_mut(&path).info_changed.insert(key);
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no relationship spec at path on the edit target layer",
-                }),
-            }
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }
@@ -125,23 +116,16 @@ impl Relationship {
         let target = target.clone();
         let mut removed = false;
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::RelationshipSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no relationship spec at path on the edit target layer",
+                sdf::RelationshipSpecMut::get,
+                |spec| {
                     removed = spec.remove_target(&target);
-                    let mut cl = sdf::ChangeList::new();
-                    if removed {
-                        let entry = cl.entry_mut(&path);
-                        entry.flags |= sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
-                        entry.info_changed.insert(sdf::FieldKey::TargetPaths.as_str());
-                    }
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no relationship spec at path on the edit target layer",
-                }),
-            }
+                    Ok(())
+                },
+            )
         })?;
         Ok(removed)
     }
@@ -202,16 +186,15 @@ impl Relationship {
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's
-    /// layer, apply `f`, and return `self` for chaining. `fields` names the
-    /// authored metadata keys; `targets_changed` sets the target-list flag
-    /// in the change list. Returns `InvalidPath` if no relationship spec exists
-    /// at the path.
+    /// layer, apply `f`, and return `self` for chaining. The layer's
+    /// `EditProxy` records whatever fields `f` writes, setting
+    /// `CHANGE_RELATIONSHIP_TARGETS` when the write touches `targetPaths`.
+    /// Returns `InvalidPath` if no relationship spec exists at the path.
     //
     // The change-list entry is recorded at the relationship's property
     // path, which `pcp::Changes::did_change` currently skips (no consumer
-    // for relationship-target invalidation). Flag and `info_changed`
-    // opinions are still emitted here so the producer side is in place
-    // when a consumer lands.
+    // for relationship-target invalidation). The producer side is in place
+    // (the proxy emits the flag and `info_changed`) for when a consumer lands.
     //
     // TODO: wire the consumer. When `IndexCache` starts memoizing per-attribute
     // composed values or per-relationship resolved-target lists:
@@ -231,36 +214,21 @@ impl Relationship {
     //      in place. The current `did_change_specs` field is already
     //      reserved for this; right now the entry is dropped on the
     //      floor (see CacheChanges docs).
-    //   4. Remove the `targets_changed` parameter from `edit` and the
-    //      flag emission here if the classifier ends up not needing
-    //      either signal (e.g. it can infer everything from
-    //      `info_changed[TargetPaths]`). Until then both stay for
-    //      forward-compat.
-    fn edit<F>(self, fields: &[sdf::FieldKey], targets_changed: bool, f: F) -> Result<Self, StageAuthoringError>
+    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),
     {
-        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::RelationshipSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
-                    f(&mut spec);
-                    let mut cl = sdf::ChangeList::new();
-                    let entry = cl.entry_mut(&path);
-                    if targets_changed {
-                        entry.flags |= sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
-                    }
-                    for name in &info_changed {
-                        entry.info_changed.insert(name);
-                    }
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no relationship spec at path on the edit target layer",
-                }),
-            }
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no relationship spec at path on the edit target layer",
+                sdf::RelationshipSpecMut::get,
+                |spec| {
+                    f(spec);
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }

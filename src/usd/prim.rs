@@ -70,30 +70,28 @@ impl Prim {
     /// Set the prim's `typeName` field on the edit target's layer.
     pub fn set_type_name(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
-        self.edit(&[sdf::FieldKey::TypeName], |spec| spec.set_type_name(name))
+        self.edit(|spec| spec.set_type_name(name))
     }
 
     /// Set the prim's `active` flag.
     pub fn set_active(self, active: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Active], |spec| spec.set_active(active))
+        self.edit(|spec| spec.set_active(active))
     }
 
     /// Set the prim's `kind` metadata.
     pub fn set_kind(self, kind: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let kind = kind.into();
-        self.edit(&[sdf::FieldKey::Kind], |spec| spec.set_kind(kind))
+        self.edit(|spec| spec.set_kind(kind))
     }
 
     /// Set the prim's `hidden` flag.
     pub fn set_hidden(self, hidden: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Hidden], |spec| spec.set_hidden(hidden))
+        self.edit(|spec| spec.set_hidden(hidden))
     }
 
     /// Set the prim's `instanceable` flag.
     pub fn set_instanceable(self, instanceable: bool) -> Result<Self, StageAuthoringError> {
-        self.edit(&[sdf::FieldKey::Instanceable], |spec| {
-            spec.set_instanceable(instanceable)
-        })
+        self.edit(|spec| spec.set_instanceable(instanceable))
     }
 
     /// Add an applied API schema name to this prim's `apiSchemas` metadata.
@@ -113,21 +111,16 @@ impl Prim {
     pub fn add_applied_schema(self, name: impl Into<String>) -> Result<Self, StageAuthoringError> {
         let name = name.into();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            let data = layer.data_mut();
-            match sdf::PrimSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no prim spec at path on the edit target layer",
+                sdf::PrimSpecMut::get,
+                |spec| {
                     spec.add_applied_schema(name)?;
-                    let mut cl = sdf::ChangeList::new();
-                    cl.entry_mut(&path)
-                        .info_changed
-                        .insert(sdf::FieldKey::ApiSchemas.as_str());
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no prim spec at path on the edit target layer",
-                }),
-            }
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }
@@ -162,18 +155,12 @@ impl Prim {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
             // Author an `over` for the prim (and any missing ancestors) when the
             // edit target has no local spec, matching C++ `UsdObject::SetMetadata`
-            // creating the spec for editing.
-            let created = layer.ensure_prim_over(path.clone())?;
-            let data = layer.data_mut();
-            let mut spec = sdf::PrimSpecMut::get(data, path.clone())
-                .expect("ensure_prim_over guaranteed a prim spec at the edit-target path");
+            // creating the spec for editing. The layer's `EditProxy` records the
+            // ancestor adds and the metadata write.
+            let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
             let value = f(spec.field(key).ok().flatten());
             spec.set(key, value);
-
-            let mut cl = sdf::ChangeList::new();
-            cl.add_inert_prims(created);
-            cl.entry_mut(&path).info_changed.insert(key);
-            Ok(cl)
+            Ok(())
         })?;
         Ok(self)
     }
@@ -658,32 +645,24 @@ impl Prim {
     }
 
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
-    /// `f`, and return `self` for chaining. `fields` names the metadata keys
-    /// the closure intends to author so the cache invalidator can classify
-    /// them. Returns `InvalidPath` if no prim spec exists at the path.
-    fn edit<F>(self, fields: &[sdf::FieldKey], f: F) -> Result<Self, StageAuthoringError>
+    /// `f`, and return `self` for chaining. The layer's `EditProxy` records
+    /// whatever fields `f` writes. Returns `InvalidPath` if no prim spec exists
+    /// at the path.
+    fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),
     {
-        let info_changed: Vec<&'static str> = fields.iter().map(sdf::FieldKey::as_str).collect();
         self.stage.with_target_layer_at(&self.path, |layer, path| {
-            // A `None` view means no prim spec exists at the path.
-            let data = layer.data_mut();
-            match sdf::PrimSpecMut::get(data, path.clone()) {
-                Some(mut spec) => {
-                    f(&mut spec);
-                    let mut cl = sdf::ChangeList::new();
-                    let entry = cl.entry_mut(&path);
-                    for name in &info_changed {
-                        entry.info_changed.insert(name);
-                    }
-                    Ok(cl)
-                }
-                None => Err(sdf::AuthoringError::InvalidPath {
-                    path: path.clone(),
-                    reason: "no prim spec at path on the edit target layer",
-                }),
-            }
+            super::edit_spec(
+                layer.data_mut(),
+                path,
+                "no prim spec at path on the edit target layer",
+                sdf::PrimSpecMut::get,
+                |spec| {
+                    f(spec);
+                    Ok(())
+                },
+            )
         })?;
         Ok(self)
     }
@@ -919,11 +898,7 @@ mod tests {
                     ..Default::default()
                 }),
             );
-            let mut cl = sdf::ChangeList::new();
-            cl.entry_mut(&path)
-                .info_changed
-                .insert(sdf::FieldKey::ApiSchemas.as_str());
-            Ok(cl)
+            Ok(())
         })?;
 
         stage

@@ -181,14 +181,14 @@ impl Changes {
     }
 
     fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {
-        for &key in &entry.info_changed {
-            if key == FieldKey::SubLayers.as_str() {
+        for key in &entry.info_changed {
+            if *key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
-            } else if key == FieldKey::SubLayerOffsets.as_str() {
+            } else if *key == FieldKey::SubLayerOffsets.as_str() {
                 self.layer_stack |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
-            } else if key == FieldKey::LayerRelocates.as_str() {
+            } else if *key == FieldKey::LayerRelocates.as_str() {
                 self.layer_stack |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
-            } else if key == FieldKey::DefaultPrim.as_str() {
+            } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
         }
@@ -330,7 +330,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
             .info_changed
-            .insert(FieldKey::References.as_str());
+            .insert(FieldKey::References.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
@@ -342,7 +342,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
             .info_changed
-            .insert(FieldKey::VariantSelection.as_str());
+            .insert(FieldKey::VariantSelection.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
@@ -354,8 +354,7 @@ mod tests {
     #[test]
     fn inert_add_with_instanceable_is_significant() {
         let mut layer = crate::sdf::Layer::new_anonymous("root.usda");
-        layer
-            .create_prim("/X", crate::sdf::Specifier::Over, "")
+        crate::sdf::PrimSpec::new(layer.data_mut(), "/X", crate::sdf::Specifier::Over, "")
             .unwrap()
             .set_instanceable(true);
         let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
@@ -399,7 +398,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
-            .insert(FieldKey::SubLayers.as_str());
+            .insert(FieldKey::SubLayers.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
@@ -412,7 +411,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
-            .insert(FieldKey::DefaultPrim.as_str());
+            .insert(FieldKey::DefaultPrim.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
@@ -425,7 +424,7 @@ mod tests {
         let mut cl = ChangeList::new();
         cl.entry_mut(&Path::abs_root())
             .info_changed
-            .insert(FieldKey::LayerRelocates.as_str());
+            .insert(FieldKey::LayerRelocates.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &graph, &[(first_layer(&graph), cl)]);
         assert!(changes.layer_stack.contains(LayerStackChanges::RELOCATES));

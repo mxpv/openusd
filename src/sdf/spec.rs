@@ -26,11 +26,13 @@
 //! for writes (the `*Mut` aliases) — so one type serves both modes while the
 //! generic stays out of the public surface.
 //!
-//! The primary entry points are the path-keyed methods on
-//! [`Layer`](crate::sdf::Layer) (e.g. `Layer::create_prim`, `Layer::prim`),
-//! which return these views and handle the write-side bookkeeping
-//! (`primChildren` / `propertyChildren` ordering, ancestor specifiers).
+//! Spec creation lives on the views themselves — [`PrimSpec::new`],
+//! [`AttributeSpec::new`], [`RelationshipSpec::new`] (mirroring C++
+//! `Sdf*Spec::New`) — which handle the write-side bookkeeping (`primChildren` /
+//! `propertyChildren` ordering, ancestor specifiers). Read-only lookups go
+//! through [`Layer::prim`](crate::sdf::Layer::prim) and friends.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -305,6 +307,43 @@ impl<'a> PrimSpecMut<'a> {
     pub(crate) fn get(data: &'a mut dyn sdf::AbstractData, path: sdf::Path) -> Option<Self> {
         matches!(data.spec_type(&path), Some(sdf::SpecType::Prim)).then(|| Self(Spec::wrap(data, path)))
     }
+
+    /// Create or upgrade the prim spec at `path` with `specifier` and
+    /// `type_name`, mirroring C++ `SdfPrimSpec::New`. An empty `type_name`
+    /// leaves `typeName` unauthored. Missing ancestor specs are created as
+    /// `over` and each parent's `primChildren` is updated. When `data` is the
+    /// layer's recording [`EditProxy`](sdf::EditProxy) the structural change is
+    /// captured in its [`ChangeList`](sdf::ChangeList).
+    pub fn new(
+        data: &'a mut dyn sdf::AbstractData,
+        path: impl Into<sdf::Path>,
+        specifier: sdf::Specifier,
+        type_name: impl Into<String>,
+    ) -> Result<Self, sdf::AuthoringError> {
+        let path = path.into();
+        let type_name: String = type_name.into();
+        require_prim_leaf(&path)?;
+        ensure_prim_chain(data, &path)?;
+        data.set_field(
+            &path,
+            sdf::FieldKey::Specifier.as_str(),
+            sdf::Value::Specifier(specifier),
+        );
+        if !type_name.is_empty() {
+            data.set_field(&path, sdf::FieldKey::TypeName.as_str(), sdf::Value::token(type_name));
+        }
+        Ok(Self::get(data, path).expect("ensure_prim_chain created a prim spec"))
+    }
+
+    /// Ensure an `over` prim spec exists at `path`, creating it and any missing
+    /// ancestors as `over` while leaving existing `def`/`class` specs unchanged.
+    /// Mirrors C++ `SdfCreatePrimInLayer` / `UsdStage::OverridePrim`.
+    pub fn over(data: &'a mut dyn sdf::AbstractData, path: impl Into<sdf::Path>) -> Result<Self, sdf::AuthoringError> {
+        let path = path.into();
+        require_prim_leaf(&path)?;
+        ensure_prim_chain(data, &path)?;
+        Ok(Self::get(data, path).expect("ensure_prim_chain created a prim spec"))
+    }
 }
 
 impl<'a, B> PrimSpec<'a, B>
@@ -361,10 +400,9 @@ impl<'a, B> PrimSpec<'a, B>
 where
     B: DerefMut<Target = dyn sdf::AbstractData + 'a>,
 {
-    /// Set the `typeName` field. An empty `name` clears the field instead
-    /// of authoring `sdf::Value::Token("")` — matching the empty-string skip in
-    /// [`crate::sdf::Layer::create_prim`] so the two write paths stay in
-    /// lockstep.
+    /// Set the `typeName` field. An empty `name` clears the field instead of
+    /// authoring `sdf::Value::Token("")`, so a prim with no type round-trips
+    /// identically to one whose type was never authored.
     pub fn set_type_name(&mut self, name: impl Into<tf::Token>) {
         let name = name.into();
         if name.is_empty() {
@@ -742,6 +780,23 @@ impl<'a> AttributeSpecMut<'a> {
         matches!(data.spec_type(&path), Some(sdf::SpecType::Attribute))
             .then(|| Self(PropertySpec(Spec::wrap(data, path))))
     }
+
+    /// Create an attribute spec at `path` (a property path like
+    /// `/World/Mesh.points`), mirroring C++ `SdfAttributeSpec::New`. The owning
+    /// prim is auto-created as `over` if missing and its `propertyChildren` is
+    /// updated. `type_name` and `variability` are construction parameters.
+    pub fn new(
+        data: &'a mut dyn sdf::AbstractData,
+        path: impl Into<sdf::Path>,
+        type_name: impl Into<String>,
+        variability: sdf::Variability,
+        custom: bool,
+    ) -> Result<Self, sdf::AuthoringError> {
+        let path = path.into();
+        let type_name = Some(type_name.into());
+        create_property_spec(data, &path, sdf::SpecType::Attribute, type_name, variability, custom)?;
+        Ok(Self::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
+    }
 }
 
 impl<'a, B> AttributeSpec<'a, B>
@@ -1036,6 +1091,21 @@ impl<'a> RelationshipSpecMut<'a> {
         matches!(data.spec_type(&path), Some(sdf::SpecType::Relationship))
             .then(|| Self(PropertySpec(Spec::wrap(data, path))))
     }
+
+    /// Create a relationship spec at `path`, mirroring C++
+    /// `SdfRelationshipSpec::New`. The owning prim is auto-created as `over` if
+    /// missing and its `propertyChildren` is updated. `variability` and `custom`
+    /// are construction parameters.
+    pub fn new(
+        data: &'a mut dyn sdf::AbstractData,
+        path: impl Into<sdf::Path>,
+        variability: sdf::Variability,
+        custom: bool,
+    ) -> Result<Self, sdf::AuthoringError> {
+        let path = path.into();
+        create_property_spec(data, &path, sdf::SpecType::Relationship, None, variability, custom)?;
+        Ok(Self::get(data, path).expect("type guaranteed by require_spec_type_or_absent"))
+    }
 }
 
 impl<'a, B> RelationshipSpec<'a, B>
@@ -1130,6 +1200,371 @@ fn remove_path(paths: &mut Vec<sdf::Path>, path: &sdf::Path) -> bool {
     };
     paths.remove(idx);
     true
+}
+
+/// Create the property spec at `path` (a property path), shared by
+/// [`AttributeSpec::new`] and [`RelationshipSpec::new`]. Auto-creates the owning
+/// prim chain as `over`, registers `property_name` in `propertyChildren`, then
+/// authors `typeName` (attributes only), `variability`, and `custom`.
+fn create_property_spec(
+    data: &mut dyn sdf::AbstractData,
+    path: &sdf::Path,
+    spec_type: sdf::SpecType,
+    type_name: Option<String>,
+    variability: sdf::Variability,
+    custom: bool,
+) -> Result<(), sdf::AuthoringError> {
+    let (prim_path, property_name) = split_property_path(path)?;
+    require_spec_type_or_absent(data, path, spec_type)?;
+    validate_token_vec(data, &prim_path, sdf::ChildrenKey::PropertyChildren)?;
+    ensure_prim_chain(data, &prim_path)?;
+    add_to_token_vec(data, &prim_path, sdf::ChildrenKey::PropertyChildren, &property_name)?;
+
+    if !data.has_spec(path) {
+        data.create_spec(path.clone(), spec_type);
+    }
+    if let Some(type_name) = type_name {
+        data.set_field(path, sdf::FieldKey::TypeName.as_str(), sdf::Value::token(type_name));
+    }
+    let varying = variability != sdf::Variability::Varying;
+    set_or_erase(
+        data,
+        path,
+        sdf::FieldKey::Variability.as_str(),
+        varying.then_some(sdf::Value::Variability(variability)),
+    );
+    set_or_erase(
+        data,
+        path,
+        sdf::FieldKey::Custom.as_str(),
+        custom.then_some(sdf::Value::Bool(true)),
+    );
+    Ok(())
+}
+
+/// Author `value` at `key`, or erase the field when `value` is `None`.
+fn set_or_erase(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key: &str, value: Option<sdf::Value>) {
+    match value {
+        Some(value) => data.set_field(path, key, value),
+        None => data.erase_field(path, key),
+    }
+}
+
+/// Ensure prim specs exist for every ancestor of `target` and for `target`
+/// itself, creating missing ones as `over`. Updates each parent's
+/// `primChildren` to include the next name along the chain. Idempotent.
+/// `target` must be an absolute, non-root, non-property prim path;
+/// callers should validate via [`require_prim_path`] first.
+///
+/// Errors with [`sdf::AuthoringError::InvalidPath`] if any ancestor or `target`
+/// path already holds a spec of a non-prim type — stamping `primChildren`
+/// onto an Attribute or Relationship spec would corrupt the layer.
+fn ensure_prim_chain(data: &mut dyn sdf::AbstractData, target: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+    let chain = namespace_chain(target)?;
+    let abs_root = sdf::Path::abs_root();
+
+    // The first element's parent is the pseudo-root; if a spec already sits
+    // there it must be a `PseudoRoot`, or `primChildren` would be stamped onto
+    // the wrong spec type below.
+    let root_type = data.spec_type(&abs_root);
+    if matches!(root_type, Some(ty) if ty != sdf::SpecType::PseudoRoot) {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: abs_root,
+            reason: "root spec exists with a non-PseudoRoot SpecType",
+        });
+    }
+
+    // The parent of each element is positional: the preceding element, or the
+    // pseudo-root for the first.
+    let parent_of = |i: usize| if i == 0 { &abs_root } else { &chain[i - 1].path };
+
+    // First pass: every existing spec along the chain must already hold the
+    // SpecType the chain expects, and every child-list field must be a
+    // `TokenVec` (or absent). Stamping `primChildren` onto an Attribute, or a
+    // variant set onto a non-prim, would corrupt the layer.
+    for (i, elem) in chain.iter().enumerate() {
+        if let Some(existing) = data.spec_type(&elem.path) {
+            if existing != elem.spec_type {
+                return Err(sdf::AuthoringError::InvalidPath {
+                    path: elem.path.clone(),
+                    reason: "spec exists with an incompatible SpecType",
+                });
+            }
+        }
+        validate_token_vec(data, parent_of(i), elem.child_key)?;
+    }
+
+    // Materialize the pseudo-root so the first element's parent is present;
+    // every other element's parent is itself an earlier element in the chain.
+    if root_type.is_none() {
+        data.create_spec(abs_root.clone(), sdf::SpecType::PseudoRoot);
+    }
+
+    // Second pass: register each child name on its parent and create the spec.
+    for (i, elem) in chain.iter().enumerate() {
+        add_to_token_vec(data, parent_of(i), elem.child_key, &elem.child_name)?;
+
+        if data.spec_type(&elem.path).is_none() {
+            data.create_spec(elem.path.clone(), elem.spec_type);
+            // Only prim specs carry a specifier; variant set / variant specs
+            // are pure scaffolding.
+            if elem.spec_type == sdf::SpecType::Prim {
+                data.set_field(
+                    &elem.path,
+                    sdf::FieldKey::Specifier.as_str(),
+                    sdf::Value::Specifier(sdf::Specifier::Over),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One spec on the namespace chain from the pseudo-root down to an authoring
+/// target, in root → leaf order. A variant selection `{set=sel}` expands into
+/// two elements: the variant set spec (`/Prim{set=}`) registered under the
+/// owning prim's `variantSetChildren`, then the variant spec (`/Prim{set=sel}`)
+/// registered under the variant set's `variantChildren`.
+///
+/// The parent is positional — every element's parent is the preceding element
+/// (or the pseudo-root for the first), so it isn't stored. `child_name` is kept
+/// because it is not recoverable from `path` for variant elements
+/// (`/Prim{set=}.name()` is `Prim{set=}`, not the set name `set`).
+struct ChainElement {
+    /// Path of the spec to ensure.
+    path: sdf::Path,
+    /// Spec type to create at `path` if absent.
+    spec_type: sdf::SpecType,
+    /// Child-list field on the parent that records `child_name`.
+    child_key: sdf::ChildrenKey,
+    /// Name to register in the parent's child list.
+    child_name: String,
+}
+
+/// Validate that `target` is an authorable prim path and invoke `emit` for
+/// each of its components ([`sdf::Path::components`]) in root → leaf order.
+///
+/// Adds the authoring rules on top of the shared prim-path grammar: `target`
+/// must be absolute, non-root, and non-property, every prim name and variant
+/// set / selection must be a USD identifier, and the whole path must parse (no
+/// malformed tail). Both [`require_prim_path`] (validate only, no allocation)
+/// and [`namespace_chain`] (build the spec chain) drive this, so they cannot
+/// drift apart.
+fn parse_prim_path(
+    target: &sdf::Path,
+    mut emit: impl FnMut(sdf::PathComponent<'_>),
+) -> Result<(), sdf::AuthoringError> {
+    let invalid = |reason: &'static str| sdf::AuthoringError::InvalidPath {
+        path: target.clone(),
+        reason,
+    };
+    if !target.is_abs() || target.is_abs_root() {
+        return Err(invalid("expected absolute non-root prim path"));
+    }
+    if target.is_property_path() {
+        return Err(invalid("expected prim path, got property path"));
+    }
+
+    let mut components = target.components();
+    for component in components.by_ref() {
+        match component {
+            sdf::PathComponent::Prim(name) => {
+                if !sdf::Path::is_valid_identifier(name) {
+                    return Err(invalid("prim path component is not a USD identifier"));
+                }
+            }
+            sdf::PathComponent::Variant { set, selection } => {
+                if !sdf::Path::is_valid_identifier(set) {
+                    return Err(invalid("variant set name is not a USD identifier"));
+                }
+                if selection.is_empty() || !sdf::Path::is_valid_identifier(selection) {
+                    return Err(invalid("variant selection is not a USD identifier"));
+                }
+            }
+        }
+        emit(component);
+    }
+    if !components.remainder().is_empty() {
+        return Err(invalid("malformed prim path"));
+    }
+    Ok(())
+}
+
+/// Decompose `target` — a prim path that may contain `{set=sel}` variant
+/// selections — into the ordered chain of specs that must exist for it to be
+/// authorable. Validation and grammar live in [`parse_prim_path`].
+fn namespace_chain(target: &sdf::Path) -> Result<Vec<ChainElement>, sdf::AuthoringError> {
+    let mut elems = Vec::new();
+    let mut cursor = sdf::Path::abs_root();
+
+    parse_prim_path(target, |component| match component {
+        sdf::PathComponent::Prim(name) => {
+            let path = cursor.append_path(name).expect("name validated as an identifier");
+            elems.push(ChainElement {
+                path: path.clone(),
+                spec_type: sdf::SpecType::Prim,
+                child_key: sdf::ChildrenKey::PrimChildren,
+                child_name: name.to_owned(),
+            });
+            cursor = path;
+        }
+        sdf::PathComponent::Variant { set, selection } => {
+            elems.push(ChainElement {
+                path: cursor.append_variant_selection(set, ""),
+                spec_type: sdf::SpecType::VariantSet,
+                child_key: sdf::ChildrenKey::VariantSetChildren,
+                child_name: set.to_owned(),
+            });
+            let variant_path = cursor.append_variant_selection(set, selection);
+            elems.push(ChainElement {
+                path: variant_path.clone(),
+                spec_type: sdf::SpecType::Variant,
+                child_key: sdf::ChildrenKey::VariantChildren,
+                child_name: selection.to_owned(),
+            });
+            cursor = variant_path;
+        }
+    })?;
+    Ok(elems)
+}
+
+/// Insert `name` into the `TokenVec` field at `key` on the spec at `owner_path`,
+/// creating the field if absent. No-op if the name is already present.
+///
+// TODO(perf): this clones the parent's whole child-name `TokenVec` per insert
+// (read-into-owned → push → write back), so registering N siblings is O(N^2).
+// An in-place `AbstractData` append hook (default clone-set, overridden by
+// `Data` to `spec_mut` + `Vec::push`) would make each registration O(1).
+fn add_to_token_vec(
+    data: &mut dyn sdf::AbstractData,
+    owner_path: &sdf::Path,
+    key: sdf::ChildrenKey,
+    name: &str,
+) -> Result<(), sdf::AuthoringError> {
+    // A decode error must surface, not be mistaken for an absent field — the
+    // `None` arm overwrites, which would silently drop an undecodable child
+    // list on a lazy backend.
+    let existing = read_child_field(data, owner_path, key)?;
+    match existing {
+        Some(sdf::Value::TokenVec(mut v)) => {
+            if !v.iter().any(|n| *n == name) {
+                v.push(name.into());
+                data.set_field(owner_path, key.as_str(), sdf::Value::TokenVec(v));
+            }
+        }
+        Some(_) => {
+            return Err(sdf::AuthoringError::InvalidPath {
+                path: owner_path.clone(),
+                reason: "child-list field exists with non-TokenVec value",
+            });
+        }
+        None => {
+            data.set_field(owner_path, key.as_str(), sdf::Value::TokenVec(vec![name.into()]));
+        }
+    }
+    Ok(())
+}
+
+/// Verify that an authored child-list field is either absent or a `TokenVec`.
+/// Inspects the value in place, without cloning the whole child list.
+fn validate_token_vec(
+    data: &dyn sdf::AbstractData,
+    path: &sdf::Path,
+    key: sdf::ChildrenKey,
+) -> Result<(), sdf::AuthoringError> {
+    let value = data
+        .try_field(path, key.as_str())
+        .map_err(|_| sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "child-list field could not be read",
+        })?;
+    match value {
+        Some(value) if !matches!(&*value, sdf::Value::TokenVec(_)) => Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "child-list field exists with non-TokenVec value",
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Read a child-list field as an owned [`sdf::Value`], surfacing a decode
+/// failure as an [`sdf::AuthoringError`] rather than swallowing it to "absent".
+fn read_child_field(
+    data: &dyn sdf::AbstractData,
+    path: &sdf::Path,
+    key: sdf::ChildrenKey,
+) -> Result<Option<sdf::Value>, sdf::AuthoringError> {
+    let value = data
+        .try_field(path, key.as_str())
+        .map_err(|_| sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "child-list field could not be read",
+        })?;
+    Ok(value.map(Cow::into_owned))
+}
+
+/// Verify that `path` either holds no spec or holds one of type `expected`.
+fn require_spec_type_or_absent(
+    data: &dyn sdf::AbstractData,
+    path: &sdf::Path,
+    expected: sdf::SpecType,
+) -> Result<(), sdf::AuthoringError> {
+    match data.spec_type(path) {
+        Some(existing) if existing != expected => Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "spec exists with the wrong SpecType",
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Validate that `path` is an absolute, non-root, non-property path suitable
+/// for prim authoring. Each prim component must be a USD identifier, optionally
+/// carrying `{set=sel}` variant selections whose set and selection names are
+/// themselves identifiers. Shares [`parse_prim_path`] with [`namespace_chain`]
+/// so the accepted grammar stays in lock-step, but allocates nothing — it
+/// drives the parser with a no-op rather than building the spec chain.
+fn require_prim_path(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+    parse_prim_path(path, |_| {})
+}
+
+/// Reject a target whose leaf is a variant selection (e.g. `/Prim{set=sel}`).
+///
+/// Such a path identifies a variant spec, not a prim, so [`PrimSpec::new`] /
+/// [`PrimSpec::over`] cannot author a `PrimSpec` there. (Properties and children
+/// *inside* a variant — `/Prim{set=sel}.attr`, `/Prim{set=sel}child` — remain
+/// valid; only the bare variant selection as the leaf is rejected.)
+fn require_prim_leaf(path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+    if path.is_prim_variant_selection_path() {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "expected a prim path, but the leaf is a variant selection",
+        });
+    }
+    Ok(())
+}
+
+/// Split a property path like `/World/Mesh.points` into `(/World/Mesh,
+/// "points")`. Returns an error if `path` is not an absolute property path
+/// whose owning prim portion is itself a valid prim path.
+fn split_property_path(path: &sdf::Path) -> Result<(sdf::Path, String), sdf::AuthoringError> {
+    let (prim_path, suffix) = path.split_property().ok_or(sdf::AuthoringError::InvalidPath {
+        path: path.clone(),
+        reason: "expected property path",
+    })?;
+    // Owning prim must be an absolute, non-root, non-property path — guards
+    // against relative roots ("A.foo"), root-level properties ("/.foo"), and
+    // paths whose `prim_path()` returned a structurally invalid string.
+    require_prim_path(&prim_path)?;
+    // Property names are colon-separated identifiers — reject target/connection
+    // brackets, embedded dots, and other syntax that would round-trip as garbage.
+    if !suffix.split(':').all(sdf::Path::is_valid_identifier) {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "property name must be a colon-separated identifier",
+        });
+    }
+    Ok((prim_path, suffix.to_owned()))
 }
 
 #[cfg(test)]

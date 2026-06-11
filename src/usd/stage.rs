@@ -762,34 +762,11 @@ impl Stage {
     pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            // Snapshot pre-author state so an idempotent call (existing
-            // spec, matching specifier) emits an empty `ChangeList` instead
-            // of triggering a stale-index drop.
-            let data = layer.data();
-            let had_spec = data.has_spec(&layer_path);
-            let prior_specifier_matches = had_spec
-                && matches!(
-                    data.try_field(&layer_path, sdf::FieldKey::Specifier.as_str())
-                        .ok()
-                        .flatten()
-                        .as_deref(),
-                    Some(sdf::Value::Specifier(sdf::Specifier::Def))
-                );
-
-            let auto_ancestors = layer.missing_prim_ancestors(&layer_path);
-            layer.create_prim(layer_path.clone(), sdf::Specifier::Def, "")?;
-            let mut cl = sdf::ChangeList::new();
-            if !had_spec {
-                let entry = cl.entry_mut(&layer_path);
-                entry.flags |= sdf::ChangeFlags::ADD_NON_INERT_PRIM;
-                entry.info_changed.insert(sdf::FieldKey::Specifier.as_str());
-            } else if !prior_specifier_matches {
-                cl.entry_mut(&layer_path)
-                    .info_changed
-                    .insert(sdf::FieldKey::Specifier.as_str());
-            }
-            cl.add_inert_prims(auto_ancestors);
-            Ok(cl)
+            // The layer's `EditProxy` records the spec add and any auto-created
+            // ancestor `over`s; an idempotent call (existing def) records
+            // nothing because the value-diff suppresses the no-op write.
+            sdf::PrimSpec::new(layer.data_mut(), layer_path, sdf::Specifier::Def, "")?;
+            Ok(())
         })?;
         Ok(super::Prim::new(self, path))
     }
@@ -802,9 +779,8 @@ impl Stage {
     pub fn override_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            let mut cl = sdf::ChangeList::new();
-            cl.add_inert_prims(layer.ensure_prim_over(layer_path)?);
-            Ok(cl)
+            sdf::PrimSpec::over(layer.data_mut(), layer_path)?;
+            Ok(())
         })?;
         Ok(super::Prim::new(self, path))
     }
@@ -822,15 +798,11 @@ impl Stage {
         let path = path.into();
         let type_name = type_name.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            // The owning prim and all its missing ancestors get
-            // auto-created as `over` specs by `create_attribute`.
-            let owning_prim = layer_path.prim_path();
-            let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
-            layer.create_attribute(layer_path.clone(), type_name, sdf::Variability::Varying, true)?;
-            let mut cl = sdf::ChangeList::new();
-            cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
-            cl.add_inert_prims(auto_ancestors);
-            Ok(cl)
+            // The owning prim and any missing ancestors are auto-created as
+            // `over` specs; the layer's `EditProxy` records them and the
+            // property add.
+            sdf::AttributeSpec::new(layer.data_mut(), layer_path, type_name, sdf::Variability::Varying, true)?;
+            Ok(())
         })?;
         Ok(super::Attribute::new(self, path))
     }
@@ -842,13 +814,8 @@ impl Stage {
     pub fn create_relationship(&self, path: impl Into<sdf::Path>) -> Result<super::Relationship, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            let owning_prim = layer_path.prim_path();
-            let auto_ancestors = layer.missing_prim_chain_inclusive(&owning_prim);
-            layer.create_relationship(layer_path.clone(), sdf::Variability::Varying, true)?;
-            let mut cl = sdf::ChangeList::new();
-            cl.entry_mut(&layer_path).flags |= sdf::ChangeFlags::ADD_PROPERTY;
-            cl.add_inert_prims(auto_ancestors);
-            Ok(cl)
+            sdf::RelationshipSpec::new(layer.data_mut(), layer_path, sdf::Variability::Varying, true)?;
+            Ok(())
         })?;
         Ok(super::Relationship::new(self, path))
     }
@@ -865,25 +832,10 @@ impl Stage {
     pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
         let name = name.into();
         self.with_root_layer(|layer| {
-            // Skip cache invalidation when the value isn't changing.
-            // `defaultPrim` is stored as a `Token`; treat a matching
-            // `String` opinion as equivalent (the Sdf-tier setter writes
-            // `Token`, but a layer loaded from text might surface either).
-            let prior = layer
-                .data()
-                .try_field(&sdf::Path::abs_root(), sdf::FieldKey::DefaultPrim.as_str())
-                .ok()
-                .flatten();
-            let unchanged = prior.as_deref().and_then(sdf::Value::as_str) == Some(name.as_str());
-
+            // The layer's `EditProxy` records the `defaultPrim` change, and its
+            // value-diff skips cache invalidation when the value isn't changing.
             layer.set_default_prim(name)?;
-            let mut cl = sdf::ChangeList::new();
-            if !unchanged {
-                cl.entry_mut(&sdf::Path::abs_root())
-                    .info_changed
-                    .insert(sdf::FieldKey::DefaultPrim.as_str());
-            }
-            Ok(cl)
+            Ok(())
         })
     }
 
@@ -897,11 +849,7 @@ impl Stage {
             layer
                 .pseudo_root_mut()?
                 .set(sdf::FieldKey::CustomLayerData.as_str(), value);
-            let mut cl = sdf::ChangeList::new();
-            cl.entry_mut(&sdf::Path::abs_root())
-                .info_changed
-                .insert(sdf::FieldKey::CustomLayerData.as_str());
-            Ok(cl)
+            Ok(())
         })
     }
 
@@ -924,7 +872,7 @@ impl Stage {
     /// On any post-mutation error the cache falls back to "blow the world".
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<sdf::ChangeList, sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<(), sdf::AuthoringError>,
     {
         // Read the target identifier and mapped spec path under a short borrow
         // of `edit_target` (which owns a heap `MapFunction`), releasing it
@@ -939,7 +887,7 @@ impl Stage {
                     })?;
             (target.layer_identifier.clone(), spec_path)
         };
-        let (layer_id, result) = {
+        let (layer_id, authored) = {
             let mut layers = self.layers.borrow_mut();
             let layer_id = layers
                 .id_of(&identifier)
@@ -947,7 +895,7 @@ impl Stage {
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
             (layer_id, f(&mut node.layer, spec_path))
         };
-        self.finalize_layer(layer_id, result)
+        self.finalize_layer(layer_id, authored)
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
@@ -957,7 +905,7 @@ impl Stage {
     /// root-layer field authored at `abs_root` verbatim.
     fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<sdf::ChangeList, sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
     {
         let layer_id = self
             .layers
@@ -966,19 +914,25 @@ impl Stage {
             .ok_or(StageAuthoringError::OutsideEditTarget {
                 path: sdf::Path::abs_root(),
             })?;
-        let result = {
+        let authored = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("root_id refers to a live layer");
             f(&mut node.layer)
         };
-        self.finalize_layer(layer_id, result).map(|_| ())
+        self.finalize_layer(layer_id, authored).map(|_| ())
     }
 
-    /// Translate a Layer-tier authoring result into the Stage error type and
-    /// invalidate the composition cache via [`pcp::Changes`]. An empty
-    /// change list short-circuits with no invalidation; a non-empty list is
-    /// classified and applied. Post-mutation errors fall back to a
-    /// stage-wide blow-out because the layer may be in a partial state.
+    /// Drain the layer's recorded changes after an authoring call and drive
+    /// composition invalidation from them. On success the layer's `EditProxy`
+    /// change list is taken and classified through [`pcp::Changes`]: an empty
+    /// list short-circuits with no invalidation, a non-empty one is applied. On
+    /// failure the partial record is discarded and the cache falls back to a
+    /// stage-wide blow-out, because the layer may be in a partial state.
+    //
+    // TODO(perf): `take_changes` allocates a fresh `ChangeList` per authoring
+    // op. A stage-owned scratch buffer drained through the proxy's
+    // `EditProxy::take(out)`, paired with a borrowing `pcp::Changes::did_change`,
+    // would let both the proxy and the stage reuse their allocations across edits.
     //
     // TODO: the error-path fallback to layer-stack-wide reset is
     // conservative. Once `Layer` authoring methods either complete
@@ -988,9 +942,24 @@ impl Stage {
     fn finalize_layer(
         &self,
         layer_id: pcp::LayerId,
-        result: Result<sdf::ChangeList, sdf::AuthoringError>,
+        authored: Result<(), sdf::AuthoringError>,
     ) -> Result<bool, StageAuthoringError> {
-        match result {
+        // Drain (or discard a partial record) under a short layer borrow, before
+        // re-borrowing the graph and cache for classification.
+        let drained = {
+            let mut layers = self.layers.borrow_mut();
+            let node = layers
+                .get_mut(layer_id)
+                .expect("finalize_layer called with a live layer id");
+            match authored {
+                Ok(()) => Ok(node.layer.take_changes()),
+                Err(e) => {
+                    node.layer.discard_changes();
+                    Err(e)
+                }
+            }
+        };
+        match drained {
             Ok(cl) if cl.is_empty() => Ok(false),
             Ok(cl) => {
                 let mut changes = pcp::Changes::new();
@@ -1489,21 +1458,20 @@ impl Stage {
         // Author the parent's metadata first; the child node is added only after
         // this succeeds (the authored asset path is a plain string, so the node
         // need not exist yet — only the later rebuild's `find()` needs it).
-        let (parent_id, cl) = {
+        let parent_id = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
             let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-            let cl = node.layer.pseudo_root_mut().map(|mut root| {
-                root.insert_sublayer(pos, identifier, offset);
-                Self::sublayers_change_list()
-            });
-            (parent_id, cl)
+            node.layer
+                .pseudo_root_mut()
+                .map(|mut root| root.insert_sublayer(pos, identifier, offset))
+                .map_err(StageAuthoringError::Layer)?;
+            parent_id
         };
-        let cl = cl.map_err(StageAuthoringError::Layer)?;
         self.layers.borrow_mut().ensure_layer(layer);
-        self.finalize_layer(parent_id, Ok(cl))?;
+        self.finalize_layer(parent_id, Ok(()))?;
         Ok(())
     }
 
@@ -1521,7 +1489,7 @@ impl Stage {
     /// `parent` is not in the stage, and [`StageAuthoringError::Layer`] if
     /// `parent` is read-only.
     pub fn remove_sub_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
-        let (parent_id, cl) = {
+        let (parent_id, removed) = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
@@ -1536,35 +1504,22 @@ impl Stage {
                 subs.into_iter()
                     .find(|entry| layers.id_of(entry).or_else(|| layers.find(entry)) == Some(child_id))
             });
-            let cl = match authored {
+            let removed = match authored {
                 Some(entry) => {
                     let node = layers.get_mut(parent_id).expect("id_of returned a live id");
                     node.layer
                         .pseudo_root_mut()
-                        .map(|mut root| root.remove_sublayer(&entry).then(Self::sublayers_change_list))
+                        .map(|mut root| root.remove_sublayer(&entry))
+                        .map_err(StageAuthoringError::Layer)?
                 }
-                None => Ok(None),
+                None => false,
             };
-            (parent_id, cl)
+            (parent_id, removed)
         };
-        match cl.map_err(StageAuthoringError::Layer)? {
-            Some(cl) => {
-                self.finalize_layer(parent_id, Ok(cl))?;
-                Ok(true)
-            }
-            None => Ok(false),
+        if removed {
+            self.finalize_layer(parent_id, Ok(()))?;
         }
-    }
-
-    /// A pseudo-root [`sdf::ChangeList`] recording a `subLayers` /
-    /// `subLayerOffsets` edit, so [`finalize_layer`](Self::finalize_layer)
-    /// classifies it as a layer-stack rebuild.
-    fn sublayers_change_list() -> sdf::ChangeList {
-        let mut cl = sdf::ChangeList::new();
-        let entry = cl.entry_mut(&sdf::Path::abs_root());
-        entry.info_changed.insert(sdf::FieldKey::SubLayers.as_str());
-        entry.info_changed.insert(sdf::FieldKey::SubLayerOffsets.as_str());
-        cl
+        Ok(removed)
     }
 
     /// Borrows the stage's layer graph.
@@ -1940,10 +1895,22 @@ mod tests {
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
-        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
-        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
-            .set_connection_paths([target.clone()]);
+        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.outputs:out",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.inputs:in",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?
+        .set_connection_paths([target.clone()]);
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -1970,10 +1937,22 @@ mod tests {
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
-        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
-        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
-            .set_connection_paths([target.clone()]);
+        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.outputs:out",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.inputs:in",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?
+        .set_connection_paths([target.clone()]);
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -1999,10 +1978,22 @@ mod tests {
         strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        weak.create_prim("/Mat", sdf::Specifier::Def, "Shader")?;
-        weak.create_attribute("/Mat.outputs:out", "color3f", sdf::Variability::Varying, true)?;
-        weak.create_attribute("/Mat.inputs:in", "color3f", sdf::Variability::Varying, true)?
-            .set_connection_paths([target.clone()]);
+        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.outputs:out",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?;
+        sdf::AttributeSpec::new(
+            weak.data_mut(),
+            "/Mat.inputs:in",
+            "color3f",
+            sdf::Variability::Varying,
+            true,
+        )?
+        .set_connection_paths([target.clone()]);
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -2081,8 +2072,7 @@ mod tests {
     /// resolves by exact or suffix match.
     fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
         let mut layer = sdf::Layer::new_in_memory(identifier);
-        layer
-            .create_attribute("/A.x", "double", sdf::Variability::Varying, true)?
+        sdf::AttributeSpec::new(layer.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
             .set_default(sdf::Value::Double(value));
         Ok(layer)
     }

@@ -2242,8 +2242,7 @@ fn clip_timings_curve() -> Result<()> {
 /// A weak sublayer carrying one opinion, for the sublayer-mutation tests.
 fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
     let mut layer = sdf::Layer::new_anonymous(identifier);
-    layer
-        .create_attribute("/A.x", "double", sdf::Variability::Varying, true)?
+    sdf::AttributeSpec::new(layer.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
         .set_default(sdf::Value::Double(value));
     Ok(layer)
 }
