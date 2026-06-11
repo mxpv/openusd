@@ -135,7 +135,7 @@ fn connected_texture_file(shader: &Shader, base: &str) -> Result<Option<String>>
 fn resolve_asset_value(stage: &Stage, attr: &Path) -> Result<Option<String>> {
     let mut current = attr.clone();
     for _ in 0..MAX_CONNECTION_HOPS {
-        if let Some(source) = stage.attribute_at(current.clone()).connections()?.into_iter().next() {
+        if let Some(source) = stage.attribute(current.clone()).connections()?.into_iter().next() {
             current = source;
             continue;
         }

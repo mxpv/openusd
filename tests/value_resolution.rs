@@ -38,7 +38,7 @@ fn scalar(v: Option<Value>) -> Option<f64> {
 fn value_at(stage: &usd::Stage, attr: &str, time: f64) -> Option<f64> {
     scalar(
         stage
-            .attribute_at(path(attr).unwrap())
+            .attribute(path(attr).unwrap())
             .get_at::<Value>(usd::TimeCode::new(time))
             .expect("value_at"),
     )
@@ -49,7 +49,7 @@ fn value_at(stage: &usd::Stage, attr: &str, time: f64) -> Option<f64> {
 #[test]
 fn default_opinion() -> Result<()> {
     let stage = open("default")?;
-    let default = stage.prim_at(path("/Root")?).attribute("root").get::<Value>()?;
+    let default = stage.prim(path("/Root")?).attribute("root").get::<Value>()?;
     assert_eq!(scalar(default), Some(2.0));
     Ok(())
 }

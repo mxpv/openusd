@@ -174,7 +174,7 @@ impl ResolvedBase {
 /// available; only plain authored namespaced attributes are gathered here.
 pub fn compute_namespaced_settings(stage: &Stage, prim: &Path, namespaces: &[&str]) -> Result<Vec<(String, Value)>> {
     let mut out = Vec::new();
-    for name in stage.prim_at(prim.clone()).property_names()? {
+    for name in stage.prim(prim.clone()).property_names()? {
         // TODO(shade): `outputs:`-connected settings are driven by a node
         // graph; resolving their value producer needs UsdShade.
         if name.starts_with("outputs:") {
@@ -238,7 +238,7 @@ fn collect_var_indices(
 /// aperture attributes by name so it needs no dependency on the `geom`
 /// feature — the conform policy only needs these two floats.
 fn read_camera_aperture(stage: &Stage, camera: &Path) -> Result<[f32; 2]> {
-    let prim = stage.prim_at(camera.clone());
+    let prim = stage.prim(camera.clone());
     Ok([
         read_f32(&prim.attribute("horizontalAperture"))?.unwrap_or(20.955),
         read_f32(&prim.attribute("verticalAperture"))?.unwrap_or(15.2908),

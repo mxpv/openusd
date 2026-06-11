@@ -60,14 +60,8 @@ mod tests {
         Xform::define(&stage, "/Group")?;
         Scope::define(&stage, "/Stage")?;
 
-        assert_eq!(
-            stage.prim_at(sdf::path("/Group")?).type_name()?.as_deref(),
-            Some("Xform")
-        );
-        assert_eq!(
-            stage.prim_at(sdf::path("/Stage")?).type_name()?.as_deref(),
-            Some("Scope")
-        );
+        assert_eq!(stage.prim(sdf::path("/Group")?).type_name()?.as_deref(), Some("Xform"));
+        assert_eq!(stage.prim(sdf::path("/Stage")?).type_name()?.as_deref(), Some("Scope"));
         assert!(Xform::get(&stage, "/Group")?.is_some());
         assert!(Scope::get(&stage, "/Stage")?.is_some());
         assert!(Xform::get(&stage, "/Stage")?.is_none());

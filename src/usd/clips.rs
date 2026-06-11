@@ -25,7 +25,7 @@ use super::{Prim, StageAuthoringError};
 /// ```no_run
 /// # use openusd::usd::{Stage, ClipsAPI};
 /// # fn demo(stage: &Stage) -> anyhow::Result<()> {
-/// let prim = stage.prim_at(openusd::sdf::path("/World/Anim")?);
+/// let prim = stage.prim(openusd::sdf::path("/World/Anim")?);
 /// let clips = ClipsAPI::new(&prim);
 /// for set in clips.clip_set_names()? {
 ///     let assets = clips.clip_asset_paths(&set)?;
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn reads_explicit_clip_set_from_fixture() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_asset_anchor"))?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
 
         assert_eq!(clips.clip_set_names()?, vec!["default".to_string()]);
         assert_eq!(clips.clip_asset_paths("default")?, vec![AssetPath::new("./clip.usda")]);
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn reads_template_clip_set_from_fixture() -> anyhow::Result<()> {
         let stage = Stage::open(&fixture("clip_template"))?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Model")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Model")?));
 
         assert_eq!(
             clips.clip_template_asset_path("default")?.as_deref(),
@@ -371,7 +371,7 @@ mod tests {
             "clips",
             Value::Dictionary([("default".to_string(), set)].into_iter().collect()),
         )?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
 
         assert_eq!(
             clips.clip_times("default")?,
@@ -387,7 +387,7 @@ mod tests {
         // Missing set, missing field, and a prim with no clips at all.
         assert!(clips.clip_asset_paths("nope")?.is_empty());
         assert!(clips.clip_prim_path("default")?.is_none());
-        assert!(ClipsAPI::new(&stage.prim_at(sdf::path("/Absent")?))
+        assert!(ClipsAPI::new(&stage.prim(sdf::path("/Absent")?))
             .clip_set_names()?
             .is_empty());
         Ok(())
@@ -400,7 +400,7 @@ mod tests {
     fn set_get_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
 
         clips.set_clip_asset_paths("default", ["a.usda", "b.usda"])?;
         clips.set_clip_active("default", vec![gf::vec2d(0.0, 0.0), gf::vec2d(10.0, 1.0)])?;
@@ -447,7 +447,7 @@ mod tests {
     fn clip_sets_list_op_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
 
         assert!(clips.clip_sets()?.is_none());
         clips.set_clip_sets(sdf::StringListOp::explicit(vec!["b".into(), "a".into()]))?;
@@ -462,7 +462,7 @@ mod tests {
     fn clips_dict_round_trip() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
         stage.define_prim(sdf::path("/Anim")?)?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/Anim")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/Anim")?));
         assert!(clips.clips()?.is_none());
 
         let set = Value::Dictionary([(keys::PRIM_PATH.to_string(), Value::String("/Geo".into()))].into());
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn set_creates_over_without_local_spec() -> anyhow::Result<()> {
         let stage = Stage::builder().in_memory("anon.usda")?;
-        let clips = ClipsAPI::new(&stage.prim_at(sdf::path("/NoSpec")?));
+        let clips = ClipsAPI::new(&stage.prim(sdf::path("/NoSpec")?));
         clips.set_clip_prim_path("default", "/Geo")?;
         assert_eq!(clips.clip_prim_path("default")?.as_deref(), Some("/Geo"));
         Ok(())

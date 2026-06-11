@@ -135,7 +135,7 @@ fn assert_prims_exist(name: &str, format: Format, baseline: &pcp_json::Baseline,
         }
 
         // Check property names.
-        let props = stage.prim_at(prim_path.as_str()).property_names().unwrap_or_default();
+        let props = stage.prim(prim_path.as_str()).property_names().unwrap_or_default();
         for prop in &expected.property_names {
             if !props.iter().any(|p| p.as_str() == prop.as_str()) {
                 failures.push(format!("missing property: {prim_path}.{prop}"));
@@ -326,7 +326,7 @@ mod pcp_txt {
             .unwrap();
 
         for path in &prims {
-            let prim = stage.prim_at(path.clone());
+            let prim = stage.prim(path.clone());
 
             let _ = writeln!(out, "{sep}");
             let _ = writeln!(out, "Results for composing <{path}>");
@@ -1054,7 +1054,7 @@ mod cycle_termination {
         assert!(count > 0, "traversal composed at least one prim");
 
         // The reference diamond GroupRoot -> A -> B -> A keeps GroupA's child.
-        let group_root = stage.prim_at(sdf::path("/GroupRoot").unwrap());
+        let group_root = stage.prim(sdf::path("/GroupRoot").unwrap());
         assert_eq!(
             group_root
                 .child_names()
@@ -1066,11 +1066,11 @@ mod cycle_termination {
         );
 
         // A prim inheriting its own ancestor gains no further self-named child.
-        let yap_child = stage.prim_at(sdf::path("/YetAnotherParent/Child").unwrap());
+        let yap_child = stage.prim(sdf::path("/YetAnotherParent/Child").unwrap());
         assert!(yap_child.child_names().unwrap().is_empty());
 
         // The co-recursive inherit resolves one level then drops the cycle.
-        let corec = stage.prim_at(sdf::path("/CoRecursiveParent1/Child1/Child2").unwrap());
+        let corec = stage.prim(sdf::path("/CoRecursiveParent1/Child1/Child2").unwrap());
         assert!(corec.child_names().unwrap().is_empty());
     }
 
@@ -1080,7 +1080,7 @@ mod cycle_termination {
     #[test]
     fn bug92827_invalid_relocate_dropped() {
         let stage = open("bug92827_root");
-        let a = stage.prim_at(sdf::path("/Rig/Other/A").unwrap());
+        let a = stage.prim(sdf::path("/Rig/Other/A").unwrap());
         let (children, prohibited) = a.prim_index().child_names().unwrap();
         assert_eq!(children.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["Instance"]);
         assert_eq!(prohibited.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["B"]);
@@ -1098,7 +1098,7 @@ mod reorder {
     #[test]
     fn prim_order_reorders_named_children() {
         let stage = open_fixture();
-        let children = stage.prim_at(sdf::path("/Root").unwrap()).child_names().unwrap();
+        let children = stage.prim(sdf::path("/Root").unwrap()).child_names().unwrap();
         assert_eq!(
             children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
             ["C", "D", "A", "B"]
@@ -1111,7 +1111,7 @@ mod reorder {
         // order follows authoring order despite the `reorder properties = [y, x]`
         // opinion in the fixture.
         let stage = open_fixture();
-        let props = stage.prim_at(sdf::path("/Props").unwrap()).property_names().unwrap();
+        let props = stage.prim(sdf::path("/Props").unwrap()).property_names().unwrap();
         assert_eq!(props.iter().map(|t| t.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
     }
 }
@@ -1147,21 +1147,21 @@ mod value_resolution {
         // Local `over` opinion plus an inherit from a `class`. With strongest-
         // wins this would be `over`; per spec 12.2.1 it must be `class`.
         let stage = open_fixture();
-        let value = stage.prim_at(sdf::path("/InheritOnly").unwrap()).specifier().unwrap();
+        let value = stage.prim(sdf::path("/InheritOnly").unwrap()).specifier().unwrap();
         assert_eq!(value, Some(Specifier::Class));
     }
 
     #[test]
     fn specifier_all_over_resolves_to_over() {
         let stage = open_fixture();
-        let value = stage.prim_at(sdf::path("/AllOver").unwrap()).specifier().unwrap();
+        let value = stage.prim(sdf::path("/AllOver").unwrap()).specifier().unwrap();
         assert_eq!(value, Some(Specifier::Over));
     }
 
     #[test]
     fn specifier_def_resolves_to_def() {
         let stage = open_fixture();
-        let value = stage.prim_at(sdf::path("/DefPrim").unwrap()).specifier().unwrap();
+        let value = stage.prim(sdf::path("/DefPrim").unwrap()).specifier().unwrap();
         assert_eq!(value, Some(Specifier::Def));
     }
 
@@ -1172,7 +1172,7 @@ mod value_resolution {
         // authored opinion (`uniform`).
         let stage = open_fixture();
         let value = stage
-            .prim_at(sdf::path("/VarTest").unwrap())
+            .prim(sdf::path("/VarTest").unwrap())
             .attribute("attr")
             .variability()
             .unwrap();
@@ -1185,7 +1185,7 @@ mod value_resolution {
         // resolved value is `true` because *any* opinion in the stack is true.
         let stage = open_fixture();
         let value = stage
-            .prim_at(sdf::path("/CustomTest").unwrap())
+            .prim(sdf::path("/CustomTest").unwrap())
             .attribute("attr")
             .is_custom()
             .unwrap();
@@ -1195,7 +1195,7 @@ mod value_resolution {
     #[test]
     fn dictionary_values_compose_recursively() {
         let stage = open_fixture();
-        let value = stage.prim_at(sdf::path("/DictTest").unwrap()).custom_data().unwrap();
+        let value = stage.prim(sdf::path("/DictTest").unwrap()).custom_data().unwrap();
         let Some(Value::Dictionary(dict)) = value else {
             panic!("customData should resolve to a dictionary");
         };

@@ -613,7 +613,7 @@ impl Prim {
 
     /// Returns `true` when a prim spec is composed at this path. Mirrors C++
     /// `UsdPrim::IsValid` for a handle obtained from
-    /// [`Stage::prim_at`](crate::usd::Stage::prim_at): a path with no
+    /// [`Stage::prim`](crate::usd::Stage::prim): a path with no
     /// contributing spec yields a handle that is not valid.
     pub fn is_valid(&self) -> anyhow::Result<bool> {
         self.stage.has_spec(&self.path)
@@ -774,13 +774,13 @@ mod tests {
             let stage = stage()?;
             stage.define_prim("/A")?.set_type_name("Xform")?;
             stage.define_prim("/B")?.set_type_name("Scope")?;
-            vec![stage.prim_at("/A"), stage.prim_at("/B")]
+            vec![stage.prim("/A"), stage.prim("/B")]
             // `stage` is dropped here; each handle's cloned `Rc` keeps the
             // shared state alive.
         };
 
         assert_eq!(prims[0].path().as_str(), "/A");
-        let type_name = prims[1].stage().prim_at(prims[1].path()).type_name()?;
+        let type_name = prims[1].stage().prim(prims[1].path()).type_name()?;
         assert_eq!(type_name.as_deref(), Some("Scope"));
         Ok(())
     }
@@ -837,8 +837,8 @@ mod tests {
         let stage = stage()?;
         stage.define_prim("/Def")?;
         stage.override_prim("/Over")?;
-        assert_eq!(stage.prim_at("/Def").specifier()?, Some(sdf::Specifier::Def));
-        assert_eq!(stage.prim_at("/Over").specifier()?, Some(sdf::Specifier::Over));
+        assert_eq!(stage.prim("/Def").specifier()?, Some(sdf::Specifier::Def));
+        assert_eq!(stage.prim("/Over").specifier()?, Some(sdf::Specifier::Over));
         Ok(())
     }
 
@@ -851,11 +851,11 @@ mod tests {
         stage
             .define_prim("/A")?
             .set_metadata(sdf::FieldKey::CustomData.as_str(), dict)?;
-        let Some(sdf::Value::Dictionary(read)) = stage.prim_at("/A").custom_data()? else {
+        let Some(sdf::Value::Dictionary(read)) = stage.prim("/A").custom_data()? else {
             panic!("customData should resolve to a dictionary");
         };
         assert_eq!(read.get("note"), Some(&sdf::Value::String("hi".into())));
-        assert!(stage.prim_at("/B").custom_data()?.is_none());
+        assert!(stage.prim("/B").custom_data()?.is_none());
         Ok(())
     }
 
@@ -871,7 +871,7 @@ mod tests {
             stage.field::<sdf::Value>("/World", sdf::FieldKey::TypeName)?,
             Some(sdf::Value::Token("Xform".into())),
         );
-        assert_eq!(stage.prim_at("/World").kind()?.as_deref(), Some("group"));
+        assert_eq!(stage.prim("/World").kind()?.as_deref(), Some("group"));
         Ok(())
     }
 
@@ -880,10 +880,10 @@ mod tests {
         let stage = stage()?;
         let prim = stage.define_prim("/World")?.add_applied_schema("MaterialBindingAPI")?;
         assert_eq!(
-            stage.prim_at(prim.path()).api_schemas()?,
+            stage.prim(prim.path()).api_schemas()?,
             vec![Token::from("MaterialBindingAPI")]
         );
-        assert!(stage.prim_at(prim.path()).has_api_schema("MaterialBindingAPI")?);
+        assert!(stage.prim(prim.path()).has_api_schema("MaterialBindingAPI")?);
         Ok(())
     }
 
@@ -966,7 +966,7 @@ mod tests {
     fn update_metadata_on_pseudo_root_errors() -> anyhow::Result<()> {
         let stage = stage()?;
         let result = stage
-            .prim_at(sdf::path("/")?)
+            .prim(sdf::path("/")?)
             .set_metadata("documentation", sdf::Value::String("x".into()));
         assert!(result.is_err());
         Ok(())

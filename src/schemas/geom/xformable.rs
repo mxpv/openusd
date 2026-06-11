@@ -214,7 +214,7 @@ fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Mat
     };
 
     let attr = prim.path().append_property(base)?;
-    let Some(raw) = prim.stage().attribute_at(attr).get_at::<sdf::Value>(time)? else {
+    let Some(raw) = prim.stage().attribute(attr).get_at::<sdf::Value>(time)? else {
         return Ok(gf::Matrix4d::IDENTITY);
     };
 

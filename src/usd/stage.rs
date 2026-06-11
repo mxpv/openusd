@@ -1260,20 +1260,20 @@ impl Stage {
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; it is returned unconditionally and does not assert that a prim
     /// is composed at the path (query the handle to find out).
-    pub fn prim_at(&self, path: impl Into<sdf::Path>) -> super::Prim {
+    pub fn prim(&self, path: impl Into<sdf::Path>) -> super::Prim {
         super::Prim::new(self, path.into().prim_path())
     }
 
     /// Returns an [`Attribute`](super::Attribute) handle anchored to `path`.
-    /// Mirrors C++ `UsdStage::GetAttributeAtPath`. Like [`Self::prim_at`],
+    /// Mirrors C++ `UsdStage::GetAttributeAtPath`. Like [`Self::prim`],
     /// the handle is returned unconditionally; query it to resolve a value.
-    pub fn attribute_at(&self, path: impl Into<sdf::Path>) -> super::Attribute {
+    pub fn attribute(&self, path: impl Into<sdf::Path>) -> super::Attribute {
         super::Attribute::new(self, path.into())
     }
 
     /// Returns a [`Relationship`](super::Relationship) handle anchored to `path`.
     /// Mirrors C++ `UsdStage::GetRelationshipAtPath`.
-    pub fn relationship_at(&self, path: impl Into<sdf::Path>) -> super::Relationship {
+    pub fn relationship(&self, path: impl Into<sdf::Path>) -> super::Relationship {
         super::Relationship::new(self, path.into())
     }
 
@@ -1438,7 +1438,7 @@ impl Stage {
     /// left unset. Used by traversal so unused checks (e.g. INSTANCE, MODEL
     /// for default traversal) are skipped.
     fn prim_status_masked(&self, prim: &sdf::Path, mask: PrimStatus) -> Result<PrimStatus> {
-        let prim = self.prim_at(prim.clone());
+        let prim = self.prim(prim.clone());
         let mut status = PrimStatus::empty();
         if mask.contains(PrimStatus::ACTIVE) {
             status.set(PrimStatus::ACTIVE, prim.is_active()?);
@@ -2172,7 +2172,7 @@ mod tests {
         stage.insert_sub_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
         assert_eq!(
             stage
-                .attribute_at("/A.x")
+                .attribute("/A.x")
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0))
         );
@@ -2188,7 +2188,7 @@ mod tests {
         )?;
         assert_eq!(
             stage
-                .attribute_at("/A.x")
+                .attribute("/A.x")
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0)),
             "the already-loaded mid layer's child edge to leaf must survive re-insertion"
@@ -2211,7 +2211,7 @@ mod tests {
         let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
         assert_eq!(
             stage
-                .attribute_at("/A.x")
+                .attribute("/A.x")
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0))
         );
@@ -2228,7 +2228,7 @@ mod tests {
         );
         assert_eq!(
             stage
-                .attribute_at("/A.x")
+                .attribute("/A.x")
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the removed sublayer's opinion is gone"

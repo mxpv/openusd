@@ -47,10 +47,10 @@
 //!
 //! let stage = usd::Stage::open("scene.usda")?;
 //!
-//! let sphere = stage.prim_at("/World/Sphere");
+//! let sphere = stage.prim("/World/Sphere");
 //! println!("type: {:?}", sphere.type_name()?);
 //!
-//! let radius = stage.attribute_at("/World/Sphere.radius");
+//! let radius = stage.attribute("/World/Sphere.radius");
 //! if let Some(r) = radius.get::<f64>()? {
 //!     println!("radius = {r}");
 //! }
@@ -69,7 +69,7 @@
 //! stage.set_default_prim("World")?;
 //!
 //! stage.create_attribute("/World/Sphere.radius", "double")?.set(2.5_f64)?;
-//! let radius = stage.attribute_at("/World/Sphere.radius").get::<f64>()?;
+//! let radius = stage.attribute("/World/Sphere.radius").get::<f64>()?;
 //! assert_eq!(radius, Some(2.5));
 //!
 //! # Ok::<(), anyhow::Error>(())

@@ -295,7 +295,7 @@ mod tests {
         AssetPreviewsAPI::apply(&stage, "/Chair")?.set_default_thumbnail("./chair_thumb.jpg")?;
 
         assert!(stage
-            .prim_at(sdf::path("/Chair")?)
+            .prim(sdf::path("/Chair")?)
             .has_api_schema(tok::API_ASSET_PREVIEWS)?);
         let previews = AssetPreviewsAPI::get(&stage, "/Chair")?.expect("AssetPreviewsAPI");
         assert_eq!(previews.default_thumbnail()?.as_deref(), Some("./chair_thumb.jpg"));

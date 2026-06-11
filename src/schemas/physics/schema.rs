@@ -874,7 +874,7 @@ impl DriveAPI {
     /// Every `PhysicsDriveAPI` instance applied to the prim at `path`, one per
     /// driven DOF (C++ `UsdPhysicsDriveAPI::GetAll`).
     pub fn get_all(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<Self>> {
-        let prim = stage.prim_at(path);
+        let prim = stage.prim(path);
         let prefix = format!("{}:", tok::API_DRIVE);
         Ok(prim
             .api_schemas()?
@@ -1034,7 +1034,7 @@ impl LimitAPI {
     /// Every `PhysicsLimitAPI` instance applied to the prim at `path`, one per
     /// limited DOF (C++ `UsdPhysicsLimitAPI::GetAll`).
     pub fn get_all(stage: &Stage, path: impl Into<sdf::Path>) -> Result<Vec<Self>> {
-        let prim = stage.prim_at(path);
+        let prim = stage.prim(path);
         let prefix = format!("{}:", tok::API_LIMIT);
         Ok(prim
             .api_schemas()?

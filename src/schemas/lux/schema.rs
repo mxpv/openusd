@@ -888,7 +888,7 @@ mod tests {
         light.create_intensity_attr()?.set(1500.0_f32)?;
 
         assert!(stage
-            .prim_at(sdf::path("/Emitter")?)
+            .prim(sdf::path("/Emitter")?)
             .api_schemas()?
             .iter()
             .any(|s| s == "LightAPI"));

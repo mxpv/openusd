@@ -29,7 +29,7 @@ fn resolved_path_populated() {
 
     // Scalar `asset`: authored path preserved, resolved path filled in.
     let asset = stage
-        .attribute_at(sdf::path("/M.inputs:file").unwrap())
+        .attribute(sdf::path("/M.inputs:file").unwrap())
         .get::<sdf::AssetPath>()
         .unwrap()
         .expect("asset value");
@@ -39,7 +39,7 @@ fn resolved_path_populated() {
     // `asset[]`: each element resolved against the same layer; a missing
     // target stays unresolved.
     let files = stage
-        .attribute_at(sdf::path("/M.inputs:files").unwrap())
+        .attribute(sdf::path("/M.inputs:files").unwrap())
         .get::<Vec<sdf::AssetPath>>()
         .unwrap()
         .expect("asset array value");
@@ -50,7 +50,7 @@ fn resolved_path_populated() {
 
     // The time-aware read anchors the default-sourced value the same way.
     let at_time = stage
-        .attribute_at(sdf::path("/M.inputs:file").unwrap())
+        .attribute(sdf::path("/M.inputs:file").unwrap())
         .get_at::<sdf::AssetPath>(openusd::usd::TimeCode::new(0.0))
         .unwrap()
         .expect("asset value at time");
@@ -70,7 +70,7 @@ fn stale_resolved_path_cleared() {
         .expect("set asset");
 
     let asset = stage
-        .attribute_at(sdf::path("/M.inputs:file").unwrap())
+        .attribute(sdf::path("/M.inputs:file").unwrap())
         .get::<sdf::AssetPath>()
         .unwrap()
         .expect("asset value");
@@ -106,7 +106,7 @@ fn expression_evaluated_and_resolved() {
     let canonical = tex.canonicalize().unwrap().to_string_lossy().into_owned();
 
     let asset = stage
-        .attribute_at(sdf::path("/M.inputs:file").unwrap())
+        .attribute(sdf::path("/M.inputs:file").unwrap())
         .get::<sdf::AssetPath>()
         .unwrap()
         .expect("asset value");

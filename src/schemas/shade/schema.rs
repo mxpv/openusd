@@ -227,7 +227,7 @@ impl Material {
             let suffix = format!(":{}", tok::TERMINAL_SURFACE);
             let mut contexts: Vec<String> = self
                 .stage()
-                .prim_at(self.path().clone())
+                .prim(self.path().clone())
                 .property_names()?
                 .into_iter()
                 .filter(|prop| {

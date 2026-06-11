@@ -27,7 +27,7 @@ pub(crate) fn read_token(stage: &Stage, prim: &Path, name: &str) -> Result<Optio
 /// Wrap `path` as a concrete view's `Prim` if its composed `typeName` equals
 /// `type_name` — the type-gate every typed view's `get` performs.
 pub(crate) fn get_typed(stage: &Stage, path: impl Into<Path>, type_name: impl Into<tf::Token>) -> Result<Option<Prim>> {
-    let prim = stage.prim_at(path);
+    let prim = stage.prim(path);
     if prim.type_name()? != Some(type_name.into()) {
         return Ok(None);
     }
@@ -41,7 +41,7 @@ pub(crate) fn get_typed_any(
     path: impl Into<Path>,
     type_names: &[impl AsRef<str>],
 ) -> Result<Option<Prim>> {
-    let prim = stage.prim_at(path);
+    let prim = stage.prim(path);
     match prim.type_name()? {
         Some(t) if type_names.iter().any(|n| n.as_ref() == t.as_str()) => Ok(Some(prim)),
         _ => Ok(None),
@@ -52,7 +52,7 @@ pub(crate) fn get_typed_any(
 /// prim's composed `apiSchemas` — the gate every single-apply API view's `get`
 /// performs.
 pub(crate) fn get_with_api(stage: &Stage, path: impl Into<Path>, apis: &[impl AsRef<str>]) -> Result<Option<Prim>> {
-    let prim = stage.prim_at(path);
+    let prim = stage.prim(path);
     let applied = prim.api_schemas()?;
     if apis.iter().any(|a| applied.iter().any(|s| s.as_str() == a.as_ref())) {
         Ok(Some(prim))

@@ -404,7 +404,7 @@ impl BlendShape {
     /// `offsets`, and optional `inbetweens:<name>:normalOffsets`.
     pub fn inbetweens(&self) -> Result<Vec<Inbetween>> {
         let mut out = Vec::new();
-        let props = self.stage().prim_at(self.path().clone()).property_names()?;
+        let props = self.stage().prim(self.path().clone()).property_names()?;
         for name in &props {
             let Some(rest) = name.strip_prefix(tok::NS_INBETWEENS) else {
                 continue;
@@ -708,7 +708,7 @@ fn inherited_rel(stage: &Stage, prim: &sdf::Path, rel_name: impl Into<tf::Token>
     let mut cur = prim.clone();
     loop {
         let rel = cur.append_property(&rel_name)?;
-        if let Some(target) = stage.relationship_at(rel).targets()?.into_iter().next() {
+        if let Some(target) = stage.relationship(rel).targets()?.into_iter().next() {
             return Ok(Some(target));
         }
         match cur.parent() {
