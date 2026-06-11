@@ -13,6 +13,7 @@ mod prim;
 mod relationship;
 mod schema;
 mod stage;
+mod timecode;
 
 pub use attribute::Attribute;
 pub use clips::ClipsAPI;
@@ -29,6 +30,7 @@ pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask,
 };
+pub use timecode::TimeCode;
 
 use crate::sdf;
 

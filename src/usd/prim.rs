@@ -801,7 +801,10 @@ mod tests {
 
         // get_at flows through clip resolution: the clip overrides the reference.
         let size = super::Attribute::new(&stage, sdf::path("/Model.size")?);
-        assert_eq!(size.get_at(10.0)?, Some(sdf::Value::Float(10.0)));
+        assert_eq!(
+            size.get_at(crate::usd::TimeCode::new(10.0))?,
+            Some(sdf::Value::Float(10.0))
+        );
 
         // A prim with no clips reports none.
         let other = super::Prim::new(&stage, sdf::path("/Model2")?);

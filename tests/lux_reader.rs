@@ -230,9 +230,18 @@ fn animated_intensity_via_get_at() -> Result<()> {
     assert_eq!(light.intensity_attr().get::<sdf::Value>()?, None);
     // At-time reads pick / interpolate the samples (stage default is linear).
     // The unsuffixed sample literals parse as `double`.
-    assert_eq!(light.intensity_attr().get_at(0.0)?, Some(sdf::Value::Double(100.0)));
-    assert_eq!(light.intensity_attr().get_at(10.0)?, Some(sdf::Value::Double(1000.0)));
-    assert_eq!(light.intensity_attr().get_at(5.0)?, Some(sdf::Value::Double(550.0)));
+    assert_eq!(
+        light.intensity_attr().get_at(openusd::usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(100.0))
+    );
+    assert_eq!(
+        light.intensity_attr().get_at(openusd::usd::TimeCode::new(10.0))?,
+        Some(sdf::Value::Double(1000.0))
+    );
+    assert_eq!(
+        light.intensity_attr().get_at(openusd::usd::TimeCode::new(5.0))?,
+        Some(sdf::Value::Double(550.0))
+    );
     Ok(())
 }
 

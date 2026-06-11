@@ -579,6 +579,11 @@ where
         self.get(sdf::FieldKey::FramesPerSecond)
     }
 
+    /// Number of decimal digits printed for sub-frame time codes.
+    pub fn frame_precision(&self) -> Option<i32> {
+        self.get(sdf::FieldKey::FramePrecision)
+    }
+
     /// Names of root prims in declared order.
     pub fn prim_children(&self) -> Option<Vec<tf::Token>> {
         self.get(sdf::ChildrenKey::PrimChildren)
@@ -706,6 +711,11 @@ where
     /// Set the frames per second.
     pub fn set_frames_per_second(&mut self, rate: f64) {
         self.set(sdf::FieldKey::FramesPerSecond.as_str(), sdf::Value::Double(rate));
+    }
+
+    /// Set the number of decimal digits printed for sub-frame time codes.
+    pub fn set_frame_precision(&mut self, precision: i32) {
+        self.set(sdf::FieldKey::FramePrecision.as_str(), sdf::Value::Int(precision));
     }
 }
 

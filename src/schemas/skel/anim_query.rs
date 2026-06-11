@@ -2,7 +2,7 @@
 //!
 //! Mirrors Pixar's `UsdSkelAnimQuery`. Thin wrapper: each
 //! `compute_*` method pulls the underlying `timeSamples` through
-//! [`crate::usd::Stage::value_at`], so the values it returns already
+//! [`crate::usd::Attribute::get`], so the values it returns already
 //! honour the stage's interpolation mode (AOUSD §12.5 — linear by
 //! default, with per-joint slerp for the `rotations` array).
 //!
@@ -16,7 +16,7 @@ use anyhow::Result;
 use crate::gf;
 use crate::sdf::{Path, Value};
 use crate::tf;
-use crate::usd::{SchemaBase, Stage};
+use crate::usd::{SchemaBase, Stage, TimeCode};
 
 use super::schema::SkelAnimation;
 use super::tokens::{A_BLEND_SHAPE_WEIGHTS, A_ROTATIONS, A_SCALES, A_TRANSLATIONS};
@@ -104,8 +104,9 @@ impl SkelAnimQuery {
     pub fn compute_joint_local_transform_components(
         &self,
         stage: &Stage,
-        time: f64,
+        time: impl Into<TimeCode>,
     ) -> Result<JointTransformComponents> {
+        let time = time.into();
         let n = self.joints.len();
         let translations = self.read_vec3f_attr_at(stage, A_TRANSLATIONS, time, n, gf::Vec3f::default())?;
         let rotations = self.read_quatf_attr_at(stage, A_ROTATIONS, time, n, gf::Quatf::IDENTITY)?;
@@ -118,8 +119,12 @@ impl SkelAnimQuery {
     /// convention. Callers feeding the result into
     /// [`super::SkeletonResolver::compute_skinning_transforms_from_local`]
     /// get full skinning transforms out the other side.
-    pub fn compute_joint_local_transforms(&self, stage: &Stage, time: f64) -> Result<Vec<gf::Matrix4d>> {
-        let (translations, rotations, scales) = self.compute_joint_local_transform_components(stage, time)?;
+    pub fn compute_joint_local_transforms(
+        &self,
+        stage: &Stage,
+        time: impl Into<TimeCode>,
+    ) -> Result<Vec<gf::Matrix4d>> {
+        let (translations, rotations, scales) = self.compute_joint_local_transform_components(stage, time.into())?;
         Ok(translations
             .iter()
             .zip(rotations.iter())
@@ -131,13 +136,13 @@ impl SkelAnimQuery {
     /// Blend-shape weight per entry in
     /// [`blend_shape_order`](Self::blend_shape_order) at `time`. Unauthored
     /// weights default to zero (no contribution).
-    pub fn compute_blend_shape_weights(&self, stage: &Stage, time: f64) -> Result<Vec<f32>> {
+    pub fn compute_blend_shape_weights(&self, stage: &Stage, time: impl Into<TimeCode>) -> Result<Vec<f32>> {
         let n = self.blend_shapes.len();
         if n == 0 {
             return Ok(Vec::new());
         }
         let attr = self.prim.append_property(A_BLEND_SHAPE_WEIGHTS)?;
-        let v = stage.value_at(attr, time)?;
+        let v = stage.attribute_at(attr).get_at::<Value>(time.into())?;
         Ok(match v {
             Some(Value::FloatVec(w)) if w.len() == n => w,
             Some(Value::DoubleVec(w)) if w.len() == n => w.into_iter().map(|d| d as f32).collect(),
@@ -150,12 +155,12 @@ impl SkelAnimQuery {
         &self,
         stage: &Stage,
         name: impl Into<tf::Token>,
-        time: f64,
+        time: TimeCode,
         n: usize,
         default: gf::Vec3f,
     ) -> Result<Vec<gf::Vec3f>> {
         let attr = self.prim.append_property(name)?;
-        let v = stage.value_at(attr, time)?;
+        let v = stage.attribute_at(attr).get_at::<Value>(time)?;
         Ok(match v {
             Some(Value::Vec3fVec(a)) if a.len() == n => a,
             Some(Value::Vec3dVec(a)) if a.len() == n => a
@@ -174,12 +179,12 @@ impl SkelAnimQuery {
         &self,
         stage: &Stage,
         name: impl Into<tf::Token>,
-        time: f64,
+        time: TimeCode,
         n: usize,
         default: gf::Quatf,
     ) -> Result<Vec<gf::Quatf>> {
         let attr = self.prim.append_property(name)?;
-        let v = stage.value_at(attr, time)?;
+        let v = stage.attribute_at(attr).get_at::<Value>(time)?;
         Ok(match v {
             Some(Value::QuatfVec(a)) if a.len() == n => a,
             Some(Value::QuatdVec(a)) if a.len() == n => a

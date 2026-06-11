@@ -868,9 +868,24 @@ fn instance_children_from_arcs_only() -> Result<()> {
 fn shared_instances_resolve_identically() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
 
-    assert_eq!(stage.value_at("/A/Child.size", 0.0)?, Some(sdf::Value::Double(5.0)));
-    assert_eq!(stage.value_at("/B/Child.size", 0.0)?, Some(sdf::Value::Double(5.0)));
-    assert_eq!(stage.value_at("/C/Child.size", 0.0)?, Some(sdf::Value::Double(9.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(5.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/B/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(5.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/C/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(9.0))
+    );
 
     assert_eq!(child_names(&stage, "/A")?, vec!["Child".to_string()]);
     assert_eq!(child_names(&stage, "/B")?, vec!["Child".to_string()]);
@@ -905,7 +920,9 @@ fn prototype_queries() -> Result<()> {
     let child = sdf::path(format!("{proto}/Child"))?;
     assert!(stage.prim_at(child.clone()).is_in_prototype());
     assert_eq!(
-        stage.value_at(child.append_property("size")?, 0.0)?,
+        stage
+            .attribute_at(child.append_property("size")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     Ok(())
@@ -941,8 +958,18 @@ fn prototype_queries_masked() -> Result<()> {
 fn nested_instances() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_nested.usda"))?;
 
-    assert_eq!(stage.value_at("/A/Sub/L.v", 0.0)?, Some(sdf::Value::Double(7.0)));
-    assert_eq!(stage.value_at("/B/Sub/L.v", 0.0)?, Some(sdf::Value::Double(7.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A/Sub/L.v")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/B/Sub/L.v")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0))
+    );
 
     // The nested prims are instances and share one prototype.
     assert!(stage.prim_at("/A/Sub").is_instance()?);
@@ -959,7 +986,9 @@ fn nested_instances() -> Result<()> {
     // The nested subtree is also reachable through the outer prototype.
     let outer = outer.unwrap();
     assert_eq!(
-        stage.value_at(sdf::path(format!("{outer}/Sub/L.v"))?, 0.0)?,
+        stage
+            .attribute_at(sdf::path(format!("{outer}/Sub/L.v"))?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(7.0))
     );
     Ok(())
@@ -1110,17 +1139,34 @@ fn prototype_root_drops_instance_overrides() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_root_override.usda"))?;
 
     // The instance root keeps its local overrides.
-    assert_eq!(stage.value_at("/A.shared", 0.0)?, Some(sdf::Value::Double(7.0)));
-    assert_eq!(stage.value_at("/A.rootOnly", 0.0)?, Some(sdf::Value::Double(42.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A.shared")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/A.rootOnly")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(42.0))
+    );
 
     // The shared prototype root drops them: the overridden property falls
     // back to the referenced value and the instance-only property is gone.
     let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
     assert_eq!(
-        stage.value_at(proto.append_property("shared")?, 0.0)?,
+        stage
+            .attribute_at(proto.append_property("shared")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
-    assert_eq!(stage.value_at(proto.append_property("rootOnly")?, 0.0)?, None);
+    assert_eq!(
+        stage
+            .attribute_at(proto.append_property("rootOnly")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None
+    );
     Ok(())
 }
 
@@ -1134,7 +1180,12 @@ fn prototype_root_survives_early_query() -> Result<()> {
 
     // Touch the deterministic synthetic path before any instance registers;
     // this caches an empty index at /__Prototype_0.
-    assert_eq!(stage.value_at("/__Prototype_0.shared", 0.0)?, None);
+    assert_eq!(
+        stage
+            .attribute_at("/__Prototype_0.shared")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None
+    );
 
     // Composing the instance mints and materializes /__Prototype_0.
     let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
@@ -1143,7 +1194,9 @@ fn prototype_root_survives_early_query() -> Result<()> {
     // The prototype root now holds the real composition, not the stale empty
     // index that the guard would otherwise have mistaken for it.
     assert_eq!(
-        stage.value_at(proto.append_property("shared")?, 0.0)?,
+        stage
+            .attribute_at(proto.append_property("shared")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
     Ok(())
@@ -1160,7 +1213,12 @@ fn prototype_descendant_survives_early_query() -> Result<()> {
     // Touch the synthetic descendant before any instance registers; this
     // caches an empty index at /__Prototype_0/Child and memoizes its path as
     // an identity (non-redirected) mapping.
-    assert_eq!(stage.value_at("/__Prototype_0/Child.size", 0.0)?, None);
+    assert_eq!(
+        stage
+            .attribute_at("/__Prototype_0/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None
+    );
 
     // Composing the instance mints and materializes /__Prototype_0.
     let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
@@ -1170,7 +1228,9 @@ fn prototype_descendant_survives_early_query() -> Result<()> {
     // stale empty index and identity redirection under /__Prototype_0, so the
     // query recomposes it in place from the materialized prototype root.
     assert_eq!(
-        stage.value_at(proto.append_path("Child")?.append_property("size")?, 0.0)?,
+        stage
+            .attribute_at(proto.append_path("Child")?.append_property("size")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     Ok(())
@@ -1184,14 +1244,21 @@ fn prototype_root_keeps_variant_opinions() -> Result<()> {
     let stage = Stage::open(&fixture_path("instancing_variant_root.usda"))?;
 
     // The instance resolves the variant-authored property.
-    assert_eq!(stage.value_at("/A.picked", 0.0)?, Some(sdf::Value::Double(5.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A.picked")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(5.0))
+    );
 
     // So must the prototype root: the variant opinion lives at the instance's
     // own namespace (/A{v=x}), and rebasing must not move the spec lookup off
     // it.
     let proto = stage.prim_at("/A").prototype()?.expect("A is an instance");
     assert_eq!(
-        stage.value_at(proto.append_property("picked")?, 0.0)?,
+        stage
+            .attribute_at(proto.append_property("picked")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
     Ok(())
@@ -1253,9 +1320,24 @@ fn variant_selection_keys_prototype() -> Result<()> {
     assert_ne!(proto("/A")?, proto("/B")?);
 
     // Each prototype resolves its own variant content.
-    assert_eq!(stage.value_at("/A.picked", 0.0)?, Some(sdf::Value::Double(1.0)));
-    assert_eq!(stage.value_at("/B.picked", 0.0)?, Some(sdf::Value::Double(2.0)));
-    assert_eq!(stage.value_at("/C.picked", 0.0)?, Some(sdf::Value::Double(1.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A.picked")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/B.picked")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(2.0))
+    );
+    assert_eq!(
+        stage
+            .attribute_at("/C.picked")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0))
+    );
     Ok(())
 }
 
@@ -1278,7 +1360,9 @@ fn prototype_visible_under_mask() -> Result<()> {
     let child = proto.append_path("Child")?;
     assert!(stage.prim_at(child.clone()).is_valid()?);
     assert_eq!(
-        stage.value_at(child.append_property("size")?, 0.0)?,
+        stage
+            .attribute_at(child.append_property("size")?)
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
 
@@ -1301,7 +1385,12 @@ fn nested_instance_in_prototype() -> Result<()> {
     // The proxy chain through the instance namespace resolves the nested
     // value (/A/Nested is itself an instance).
     assert!(stage.prim_at("/A/Nested").is_instance()?);
-    assert_eq!(stage.value_at("/A/Nested/Leaf.v", 0.0)?, Some(sdf::Value::Double(3.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A/Nested/Leaf.v")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(3.0))
+    );
 
     // Inside the prototype namespace, the nested prim is an instance and
     // mints its own, distinct prototype.
@@ -1356,13 +1445,17 @@ fn instance_descendant_ignores_local_override() -> Result<()> {
 
     // Instance: the local `over Child { size = 999 }` is ignored.
     assert_eq!(
-        stage.value_at("/Instance/Child.size", 0.0)?,
+        stage
+            .attribute_at("/Instance/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(1.0))
     );
 
     // Non-instance: the local override wins as usual.
     assert_eq!(
-        stage.value_at("/NonInstance/Child.size", 0.0)?,
+        stage
+            .attribute_at("/NonInstance/Child.size")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(999.0))
     );
     Ok(())
@@ -1375,7 +1468,12 @@ fn instance_descendant_ignores_local_arc() -> Result<()> {
     // The local `over Child (references = </Other/Child>)` carries its own
     // arc; both the local opinion and the node that arc spawns are
     // discarded, so the value comes from the prototype, not /Other/Child.
-    assert_eq!(stage.value_at("/A/Child.v", 0.0)?, Some(sdf::Value::Double(1.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A/Child.v")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0))
+    );
     Ok(())
 }
 
@@ -1851,14 +1949,19 @@ fn arc_target_retimes_time_sample() -> Result<()> {
     assert_eq!(target.map_to_spec_time(15.0), 5.0);
     {
         let _ctx = stage.edit_context(target)?;
-        stage.attribute_at("/Prim.x").set_at(15.0, sdf::Value::Double(42.0))?;
+        stage
+            .attribute_at("/Prim.x")
+            .set_at(sdf::Value::Double(42.0), usd::TimeCode::new(15.0))?;
     }
 
     // The sample landed at source time 5 in the root layer...
     let samples = stage.attribute_at("/Source.x").time_samples()?.expect("samples");
     assert_eq!(samples, vec![(5.0, sdf::Value::Double(42.0))]);
     // ...and reads back at stage time 15 through the offset reference.
-    assert_eq!(stage.attribute_at("/Prim.x").get_at::<f64>(15.0)?, Some(42.0));
+    assert_eq!(
+        stage.attribute_at("/Prim.x").get_at::<f64>(usd::TimeCode::new(15.0))?,
+        Some(42.0)
+    );
     Ok(())
 }
 
@@ -1896,7 +1999,11 @@ fn clip_asset(name: &str) -> String {
 }
 
 fn value_f64(stage: &Stage, attr: &str, time: f64) -> Option<f64> {
-    match stage.value_at(attr, time).expect("value_at") {
+    match stage
+        .attribute_at(attr)
+        .get_at::<sdf::Value>(usd::TimeCode::new(time))
+        .expect("value_at")
+    {
         Some(sdf::Value::Float(v)) => Some(v as f64),
         Some(sdf::Value::Double(v)) => Some(v),
         Some(sdf::Value::Int64(v)) => Some(v as f64),
@@ -2264,7 +2371,12 @@ fn insert_sub_layer_authors_metadata() -> Result<()> {
     let weak_id = weak.identifier().to_string();
     stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
 
-    assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A.x")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(5.0))
+    );
     assert_eq!(authored_sublayers(&stage), vec![weak_id]);
     Ok(())
 }
@@ -2278,12 +2390,19 @@ fn remove_sub_layer_clears_metadata() -> Result<()> {
     let weak = opinion_layer("weak.usda", 5.0)?;
     let weak_id = weak.identifier().to_string();
     stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
-    assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+    assert_eq!(
+        stage
+            .attribute_at("/A.x")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(5.0))
+    );
 
     assert!(stage.remove_sub_layer(&root_id, &weak_id)?, "a sublayer was removed");
 
     assert_eq!(
-        stage.value_at("/A.x", 0.0)?,
+        stage
+            .attribute_at("/A.x")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None,
         "the removed sublayer's opinion is gone"
     );
@@ -3038,6 +3157,11 @@ def "Model"
             .any(|n| n.as_str() == "ghost"),
         "the clip must not fabricate an attribute"
     );
-    assert_eq!(stage.value_at("/Model.ghost", 0.0)?, None);
+    assert_eq!(
+        stage
+            .attribute_at("/Model.ghost")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None
+    );
     Ok(())
 }

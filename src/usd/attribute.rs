@@ -58,23 +58,35 @@ impl Attribute {
         self.edit(|spec| spec.set(sdf::FieldKey::Custom.as_str(), sdf::Value::Bool(custom)))
     }
 
-    /// Set the default value. Mirrors C++ `UsdAttribute::Set(value)`.
+    /// Set the attribute's default value. The convenience spelling of
+    /// `set_at(value, None)`; mirrors C++ `UsdAttribute::Set(value)`.
     pub fn set(self, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
-        let value = value.into();
-        self.edit(|spec| spec.set_default(value))
+        self.set_at(value, None)
     }
 
-    /// Set a value at a specific time. Mirrors C++
+    /// Set the attribute's value at `time`. Mirrors C++
     /// `UsdAttribute::Set(value, time)`.
     ///
-    /// `time` is in stage (composed) time. When the current edit target is an
-    /// arc with a non-identity layer offset, the sample is keyed at the
-    /// inverse-mapped source-layer time (C++ `UsdEditTarget::MapToSpecTime`),
-    /// so it reads back at `time` once composition re-applies the offset.
-    pub fn set_at(self, time: f64, value: impl Into<sdf::Value>) -> Result<Self, StageAuthoringError> {
+    /// `time` is `None` to author the default value, or `Some(tc)` (a
+    /// [`usd::TimeCode`](super::TimeCode), which a bare `TimeCode` coerces
+    /// into) to author a time sample. A numeric time is in stage (composed)
+    /// time: when the current edit target is an arc with a non-identity layer
+    /// offset, the sample is keyed at the inverse-mapped source-layer time (C++
+    /// `UsdEditTarget::MapToSpecTime`), so it reads back at `time` once
+    /// composition re-applies the offset.
+    pub fn set_at(
+        self,
+        value: impl Into<sdf::Value>,
+        time: impl Into<Option<super::TimeCode>>,
+    ) -> Result<Self, StageAuthoringError> {
         let value = value.into();
-        let spec_time = self.stage.map_to_spec_time(time);
-        self.edit(|spec| spec.set_time_sample(spec_time, value))
+        match time.into() {
+            None => self.edit(|spec| spec.set_default(value)),
+            Some(time) => {
+                let spec_time = self.stage.map_to_spec_time(time.value());
+                self.edit(|spec| spec.set_time_sample(spec_time, value))
+            }
+        }
     }
 
     /// Block opinions from weaker layers by authoring a value block on the
@@ -325,8 +337,8 @@ impl Attribute {
             .and_then(|v| v.try_as_token()))
     }
 
-    /// Composed default value decoded to `T`, if any layer authored one.
-    /// Mirrors C++ `UsdAttribute::Get`.
+    /// Composed default value decoded to `T`, if any layer authored one. The
+    /// convenience spelling of `get_at(None)`; mirrors C++ `UsdAttribute::Get`.
     ///
     /// `T` is any type implementing `TryFrom<sdf::Value>` — a scalar
     /// (`get::<f32>()`), an array (`get::<Vec<f32>>()`), or [`sdf::Value`]
@@ -337,7 +349,27 @@ impl Attribute {
         T: TryFrom<sdf::Value>,
         T::Error: std::error::Error + Send + Sync + 'static,
     {
-        self.stage.field::<T>(&self.path, sdf::FieldKey::Default)
+        self.get_at(None)
+    }
+
+    /// Composed value at `time` decoded to `T`. Mirrors C++
+    /// `UsdAttribute::Get(value, time)`.
+    ///
+    /// `time` is `None` to read the default value, or `Some(tc)` (a
+    /// [`usd::TimeCode`](super::TimeCode), which a bare `TimeCode` coerces
+    /// into) to resolve a time sample under the stage's [`InterpolationType`].
+    ///
+    /// [`InterpolationType`]: super::InterpolationType
+    pub fn get_at<T>(&self, time: impl Into<Option<super::TimeCode>>) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let value = match time.into() {
+            None => self.stage.field::<sdf::Value>(&self.path, sdf::FieldKey::Default)?,
+            Some(time) => self.stage.resolve_at(&self.path, time.value())?,
+        };
+        Ok(value.map(T::try_from).transpose()?)
     }
 
     /// Retrieves the composed default [`sdf::Value`] and casts it to `T` via the
@@ -354,17 +386,6 @@ impl Attribute {
             Some(value) => Ok(Some(value.cast::<T>()?)),
             None => Ok(None),
         }
-    }
-
-    /// Composed value at `time` decoded to `T`, applying the stage's
-    /// interpolation type. The time-sampled counterpart of [`Attribute::get`];
-    /// mirrors C++ `UsdAttribute::Get(time)`.
-    pub fn get_at<T>(&self, time: f64) -> anyhow::Result<Option<T>>
-    where
-        T: TryFrom<sdf::Value>,
-        T::Error: std::error::Error + Send + Sync + 'static,
-    {
-        Ok(self.stage.value_at(&self.path, time)?.map(T::try_from).transpose()?)
     }
 
     /// Composed value of a generic metadata field on the attribute decoded to
@@ -423,7 +444,7 @@ impl Attribute {
 #[cfg(test)]
 mod tests {
     use crate::sdf;
-    use crate::usd::Stage;
+    use crate::usd::{Stage, TimeCode};
 
     fn stage() -> anyhow::Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -474,10 +495,10 @@ mod tests {
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(0.0, sdf::Value::Double(1.0))?
-            .set_at(10.0, sdf::Value::Double(3.0))?;
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
         // Linear interpolation default → halfway = 2.0.
-        assert_eq!(attr.get_at(5.0)?, Some(sdf::Value::Double(2.0)));
+        assert_eq!(attr.get_at(TimeCode::new(5.0))?, Some(sdf::Value::Double(2.0)));
         let samples = attr.time_samples()?.expect("samples");
         assert_eq!(samples.len(), 2);
         Ok(())
@@ -492,15 +513,15 @@ mod tests {
             .create_attribute("x", "double")?
             .set(sdf::Value::Double(1.0))?
             .block()?;
-        // ValueBlock resolves to None through Stage::field / value_at.
+        // ValueBlock resolves to None through the default and time-sample paths.
         assert_eq!(attr.get::<sdf::Value>()?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(0.0)?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(0.0))?, None);
         Ok(())
     }
 
     /// `block()` must also replace every authored time-sample value with
     /// `ValueBlock` — otherwise the default block is silently bypassed for
-    /// `get_at` queries that fall onto an authored sample.
+    /// time-code queries that fall onto an authored sample.
     #[test]
     fn attribute_block_clears_time_samples() -> anyhow::Result<()> {
         let stage = stage()?;
@@ -508,12 +529,12 @@ mod tests {
             .define_prim("/A")?
             .set_type_name("Xform")?
             .create_attribute("x", "double")?
-            .set_at(0.0, sdf::Value::Double(1.0))?
-            .set_at(10.0, sdf::Value::Double(3.0))?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?
             .block()?;
-        assert_eq!(attr.get_at::<sdf::Value>(0.0)?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(5.0)?, None);
-        assert_eq!(attr.get_at::<sdf::Value>(10.0)?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(0.0))?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(5.0))?, None);
+        assert_eq!(attr.get_at::<sdf::Value>(TimeCode::new(10.0))?, None);
         Ok(())
     }
 

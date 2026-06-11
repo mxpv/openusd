@@ -857,6 +857,30 @@ impl Stage {
         })
     }
 
+    /// Authors `startTimeCode` on the stage's root layer, regardless of the
+    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetStartTimeCode`.
+    pub fn set_start_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
+        self.with_root_layer(|layer| layer.set_start_time_code(time))
+    }
+
+    /// Authors `endTimeCode` on the stage's root layer, regardless of the
+    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetEndTimeCode`.
+    pub fn set_end_time_code(&self, time: f64) -> Result<(), StageAuthoringError> {
+        self.with_root_layer(|layer| layer.set_end_time_code(time))
+    }
+
+    /// Authors `timeCodesPerSecond` on the stage's root layer, regardless of
+    /// the current [`EditTarget`]. Mirrors C++ `UsdStage::SetTimeCodesPerSecond`.
+    pub fn set_time_codes_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
+        self.with_root_layer(|layer| layer.set_time_codes_per_second(rate))
+    }
+
+    /// Authors `framesPerSecond` on the stage's root layer, regardless of the
+    /// current [`EditTarget`]. Mirrors C++ `UsdStage::SetFramesPerSecond`.
+    pub fn set_frames_per_second(&self, rate: f64) -> Result<(), StageAuthoringError> {
+        self.with_root_layer(|layer| layer.set_frames_per_second(rate))
+    }
+
     /// Map `scene_path` through the current edit target, borrow the target's
     /// layer, and hand both the layer and the mapped spec path to `f`, then
     /// drive cache invalidation from the [`sdf::ChangeList`] the closure
@@ -1135,16 +1159,62 @@ impl Stage {
         self.with_cache(|g, c| c.stage_metadata(g, field.as_ref()))
     }
 
-    /// Returns the stage-level interpolation mode used by
-    /// [`Stage::value_at`]. AOUSD §12.5 defaults this to
-    /// [`InterpolationType::Linear`].
+    /// The stage's `startTimeCode`, or `0.0` when unauthored. The session
+    /// layer's opinion wins over the root layer (via [`Stage::stage_metadata`]).
+    /// Mirrors C++ `UsdStage::GetStartTimeCode`.
+    pub fn start_time_code(&self) -> f64 {
+        self.metadata_double(sdf::FieldKey::StartTimeCode).unwrap_or(0.0)
+    }
+
+    /// The stage's `endTimeCode`, or `0.0` when unauthored. The session layer's
+    /// opinion wins over the root layer. Mirrors C++ `UsdStage::GetEndTimeCode`.
+    pub fn end_time_code(&self) -> f64 {
+        self.metadata_double(sdf::FieldKey::EndTimeCode).unwrap_or(0.0)
+    }
+
+    /// Whether the stage authors both `startTimeCode` and `endTimeCode`.
+    /// Mirrors C++ `UsdStage::HasAuthoredTimeCodeRange`.
+    pub fn has_authored_time_code_range(&self) -> bool {
+        self.metadata_double(sdf::FieldKey::StartTimeCode).is_some()
+            && self.metadata_double(sdf::FieldKey::EndTimeCode).is_some()
+    }
+
+    /// The stage's `timeCodesPerSecond`. Falls back to the authored
+    /// `framesPerSecond`, then to `24.0`, when unauthored. The session layer's
+    /// opinion wins over the root layer. Mirrors C++
+    /// `UsdStage::GetTimeCodesPerSecond`.
+    pub fn time_codes_per_second(&self) -> f64 {
+        self.metadata_double(sdf::FieldKey::TimeCodesPerSecond)
+            .or_else(|| self.metadata_double(sdf::FieldKey::FramesPerSecond))
+            .unwrap_or(24.0)
+    }
+
+    /// The stage's `framesPerSecond`, or `24.0` when unauthored. The session
+    /// layer's opinion wins over the root layer. Mirrors C++
+    /// `UsdStage::GetFramesPerSecond`.
+    pub fn frames_per_second(&self) -> f64 {
+        self.metadata_double(sdf::FieldKey::FramesPerSecond).unwrap_or(24.0)
+    }
+
+    /// Reads a composed stage-metadata field as a `double`, honoring the
+    /// session-over-root resolution of [`Stage::stage_metadata`]. `None` when
+    /// unauthored or stored with a non-`double` value.
+    fn metadata_double(&self, field: sdf::FieldKey) -> Option<f64> {
+        self.stage_metadata(field.as_str())
+            .ok()
+            .flatten()
+            .and_then(|v| v.try_as_double())
+    }
+
+    /// Returns the stage-level interpolation mode applied when resolving a
+    /// value at a time code (see [`Attribute::get`](super::Attribute::get)).
+    /// AOUSD §12.5 defaults this to [`InterpolationType::Linear`].
     pub fn interpolation_type(&self) -> InterpolationType {
         self.interpolation_type.get()
     }
 
     /// Override the stage-level interpolation mode at runtime.
-    /// Cheap — no recomputation, the next [`Stage::value_at`] call
-    /// reads the new mode.
+    /// Cheap — no recomputation, the next value resolution reads the new mode.
     pub fn set_interpolation_type(&self, mode: InterpolationType) {
         self.interpolation_type.set(mode);
     }
@@ -1152,8 +1222,9 @@ impl Stage {
     /// Returns the composed `timeSamples` for an attribute, or
     /// `None` when the attribute has none authored.
     ///
-    /// This returns raw composed samples. Use [`Stage::value_at`] when you
-    /// need the stage's [`InterpolationType`] applied to a specific time code.
+    /// This returns raw composed samples. Read through
+    /// [`Attribute::get`](super::Attribute::get) with a time code when you
+    /// need the stage's [`InterpolationType`] applied to a specific time.
     pub fn time_samples(&self, attr_path: impl Into<sdf::Path>) -> Result<Option<sdf::TimeSampleMap>> {
         Ok(match self.field::<sdf::Value>(attr_path, sdf::FieldKey::TimeSamples)? {
             Some(sdf::Value::TimeSamples(samples)) => Some(samples),
@@ -1161,10 +1232,9 @@ impl Stage {
         })
     }
 
-    /// Evaluate an attribute's value at `time` under the stage's
-    /// current [`InterpolationType`]. Mirrors C++ `UsdAttribute::Get`
-    /// — the universal entry point for any consumer that needs a
-    /// resolved value at a specific time code.
+    /// Evaluate an attribute's value at `time` under the stage's current
+    /// [`InterpolationType`]. The crate-internal resolution engine behind
+    /// [`Attribute::get`](super::Attribute::get) with a numeric time code.
     ///
     /// Resolution order (AOUSD §12.3):
     /// 1. Local `timeSamples` (root layer stack), §12.5 interpolated.
@@ -1176,10 +1246,7 @@ impl Stage {
     /// authored value is a [`sdf::Value::ValueBlock`] / [`sdf::Value::None`]
     /// (the spec sentinels for "no value"), or when the queried prim
     /// is excluded by the stage's population mask.
-    ///
-    /// For multi-frame queries against the same attribute, see
-    /// [`Stage::time_samples`].
-    pub fn value_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
+    pub(crate) fn resolve_at(&self, attr_path: impl Into<sdf::Path>, time: f64) -> Result<Option<sdf::Value>> {
         let attr_path = attr_path.into();
         if !self.mask_includes(&attr_path.prim_path()) {
             return Ok(None);
@@ -1638,8 +1705,8 @@ impl<R: ar::Resolver> StageBuilder<R> {
     }
 
     /// Sets the stage-level interpolation mode for time-sampled
-    /// attribute queries through [`Stage::value_at`]. Default per
-    /// AOUSD §12.5 is [`InterpolationType::Linear`].
+    /// attribute queries through [`Attribute::get`](super::Attribute::get).
+    /// Default per AOUSD §12.5 is [`InterpolationType::Linear`].
     pub fn interpolation_type(mut self, mode: InterpolationType) -> Self {
         self.interpolation_type = mode;
         self
@@ -2103,7 +2170,12 @@ mod tests {
         let mid_id = mid.identifier().to_string();
         stage.insert_sub_layer(&root_id, 0, mid, sdf::LayerOffset::IDENTITY)?;
         stage.insert_sub_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
-        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(
+            stage
+                .attribute_at("/A.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(5.0))
+        );
 
         // Re-insert `mid` by its identifier, passing a fresh empty layer with the
         // same identifier. The graph must keep the loaded `mid` (whose
@@ -2115,7 +2187,9 @@ mod tests {
             sdf::LayerOffset::IDENTITY,
         )?;
         assert_eq!(
-            stage.value_at("/A.x", 0.0)?,
+            stage
+                .attribute_at("/A.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             Some(sdf::Value::Double(5.0)),
             "the already-loaded mid layer's child edge to leaf must survive re-insertion"
         );
@@ -2135,7 +2209,12 @@ mod tests {
         root.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
         let child = opinion_layer("dir/sub.usda", 5.0)?;
         let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
-        assert_eq!(stage.value_at("/A.x", 0.0)?, Some(sdf::Value::Double(5.0)));
+        assert_eq!(
+            stage
+                .attribute_at("/A.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(5.0))
+        );
 
         // sub_layers reports the canonical identifier, not the authored string.
         let canonical = stage.sub_layers("root.usda");
@@ -2148,7 +2227,9 @@ mod tests {
             "the relative sublayer is removed when named by canonical identifier"
         );
         assert_eq!(
-            stage.value_at("/A.x", 0.0)?,
+            stage
+                .attribute_at("/A.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
             None,
             "the removed sublayer's opinion is gone"
         );
@@ -2156,6 +2237,53 @@ mod tests {
             authored_sublayers(&stage).is_empty(),
             "the authored subLayers entry is gone"
         );
+        Ok(())
+    }
+
+    /// The stage time-code range round-trips through the root layer and reports
+    /// the documented unauthored defaults beforehand.
+    #[test]
+    fn stage_time_code_range() -> Result<()> {
+        let stage = in_memory_stage()?;
+        assert_eq!(stage.start_time_code(), 0.0);
+        assert_eq!(stage.end_time_code(), 0.0);
+        assert!(!stage.has_authored_time_code_range());
+
+        stage.set_start_time_code(1.0)?;
+        stage.set_end_time_code(48.0)?;
+
+        assert_eq!(stage.start_time_code(), 1.0);
+        assert_eq!(stage.end_time_code(), 48.0);
+        assert_eq!(stage.root_layer().start_time_code(), 1.0);
+        assert!(stage.has_authored_time_code_range());
+        Ok(())
+    }
+
+    /// `time_codes_per_second` falls back to the authored `framesPerSecond`,
+    /// then to `24.0`, when no `timeCodesPerSecond` opinion exists.
+    #[test]
+    fn stage_tcps_fps_fallback() -> Result<()> {
+        let stage = in_memory_stage()?;
+        assert_eq!(stage.time_codes_per_second(), 24.0);
+        assert_eq!(stage.frames_per_second(), 24.0);
+
+        stage.set_frames_per_second(30.0)?;
+        assert_eq!(stage.time_codes_per_second(), 30.0);
+
+        stage.set_time_codes_per_second(48.0)?;
+        assert_eq!(stage.time_codes_per_second(), 48.0);
+        Ok(())
+    }
+
+    /// `has_authored_time_code_range` requires both endpoints; one alone is
+    /// not a range.
+    #[test]
+    fn authored_time_code_range() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.set_start_time_code(0.0)?;
+        assert!(!stage.has_authored_time_code_range());
+        stage.set_end_time_code(10.0)?;
+        assert!(stage.has_authored_time_code_range());
         Ok(())
     }
 }

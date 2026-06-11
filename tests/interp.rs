@@ -1,4 +1,4 @@
-//! Integration tests for `Stage::value_at` — the universal
+//! Integration tests for `Attribute::get_at` — the universal
 //! time-sample evaluator wired through stage composition.
 
 use anyhow::Result;
@@ -21,7 +21,10 @@ fn default_interpolation_is_linear() -> Result<()> {
 #[test]
 fn linear_double_midpoint() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.scalar")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.scalar")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     assert_eq!(v, Value::Double(10.0));
     Ok(())
 }
@@ -29,7 +32,10 @@ fn linear_double_midpoint() -> Result<()> {
 #[test]
 fn linear_vec3f_componentwise() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.vec")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.vec")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     assert_eq!(v, Value::vec3f(5.0_f32, 10.0, 15.0));
     Ok(())
 }
@@ -37,7 +43,10 @@ fn linear_vec3f_componentwise() -> Result<()> {
 #[test]
 fn linear_quatf_uses_slerp() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.rot")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.rot")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     if let Value::Quatf(q) = v {
         let expected_w = std::f32::consts::FRAC_PI_4.cos();
         let expected_x = std::f32::consts::FRAC_PI_4.sin();
@@ -56,7 +65,10 @@ fn unsupported_type_falls_back_to_held() -> Result<()> {
     let stage = open()?;
     // Token in linear mode → spec mandates held fallback. A `token` value
     // isn't in §12.5.2's linear-supported set.
-    let v = stage.value_at(path("/Prim.label")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.label")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     match v {
         Value::Token(s) => assert_eq!(s.as_str(), "alpha"),
         Value::String(s) => assert_eq!(s, "alpha"),
@@ -69,7 +81,10 @@ fn unsupported_type_falls_back_to_held() -> Result<()> {
 fn held_mode_returns_previous_sample() -> Result<()> {
     let stage = open()?;
     stage.set_interpolation_type(usd::InterpolationType::Held);
-    let v = stage.value_at(path("/Prim.scalar")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.scalar")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     // Previous sample is at t=0 with value 0.0.
     assert_eq!(v, Value::Double(0.0));
     Ok(())
@@ -78,17 +93,26 @@ fn held_mode_returns_previous_sample() -> Result<()> {
 #[test]
 fn blocked_sample_returns_none() -> Result<()> {
     let stage = open()?;
-    // Bracketing pair includes a ValueBlock — Stage::value_at returns None.
-    assert!(stage.value_at(path("/Prim.blocked")?, 5.0)?.is_none());
+    // Bracketing pair includes a ValueBlock — get_at returns None.
+    assert!(stage
+        .attribute_at(path("/Prim.blocked")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .is_none());
     // At the blocked sample itself.
-    assert!(stage.value_at(path("/Prim.blocked")?, 10.0)?.is_none());
+    assert!(stage
+        .attribute_at(path("/Prim.blocked")?)
+        .get_at::<Value>(usd::TimeCode::new(10.0))?
+        .is_none());
     Ok(())
 }
 
 #[test]
 fn before_first_sample_clamps() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.scalar")?, -100.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.scalar")?)
+        .get_at::<Value>(usd::TimeCode::new(-100.0))?
+        .unwrap();
     assert_eq!(v, Value::Double(0.0));
     Ok(())
 }
@@ -96,7 +120,10 @@ fn before_first_sample_clamps() -> Result<()> {
 #[test]
 fn after_last_sample_clamps() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.scalar")?, 100.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.scalar")?)
+        .get_at::<Value>(usd::TimeCode::new(100.0))?
+        .unwrap();
     assert_eq!(v, Value::Double(20.0));
     Ok(())
 }
@@ -104,7 +131,10 @@ fn after_last_sample_clamps() -> Result<()> {
 #[test]
 fn falls_back_to_default_when_no_timesamples() -> Result<()> {
     let stage = open()?;
-    let v = stage.value_at(path("/Prim.static")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.static")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     assert_eq!(v, Value::Double(42.0));
     Ok(())
 }
@@ -115,7 +145,10 @@ fn set_interpolation_type_via_builder() -> Result<()> {
         .interpolation_type(usd::InterpolationType::Held)
         .open(FIXTURE)?;
     assert_eq!(stage.interpolation_type(), usd::InterpolationType::Held);
-    let v = stage.value_at(path("/Prim.scalar")?, 5.0)?.unwrap();
+    let v = stage
+        .attribute_at(path("/Prim.scalar")?)
+        .get_at::<Value>(usd::TimeCode::new(5.0))?
+        .unwrap();
     assert_eq!(v, Value::Double(0.0));
     Ok(())
 }

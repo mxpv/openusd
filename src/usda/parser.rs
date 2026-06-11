@@ -267,6 +267,7 @@ impl<'a> Parser<'a> {
             (FieldKey::HasOwnedSubLayers.as_str(), TypeInfo::scalar(Type::Bool)),
             ("doc", TypeInfo::scalar(Type::String)),
             ("endTimeCode", TypeInfo::scalar(Type::Double)),
+            ("framePrecision", TypeInfo::scalar(Type::Int)),
             ("framesPerSecond", TypeInfo::scalar(Type::Double)),
             ("metersPerUnit", TypeInfo::scalar(Type::Double)),
             ("timeCodesPerSecond", TypeInfo::scalar(Type::Double)),
@@ -2003,6 +2004,7 @@ mod tests {
 
                 upAxis = "Y"
                 metersPerUnit = 0.01
+                framePrecision = 6
 
                 defaultPrim = "World"
             )
@@ -2024,6 +2026,17 @@ mod tests {
                 .unwrap()
                 .as_str()
                 == "Y"
+        );
+
+        // `framePrecision` is an int field — it must decode to `Value::Int`,
+        // not the type-blind fallback's `Value::Int64`, so `frame_precision()`
+        // reads it back.
+        assert_eq!(
+            pseudo_root
+                .get(FieldKey::FramePrecision.as_str())
+                .and_then(|v| v.try_as_int_ref())
+                .copied(),
+            Some(6)
         );
     }
 

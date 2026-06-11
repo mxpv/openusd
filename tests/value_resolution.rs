@@ -4,8 +4,8 @@
 //!
 //! The reference suite hardcodes its expectations inline rather than shipping
 //! JSON baselines, so each `test_*` method is transcribed here against the
-//! `usd::Stage` value-resolution surface (`Stage::value_at`, composed `default`
-//! reads, and `Stage::set_interpolation_type`).
+//! `usd::Stage` value-resolution surface (`Attribute::get_at`, composed
+//! `default` reads, and `Stage::set_interpolation_type`).
 //!
 //! Excluded — not yet supported by the core:
 //! - Attribute type fallbacks and the reference's `ValueResolutionProcess`
@@ -36,7 +36,12 @@ fn scalar(v: Option<Value>) -> Option<f64> {
 }
 
 fn value_at(stage: &usd::Stage, attr: &str, time: f64) -> Option<f64> {
-    scalar(stage.value_at(path(attr).unwrap(), time).expect("value_at"))
+    scalar(
+        stage
+            .attribute_at(path(attr).unwrap())
+            .get_at::<Value>(usd::TimeCode::new(time))
+            .expect("value_at"),
+    )
 }
 
 /// `test_default`: at the default time code the composed `default` opinion

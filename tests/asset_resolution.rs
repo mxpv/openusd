@@ -51,7 +51,7 @@ fn resolved_path_populated() {
     // The time-aware read anchors the default-sourced value the same way.
     let at_time = stage
         .attribute_at(sdf::path("/M.inputs:file").unwrap())
-        .get_at::<sdf::AssetPath>(0.0)
+        .get_at::<sdf::AssetPath>(openusd::usd::TimeCode::new(0.0))
         .unwrap()
         .expect("asset value at time");
     assert_eq!(at_time.resolved_path(), Some(canonical.as_str()));

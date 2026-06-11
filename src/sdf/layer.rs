@@ -317,8 +317,7 @@ impl Layer {
     /// an explicit empty list (an opinion that *there should be no* relocates).
     /// Mirrors C++ `SdfLayer::HasRelocates`.
     pub fn has_relocates(&self) -> bool {
-        self.data
-            .has_field(&Path::abs_root(), FieldKey::LayerRelocates.as_str())
+        self.has_root_field(FieldKey::LayerRelocates)
     }
 
     /// Set this layer's entire list of namespace relocations to `relocates`.
@@ -334,6 +333,144 @@ impl Layer {
     /// `SdfLayer::ClearRelocates`. No-op when no pseudo-root spec exists.
     pub fn clear_relocates(&mut self) -> Result<(), AuthoringError> {
         self.clear_root_field(FieldKey::LayerRelocates)
+    }
+
+    /// The layer's `startTimeCode`, or `0.0` when unauthored. Mirrors C++
+    /// `SdfLayer::GetStartTimeCode`.
+    pub fn start_time_code(&self) -> f64 {
+        self.pseudo_root()
+            .and_then(|root| root.start_time_code())
+            .unwrap_or(0.0)
+    }
+
+    /// Set the layer's `startTimeCode`. Mirrors C++ `SdfLayer::SetStartTimeCode`.
+    pub fn set_start_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_start_time_code(time);
+        Ok(())
+    }
+
+    /// Whether this layer authors a `startTimeCode` opinion. Mirrors C++
+    /// `SdfLayer::HasStartTimeCode`.
+    pub fn has_start_time_code(&self) -> bool {
+        self.has_root_field(FieldKey::StartTimeCode)
+    }
+
+    /// Clear this layer's `startTimeCode` opinion. Mirrors C++
+    /// `SdfLayer::ClearStartTimeCode`. No-op when no pseudo-root spec exists.
+    pub fn clear_start_time_code(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::StartTimeCode)
+    }
+
+    /// The layer's `endTimeCode`, or `0.0` when unauthored. Mirrors C++
+    /// `SdfLayer::GetEndTimeCode`.
+    pub fn end_time_code(&self) -> f64 {
+        self.pseudo_root().and_then(|root| root.end_time_code()).unwrap_or(0.0)
+    }
+
+    /// Set the layer's `endTimeCode`. Mirrors C++ `SdfLayer::SetEndTimeCode`.
+    pub fn set_end_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_end_time_code(time);
+        Ok(())
+    }
+
+    /// Whether this layer authors an `endTimeCode` opinion. Mirrors C++
+    /// `SdfLayer::HasEndTimeCode`.
+    pub fn has_end_time_code(&self) -> bool {
+        self.has_root_field(FieldKey::EndTimeCode)
+    }
+
+    /// Clear this layer's `endTimeCode` opinion. Mirrors C++
+    /// `SdfLayer::ClearEndTimeCode`. No-op when no pseudo-root spec exists.
+    pub fn clear_end_time_code(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::EndTimeCode)
+    }
+
+    /// The layer's `timeCodesPerSecond`. Falls back to the authored
+    /// `framesPerSecond`, then to `24.0`, when unauthored. Mirrors C++
+    /// `SdfLayer::GetTimeCodesPerSecond`.
+    pub fn time_codes_per_second(&self) -> f64 {
+        let root = self.pseudo_root();
+        root.as_ref()
+            .and_then(|root| root.time_codes_per_second())
+            .or_else(|| root.as_ref().and_then(|root| root.frames_per_second()))
+            .unwrap_or(24.0)
+    }
+
+    /// Set the layer's `timeCodesPerSecond`. Mirrors C++
+    /// `SdfLayer::SetTimeCodesPerSecond`.
+    pub fn set_time_codes_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_time_codes_per_second(rate);
+        Ok(())
+    }
+
+    /// Whether this layer authors a `timeCodesPerSecond` opinion. Mirrors C++
+    /// `SdfLayer::HasTimeCodesPerSecond`.
+    pub fn has_time_codes_per_second(&self) -> bool {
+        self.has_root_field(FieldKey::TimeCodesPerSecond)
+    }
+
+    /// Clear this layer's `timeCodesPerSecond` opinion. Mirrors C++
+    /// `SdfLayer::ClearTimeCodesPerSecond`. No-op when no pseudo-root spec exists.
+    pub fn clear_time_codes_per_second(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::TimeCodesPerSecond)
+    }
+
+    /// The layer's `framesPerSecond`, or `24.0` when unauthored. Mirrors C++
+    /// `SdfLayer::GetFramesPerSecond`.
+    pub fn frames_per_second(&self) -> f64 {
+        self.pseudo_root()
+            .and_then(|root| root.frames_per_second())
+            .unwrap_or(24.0)
+    }
+
+    /// Set the layer's `framesPerSecond`. Mirrors C++
+    /// `SdfLayer::SetFramesPerSecond`.
+    pub fn set_frames_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_frames_per_second(rate);
+        Ok(())
+    }
+
+    /// Whether this layer authors a `framesPerSecond` opinion. Mirrors C++
+    /// `SdfLayer::HasFramesPerSecond`.
+    pub fn has_frames_per_second(&self) -> bool {
+        self.has_root_field(FieldKey::FramesPerSecond)
+    }
+
+    /// Clear this layer's `framesPerSecond` opinion. Mirrors C++
+    /// `SdfLayer::ClearFramesPerSecond`. No-op when no pseudo-root spec exists.
+    pub fn clear_frames_per_second(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::FramesPerSecond)
+    }
+
+    /// The layer's `framePrecision`, or `3` when unauthored. Mirrors C++
+    /// `SdfLayer::GetFramePrecision`.
+    pub fn frame_precision(&self) -> i32 {
+        self.pseudo_root().and_then(|root| root.frame_precision()).unwrap_or(3)
+    }
+
+    /// Set the layer's `framePrecision`. Mirrors C++
+    /// `SdfLayer::SetFramePrecision`.
+    pub fn set_frame_precision(&mut self, precision: i32) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_frame_precision(precision);
+        Ok(())
+    }
+
+    /// Whether this layer authors a `framePrecision` opinion. Mirrors C++
+    /// `SdfLayer::HasFramePrecision`.
+    pub fn has_frame_precision(&self) -> bool {
+        self.has_root_field(FieldKey::FramePrecision)
+    }
+
+    /// Clear this layer's `framePrecision` opinion. Mirrors C++
+    /// `SdfLayer::ClearFramePrecision`. No-op when no pseudo-root spec exists.
+    pub fn clear_frame_precision(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::FramePrecision)
+    }
+
+    /// Whether the pseudo-root spec authors `key`, including an explicit
+    /// opinion that carries an "empty"/default value.
+    fn has_root_field(&self, key: FieldKey) -> bool {
+        self.data.has_field(&Path::abs_root(), key.as_str())
     }
 
     /// Remove a metadata field from the pseudo-root spec, if that spec exists.
@@ -418,5 +555,53 @@ mod tests {
         layer.clear_relocates().expect("writable");
         assert!(!layer.has_relocates());
         assert!(layer.relocates().is_empty());
+    }
+
+    /// The five time-code fields round-trip through set/get and report the
+    /// documented unauthored defaults before any opinion is written.
+    #[test]
+    fn time_code_round_trip() {
+        let mut layer = Layer::new_anonymous("test.usda");
+        assert!(!layer.has_start_time_code());
+        assert_eq!(layer.start_time_code(), 0.0);
+        assert_eq!(layer.end_time_code(), 0.0);
+        assert_eq!(layer.frame_precision(), 3);
+
+        layer.set_start_time_code(1.0).expect("writable");
+        layer.set_end_time_code(48.0).expect("writable");
+        layer.set_frame_precision(6).expect("writable");
+
+        assert!(layer.has_start_time_code());
+        assert_eq!(layer.start_time_code(), 1.0);
+        assert_eq!(layer.end_time_code(), 48.0);
+        assert_eq!(layer.frame_precision(), 6);
+    }
+
+    /// `timeCodesPerSecond` falls back to the authored `framesPerSecond`, then
+    /// to `24.0`, when no `timeCodesPerSecond` opinion is authored.
+    #[test]
+    fn tcps_fps_fallback() {
+        let mut layer = Layer::new_anonymous("test.usda");
+        assert_eq!(layer.time_codes_per_second(), 24.0);
+        assert_eq!(layer.frames_per_second(), 24.0);
+
+        layer.set_frames_per_second(30.0).expect("writable");
+        assert_eq!(layer.time_codes_per_second(), 30.0);
+
+        layer.set_time_codes_per_second(48.0).expect("writable");
+        assert_eq!(layer.time_codes_per_second(), 48.0);
+    }
+
+    /// `clear_*` removes the opinion so `has_*` reports false and the getter
+    /// returns the unauthored default again.
+    #[test]
+    fn clear_time_code() {
+        let mut layer = Layer::new_anonymous("test.usda");
+        layer.set_start_time_code(5.0).expect("writable");
+        assert!(layer.has_start_time_code());
+
+        layer.clear_start_time_code().expect("writable");
+        assert!(!layer.has_start_time_code());
+        assert_eq!(layer.start_time_code(), 0.0);
     }
 }

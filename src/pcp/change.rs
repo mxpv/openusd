@@ -153,6 +153,13 @@ impl Changes {
                 self.layer_stack |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
             } else if *key == FieldKey::LayerRelocates.as_str() {
                 self.layer_stack |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
+            } else if *key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str() {
+                // The effective timeCodesPerSecond (authored rate, else
+                // framesPerSecond) retimes reference/payload arcs whose target
+                // resolves at a different rate (spec 12.3.2, see
+                // `arc_tcps_scale`). Every cached index that folded the old
+                // ratio into an arc offset is now stale, so drop the stack.
+                self.layer_stack |= LayerStackChanges::SIGNIFICANT;
             } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
@@ -383,6 +390,23 @@ mod tests {
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&Path::abs_root()));
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
+    }
+
+    /// Editing the root layer's `timeCodesPerSecond` (or its `framesPerSecond`
+    /// fallback) retimes reference/payload arcs, so it must mark the whole
+    /// layer stack significant to drop indices that folded the old ratio.
+    #[test]
+    fn time_codes_per_second_change_is_significant() {
+        for field in [FieldKey::TimeCodesPerSecond, FieldKey::FramesPerSecond] {
+            let (graph, cache) = empty_cache();
+            let mut cl = ChangeList::new();
+            cl.entry_mut(&Path::abs_root())
+                .info_changed
+                .insert(field.as_str().into());
+            let mut changes = Changes::new();
+            changes.did_change(&cache, &graph, &[(first_layer(&graph), &cl)]);
+            assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
+        }
     }
 
     #[test]

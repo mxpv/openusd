@@ -6,14 +6,14 @@
 //! sentinels are honored — `!invert!<op>` inverts an op's value, and a
 //! leading `!resetXformStack!` opts the prim out of inheriting its parent
 //! transform (surfaced via [`Xformable::resets_xform_stack`]). Per-op values
-//! flow through [`crate::usd::Stage::value_at`], so time-sampled ops
+//! flow through [`crate::usd::Attribute::get`], so time-sampled ops
 //! interpolate per AOUSD §12.5.
 
 use anyhow::Result;
 
 use crate::gf;
 use crate::sdf;
-use crate::usd::{Attribute, Prim};
+use crate::usd::{Attribute, Prim, TimeCode};
 
 use super::tokens as tok;
 use super::Imageable;
@@ -76,7 +76,8 @@ pub trait Xformable: Imageable {
     /// Compose `xformOpOrder` into a single local-to-parent 4×4 matrix at
     /// `time`. [`gf::Matrix4d::IDENTITY`] when no stack is authored. Mirrors C++
     /// `ComputeLocalToParentTransform`.
-    fn local_to_parent_transform(&self, time: f64) -> Result<gf::Matrix4d> {
+    fn local_to_parent_transform(&self, time: impl Into<TimeCode>) -> Result<gf::Matrix4d> {
+        let time = time.into();
         let Some(order) = self.xform_op_order()? else {
             return Ok(gf::Matrix4d::IDENTITY);
         };
@@ -206,14 +207,14 @@ pub trait Xformable: Imageable {
 }
 
 /// Build the 4×4 contribution of a single xformOp (possibly `!invert!`-ed).
-fn build_op_matrix(prim: &Prim, op_name: &str, time: f64) -> Result<gf::Matrix4d> {
+fn build_op_matrix(prim: &Prim, op_name: &str, time: TimeCode) -> Result<gf::Matrix4d> {
     let (inverted, base) = match op_name.strip_prefix(TOKEN_INVERT_PREFIX) {
         Some(stripped) => (true, stripped),
         None => (false, op_name),
     };
 
     let attr = prim.path().append_property(base)?;
-    let Some(raw) = prim.stage().value_at(attr, time)? else {
+    let Some(raw) = prim.stage().attribute_at(attr).get_at::<sdf::Value>(time)? else {
         return Ok(gf::Matrix4d::IDENTITY);
     };
 

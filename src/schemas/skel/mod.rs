@@ -19,7 +19,7 @@
 //! [`SkelRoot`] and [`Skeleton`] are [`geom::Boundable`](crate::schemas::geom)
 //! prims, so `skel` enables the `geom` feature. Time-sampled SkelAnimation
 //! evaluation is handled by [`SkelAnimQuery`], which delegates to
-//! [`crate::usd::Stage::value_at`] and inherits the stage's interpolation mode
+//! [`crate::usd::Attribute::get`] and inherits the stage's interpolation mode
 //! (AOUSD §12.5 — linear by default, with per-joint slerp for `rotations`).
 //! The static resolvers ([`SkeletonResolver`] / [`SkinningResolver`]) take
 //! pre-evaluated joint poses, so callers typically wire `SkelAnimQuery` into
