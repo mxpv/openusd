@@ -47,7 +47,7 @@ use crate::tf::Token;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
-use super::notice::{Notice, ObjectsChanged};
+use super::notice::{LayerMutingChanged, Notice, ObjectsChanged};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -483,10 +483,11 @@ pub struct EditContext<'a> {
 
 impl Drop for EditContext<'_> {
     fn drop(&mut self) {
-        // A `drop` must be infallible and must not re-enter the composition
-        // cache. The saved target was valid when the guard was created, so
-        // restoring it needs no validation — assign the field directly.
-        *self.stage.edit_target.borrow_mut() = self.saved.clone();
+        // The saved target was valid when the guard was created, so restoring it
+        // needs no validation. `replace_edit_target` notifies the change so a
+        // listener tracking the edit target stays current (C++ `UsdEditContext`
+        // notifies on both enter and restore).
+        self.stage.replace_edit_target(self.saved.clone());
     }
 }
 
@@ -601,7 +602,7 @@ pub struct StageInner {
 /// A stage change-listener callback, installed with
 /// [`Stage::set_listener`]. Receives the originating stage (so it can call
 /// [`Stage::extract_diff`] without capturing a handle) and the [`Notice`].
-type ChangeListener = Box<dyn Fn(&Stage, &Notice<'_>)>;
+type ChangeListener = Box<dyn Fn(&Stage, Notice<'_>)>;
 
 /// A composed USD stage.
 ///
@@ -814,8 +815,25 @@ impl Stage {
             });
         }
 
-        *self.edit_target.borrow_mut() = target;
+        self.replace_edit_target(target);
         Ok(())
+    }
+
+    /// Store `target` as the edit target, delivering [`Notice::EditTargetChanged`]
+    /// when it differs from the current one. The shared core of
+    /// [`set_edit_target`](Self::set_edit_target) and the [`EditContext`] restore;
+    /// it performs no validation. The notification is skipped while the thread is
+    /// unwinding — an [`EditContext`] may restore during a panic, where a
+    /// listener panic would abort the process.
+    fn replace_edit_target(&self, target: EditTarget) {
+        let mut changed = false;
+        self.edit_target.replace_with(|current| {
+            changed = *current != target;
+            target
+        });
+        if changed && !std::thread::panicking() {
+            self.notify(Notice::EditTargetChanged);
+        }
     }
 
     /// Scope a temporary edit-target switch. Sets `target` as the current edit
@@ -958,13 +976,24 @@ impl Stage {
     ///
     /// Returns the previously installed listener, if any, so a caller can
     /// temporarily swap in a listener and later restore the old one.
-    pub fn set_listener(&self, f: impl Fn(&Stage, &Notice<'_>) + 'static) -> Option<ChangeListener> {
+    pub fn set_listener(&self, f: impl Fn(&Stage, Notice<'_>) + 'static) -> Option<ChangeListener> {
         self.listener.replace(Some(Box::new(f)))
     }
 
     /// Remove this stage's change listener and return it, if one was installed.
     pub fn unset_listener(&self) -> Option<ChangeListener> {
         self.listener.take()
+    }
+
+    /// Deliver `notice` to the installed listener, if any. The listener slot is
+    /// borrowed across the call, so the callback must not set/unset the listener
+    /// (see [`set_listener`](Self::set_listener)); reading or re-authoring the
+    /// stage is fine. Callers must release any other stage borrow first, since
+    /// the callback may read or mutate the stage.
+    fn notify(&self, notice: Notice<'_>) {
+        if let Some(listener) = self.listener.borrow().as_ref() {
+            listener(self, notice);
+        }
     }
 
     /// Extract a serializable diff for the edit described by `objects`.
@@ -1227,15 +1256,12 @@ impl Stage {
                     // it may re-author, which re-enters `finalize_layer` and
                     // re-borrows this buffer.
                     drop(scratch);
-                    if let Some(listener) = self.listener.borrow().as_ref() {
-                        let notice = Notice::ObjectsChanged(ObjectsChanged {
-                            resynced: &resynced,
-                            changed_info_only: &changed_info_only,
-                            layer_identifier: &layer_identifier,
-                            change_list: &change_list,
-                        });
-                        listener(self, &notice);
-                    }
+                    self.notify(Notice::ObjectsChanged(ObjectsChanged {
+                        resynced: &resynced,
+                        changed_info_only: &changed_info_only,
+                        layer_identifier: &layer_identifier,
+                        change_list: &change_list,
+                    }));
                 }
                 Ok(true)
             }
@@ -1334,12 +1360,27 @@ impl Stage {
     /// value-resolution suppression of muted layers is not yet wired into
     /// composition.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
-        self.muted.borrow_mut().insert(identifier.into());
+        let identifier = identifier.into();
+        // Bind the result so the `muted` borrow is released before notifying:
+        // the listener may read the muted set or re-author.
+        let newly_muted = self.muted.borrow_mut().insert(identifier.clone());
+        if newly_muted {
+            self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
+                layer: &identifier,
+                muted: true,
+            }));
+        }
     }
 
     /// Removes a layer identifier from the muted set.
     pub fn unmute_layer(&self, identifier: &str) {
-        self.muted.borrow_mut().remove(identifier);
+        let was_muted = self.muted.borrow_mut().remove(identifier);
+        if was_muted {
+            self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
+                layer: identifier,
+                muted: false,
+            }));
+        }
     }
 
     /// Whether the layer with the given identifier is currently muted.

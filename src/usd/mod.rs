@@ -24,7 +24,7 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
-pub use notice::{Notice, ObjectsChanged};
+pub use notice::{LayerMutingChanged, Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};

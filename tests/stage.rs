@@ -3479,7 +3479,7 @@ fn extract_diff_roundtrip() -> Result<()> {
         let size = sdf::Path::new("/World.size")?;
         stage.set_listener(move |stage, notice| {
             if let Notice::ObjectsChanged(oc) = notice {
-                let diff = stage.extract_diff(oc).expect("extract diff");
+                let diff = stage.extract_diff(&oc).expect("extract diff");
                 *exported.borrow_mut() = diff.layer.export_to_string().expect("export");
                 *value.borrow_mut() = diff
                     .layer
@@ -3513,7 +3513,7 @@ fn extract_diff_field_erasure() -> Result<()> {
         let erased = erased.clone();
         stage.set_listener(move |stage, notice| {
             if let Notice::ObjectsChanged(oc) = notice {
-                let diff = stage.extract_diff(oc).expect("extract diff");
+                let diff = stage.extract_diff(&oc).expect("extract diff");
                 let size = sdf::Path::new("/World.size").unwrap();
                 erased.borrow_mut().extend(diff.removed.iter().filter_map(|r| match r {
                     Deletion::Field(p, f) if *p == size => Some(f.as_str().to_string()),
@@ -3524,6 +3524,85 @@ fn extract_diff_field_erasure() -> Result<()> {
     }
     attr.clear_connections()?;
     assert!(erased.borrow().iter().any(|f| f == "connectionPaths"));
+    Ok(())
+}
+
+/// Switching the edit target delivers `EditTargetChanged`; re-setting the same
+/// target is a no-op and fires nothing.
+#[test]
+fn listener_edit_target_changed() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.root_layer().identifier().to_string();
+    let sub = sdf::Layer::new_anonymous("sub.usda");
+    let sub_id = sub.identifier().to_string();
+    stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.set_listener(move |_stage, notice| {
+            if matches!(notice, Notice::EditTargetChanged) {
+                count.set(count.get() + 1);
+            }
+        });
+    }
+    stage.set_edit_target(EditTarget::for_layer(sub_id.clone()))?;
+    assert_eq!(count.get(), 1);
+    stage.set_edit_target(EditTarget::for_layer(sub_id))?;
+    assert_eq!(count.get(), 1);
+    Ok(())
+}
+
+/// An `EditContext` fires `EditTargetChanged` on both entry and restore, so a
+/// listener tracking the edit target stays consistent across the scope.
+#[test]
+fn listener_edit_context_restore() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.root_layer().identifier().to_string();
+    let sub = sdf::Layer::new_anonymous("sub.usda");
+    let sub_id = sub.identifier().to_string();
+    stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.set_listener(move |_stage, notice| {
+            if matches!(notice, Notice::EditTargetChanged) {
+                count.set(count.get() + 1);
+            }
+        });
+    }
+    {
+        let _ctx = stage.edit_context(EditTarget::for_layer(sub_id))?;
+        assert_eq!(count.get(), 1); // entry fired
+    } // drop restores the previous target → fires again
+    assert_eq!(count.get(), 2);
+    Ok(())
+}
+
+/// Muting and unmuting a layer deliver `LayerMutingChanged` with the changed
+/// identifiers; a redundant mute/unmute fires nothing.
+#[test]
+fn listener_layer_muting() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let muted = Rc::new(RefCell::new(Vec::<String>::new()));
+    let unmuted = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let (muted, unmuted) = (muted.clone(), unmuted.clone());
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::LayerMutingChanged(m) = notice {
+                if m.muted {
+                    muted.borrow_mut().push(m.layer.to_string());
+                } else {
+                    unmuted.borrow_mut().push(m.layer.to_string());
+                }
+            }
+        });
+    }
+    stage.mute_layer("weak.usda");
+    stage.mute_layer("weak.usda"); // already muted — no notice
+    stage.unmute_layer("weak.usda");
+    stage.unmute_layer("weak.usda"); // already unmuted — no notice
+    assert_eq!(*muted.borrow(), vec!["weak.usda".to_string()]);
+    assert_eq!(*unmuted.borrow(), vec!["weak.usda".to_string()]);
     Ok(())
 }
 

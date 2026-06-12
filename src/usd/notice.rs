@@ -12,12 +12,32 @@ use crate::{sdf, tf};
 
 /// A change notification delivered to a stage listener (C++ `UsdNotice`).
 ///
-/// One variant today; edit-target and layer-muting notices are future
-/// additions, hence `#[non_exhaustive]`.
+/// `#[non_exhaustive]` reserves room for further `UsdNotice` kinds.
 #[non_exhaustive]
 pub enum Notice<'a> {
     /// Scene objects were added, removed, or changed by an edit.
     ObjectsChanged(ObjectsChanged<'a>),
+    /// The stage's edit target changed (C++ `UsdNotice::StageEditTargetChanged`).
+    /// The new target is available from
+    /// [`Stage::edit_target`](super::Stage::edit_target). Fires on
+    /// [`Stage::set_edit_target`](super::Stage::set_edit_target) and on both
+    /// entering and leaving an [`EditContext`](super::EditContext) scope (the
+    /// latter when its restore changes the target).
+    EditTargetChanged,
+    /// A layer was muted or unmuted (C++ `UsdNotice::LayerMutingChanged`).
+    /// Reports the change to the muted set; suppressing muted opinions during
+    /// composition is not yet wired up (see
+    /// [`Stage::mute_layer`](super::Stage::mute_layer)).
+    LayerMutingChanged(LayerMutingChanged<'a>),
+}
+
+/// A layer's muting changed (C++ `UsdNotice::LayerMutingChanged`). The stage
+/// mutes one layer per call, so each notice reports a single layer.
+pub struct LayerMutingChanged<'a> {
+    /// Identifier of the layer whose muting changed.
+    pub layer: &'a str,
+    /// `true` if the layer is now muted, `false` if it was unmuted.
+    pub muted: bool,
 }
 
 /// The objects affected by one edit (C++ `UsdNotice::ObjectsChanged`).

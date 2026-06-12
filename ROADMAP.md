@@ -197,7 +197,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Stage cache](https://openusd.org/release/api/class_usd_utils_stage_cache.html) | :thinking: | | Avoid redundant stage loading |
 | [Kind registry](https://openusd.org/release/api/class_kind_registry.html) | :thinking: | | Model/group/assembly/component taxonomy |
 | [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :white_check_mark: | `main` | Fully supported, see `usd::EditTarget` |
-| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | A single per-stage listener (`Stage::set_listener`) fired after each edit with a `Notice::ObjectsChanged` (resynced vs changed-info paths, per-path changed fields); `Stage::extract_diff` turns it into a serializable `LayerDiff` (sparse overlay layer + `Deletion`s) for mirroring edits to another stage or machine, with `WeakStage` to capture the stage without a reference cycle<br>Remaining — the apply side (`apply_diff`), `StageEditTargetChanged` / `LayerMutingChanged` notices, arc-target namespace translation |
+| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | `Stage::set_listener` delivers a `Notice` per edit (`ObjectsChanged` / `EditTargetChanged` / `LayerMutingChanged`); `Stage::extract_diff` builds a `LayerDiff` for mirroring<br>Remaining — apply side, arc-target namespace translation |
 | [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :thinking: | | Inspect all contributing opinions across layers |
 
 ## Tooling
