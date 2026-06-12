@@ -1480,15 +1480,25 @@ fn add_to_token_vec(
 /// non-`TokenVec` value, or does not contain `name`. Removing the last entry
 /// erases the field, so a spec whose children are all gone round-trips
 /// identically to one that never authored a child list.
-fn remove_from_token_vec(data: &mut dyn sdf::AbstractData, owner_path: &sdf::Path, key: sdf::ChildrenKey, name: &str) {
-    let Ok(Some(value)) = try_child_field(data, owner_path, key) else {
-        return;
+///
+/// A read failure on the child-list field surfaces as an [`sdf::AuthoringError`]
+/// rather than being mistaken for an absent list, matching [`add_to_token_vec`];
+/// otherwise a child whose list could not be decoded would be silently left in
+/// place after its spec is erased.
+fn remove_from_token_vec(
+    data: &mut dyn sdf::AbstractData,
+    owner_path: &sdf::Path,
+    key: sdf::ChildrenKey,
+    name: &str,
+) -> Result<(), sdf::AuthoringError> {
+    let Some(value) = try_child_field(data, owner_path, key)? else {
+        return Ok(());
     };
     let sdf::Value::TokenVec(mut v) = value.into_owned() else {
-        return;
+        return Ok(());
     };
     let Some(idx) = v.iter().position(|n| *n == name) else {
-        return;
+        return Ok(());
     };
     v.remove(idx);
     if v.is_empty() {
@@ -1496,21 +1506,23 @@ fn remove_from_token_vec(data: &mut dyn sdf::AbstractData, owner_path: &sdf::Pat
     } else {
         data.set_field(owner_path, key.as_str(), sdf::Value::TokenVec(v));
     }
+    Ok(())
 }
 
 /// Remove the spec at `path` and reconcile the owning prim's child-name list,
-/// the structural inverse of the typed spec constructors. Returns `true` when a
-/// spec was present and removed.
+/// the structural inverse of the typed spec constructors. Returns `Ok(true)`
+/// when a spec was present and removed.
 ///
 /// [`sdf::AbstractData::erase_spec`] drops a single spec record, so removing a
 /// prim erases every descendant prim and property spec under `path` as well.
 /// Once the spec(s) are erased, the leaf name is dropped from the owning prim's
 /// `primChildren` (for a prim) or `propertyChildren` (for a property) list. The
-/// pseudo-root and variant scaffolding are not removable here and yield `false`.
+/// pseudo-root and variant scaffolding are not removable here and yield
+/// `Ok(false)`; a child-list read failure yields an [`sdf::AuthoringError`].
 ///
 /// Driven through the layer's recording [`EditProxy`](sdf::EditProxy), each
 /// erase records a `REMOVE_*` flag so composition invalidates.
-pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> bool {
+pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<bool, sdf::AuthoringError> {
     let (owner, name, child_key) = match data.spec_type(path) {
         Some(sdf::SpecType::Prim) => {
             // `erase_spec` removes only `path`, so erase the subtree's descendant
@@ -1527,7 +1539,7 @@ pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) ->
                 }
             }
             let Some(name) = path.name() else {
-                return false;
+                return Ok(false);
             };
             (
                 path.parent().unwrap_or_else(sdf::Path::abs_root),
@@ -1537,15 +1549,15 @@ pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) ->
         }
         Some(sdf::SpecType::Attribute | sdf::SpecType::Relationship) => {
             let Some((owner, name)) = path.split_property() else {
-                return false;
+                return Ok(false);
             };
             (owner, name.to_owned(), sdf::ChildrenKey::PropertyChildren)
         }
-        _ => return false,
+        _ => return Ok(false),
     };
     data.erase_spec(path);
-    remove_from_token_vec(data, &owner, child_key, &name);
-    true
+    remove_from_token_vec(data, &owner, child_key, &name)?;
+    Ok(true)
 }
 
 /// Verify that an authored child-list field is either absent or a `TokenVec`.
@@ -1571,11 +1583,7 @@ fn try_child_field<'a>(
     path: &sdf::Path,
     key: sdf::ChildrenKey,
 ) -> Result<Option<Cow<'a, sdf::Value>>, sdf::AuthoringError> {
-    data.try_field(path, key.as_str())
-        .map_err(|_| sdf::AuthoringError::InvalidPath {
-            path: path.clone(),
-            reason: "child-list field could not be read",
-        })
+    Ok(data.try_field(path, key.as_str())?)
 }
 
 /// Verify that `path` either holds no spec or holds one of type `expected`.

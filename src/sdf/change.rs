@@ -20,10 +20,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 
-use anyhow::Result;
 use bitflags::bitflags;
 
-use super::{AbstractData, FieldKey, Path, SpecType, Specifier, Value};
+use super::{AbstractData, DataError, FieldKey, Path, SpecType, Specifier, Value};
 use crate::tf;
 
 /// Per-layer ordered list of authoring changes.
@@ -281,7 +280,7 @@ impl AbstractData for EditProxy {
         self.inner.spec_type(path)
     }
 
-    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>> {
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
         self.inner.try_field(path, field)
     }
 

@@ -136,14 +136,20 @@ where
         self.data.get(path).map(|spec| spec.ty)
     }
 
-    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>> {
+    fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>, sdf::DataError> {
         let Some(field_value) = self.data.get(path).and_then(|spec| spec.get(field)) else {
             return Ok(None);
         };
         match field_value {
             FieldValue::Authored(value) => Ok(Some(Cow::Borrowed(value))),
             FieldValue::Lazy(rep) => {
-                let value = self.file.borrow_mut().value(*rep)?;
+                // The crate value decoder still reports failures as `anyhow`; box
+                // it as the typed `DataError`'s source at this trait boundary.
+                let value = self.file.borrow_mut().value(*rep).map_err(|e| sdf::DataError::Decode {
+                    path: path.clone(),
+                    field: field.to_owned(),
+                    source: e.into(),
+                })?;
                 Ok(Some(Cow::Owned(value)))
             }
         }

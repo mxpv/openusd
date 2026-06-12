@@ -129,6 +129,12 @@ impl From<anyhow::Error> for BuildError {
     }
 }
 
+impl From<sdf::DataError> for BuildError {
+    fn from(error: sdf::DataError) -> Self {
+        Self::from(anyhow::Error::from(error))
+    }
+}
+
 /// The nearest namespace ancestor of `path` (inclusive) whose final component is
 /// a variant selection, or `None` if there is none (C++
 /// `_FindContainingVariantSelection`).

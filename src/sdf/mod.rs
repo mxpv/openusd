@@ -26,7 +26,7 @@ mod value;
 
 pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, EditProxy};
-pub use data::{AbstractData, Data};
+pub use data::{AbstractData, Data, DataError};
 pub use expr::Expr;
 pub use file_format::{find_by_extension, find_by_id, FileFormat, FileFormatCaps, WriteSeek};
 pub use layer::{AuthoringError, Layer};

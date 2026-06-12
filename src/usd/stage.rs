@@ -940,7 +940,7 @@ impl Stage {
     /// and [`remove_property`](Self::remove_property).
     fn remove_spec(&self, path: &sdf::Path) -> Result<bool, StageAuthoringError> {
         self.with_target_layer_at(path, |layer, layer_path| {
-            layer.remove_spec(&layer_path);
+            layer.remove_spec(&layer_path)?;
             Ok(())
         })
     }
@@ -1120,14 +1120,7 @@ impl Stage {
         // record but not the partial layer mutations, leaving a half-applied
         // diff that composition then rebuilds over. Apply to a scratch layer and
         // swap on success (or pre-validate every path) to make it all-or-nothing.
-        let authored = {
-            let mut layers = self.layers.borrow_mut();
-            let node = layers
-                .get_mut(layer_id)
-                .expect("edit-target layer id refers to a live layer");
-            apply_diff_to_layer(&mut node.layer, diff).map_err(StageAuthoringError::Composition)
-        };
-        self.finalize_layer(layer_id, authored, None).map(|_| ())
+        self.author_on_layer(layer_id, |layer| apply_diff_to_layer(layer, diff))
     }
 
     /// The id of the layer the current edit target writes to, or
@@ -1219,10 +1212,7 @@ impl Stage {
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            (
-                layer_id,
-                f(&mut node.layer, spec_path).map_err(StageAuthoringError::from),
-            )
+            (layer_id, f(&mut node.layer, spec_path))
         };
         self.finalize_layer(layer_id, authored, mapping.as_ref())
     }
@@ -1281,7 +1271,7 @@ impl Stage {
         let authored = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            f(&mut node.layer).map_err(StageAuthoringError::from)
+            f(&mut node.layer)
         };
         self.finalize_layer(layer_id, authored, None).map(|_| ())
     }
@@ -1306,7 +1296,7 @@ impl Stage {
     fn finalize_layer(
         &self,
         layer_id: pcp::LayerId,
-        authored: Result<(), StageAuthoringError>,
+        authored: Result<(), sdf::AuthoringError>,
         mapping: Option<&pcp::MapFunction>,
     ) -> Result<bool, StageAuthoringError> {
         // Drain the layer's record into the stage scratch buffer (reusing its
@@ -1376,7 +1366,7 @@ impl Stage {
                 let mut graph = self.layers.borrow_mut();
                 let mut cache = self.cache.borrow_mut();
                 changes.apply(&mut cache, &mut graph);
-                Err(e)
+                Err(StageAuthoringError::Layer(e))
             }
         }
     }
@@ -2083,7 +2073,7 @@ impl Stage {
 /// deletion the overlay cannot carry. The mutating core of
 /// [`Stage::apply_diff`], factored out so the borrow of the target layer node
 /// is scoped tightly around it.
-fn apply_diff_to_layer(layer: &mut sdf::Layer, diff: &LayerDiff) -> Result<()> {
+fn apply_diff_to_layer(layer: &mut sdf::Layer, diff: &LayerDiff) -> Result<(), sdf::AuthoringError> {
     let src = diff.layer.data();
     for path in src.spec_paths() {
         layer.copy_spec_from(src, &path)?;
@@ -2091,7 +2081,7 @@ fn apply_diff_to_layer(layer: &mut sdf::Layer, diff: &LayerDiff) -> Result<()> {
     for deletion in &diff.removed {
         match deletion {
             Deletion::Spec(path) => {
-                layer.remove_spec(path);
+                layer.remove_spec(path)?;
             }
             Deletion::Field(path, field) => layer.data_mut().erase_field(path, field.as_str()),
         }

@@ -13,9 +13,9 @@ use anyhow::{Context, Result};
 
 use super::schema::{ChildrenKey, FieldKey};
 use super::{
-    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, Data, EditProxy, LayerData, Path, PrimSpecMut,
-    PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef, RelocateList,
-    SpecError, SpecType, Variability,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, Data, DataError, EditProxy, LayerData, Path,
+    PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
+    RelocateList, SpecError, SpecType, Variability,
 };
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
@@ -93,7 +93,7 @@ impl Layer {
     /// views keeps this layer's structural invariants intact, so a subset of
     /// `src`'s specs assembles into a valid sparse layer — the basis of the diff
     /// layer in [`Stage::extract_diff`](crate::usd::Stage::extract_diff).
-    pub fn copy_spec_from(&mut self, src: &dyn AbstractData, path: &Path) -> Result<()> {
+    pub fn copy_spec_from(&mut self, src: &dyn AbstractData, path: &Path) -> Result<(), AuthoringError> {
         let Some(ty) = src.spec_type(path) else {
             return Ok(());
         };
@@ -135,11 +135,12 @@ impl Layer {
     /// Remove the spec at `path` from this layer, the structural inverse of
     /// [`copy_spec_from`](Self::copy_spec_from). Removing a prim also erases its
     /// descendant specs, and the leaf name is dropped from the owning prim's
-    /// child-name list. Returns `true` when a spec was present and removed.
+    /// child-name list. Returns `Ok(true)` when a spec was present and removed,
+    /// or an [`AuthoringError`] when the owning prim's child list cannot be read.
     ///
     /// The recording [`EditProxy`] captures each erase so composition can
     /// invalidate.
-    pub fn remove_spec(&mut self, path: &Path) -> bool {
+    pub fn remove_spec(&mut self, path: &Path) -> Result<bool, AuthoringError> {
         super::spec::remove_spec(self.data_mut(), path)
     }
 
@@ -240,6 +241,11 @@ pub enum AuthoringError {
     /// The target spec rejected an edit.
     #[error(transparent)]
     Spec(#[from] SpecError),
+
+    /// Reading a field from the source data failed (e.g. a lazy backend could
+    /// not decode an authored value while copying it).
+    #[error(transparent)]
+    Data(#[from] DataError),
 
     /// The given path is not valid for the requested authoring operation.
     /// Prim authoring requires an absolute, non-root, non-property path;

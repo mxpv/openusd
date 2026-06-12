@@ -5,7 +5,7 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 use crate::sdf::{Path, SpecData, SpecType, Value};
 
@@ -40,14 +40,16 @@ pub trait AbstractData {
     ///
     /// Errors propagate I/O or decoding failures; a missing spec or field is
     /// signalled by `Ok(None)`.
-    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>>;
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError>;
 
     /// Returns the value for a field, erroring if not authored.
     ///
     /// Use [`AbstractData::try_field`] when absence is an expected condition.
-    fn get_field(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>> {
-        self.try_field(path, field)?
-            .ok_or_else(|| anyhow!("No field '{field}' at path '{path}'"))
+    fn get_field(&self, path: &Path, field: &str) -> Result<Cow<'_, Value>, DataError> {
+        self.try_field(path, field)?.ok_or_else(|| DataError::Missing {
+            path: path.clone(),
+            field: field.to_owned(),
+        })
     }
 
     /// Returns the field names for a given path in authored order.
@@ -85,6 +87,42 @@ pub trait AbstractData {
     /// Removes `field` from the spec at `path`. Mirrors C++
     /// `SdfAbstractData::EraseField`. No-op if the spec or field is absent.
     fn erase_field(&mut self, path: &Path, field: &str);
+}
+
+/// A failure reading a field value through [`AbstractData::try_field`] /
+/// [`AbstractData::get_field`].
+///
+/// Eager backends ([`Data`], the text reader) never fail a field read; only a
+/// lazy backend that decodes on demand — the `.usdc` crate reader — can error,
+/// when an authored value fails to decode or decompress.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DataError {
+    /// A backend failed to decode or decompress an authored field value.
+    //
+    // TODO: the crate reader's value decoder still returns `anyhow::Error`, so
+    // its failure is boxed here rather than typed. Give the decoder its own
+    // error and have this variant wrap it directly.
+    #[error("failed to decode field {field:?} at {path}")]
+    Decode {
+        /// The spec path whose field failed to decode.
+        path: Path,
+        /// The name of the field that failed to decode.
+        field: String,
+        /// The backend-specific decode failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    /// [`get_field`](AbstractData::get_field) was asked for a field that is not
+    /// authored on the spec.
+    #[error("no field {field:?} at {path}")]
+    Missing {
+        /// The spec path that was queried.
+        path: Path,
+        /// The name of the absent field.
+        field: String,
+    },
 }
 
 /// In-memory mutable layer data.
@@ -177,7 +215,7 @@ impl AbstractData for Data {
         self.specs.get(path).map(|spec| spec.ty)
     }
 
-    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>> {
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
         Ok(self.specs.get(path).and_then(|spec| spec.get(field)).map(Cow::Borrowed))
     }
 

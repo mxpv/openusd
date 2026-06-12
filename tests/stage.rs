@@ -3898,3 +3898,21 @@ fn apply_diff_rejects_variant_target() -> Result<()> {
     ));
     Ok(())
 }
+
+/// A diff whose overlay cannot be authored surfaces as a layer-authoring error,
+/// not a composition error: `apply_diff` replays through `copy_spec_from`, a
+/// `Layer`-tier operation, so its failure lands in `StageAuthoringError::Layer`.
+#[test]
+fn apply_diff_copy_layer_error() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let mut layer = sdf::Layer::new_anonymous("diff");
+    // A prim spec at the absolute root is not authorable: `copy_spec_from` runs
+    // `PrimSpecMut::over` on it, which rejects the root path.
+    layer.data_mut().create_spec(sdf::Path::abs_root(), sdf::SpecType::Prim);
+    let diff = usd::LayerDiff {
+        layer,
+        removed: Vec::new(),
+    };
+    assert!(matches!(stage.apply_diff(&diff), Err(StageAuthoringError::Layer(_))));
+    Ok(())
+}

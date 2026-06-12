@@ -424,7 +424,7 @@ impl PrimIndex {
                             offset,
                         })),
                         Ok(None) => {}
-                        Err(err) => out.push(Err(err)),
+                        Err(err) => out.push(Err(err.into())),
                     }
                 }
                 out
