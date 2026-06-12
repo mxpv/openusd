@@ -6,7 +6,10 @@
 //! fluent setters take `self` by value and return `Self`, so writes chain in a
 //! single statement that ends with the final handle bound.
 
-use super::{interp, Prim, Stage, StageAuthoringError};
+use std::cell::RefCell;
+
+use super::{interp, Prim, Stage, StageAuthoringError, TimeCode};
+use crate::pcp::AttributeValueSource;
 use crate::sdf;
 use crate::tf;
 
@@ -410,6 +413,15 @@ impl Attribute {
         self.stage.time_samples(&self.path)
     }
 
+    /// Builds an [`AttributeQuery`] for this attribute — a cached value source
+    /// for repeated time-code reads. Mirrors C++ `UsdAttributeQuery(attr)`.
+    /// Prefer this over calling [`get_at`](Attribute::get_at) in a loop when
+    /// sampling one attribute at many time codes, since the query resolves the
+    /// value source once.
+    pub fn query(&self) -> AttributeQuery {
+        AttributeQuery::new(self)
+    }
+
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttribute::GetTimeSamples`.
     ///
@@ -489,6 +501,155 @@ impl Attribute {
             )
         })?;
         Ok(self)
+    }
+}
+
+/// Cached value query for one attribute. Mirrors C++ `UsdAttributeQuery`.
+///
+/// [`Attribute::get_at`] re-resolves the attribute's value source — the opinion
+/// walk down the composition graph — on every call. When the same attribute is
+/// sampled at many time codes (motion blur, baking, a playback scrub), an
+/// `AttributeQuery` resolves that source once and replays it, so each
+/// [`get_at`](AttributeQuery::get_at) is just an interpolation rather than a
+/// fresh composition.
+///
+/// The cached source is snapshotted against the stage's composition revision: a
+/// timed [`get_at`](AttributeQuery::get_at) reuses it until an edit advances the
+/// revision, at which point the next query rebuilds it — so the handle stays
+/// correct across authoring without the caller re-creating it.
+///
+/// The fast path covers attributes resolved from `default` opinions or
+/// `timeSamples`. An attribute resolved through value clips (spec 12.3.4) is
+/// time-dependent at the source level, so the query transparently falls back to
+/// the full resolution path for it; results stay correct, without the speedup.
+pub struct AttributeQuery {
+    attr: Attribute,
+    cached: RefCell<Option<CachedSource>>,
+}
+
+impl Clone for AttributeQuery {
+    /// Clones the attribute handle but not the resolved-source memo: the clone
+    /// resolves its source lazily on first use, like a fresh query.
+    fn clone(&self) -> Self {
+        Self::new(&self.attr)
+    }
+}
+
+/// A resolved value source paired with the composition revision it was resolved
+/// against. Stale once the stage's revision advances past `revision`.
+struct CachedSource {
+    revision: u64,
+    source: AttributeValueSource,
+}
+
+impl AttributeQuery {
+    /// Builds a query for `attr`. The value source resolves lazily on the first
+    /// timed [`get_at`](Self::get_at). Mirrors C++ `UsdAttributeQuery`'s
+    /// attribute constructor.
+    pub fn new(attr: &Attribute) -> Self {
+        Self {
+            attr: attr.clone(),
+            cached: RefCell::new(None),
+        }
+    }
+
+    /// The attribute this query is anchored to.
+    pub fn attribute(&self) -> &Attribute {
+        &self.attr
+    }
+
+    /// Composed default value decoded to `T`, if any layer authored one. The
+    /// convenience spelling of `get_at(None)`; mirrors C++
+    /// `UsdAttributeQuery::Get()`.
+    pub fn get<T>(&self) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.get_at(None)
+    }
+
+    /// Composed value at `time` decoded to `T`. Mirrors C++
+    /// `UsdAttributeQuery::Get(value, time)`.
+    ///
+    /// `time` is `None` to read the default value, or `Some(tc)` (a
+    /// [`TimeCode`], which a bare `TimeCode` coerces into) to resolve a time
+    /// sample under the stage's [`InterpolationType`](super::InterpolationType).
+    /// A timed read reuses the cached value source; the default read delegates
+    /// to the attribute, since a `default` opinion is resolved from a separate
+    /// field.
+    pub fn get_at<T>(&self, time: impl Into<Option<TimeCode>>) -> anyhow::Result<Option<T>>
+    where
+        T: TryFrom<sdf::Value>,
+        T::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let value = match time.into() {
+            None => self.attr.get_at::<sdf::Value>(None)?,
+            Some(time) => self.value_at(time.value())?,
+        };
+        Ok(value.map(T::try_from).transpose()?)
+    }
+
+    /// `true` when more than one time sample is authored — the cached-source
+    /// counterpart of [`Attribute::value_might_be_time_varying`]. Mirrors C++
+    /// `UsdAttributeQuery::ValueMightBeTimeVarying`.
+    pub fn value_might_be_time_varying(&self) -> anyhow::Result<bool> {
+        self.attr.value_might_be_time_varying()
+    }
+
+    /// The authored sample times in ascending order, or empty when none are
+    /// authored. Mirrors C++ `UsdAttributeQuery::GetTimeSamples`.
+    pub fn time_sample_times(&self) -> anyhow::Result<Vec<f64>> {
+        self.attr.time_sample_times()
+    }
+
+    /// Resolves the value at stage `time` through the cached source, rebuilding
+    /// it when the stage's composition revision has advanced.
+    fn value_at(&self, time: f64) -> anyhow::Result<Option<sdf::Value>> {
+        let stage = self.attr.stage();
+        let revision = stage.cache_revision();
+
+        // Reuse a cached source still valid at the current revision.
+        if let Some(cached) = self.cached.borrow().as_ref() {
+            if cached.revision == revision {
+                return self.evaluate(&cached.source, time);
+            }
+        }
+
+        // Miss: resolve the source once and evaluate it. Snapshot the revision
+        // *after* resolving, so a prototype materialized lazily during the
+        // resolve (which advances the revision) is captured rather than leaving
+        // the entry instantly stale.
+        let source = stage.resolve_value_source(self.attr.path())?;
+        let value = self.evaluate(&source, time)?;
+        // Don't memoize an empty source. A synthetic `/__Prototype_N` path
+        // resolves to `Static(None)` until its prototype materializes — a lazy
+        // composition step that does not bump the revision — and then gains a
+        // value. Re-resolving each call lets the query self-heal; a real source
+        // only changes on an edit, which does bump the revision.
+        if !matches!(source, AttributeValueSource::Static(None)) {
+            self.cached.replace(Some(CachedSource {
+                revision: stage.cache_revision(),
+                source,
+            }));
+        }
+        Ok(value)
+    }
+
+    /// Evaluates an already-resolved value source at stage `time`.
+    fn evaluate(&self, source: &AttributeValueSource, time: f64) -> anyhow::Result<Option<sdf::Value>> {
+        let stage = self.attr.stage();
+        match source {
+            AttributeValueSource::Static(value) => Ok(value.clone()),
+            // Interpolate in the node's layer-time frame, mapping `time` back
+            // through the inverse offset — matching `PrimIndex::resolve_value_at`.
+            AttributeValueSource::TimeSamples { samples, offset } => Ok(interp::evaluate(
+                samples,
+                offset.inverse().apply(time),
+                stage.interpolation_type(),
+            )),
+            AttributeValueSource::Clips => stage.resolve_at(self.attr.path(), time),
+        }
     }
 }
 
@@ -790,6 +951,98 @@ mod tests {
             .unwrap();
         assert!(op.explicit);
         assert_eq!(op.explicit_items, vec![b, a]);
+        Ok(())
+    }
+
+    /// A query reproduces `get_at` at every time code over a time-sampled
+    /// attribute: before, between, exact, and after the authored samples.
+    #[test]
+    fn query_matches_get_at() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+        let q = attr.query();
+        for t in [-5.0, 0.0, 5.0, 10.0, 100.0] {
+            assert_eq!(
+                q.get_at::<sdf::Value>(TimeCode::new(t))?,
+                attr.get_at(TimeCode::new(t))?
+            );
+        }
+        assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(2.0));
+        Ok(())
+    }
+
+    /// An attribute with only a default resolves to that default at every time
+    /// code, and `get()` returns it.
+    #[test]
+    fn query_static_default() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set(sdf::Value::Double(7.0))?;
+        let q = attr.query();
+        assert_eq!(q.get::<f64>()?, Some(7.0));
+        assert_eq!(q.get_at::<f64>(TimeCode::new(0.0))?, Some(7.0));
+        assert_eq!(q.get_at::<f64>(TimeCode::new(50.0))?, Some(7.0));
+        Ok(())
+    }
+
+    /// The cached source rebuilds after an edit: re-authoring a sample value is
+    /// reflected on the next query, since the composition revision advances.
+    #[test]
+    fn query_rebuilds_after_edit() -> anyhow::Result<()> {
+        let stage = stage()?;
+        let attr = stage
+            .define_prim("/A")?
+            .set_type_name("Xform")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+        let q = attr.query();
+        assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(2.0));
+
+        // Re-author the t=10 sample; the next query must reflect it.
+        let _attr = attr.set_at(sdf::Value::Double(5.0), TimeCode::new(10.0))?;
+        assert_eq!(q.get_at::<f64>(TimeCode::new(5.0))?, Some(3.0));
+        Ok(())
+    }
+
+    /// A query over samples brought in through a non-identity arc offset
+    /// interpolates identically to `get_at`, proving the layer-time mapping.
+    #[test]
+    fn query_retimed_offset() -> anyhow::Result<()> {
+        let stage = stage()?;
+        stage
+            .define_prim("/Source")?
+            .create_attribute("x", "double")?
+            .set_at(sdf::Value::Double(1.0), TimeCode::new(0.0))?
+            .set_at(sdf::Value::Double(3.0), TimeCode::new(10.0))?;
+        stage.define_prim("/Prim")?.set_metadata(
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                prim_path: sdf::path("/Source")?,
+                layer_offset: sdf::LayerOffset::new(10.0, 1.0),
+                ..Default::default()
+            }])),
+        )?;
+
+        let attr = stage.attribute("/Prim.x");
+        let q = attr.query();
+        // Sample at source 0/10 reads back at stage 10/20 through the offset.
+        for t in [10.0, 15.0, 20.0] {
+            assert_eq!(
+                q.get_at::<sdf::Value>(TimeCode::new(t))?,
+                attr.get_at(TimeCode::new(t))?
+            );
+        }
+        assert_eq!(q.get_at::<f64>(TimeCode::new(10.0))?, Some(1.0));
+        assert_eq!(q.get_at::<f64>(TimeCode::new(20.0))?, Some(3.0));
         Ok(())
     }
 }

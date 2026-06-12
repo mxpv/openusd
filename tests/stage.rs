@@ -1228,6 +1228,30 @@ fn prototype_descendant_survives_early_query() -> Result<()> {
     Ok(())
 }
 
+/// An `AttributeQuery` built on a synthetic prototype descendant before any
+/// instance registers must self-heal once the prototype materializes: the
+/// empty source is not memoized, so a later read picks up the shared content
+/// even though materialization is lazy and does not advance the cache revision
+/// (spec 11.3.3).
+#[test]
+fn query_self_heals_prototype_materialization() -> Result<()> {
+    let stage = Stage::open(&fixture_path("instancing_shared.usda"))?;
+
+    // Use the query before any instance registers: the synthetic path resolves
+    // to nothing yet, and the empty source must not be cached.
+    let q = stage.attribute_query("/__Prototype_0/Child.size");
+    assert_eq!(q.get_at::<sdf::Value>(usd::TimeCode::new(0.0))?, None);
+
+    // Composing an instance mints and materializes /__Prototype_0 — a lazy step
+    // that does not bump the cache revision.
+    let proto = stage.prim("/A").prototype()?.expect("A is an instance");
+    assert_eq!(proto.as_str(), "/__Prototype_0");
+
+    // The same query now resolves the shared content rather than the stale None.
+    assert_eq!(q.get_at::<f64>(usd::TimeCode::new(0.0))?, Some(5.0));
+    Ok(())
+}
+
 /// A property authored inside a variant selected on an instance is shared
 /// content (the selection defines the prototype) and must resolve on the
 /// materialized prototype root (spec 11.3.3).
@@ -2066,6 +2090,24 @@ fn clip_basic_overrides_reference() -> Result<()> {
     // clip.usd authors size = stage time; the reference authors negatives.
     assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(10.0));
     assert_eq!(value_f64(&stage, "/Model.size", 7.0), Some(7.0)); // interpolated
+    Ok(())
+}
+
+/// An attribute resolved through value clips routes the query through the full
+/// resolution path (clips are time-dependent), so the query reproduces `get_at`
+/// at every time code.
+#[test]
+fn query_clip_fallback() -> Result<()> {
+    let stage = Stage::open(&clip_asset("clip_basic"))?;
+    let attr = stage.attribute("/Model.size");
+    let q = attr.query();
+    for t in [0.0, 7.0, 10.0, 15.0] {
+        assert_eq!(
+            q.get_at::<sdf::Value>(usd::TimeCode::new(t))?,
+            attr.get_at(usd::TimeCode::new(t))?
+        );
+    }
+    assert_eq!(q.get_at::<f32>(usd::TimeCode::new(7.0))?, Some(7.0));
     Ok(())
 }
 

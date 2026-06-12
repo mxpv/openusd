@@ -17,7 +17,7 @@ use anyhow::Result;
 use crate::ar::ResolvedPath;
 use crate::sdf;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{Path, SpecType, Value};
+use crate::sdf::{LayerOffset, Path, SpecType, Value};
 use crate::tf::Token;
 
 use super::clip::ResolvedClipSet;
@@ -113,11 +113,50 @@ pub struct IndexCache {
     /// returns early, so the cycle-closing arc simply finds no cached target and
     /// drops out of composition.
     in_progress: HashSet<Path>,
+    /// Monotonic counter bumped once per applied change batch
+    /// ([`Changes::apply`](super::Changes::apply)), the single funnel every
+    /// authoring and layer-stack edit passes through. Cached views that resolve
+    /// values once and replay them (e.g. [`Stage::attribute_query`]) snapshot
+    /// this and rebuild when it advances, so an edit to any opinion — even a
+    /// value-only edit that leaves the prim index intact — invalidates them.
+    ///
+    /// It does not capture lazy prototype materialization, which can change what
+    /// resolves under a synthetic `/__Prototype_N` path without an edit (see
+    /// [`register_prototype`](Self::register_prototype)). A cached view must not
+    /// rely on this counter alone for paths that may be empty pending such
+    /// materialization.
+    ///
+    /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
+    revision: u64,
 }
 
 enum FieldValue {
     NotAuthored,
     Authored(Option<Value>),
+}
+
+/// The resolved source of an attribute's value at a time code, the cacheable
+/// half of [`IndexCache::value_at`]. A cached view
+/// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query)) resolves
+/// this once — paying the opinion walk and the one sample-map clone — then
+/// replays it across many time codes.
+pub(crate) enum AttributeValueSource {
+    /// A time-independent value: a `default` opinion (local or fallback), or
+    /// `None` when the attribute is unauthored, masked out, or blocked. The
+    /// same value resolves at every time code.
+    Static(Option<Value>),
+    /// A time-sampled source — the matched map and its node's layer offset.
+    /// Interpolated per query in layer time via `offset.inverse().apply(time)`,
+    /// matching [`PrimIndex::resolve_value_at`](super::PrimIndex::resolve_value_at).
+    TimeSamples {
+        samples: sdf::TimeSampleMap,
+        offset: LayerOffset,
+    },
+    /// Value clips are authoritative for this attribute (spec 12.3.4). Clip
+    /// resolution selects a different clip layer per time, so a cached view
+    /// falls back to [`IndexCache::value_at`] for every query rather than
+    /// snapshotting a single source.
+    Clips,
 }
 
 /// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
@@ -151,7 +190,20 @@ impl IndexCache {
             prim_errors: HashMap::new(),
             query_errors: Vec::new(),
             in_progress: HashSet::new(),
+            revision: 0,
         }
+    }
+
+    /// The current composition revision (see the [`revision`](Self::revision)
+    /// field). Advances once per applied change batch.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Advances the composition revision, invalidating cached views that
+    /// snapshot it. Called once per [`Changes::apply`](super::Changes::apply).
+    pub(super) fn bump_revision(&mut self) {
+        self.revision += 1;
     }
 
     /// Returns the recoverable composition errors encountered so far: the
@@ -217,6 +269,9 @@ impl IndexCache {
     /// `interp` applies the stage's interpolation policy to a sample map at a
     /// given time; it is supplied by the caller so this layer stays free of any
     /// interpolation policy.
+    ///
+    /// [`Self::resolve_value_source`] mirrors this strength order to cache the
+    /// winning source for replay; keep the two in sync when the order changes.
     pub(crate) fn value_at(
         &mut self,
         graph: &LayerGraph,
@@ -276,6 +331,82 @@ impl IndexCache {
             .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
         let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
         Ok(default.and_then(block_to_none))
+    }
+
+    /// Resolves the cacheable value source for an attribute (the source half of
+    /// [`Self::value_at`]), so a [`Stage::attribute_query`] can replay it across
+    /// time codes. Walks the same strength order as `value_at`, stopping at the
+    /// first authoritative source. When value clips claim the attribute the
+    /// source is [`AttributeValueSource::Clips`]: the query then falls back to
+    /// `value_at` per call, since clip resolution is time-dependent.
+    ///
+    /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
+    pub(crate) fn resolve_value_source(
+        &mut self,
+        graph: &LayerGraph,
+        attr_path: &Path,
+    ) -> Result<AttributeValueSource> {
+        let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
+            return Ok(AttributeValueSource::Static(None));
+        };
+        let local_layers = graph.local_layers();
+
+        // 1) Local time samples take precedence over clip data.
+        if let Some((samples, offset)) =
+            self.cached(&prim)
+                .resolve_time_samples_with_offset(graph, Some(&suffix), Some(&local_layers))?
+        {
+            return Ok(AttributeValueSource::TimeSamples { samples, offset });
+        }
+
+        // 2) Local defaults also take precedence over clip data.
+        if let FieldValue::Authored(value) =
+            self.resolve_local_field_value(graph, &prim, &suffix, FieldKey::Default.as_str(), &local_layers)?
+        {
+            let value = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), value);
+            return Ok(AttributeValueSource::Static(value));
+        }
+
+        // 3) Value clips, anchored on this prim or an ancestor, resolve
+        //    authoritatively but per-time; defer them to `value_at`.
+        if self.clips_present(graph, &prim)? {
+            return Ok(AttributeValueSource::Clips);
+        }
+
+        // 4) Remaining time samples (reference/payload arcs).
+        if let Some((samples, offset)) =
+            self.cached(&prim)
+                .resolve_time_samples_with_offset(graph, Some(&suffix), None)?
+        {
+            return Ok(AttributeValueSource::TimeSamples { samples, offset });
+        }
+
+        // 5) Fall back to the strongest authored default.
+        let default = self
+            .cached(&prim)
+            .resolve_field(FieldKey::Default.as_str(), graph, Some(&suffix))?;
+        let default = self.anchor_asset_paths(graph, &prim, FieldKey::Default.as_str(), Some(&suffix), default);
+        Ok(AttributeValueSource::Static(default.and_then(block_to_none)))
+    }
+
+    /// Whether any value-clip set is anchored on `attr_prim` or an ancestor.
+    /// Conservative gate for [`Self::resolve_value_source`]: a clip set that
+    /// does not declare the attribute still routes the query through the full
+    /// [`Self::value_at`] path, which resolves it correctly (clips are rare, so
+    /// the lost fast path is negligible). Mirrors the ancestor walk in
+    /// [`Self::resolve_clip_value`].
+    fn clips_present(&mut self, graph: &LayerGraph, attr_prim: &Path) -> Result<bool> {
+        let mut anchor = attr_prim.clone();
+        loop {
+            self.ensure_index(graph, &anchor)?;
+            if !self.cached(&anchor).resolve_clip_sets(graph)?.is_empty() {
+                return Ok(true);
+            }
+            match anchor.parent() {
+                Some(parent) if !parent.is_abs_root() => anchor = parent,
+                _ => return Ok(false),
+            }
+        }
     }
 
     /// Resolves an attribute's composed `timeSamples` sample times without

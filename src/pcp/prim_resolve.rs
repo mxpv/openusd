@@ -563,6 +563,22 @@ impl PrimIndex {
         })
     }
 
+    /// Resolves the strongest authored `timeSamples` map together with its
+    /// node's layer offset, cloning the map once. A cached value view
+    /// ([`Stage::attribute_query`](crate::usd::Stage::attribute_query))
+    /// resolves this once and then interpolates the held map per query via
+    /// `offset.inverse().apply(time)`, matching [`Self::resolve_value_at`]
+    /// without re-walking opinions. `local_layers` filters as in
+    /// [`Self::resolve_value_at`].
+    pub(crate) fn resolve_time_samples_with_offset(
+        &self,
+        stack: &LayerGraph,
+        prop_suffix: Option<&str>,
+        local_layers: Option<&HashSet<LayerId>>,
+    ) -> Result<Option<(sdf::TimeSampleMap, LayerOffset)>> {
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| (map.clone(), offset))
+    }
+
     /// Resolves only the retimed sample times of the strongest authored
     /// `timeSamples` opinion, without cloning the sample values. Mirrors
     /// [`Self::resolve_time_samples`] for callers that introspect the times.

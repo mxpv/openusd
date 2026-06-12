@@ -247,7 +247,7 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
-pub(crate) use index_cache::IndexCache;
+pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::LayerGraph;
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;

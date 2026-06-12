@@ -208,6 +208,10 @@ impl Changes {
 
     /// Apply phase: commit the planned invalidations to `cache`.
     pub fn apply(self, cache: &mut IndexCache, graph: &mut LayerGraph) {
+        // Advance the composition revision so cached value views rebuild. This
+        // is the single funnel for every authoring and layer-stack edit, so a
+        // value-only change that drops no index still invalidates them.
+        cache.bump_revision();
         // Any index invalidation can change which prims are instances or how
         // they compose, so affected entries in the shared-prototype registry
         // (spec 11.3.3) must be dropped rather than left stale; they are lazily

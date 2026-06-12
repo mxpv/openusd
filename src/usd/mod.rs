@@ -15,7 +15,7 @@ mod schema;
 mod stage;
 mod timecode;
 
-pub use attribute::Attribute;
+pub use attribute::{Attribute, AttributeQuery};
 pub use clips::ClipsAPI;
 pub use collection::{
     apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule,

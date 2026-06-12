@@ -1327,6 +1327,25 @@ impl Stage {
         self.with_cache(|g, c| c.value_at(g, &attr_path, time, &interp))
     }
 
+    /// Resolves the cacheable value source for an attribute, the source half of
+    /// [`Self::resolve_at`]. Backs [`AttributeQuery`](super::AttributeQuery),
+    /// which snapshots the source and replays it across time codes. Returns
+    /// [`AttributeValueSource::Static`](pcp::AttributeValueSource::Static)
+    /// `None` when the attribute's prim is outside the population mask.
+    pub(crate) fn resolve_value_source(&self, attr_path: &sdf::Path) -> Result<pcp::AttributeValueSource> {
+        if !self.mask_includes(&attr_path.prim_path()) {
+            return Ok(pcp::AttributeValueSource::Static(None));
+        }
+        self.with_cache(|g, c| c.resolve_value_source(g, attr_path))
+    }
+
+    /// The current composition revision, advanced once per applied edit batch.
+    /// [`AttributeQuery`](super::AttributeQuery) snapshots this and rebuilds its
+    /// cached source when it advances.
+    pub(crate) fn cache_revision(&self) -> u64 {
+        self.cache.borrow().revision()
+    }
+
     /// Returns a [`Prim`](super::Prim) handle anchored to `path`. Mirrors C++
     /// `UsdStage::GetPrimAtPath`. The handle is a value-type `(stage, path)`
     /// wrapper; it is returned unconditionally and does not assert that a prim
@@ -1346,6 +1365,13 @@ impl Stage {
     /// Mirrors C++ `UsdStage::GetRelationshipAtPath`.
     pub fn relationship(&self, path: impl Into<sdf::Path>) -> super::Relationship {
         super::Relationship::new(self, path.into())
+    }
+
+    /// Returns an [`AttributeQuery`](super::AttributeQuery) for the attribute at
+    /// `path` — a cached value source for repeated time-code reads. The
+    /// `Stage`-anchored spelling of [`Attribute::query`](super::Attribute::query).
+    pub fn attribute_query(&self, path: impl Into<sdf::Path>) -> super::AttributeQuery {
+        super::AttributeQuery::new(&self.attribute(path))
     }
 
     /// Returns the composed list of root prim names (children of the pseudo-root).
