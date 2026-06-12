@@ -425,8 +425,9 @@ impl Attribute {
     /// The authored sample times in ascending order, or empty when none are
     /// authored. Mirrors C++ `UsdAttribute::GetTimeSamples`.
     ///
-    /// Reflects the composed `timeSamples` field only; sample times
-    /// contributed by value clips are not yet gathered here.
+    /// Gathers the times from the strongest value source — local `timeSamples`,
+    /// then value clips (spec 12.3.4), then `timeSamples` across reference /
+    /// payload arcs — each retimed to stage time.
     pub fn time_sample_times(&self) -> anyhow::Result<Vec<f64>> {
         Ok(self.stage.time_sample_times(&self.path)?.unwrap_or_default())
     }
@@ -465,10 +466,8 @@ impl Attribute {
 
     /// `true` when more than one time sample is authored, the fast check for
     /// "this value may change over time". Mirrors C++
-    /// `UsdAttribute::ValueMightBeTimeVarying`.
-    ///
-    /// Considers the composed `timeSamples` field only; variation driven solely
-    /// by value clips is not yet detected here.
+    /// `UsdAttribute::ValueMightBeTimeVarying`. Counts value-clip-contributed
+    /// times (spec 12.3.4) alongside the composed `timeSamples`.
     pub fn value_might_be_time_varying(&self) -> anyhow::Result<bool> {
         Ok(self.num_time_samples()? > 1)
     }

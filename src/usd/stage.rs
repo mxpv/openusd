@@ -804,8 +804,8 @@ impl Stage {
     /// Author an attribute spec at a property path (e.g. `/World/Mesh.points`)
     /// on the edit target's layer with default variability `Varying` and
     /// `custom = true`, matching C++ `UsdPrim::CreateAttribute`'s generic
-    /// overloads. Override the defaults via the returned [`Attribute`] handle's
-    /// fluent setters.
+    /// overloads. Override the defaults via the returned
+    /// [`Attribute`](super::Attribute) handle's fluent setters.
     pub fn create_attribute(
         &self,
         path: impl Into<sdf::Path>,

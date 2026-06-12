@@ -580,27 +580,31 @@ impl PrimIndex {
     }
 
     /// Resolves only the retimed sample times of the strongest authored
-    /// `timeSamples` opinion, without cloning the sample values. Mirrors
-    /// [`Self::resolve_time_samples`] for callers that introspect the times.
+    /// `timeSamples` opinion, without cloning the sample values. `local_layers`
+    /// filters as in [`Self::resolve_value_at`], letting the clip-aware times
+    /// path distinguish local from arc opinions.
     pub(crate) fn resolve_time_sample_times(
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
+        local_layers: Option<&HashSet<LayerId>>,
     ) -> Result<Option<Vec<f64>>> {
-        self.first_time_samples(stack, prop_suffix, None, |map, offset| {
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, offset| {
             map.iter().map(|(t, _)| offset.apply(*t)).collect()
         })
     }
 
     /// Resolves only the count of the strongest authored `timeSamples`
     /// opinion, without cloning the sample values. The layer offset does not
-    /// change the count.
+    /// change the count; `local_layers` filters as in
+    /// [`Self::resolve_time_sample_times`].
     pub(crate) fn resolve_time_sample_count(
         &self,
         stack: &LayerGraph,
         prop_suffix: Option<&str>,
+        local_layers: Option<&HashSet<LayerId>>,
     ) -> Result<Option<usize>> {
-        self.first_time_samples(stack, prop_suffix, None, |map, _| map.len())
+        self.first_time_samples(stack, prop_suffix, local_layers, |map, _| map.len())
     }
 
     /// Walks `timeSamples` opinions strongest-to-weakest and applies `extract`

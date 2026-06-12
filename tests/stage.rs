@@ -2082,6 +2082,37 @@ fn write_clip_scene(dir: &std::path::Path, root_body: &str, manifest_body: &str,
     Ok(dir.join("root.usda").to_string_lossy().into_owned())
 }
 
+/// Value-clip sample times surface through the introspection accessors (spec
+/// 12.3.4): the template set schedules clip.1 at stage 1 and clip.2 at stage 2,
+/// so `/Model.size` — which authors no local `timeSamples` — reports those.
+#[test]
+fn clip_time_samples_gathered() -> Result<()> {
+    let stage = Stage::open(&fixture_path("clip_template/root.usda"))?;
+    let size = stage.attribute("/Model.size");
+    assert_eq!(size.time_sample_times()?, vec![1.0, 2.0]);
+    assert_eq!(size.num_time_samples()?, 2);
+    assert!(size.value_might_be_time_varying()?);
+    assert_eq!(size.time_samples_in_interval(1.5..=3.0)?, vec![2.0]);
+    Ok(())
+}
+
+/// With `interpolateMissingClipValues`, the activation boundary of a declared
+/// but empty middle clip is a genuine value-change point — the active clip
+/// switches and the held value gives way to the cross-clip interpolation — so
+/// `time_sample_times` reports it, agreeing with `value_at` (spec 12.3.4.7).
+#[test]
+fn clip_interpolate_missing_boundary_is_a_sample() -> Result<()> {
+    let stage = Stage::open(&fixture_path("clip_missing_interp/root.usda"))?;
+    let size = stage.attribute("/Model.size");
+    // clipA@0, the empty-clip boundary at 10, and clipC@20.
+    assert_eq!(size.time_sample_times()?, vec![0.0, 10.0, 20.0]);
+    // The reported boundary at 10 is real: the value jumps there (clipA holds
+    // 0 up to the switch, then the interpolated gap begins at 50).
+    assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(0.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(50.0));
+    Ok(())
+}
+
 /// A clip overrides a referenced attribute that has no local opinion: the
 /// clip's samples win over the reference's (spec 12.3.4.5).
 #[test]
@@ -2161,6 +2192,140 @@ def "Model"
 
     let stage = Stage::open(&root)?;
     assert_eq!(value_f64(&stage, "/Model.localDefault", 0.0), Some(3.0));
+    Ok(())
+}
+
+/// A local `default` shadows a value clip in introspection just as it does in
+/// value resolution (spec 12.3.4.5): the value is the constant default, so the
+/// attribute reports no sample times and is not time-varying — the clip's
+/// schedule must not leak through.
+#[test]
+fn clip_local_default_no_time_samples() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float localDefault = 3
+}
+"#,
+        r#"#usda 1.0
+def "Model"
+{
+    float localDefault
+}
+"#,
+        r#"#usda 1.0
+def "Model"
+{
+    float localDefault.timeSamples = {
+        0: 7,
+        5: 9,
+    }
+}
+"#,
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.localDefault");
+    assert_eq!(value_f64(&stage, "/Model.localDefault", 0.0), Some(3.0));
+    assert!(attr.time_sample_times()?.is_empty());
+    assert_eq!(attr.num_time_samples()?, 0);
+    assert!(!attr.value_might_be_time_varying()?);
+    Ok(())
+}
+
+/// A manifest-less clip set sources only attributes its clips actually author.
+/// `size` (authored by the clip) reports the clip sample times, while `other`
+/// (not authored) reports none rather than the clip's activation schedule —
+/// matching the fall-through in value resolution.
+#[test]
+fn clip_manifestless_unauthored_no_times() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("clip.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 10, 4: 20 }\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size
+    float other
+}
+"#,
+    )?;
+
+    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    // The clip authors `size`, so its sample times surface.
+    assert_eq!(stage.attribute("/Model.size").time_sample_times()?, vec![0.0, 4.0]);
+    // The clip never authors `other`: no spurious clip-boundary sample times.
+    let other = stage.attribute("/Model.other");
+    assert!(other.time_sample_times()?.is_empty());
+    assert_eq!(other.num_time_samples()?, 0);
+    Ok(())
+}
+
+/// Local `timeSamples` shadow a value clip in introspection just as in value
+/// resolution (spec 12.3.4.5): `time_sample_times` reports the local sample
+/// times, not the clip's, and `value_at` reads the local samples — the two
+/// agree on which source wins.
+#[test]
+fn clip_local_timesamples_shadow_clips() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@]
+            asset manifestAssetPath = @./manifest.usda@
+            string primPath = "/Model"
+            double2[] active = [(0, 0)]
+        }
+    }
+)
+{
+    float size.timeSamples = {
+        0: 1,
+        10: 3,
+    }
+}
+"#,
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 1: 100, 5: 500 }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let size = stage.attribute("/Model.size");
+    // Local timeSamples win: their times are reported, not the clip's {1, 5}.
+    assert_eq!(size.time_sample_times()?, vec![0.0, 10.0]);
+    assert_eq!(size.num_time_samples()?, 2);
+    // value_at agrees: the local samples drive the value (1 and 3 at their
+    // times), not the clip's 100 / 500 — so introspection and resolution pick
+    // the same source.
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(1.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(3.0));
     Ok(())
 }
 

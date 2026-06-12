@@ -207,6 +207,88 @@ impl ClipSet {
             self.times.sort_by(|a, b| a.x.total_cmp(&b.x));
         }
     }
+
+    /// The stage times at which a clipped attribute's value changes under this
+    /// set (the clip half of `UsdAttribute::GetTimeSamples`), given each clip's
+    /// authored in-clip sample times. `clip_samples(index)` yields the sample
+    /// times the clip at `asset_paths[index]` authors for the attribute.
+    ///
+    /// For each clip active over a stage interval, the result gathers the
+    /// timing-curve knots in the interval and the clip's in-clip sample times
+    /// mapped to stage time through [`Self::stage_times_for_clip_time`] and
+    /// clamped to the interval, plus the clip-switch boundary. The first active
+    /// entry is active from negative infinity (spec 12.3.4.3, matching
+    /// [`Self::active_clip`]), so its interval has no lower bound and its stage
+    /// time is not a switch; each later entry's stage time bounds its interval
+    /// and is itself a switch boundary (the value can jump as the active clip
+    /// changes). Returns the union sorted ascending; empty when no clip is active.
+    ///
+    /// `declared` is whether a manifest declares the attribute. A declared set
+    /// owns the attribute across every active interval — a gap is gap-filled, so
+    /// each switch boundary is a value-change point. A manifest-less set only
+    /// sources the attribute where a clip actually authors samples, so an active
+    /// interval whose clip authors none contributes nothing, matching the
+    /// fall-through in `IndexCache::clip_value_at`.
+    pub(crate) fn stage_sample_times(
+        &self,
+        declared: bool,
+        mut clip_samples: impl FnMut(usize) -> Vec<f64>,
+    ) -> Vec<f64> {
+        let mut out: Vec<f64> = Vec::new();
+        for (k, &(start, clip_index)) in self.active.iter().enumerate() {
+            let samples = clip_samples(clip_index);
+            if !declared && samples.is_empty() {
+                continue;
+            }
+            let end = self.active.get(k + 1).map(|next| next.0);
+            // The first entry is active from negative infinity; later entries
+            // start at `start`, which is also a clip-switch sample time.
+            let lower = (k > 0).then_some(start);
+            let in_interval = |t: f64| lower.is_none_or(|l| t >= l) && end.is_none_or(|e| t < e);
+
+            if let Some(boundary) = lower {
+                out.push(boundary);
+            }
+            out.extend(self.times.iter().map(|knot| knot.x).filter(|&x| in_interval(x)));
+            for clip_time in samples {
+                out.extend(
+                    self.stage_times_for_clip_time(clip_time)
+                        .into_iter()
+                        .filter(|&t| in_interval(t)),
+                );
+            }
+        }
+        // Drop non-finite times before dedup: a clip may author a NaN time-
+        // sample key, and `dedup` (PartialEq) would not collapse repeated NaNs.
+        out.retain(|t| t.is_finite());
+        out.sort_by(f64::total_cmp);
+        out.dedup();
+        out
+    }
+
+    /// The stage times mapping to clip time `clip_time` — the inverse of
+    /// [`Self::map_stage_to_clip`] over the timing curve. With no `times`
+    /// authored the mapping is identity (the clip time is its own stage time).
+    /// Each linear segment that crosses `clip_time` contributes one stage time;
+    /// a constant segment (no clip-time change) contributes none, since the
+    /// value is held there and only the activation boundary marks a change.
+    fn stage_times_for_clip_time(&self, clip_time: f64) -> Vec<f64> {
+        if self.times.is_empty() {
+            return vec![clip_time];
+        }
+        self.times
+            .windows(2)
+            .filter_map(|seg| {
+                let (sa, ca) = (seg[0].x, seg[0].y);
+                let (sb, cb) = (seg[1].x, seg[1].y);
+                let (lo, hi) = if ca <= cb { (ca, cb) } else { (cb, ca) };
+                if ca == cb || clip_time < lo || clip_time > hi {
+                    return None;
+                }
+                Some(sa + (clip_time - ca) / (cb - ca) * (sb - sa))
+            })
+            .collect()
+    }
 }
 
 /// Maps `stage_time` to clip time through a sorted `(stageTime, clipTime)`
@@ -590,6 +672,60 @@ mod tests {
     fn map_times_identity() {
         // No times authored → stage time passes through.
         assert_eq!(clip_set(vec![], vec![]).map_stage_to_clip(7.5), 7.5);
+    }
+
+    #[test]
+    fn stage_times_identity() {
+        // Two clips, identity timing: each clip's in-clip samples are stage
+        // times, clamped to that clip's active interval, plus the boundaries.
+        let cs = clip_set(vec![(0.0, 0), (10.0, 1)], vec![]);
+        let times = cs.stage_sample_times(true, |index| match index {
+            0 => vec![0.0, 5.0, 12.0], // 12 is outside clip 0's [0,10) interval
+            1 => vec![10.0, 15.0],
+            _ => vec![],
+        });
+        assert_eq!(times, vec![0.0, 5.0, 10.0, 15.0]);
+    }
+
+    #[test]
+    fn stage_times_manifestless_skips_empty_clip() {
+        // Manifest-less (`declared = false`): a clip authoring no samples
+        // contributes nothing, not even its activation boundary, so the boundary
+        // at 10 (clip 1, empty) is not reported.
+        let cs = clip_set(vec![(0.0, 0), (10.0, 1)], vec![]);
+        let undeclared = cs.stage_sample_times(false, |i| if i == 0 { vec![0.0, 5.0] } else { vec![] });
+        assert_eq!(undeclared, vec![0.0, 5.0]);
+        // Declared: the gap-filled boundary at 10 is a value-change point.
+        let declared = cs.stage_sample_times(true, |i| if i == 0 { vec![0.0, 5.0] } else { vec![] });
+        assert_eq!(declared, vec![0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn stage_times_linear_timing() {
+        // times maps stage→clip as clip = stage/2, so a clip time maps back to
+        // stage 2*clip. Boundary 0 and timing knots {0,10} join the mapped
+        // sample stage times {0,5,10}.
+        let cs = clip_set(vec![(0.0, 0)], knots(&[(0.0, 0.0), (10.0, 5.0)]));
+        let times = cs.stage_sample_times(true, |_| vec![0.0, 2.5, 5.0]);
+        assert_eq!(times, vec![0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn stage_times_before_first_active() {
+        // The first clip is active from -∞ (matches active_clip): a sample
+        // mapping before the first active entry's stage time is still reported,
+        // and that stage time is not a spurious switch boundary.
+        let cs = clip_set(vec![(10.0, 0)], vec![]);
+        let times = cs.stage_sample_times(true, |_| vec![5.0, 15.0]);
+        assert_eq!(times, vec![5.0, 15.0]);
+    }
+
+    #[test]
+    fn stage_times_no_active() {
+        // No active entries → no clip is scheduled → no sample times.
+        assert!(clip_set(vec![], vec![])
+            .stage_sample_times(true, |_| vec![0.0, 1.0])
+            .is_empty());
     }
 
     #[test]
