@@ -1,0 +1,549 @@
+//! Stage-level namespace editing — rename, reparent, and delete prims and
+//! properties, fixing up the relationship targets and attribute connections
+//! that referenced them so nothing dangles.
+//!
+//! Mirrors C++ `UsdNamespaceEditor`. A [`NamespaceEditor`] holds a [`Stage`]
+//! handle and a single pending edit; [`NamespaceEditor::apply_edits`] validates
+//! and applies it. The single-edit model matches the C++ public API, which
+//! today also stages one edit at a time.
+//!
+//! # Scope (v1)
+//!
+//! Edits are applied to the local layer stack (the common authored case).
+//! Objects that compose only across a reference / payload would require
+//! relocates to move and are rejected for now, matching C++'s initial cut. The
+//! mechanical per-layer spec surgery lives one tier down in
+//! [`sdf::Layer::move_spec_subtree`](crate::sdf::Layer::move_spec_subtree) /
+//! [`remove_spec_subtree`](crate::sdf::Layer::remove_spec_subtree); this type
+//! adds composition awareness, the target/connection fix-up, and validation.
+
+use std::collections::HashMap;
+
+use crate::sdf;
+
+use super::{Attribute, EditTarget, Prim, PrimPredicate, Relationship, Stage, StageAuthoringError};
+
+/// A single staged namespace edit. A `None` `new_path` is a delete.
+#[derive(Clone, Debug)]
+struct Edit {
+    old_path: sdf::Path,
+    new_path: Option<sdf::Path>,
+}
+
+/// Edits a stage's namespace: rename / reparent / delete prims and properties.
+///
+/// Construct with [`NamespaceEditor::new`], stage one edit with a `*_at_path`
+/// (or the `rename_*` / `reparent_*` convenience) method, then
+/// [`apply_edits`](Self::apply_edits). Each staging call replaces the previous
+/// pending edit.
+pub struct NamespaceEditor {
+    stage: Stage,
+    pending: Option<Edit>,
+}
+
+impl NamespaceEditor {
+    /// Create an editor bound to `stage` (cheap — clones the stage handle).
+    pub fn new(stage: &Stage) -> Self {
+        Self {
+            stage: stage.clone(),
+            pending: None,
+        }
+    }
+
+    /// Stage a delete of the prim or property at `path`.
+    pub fn delete_at_path(&mut self, path: impl Into<sdf::Path>) -> &mut Self {
+        self.pending = Some(Edit {
+            old_path: path.into(),
+            new_path: None,
+        });
+        self
+    }
+
+    /// Stage a move of the prim or property at `old` to `new` (rename when the
+    /// parent is unchanged, reparent otherwise).
+    pub fn move_at_path(&mut self, old: impl Into<sdf::Path>, new: impl Into<sdf::Path>) -> &mut Self {
+        self.pending = Some(Edit {
+            old_path: old.into(),
+            new_path: Some(new.into()),
+        });
+        self
+    }
+
+    /// Stage a rename of `prim` to `new_name` (same parent).
+    pub fn rename_prim(&mut self, prim: &super::Prim, new_name: &str) -> Result<&mut Self, String> {
+        let parent = prim
+            .path()
+            .parent()
+            .ok_or_else(|| format!("source prim {} has no parent", prim.path()))?;
+        let new = parent
+            .append_path(new_name)
+            .map_err(|_| format!("new prim name {new_name:?} is not valid"))?;
+        self.pending = Some(Edit {
+            old_path: prim.path().clone(),
+            new_path: Some(new),
+        });
+        Ok(self)
+    }
+
+    /// Stage a reparent of `prim` under `new_parent`, keeping its name.
+    pub fn reparent_prim(&mut self, prim: &super::Prim, new_parent: &super::Prim) -> Result<&mut Self, String> {
+        let name = prim
+            .path()
+            .name()
+            .ok_or_else(|| format!("source prim {} has no leaf name", prim.path()))?;
+        let new = new_parent
+            .path()
+            .append_path(name)
+            .map_err(|_| format!("destination parent {} cannot take child {name:?}", new_parent.path()))?;
+        self.pending = Some(Edit {
+            old_path: prim.path().clone(),
+            new_path: Some(new),
+        });
+        Ok(self)
+    }
+
+    /// Validate the pending edit without applying it. Returns `Ok(())` if it
+    /// could be applied, or a human-readable reason why not (mirrors C++
+    /// `CanApplyEdits`'s `whyNot`).
+    pub fn can_apply_edits(&self) -> Result<(), String> {
+        let edit = self.pending.as_ref().ok_or("no pending edit")?;
+        let old = &edit.old_path;
+
+        if !old.is_abs() {
+            return Err(format!("source path {old} is not absolute"));
+        }
+        if old.is_abs_root() || old.name().is_none() {
+            return Err("cannot namespace-edit the pseudo-root".into());
+        }
+        if !self.object_exists(old)? {
+            return Err(format!("nothing exists at the source path {old}"));
+        }
+
+        let Some(new) = edit.new_path.as_ref() else {
+            // Delete: source validity is enough.
+            return Ok(());
+        };
+
+        if !new.is_abs() || new.is_abs_root() || new.name().is_none() {
+            return Err(format!("destination path {new} is not a valid absolute object path"));
+        }
+        if old.is_property_path() != new.is_property_path() {
+            return Err("source and destination are different namespace kinds".into());
+        }
+        if new == old {
+            return Err("destination path is the same as the source".into());
+        }
+        if new.has_prefix(old) {
+            return Err("destination is a descendant of the source".into());
+        }
+        if self.object_exists(new)? {
+            return Err(format!("an object already exists at the destination {new}"));
+        }
+        Ok(())
+    }
+
+    /// Whether a prim or property is composed at `path` on the stage.
+    fn object_exists(&self, path: &sdf::Path) -> Result<bool, String> {
+        let to_err = |e: anyhow::Error| e.to_string();
+        match path.split_property() {
+            // Property: the owning prim must exist and list the property.
+            Some((prim_path, name)) => {
+                let prim = self.stage.prim(prim_path);
+                if !prim.is_valid().map_err(to_err)? {
+                    return Ok(false);
+                }
+                Ok(prim.property_names().map_err(to_err)?.iter().any(|n| n == name))
+            }
+            // Prim.
+            None => self.stage.prim(path.clone()).is_valid().map_err(to_err),
+        }
+    }
+
+    /// Validate and apply the pending edit, then clear it.
+    ///
+    /// Handles prim and property edits on the local layer stack: the spec (and,
+    /// for a prim, its whole subtree) is moved or removed in every contributing
+    /// layer, then [`fixup_targets`](Self::fixup_targets) rewrites the
+    /// references to it. An object that composes only across a reference /
+    /// payload — its spec sits at a different namespace location — would need
+    /// relocates and is rejected.
+    pub fn apply_edits(&mut self) -> Result<(), StageAuthoringError> {
+        self.can_apply_edits()
+            .map_err(|why| StageAuthoringError::Composition(anyhow::anyhow!("cannot apply namespace edit: {why}")))?;
+        let edit = self.pending.clone().expect("validated above");
+        let old = &edit.old_path;
+
+        // Layers that author a spec at `old`. Reject any whose spec sits at a
+        // different namespace location — that means the object composes across
+        // an arc, and moving it would require relocates (not yet supported).
+        let stack = self.contributing_layers(old)?;
+        for (_id, spec_path) in &stack {
+            if spec_path != old {
+                return Err(StageAuthoringError::Composition(anyhow::anyhow!(
+                    "{old} composes across an arc (spec at {spec_path}); moving it would require relocates"
+                )));
+            }
+        }
+
+        let identifiers = self.stage.layer_identifiers();
+        let layer_indices: HashMap<&str, usize> = identifiers
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.as_str(), idx))
+            .collect();
+        let saved_target = self.stage.edit_target();
+
+        let apply = || -> Result<(), StageAuthoringError> {
+            for (layer_id, _) in &stack {
+                let idx = layer_indices.get(layer_id.as_str()).copied().ok_or_else(|| {
+                    StageAuthoringError::Composition(anyhow::anyhow!("layer {layer_id} not found in stack"))
+                })?;
+                self.stage
+                    .set_edit_target(EditTarget::for_layer(identifiers[idx].clone()))?;
+                self.stage.with_target_layer_at(old, |layer, old_spec| {
+                    match edit.new_path.as_ref() {
+                        None => {
+                            layer.remove_spec_subtree(&old_spec)?;
+                        }
+                        Some(new) => {
+                            layer.move_spec_subtree(&old_spec, new)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        };
+
+        let result = apply();
+        // Restore the caller's edit target regardless of outcome.
+        let _ = self.stage.set_edit_target(saved_target);
+        result?;
+
+        // Rewrite every relationship target / attribute connection that pointed
+        // into the moved-or-deleted subtree so nothing dangles.
+        self.fixup_targets(old, edit.new_path.as_ref())?;
+
+        self.pending = None;
+        Ok(())
+    }
+
+    /// Layers that author a spec at `path` (prim or property), strongest-first,
+    /// as `(layer_identifier, spec_path)` — the editing surface for the move.
+    fn contributing_layers(&self, path: &sdf::Path) -> Result<Vec<(String, sdf::Path)>, StageAuthoringError> {
+        let map = StageAuthoringError::Composition;
+        match path.split_property() {
+            None => self.stage.prim(path.clone()).prim_stack().map_err(map),
+            Some((prim_path, name)) => {
+                let prim = self.stage.prim(prim_path);
+                let is_rel = prim
+                    .relationships()
+                    .map_err(map)?
+                    .iter()
+                    .any(|r| r.path().name() == Some(name));
+                if is_rel {
+                    prim.relationship(name).property_stack().map_err(map)
+                } else {
+                    prim.attribute(name).property_stack().map_err(map)
+                }
+            }
+        }
+    }
+
+    /// Stage-wide pass that rewrites relationship targets and attribute
+    /// connections referencing `old` (or any descendant): prefix-replaced to
+    /// `new` on a move, or dropped on a delete (`new` is `None`).
+    ///
+    /// Collects the rewrites in one traversal, then authors them on the current
+    /// edit target — so a fixed target list lands as an explicit opinion in the
+    /// editing layer (a v1 simplification of C++'s per-spec list-op edits).
+    fn fixup_targets(&self, old: &sdf::Path, new: Option<&sdf::Path>) -> Result<(), StageAuthoringError> {
+        let mut rel_edits: Vec<(Relationship, Vec<sdf::Path>)> = Vec::new();
+        let mut attr_edits: Vec<(Attribute, Vec<sdf::Path>)> = Vec::new();
+        let mut scan_err: Option<anyhow::Error> = None;
+
+        self.stage
+            .traverse(PrimPredicate::DEFAULT, |prim_path| {
+                if scan_err.is_some() {
+                    return;
+                }
+                let prim = self.stage.prim(prim_path.clone());
+                if let Err(e) = collect_prim_fixups(&prim, old, new, &mut rel_edits, &mut attr_edits) {
+                    scan_err = Some(e);
+                }
+            })
+            .map_err(StageAuthoringError::Composition)?;
+
+        if let Some(e) = scan_err {
+            return Err(StageAuthoringError::Composition(e));
+        }
+
+        for (rel, targets) in rel_edits {
+            rel.set_targets(targets)?;
+        }
+        for (attr, connections) in attr_edits {
+            attr.set_connections(connections)?;
+        }
+        Ok(())
+    }
+}
+
+/// Rewrite `paths` for an edit of `old` → `new` (`None` = delete): entries at or
+/// below `old` are prefix-replaced (or dropped on delete); the rest pass
+/// through. Returns `None` when nothing referenced `old` (no edit needed).
+fn rewrite_paths(paths: &[sdf::Path], old: &sdf::Path, new: Option<&sdf::Path>) -> Option<Vec<sdf::Path>> {
+    if !paths.iter().any(|p| p.has_prefix(old)) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for p in paths {
+        if p.has_prefix(old) {
+            if let Some(new) = new {
+                out.push(
+                    p.replace_prefix(old, new)
+                        .expect("path with a matching prefix must be replaceable"),
+                );
+            }
+            // delete: drop the entry
+        } else {
+            out.push(p.clone());
+        }
+    }
+    Some(out)
+}
+
+/// Collect the relationship-target / attribute-connection rewrites a single
+/// prim needs for the pending edit.
+fn collect_prim_fixups(
+    prim: &Prim,
+    old: &sdf::Path,
+    new: Option<&sdf::Path>,
+    rel_out: &mut Vec<(Relationship, Vec<sdf::Path>)>,
+    attr_out: &mut Vec<(Attribute, Vec<sdf::Path>)>,
+) -> anyhow::Result<()> {
+    for rel in prim.relationships()? {
+        if let Some(rewritten) = rewrite_paths(&rel.targets()?, old, new) {
+            rel_out.push((rel, rewritten));
+        }
+    }
+    for attr in prim.attributes()? {
+        if let Some(rewritten) = rewrite_paths(&attr.connections()?, old, new) {
+            attr_out.push((attr, rewritten));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usd::Stage;
+    use anyhow::Result;
+
+    /// `/World/A` and `/World/B`, with `/World/A.attr` authored.
+    fn stage() -> Result<Stage> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        stage.define_prim(sdf::path("/World")?)?;
+        stage.define_prim(sdf::path("/World/A")?)?;
+        stage.define_prim(sdf::path("/World/B")?)?;
+        stage.prim(sdf::path("/World/A")?).create_attribute("attr", "double")?;
+        Ok(stage)
+    }
+
+    #[test]
+    fn validates_a_clean_rename() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        assert!(editor.can_apply_edits().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn validates_a_delete() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_at_path(sdf::path("/World/A")?);
+        assert!(editor.can_apply_edits().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_source() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/Nope")?, sdf::path("/World/C")?);
+        assert!(editor.can_apply_edits().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_collision_self_descendant_and_kind_mismatch() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+
+        // Destination already occupied.
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/B")?);
+        assert!(editor.can_apply_edits().is_err());
+
+        // Destination is a descendant of the source.
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/A/Inner")?);
+        assert!(editor.can_apply_edits().is_err());
+
+        // Prim → property kind mismatch.
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World.attr")?);
+        assert!(editor.can_apply_edits().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_pseudo_root_and_no_edit() -> Result<()> {
+        let stage = stage()?;
+        let editor = NamespaceEditor::new(&stage);
+        // Nothing staged yet.
+        assert!(editor.can_apply_edits().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_prim_rename_moving_the_subtree() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim(sdf::path("/World/A/Child")?)?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/C")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/C/Child")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_prim_delete() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_at_path(sdf::path("/World/B")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim(sdf::path("/World/B")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/A")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_fixes_up_relationship_targets() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.rel -> /World/A
+        stage
+            .prim(sdf::path("/World/B")?)
+            .create_relationship("rel")?
+            .set_targets([sdf::path("/World/A")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        let targets = stage.prim(sdf::path("/World/B")?).relationship("rel").targets()?;
+        assert_eq!(targets, vec![sdf::path("/World/C")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn reparents_a_prim_under_a_new_parent() -> Result<()> {
+        let stage = stage()?;
+        stage.define_prim(sdf::path("/World/A/Child")?)?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/B/A")?);
+        editor.apply_edits()?;
+
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/B/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/B/A/Child")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_fixes_up_attribute_connections() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.in connected to /World/A.attr
+        stage
+            .prim(sdf::path("/World/B")?)
+            .create_attribute("in", "double")?
+            .set_connections([sdf::path("/World/A.attr")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
+        editor.apply_edits()?;
+
+        let conns = stage.prim(sdf::path("/World/B")?).attribute("in").connections()?;
+        assert_eq!(conns, vec![sdf::path("/World/C.attr")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn applies_a_property_rename_with_connection_fixup() -> Result<()> {
+        let stage = stage()?;
+        // /World/B.in connected to the to-be-renamed /World/A.attr
+        stage
+            .prim(sdf::path("/World/B")?)
+            .create_attribute("in", "double")?
+            .set_connections([sdf::path("/World/A.attr")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A.attr")?, sdf::path("/World/A.renamed")?);
+        editor.apply_edits()?;
+
+        let props = stage.prim(sdf::path("/World/A")?).property_names()?;
+        assert!(props.iter().any(|n| n == "renamed"));
+        assert!(!props.iter().any(|n| n == "attr"));
+
+        let conns = stage.prim(sdf::path("/World/B")?).attribute("in").connections()?;
+        assert_eq!(conns, vec![sdf::path("/World/A.renamed")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn rename_prim_convenience_applies() -> Result<()> {
+        let stage = stage()?;
+        let prim = stage.prim(sdf::path("/World/A")?);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.rename_prim(&prim, "Renamed").map_err(anyhow::Error::msg)?;
+        editor.apply_edits()?;
+
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/Renamed")?).is_valid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_drops_relationship_targets() -> Result<()> {
+        let stage = stage()?;
+        stage
+            .prim(sdf::path("/World/B")?)
+            .create_relationship("rel")?
+            .set_targets([sdf::path("/World/A")?])?;
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_at_path(sdf::path("/World/A")?);
+        editor.apply_edits()?;
+
+        let targets = stage.prim(sdf::path("/World/B")?).relationship("rel").targets()?;
+        assert!(targets.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn validates_property_rename_and_rejects_missing_property() -> Result<()> {
+        let stage = stage()?;
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_at_path(sdf::path("/World/A.attr")?, sdf::path("/World/A.renamed")?);
+        assert!(editor.can_apply_edits().is_ok());
+
+        editor.move_at_path(sdf::path("/World/A.ghost")?, sdf::path("/World/A.renamed")?);
+        assert!(editor.can_apply_edits().is_err());
+        Ok(())
+    }
+}

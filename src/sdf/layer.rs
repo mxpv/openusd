@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
-use super::schema::FieldKey;
+use super::schema::{ChildrenKey, FieldKey};
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, Data, EditProxy, LayerData, Path, PrimSpecMut,
     PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef, RelocateList,
-    SpecError, SpecType,
+    SpecData, SpecError, SpecType, Value,
 };
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
@@ -467,6 +467,90 @@ impl Layer {
         self.clear_root_field(FieldKey::FramePrecision)
     }
 
+    /// Remove the spec at `path` together with its entire namespace subtree,
+    /// and unregister the leaf from its parent's child list.
+    ///
+    /// `path` must be a prim or prim-property path. Every spec at or below
+    /// `path` is erased; a missing parent or child list is simply nothing to
+    /// detach. This is the single-layer mechanical half of a namespace delete:
+    /// it does not touch relationship targets or attribute connections that
+    /// point at `path` because Sdf does not track backpointers.
+    pub fn remove_spec_subtree(&mut self, path: &Path) -> Result<(), AuthoringError> {
+        let (parent, child_key, child_name) = child_registration(path)?;
+
+        remove_from_token_vec(&mut self.data, &parent, child_key, &child_name)?;
+        for p in subtree_paths(&self.data, path) {
+            self.data.erase_spec(&p);
+        }
+        Ok(())
+    }
+
+    /// Move the spec subtree rooted at `old` to `new` within this layer,
+    /// rebuilding the destination parent chain as `over`s when needed and
+    /// updating both parents' child lists. Handles rename and reparent
+    /// uniformly.
+    ///
+    /// `old` and `new` must be the same kind, either both prim paths or both
+    /// prim-property paths. The destination must not already exist, and it must
+    /// not be the source or a descendant of it. Like
+    /// [`remove_spec_subtree`](Self::remove_spec_subtree), this is the
+    /// mechanical single-layer half; target and connection fixup is the caller's
+    /// responsibility.
+    pub fn move_spec_subtree(&mut self, old: &Path, new: &Path) -> Result<(), AuthoringError> {
+        let (old_parent, old_key, old_name) = child_registration(old)?;
+        let (new_parent, new_key, new_name) = child_registration(new)?;
+
+        let invalid_new = |reason: &'static str| AuthoringError::InvalidPath {
+            path: new.clone(),
+            reason,
+        };
+        if old.is_property_path() != new.is_property_path() {
+            return Err(invalid_new("source and destination are different namespace kinds"));
+        }
+        if new.has_prefix(old) {
+            return Err(invalid_new("destination is the source or a descendant of it"));
+        }
+        if self.data.spec_type(old).is_none() {
+            return Err(AuthoringError::InvalidPath {
+                path: old.clone(),
+                reason: "no spec to move at the source path",
+            });
+        }
+        if self.data.has_spec(new) {
+            return Err(invalid_new("an object already exists at the destination"));
+        }
+
+        if new_parent.is_abs_root() {
+            self.pseudo_root_mut()?;
+        } else {
+            PrimSpecMut::over(self.data_mut(), new_parent.clone())?;
+        }
+
+        let mut moved = Vec::new();
+        for old_path in subtree_paths(&self.data, old) {
+            let new_path = old_path
+                .replace_prefix(old, new)
+                .expect("subtree path must be at or below the source path");
+            let spec = spec_data(&self.data, &old_path)?;
+            moved.push((old_path, new_path, spec));
+        }
+
+        for (old_path, _, _) in &moved {
+            self.data.erase_spec(old_path);
+        }
+        for (_, new_path, spec) in moved {
+            self.data.create_spec(new_path.clone(), spec.ty);
+            for (field, value) in spec.fields {
+                self.data.set_field(&new_path, &field, value);
+            }
+        }
+
+        remove_from_token_vec(&mut self.data, &old_parent, old_key, &old_name)?;
+        add_to_token_vec(&mut self.data, &new_parent, new_key, &new_name)?;
+
+        Ok(())
+    }
+
     /// Whether the pseudo-root spec authors `key`, including an explicit
     /// opinion that carries an "empty"/default value.
     fn has_root_field(&self, key: FieldKey) -> bool {
@@ -499,6 +583,131 @@ impl Layer {
     }
 }
 
+/// Resolve the parent path, child-list key, and child name that register
+/// `path`'s leaf on its parent. Supports prim and prim-property leaves;
+/// variant-selection leaves and the pseudo-root are outside namespace-edit
+/// scope.
+fn child_registration(path: &Path) -> Result<(Path, ChildrenKey, String), AuthoringError> {
+    let invalid = |reason: &'static str| AuthoringError::InvalidPath {
+        path: path.clone(),
+        reason,
+    };
+    if let Some((prim, prop)) = path.split_property() {
+        return Ok((prim, ChildrenKey::PropertyChildren, prop.to_owned()));
+    }
+    match path.last_element() {
+        Some(super::PathElement::Prim(name)) => {
+            let parent = path.parent().ok_or_else(|| invalid("prim path has no parent"))?;
+            Ok((parent, ChildrenKey::PrimChildren, name.to_owned()))
+        }
+        Some(super::PathElement::Variant { .. }) => Err(invalid("variant-selection paths are not supported")),
+        Some(super::PathElement::Property(_)) => unreachable!("property paths are handled by split_property above"),
+        None => Err(invalid("cannot namespace-edit the pseudo-root")),
+    }
+}
+
+/// Remove `name` from a child-list field, dropping the field when it becomes
+/// empty. An absent parent or field is a no-op; a present non-token child list
+/// is invalid layer bookkeeping and is reported.
+fn remove_from_token_vec(
+    data: &mut dyn AbstractData,
+    owner_path: &Path,
+    key: ChildrenKey,
+    name: &str,
+) -> Result<(), AuthoringError> {
+    let value = data
+        .try_field(owner_path, key.as_str())
+        .map_err(|_| AuthoringError::InvalidPath {
+            path: owner_path.clone(),
+            reason: "child-list field could not be read",
+        })?
+        .map(std::borrow::Cow::into_owned);
+    match value {
+        Some(Value::TokenVec(mut v)) => {
+            v.retain(|n| n != name);
+            if v.is_empty() {
+                data.erase_field(owner_path, key.as_str());
+            } else {
+                data.set_field(owner_path, key.as_str(), Value::TokenVec(v));
+            }
+        }
+        Some(_) => {
+            return Err(AuthoringError::InvalidPath {
+                path: owner_path.clone(),
+                reason: "child-list field exists with non-TokenVec value",
+            });
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Insert `name` into a child-list field, creating the field if absent.
+fn add_to_token_vec(
+    data: &mut dyn AbstractData,
+    owner_path: &Path,
+    key: ChildrenKey,
+    name: &str,
+) -> Result<(), AuthoringError> {
+    let value = data
+        .try_field(owner_path, key.as_str())
+        .map_err(|_| AuthoringError::InvalidPath {
+            path: owner_path.clone(),
+            reason: "child-list field could not be read",
+        })?
+        .map(std::borrow::Cow::into_owned);
+    match value {
+        Some(Value::TokenVec(mut v)) => {
+            if !v.iter().any(|n| n == name) {
+                v.push(name.into());
+                data.set_field(owner_path, key.as_str(), Value::TokenVec(v));
+            }
+        }
+        Some(_) => {
+            return Err(AuthoringError::InvalidPath {
+                path: owner_path.clone(),
+                reason: "child-list field exists with non-TokenVec value",
+            });
+        }
+        None => data.set_field(owner_path, key.as_str(), Value::TokenVec(vec![name.into()])),
+    }
+    Ok(())
+}
+
+/// Every authored path at or below `prefix`, including `prefix` itself, ordered
+/// parent-before-child.
+fn subtree_paths(data: &dyn AbstractData, prefix: &Path) -> Vec<Path> {
+    let mut paths: Vec<Path> = data.spec_paths().into_iter().filter(|p| p.has_prefix(prefix)).collect();
+    paths.sort_by_key(Path::element_count);
+    paths
+}
+
+/// Copy one spec record out of an abstract backend.
+fn spec_data(data: &dyn AbstractData, path: &Path) -> Result<SpecData, AuthoringError> {
+    let ty = data.spec_type(path).ok_or_else(|| AuthoringError::InvalidPath {
+        path: path.clone(),
+        reason: "no spec at path",
+    })?;
+    let mut spec = SpecData::new(ty);
+    if let Some(fields) = data.list_fields(path) {
+        for field in fields {
+            let value = data
+                .try_field(path, &field)
+                .map_err(|_| AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "field could not be read",
+                })?
+                .ok_or_else(|| AuthoringError::InvalidPath {
+                    path: path.clone(),
+                    reason: "listed field was not authored",
+                })?
+                .into_owned();
+            spec.add(field, value);
+        }
+    }
+    Ok(spec)
+}
+
 impl std::fmt::Debug for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Layer")
@@ -510,6 +719,28 @@ impl std::fmt::Debug for Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sdf::{path, Specifier, Variability};
+
+    /// Read a child-list field as a `Vec<String>`; absent means empty.
+    fn children(layer: &Layer, prim: &str, key: ChildrenKey) -> Vec<String> {
+        match layer.data().try_field(&path(prim).unwrap(), key.as_str()).unwrap() {
+            Some(cow) => match cow.as_ref() {
+                Value::TokenVec(v) => v.iter().map(ToString::to_string).collect(),
+                other => panic!("{} is not a TokenVec: {other:?}", key.as_str()),
+            },
+            None => Vec::new(),
+        }
+    }
+
+    /// `/A` → `/A/B` → `/A/B/C`, plus `/A/B.radius`.
+    fn namespace_scene() -> Layer {
+        let mut layer = Layer::new_anonymous("anon.usda");
+        PrimSpecMut::new(layer.data_mut(), "/A", Specifier::Def, "Xform").unwrap();
+        PrimSpecMut::new(layer.data_mut(), "/A/B", Specifier::Def, "Xform").unwrap();
+        PrimSpecMut::new(layer.data_mut(), "/A/B/C", Specifier::Def, "Sphere").unwrap();
+        AttributeSpecMut::new(layer.data_mut(), "/A/B.radius", "double", Variability::Varying, false).unwrap();
+        layer
+    }
 
     /// `new_anonymous` mints a unique `anon:<n>:<tag>` identifier each call, so
     /// two layers given the same tag never alias; `is_anonymous` recognizes them
@@ -603,5 +834,130 @@ mod tests {
         layer.clear_start_time_code().expect("writable");
         assert!(!layer.has_start_time_code());
         assert_eq!(layer.start_time_code(), 0.0);
+    }
+
+    #[test]
+    fn remove_prim_subtree() {
+        let mut layer = namespace_scene();
+        layer.remove_spec_subtree(&path("/A/B").unwrap()).unwrap();
+
+        assert!(!layer.data().has_spec(&path("/A/B").unwrap()));
+        assert!(!layer.data().has_spec(&path("/A/B/C").unwrap()));
+        assert!(!layer.data().has_spec(&path("/A/B.radius").unwrap()));
+        assert!(layer.data().has_spec(&path("/A").unwrap()));
+        assert!(children(&layer, "/A", ChildrenKey::PrimChildren).is_empty());
+    }
+
+    #[test]
+    fn remove_property() {
+        let mut layer = namespace_scene();
+        layer.remove_spec_subtree(&path("/A/B.radius").unwrap()).unwrap();
+
+        assert!(!layer.data().has_spec(&path("/A/B.radius").unwrap()));
+        assert!(layer.data().has_spec(&path("/A/B").unwrap()));
+        assert!(layer.data().has_spec(&path("/A/B/C").unwrap()));
+        assert!(children(&layer, "/A/B", ChildrenKey::PropertyChildren).is_empty());
+    }
+
+    #[test]
+    fn rename_prim_subtree() {
+        let mut layer = namespace_scene();
+        layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/A/Bee").unwrap())
+            .unwrap();
+
+        assert!(!layer.data().has_spec(&path("/A/B").unwrap()));
+        assert!(layer.data().has_spec(&path("/A/Bee/C").unwrap()));
+        assert!(layer.data().has_spec(&path("/A/Bee.radius").unwrap()));
+        assert_eq!(
+            layer
+                .data()
+                .try_field(&path("/A/Bee/C").unwrap(), FieldKey::TypeName.as_str())
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            &Value::Token("Sphere".into())
+        );
+        assert_eq!(
+            children(&layer, "/A", ChildrenKey::PrimChildren),
+            vec!["Bee".to_string()]
+        );
+    }
+
+    #[test]
+    fn reparent_prim() {
+        let mut layer = namespace_scene();
+        PrimSpecMut::new(layer.data_mut(), "/X", Specifier::Def, "Xform").unwrap();
+        layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/X/B").unwrap())
+            .unwrap();
+
+        assert!(layer.data().has_spec(&path("/X/B/C").unwrap()));
+        assert!(!layer.data().has_spec(&path("/A/B").unwrap()));
+        assert!(children(&layer, "/A", ChildrenKey::PrimChildren).is_empty());
+        assert_eq!(children(&layer, "/X", ChildrenKey::PrimChildren), vec!["B".to_string()]);
+    }
+
+    #[test]
+    fn reparent_scaffolds_parent() {
+        let mut layer = namespace_scene();
+        layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/New/B").unwrap())
+            .unwrap();
+
+        assert!(layer.data().has_spec(&path("/New/B/C").unwrap()));
+        assert_eq!(
+            layer
+                .data()
+                .try_field(&path("/New").unwrap(), FieldKey::Specifier.as_str())
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            &Value::Specifier(Specifier::Over)
+        );
+        assert_eq!(
+            children(&layer, "/New", ChildrenKey::PrimChildren),
+            vec!["B".to_string()]
+        );
+    }
+
+    #[test]
+    fn rename_property() {
+        let mut layer = namespace_scene();
+        layer
+            .move_spec_subtree(&path("/A/B.radius").unwrap(), &path("/A/B.size").unwrap())
+            .unwrap();
+
+        assert!(!layer.data().has_spec(&path("/A/B.radius").unwrap()));
+        assert!(layer.data().has_spec(&path("/A/B.size").unwrap()));
+        assert_eq!(
+            children(&layer, "/A/B", ChildrenKey::PropertyChildren),
+            vec!["size".to_string()]
+        );
+        assert_eq!(
+            layer
+                .data()
+                .try_field(&path("/A/B.size").unwrap(), FieldKey::TypeName.as_str())
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            &Value::Token("double".into())
+        );
+    }
+
+    #[test]
+    fn move_rejects_bad_targets() {
+        let mut layer = namespace_scene();
+        PrimSpecMut::new(layer.data_mut(), "/A/D", Specifier::Def, "Xform").unwrap();
+
+        assert!(layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/A/D").unwrap())
+            .is_err());
+        assert!(layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/A/B/Inner").unwrap())
+            .is_err());
+        assert!(layer
+            .move_spec_subtree(&path("/A/B").unwrap(), &path("/A.attr").unwrap())
+            .is_err());
     }
 }

@@ -9,6 +9,7 @@ mod clips;
 mod collection;
 mod connections;
 mod interp;
+mod namespace_editor;
 mod prim;
 mod relationship;
 mod schema;
@@ -23,6 +24,7 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
+pub use namespace_editor::NamespaceEditor;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
