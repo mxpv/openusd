@@ -902,7 +902,15 @@ impl Stage {
     /// layer drops out of the composed stage when no weaker layer still defines
     /// it.
     pub fn remove_prim(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
-        self.remove_spec(&path.into())
+        let path = path.into();
+        if path.is_property_path() {
+            return Err(sdf::AuthoringError::InvalidPath {
+                path,
+                reason: "remove_prim expects a prim path, got a property path",
+            }
+            .into());
+        }
+        self.remove_spec(&path)
     }
 
     /// Remove the property spec (attribute or relationship) at `path` from the
@@ -913,7 +921,15 @@ impl Stage {
     /// current [`EditTarget`], fires [`Notice::ObjectsChanged`], and invalidates
     /// the owning prim.
     pub fn remove_property(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
-        self.remove_spec(&path.into())
+        let path = path.into();
+        if !path.is_property_path() {
+            return Err(sdf::AuthoringError::InvalidPath {
+                path,
+                reason: "remove_property expects a property path, got a prim path",
+            }
+            .into());
+        }
+        self.remove_spec(&path)
     }
 
     /// Erase the spec at `path` on the current edit target's layer, routing

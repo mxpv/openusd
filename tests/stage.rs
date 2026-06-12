@@ -3785,6 +3785,29 @@ fn remove_property_drops_spec() -> Result<()> {
     Ok(())
 }
 
+/// Each removal API rejects the wrong path kind rather than crossing into the
+/// other: a property path on `remove_prim`, a prim path on `remove_property`.
+#[test]
+fn remove_rejects_wrong_path_kind() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.create_attribute("/A.size", "double")?;
+
+    assert!(matches!(
+        stage.remove_prim("/A.size"),
+        Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
+    ));
+    assert!(matches!(
+        stage.remove_property("/A"),
+        Err(StageAuthoringError::Layer(sdf::AuthoringError::InvalidPath { .. }))
+    ));
+
+    // The rejected calls left both specs intact.
+    assert!(stage.prim("/A").is_valid()?);
+    assert!(stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
+    Ok(())
+}
+
 /// Replaying every diff a listener captures from stage A onto stage B
 /// reconstructs A's edited subtree — the round trip through
 /// `extract_diff` / `apply_diff`.
