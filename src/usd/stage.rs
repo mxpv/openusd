@@ -47,7 +47,7 @@ use crate::tf::Token;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
-use super::notice::{LayerMutingChanged, Notice, ObjectsChanged};
+use super::notice::{self, Deletion, LayerDiff, LayerMutingChanged, Notice, ObjectsChanged};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -640,37 +640,6 @@ impl WeakStage {
     }
 }
 
-/// A deletion in a [`LayerDiff`] that the overlay [`LayerDiff::layer`] cannot
-/// express (it records "set", not "erase"). A mirror must replay these, or it
-/// keeps its stale opinion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Deletion {
-    /// The whole prim or property spec at this path was removed; a mirror
-    /// applies it with `remove_prim` / `remove_property`.
-    Spec(sdf::Path),
-    /// This field was erased while its spec survives (e.g. clearing an
-    /// attribute's connections); a mirror applies it with `erase_field`.
-    Field(sdf::Path, Token),
-}
-
-/// A serializable, replayable diff of one stage edit, produced by
-/// [`Stage::extract_diff`].
-///
-/// Together the two fields describe the whole edit: `layer` carries the new and
-/// changed scene description, `removed` carries the deletions an overlay layer
-/// cannot express. A mirror applies the diff by composing or authoring `layer`
-/// and then replaying each [`Deletion`].
-pub struct LayerDiff {
-    /// An anonymous layer holding the added and value/metadata/target edits —
-    /// including list-op deletions of references, targets, or apiSchemas, which
-    /// compose as authored. Serialize it with [`sdf::Layer::export`] /
-    /// [`sdf::Layer::export_to_string`].
-    pub layer: sdf::Layer,
-    /// Deletions the overlay `layer` cannot express — whole-spec removals and
-    /// erased fields. See [`Deletion`].
-    pub removed: Vec<Deletion>,
-}
-
 impl Stage {
     /// Opens a stage from a root layer file using the [`ar::DefaultResolver`].
     ///
@@ -1009,12 +978,15 @@ impl Stage {
     /// List-valued field edits (reference / target / apiSchema removals
     /// included) ride along in the layer as their authored list ops.
     ///
-    /// The diff is in the originating layer's namespace, exact for an edit on
-    /// the local/root layer through the default edit target. Edits authored
-    /// through an arc edit target (a reference or variant) are recorded in the
-    /// arc source layer's namespace and are not yet translated back to stage
-    /// namespace — see the TODO on
-    /// [`ObjectsChanged::changed_info_only`](super::ObjectsChanged::changed_info_only).
+    /// The diff is in the originating layer's namespace: for an edit authored
+    /// through an arc or variant edit target the specs carry the arc source
+    /// layer's paths (e.g. a `{set=sel}` variant segment), not the composed
+    /// stage paths. This is deliberate — the diff is meant to be replayed onto
+    /// the same layer on a mirror, where the layer-namespace paths apply
+    /// directly. The composed stage paths the edit touched are reported
+    /// separately on
+    /// [`ObjectsChanged`](super::ObjectsChanged) (`resynced` /
+    /// `changed_info_only`).
     pub fn extract_diff(&self, objects: &ObjectsChanged<'_>) -> Result<LayerDiff> {
         let mut layer = sdf::Layer::new_anonymous("diff");
         let mut removed = Vec::new();
@@ -1104,8 +1076,13 @@ impl Stage {
     {
         // Read the target identifier and mapped spec path under a short borrow
         // of `edit_target` (which owns a heap `MapFunction`), releasing it
-        // before the layer borrow below.
-        let (identifier, spec_path) = {
+        // before the layer borrow below. The mapping is cloned out (rather than
+        // borrowed across `finalize_layer`) because the listener it ultimately
+        // feeds can re-author and re-target the stage; clone it only when a
+        // listener is installed to consume it, keeping the common no-listener
+        // authoring path allocation-free.
+        let notify = self.listener.borrow().is_some();
+        let (identifier, spec_path, mapping) = {
             let target = self.edit_target.borrow();
             let spec_path =
                 target
@@ -1113,7 +1090,11 @@ impl Stage {
                     .ok_or_else(|| StageAuthoringError::OutsideEditTarget {
                         path: scene_path.clone(),
                     })?;
-            (target.layer_identifier.clone(), spec_path)
+            (
+                target.layer_identifier.clone(),
+                spec_path,
+                notify.then(|| target.mapping.clone()),
+            )
         };
         let (layer_id, authored) = {
             let mut layers = self.layers.borrow_mut();
@@ -1123,7 +1104,7 @@ impl Stage {
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
             (layer_id, f(&mut node.layer, spec_path))
         };
-        self.finalize_layer(layer_id, authored)
+        self.finalize_layer(layer_id, authored, mapping.as_ref())
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
@@ -1186,7 +1167,7 @@ impl Stage {
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
             f(&mut node.layer)
         };
-        self.finalize_layer(layer_id, authored).map(|_| ())
+        self.finalize_layer(layer_id, authored, None).map(|_| ())
     }
 
     /// Drain the layer's recorded changes after an authoring call and drive
@@ -1195,6 +1176,11 @@ impl Stage {
     /// list short-circuits with no invalidation, a non-empty one is applied. On
     /// failure the partial record is discarded and the cache falls back to a
     /// stage-wide blow-out, because the layer may be in a partial state.
+    ///
+    /// `mapping` is the edit target's namespace mapping (layer source to stage
+    /// target), used to translate the change record's layer-namespace paths back
+    /// to stage namespace for the notice. `None` means identity — a root or
+    /// metadata edit whose paths are already in stage namespace.
     //
     // TODO: the error-path fallback to layer-stack-wide reset is
     // conservative. Once `Layer` authoring methods either complete
@@ -1205,6 +1191,7 @@ impl Stage {
         &self,
         layer_id: pcp::LayerId,
         authored: Result<(), sdf::AuthoringError>,
+        mapping: Option<&pcp::MapFunction>,
     ) -> Result<bool, StageAuthoringError> {
         // Drain the layer's record into the stage scratch buffer (reusing its
         // allocation across edits) — or discard a partial record — under a short
@@ -1239,29 +1226,26 @@ impl Stage {
                 // Snapshot the notice payload before `apply` consumes `changes`,
                 // and only when a listener is installed — the no-listener path
                 // stays allocation-free.
-                let notice = self
+                let payload = self
                     .listener
                     .borrow()
                     .is_some()
-                    .then(|| notice_payload(&changes, &scratch));
+                    .then(|| notice::Payload::new(&changes, &scratch, mapping));
                 {
                     let mut graph = self.layers.borrow_mut();
                     let mut cache = self.cache.borrow_mut();
                     changes.apply(&mut cache, &mut graph);
                 }
 
-                if let Some((resynced, changed_info_only, change_list)) = notice {
+                if let Some(payload) = payload {
                     let layer_identifier = self.layer_identifier(layer_id).unwrap_or_default();
                     // Release the scratch borrow before invoking the listener:
                     // it may re-author, which re-enters `finalize_layer` and
                     // re-borrows this buffer.
                     drop(scratch);
-                    self.notify(Notice::ObjectsChanged(ObjectsChanged {
-                        resynced: &resynced,
-                        changed_info_only: &changed_info_only,
-                        layer_identifier: &layer_identifier,
-                        change_list: &change_list,
-                    }));
+                    self.notify(Notice::ObjectsChanged(
+                        payload.objects_changed(&layer_identifier, mapping),
+                    ));
                 }
                 Ok(true)
             }
@@ -1862,7 +1846,7 @@ impl Stage {
             parent_id
         };
         self.layers.borrow_mut().ensure_layer(layer);
-        self.finalize_layer(parent_id, Ok(()))?;
+        self.finalize_layer(parent_id, Ok(()), None)?;
         Ok(())
     }
 
@@ -1908,7 +1892,7 @@ impl Stage {
             (parent_id, removed)
         };
         if removed {
-            self.finalize_layer(parent_id, Ok(()))?;
+            self.finalize_layer(parent_id, Ok(()), None)?;
         }
         Ok(removed)
     }
@@ -2227,41 +2211,6 @@ impl<R: ar::Resolver> StageBuilder<R> {
             listener: RefCell::new(None),
         }))
     }
-}
-
-/// Build the `(resynced, changed_info_only, change_list)` payload for an
-/// [`ObjectsChanged`] notice from the classified `changes` and the raw
-/// `scratch` change list of one edit. `resynced` is the union of the
-/// significant and prim-tier composed paths; `changed_info_only` is every other
-/// edited path that authored a field value or edited relationship/connection
-/// targets.
-fn notice_payload(
-    changes: &pcp::Changes,
-    scratch: &sdf::ChangeList,
-) -> (Vec<sdf::Path>, Vec<sdf::Path>, sdf::ChangeList) {
-    let mut resynced: Vec<sdf::Path> = changes.cache.resynced_paths().cloned().collect();
-    // A layer-stack-significant edit (sublayers, layer offsets, relocates, or
-    // the effective timeCodesPerSecond) drops every cached index via
-    // `clear_all_indices`, which the per-path tiers don't capture. Report it as
-    // a stage-wide resync at the pseudo-root, matching C++ `ResyncedPaths`.
-    if changes.layer_stack.intersects(pcp::LayerStackChanges::SIGNIFICANT) {
-        resynced.push(sdf::Path::abs_root());
-    }
-    resynced.sort();
-    resynced.dedup();
-    let changed_info_only: Vec<sdf::Path> = scratch
-        .entries()
-        .iter()
-        .filter(|(p, e)| {
-            resynced.binary_search(p).is_err()
-                && (!e.info_changed.is_empty()
-                    || e.flags.intersects(
-                        sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
-                    ))
-        })
-        .map(|(p, _)| p.clone())
-        .collect();
-    (resynced, changed_info_only, scratch.clone())
 }
 
 #[cfg(test)]
@@ -2697,6 +2646,7 @@ mod tests {
             changed_info_only: std::slice::from_ref(&size),
             layer_identifier: &root,
             change_list: &change_list,
+            mapping: None,
         };
         let diff = stage.extract_diff(&objects)?;
         assert_eq!(diff.removed, vec![Deletion::Spec(size.clone())]);

@@ -3464,6 +3464,71 @@ fn listener_info_only() -> Result<()> {
     Ok(())
 }
 
+/// An info-only edit authored through a variant edit target reports its path
+/// in stage namespace (`/Prim.size`), translated from the `{set=sel}` layer
+/// namespace through the target's mapping, not the raw spec path. The
+/// stage-namespace path round-trips through `changed_fields`, which translates
+/// it back to the `{set=sel}` change-list key.
+#[test]
+fn listener_info_under_variant_target() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.edit_target().layer_identifier().to_string();
+    stage.define_prim("/Prim")?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    // Create the attribute inside the variant before installing the listener, so
+    // the listener only observes the info-only `set` below.
+    let attr = stage.create_attribute("/Prim.size", "double")?;
+
+    let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let has_default = Rc::new(Cell::new(false));
+    {
+        let (info, has_default) = (info.clone(), has_default.clone());
+        let size = sdf::path("/Prim.size")?;
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+                // `changed_fields` takes the stage-namespace path from
+                // `changed_info_only` and finds the field under the layer key.
+                if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+                    has_default.set(true);
+                }
+            }
+        });
+    }
+    attr.set(2.0_f64)?;
+
+    assert!(info.borrow().contains(&sdf::path("/Prim.size")?));
+    assert!(!info.borrow().contains(&sdf::path("/Prim{set=sel}.size")?));
+    assert!(has_default.get());
+    Ok(())
+}
+
+/// A structural edit through a variant edit target reports its resynced path in
+/// stage namespace (`/Prim/child`). The literal authored path the change
+/// pipeline fans out (`/Prim{set=sel}child`) must not leak into `resynced`.
+#[test]
+fn listener_resync_under_variant_target() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.edit_target().layer_identifier().to_string();
+    stage.define_prim("/Prim")?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let resynced = resynced.clone();
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            }
+        });
+    }
+    stage.define_prim("/Prim/child")?;
+
+    assert!(resynced.borrow().contains(&sdf::path("/Prim/child")?));
+    assert!(!resynced.borrow().contains(&sdf::path("/Prim{set=sel}child")?));
+    Ok(())
+}
+
 /// `extract_diff` called from the callback captures the edited specs and their
 /// authored values into a layer that serializes to text and reads back equal —
 /// the source half of mirroring an edit.

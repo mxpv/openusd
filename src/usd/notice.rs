@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::{sdf, tf};
+use crate::{pcp, sdf, tf};
 
 /// A change notification delivered to a stage listener (C++ `UsdNotice`).
 ///
@@ -55,32 +55,189 @@ pub struct ObjectsChanged<'a> {
     /// descendants were dropped (C++ `ResyncedPaths`). Composed/stage namespace.
     pub resynced: &'a [sdf::Path],
     /// Paths that changed only in field or target info, without restructuring
-    /// composition (C++ `ChangedInfoOnlyPaths`).
-    //
-    // TODO: these come from the edited layer's `ChangeList`, so they are in
-    // edit-target/layer namespace. For a local-layer edit that equals stage
-    // namespace, but arc-target edits are not yet translated back.
+    /// composition (C++ `ChangedInfoOnlyPaths`). Composed/stage namespace: a
+    /// path authored through an arc or variant edit target is translated back
+    /// from the edited layer's namespace through the target's mapping.
     pub changed_info_only: &'a [sdf::Path],
     /// Canonical identifier of the layer the edit landed on, and the lookup
     /// key [`Stage::extract_diff`](super::Stage::extract_diff) uses to read its
     /// authored values.
     pub layer_identifier: &'a str,
     /// The recorded change index for the edit: which `(path, field)` pairs were
-    /// authored, plus structural flags. Backs [`changed_fields`](Self::changed_fields)
-    /// and [`Stage::extract_diff`](super::Stage::extract_diff).
+    /// authored, plus structural flags. Keyed in the edited layer's namespace
+    /// (the same as [`Stage::extract_diff`](super::Stage::extract_diff)); under
+    /// an arc or variant edit target this differs from the stage-namespace
+    /// [`resynced`](Self::resynced) / [`changed_info_only`](Self::changed_info_only)
+    /// paths. [`changed_fields`](Self::changed_fields) bridges the two.
     pub change_list: &'a sdf::ChangeList,
+    /// Namespace mapping (layer source to stage target) of the edit target the
+    /// edit was authored through, or `None` for a local/root edit that needs no
+    /// translation. [`changed_fields`](Self::changed_fields) uses it to map a
+    /// stage-namespace query path back to the [`change_list`](Self::change_list)
+    /// key.
+    pub(crate) mapping: Option<&'a pcp::MapFunction>,
 }
 
 impl ObjectsChanged<'_> {
     /// The field names authored at `path` by this edit (C++ `GetChangedFields`),
-    /// or an empty set if `path` was not touched.
+    /// or an empty set if `path` was not touched. `path` is in stage namespace,
+    /// the same as the paths in [`resynced`](Self::resynced) and
+    /// [`changed_info_only`](Self::changed_info_only); under an arc or variant
+    /// edit target it is translated back to the layer-namespace key
+    /// [`change_list`](Self::change_list) records it under.
     pub fn changed_fields(&self, path: &sdf::Path) -> &BTreeSet<tf::Token> {
         static EMPTY: BTreeSet<tf::Token> = BTreeSet::new();
+        let key = match self.mapping {
+            Some(m) => match m.map_target_to_source(path) {
+                Some(key) => key,
+                None => return &EMPTY,
+            },
+            None => path.clone(),
+        };
         self.change_list
             .entries()
             .iter()
-            .find(|(p, _)| p == path)
+            .find(|(p, _)| p == &key)
             .map(|(_, entry)| &entry.info_changed)
             .unwrap_or(&EMPTY)
     }
+}
+
+/// The owned backing store for one [`ObjectsChanged`] notice.
+///
+/// [`ObjectsChanged`] is a borrowed view valid only for the listener callback,
+/// so the paths and change record it points at must outlive the call. The stage
+/// builds a `Payload` from the classified [`pcp::Changes`] and the edit's raw
+/// change list, then lends it out as an [`ObjectsChanged`] through
+/// [`objects_changed`](Self::objects_changed). Held only while a listener is
+/// installed, so the no-listener authoring path allocates nothing.
+pub(crate) struct Payload {
+    resynced: Vec<sdf::Path>,
+    changed_info_only: Vec<sdf::Path>,
+    change_list: sdf::ChangeList,
+}
+
+impl Payload {
+    /// Classify one edit into the composed path-sets a notice reports.
+    ///
+    /// `changes` is the edit's invalidation plan and `scratch` its raw change
+    /// list, in the edited layer's namespace. `mapping` is the edit target's
+    /// namespace mapping (layer source to stage target), or `None` for a
+    /// local/root edit that needs no translation.
+    ///
+    /// [`resynced`](ObjectsChanged::resynced) is the union of the significant and
+    /// prim-tier composed paths; [`changed_info_only`](ObjectsChanged::changed_info_only)
+    /// is every other edited path that authored a field value or edited
+    /// relationship/connection targets.
+    pub(crate) fn new(changes: &pcp::Changes, scratch: &sdf::ChangeList, mapping: Option<&pcp::MapFunction>) -> Self {
+        // `resynced_paths` mixes composed dependency paths (already stage
+        // namespace) with the literal authored path, which under an arc or
+        // variant edit target is in the edited layer's namespace (e.g.
+        // `/Prim{set=sel}child`). Map each through the edit target's mapping so
+        // the literal path is carried to its composed form. A path already in
+        // stage namespace matches no source pair, so it is kept unchanged —
+        // mapped to itself by the variant target's root identity, or returned as
+        // `None` (and kept) by a restricted arc mapping. A local/root edit has no
+        // mapping and keeps every path.
+        let mut resynced: Vec<sdf::Path> = changes
+            .cache
+            .resynced_paths()
+            .map(|p| match mapping {
+                Some(m) => m.map_source_to_target(p).unwrap_or_else(|| p.clone()),
+                None => p.clone(),
+            })
+            .collect();
+        // A layer-stack-significant edit (sublayers, layer offsets, relocates, or
+        // the effective timeCodesPerSecond) drops every cached index via
+        // `clear_all_indices`, which the per-path tiers don't capture. Report it
+        // as a stage-wide resync at the pseudo-root, matching C++ `ResyncedPaths`.
+        if changes.layer_stack.intersects(pcp::LayerStackChanges::SIGNIFICANT) {
+            resynced.push(sdf::Path::abs_root());
+        }
+        resynced.sort();
+        resynced.dedup();
+        // The `ChangeList` records paths in the edited layer's namespace.
+        // Translate each back to stage namespace through the mapping (its
+        // source-to-target direction) so the listener sees composed paths; for a
+        // local/root edit the mapping is identity (`None`) and paths pass
+        // through. A path outside the mapping's domain (one the arc target cannot
+        // reach, so it could not have been authored through it) is dropped. After
+        // translation `resynced` and `changed_info_only` share a namespace, so the
+        // dedup against `resynced` is meaningful; the sort/dedup also collapses
+        // distinct layer paths the mapping merges onto one stage path.
+        let mut changed_info_only: Vec<sdf::Path> = scratch
+            .entries()
+            .iter()
+            .filter(|(_, e)| {
+                !e.info_changed.is_empty()
+                    || e.flags.intersects(
+                        sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
+                    )
+            })
+            .filter_map(|(p, _)| match mapping {
+                Some(m) => m.map_source_to_target(p),
+                None => Some(p.clone()),
+            })
+            .filter(|p| resynced.binary_search(p).is_err())
+            .collect();
+        changed_info_only.sort();
+        changed_info_only.dedup();
+        Self {
+            resynced,
+            changed_info_only,
+            change_list: scratch.clone(),
+        }
+    }
+
+    /// Borrow this payload as an [`ObjectsChanged`] for the listener callback.
+    ///
+    /// `layer_identifier` names the layer the edit landed on and `mapping` is the
+    /// edit target's mapping (the same one passed to [`new`](Self::new)), which
+    /// [`changed_fields`](ObjectsChanged::changed_fields) uses to translate query
+    /// paths back to the change-list namespace.
+    pub(crate) fn objects_changed<'a>(
+        &'a self,
+        layer_identifier: &'a str,
+        mapping: Option<&'a pcp::MapFunction>,
+    ) -> ObjectsChanged<'a> {
+        ObjectsChanged {
+            resynced: &self.resynced,
+            changed_info_only: &self.changed_info_only,
+            layer_identifier,
+            change_list: &self.change_list,
+            mapping,
+        }
+    }
+}
+
+/// A serializable, replayable diff of one stage edit, produced by
+/// [`Stage::extract_diff`](super::Stage::extract_diff) from an [`ObjectsChanged`]
+/// notice.
+///
+/// Together the two fields describe the whole edit: `layer` carries the new and
+/// changed scene description, `removed` carries the deletions an overlay layer
+/// cannot express. A mirror applies the diff by composing or authoring `layer`
+/// and then replaying each [`Deletion`].
+pub struct LayerDiff {
+    /// An anonymous layer holding the added and value/metadata/target edits —
+    /// including list-op deletions of references, targets, or apiSchemas, which
+    /// compose as authored. Serialize it with [`sdf::Layer::export`] /
+    /// [`sdf::Layer::export_to_string`].
+    pub layer: sdf::Layer,
+    /// Deletions the overlay `layer` cannot express — whole-spec removals and
+    /// erased fields. See [`Deletion`].
+    pub removed: Vec<Deletion>,
+}
+
+/// A deletion in a [`LayerDiff`] that the overlay [`LayerDiff::layer`] cannot
+/// express (it records "set", not "erase"). A mirror must replay these, or it
+/// keeps its stale opinion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deletion {
+    /// The whole prim or property spec at this path was removed; a mirror
+    /// applies it with `remove_prim` / `remove_property`.
+    Spec(sdf::Path),
+    /// This field was erased while its spec survives (e.g. clearing an
+    /// attribute's connections); a mirror applies it with `erase_field`.
+    Field(sdf::Path, tf::Token),
 }

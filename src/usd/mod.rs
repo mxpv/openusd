@@ -24,13 +24,13 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
-pub use notice::{LayerMutingChanged, Notice, ObjectsChanged};
+pub use notice::{Deletion, LayerDiff, LayerMutingChanged, Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
 pub use stage::{
-    Deletion, EditContext, EditTarget, EditTargetArc, InitialLoadSet, LayerDiff, PrimPredicate, PrimStatus, Stage,
-    StageAuthoringError, StageBuilder, StagePopulationMask, WeakStage,
+    EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    StageBuilder, StagePopulationMask, WeakStage,
 };
 pub use timecode::TimeCode;
 
