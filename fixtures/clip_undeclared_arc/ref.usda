@@ -1,0 +1,14 @@
+#usda 1.0
+(
+    defaultPrim = "Model"
+)
+
+def "Model"
+{
+    float size.timeSamples = {
+        10: 777.0,
+    }
+    float extra.timeSamples = {
+        3: 42.0,
+    }
+}
