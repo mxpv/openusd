@@ -17,6 +17,8 @@
 //! [`remove_spec_subtree`](crate::sdf::Layer::remove_spec_subtree); this type
 //! adds composition awareness, the target/connection fix-up, and validation.
 
+use std::collections::HashMap;
+
 use crate::sdf;
 
 use super::{Attribute, EditTarget, Prim, PrimPredicate, Relationship, Stage, StageAuthoringError};
@@ -68,25 +70,36 @@ impl NamespaceEditor {
     }
 
     /// Stage a rename of `prim` to `new_name` (same parent).
-    pub fn rename_prim(&mut self, prim: &super::Prim, new_name: &str) -> &mut Self {
-        if let Some(new) = prim.path().parent().and_then(|p| p.append_path(new_name).ok()) {
-            self.pending = Some(Edit {
-                old_path: prim.path().clone(),
-                new_path: Some(new),
-            });
-        }
-        self
+    pub fn rename_prim(&mut self, prim: &super::Prim, new_name: &str) -> Result<&mut Self, String> {
+        let parent = prim
+            .path()
+            .parent()
+            .ok_or_else(|| format!("source prim {} has no parent", prim.path()))?;
+        let new = parent
+            .append_path(new_name)
+            .map_err(|_| format!("new prim name {new_name:?} is not valid"))?;
+        self.pending = Some(Edit {
+            old_path: prim.path().clone(),
+            new_path: Some(new),
+        });
+        Ok(self)
     }
 
     /// Stage a reparent of `prim` under `new_parent`, keeping its name.
-    pub fn reparent_prim(&mut self, prim: &super::Prim, new_parent: &super::Prim) -> &mut Self {
-        if let Some(new) = prim.path().name().and_then(|n| new_parent.path().append_path(n).ok()) {
-            self.pending = Some(Edit {
-                old_path: prim.path().clone(),
-                new_path: Some(new),
-            });
-        }
-        self
+    pub fn reparent_prim(&mut self, prim: &super::Prim, new_parent: &super::Prim) -> Result<&mut Self, String> {
+        let name = prim
+            .path()
+            .name()
+            .ok_or_else(|| format!("source prim {} has no leaf name", prim.path()))?;
+        let new = new_parent
+            .path()
+            .append_path(name)
+            .map_err(|_| format!("destination parent {} cannot take child {name:?}", new_parent.path()))?;
+        self.pending = Some(Edit {
+            old_path: prim.path().clone(),
+            new_path: Some(new),
+        });
+        Ok(self)
     }
 
     /// Validate the pending edit without applying it. Returns `Ok(())` if it
@@ -135,14 +148,14 @@ impl NamespaceEditor {
         match path.split_property() {
             // Property: the owning prim must exist and list the property.
             Some((prim_path, name)) => {
-                let prim = self.stage.prim_at(prim_path);
+                let prim = self.stage.prim(prim_path);
                 if !prim.is_valid().map_err(to_err)? {
                     return Ok(false);
                 }
                 Ok(prim.property_names().map_err(to_err)?.iter().any(|n| n == name))
             }
             // Prim.
-            None => self.stage.prim_at(path.clone()).is_valid().map_err(to_err),
+            None => self.stage.prim(path.clone()).is_valid().map_err(to_err),
         }
     }
 
@@ -172,38 +185,31 @@ impl NamespaceEditor {
             }
         }
 
-        let (remove_flag, add_flag) = if old.is_property_path() {
-            (sdf::ChangeFlags::REMOVE_PROPERTY, sdf::ChangeFlags::ADD_PROPERTY)
-        } else {
-            (
-                sdf::ChangeFlags::REMOVE_NON_INERT_PRIM,
-                sdf::ChangeFlags::ADD_NON_INERT_PRIM,
-            )
-        };
-
         let identifiers = self.stage.layer_identifiers();
+        let layer_indices: HashMap<&str, usize> = identifiers
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| (id.as_str(), idx))
+            .collect();
         let saved_target = self.stage.edit_target();
 
         let apply = || -> Result<(), StageAuthoringError> {
             for (layer_id, _) in &stack {
-                let idx = identifiers.iter().position(|i| i == layer_id).ok_or_else(|| {
+                let idx = layer_indices.get(layer_id.as_str()).copied().ok_or_else(|| {
                     StageAuthoringError::Composition(anyhow::anyhow!("layer {layer_id} not found in stack"))
                 })?;
-                self.stage.set_edit_target(EditTarget::for_layer_index(idx))?;
+                self.stage
+                    .set_edit_target(EditTarget::for_layer(identifiers[idx].clone()))?;
                 self.stage.with_target_layer_at(old, |layer, old_spec| {
-                    let mut cl = sdf::ChangeList::new();
                     match edit.new_path.as_ref() {
                         None => {
                             layer.remove_spec_subtree(&old_spec)?;
-                            cl.entry_mut(&old_spec).flags |= remove_flag;
                         }
                         Some(new) => {
                             layer.move_spec_subtree(&old_spec, new)?;
-                            cl.entry_mut(&old_spec).flags |= remove_flag;
-                            cl.entry_mut(new).flags |= add_flag;
                         }
                     }
-                    Ok(cl)
+                    Ok(())
                 })?;
             }
             Ok(())
@@ -227,9 +233,9 @@ impl NamespaceEditor {
     fn contributing_layers(&self, path: &sdf::Path) -> Result<Vec<(String, sdf::Path)>, StageAuthoringError> {
         let map = StageAuthoringError::Composition;
         match path.split_property() {
-            None => self.stage.prim_at(path.clone()).prim_stack().map_err(map),
+            None => self.stage.prim(path.clone()).prim_stack().map_err(map),
             Some((prim_path, name)) => {
-                let prim = self.stage.prim_at(prim_path);
+                let prim = self.stage.prim(prim_path);
                 let is_rel = prim
                     .relationships()
                     .map_err(map)?
@@ -261,7 +267,7 @@ impl NamespaceEditor {
                 if scan_err.is_some() {
                     return;
                 }
-                let prim = self.stage.prim_at(prim_path.clone());
+                let prim = self.stage.prim(prim_path.clone());
                 if let Err(e) = collect_prim_fixups(&prim, old, new, &mut rel_edits, &mut attr_edits) {
                     scan_err = Some(e);
                 }
@@ -293,7 +299,10 @@ fn rewrite_paths(paths: &[sdf::Path], old: &sdf::Path, new: Option<&sdf::Path>) 
     for p in paths {
         if p.has_prefix(old) {
             if let Some(new) = new {
-                out.push(p.replace_prefix(old, new).unwrap_or_else(|| p.clone()));
+                out.push(
+                    p.replace_prefix(old, new)
+                        .expect("path with a matching prefix must be replaceable"),
+                );
             }
             // delete: drop the entry
         } else {
@@ -337,9 +346,7 @@ mod tests {
         stage.define_prim(sdf::path("/World")?)?;
         stage.define_prim(sdf::path("/World/A")?)?;
         stage.define_prim(sdf::path("/World/B")?)?;
-        stage
-            .prim_at(sdf::path("/World/A")?)
-            .create_attribute("attr", "double")?;
+        stage.prim(sdf::path("/World/A")?).create_attribute("attr", "double")?;
         Ok(stage)
     }
 
@@ -407,9 +414,9 @@ mod tests {
         editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
         editor.apply_edits()?;
 
-        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/C")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/C/Child")?).is_valid()?);
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/C")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/C/Child")?).is_valid()?);
         Ok(())
     }
 
@@ -420,8 +427,8 @@ mod tests {
         editor.delete_at_path(sdf::path("/World/B")?);
         editor.apply_edits()?;
 
-        assert!(!stage.prim_at(sdf::path("/World/B")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/A")?).is_valid()?);
+        assert!(!stage.prim(sdf::path("/World/B")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/A")?).is_valid()?);
         Ok(())
     }
 
@@ -430,7 +437,7 @@ mod tests {
         let stage = stage()?;
         // /World/B.rel -> /World/A
         stage
-            .prim_at(sdf::path("/World/B")?)
+            .prim(sdf::path("/World/B")?)
             .create_relationship("rel")?
             .set_targets([sdf::path("/World/A")?])?;
 
@@ -438,7 +445,7 @@ mod tests {
         editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
         editor.apply_edits()?;
 
-        let targets = stage.prim_at(sdf::path("/World/B")?).relationship("rel").targets()?;
+        let targets = stage.prim(sdf::path("/World/B")?).relationship("rel").targets()?;
         assert_eq!(targets, vec![sdf::path("/World/C")?]);
         Ok(())
     }
@@ -452,9 +459,9 @@ mod tests {
         editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/B/A")?);
         editor.apply_edits()?;
 
-        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/B/A")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/B/A/Child")?).is_valid()?);
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/B/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/B/A/Child")?).is_valid()?);
         Ok(())
     }
 
@@ -463,7 +470,7 @@ mod tests {
         let stage = stage()?;
         // /World/B.in connected to /World/A.attr
         stage
-            .prim_at(sdf::path("/World/B")?)
+            .prim(sdf::path("/World/B")?)
             .create_attribute("in", "double")?
             .set_connections([sdf::path("/World/A.attr")?])?;
 
@@ -471,7 +478,7 @@ mod tests {
         editor.move_at_path(sdf::path("/World/A")?, sdf::path("/World/C")?);
         editor.apply_edits()?;
 
-        let conns = stage.prim_at(sdf::path("/World/B")?).attribute("in").connections()?;
+        let conns = stage.prim(sdf::path("/World/B")?).attribute("in").connections()?;
         assert_eq!(conns, vec![sdf::path("/World/C.attr")?]);
         Ok(())
     }
@@ -481,7 +488,7 @@ mod tests {
         let stage = stage()?;
         // /World/B.in connected to the to-be-renamed /World/A.attr
         stage
-            .prim_at(sdf::path("/World/B")?)
+            .prim(sdf::path("/World/B")?)
             .create_attribute("in", "double")?
             .set_connections([sdf::path("/World/A.attr")?])?;
 
@@ -489,11 +496,11 @@ mod tests {
         editor.move_at_path(sdf::path("/World/A.attr")?, sdf::path("/World/A.renamed")?);
         editor.apply_edits()?;
 
-        let props = stage.prim_at(sdf::path("/World/A")?).property_names()?;
+        let props = stage.prim(sdf::path("/World/A")?).property_names()?;
         assert!(props.iter().any(|n| n == "renamed"));
         assert!(!props.iter().any(|n| n == "attr"));
 
-        let conns = stage.prim_at(sdf::path("/World/B")?).attribute("in").connections()?;
+        let conns = stage.prim(sdf::path("/World/B")?).attribute("in").connections()?;
         assert_eq!(conns, vec![sdf::path("/World/A.renamed")?]);
         Ok(())
     }
@@ -501,13 +508,13 @@ mod tests {
     #[test]
     fn rename_prim_convenience_applies() -> Result<()> {
         let stage = stage()?;
-        let prim = stage.prim_at(sdf::path("/World/A")?);
+        let prim = stage.prim(sdf::path("/World/A")?);
         let mut editor = NamespaceEditor::new(&stage);
-        editor.rename_prim(&prim, "Renamed");
+        editor.rename_prim(&prim, "Renamed").map_err(anyhow::Error::msg)?;
         editor.apply_edits()?;
 
-        assert!(!stage.prim_at(sdf::path("/World/A")?).is_valid()?);
-        assert!(stage.prim_at(sdf::path("/World/Renamed")?).is_valid()?);
+        assert!(!stage.prim(sdf::path("/World/A")?).is_valid()?);
+        assert!(stage.prim(sdf::path("/World/Renamed")?).is_valid()?);
         Ok(())
     }
 
@@ -515,7 +522,7 @@ mod tests {
     fn delete_drops_relationship_targets() -> Result<()> {
         let stage = stage()?;
         stage
-            .prim_at(sdf::path("/World/B")?)
+            .prim(sdf::path("/World/B")?)
             .create_relationship("rel")?
             .set_targets([sdf::path("/World/A")?])?;
 
@@ -523,7 +530,7 @@ mod tests {
         editor.delete_at_path(sdf::path("/World/A")?);
         editor.apply_edits()?;
 
-        let targets = stage.prim_at(sdf::path("/World/B")?).relationship("rel").targets()?;
+        let targets = stage.prim(sdf::path("/World/B")?).relationship("rel").targets()?;
         assert!(targets.is_empty());
         Ok(())
     }
