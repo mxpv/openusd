@@ -3743,3 +3743,135 @@ fn empty_edit_no_fire() -> Result<()> {
     assert_eq!(count.get(), 0);
     Ok(())
 }
+
+/// `remove_prim` erases the prim spec, drops it from the parent's children, and
+/// resyncs its path; a second removal is a no-op.
+#[test]
+fn remove_prim_drops_spec() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A/B")?;
+    assert!(stage.prim("/A/B").is_valid()?);
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let resynced = resynced.clone();
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            }
+        });
+    }
+    assert!(stage.remove_prim("/A/B")?);
+    assert!(!stage.prim("/A/B").is_valid()?);
+    assert!(!child_names(&stage, "/A")?.contains(&"B".to_string()));
+    assert!(resynced.borrow().contains(&sdf::path("/A/B")?));
+    // Nothing left to remove.
+    assert!(!stage.remove_prim("/A/B")?);
+    Ok(())
+}
+
+/// `remove_property` erases the attribute spec and drops it from the owning
+/// prim's properties; a second removal is a no-op.
+#[test]
+fn remove_property_drops_spec() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.create_attribute("/A.size", "double")?;
+    assert!(stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
+
+    assert!(stage.remove_property("/A.size")?);
+    assert!(!stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
+    assert!(stage.prim("/A").is_valid()?);
+    assert!(!stage.remove_property("/A.size")?);
+    Ok(())
+}
+
+/// Replaying every diff a listener captures from stage A onto stage B
+/// reconstructs A's edited subtree — the round trip through
+/// `extract_diff` / `apply_diff`.
+#[test]
+fn apply_diff_roundtrip() -> Result<()> {
+    let a = in_memory_stage()?;
+    let diffs: Rc<RefCell<Vec<usd::LayerDiff>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let diffs = diffs.clone();
+        a.set_listener(move |stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                diffs.borrow_mut().push(stage.extract_diff(&oc).expect("extract diff"));
+            }
+        });
+    }
+    a.define_prim("/World")?.set_type_name("Xform")?;
+    a.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
+    a.create_attribute("/World/Mesh.size", "double")?.set(2.0_f64)?;
+
+    let b = in_memory_stage()?;
+    for diff in diffs.borrow().iter() {
+        b.apply_diff(diff)?;
+    }
+    assert_eq!(child_names(&b, "/World")?, vec!["Mesh".to_string()]);
+    assert_eq!(b.prim("/World").type_name()?.as_deref(), Some("Xform"));
+    assert_eq!(b.attribute("/World/Mesh.size").get::<f64>()?, Some(2.0));
+    Ok(())
+}
+
+/// A diff's `removed` carries the deletions an overlay layer cannot express —
+/// a whole-spec removal and an erased field — and `apply_diff` replays them so
+/// stage B drops the prim and the connections, matching A.
+#[test]
+fn apply_diff_removal() -> Result<()> {
+    let a = in_memory_stage()?;
+    let diffs: Rc<RefCell<Vec<usd::LayerDiff>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let diffs = diffs.clone();
+        a.set_listener(move |stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                diffs.borrow_mut().push(stage.extract_diff(&oc).expect("extract diff"));
+            }
+        });
+    }
+    a.define_prim("/World")?;
+    a.define_prim("/World/Doomed")?;
+    a.define_prim("/World/Target")?;
+    let attr = a.create_attribute("/World.size", "double")?;
+    let attr = attr.set_connections([sdf::Path::new("/World/Target.size")?])?;
+    assert!(a.remove_prim("/World/Doomed")?);
+    attr.clear_connections()?;
+
+    // The deletions surface in the captured diffs as a spec and a field removal.
+    let removed: Vec<Deletion> = diffs.borrow().iter().flat_map(|d| d.removed.clone()).collect();
+    assert!(removed
+        .iter()
+        .any(|d| matches!(d, Deletion::Spec(p) if *p == sdf::path("/World/Doomed").unwrap())));
+    assert!(removed
+        .iter()
+        .any(|d| matches!(d, Deletion::Field(p, _) if *p == sdf::path("/World.size").unwrap())));
+
+    let b = in_memory_stage()?;
+    for diff in diffs.borrow().iter() {
+        b.apply_diff(diff)?;
+    }
+    assert!(!b.prim("/World/Doomed").is_valid()?);
+    assert!(b.prim("/World/Target").is_valid()?);
+    assert!(connections(&b, &sdf::path("/World.size")?)?.is_empty());
+    Ok(())
+}
+
+/// `apply_diff` replays in the originating layer's namespace, so it refuses a
+/// non-identity edit target (a variant target here) rather than silently
+/// authoring at the wrong spec paths.
+#[test]
+fn apply_diff_rejects_variant_target() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.edit_target().layer_identifier().to_string();
+    stage.define_prim("/Prim")?;
+    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
+    let diff = usd::LayerDiff {
+        layer: sdf::Layer::new_anonymous("diff"),
+        removed: Vec::new(),
+    };
+    assert!(matches!(
+        stage.apply_diff(&diff),
+        Err(StageAuthoringError::NonLocalEditTarget)
+    ));
+    Ok(())
+}

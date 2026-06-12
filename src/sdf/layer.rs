@@ -132,6 +132,17 @@ impl Layer {
         Ok(())
     }
 
+    /// Remove the spec at `path` from this layer, the structural inverse of
+    /// [`copy_spec_from`](Self::copy_spec_from). Removing a prim also erases its
+    /// descendant specs, and the leaf name is dropped from the owning prim's
+    /// child-name list. Returns `true` when a spec was present and removed.
+    ///
+    /// The recording [`EditProxy`] captures each erase so composition can
+    /// invalidate.
+    pub fn remove_spec(&mut self, path: &Path) -> bool {
+        super::spec::remove_spec(self.data_mut(), path)
+    }
+
     /// The layer's resolved, canonical identifier.
     pub fn identifier(&self) -> &str {
         &self.identifier

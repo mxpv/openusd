@@ -548,6 +548,14 @@ pub enum StageAuthoringError {
         /// The current edit target's layer identifier.
         layer: String,
     },
+
+    /// [`Stage::apply_diff`] replays a diff in the originating layer's
+    /// namespace, so it requires the current edit target to map paths
+    /// identically — a local or root-layer target. A variant or arc edit target
+    /// carries a non-identity namespace mapping that diff replay does not yet
+    /// translate through; switch to a matching edit target before replaying.
+    #[error("apply_diff requires an identity edit-target mapping; the current target remaps the namespace")]
+    NonLocalEditTarget,
 }
 
 /// Shared state behind a [`Stage`] handle.
@@ -884,6 +892,43 @@ impl Stage {
         Ok(super::Relationship::new(self, path))
     }
 
+    /// Remove the prim spec at `path` (and its descendant specs) from the
+    /// current edit target's layer. Mirrors C++ `UsdStage::RemovePrim`.
+    ///
+    /// Returns `true` when a spec was present and removed, `false` when the
+    /// edit-target layer had nothing at `path`. The removal is authored on the
+    /// current [`EditTarget`], fires [`Notice::ObjectsChanged`], and invalidates
+    /// the affected composition subtree — a prim removed from the edit-target
+    /// layer drops out of the composed stage when no weaker layer still defines
+    /// it.
+    pub fn remove_prim(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
+        self.remove_spec(&path.into())
+    }
+
+    /// Remove the property spec (attribute or relationship) at `path` from the
+    /// current edit target's layer. Mirrors C++ `UsdPrim::RemoveProperty`.
+    ///
+    /// Returns `true` when a spec was present and removed, `false` when the
+    /// edit-target layer had nothing at `path`. The removal is authored on the
+    /// current [`EditTarget`], fires [`Notice::ObjectsChanged`], and invalidates
+    /// the owning prim.
+    pub fn remove_property(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
+        self.remove_spec(&path.into())
+    }
+
+    /// Erase the spec at `path` on the current edit target's layer, routing
+    /// through [`with_target_layer_at`](Self::with_target_layer_at) so the edit
+    /// target mapping, change recording, invalidation, and notice all run. The
+    /// returned `bool` reflects whether the erase recorded any change, which is
+    /// exactly whether a spec was present. Shared by [`remove_prim`](Self::remove_prim)
+    /// and [`remove_property`](Self::remove_property).
+    fn remove_spec(&self, path: &sdf::Path) -> Result<bool, StageAuthoringError> {
+        self.with_target_layer_at(path, |layer, layer_path| {
+            layer.remove_spec(&layer_path);
+            Ok(())
+        })
+    }
+
     /// Author `defaultPrim` on the stage's root layer.
     ///
     /// `defaultPrim` is a layer-level field that resolves from the root
@@ -1025,6 +1070,62 @@ impl Stage {
         Ok(LayerDiff { layer, removed })
     }
 
+    /// Replay a [`LayerDiff`] onto the current edit target's layer in one
+    /// transaction, the consume half of [`extract_diff`](Self::extract_diff).
+    /// The diff's overlay specs are copied in (adds plus value, metadata, and
+    /// list-op target edits) and each [`Deletion`] the overlay cannot carry is
+    /// applied: a whole-spec removal through [`sdf::Layer::remove_spec`], an
+    /// erased field through [`sdf::AbstractData::erase_field`]. The whole replay
+    /// drains as a single edit, firing one [`Notice::ObjectsChanged`] and
+    /// invalidating composition for every path it touched.
+    ///
+    /// The diff is applied in the originating layer's namespace, so this is
+    /// exact when the target's edit layer shares that namespace — the common
+    /// local / root-layer mirror. Translating a diff authored through an arc or
+    /// variant edit target into a different target namespace is a separate
+    /// feature; until it lands, mirror through a matching edit target.
+    ///
+    /// `apply_diff` fires this stage's own `ObjectsChanged`. A bidirectional
+    /// mirror that feeds those notices back to the origin must tag or suppress
+    /// the echo itself — that is an application-level concern this method does
+    /// not arbitrate.
+    pub fn apply_diff(&self, diff: &LayerDiff) -> Result<(), StageAuthoringError> {
+        // The diff's paths are in the originating layer's namespace and are
+        // authored verbatim, with `mapping = None` in the notice. Under a
+        // non-identity target (variant or arc) that would silently write to the
+        // wrong spec paths, so refuse rather than mis-author. Replaying through
+        // the target mapping is the arc-target translation feature.
+        if !self.edit_target.borrow().mapping.is_identity() {
+            return Err(StageAuthoringError::NonLocalEditTarget);
+        }
+        let layer_id = self.edit_target_layer_id()?;
+        // TODO: this replay is not atomic — if `apply_diff_to_layer` fails after
+        // copying some specs, `finalize_layer`'s error path discards the change
+        // record but not the partial layer mutations, leaving a half-applied
+        // diff that composition then rebuilds over. Apply to a scratch layer and
+        // swap on success (or pre-validate every path) to make it all-or-nothing.
+        let authored = {
+            let mut layers = self.layers.borrow_mut();
+            let node = layers
+                .get_mut(layer_id)
+                .expect("edit-target layer id refers to a live layer");
+            apply_diff_to_layer(&mut node.layer, diff).map_err(StageAuthoringError::Composition)
+        };
+        self.finalize_layer(layer_id, authored, None).map(|_| ())
+    }
+
+    /// The id of the layer the current edit target writes to, or
+    /// [`StageAuthoringError::LayerNotFound`] when that layer is no longer in
+    /// the stage. Resolves the edit-target identifier to its graph id, the
+    /// shared step of the stage-metadata and diff-replay authoring paths.
+    fn edit_target_layer_id(&self) -> Result<pcp::LayerId, StageAuthoringError> {
+        let identifier = self.edit_target.borrow().layer_identifier.clone();
+        self.layers
+            .borrow()
+            .id_of(&identifier)
+            .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })
+    }
+
     /// Authors `startTimeCode` on the current edit target's layer when it is
     /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
     /// Mirrors C++ `UsdStage::SetStartTimeCode`.
@@ -1102,7 +1203,10 @@ impl Stage {
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            (layer_id, f(&mut node.layer, spec_path))
+            (
+                layer_id,
+                f(&mut node.layer, spec_path).map_err(StageAuthoringError::from),
+            )
         };
         self.finalize_layer(layer_id, authored, mapping.as_ref())
     }
@@ -1139,19 +1243,15 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
     {
-        let identifier = self.edit_target.borrow().layer_identifier.clone();
-        let layer_id = {
+        let layer_id = self.edit_target_layer_id()?;
+        {
             let layers = self.layers.borrow();
-            let id = layers
-                .id_of(&identifier)
-                .ok_or_else(|| StageAuthoringError::LayerNotFound {
-                    layer: identifier.clone(),
-                })?;
-            if layers.root_id() != Some(id) && !layers.session_layers().contains(&id) {
-                return Err(StageAuthoringError::StageMetadataTarget { layer: identifier });
+            if layers.root_id() != Some(layer_id) && !layers.session_layers().contains(&layer_id) {
+                return Err(StageAuthoringError::StageMetadataTarget {
+                    layer: layers.identifier(layer_id).to_string(),
+                });
             }
-            id
-        };
+        }
         self.author_on_layer(layer_id, f)
     }
 
@@ -1165,7 +1265,7 @@ impl Stage {
         let authored = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            f(&mut node.layer)
+            f(&mut node.layer).map_err(StageAuthoringError::from)
         };
         self.finalize_layer(layer_id, authored, None).map(|_| ())
     }
@@ -1190,7 +1290,7 @@ impl Stage {
     fn finalize_layer(
         &self,
         layer_id: pcp::LayerId,
-        authored: Result<(), sdf::AuthoringError>,
+        authored: Result<(), StageAuthoringError>,
         mapping: Option<&pcp::MapFunction>,
     ) -> Result<bool, StageAuthoringError> {
         // Drain the layer's record into the stage scratch buffer (reusing its
@@ -1260,7 +1360,7 @@ impl Stage {
                 let mut graph = self.layers.borrow_mut();
                 let mut cache = self.cache.borrow_mut();
                 changes.apply(&mut cache, &mut graph);
-                Err(StageAuthoringError::Layer(e))
+                Err(e)
             }
         }
     }
@@ -1963,6 +2063,26 @@ impl Stage {
     }
 }
 
+/// Apply a [`LayerDiff`] to `layer`: copy every overlay spec, then replay each
+/// deletion the overlay cannot carry. The mutating core of
+/// [`Stage::apply_diff`], factored out so the borrow of the target layer node
+/// is scoped tightly around it.
+fn apply_diff_to_layer(layer: &mut sdf::Layer, diff: &LayerDiff) -> Result<()> {
+    let src = diff.layer.data();
+    for path in src.spec_paths() {
+        layer.copy_spec_from(src, &path)?;
+    }
+    for deletion in &diff.removed {
+        match deletion {
+            Deletion::Spec(path) => {
+                layer.remove_spec(path);
+            }
+            Deletion::Field(path, field) => layer.data_mut().erase_field(path, field.as_str()),
+        }
+    }
+    Ok(())
+}
+
 /// Builder for configuring and opening a [`Stage`].
 ///
 /// Created via [`Stage::builder`]. Allows setting a custom asset resolver and
@@ -2617,9 +2737,9 @@ mod tests {
 
     /// `extract_diff` routes a whole-spec removal into `removed`, keeping it out
     /// of the overlay layer, while a spec that still exists is copied. Driven
-    /// with a synthetic notice and a direct `erase_spec` because the stage has
-    /// no public whole-spec removal API yet; the public listener and
-    /// `extract_diff` paths are covered in `tests/stage.rs`.
+    /// with a synthetic notice and a direct `erase_spec` to unit-test the
+    /// routing in isolation; the end-to-end `remove_prim` / `apply_diff` path is
+    /// covered in `tests/stage.rs`.
     #[test]
     fn extract_diff_removal() -> Result<()> {
         let stage = in_memory_stage()?;
