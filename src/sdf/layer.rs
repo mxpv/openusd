@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
-use super::schema::FieldKey;
+use super::schema::{ChildrenKey, FieldKey};
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, Data, EditProxy, LayerData, Path, PrimSpecMut,
     PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef, RelocateList,
-    SpecError, SpecType,
+    SpecError, SpecType, Variability,
 };
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
@@ -81,6 +81,55 @@ impl Layer {
     /// Used to drop a partial record after an authoring call fails midway.
     pub fn discard_changes(&mut self) {
         self.data.clear();
+    }
+
+    /// Copy the spec at `path` from `src` into this layer, recreating its
+    /// ancestor chain and child-name lists through the typed spec constructors
+    /// and copying every authored field except the `primChildren` /
+    /// `propertyChildren` lists those constructors maintain.
+    ///
+    /// A spec absent from `src` copies nothing; spec types other than prims,
+    /// properties, and the pseudo-root are skipped. Authoring through the spec
+    /// views keeps this layer's structural invariants intact, so a subset of
+    /// `src`'s specs assembles into a valid sparse layer — the basis of the diff
+    /// layer in [`Stage::extract_diff`](crate::usd::Stage::extract_diff).
+    pub fn copy_spec_from(&mut self, src: &dyn AbstractData, path: &Path) -> Result<()> {
+        let Some(ty) = src.spec_type(path) else {
+            return Ok(());
+        };
+        let dst = self.data_mut();
+        match ty {
+            SpecType::Prim => {
+                PrimSpecMut::over(dst, path.clone())?;
+            }
+            SpecType::Attribute => {
+                AttributeSpecMut::new(dst, path.clone(), "", Variability::Varying, false)?;
+            }
+            SpecType::Relationship => {
+                RelationshipSpecMut::new(dst, path.clone(), Variability::Varying, false)?;
+            }
+            // The pseudo-root already exists; copy its layer metadata below
+            // without creating a spec.
+            SpecType::PseudoRoot => {}
+            _ => return Ok(()),
+        }
+        let Some(fields) = src.list_fields(path) else {
+            return Ok(());
+        };
+        for field in &fields {
+            if field == ChildrenKey::PrimChildren.as_str() || field == ChildrenKey::PropertyChildren.as_str() {
+                continue;
+            }
+            if let Some(value) = src.try_field(path, field)? {
+                dst.set_field(path, field, value.into_owned());
+            }
+        }
+        // `AttributeSpecMut::new` stamps a placeholder `typeName`; drop it when
+        // the source authored none, so the copy never invents a type.
+        if ty == SpecType::Attribute && !fields.iter().any(|f| f == FieldKey::TypeName.as_str()) {
+            dst.erase_field(path, FieldKey::TypeName.as_str());
+        }
+        Ok(())
     }
 
     /// The layer's resolved, canonical identifier.

@@ -3,9 +3,12 @@
 //! resolution, prim/attribute/relationship handles, instancing, value
 //! clips, and stage-tier authoring.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use anyhow::Result;
 use openusd::usd::{
-    EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    Deletion, EditTarget, EditTargetArc, InitialLoadSet, Notice, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StagePopulationMask,
 };
 use openusd::{gf, pcp, sdf, tf, usd};
@@ -3404,5 +3407,195 @@ def "Model"
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         None
     );
+    Ok(())
+}
+
+// Stage change listeners (C++ `UsdNotice`), exercised through the public API.
+
+/// A listener installed with `set_listener` fires once per edit, and the
+/// notice's `resynced` paths name the prim whose composition changed.
+#[test]
+fn listener_fires_on_define() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let (resynced, count) = (resynced.clone(), count.clone());
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                count.set(count.get() + 1);
+                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            }
+        });
+    }
+    stage.define_prim("/World")?;
+    assert_eq!(count.get(), 1);
+    assert!(resynced.borrow().contains(&sdf::Path::new("/World")?));
+    Ok(())
+}
+
+/// A pure value edit reports its path under `changed_info_only` (not
+/// `resynced`), and `changed_fields` names the authored field.
+#[test]
+fn listener_info_only() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/World")?;
+    let attr = stage.create_attribute("/World.size", "double")?;
+    let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let has_default = Rc::new(Cell::new(false));
+    {
+        let (info, resynced, has_default) = (info.clone(), resynced.clone(), has_default.clone());
+        let size = sdf::Path::new("/World.size")?;
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+                if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+                    has_default.set(true);
+                }
+            }
+        });
+    }
+    attr.set(2.0_f64)?;
+    assert!(info.borrow().contains(&sdf::Path::new("/World.size")?));
+    assert!(resynced.borrow().is_empty());
+    assert!(has_default.get());
+    Ok(())
+}
+
+/// `extract_diff` called from the callback captures the edited specs and their
+/// authored values into a layer that serializes to text and reads back equal —
+/// the source half of mirroring an edit.
+#[test]
+fn extract_diff_roundtrip() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/World")?;
+    let attr = stage.create_attribute("/World.size", "double")?;
+    let exported = Rc::new(RefCell::new(String::new()));
+    let value: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
+    {
+        let (exported, value) = (exported.clone(), value.clone());
+        let size = sdf::Path::new("/World.size")?;
+        stage.set_listener(move |stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                let diff = stage.extract_diff(oc).expect("extract diff");
+                *exported.borrow_mut() = diff.layer.export_to_string().expect("export");
+                *value.borrow_mut() = diff
+                    .layer
+                    .data()
+                    .try_field(&size, sdf::FieldKey::Default.as_str())
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.into_owned().try_as_double());
+            }
+        });
+    }
+    attr.set(2.0_f64)?;
+    assert!(exported.borrow().contains("double"));
+    assert_eq!(*value.borrow(), Some(2.0));
+    Ok(())
+}
+
+/// Clearing an attribute's connections erases the connectionPaths field; the
+/// diff reports it in `removed` as `(path, Some(field))` (an overlay layer can't
+/// express the erasure) so a mirror can drop its stale opinion.
+#[test]
+fn extract_diff_field_erasure() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/World")?;
+    stage.create_attribute("/World.target", "double")?;
+    let attr = stage.create_attribute("/World.size", "double")?;
+    let attr = attr.set_connections([sdf::Path::new("/World.target")?])?;
+    // Field name erased on /World.size, captured from the diff's `removed`.
+    let erased: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let erased = erased.clone();
+        stage.set_listener(move |stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                let diff = stage.extract_diff(oc).expect("extract diff");
+                let size = sdf::Path::new("/World.size").unwrap();
+                erased.borrow_mut().extend(diff.removed.iter().filter_map(|r| match r {
+                    Deletion::Field(p, f) if *p == size => Some(f.as_str().to_string()),
+                    _ => None,
+                }));
+            }
+        });
+    }
+    attr.clear_connections()?;
+    assert!(erased.borrow().iter().any(|f| f == "connectionPaths"));
+    Ok(())
+}
+
+/// After `unset_listener`, no further notices are delivered.
+#[test]
+fn unset_stops_delivery() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.set_listener(move |_, _| count.set(count.get() + 1));
+    }
+    stage.define_prim("/A")?;
+    assert_eq!(count.get(), 1);
+    stage.unset_listener();
+    stage.define_prim("/B")?;
+    assert_eq!(count.get(), 1);
+    Ok(())
+}
+
+/// A layer-stack-significant edit (here `timeCodesPerSecond`) drops every
+/// cached index, so the notice reports a stage-wide resync at the pseudo-root
+/// rather than an empty `resynced`.
+#[test]
+fn listener_layer_stack_resync() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/World")?;
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let resynced = resynced.clone();
+        stage.set_listener(move |_stage, notice| {
+            if let Notice::ObjectsChanged(oc) = notice {
+                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            }
+        });
+    }
+    stage.set_time_codes_per_second(48.0)?;
+    assert!(resynced.borrow().contains(&sdf::Path::abs_root()));
+    Ok(())
+}
+
+/// A listener may author another edit from within the callback: the re-entrant
+/// `finalize_layer` only takes shared borrows of the listener slot (and the
+/// other cells are released before the fire), so it does not panic.
+#[test]
+fn listener_reentrant_author() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let done = Rc::new(Cell::new(false));
+    {
+        let done = done.clone();
+        stage.set_listener(move |stage, _notice| {
+            if !done.replace(true) {
+                stage.define_prim("/Nested").unwrap();
+            }
+        });
+    }
+    stage.define_prim("/World")?;
+    assert!(stage.prim("/Nested").is_valid()?);
+    Ok(())
+}
+
+/// An idempotent author records no change, so the listener does not fire.
+#[test]
+fn empty_edit_no_fire() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.set_listener(move |_, _| count.set(count.get() + 1));
+    }
+    stage.define_prim("/A")?;
+    assert_eq!(count.get(), 0);
     Ok(())
 }

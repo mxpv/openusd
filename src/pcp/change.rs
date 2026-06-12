@@ -57,6 +57,21 @@ pub struct CacheChanges {
     pub(crate) did_change_specs: BTreeSet<(LayerId, Path)>,
 }
 
+impl CacheChanges {
+    /// The composed paths whose cached composition changed — the union of the
+    /// significant, prim, and spec tiers. These are the paths a consumer must
+    /// re-resolve (C++ `PcpCacheChanges` resync set). The spec tier is included
+    /// so an inert spec add/remove (e.g. an `over`) is surfaced, not silently
+    /// dropped, even though it refreshes `has_specs` in place rather than
+    /// rebuilding the index.
+    pub(crate) fn resynced_paths(&self) -> impl Iterator<Item = &Path> {
+        self.did_change_significantly
+            .iter()
+            .chain(self.did_change_prims.iter())
+            .chain(self.did_change_specs.iter().map(|(_, path)| path))
+    }
+}
+
 bitflags! {
     /// Layer-stack-level change flags. Drives layer-stack precomputed-state
     /// rebuilds (sublayer ordering, layer offsets, relocates) inside the

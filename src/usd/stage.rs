@@ -38,7 +38,7 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::{Cell, Ref, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use anyhow::Result;
 use bitflags::bitflags;
@@ -47,6 +47,7 @@ use crate::tf::Token;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
+use super::notice::{Notice, ObjectsChanged};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -589,7 +590,18 @@ pub struct StageInner {
     /// [`sdf::ChangeList`] into, so classification doesn't allocate a fresh
     /// list per edit. Cleared at the start of every [`StageInner::finalize_layer`].
     change_scratch: RefCell<sdf::ChangeList>,
+    /// Optional change listener (C++ `UsdNotice` registration), fired by
+    /// [`Stage::finalize_layer`] after each successful edit. A single slot:
+    /// callers fan out to multiple sinks inside their own closure. Boxed for
+    /// single ownership; the fire path holds a shared borrow across the call,
+    /// so the callback must not install or clear the listener.
+    listener: RefCell<Option<ChangeListener>>,
 }
+
+/// A stage change-listener callback, installed with
+/// [`Stage::set_listener`]. Receives the originating stage (so it can call
+/// [`Stage::extract_diff`] without capturing a handle) and the [`Notice`].
+type ChangeListener = Box<dyn Fn(&Stage, &Notice<'_>)>;
 
 /// A composed USD stage.
 ///
@@ -607,6 +619,55 @@ impl std::ops::Deref for Stage {
     fn deref(&self) -> &Self::Target {
         &self.0
     }
+}
+
+/// A non-owning handle to a [`Stage`] (C++ `UsdStageWeakPtr`).
+///
+/// Holds no strong reference, so it does not keep the stage alive. Obtain one
+/// with [`Stage::downgrade`] and recover a strong handle with
+/// [`WeakStage::upgrade`]. Capture this — not a [`Stage`] clone — inside a
+/// change listener that must retain stage access across calls, so the listener
+/// does not form a reference cycle that leaks the stage.
+#[derive(Clone)]
+pub struct WeakStage(Weak<StageInner>);
+
+impl WeakStage {
+    /// Recover a strong [`Stage`] handle, or `None` if every strong handle has
+    /// been dropped.
+    pub fn upgrade(&self) -> Option<Stage> {
+        self.0.upgrade().map(Stage)
+    }
+}
+
+/// A deletion in a [`LayerDiff`] that the overlay [`LayerDiff::layer`] cannot
+/// express (it records "set", not "erase"). A mirror must replay these, or it
+/// keeps its stale opinion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deletion {
+    /// The whole prim or property spec at this path was removed; a mirror
+    /// applies it with `remove_prim` / `remove_property`.
+    Spec(sdf::Path),
+    /// This field was erased while its spec survives (e.g. clearing an
+    /// attribute's connections); a mirror applies it with `erase_field`.
+    Field(sdf::Path, Token),
+}
+
+/// A serializable, replayable diff of one stage edit, produced by
+/// [`Stage::extract_diff`].
+///
+/// Together the two fields describe the whole edit: `layer` carries the new and
+/// changed scene description, `removed` carries the deletions an overlay layer
+/// cannot express. A mirror applies the diff by composing or authoring `layer`
+/// and then replaying each [`Deletion`].
+pub struct LayerDiff {
+    /// An anonymous layer holding the added and value/metadata/target edits —
+    /// including list-op deletions of references, targets, or apiSchemas, which
+    /// compose as authored. Serialize it with [`sdf::Layer::export`] /
+    /// [`sdf::Layer::export_to_string`].
+    pub layer: sdf::Layer,
+    /// Deletions the overlay `layer` cannot express — whole-spec removals and
+    /// erased fields. See [`Deletion`].
+    pub removed: Vec<Deletion>,
 }
 
 impl Stage {
@@ -869,6 +930,100 @@ impl Stage {
         })
     }
 
+    /// A non-owning [`WeakStage`] handle to this stage (C++
+    /// `UsdStage::GetWeakPtr`-style). Capture this inside a change listener that
+    /// must retain stage access, so the listener does not leak the stage.
+    pub fn downgrade(&self) -> WeakStage {
+        WeakStage(Rc::downgrade(&self.0))
+    }
+
+    /// Install this stage's change listener, replacing any previous one
+    /// (C++ `TfNotice::Register`).
+    ///
+    /// The callback fires after every successful, non-empty edit with the
+    /// originating stage and a [`Notice`]. It may read the stage, call
+    /// [`extract_diff`](Self::extract_diff), or author further edits.
+    ///
+    /// It must not call `set_listener` / `unset_listener`, though: the listener
+    /// slot is held borrowed across the call, so mutating it from inside the
+    /// callback (e.g. a "fire once then detach" pattern) panics with a
+    /// [`RefCell`](std::cell::RefCell) double borrow. Detach from outside the
+    /// callback, or have the closure gate itself on captured state instead.
+    ///
+    /// A single slot: register one closure and fan out to multiple sinks inside
+    /// it. The stage is passed to the callback as an argument so the closure
+    /// need not capture one; capturing a [`Stage`] clone forms a reference
+    /// cycle that leaks the stage, so capture a [`WeakStage`] from
+    /// [`downgrade`](Self::downgrade) if you must retain stage access.
+    ///
+    /// Returns the previously installed listener, if any, so a caller can
+    /// temporarily swap in a listener and later restore the old one.
+    pub fn set_listener(&self, f: impl Fn(&Stage, &Notice<'_>) + 'static) -> Option<ChangeListener> {
+        self.listener.replace(Some(Box::new(f)))
+    }
+
+    /// Remove this stage's change listener and return it, if one was installed.
+    pub fn unset_listener(&self) -> Option<ChangeListener> {
+        self.listener.take()
+    }
+
+    /// Extract a serializable diff for the edit described by `objects`.
+    ///
+    /// Reads the authored values for the specs named in
+    /// [`objects.change_list`](ObjectsChanged::change_list) out of the
+    /// originating layer into a fresh anonymous [`sdf::Layer`]. Deletions an
+    /// overlay layer cannot express — whole-spec removals and erased fields —
+    /// are reported out of band in [`LayerDiff::removed`]. Call it synchronously
+    /// from the listener callback: the notice borrows the transient change
+    /// record and the layer keeps mutating afterward.
+    ///
+    /// List-valued field edits (reference / target / apiSchema removals
+    /// included) ride along in the layer as their authored list ops.
+    ///
+    /// The diff is in the originating layer's namespace, exact for an edit on
+    /// the local/root layer through the default edit target. Edits authored
+    /// through an arc edit target (a reference or variant) are recorded in the
+    /// arc source layer's namespace and are not yet translated back to stage
+    /// namespace — see the TODO on
+    /// [`ObjectsChanged::changed_info_only`](super::ObjectsChanged::changed_info_only).
+    pub fn extract_diff(&self, objects: &ObjectsChanged<'_>) -> Result<LayerDiff> {
+        let mut layer = sdf::Layer::new_anonymous("diff");
+        let mut removed = Vec::new();
+        let layers = self.layers();
+        let layer_id = layers
+            .id_of(objects.layer_identifier)
+            .ok_or_else(|| anyhow::anyhow!("change notice references a layer no longer in the stage"))?;
+        let src = layers.layer(layer_id).data();
+        for (path, entry) in objects.change_list.entries() {
+            // A spec's presence in `src` is the source of truth: one still there
+            // (added, modified, or removed-then-re-added within the edit) is
+            // copied with its current authored state; one gone with a removal
+            // flag is a whole-spec deletion the overlay layer cannot carry.
+            if src.spec_type(path).is_some() {
+                layer.copy_spec_from(src, path)?;
+                // A field the edit touched but that is now absent from `src` was
+                // erased, not set; the copied overlay can't express that, so
+                // carry it for the mirror to erase. Child-name lists are
+                // structural bookkeeping `copy_spec_from` maintains, not authored
+                // opinions to delete.
+                for field in &entry.info_changed {
+                    let name = field.as_str();
+                    if name == sdf::ChildrenKey::PrimChildren.as_str()
+                        || name == sdf::ChildrenKey::PropertyChildren.as_str()
+                    {
+                        continue;
+                    }
+                    if src.try_field(path, name)?.is_none() {
+                        removed.push(Deletion::Field(path.clone(), field.clone()));
+                    }
+                }
+            } else if entry.flags.intersects(sdf::ChangeFlags::REMOVE) {
+                removed.push(Deletion::Spec(path.clone()));
+            }
+        }
+        Ok(LayerDiff { layer, removed })
+    }
+
     /// Authors `startTimeCode` on the current edit target's layer when it is
     /// the root or session layer (see [`Self::with_stage_metadata_layer`]).
     /// Mirrors C++ `UsdStage::SetStartTimeCode`.
@@ -1052,9 +1207,36 @@ impl Stage {
                     let cache = self.cache.borrow();
                     changes.did_change(&cache, &edits);
                 }
-                let mut graph = self.layers.borrow_mut();
-                let mut cache = self.cache.borrow_mut();
-                changes.apply(&mut cache, &mut graph);
+                // Snapshot the notice payload before `apply` consumes `changes`,
+                // and only when a listener is installed — the no-listener path
+                // stays allocation-free.
+                let notice = self
+                    .listener
+                    .borrow()
+                    .is_some()
+                    .then(|| notice_payload(&changes, &scratch));
+                {
+                    let mut graph = self.layers.borrow_mut();
+                    let mut cache = self.cache.borrow_mut();
+                    changes.apply(&mut cache, &mut graph);
+                }
+
+                if let Some((resynced, changed_info_only, change_list)) = notice {
+                    let layer_identifier = self.layer_identifier(layer_id).unwrap_or_default();
+                    // Release the scratch borrow before invoking the listener:
+                    // it may re-author, which re-enters `finalize_layer` and
+                    // re-borrows this buffer.
+                    drop(scratch);
+                    if let Some(listener) = self.listener.borrow().as_ref() {
+                        let notice = Notice::ObjectsChanged(ObjectsChanged {
+                            resynced: &resynced,
+                            changed_info_only: &changed_info_only,
+                            layer_identifier: &layer_identifier,
+                            change_list: &change_list,
+                        });
+                        listener(self, &notice);
+                    }
+                }
                 Ok(true)
             }
             Err(e) => {
@@ -2001,8 +2183,44 @@ impl<R: ar::Resolver> StageBuilder<R> {
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
             change_scratch: RefCell::new(sdf::ChangeList::new()),
+            listener: RefCell::new(None),
         }))
     }
+}
+
+/// Build the `(resynced, changed_info_only, change_list)` payload for an
+/// [`ObjectsChanged`] notice from the classified `changes` and the raw
+/// `scratch` change list of one edit. `resynced` is the union of the
+/// significant and prim-tier composed paths; `changed_info_only` is every other
+/// edited path that authored a field value or edited relationship/connection
+/// targets.
+fn notice_payload(
+    changes: &pcp::Changes,
+    scratch: &sdf::ChangeList,
+) -> (Vec<sdf::Path>, Vec<sdf::Path>, sdf::ChangeList) {
+    let mut resynced: Vec<sdf::Path> = changes.cache.resynced_paths().cloned().collect();
+    // A layer-stack-significant edit (sublayers, layer offsets, relocates, or
+    // the effective timeCodesPerSecond) drops every cached index via
+    // `clear_all_indices`, which the per-path tiers don't capture. Report it as
+    // a stage-wide resync at the pseudo-root, matching C++ `ResyncedPaths`.
+    if changes.layer_stack.intersects(pcp::LayerStackChanges::SIGNIFICANT) {
+        resynced.push(sdf::Path::abs_root());
+    }
+    resynced.sort();
+    resynced.dedup();
+    let changed_info_only: Vec<sdf::Path> = scratch
+        .entries()
+        .iter()
+        .filter(|(p, e)| {
+            resynced.binary_search(p).is_err()
+                && (!e.info_changed.is_empty()
+                    || e.flags.intersects(
+                        sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
+                    ))
+        })
+        .map(|(p, _)| p.clone())
+        .collect();
+    (resynced, changed_info_only, scratch.clone())
 }
 
 #[cfg(test)]
@@ -2404,6 +2622,44 @@ mod tests {
         stage.set_edit_target(EditTarget::for_layer(root))?;
         stage.set_start_time_code(1.0)?;
         assert_eq!(stage.start_time_code(), 1.0);
+        Ok(())
+    }
+
+    /// `extract_diff` routes a whole-spec removal into `removed`, keeping it out
+    /// of the overlay layer, while a spec that still exists is copied. Driven
+    /// with a synthetic notice and a direct `erase_spec` because the stage has
+    /// no public whole-spec removal API yet; the public listener and
+    /// `extract_diff` paths are covered in `tests/stage.rs`.
+    #[test]
+    fn extract_diff_removal() -> Result<()> {
+        let stage = in_memory_stage()?;
+        stage.define_prim("/World")?;
+        stage.create_attribute("/World.size", "double")?;
+        let size = sdf::path("/World.size")?;
+        let root = stage.root_layer().identifier().to_string();
+        // Actually remove the spec, as a real removal edit would, so it is gone
+        // from the layer when the notice is processed.
+        {
+            let mut layers = stage.layers.borrow_mut();
+            let root_id = layers.root_id().expect("root layer");
+            layers
+                .get_mut(root_id)
+                .expect("root layer node")
+                .layer
+                .data_mut()
+                .erase_spec(&size);
+        }
+        let mut change_list = sdf::ChangeList::new();
+        change_list.entry_mut(&size).flags |= sdf::ChangeFlags::REMOVE_PROPERTY;
+        let objects = ObjectsChanged {
+            resynced: &[],
+            changed_info_only: std::slice::from_ref(&size),
+            layer_identifier: &root,
+            change_list: &change_list,
+        };
+        let diff = stage.extract_diff(&objects)?;
+        assert_eq!(diff.removed, vec![Deletion::Spec(size.clone())]);
+        assert_eq!(diff.layer.data().spec_type(&size), None);
         Ok(())
     }
 }

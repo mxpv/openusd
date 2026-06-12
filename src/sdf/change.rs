@@ -90,6 +90,9 @@ bitflags! {
         const NON_INERT_PRIM = Self::ADD_NON_INERT_PRIM.bits() | Self::REMOVE_NON_INERT_PRIM.bits();
         /// Set bit when the change adds or removes an inert (`over`) prim spec.
         const INERT_PRIM = Self::ADD_INERT_PRIM.bits() | Self::REMOVE_INERT_PRIM.bits();
+        /// Set bit when the change removes a prim or property spec outright.
+        const REMOVE =
+            Self::REMOVE_NON_INERT_PRIM.bits() | Self::REMOVE_INERT_PRIM.bits() | Self::REMOVE_PROPERTY.bits();
     }
 }
 

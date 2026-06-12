@@ -9,6 +9,7 @@ mod clips;
 mod collection;
 mod connections;
 mod interp;
+mod notice;
 mod prim;
 mod relationship;
 mod schema;
@@ -23,12 +24,13 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use interp::InterpolationType;
+pub use notice::{Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
 pub use stage::{
-    EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
-    StageBuilder, StagePopulationMask,
+    Deletion, EditContext, EditTarget, EditTargetArc, InitialLoadSet, LayerDiff, PrimPredicate, PrimStatus, Stage,
+    StageAuthoringError, StageBuilder, StagePopulationMask, WeakStage,
 };
 pub use timecode::TimeCode;
 
