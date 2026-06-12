@@ -1062,11 +1062,11 @@ impl Stage {
             // copied with its current authored state; one gone with a removal
             // flag is a whole-spec deletion the overlay layer cannot carry.
             if src.spec_type(path).is_some() {
-                layer.copy_spec_from(src, path)?;
+                layer.copy_spec_fields_from(src, path)?;
                 // A field the edit touched but that is now absent from `src` was
                 // erased, not set; the copied overlay can't express that, so
                 // carry it for the mirror to erase. Child-name lists are
-                // structural bookkeeping `copy_spec_from` maintains, not authored
+                // structural bookkeeping `copy_spec_fields_from` maintains, not authored
                 // opinions to delete.
                 for field in &entry.info_changed {
                     let name = field.as_str();
@@ -2076,7 +2076,7 @@ impl Stage {
 fn apply_diff_to_layer(layer: &mut sdf::Layer, diff: &LayerDiff) -> Result<(), sdf::AuthoringError> {
     let src = diff.layer.data();
     for path in src.spec_paths() {
-        layer.copy_spec_from(src, &path)?;
+        layer.copy_spec_fields_from(src, &path)?;
     }
     for deletion in &diff.removed {
         match deletion {

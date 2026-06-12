@@ -159,6 +159,19 @@ impl Path {
         self.path.ends_with('}')
     }
 
+    /// Returns the variant set name of the deepest `{set=sel}` (or `{set=}`)
+    /// selection in this path — `"set"` for both `/Prim{set=sel}` and the bare
+    /// variant-set path `/Prim{set=}`. `None` when the path carries no variant
+    /// selection.
+    pub fn variant_set_name(&self) -> Option<&str> {
+        self.components()
+            .filter_map(|component| match component {
+                PathComponent::Variant { set, .. } => Some(set),
+                PathComponent::Prim(_) => None,
+            })
+            .last()
+    }
+
     /// Returns `true` if any component of this path is a variant selection,
     /// e.g. both `/Prim{set=sel}` and `/Prim{set=sel}/Child`.
     ///

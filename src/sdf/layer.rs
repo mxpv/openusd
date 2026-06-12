@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
-use super::schema::{ChildrenKey, FieldKey};
+use super::schema::FieldKey;
 use super::{
     AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, Data, DataError, EditProxy, LayerData, Path,
     PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
-    RelocateList, SpecError, SpecType, Variability,
+    RelocateList, SpecError, SpecType,
 };
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
@@ -83,57 +83,8 @@ impl Layer {
         self.data.clear();
     }
 
-    /// Copy the spec at `path` from `src` into this layer, recreating its
-    /// ancestor chain and child-name lists through the typed spec constructors
-    /// and copying every authored field except the `primChildren` /
-    /// `propertyChildren` lists those constructors maintain.
-    ///
-    /// A spec absent from `src` copies nothing; spec types other than prims,
-    /// properties, and the pseudo-root are skipped. Authoring through the spec
-    /// views keeps this layer's structural invariants intact, so a subset of
-    /// `src`'s specs assembles into a valid sparse layer — the basis of the diff
-    /// layer in [`Stage::extract_diff`](crate::usd::Stage::extract_diff).
-    pub fn copy_spec_from(&mut self, src: &dyn AbstractData, path: &Path) -> Result<(), AuthoringError> {
-        let Some(ty) = src.spec_type(path) else {
-            return Ok(());
-        };
-        let dst = self.data_mut();
-        match ty {
-            SpecType::Prim => {
-                PrimSpecMut::over(dst, path.clone())?;
-            }
-            SpecType::Attribute => {
-                AttributeSpecMut::new(dst, path.clone(), "", Variability::Varying, false)?;
-            }
-            SpecType::Relationship => {
-                RelationshipSpecMut::new(dst, path.clone(), Variability::Varying, false)?;
-            }
-            // The pseudo-root already exists; copy its layer metadata below
-            // without creating a spec.
-            SpecType::PseudoRoot => {}
-            _ => return Ok(()),
-        }
-        let Some(fields) = src.list_fields(path) else {
-            return Ok(());
-        };
-        for field in &fields {
-            if field == ChildrenKey::PrimChildren.as_str() || field == ChildrenKey::PropertyChildren.as_str() {
-                continue;
-            }
-            if let Some(value) = src.try_field(path, field)? {
-                dst.set_field(path, field, value.into_owned());
-            }
-        }
-        // `AttributeSpecMut::new` stamps a placeholder `typeName`; drop it when
-        // the source authored none, so the copy never invents a type.
-        if ty == SpecType::Attribute && !fields.iter().any(|f| f == FieldKey::TypeName.as_str()) {
-            dst.erase_field(path, FieldKey::TypeName.as_str());
-        }
-        Ok(())
-    }
-
     /// Remove the spec at `path` from this layer, the structural inverse of
-    /// [`copy_spec_from`](Self::copy_spec_from). Removing a prim also erases its
+    /// [`copy_spec_fields_from`](Self::copy_spec_fields_from). Removing a prim also erases its
     /// descendant specs, and the leaf name is dropped from the owning prim's
     /// child-name list. Returns `Ok(true)` when a spec was present and removed,
     /// or an [`AuthoringError`] when the owning prim's child list cannot be read.

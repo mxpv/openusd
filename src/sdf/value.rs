@@ -323,6 +323,37 @@ impl Value {
     pub fn get<T: TryFrom<Value>>(self) -> Option<T> {
         T::try_from(self).ok()
     }
+
+    /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
+    /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
+    /// connections, `inheritPaths`, `specializes`), and `Relocates`. The single
+    /// source of truth a copy value policy checks before remapping, so the set of
+    /// path-bearing variants lives only here.
+    pub fn has_embedded_paths(&self) -> bool {
+        matches!(self, Value::PathVec(_) | Value::PathListOp(_) | Value::Relocates(_))
+    }
+
+    /// Returns a copy of this value with every embedded namespace path rewritten
+    /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
+    /// targets, attribute connections, `inheritPaths`, `specializes`), and
+    /// `Relocates` (source/target pairs); every other value kind is cloned
+    /// unchanged.
+    ///
+    /// The path-rewriting core behind [`copy_spec`](crate::sdf::copy_spec),
+    /// exposed so callers building a custom copy value policy (flatten, namespace
+    /// editing, rename) can remap paths with their own mapping rather than the
+    /// default root-to-root prefix swap.
+    pub fn remap_paths(&self, remap: impl Fn(&Path) -> Path) -> Value {
+        let remap = &remap;
+        match self {
+            Value::PathVec(paths) => Value::PathVec(paths.iter().map(remap).collect()),
+            Value::PathListOp(op) => Value::PathListOp(op.clone().map(|p| remap(&p))),
+            Value::Relocates(relocates) => {
+                Value::Relocates(relocates.iter().map(|(s, t)| (remap(s), remap(t))).collect())
+            }
+            other => other.clone(),
+        }
+    }
 }
 
 // Exact extraction: owned conversions that move data out of `Value` without
@@ -848,6 +879,34 @@ mod tests {
 
         assert!(Value::PayloadListOp(Default::default()).is_payload_list_op());
         assert!(Value::UnregisteredValue(String::new()).is_unregistered_value());
+    }
+
+    #[test]
+    fn remap_paths_rewrites_embedded() {
+        let p = |s: &str| crate::sdf::path(s).unwrap();
+        let remap = |path: &Path| path.replace_prefix(&p("/A"), &p("/B")).unwrap_or_else(|| path.clone());
+
+        // PathListOp: an in-subtree path re-roots, an outside path is untouched.
+        let op = Value::PathListOp(PathListOp::explicit([p("/A/Child"), p("/Other")]));
+        let items: Vec<String> = op
+            .remap_paths(remap)
+            .try_as_path_list_op()
+            .unwrap()
+            .explicit_items
+            .iter()
+            .map(|p| p.as_str().to_owned())
+            .collect();
+        assert_eq!(items, vec!["/B/Child", "/Other"]);
+
+        // PathVec and both endpoints of a Relocates remap.
+        let pv = Value::PathVec(vec![p("/A/X")]).remap_paths(remap);
+        assert_eq!(pv.try_as_path_vec().unwrap()[0].as_str(), "/B/X");
+        let relocates = Value::Relocates(vec![(p("/A/From"), p("/A/To"))]).remap_paths(remap);
+        let pairs = relocates.try_as_relocates().unwrap();
+        assert_eq!((pairs[0].0.as_str(), pairs[0].1.as_str()), ("/B/From", "/B/To"));
+
+        // A value with no embedded paths is returned unchanged.
+        assert_eq!(Value::Int(7).remap_paths(remap), Value::Int(7));
     }
 
     #[test]

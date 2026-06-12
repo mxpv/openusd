@@ -1269,7 +1269,14 @@ fn set_or_erase(data: &mut dyn sdf::AbstractData, path: &sdf::Path, key: &str, v
 /// Errors with [`sdf::AuthoringError::InvalidPath`] if any ancestor or `target`
 /// path already holds a spec of a non-prim type — stamping `primChildren`
 /// onto an Attribute or Relationship spec would corrupt the layer.
-fn ensure_prim_chain(data: &mut dyn sdf::AbstractData, target: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+///
+/// Authoring a `target` that carries `{set=sel}` variant selections also
+/// materializes the variant-set / variant scaffolding along the way, which is
+/// how [`copy`](super::copy) creates a copied variant spec.
+pub(crate) fn ensure_prim_chain(
+    data: &mut dyn sdf::AbstractData,
+    target: &sdf::Path,
+) -> Result<(), sdf::AuthoringError> {
     let chain = namespace_chain(target)?;
     let abs_root = sdf::Path::abs_root();
 
@@ -1326,6 +1333,33 @@ fn ensure_prim_chain(data: &mut dyn sdf::AbstractData, target: &sdf::Path) -> Re
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Ensure the variant-set spec at `vset_path` (a bare `/Prim{set=}` path)
+/// exists, registering the set name on the owning prim's `variantSetChildren`
+/// and creating the scaffolding spec. The owning prim chain is materialized
+/// first (as `over`), so this is correct whether reached top-down through
+/// [`copy`](super::copy) or called standalone on a fresh layer.
+pub(crate) fn ensure_variant_set(
+    data: &mut dyn sdf::AbstractData,
+    vset_path: &sdf::Path,
+) -> Result<(), sdf::AuthoringError> {
+    let invalid = |reason: &'static str| sdf::AuthoringError::InvalidPath {
+        path: vset_path.clone(),
+        reason,
+    };
+    let prim = vset_path
+        .parent()
+        .ok_or_else(|| invalid("variant-set path has no owning prim"))?;
+    let set = vset_path
+        .variant_set_name()
+        .ok_or_else(|| invalid("path is not a variant-set path"))?;
+    ensure_prim_chain(data, &prim)?;
+    add_to_token_vec(data, &prim, sdf::ChildrenKey::VariantSetChildren, set)?;
+    if data.spec_type(vset_path).is_none() {
+        data.create_spec(vset_path.clone(), sdf::SpecType::VariantSet);
     }
     Ok(())
 }
