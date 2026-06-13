@@ -1570,6 +1570,17 @@ impl Stage {
         self.masked(&attr_path, |g, c| c.num_time_samples(g, &attr_path))
     }
 
+    /// Whether an attribute's value may vary over time, the introspection behind
+    /// [`Attribute::value_might_be_time_varying`](super::Attribute::value_might_be_time_varying).
+    /// Reports `true` when the winning value source has more than one composed
+    /// sample, and conservatively when that source is a value-clip set with more
+    /// than one active clip — those clips can each contribute a different value
+    /// even where the discrete sample count collapses to one (spec 12.3.4).
+    pub fn value_might_be_time_varying(&self, attr_path: impl Into<sdf::Path>) -> Result<bool> {
+        let attr_path = attr_path.into();
+        self.masked(&attr_path, |g, c| c.value_might_be_time_varying(g, &attr_path))
+    }
+
     /// Evaluate an attribute's value at `time` under the stage's current
     /// [`InterpolationType`]. The crate-internal resolution engine behind
     /// [`Attribute::get`](super::Attribute::get) with a numeric time code.

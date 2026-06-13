@@ -2248,6 +2248,42 @@ def "Model"
     Ok(())
 }
 
+/// A constant local `default` shadows a multi-clip set: `value_at` is the
+/// constant default at every time, so `value_might_be_time_varying` must be
+/// false even though the shadowed clip set switches active clips. The clip
+/// schedule is only consulted once clips are the winning source.
+#[test]
+fn clip_shadowed_default_not_varying() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_clip_scene(
+        dir.path(),
+        r#"#usda 1.0
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip.usda@, @./clip.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1)]
+        }
+    }
+)
+{
+    float size = 3
+}
+"#,
+        "#usda 1.0\ndef \"Model\"\n{\n    float size\n}\n",
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 7, 5: 9 }\n}\n",
+    )?;
+
+    let stage = Stage::open(&root)?;
+    let attr = stage.attribute("/Model.size");
+    assert_eq!(value_f64(&stage, "/Model.size", 0.0), Some(3.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 12.0), Some(3.0));
+    assert!(attr.time_sample_times()?.is_empty());
+    assert!(!attr.value_might_be_time_varying()?);
+    Ok(())
+}
+
 /// A manifest-less clip set sources only attributes its clips actually author.
 /// `size` (authored by the clip) reports the clip sample times, while `other`
 /// (not authored) reports none rather than the clip's activation schedule —
@@ -2285,6 +2321,126 @@ def "Model" (
     let other = stage.attribute("/Model.other");
     assert!(other.time_sample_times()?.is_empty());
     assert_eq!(other.num_time_samples()?, 0);
+    Ok(())
+}
+
+/// A manifest-less set participates only via the clips its `active` schedule
+/// names. Here `active` selects only the empty clip while an unscheduled clip
+/// authors samples, so `value_at` falls through to the referenced `timeSamples`
+/// — and introspection must surface those arc times, not the empty clip's none.
+#[test]
+fn clip_manifestless_unscheduled_clip() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("sampled.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 1, 4: 2 }\n}\n",
+    )?;
+    std::fs::write(dir.path().join("empty.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
+    std::fs::write(
+        dir.path().join("ref.usda"),
+        "#usda 1.0\n(\n    defaultPrim = \"Model\"\n)\ndef \"Model\"\n{\n    float size.timeSamples = { 5: 50, 8: 80 }\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    references = @./ref.usda@
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./sampled.usda@, @./empty.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 1)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+
+    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    let size = stage.attribute("/Model.size");
+    // The scheduled clip (index 1) is empty, so the set does not source `size`;
+    // introspection reports the reference arc's times, agreeing with value_at.
+    assert_eq!(size.time_sample_times()?, vec![5.0, 8.0]);
+    assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(50.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 8.0), Some(80.0));
+    Ok(())
+}
+
+/// A manifest-less clip set whose later clip authors nothing still reports that
+/// clip's activation boundary as a sample time, because the value changes there:
+/// clip0 holds its lone sample back over stage `[0, 10)`, then clip1 (empty)
+/// falls through to the reference at `t >= 10`. The reported boundary at 10 is
+/// the sole `value_at` change point, so introspection agrees with resolution —
+/// no under-reporting (the missed switch) and no arc bleed-through (the
+/// reference's `5.0`, a time where the held value never changes).
+#[test]
+fn clip_manifestless_held_boundary() -> Result<()> {
+    let stage = Stage::open(&fixture_path("clip_manifestless_held/root.usda"))?;
+    let size = stage.attribute("/Model.size");
+    assert_eq!(size.time_sample_times()?, vec![10.0]);
+    assert_eq!(size.num_time_samples()?, 1);
+    // Two active clips can each serve a different value, so the attribute is
+    // time-varying even though the discrete sample count is one.
+    assert!(size.value_might_be_time_varying()?);
+    // value_at agrees: clip0 holds 50 backward, clip1 falls through to the
+    // reference's 999 from the switch at 10.
+    assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(50.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(50.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), Some(999.0));
+    Ok(())
+}
+
+/// A manifest-less clip set with an empty interior window reports that window's
+/// boundary too: clip0 and clip2 author samples, the middle clip authors
+/// nothing, and `value_at` changes at each boundary, so all are reported.
+#[test]
+fn clip_manifestless_interior_empty() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("clip0.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 0: 0, 2: 2 }\n}\n",
+    )?;
+    std::fs::write(dir.path().join("clip1.usda"), "#usda 1.0\ndef \"Model\"\n{\n}\n")?;
+    std::fs::write(
+        dir.path().join("clip2.usda"),
+        "#usda 1.0\ndef \"Model\"\n{\n    float size.timeSamples = { 20: 20, 22: 22 }\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        r#"#usda 1.0
+(
+    defaultPrim = "Model"
+)
+def "Model" (
+    clips = {
+        dictionary default = {
+            asset[] assetPaths = [@./clip0.usda@, @./clip1.usda@, @./clip2.usda@]
+            string primPath = "/Model"
+            double2[] active = [(0, 0), (10, 1), (20, 2)]
+        }
+    }
+)
+{
+    float size
+}
+"#,
+    )?;
+    let stage = Stage::open(&dir.path().join("root.usda").to_string_lossy())?;
+    let size = stage.attribute("/Model.size");
+    // clip0's samples, the empty middle window's boundary at 10, clip2's samples.
+    assert_eq!(size.time_sample_times()?, vec![0.0, 2.0, 10.0, 20.0, 22.0]);
+    // value_at changes at every reported time: held 2 up to the empty window,
+    // None across it, clip2's samples from 20.
+    assert_eq!(value_f64(&stage, "/Model.size", 5.0), Some(2.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 9.999), Some(2.0));
+    assert_eq!(value_f64(&stage, "/Model.size", 10.0), None);
+    assert_eq!(value_f64(&stage, "/Model.size", 20.0), Some(20.0));
     Ok(())
 }
 

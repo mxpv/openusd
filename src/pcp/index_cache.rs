@@ -20,7 +20,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType, Value};
 use crate::tf::Token;
 
-use super::clip::ResolvedClipSet;
+use super::clip::{ClipSet, ResolvedClipSet};
 use super::dependencies::Dependencies;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
@@ -378,11 +378,11 @@ impl IndexCache {
         }
 
         // 3) Value clips, anchored on this prim or an ancestor, resolve
-        //    authoritatively but per-time; defer them to `value_at`. The gate
-        //    matches `clip_value_at`'s ownership, so a clip-bearing prim's
-        //    non-clip attributes fall through to the cached arc / default tiers
-        //    below.
-        if self.clips_own(graph, &prim, &suffix)? {
+        //    authoritatively but per-time; defer them to `value_at`. The gate is
+        //    clip participation (`clip_sample_times` returns `Some` exactly when
+        //    a set sources the attribute), so a clip-bearing prim's non-clip
+        //    attributes fall through to the cached arc / default tiers below.
+        if self.clip_sample_times(graph, &prim, &suffix)?.is_some() {
             return Ok(AttributeValueSource::Clips);
         }
 
@@ -430,14 +430,20 @@ impl IndexCache {
         if self.has_local_default(graph, &prim, &suffix, &local_layers)? {
             return Ok(None);
         }
-        // TODO: this can disagree with `value_at` for a manifest-less clip that
-        // holds a value across its active interval. `clip_sample_times` reports
-        // only discrete in-interval sample times (so a clip whose sole sample
-        // maps outside its active window contributes none and falls through to
-        // arc `timeSamples` here), while `value_at` still serves the held clip
-        // value over that window via `clips_own`. Reporting the activation
-        // boundary as a sample time for such a held window would restore
-        // agreement, but it touches the spec-frozen tier walk and is deferred.
+        // Value clips own the attribute when a set participates, reporting every
+        // active-window boundary so a held window's switch point agrees with
+        // where `value_at` changes. The participation rule (manifest declares,
+        // or manifest-less with an authored sample) is the same one `clip_value_at`
+        // applies per-time, but computed independently there — the two must stay
+        // in agreement; the consistency tests in `tests/stage.rs` pin it.
+        //
+        // TODO: a manifest-less set reports only its own boundaries/samples here,
+        // but `clip_value_at` falls through to weaker sources (arc `timeSamples`)
+        // inside a fully-empty active window. Arc samples landing in such a gap
+        // window are served by `value_at` yet absent from this list. Closing the
+        // gap means unioning weaker-source sample times that fall within active
+        // windows the clip set authors nothing for — a clip/arc tier crossing
+        // tied to the broader `clip_value_at` unification.
         if let Some(times) = self.clip_sample_times(graph, &prim, &suffix)? {
             return Ok(Some(times));
         }
@@ -450,28 +456,54 @@ impl IndexCache {
     /// and only materializes the time list when value clips own the attribute.
     /// Zero when no source has samples or the prim is masked out.
     pub(crate) fn num_time_samples(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<usize> {
+        Ok(self.time_sample_summary(graph, attr_path)?.0)
+    }
+
+    /// Whether an attribute's value may vary over time, the introspection behind
+    /// [`Attribute::value_might_be_time_varying`]. True when the winning value
+    /// source has more than one composed sample, or when that source is a value-
+    /// clip set whose schedule alone can vary the value
+    /// ([`ClipSet::may_be_time_varying`]). Resolving the source first keeps a
+    /// constant local `default` / `timeSamples` from being reported as
+    /// time-varying merely because it shadows a multi-clip set.
+    ///
+    /// [`Attribute::value_might_be_time_varying`]: crate::usd::Attribute::value_might_be_time_varying
+    pub(crate) fn value_might_be_time_varying(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<bool> {
+        let (count, clip_may_vary) = self.time_sample_summary(graph, attr_path)?;
+        Ok(count > 1 || clip_may_vary)
+    }
+
+    /// The composed sample-time count for an attribute plus, when the winning
+    /// source is a value-clip set, whether that set's schedule can vary the value
+    /// ([`ClipSet::may_be_time_varying`]). Walks [`Self::value_at`]'s source
+    /// precedence in one pass — local `timeSamples`, local `default` (constant),
+    /// clips, then arc `timeSamples` — so [`Self::num_time_samples`] and
+    /// [`Self::value_might_be_time_varying`] share a single resolution. `(0,
+    /// false)` when no source has samples or the prim is masked out.
+    fn time_sample_summary(&mut self, graph: &LayerGraph, attr_path: &Path) -> Result<(usize, bool)> {
         let Some((prim, suffix)) = self.ensure_attr_index(graph, attr_path)? else {
-            return Ok(0);
+            return Ok((0, false));
         };
         let local_layers = graph.local_layers();
         if let Some(count) = self
             .cached(&prim)
             .resolve_time_sample_count(graph, Some(&suffix), Some(&local_layers))?
         {
-            return Ok(count);
+            return Ok((count, false));
         }
         // A local `default` shadows clips and arc samples (see
         // [`Self::time_sample_times`]), so the attribute has no time samples.
         if self.has_local_default(graph, &prim, &suffix, &local_layers)? {
-            return Ok(0);
+            return Ok((0, false));
         }
-        if let Some(times) = self.clip_sample_times(graph, &prim, &suffix)? {
-            return Ok(times.len());
+        if let Some((times, may_vary)) = self.clip_introspection(graph, &prim, &suffix)? {
+            return Ok((times.len(), may_vary));
         }
-        Ok(self
+        let arc = self
             .cached(&prim)
             .resolve_time_sample_count(graph, Some(&suffix), None)?
-            .unwrap_or(0))
+            .unwrap_or(0);
+        Ok((arc, false))
     }
 
     /// Whether a `default` opinion is authored for the attribute in the root
@@ -497,8 +529,7 @@ impl IndexCache {
     /// to weaker sources. A manifest-less set returns `false` here: its
     /// ownership is per-time, resolved by each caller's own sample handling.
     /// This is the shared manifest-declaration predicate behind
-    /// [`Self::clip_value_at`], [`Self::clip_sample_times`], and
-    /// [`Self::clips_own`].
+    /// [`Self::clip_value_at`] and [`Self::clip_set_participates`].
     fn clip_set_declares(&mut self, graph: &LayerGraph, resolved: &ResolvedClipSet, clip_path: &Path) -> Result<bool> {
         match resolved.set.manifest_asset.as_deref() {
             Some(asset) => {
@@ -510,70 +541,64 @@ impl IndexCache {
         }
     }
 
-    /// Whether a value-clip set anchored on `attr_prim` or an ancestor sources
-    /// the attribute's value, the gate [`Self::resolve_value_source`] uses to
-    /// route the attribute through clips.
+    /// Whether the resolved clip `set` participates in sourcing the attribute at
+    /// `clip_path`, returning each clip's in-clip authored sample times when it
+    /// does and `None` when it does not. A set participates when its manifest
+    /// declares the attribute ([`Self::clip_set_declares`]), or — manifest-less —
+    /// when a clip the `active` schedule selects authors a sample for it. The
+    /// single participation predicate behind [`Self::first_participating_clip_set`].
     ///
-    /// This mirrors the per-time ownership in [`Self::clip_value_at`], not the
-    /// discrete change-point view of [`Self::clip_sample_times`]: a manifest-less
-    /// clip holds its value across its whole active interval, owning the
-    /// attribute even at times where it authors no in-interval sample, so
-    /// ownership turns on whether a clip authors *any* sample rather than on the
-    /// retimed sample times. A set owns the attribute when its manifest declares
-    /// it ([`Self::clip_set_declares`]); a manifest-less set owns it when any of
-    /// its clips authors a sample for it. Over-reporting is safe — the query
-    /// then re-resolves through [`Self::value_at`] — but under-reporting would
-    /// cache a weaker source and replay a stale value.
-    fn clips_own(&mut self, graph: &LayerGraph, attr_prim: &Path, suffix: &str) -> Result<bool> {
-        let mut anchor = attr_prim.clone();
-        loop {
-            let sets = {
-                self.ensure_index(graph, &anchor)?;
-                self.cached(&anchor).resolve_clip_sets(graph)?
-            };
-            for resolved in &sets {
-                let set = &resolved.set;
-                let base = set.prim_path.clone().unwrap_or_else(|| anchor.clone());
-                let clip_path = clip_attr_path(&anchor, &base, attr_prim, suffix)?;
-
-                if self.clip_set_declares(graph, resolved, &clip_path)? {
-                    return Ok(true);
-                }
-                // A manifest that does not declare the attribute does not own it.
-                if set.manifest_asset.is_some() {
-                    continue;
-                }
-                // A manifest-less set owns the attribute wherever a clip authors
-                // a sample; the value is then held across that clip's active
-                // interval, so the presence of any sample (not its retimed stage
-                // time) decides ownership.
-                for asset in &set.asset_paths {
-                    if !self
-                        .clip_in_clip_times(graph, asset.as_str(), resolved.asset_layer, &clip_path)?
-                        .is_empty()
-                    {
-                        return Ok(true);
-                    }
-                }
-            }
-            match anchor.parent() {
-                Some(parent) if !parent.is_abs_root() => anchor = parent,
-                _ => return Ok(false),
-            }
+    /// Participation tracks what [`Self::clip_value_at`] can reach: it selects a
+    /// clip only through [`ClipSet::active_clip`], so a set with no `active`
+    /// schedule sources nothing, and a manifest-less set is sourced only by the
+    /// clips its schedule names — an authored-but-unscheduled clip is never read.
+    fn clip_set_participates(
+        &mut self,
+        graph: &LayerGraph,
+        resolved: &ResolvedClipSet,
+        clip_path: &Path,
+    ) -> Result<Option<Vec<Vec<f64>>>> {
+        let set = &resolved.set;
+        let declared = self.clip_set_declares(graph, resolved, clip_path)?;
+        // A manifest that does not declare the attribute does not source it.
+        if set.manifest_asset.is_some() && !declared {
+            return Ok(None);
         }
+        // With no active schedule no clip is ever selected, so the set sources
+        // nothing regardless of what its clips author.
+        if set.active.is_empty() {
+            return Ok(None);
+        }
+        let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
+        for asset in &set.asset_paths {
+            per_clip.push(self.clip_in_clip_times(graph, asset.as_str(), resolved.asset_layer, clip_path)?);
+        }
+        // A manifest-less set sources the attribute only where a *scheduled* clip
+        // authors a sample; if no `active` entry names a sampled clip, value_at
+        // falls through to weaker sources, so the set does not participate.
+        let scheduled_sample = set
+            .active
+            .iter()
+            .any(|&(_, index)| per_clip.get(index).is_some_and(|s| !s.is_empty()));
+        if !declared && !scheduled_sample {
+            return Ok(None);
+        }
+        Ok(Some(per_clip))
     }
 
-    /// The stage times a value-clip set contributes for `attr_prim + suffix`
-    /// (spec 12.3.4), searching the prim and its ancestors nearest-first.
-    /// Reports the first owning set's [`ClipSet::stage_sample_times`]; `None`
-    /// when no clip set owns it.
-    ///
-    /// Ownership mirrors [`Self::clip_value_at`]: a manifest that declares the
-    /// attribute owns it authoritatively (gaps gap-fill), while a manifest-less
-    /// set owns it only where its clips actually author samples — so a
-    /// manifest-less set that contributes no times for the attribute is skipped,
-    /// falling through to weaker sources rather than claiming it.
-    fn clip_sample_times(&mut self, graph: &LayerGraph, attr_prim: &Path, suffix: &str) -> Result<Option<Vec<f64>>> {
+    /// Searches `attr_prim` and its ancestors nearest-first for the first
+    /// value-clip set that participates in sourcing `attr_prim + suffix`,
+    /// applying `f` to it (and its per-clip sample times) and returning the
+    /// result; `None` when no set participates. Centralizes the ancestor walk
+    /// and per-set participation check so every clip introspection shares one
+    /// notion of ownership.
+    fn first_participating_clip_set<T>(
+        &mut self,
+        graph: &LayerGraph,
+        attr_prim: &Path,
+        suffix: &str,
+        f: impl Fn(&ClipSet, Vec<Vec<f64>>) -> T,
+    ) -> Result<Option<T>> {
         let mut anchor = attr_prim.clone();
         loop {
             let sets = {
@@ -581,28 +606,10 @@ impl IndexCache {
                 self.cached(&anchor).resolve_clip_sets(graph)?
             };
             for resolved in &sets {
-                let set = &resolved.set;
-                let base = set.prim_path.clone().unwrap_or_else(|| anchor.clone());
+                let base = resolved.set.prim_path.clone().unwrap_or_else(|| anchor.clone());
                 let clip_path = clip_attr_path(&anchor, &base, attr_prim, suffix)?;
-
-                let declared = self.clip_set_declares(graph, resolved, &clip_path)?;
-                // A manifest that does not declare the attribute does not own it.
-                if set.manifest_asset.is_some() && !declared {
-                    continue;
-                }
-
-                let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
-                for asset in &set.asset_paths {
-                    per_clip.push(self.clip_in_clip_times(graph, asset.as_str(), resolved.asset_layer, &clip_path)?);
-                }
-                let times = set.stage_sample_times(declared, |index| per_clip.get(index).cloned().unwrap_or_default());
-
-                // A declared set owns the attribute even across gaps. A
-                // manifest-less set owns it only where it contributed times;
-                // having none means it does not source the attribute, so fall
-                // through to weaker sources.
-                if declared || !times.is_empty() {
-                    return Ok(Some(times));
+                if let Some(per_clip) = self.clip_set_participates(graph, resolved, &clip_path)? {
+                    return Ok(Some(f(&resolved.set, per_clip)));
                 }
             }
             match anchor.parent() {
@@ -610,6 +617,33 @@ impl IndexCache {
                 _ => return Ok(None),
             }
         }
+    }
+
+    /// The value-clip introspection for `attr_prim + suffix` from the first
+    /// participating set: its stage sample times (spec 12.3.4) and whether its
+    /// schedule alone can vary the value ([`ClipSet::may_be_time_varying`]).
+    /// `None` when no clip set sources the attribute; `Some` exactly when a set
+    /// participates, so [`Self::clip_sample_times`] doubles as the clip gate for
+    /// [`Self::resolve_value_source`]. The sample-time vector may be empty for a
+    /// participating set that contributes no discrete times.
+    fn clip_introspection(
+        &mut self,
+        graph: &LayerGraph,
+        attr_prim: &Path,
+        suffix: &str,
+    ) -> Result<Option<(Vec<f64>, bool)>> {
+        self.first_participating_clip_set(graph, attr_prim, suffix, |set, per_clip| {
+            (set.stage_sample_times(&per_clip), set.may_be_time_varying())
+        })
+    }
+
+    /// The stage times a value-clip set contributes for `attr_prim + suffix`, or
+    /// `None` when no clip set sources the attribute. Drops the time-varying flag
+    /// from [`Self::clip_introspection`] for callers that need only the times.
+    fn clip_sample_times(&mut self, graph: &LayerGraph, attr_prim: &Path, suffix: &str) -> Result<Option<Vec<f64>>> {
+        Ok(self
+            .clip_introspection(graph, attr_prim, suffix)?
+            .map(|(times, _)| times))
     }
 
     /// The in-clip authored sample times for `clip_path` in a single clip layer,
@@ -3087,6 +3121,29 @@ def "Scope"
             cache.resolve_value_source(&graph, &sdf::path("/Model.size")?)?,
             AttributeValueSource::Clips
         ));
+        Ok(())
+    }
+
+    /// `clip_sample_times` reports every active-window boundary of a
+    /// participating set and `None` when no set sources the attribute. The
+    /// manifest-less held set contributes only clip1's boundary at 10 (clip0's
+    /// sole sample maps to stage 50, outside its `[0, 10)` window). A
+    /// manifest that omits an attribute does not source it: `extra` returns
+    /// `None`, falling through to the arc.
+    #[test]
+    fn clip_sample_times_boundaries() -> Result<()> {
+        let held = format!("{}/fixtures/clip_manifestless_held/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&held);
+        assert_eq!(
+            cache.clip_sample_times(&graph, &sdf::path("/Model")?, ".size")?,
+            Some(vec![10.0])
+        );
+
+        let arc = format!("{}/fixtures/clip_undeclared_arc/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&arc);
+        assert!(cache
+            .clip_sample_times(&graph, &sdf::path("/Model")?, ".extra")?
+            .is_none());
         Ok(())
     }
 

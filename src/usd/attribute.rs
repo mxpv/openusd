@@ -464,12 +464,14 @@ impl Attribute {
         Ok(interp::bracketing_time_samples(&times, time.value()))
     }
 
-    /// `true` when more than one time sample is authored, the fast check for
-    /// "this value may change over time". Mirrors C++
-    /// `UsdAttribute::ValueMightBeTimeVarying`. Counts value-clip-contributed
-    /// times (spec 12.3.4) alongside the composed `timeSamples`.
+    /// `true` when the value may change over time, the fast check behind
+    /// motion-blur and animation queries. Mirrors C++
+    /// `UsdAttribute::ValueMightBeTimeVarying`: `true` when more than one sample
+    /// is composed, and conservatively when a participating value-clip set has
+    /// more than one active clip (spec 12.3.4) — those clips can each serve a
+    /// different value even where the reported sample count collapses to one.
     pub fn value_might_be_time_varying(&self) -> anyhow::Result<bool> {
-        Ok(self.num_time_samples()? > 1)
+        self.stage.value_might_be_time_varying(&self.path)
     }
 
     /// Returns the property stack: each `(layer identifier, spec path)` site
