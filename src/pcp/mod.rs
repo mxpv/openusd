@@ -224,6 +224,34 @@
 //!   already composed during indexing. Storing the composed set on the index
 //!   (or each node) would remove the duplicate walk and the risk of the two
 //!   diverging.
+//! - Muted reference/payload targets: a muted layer that is the root of a
+//!   referenced/payloaded layer stack yields an empty target stack, so the arc
+//!   is skipped silently. C++ records a `PcpErrorMutedAssetPath`
+//!   (`prim_indexer.rs`, the external-arc add); value resolution needs an error
+//!   channel to surface it.
+//! - Incremental recomposition on mute: `Stage::mute_layer` / `unmute_layer`
+//!   clear every cached index (a `SIGNIFICANT` layer-stack change). Re-indexing
+//!   only the prims whose indices depend on a layer stack containing the
+//!   (un)muted layer would match C++'s final result with less work
+//!   (`TODO(perf)` on `Stage::recompose_significant`).
+//! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
+//!   interned so unmute is a rebuild; C++ drops its references. The node and its
+//!   backing data are retained for the life of the graph.
+//! - Muted-identifier canonicalization: `LayerGraph::resolve_muted_ids` matches
+//!   a muted identifier exactly, then anchored against the root layer only. C++
+//!   `Pcp_MutedLayers::_GetCanonicalLayerId` anchors a relative path per
+//!   containing layer and strips file-format target args before matching. The
+//!   muted set is keyed by the raw spelling, so two spellings of one loaded
+//!   layer mute it twice and unmuting one spelling leaves it muted via the
+//!   other; canonicalizing (or keying on the resolved id) fixes both.
+//! - Open-time and unresolved muting diagnostics:
+//!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection,
+//!   so a missing sublayer under a muted layer still surfaces as an
+//!   `UnresolvedSublayer` collection error; likewise a reference/payload whose
+//!   target asset was muted before loading is reported `UnresolvedLayer`
+//!   (`prim_indexer.rs`) rather than recognized as muted. Applying the muted set
+//!   during collection and checking it before the unresolved-arc error would
+//!   suppress both.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 

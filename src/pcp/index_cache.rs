@@ -1620,12 +1620,14 @@ impl IndexCache {
     /// stronger layer blocks weaker opinions.
     pub fn stage_metadata(&self, graph: &LayerGraph, field: &str) -> Result<Option<Value>> {
         let root = Path::abs_root();
-        // Walk session layers then the root layer so the session opinion wins.
+        // Walk session layers then the root layer so the session opinion wins,
+        // skipping muted session layers (the root is never muted).
         let layer_ids = graph
             .session_layers()
             .iter()
             .copied()
             .chain(graph.root_id())
+            .filter(|&id| !graph.is_muted(id))
             .collect::<Vec<_>>();
         for id in layer_ids {
             let layer = graph.layer(id);

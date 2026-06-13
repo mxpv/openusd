@@ -38,6 +38,7 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::{Cell, Ref, RefCell};
+use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 use anyhow::Result;
@@ -588,9 +589,6 @@ pub struct StageInner {
     layers: RefCell<pcp::LayerGraph>,
     /// Lazily-built composition cache of per-prim indices and contexts.
     cache: RefCell<pcp::IndexCache>,
-    /// Muted layer identifiers (C++ `UsdStage::MuteLayer`). A muted layer
-    /// contributes no opinions while remaining in the graph.
-    muted: RefCell<std::collections::HashSet<String>>,
     /// Initial payload loading behavior for this stage.
     initial_load_set: InitialLoadSet,
     /// Population mask limiting stage-visible prims.
@@ -1283,14 +1281,11 @@ impl Stage {
             Err(e) => {
                 // Conservatively drop every cached index on post-mutation
                 // failure (the layer may be in a partial state). `SIGNIFICANT`
-                // alone is enough — `apply` routes it through `clear_all_indices`
-                // and the layer graph cannot have been affected by a failing
-                // prim/property edit.
-                let mut changes = pcp::Changes::new();
-                changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
+                // alone is enough — it clears every cached index and the layer
+                // graph cannot have been affected by a failing prim/property edit.
                 let mut graph = self.layers.borrow_mut();
                 let mut cache = self.cache.borrow_mut();
-                changes.apply(&mut cache, &mut graph);
+                Self::recompose_significant(&mut cache, &mut graph);
                 Err(StageAuthoringError::Layer(e))
             }
         }
@@ -1370,16 +1365,24 @@ impl Stage {
         graph.identifiers_of(graph.sublayer_stack(parent_id).iter().map(|&(id, _)| id))
     }
 
-    /// Records a layer identifier in the muted set (C++ `UsdStage::MuteLayer`,
-    /// which likewise mutes by identifier — the layer need not be loaded). Full
-    /// value-resolution suppression of muted layers is not yet wired into
-    /// composition.
+    /// Mutes the layer with the given identifier so it contributes no opinions to
+    /// composition — as if absent from every layer stack it participates in —
+    /// while staying registered so [`unmute_layer`](Self::unmute_layer) restores
+    /// it (C++ `UsdStage::MuteLayer` → `PcpCache::RequestLayerMuting`). Muting
+    /// prunes the layer's whole sublayer subtree, not just the one layer.
+    ///
+    /// The layer need not be loaded: muting an identifier the stage does not
+    /// (yet) contain records it and takes effect if such a layer is later
+    /// encountered. The session layer can be muted; the root layer cannot (it
+    /// "would lead to empty layer stacks", matching C++), so a request to mute it
+    /// is ignored and `is_layer_muted` stays false for the root.
+    ///
+    /// This implements Pcp/Stage-level muting. Sdf-level layer muting
+    /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
+    /// and is not implemented.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
         let identifier = identifier.into();
-        // Bind the result so the `muted` borrow is released before notifying:
-        // the listener may read the muted set or re-author.
-        let newly_muted = self.muted.borrow_mut().insert(identifier.clone());
-        if newly_muted {
+        if self.apply_mute(|graph| graph.mute_layer(identifier.clone())) {
             self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
                 layer: &identifier,
                 muted: true,
@@ -1387,10 +1390,10 @@ impl Stage {
         }
     }
 
-    /// Removes a layer identifier from the muted set.
+    /// Unmutes the layer with the given identifier, restoring its opinions to
+    /// composition (C++ `UsdStage::UnmuteLayer`).
     pub fn unmute_layer(&self, identifier: &str) {
-        let was_muted = self.muted.borrow_mut().remove(identifier);
-        if was_muted {
+        if self.apply_mute(|graph| graph.unmute_layer(identifier)) {
             self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
                 layer: identifier,
                 muted: false,
@@ -1398,16 +1401,42 @@ impl Stage {
         }
     }
 
+    /// Applies a muted-set mutation to the layer graph and recomposes when it
+    /// reports a change, returning whether the set changed. The graph owns the
+    /// muted set and rejects the root layer; the borrows are released before the
+    /// caller notifies, so the listener may read the set or re-author.
+    fn apply_mute(&self, mutate: impl FnOnce(&mut pcp::LayerGraph) -> bool) -> bool {
+        let mut graph = self.layers.borrow_mut();
+        let mut cache = self.cache.borrow_mut();
+        let changed = mutate(&mut graph);
+        if changed {
+            Self::recompose_significant(&mut cache, &mut graph);
+        }
+        changed
+    }
+
     /// Whether the layer with the given identifier is currently muted.
     pub fn is_layer_muted(&self, identifier: &str) -> bool {
-        self.muted.borrow().contains(identifier)
+        self.layers.borrow().is_layer_muted(identifier)
     }
 
     /// The currently muted layer identifiers, sorted for a deterministic result.
     pub fn muted_layers(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.muted.borrow().iter().cloned().collect();
-        ids.sort();
-        ids
+        self.layers.borrow().muted_layers()
+    }
+
+    /// Applies a `SIGNIFICANT` layer-stack change: clears every cached index and
+    /// bumps the revision (so cached [`AttributeQuery`](super::AttributeQuery)
+    /// value sources rebuild). The graph must already reflect the new stacks; the
+    /// caller passes both borrows so the two `RefCell`s are taken once.
+    ///
+    /// TODO(perf): recompose incrementally — re-index only prims whose indices
+    /// depend on the changed layer stacks, rather than clearing every cached
+    /// index. The coarse clear matches C++'s final composed result.
+    fn recompose_significant(cache: &mut pcp::IndexCache, graph: &mut pcp::LayerGraph) {
+        let mut changes = pcp::Changes::new();
+        changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
+        changes.apply(cache, graph);
     }
 
     /// Returns the stage's initial payload loading behavior.
@@ -2005,6 +2034,7 @@ pub struct StageBuilder<R: ar::Resolver = ar::DefaultResolver> {
     initial_load_set: InitialLoadSet,
     population_mask: StagePopulationMask,
     interpolation_type: InterpolationType,
+    muted: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -2022,6 +2052,7 @@ impl StageBuilder {
             initial_load_set: InitialLoadSet::LoadAll,
             population_mask: StagePopulationMask::all(),
             interpolation_type: InterpolationType::default(),
+            muted: HashSet::new(),
         }
     }
 }
@@ -2036,6 +2067,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             interpolation_type: self.interpolation_type,
+            muted: self.muted,
         }
     }
 
@@ -2071,6 +2103,28 @@ impl<R: ar::Resolver> StageBuilder<R> {
     /// ```
     pub fn session_layer(mut self, path: impl Into<String>) -> Self {
         self.session_layer = Some(path.into());
+        self
+    }
+
+    /// Mutes the given layer identifiers at open time, so they contribute no
+    /// opinions to the stage's first composition (see
+    /// [`Stage::mute_layer`]). The root layer cannot be muted and a request to
+    /// mute it is ignored. C++ has no open-time mute; this mirrors how
+    /// [`variant_fallbacks`](Self::variant_fallbacks) and the population mask are
+    /// threaded into the initial build.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use openusd::usd;
+    ///
+    /// let stage = usd::Stage::builder()
+    ///     .mute(["override.usda"])
+    ///     .open("scene.usda")
+    ///     .unwrap();
+    /// ```
+    pub fn mute(mut self, identifiers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.muted.extend(identifiers.into_iter().map(Into::into));
         self
     }
 
@@ -2219,7 +2273,18 @@ impl<R: ar::Resolver> StageBuilder<R> {
         // The graph keeps its own regenerable diagnostics (sublayer cycles,
         // invalid relocates); the cache holds only the one-shot collection
         // errors. `Stage::composition_errors` concatenates the two.
-        let graph = pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        let mut graph =
+            pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        if !self.muted.is_empty() {
+            // Seed the graph's muted set (it drops any root-layer request and
+            // re-resolves identifiers on each later rebuild). The cache is still
+            // empty (composition is lazy), so no cache invalidation is needed yet.
+            // TODO: a missing sublayer under a muted layer was already recorded as
+            // an `UnresolvedSublayer` collection error before this seeding, so
+            // `composition_errors` still reports a muted branch. Apply the muted
+            // set during collection to suppress those.
+            graph.set_muted_identifiers(self.muted);
+        }
         let layer_stack_id = graph.layer_stack_id();
         // The root layer is the strongest authoring target by default; an
         // empty graph (no layers) has none, so the target names no layer and
@@ -2232,7 +2297,6 @@ impl<R: ar::Resolver> StageBuilder<R> {
         Stage(Rc::new(StageInner {
             layers: RefCell::new(graph),
             cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
-            muted: RefCell::new(std::collections::HashSet::new()),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),
@@ -2572,6 +2636,273 @@ mod tests {
         assert!(
             authored_sublayers(&stage).is_empty(),
             "the authored subLayers entry is gone"
+        );
+        Ok(())
+    }
+
+    /// Reads the composed `/A.x` default value as an `f64`, for the muting tests.
+    fn read_ax(stage: &Stage) -> Result<Option<f64>> {
+        stage.attribute("/A.x").get_at::<f64>(crate::usd::TimeCode::new(0.0))
+    }
+
+    /// A root layer sublayering each `(identifier, value)` opinion in strength
+    /// order, followed by the opinion sublayers — the layer list for `make_stage`
+    /// or a configured builder in the muting tests.
+    fn sublayer_layers(opinions: &[(&str, f64)]) -> Result<Vec<sdf::Layer>> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.pseudo_root_mut()?
+            .set_sublayers(opinions.iter().map(|(id, _)| *id));
+        let mut layers = vec![root];
+        for &(id, value) in opinions {
+            layers.push(opinion_layer(id, value)?);
+        }
+        Ok(layers)
+    }
+
+    /// Muting a sublayer suppresses its opinions, so a stronger value falls back
+    /// to the weaker sublayer; unmuting restores the stronger opinion.
+    #[test]
+    fn mute_sublayer_drops_opinions() -> Result<()> {
+        let stage = Stage::builder().make_stage(
+            sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
+            0,
+            Vec::new(),
+        );
+        assert_eq!(read_ax(&stage)?, Some(9.0));
+
+        stage.mute_layer("strong.usda");
+        assert!(stage.is_layer_muted("strong.usda"));
+        assert_eq!(read_ax(&stage)?, Some(5.0), "value falls back to the weaker sublayer");
+
+        stage.unmute_layer("strong.usda");
+        assert!(!stage.is_layer_muted("strong.usda"));
+        assert_eq!(read_ax(&stage)?, Some(9.0), "unmuting restores the stronger opinion");
+        Ok(())
+    }
+
+    /// Muting a session layer suppresses its pseudo-root stage metadata too, so
+    /// `startTimeCode` falls back to the root layer's opinion.
+    #[test]
+    fn mute_session_metadata() -> Result<()> {
+        let mut session = sdf::Layer::new_in_memory("session.usda");
+        session.set_start_time_code(10.0)?;
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.set_start_time_code(1.0)?;
+        let stage = Stage::builder().make_stage(vec![session, root], 1, Vec::new());
+        assert_eq!(stage.start_time_code(), 10.0, "the session opinion wins");
+
+        stage.mute_layer("session.usda");
+        assert_eq!(
+            stage.start_time_code(),
+            1.0,
+            "muting the session falls back to the root opinion"
+        );
+        Ok(())
+    }
+
+    /// Muting a session layer prunes its whole sublayer subtree, not just the
+    /// session layer itself, so a sublayer's opinion disappears too.
+    #[test]
+    fn mute_session_prunes_subtree() -> Result<()> {
+        let mut session = sdf::Layer::new_in_memory("session.usda");
+        session.pseudo_root_mut()?.set_sublayers(["subsession.usda"]);
+        let subsession = opinion_layer("subsession.usda", 7.0)?;
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let stage = Stage::builder().make_stage(vec![session, subsession, root], 2, Vec::new());
+        assert_eq!(read_ax(&stage)?, Some(7.0), "the session sublayer contributes");
+
+        stage.mute_layer("session.usda");
+        assert_eq!(
+            read_ax(&stage)?,
+            None,
+            "muting the session layer prunes its sublayer subtree"
+        );
+
+        stage.unmute_layer("session.usda");
+        assert_eq!(read_ax(&stage)?, Some(7.0), "unmuting restores the subtree");
+        Ok(())
+    }
+
+    /// A session-layer opinion disappears when the session layer is muted.
+    #[test]
+    fn mute_session_layer() -> Result<()> {
+        let session = opinion_layer("session.usda", 7.0)?;
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let stage = Stage::builder().make_stage(vec![session, root], 1, Vec::new());
+        assert_eq!(read_ax(&stage)?, Some(7.0));
+
+        stage.mute_layer("session.usda");
+        assert_eq!(read_ax(&stage)?, None, "the muted session layer contributes nothing");
+        Ok(())
+    }
+
+    /// Muting the root layer is rejected: it stays unmuted and composition is
+    /// unchanged.
+    #[test]
+    fn mute_root_rejected() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, Vec::new());
+        let root_id = stage.root_layer().identifier().to_string();
+
+        stage.mute_layer(root_id.clone());
+        assert!(!stage.is_layer_muted(&root_id), "the root layer cannot be muted");
+        assert!(stage.muted_layers().is_empty());
+        assert_eq!(read_ax(&stage)?, Some(3.0), "composition is unchanged");
+        Ok(())
+    }
+
+    /// Muting a sublayer that itself has sublayers prunes the whole subtree.
+    #[test]
+    fn mute_prunes_subtree() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.pseudo_root_mut()?.set_sublayers(["mid.usda"]);
+        let mut mid = sdf::Layer::new_in_memory("mid.usda");
+        mid.pseudo_root_mut()?.set_sublayers(["leaf.usda"]);
+        let stage = Stage::builder().make_stage(vec![root, mid, opinion_layer("leaf.usda", 5.0)?], 0, Vec::new());
+        assert_eq!(read_ax(&stage)?, Some(5.0));
+
+        stage.mute_layer("mid.usda");
+        assert_eq!(read_ax(&stage)?, None, "the muted layer's whole subtree is pruned");
+
+        stage.unmute_layer("mid.usda");
+        assert_eq!(read_ax(&stage)?, Some(5.0));
+        Ok(())
+    }
+
+    /// Muting bumps the cache revision, so an [`AttributeQuery`] built before the
+    /// mute returns the new composed value afterward.
+    #[test]
+    fn mute_bumps_revision() -> Result<()> {
+        let stage = Stage::builder().make_stage(
+            sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
+            0,
+            Vec::new(),
+        );
+        let query = stage.attribute("/A.x").query();
+        assert_eq!(query.get_at::<f64>(crate::usd::TimeCode::new(0.0))?, Some(9.0));
+
+        stage.mute_layer("strong.usda");
+        assert_eq!(
+            query.get_at::<f64>(crate::usd::TimeCode::new(0.0))?,
+            Some(5.0),
+            "the pre-mute query reflects the post-mute value"
+        );
+        Ok(())
+    }
+
+    /// Muting an identifier not present in the stage stores it without panicking
+    /// and leaves composition unchanged.
+    #[test]
+    fn mute_unknown_identifier_noop() -> Result<()> {
+        let stage = Stage::builder().make_stage(vec![opinion_layer("root.usda", 3.0)?], 0, Vec::new());
+        stage.mute_layer("nonexistent.usda");
+        assert!(stage.is_layer_muted("nonexistent.usda"));
+        assert_eq!(read_ax(&stage)?, Some(3.0), "an unmatched mute changes nothing");
+        Ok(())
+    }
+
+    /// `mute_layer` / `unmute_layer` are reflected by `is_layer_muted` and
+    /// `muted_layers`.
+    #[test]
+    fn muted_layers_roundtrip() -> Result<()> {
+        let stage = Stage::builder().make_stage(sublayer_layers(&[("a.usda", 1.0), ("b.usda", 2.0)])?, 0, Vec::new());
+        stage.mute_layer("a.usda");
+        stage.mute_layer("b.usda");
+        assert_eq!(stage.muted_layers(), vec!["a.usda".to_string(), "b.usda".to_string()]);
+        assert!(stage.is_layer_muted("a.usda"));
+
+        stage.unmute_layer("a.usda");
+        assert_eq!(stage.muted_layers(), vec!["b.usda".to_string()]);
+        assert!(!stage.is_layer_muted("a.usda"));
+        Ok(())
+    }
+
+    /// Muting an identifier before its layer is loaded takes effect once a later
+    /// `insert_sub_layer` interns a matching layer; unmuting restores it.
+    #[test]
+    fn mute_before_load_excludes() -> Result<()> {
+        let stage = Stage::builder().in_memory("root.usda")?;
+        let root_id = stage.root_layer().identifier().to_string();
+
+        stage.mute_layer("late.usda");
+        assert!(stage.is_layer_muted("late.usda"));
+
+        stage.insert_sub_layer(
+            &root_id,
+            0,
+            opinion_layer("late.usda", 5.0)?,
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        assert_eq!(
+            read_ax(&stage)?,
+            None,
+            "a layer muted before loading is excluded once interned"
+        );
+
+        stage.unmute_layer("late.usda");
+        assert_eq!(read_ax(&stage)?, Some(5.0), "unmuting restores the now-loaded layer");
+        Ok(())
+    }
+
+    /// Muting a layer that is a reference target skips the arc without panicking
+    /// (its `sublayer_stack` is empty); unmuting restores the referenced opinion.
+    #[test]
+    fn mute_reference_target() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        sdf::PrimSpec::new(root.data_mut(), "/P", sdf::Specifier::Def, "")?;
+        root.data_mut().set_field(
+            &sdf::path("/P")?,
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                asset_path: "target.usda".into(),
+                prim_path: sdf::path("/Target")?,
+                ..Default::default()
+            }])),
+        );
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        sdf::PrimSpec::new(target.data_mut(), "/Target", sdf::Specifier::Def, "")?;
+        sdf::AttributeSpec::new(
+            target.data_mut(),
+            "/Target.x",
+            "double",
+            sdf::Variability::Varying,
+            true,
+        )?
+        .set_default(sdf::Value::Double(5.0));
+
+        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let read_px = |stage: &Stage| stage.attribute("/P.x").get_at::<f64>(crate::usd::TimeCode::new(0.0));
+        assert_eq!(read_px(&stage)?, Some(5.0), "the reference brings /Target.x to /P.x");
+
+        stage.mute_layer("target.usda");
+        assert_eq!(
+            read_px(&stage)?,
+            None,
+            "muting the reference target drops the arc without panic"
+        );
+
+        stage.unmute_layer("target.usda");
+        assert_eq!(read_px(&stage)?, Some(5.0), "unmuting restores the referenced opinion");
+        Ok(())
+    }
+
+    /// A builder-requested mute takes effect on the first composition, and a
+    /// builder mute of the root layer is dropped.
+    #[test]
+    fn builder_mute_at_open() -> Result<()> {
+        let stage = Stage::builder().mute(["strong.usda", "root.usda"]).make_stage(
+            sublayer_layers(&[("strong.usda", 9.0), ("weak.usda", 5.0)])?,
+            0,
+            Vec::new(),
+        );
+        assert!(stage.is_layer_muted("strong.usda"));
+        assert!(
+            !stage.is_layer_muted("root.usda"),
+            "a builder mute of the root is dropped"
+        );
+        assert_eq!(
+            read_ax(&stage)?,
+            Some(5.0),
+            "the muted sublayer is excluded from the start"
         );
         Ok(())
     }

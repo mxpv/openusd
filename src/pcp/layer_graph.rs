@@ -128,6 +128,20 @@ pub(crate) struct LayerGraph {
     session_layer_count: usize,
     /// The root layer's id (the first non-session layer), if any.
     root: Option<LayerId>,
+    /// Muted layer identifiers — the source of truth for muting (C++
+    /// `PcpCache`'s muted-layer set), kept by identifier so a layer can be muted
+    /// before it is loaded. Excludes the root layer's identifier, which cannot be
+    /// muted. The root layer can be muted neither here nor in
+    /// [`muted`](Self::muted).
+    muted_identifiers: HashSet<String>,
+    /// The interned ids of [`muted_identifiers`](Self::muted_identifiers),
+    /// re-resolved on every stack rebuild and excluded when materializing the
+    /// stacks (C++ `PcpLayerStack::_BuildLayerStack`). A muted layer and its whole
+    /// sublayer subtree are pruned from every stack while staying interned, so
+    /// unmute is a rebuild. Re-resolving on each rebuild lets a layer muted before
+    /// it was loaded take effect the moment it is interned. Empty by default,
+    /// leaving composition unchanged.
+    muted: HashSet<LayerId>,
     /// Precomputed sublayer stack for each layer (its DFS pre-order with offsets
     /// composed), rebuilt by [`rebuild_sublayer_stacks`](Self::rebuild_sublayer_stacks)
     /// whenever the edges change. Avoids re-walking the edges per query.
@@ -176,6 +190,8 @@ impl LayerGraph {
             order: Vec::with_capacity(layers.len()),
             session_layer_count: 0,
             root: None,
+            muted_identifiers: HashSet::new(),
+            muted: HashSet::new(),
             sublayer_stacks: HashMap::new(),
             root_stack: Vec::new(),
             has_relocates: false,
@@ -292,9 +308,14 @@ impl LayerGraph {
         }
 
         self.rebuild_sublayer_stacks();
+        self.recompute_cycle_errors();
+    }
 
-        // Replace the cycle diagnostics reachable from the root layer, matching
-        // the stage-root build in the previous layer-stack model.
+    /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer cycles
+    /// reachable from the root layer through non-muted edges. Run after an edge
+    /// rebuild and after a mute change, since muting a layer breaks any cycle
+    /// running through it.
+    fn recompute_cycle_errors(&mut self) {
         let mut errors = Vec::new();
         if let Some(root) = self.root {
             let mut ancestors = HashSet::new();
@@ -307,6 +328,10 @@ impl LayerGraph {
     /// edges. Run after any edge mutation so [`sublayer_stack`](Self::sublayer_stack)
     /// and its callers read up-to-date stacks.
     fn rebuild_sublayer_stacks(&mut self) {
+        // Re-resolve the muted identifiers to ids first, so a layer muted before
+        // it was loaded takes effect the moment a later edit interns it and
+        // rebuilds the stacks.
+        self.resolve_muted_ids();
         // Collect into a local map under the immutable `collect_sublayers` borrow,
         // then swap it in.
         let stacks: HashMap<LayerId, Vec<(LayerId, LayerOffset)>> = self
@@ -323,16 +348,49 @@ impl LayerGraph {
 
         // The stage root stack reads from the just-rebuilt per-layer stacks, so
         // recompute it here too (session layers at identity offset, then the
-        // root layer and its sublayers).
+        // root layer and its sublayers). Muting a session layer prunes its whole
+        // sublayer subtree, mirroring the root portion's `collect_sublayers`.
+        let pruned = self.muted_session_subtree();
         let mut root_stack: Vec<(LayerId, LayerOffset)> = self
             .session_layers()
             .iter()
+            .filter(|id| !pruned.contains(id))
             .map(|&id| (id, LayerOffset::IDENTITY))
             .collect();
         if let Some(root) = self.root {
+            // The root layer is never muted (the Stage API rejects it), and
+            // `collect_sublayers` would prune it defensively if it ever were.
             root_stack.extend_from_slice(self.sublayer_stack(root));
         }
         self.root_stack = root_stack;
+    }
+
+    /// The session-region ids muting removes from the root stack: every muted
+    /// session layer plus the sublayer descendants it would otherwise carry in.
+    /// The session prefix is a flat list, so unlike the root portion (built by
+    /// the subtree-pruning [`collect_sublayers`](Self::collect_sublayers)) it
+    /// needs the subtree computed explicitly. Descendants are confined to the
+    /// session region.
+    fn muted_session_subtree(&self) -> HashSet<LayerId> {
+        // The common no-mute case allocates nothing and walks nothing. This runs
+        // on every stack rebuild (every `subLayers` edit, not just mutes).
+        if self.muted.is_empty() {
+            return HashSet::new();
+        }
+        let session: HashSet<LayerId> = self.session_layers().iter().copied().collect();
+        let mut pruned = HashSet::new();
+        let mut pending: Vec<LayerId> = session.iter().copied().filter(|id| self.is_muted(*id)).collect();
+        while let Some(id) = pending.pop() {
+            if !pruned.insert(id) {
+                continue;
+            }
+            for &(child, _) in &self.nodes[&id].children {
+                if session.contains(&child) {
+                    pending.push(child);
+                }
+            }
+        }
+        pruned
     }
 
     /// Depth-first cycle scan recording [`Error::SublayerCycle`] for any edge
@@ -340,6 +398,11 @@ impl LayerGraph {
     fn detect_cycles(&self, id: LayerId, ancestors: &mut HashSet<LayerId>, errors: &mut Vec<Error>) {
         ancestors.insert(id);
         for &(child, _) in &self.nodes[&id].children {
+            // A muted child is pruned from every stack, so a cycle through it
+            // never composes and is not reported.
+            if self.is_muted(child) {
+                continue;
+            }
             if ancestors.contains(&child) {
                 errors.push(Error::SublayerCycle {
                     root_layer: self.nodes[&id].layer.identifier().to_string(),
@@ -496,6 +559,12 @@ impl LayerGraph {
         stack: &mut Vec<(LayerId, LayerOffset)>,
         ancestors: &mut HashSet<LayerId>,
     ) {
+        // A muted layer contributes nothing: skip it and its whole subtree, so a
+        // muted sublayer (or a muted root handed to `sublayer_stack`) prunes the
+        // entire branch rather than just the one node.
+        if self.is_muted(id) {
+            return;
+        }
         stack.push((id, effective));
         ancestors.insert(id);
         for &(child, edge_offset) in &self.nodes[&id].children {
@@ -713,5 +782,201 @@ impl LayerGraph {
     /// [`find`](Self::find); the authoring surface resolves a layer this way.
     pub(crate) fn id_of(&self, identifier: &str) -> Option<LayerId> {
         self.by_identifier.get(identifier).copied()
+    }
+
+    /// Mutes the layer with the given identifier so it contributes no opinions to
+    /// composition (C++ `PcpCache::RequestLayerMuting`), recomposing the
+    /// muting-dependent graph state. Returns whether the set changed: `false`
+    /// when the identifier was already muted, or when it resolves to the root
+    /// layer, which cannot be muted ("would lead to empty layer stacks").
+    ///
+    /// The layer need not be loaded; the identifier is stored and takes effect
+    /// the moment a later edit interns a matching layer (see
+    /// [`rebuild_sublayer_stacks`](Self::rebuild_sublayer_stacks), which
+    /// re-resolves the muted identifiers).
+    pub(crate) fn mute_layer(&mut self, identifier: String) -> bool {
+        if self.resolves_to_root(&identifier) || !self.muted_identifiers.insert(identifier) {
+            return false;
+        }
+        self.recompose_for_mute();
+        true
+    }
+
+    /// Unmutes the layer with the given identifier, restoring its opinions and
+    /// recomposing. Returns whether the identifier was muted.
+    pub(crate) fn unmute_layer(&mut self, identifier: &str) -> bool {
+        if !self.muted_identifiers.remove(identifier) {
+            return false;
+        }
+        self.recompose_for_mute();
+        true
+    }
+
+    /// Seeds the muted set from `identifiers` (open-time muting), dropping any
+    /// that resolve to the root layer, then recomposes once. Cheaper than a
+    /// `mute_layer` per identifier, which would recompose on each.
+    pub(crate) fn set_muted_identifiers(&mut self, identifiers: impl IntoIterator<Item = String>) {
+        for identifier in identifiers {
+            if !self.resolves_to_root(&identifier) {
+                self.muted_identifiers.insert(identifier);
+            }
+        }
+        self.recompose_for_mute();
+    }
+
+    /// Whether the layer with this identifier is muted.
+    pub(crate) fn is_layer_muted(&self, identifier: &str) -> bool {
+        self.muted_identifiers.contains(identifier)
+    }
+
+    /// The muted layer identifiers, sorted for a deterministic result.
+    pub(crate) fn muted_layers(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.muted_identifiers.iter().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Whether the layer with this id is muted, i.e. excluded from every stack.
+    /// A muted layer contributes nothing to composition — not its opinions, its
+    /// stage metadata, or its diagnostics.
+    pub(crate) fn is_muted(&self, id: LayerId) -> bool {
+        self.muted.contains(&id)
+    }
+
+    /// Refreshes every muting-dependent piece of graph state after the muted set
+    /// changes: the sublayer stacks (rebuilding re-resolves the muted ids), the
+    /// sublayer-cycle diagnostics (a cycle through a muted layer no longer
+    /// composes), and the relocates, whose validation and conflict scopes both
+    /// drop muted layers.
+    fn recompose_for_mute(&mut self) {
+        self.rebuild_sublayer_stacks();
+        self.recompute_cycle_errors();
+        self.recompute_relocates();
+    }
+
+    /// Re-resolves [`muted_identifiers`](Self::muted_identifiers) to interned ids.
+    /// Run at the start of every stack rebuild so the id set always reflects the
+    /// currently-loaded layers. The set never resolves to the root layer, since
+    /// the root is rejected before any identifier is inserted (see
+    /// [`resolves_to_root`](Self::resolves_to_root)).
+    fn resolve_muted_ids(&mut self) {
+        // TODO: reclaim a muted layer's memory. C++ drops its references; here
+        // the node stays interned so unmute is a rebuild and nothing is freed.
+        // TODO: match C++ `Pcp_MutedLayers::_GetCanonicalLayerId` identifier
+        // canonicalization — anchor a relative path per containing layer (not
+        // only against the root) and strip file-format target args before
+        // matching. Until then, two spellings of the same loaded layer (e.g. an
+        // authored relative sublayer path and its canonical identifier) can each
+        // be muted as a separate entry, so unmuting one spelling leaves the layer
+        // muted through the other; muting and unmuting should key on the resolved
+        // id once resolution canonicalizes reliably.
+        if self.muted_identifiers.is_empty() {
+            self.muted.clear();
+            return;
+        }
+        let root_anchor = self.anchor_location(self.root);
+        self.muted = self
+            .muted_identifiers
+            .iter()
+            .filter_map(|identifier| self.resolve_muted_id(identifier, root_anchor.as_ref()))
+            .collect();
+    }
+
+    /// Whether `identifier` resolves to the root layer, by the same exact-then-
+    /// root-anchored matching muting uses. The single authority for rejecting a
+    /// request to mute the root, regardless of the spelling the caller supplies.
+    fn resolves_to_root(&self, identifier: &str) -> bool {
+        match self.root {
+            Some(root) => self.resolve_muted_id(identifier, self.anchor_location(self.root).as_ref()) == Some(root),
+            None => false,
+        }
+    }
+
+    /// Resolves a muted-layer identifier to an interned id: exact canonical match
+    /// first, then the resolver-anchored form against the root layer.
+    fn resolve_muted_id(&self, identifier: &str, root_anchor: Option<&ResolvedPath>) -> Option<LayerId> {
+        if let Some(id) = self.id_of(identifier) {
+            return Some(id);
+        }
+        let anchored = self.resolver.create_identifier(identifier, root_anchor);
+        self.id_of(&anchored)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ar::DefaultResolver;
+
+    /// A `root → sub → leaf` sublayer chain, each layer named verbatim so the
+    /// authored `subLayers` entries resolve by exact identifier match.
+    fn chain_graph() -> LayerGraph {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        sub.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
+        let leaf = sdf::Layer::new_in_memory("leaf.usda");
+        LayerGraph::from_layers(vec![root, sub, leaf], 0, Box::new(DefaultResolver::new()), true)
+    }
+
+    /// Muting a sublayer drops it and its whole subtree from `sublayer_stack`,
+    /// `root_layer_stack`, and `local_layers`; unmuting restores them.
+    #[test]
+    fn muted_excludes_subtree() {
+        let mut graph = chain_graph();
+        let root = graph.root_id().unwrap();
+        let sub = graph.id_of("sub.usda").unwrap();
+        let leaf = graph.id_of("leaf.usda").unwrap();
+
+        let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![root, sub, leaf]);
+        assert_eq!(graph.root_layer_stack().len(), 3);
+
+        assert!(graph.mute_layer("sub.usda".to_string()));
+        let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![root], "the muted sublayer and its subtree are pruned");
+        assert_eq!(graph.root_layer_stack().len(), 1);
+        assert_eq!(graph.local_layers(), HashSet::from([root]));
+
+        assert!(graph.unmute_layer("sub.usda"));
+        let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![root, sub, leaf], "unmuting restores the subtree");
+        assert_eq!(graph.local_layers(), HashSet::from([root, sub, leaf]));
+    }
+
+    /// Muting the root layer is rejected: `mute_layer` returns false and the root
+    /// stack is unchanged.
+    #[test]
+    fn muted_root_ignored() {
+        let mut graph = chain_graph();
+        assert!(
+            !graph.mute_layer("root.usda".to_string()),
+            "the root layer cannot be muted"
+        );
+        assert!(!graph.is_layer_muted("root.usda"));
+        assert_eq!(graph.root_layer_stack().len(), 3);
+    }
+
+    /// Muting a layer in a sublayer cycle clears the cycle diagnostic, since the
+    /// muted branch no longer composes; unmuting brings it back.
+    #[test]
+    fn muted_cycle_clears_error() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        let mut a = sdf::Layer::new_in_memory("a.usda");
+        a.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        let mut b = sdf::Layer::new_in_memory("b.usda");
+        b.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, Box::new(DefaultResolver::new()), true);
+        assert!(!graph.errors().is_empty(), "the a → b → a sublayer cycle is reported");
+
+        assert!(graph.mute_layer("b.usda".to_string()));
+        assert!(
+            graph.errors().is_empty(),
+            "muting a layer in the cycle clears the diagnostic"
+        );
+
+        assert!(graph.unmute_layer("b.usda"));
+        assert!(!graph.errors().is_empty(), "unmuting restores the cycle diagnostic");
     }
 }

@@ -2540,6 +2540,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 // An unresolvable asset is a recoverable error (C++ "Could not
                 // open asset … for {arc}"): record it and skip the arc so the rest
                 // of the prim — including its own local opinions — still composes.
+                // TODO: an asset path muted before it was ever loaded reaches here
+                // (it has no interned id to drop from a stack) and is reported
+                // unresolved rather than recognized as muted; check the muted
+                // identifiers before recording this error.
                 self.errors.push(Error::UnresolvedLayer {
                     asset_path: asset_path.to_string(),
                     arc,
@@ -2550,6 +2554,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
             };
             (self.inputs.stack.sublayer_stack(layer_index).to_vec(), false)
         };
+
+        // A muted target root drops out of its own `sublayer_stack`, leaving the
+        // stack empty. Skip the arc rather than indexing `target_stack[0]` on an
+        // empty vector.
+        // TODO: record a `PcpErrorMutedAssetPath` analog here (C++
+        // `primIndex.cpp`) so a muted reference/payload target surfaces a
+        // composition error instead of silently contributing nothing.
+        if target_stack.is_empty() {
+            return Ok(());
+        }
 
         // Resolve the source prim path, falling back to the target layer's
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).

@@ -166,6 +166,11 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
     // ("in the same layer stack"). Each structurally invalid pair is reported here.
     let mut all: Vec<(Path, Path, LayerId, String)> = Vec::new();
     for &id in graph.all_ids() {
+        // A muted layer contributes nothing, including its authored relocates and
+        // their diagnostics.
+        if graph.is_muted(id) {
+            continue;
+        }
         let layer = graph.layer(id);
         for (source, target) in layer.relocates() {
             match relocate_invalid_reason(&source, &target) {
