@@ -373,6 +373,16 @@ pub(crate) struct PrimIndexGraph {
     pub(crate) nodes: Vec<Node>,
     pub(crate) strength_order: Vec<NodeId>,
     pub(crate) root: NodeId,
+    /// Layer ids of reference/payload target roots a composition arc resolved to
+    /// but skipped because the target layer was muted (its sublayer stack came
+    /// out empty). A muted target contributes no node, so without this the index
+    /// keeps no trace of the dependency and unmuting the target could not find it
+    /// to recompose; the change machinery reads it to fan a mute toggle out to
+    /// such an index (see [`IndexCache`](super::index_cache::IndexCache)'s
+    /// layer-muting drop). This serves only that recomposition fanout, not error
+    /// reporting — surfacing a skipped muted arc as a diagnostic is the separate
+    /// `PcpErrorMutedAssetPath` work the `prim_indexer` still defers.
+    pub(crate) muted_external_targets: Vec<LayerId>,
 }
 
 impl PrimIndexGraph {

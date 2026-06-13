@@ -786,30 +786,118 @@ impl LayerGraph {
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
     /// composition (C++ `PcpCache::RequestLayerMuting`), recomposing the
-    /// muting-dependent graph state. Returns whether the set changed: `false`
-    /// when the identifier was already muted, or when it resolves to the root
-    /// layer, which cannot be muted ("would lead to empty layer stacks").
+    /// muting-dependent graph state. Returns the layers whose cached prim indices
+    /// the mute can invalidate (see [`mute_fanout`](Self::mute_fanout)), or `None`
+    /// when nothing changed: the identifier was already muted, or it resolves to
+    /// the root layer, which cannot be muted ("would lead to empty layer stacks").
     ///
     /// The layer need not be loaded; the identifier is stored and takes effect
     /// the moment a later edit interns a matching layer (see
     /// [`rebuild_sublayer_stacks`](Self::rebuild_sublayer_stacks), which
     /// re-resolves the muted identifiers).
-    pub(crate) fn mute_layer(&mut self, identifier: String) -> bool {
-        if self.resolves_to_root(&identifier) || !self.muted_identifiers.insert(identifier) {
-            return false;
+    pub(crate) fn mute_layer(&mut self, identifier: String) -> Option<HashSet<LayerId>> {
+        if self.resolves_to_root(&identifier) || !self.muted_identifiers.insert(identifier.clone()) {
+            return None;
         }
-        self.recompose_for_mute();
-        true
+        Some(self.recompose_for_mute_with_fanout(&identifier))
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions and
-    /// recomposing. Returns whether the identifier was muted.
-    pub(crate) fn unmute_layer(&mut self, identifier: &str) -> bool {
+    /// recomposing. Returns the layers whose cached prim indices the unmute can
+    /// invalidate (see [`mute_fanout`](Self::mute_fanout)), or `None` when the
+    /// identifier was not muted.
+    pub(crate) fn unmute_layer(&mut self, identifier: &str) -> Option<HashSet<LayerId>> {
         if !self.muted_identifiers.remove(identifier) {
-            return false;
+            return None;
         }
+        Some(self.recompose_for_mute_with_fanout(identifier))
+    }
+
+    /// Recomposes the muting-dependent graph state for a just-changed muted set
+    /// and returns the layers whose cached prim indices the toggle of
+    /// `identifier` can invalidate: the structural [`mute_fanout`](Self::mute_fanout)
+    /// plus any layer whose validated relocates the recompose changed.
+    ///
+    /// Relocate conflicts are scoped per layer stack
+    /// ([`relocate_conflict_scopes`](Self::relocate_conflict_scopes)), so muting a
+    /// layer can re-validate the relocates of a layer *outside* the muted subtree
+    /// — two relocates that conflicted only by co-occurring in the muted layer's
+    /// stack become valid once it is pruned. A prim composing against such a layer
+    /// through a separate arc keeps no muted layer in its node stacks, so the
+    /// structural fanout alone would leave it cached with the old relocate
+    /// structure. Comparing each layer's relocates across the recompose surfaces
+    /// exactly the layers whose validity flipped, and the prims that read them are
+    /// then found by their node stacks.
+    fn recompose_for_mute_with_fanout(&mut self, identifier: &str) -> HashSet<LayerId> {
+        let mut affected = self.mute_fanout(identifier);
+        let before: HashMap<LayerId, RelocateList> = self
+            .order
+            .iter()
+            .map(|&id| (id, self.nodes[&id].relocates.clone()))
+            .collect();
         self.recompose_for_mute();
-        true
+        for (id, pairs) in before {
+            if self.nodes[&id].relocates != pairs {
+                affected.insert(id);
+            }
+        }
+        affected
+    }
+
+    /// The interned layers a (un)mute of `identifier` can invalidate: the layer
+    /// it resolves to and every layer whose `subLayers` subtree contains it.
+    /// Empty when the identifier names no loaded layer — muting a not-yet-loaded
+    /// layer changes no composed index.
+    ///
+    /// A composed prim index is affected by toggling `identifier` exactly when
+    /// one of its nodes resolves against a layer stack containing the toggled
+    /// layer, and a sublayer stack contains a layer iff its root layer does, so
+    /// the set's members are the stack roots whose nodes a dependent index would
+    /// list. Both identifier resolution and the subtree edges are independent of
+    /// the muted set, so the set is identical whether computed before muting or
+    /// after unmuting.
+    ///
+    /// The stage root layer stack is the one stack that is not a single sublayer
+    /// subtree: it glues the session layers (and their subtrees) onto the root
+    /// layer's subtree. A toggle anywhere in it can change every prim that
+    /// composes locally against it, and such a prim always retains the root layer
+    /// in its composition (the root layer is never muted), so when a session
+    /// layer is in the set the root layer is added as the anchor a dependent
+    /// index is found through.
+    fn mute_fanout(&self, identifier: &str) -> HashSet<LayerId> {
+        let root_anchor = self.anchor_location(self.root);
+        let Some(id) = self.resolve_muted_id(identifier, root_anchor.as_ref()) else {
+            return HashSet::new();
+        };
+        let mut affected = self.ancestors_including(id);
+        if let Some(root) = self.root {
+            if self.session_layers().iter().any(|s| affected.contains(s)) {
+                affected.insert(root);
+            }
+        }
+        affected
+    }
+
+    /// Every layer whose `subLayers` subtree contains `target`, including
+    /// `target` itself. Derived from the sublayer edges, which `subLayers`
+    /// metadata is the single source of truth for and which muting never alters,
+    /// so the result does not depend on the current muted set.
+    fn ancestors_including(&self, target: LayerId) -> HashSet<LayerId> {
+        let mut found = HashSet::from([target]);
+        // The sublayer DAG holds one node per loaded layer, so growing the set to
+        // a fixpoint — add any layer with a child already in it, until it stops
+        // growing — is cheaper than materializing a reverse-edge index.
+        let mut growing = true;
+        while growing {
+            growing = false;
+            for (&id, node) in &self.nodes {
+                if !found.contains(&id) && node.children.iter().any(|&(child, _)| found.contains(&child)) {
+                    found.insert(id);
+                    growing = true;
+                }
+            }
+        }
+        found
     }
 
     /// Seeds the muted set from `identifiers` (open-time muting), dropping any
@@ -932,25 +1020,25 @@ mod tests {
         assert_eq!(ids, vec![root, sub, leaf]);
         assert_eq!(graph.root_layer_stack().len(), 3);
 
-        assert!(graph.mute_layer("sub.usda".to_string()));
+        assert!(graph.mute_layer("sub.usda".to_string()).is_some());
         let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
         assert_eq!(ids, vec![root], "the muted sublayer and its subtree are pruned");
         assert_eq!(graph.root_layer_stack().len(), 1);
         assert_eq!(graph.local_layers(), HashSet::from([root]));
 
-        assert!(graph.unmute_layer("sub.usda"));
+        assert!(graph.unmute_layer("sub.usda").is_some());
         let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
         assert_eq!(ids, vec![root, sub, leaf], "unmuting restores the subtree");
         assert_eq!(graph.local_layers(), HashSet::from([root, sub, leaf]));
     }
 
-    /// Muting the root layer is rejected: `mute_layer` returns false and the root
-    /// stack is unchanged.
+    /// Muting the root layer is rejected: `mute_layer` reports no change and the
+    /// root stack is unchanged.
     #[test]
     fn muted_root_ignored() {
         let mut graph = chain_graph();
         assert!(
-            !graph.mute_layer("root.usda".to_string()),
+            graph.mute_layer("root.usda".to_string()).is_none(),
             "the root layer cannot be muted"
         );
         assert!(!graph.is_layer_muted("root.usda"));
@@ -970,13 +1058,54 @@ mod tests {
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, Box::new(DefaultResolver::new()), true);
         assert!(!graph.errors().is_empty(), "the a → b → a sublayer cycle is reported");
 
-        assert!(graph.mute_layer("b.usda".to_string()));
+        assert!(graph.mute_layer("b.usda".to_string()).is_some());
         assert!(
             graph.errors().is_empty(),
             "muting a layer in the cycle clears the diagnostic"
         );
 
-        assert!(graph.unmute_layer("b.usda"));
+        assert!(graph.unmute_layer("b.usda").is_some());
         assert!(!graph.errors().is_empty(), "unmuting restores the cycle diagnostic");
+    }
+
+    /// Muting a layer whose stack scopes a relocate conflict re-validates the
+    /// relocates of layers outside its subtree, so the returned fanout must
+    /// include those layers — a prim composing against one of them through a
+    /// separate arc keeps no muted layer in its node stacks and would otherwise
+    /// stay cached with the pre-mute relocate structure.
+    #[test]
+    fn mute_fanout_includes_relocate_revalidated() {
+        let reloc = |id: &str, source: &str, target: &str| {
+            let mut layer = sdf::Layer::new_in_memory(id);
+            layer
+                .set_relocates(vec![(Path::new(source).unwrap(), Path::new(target).unwrap())])
+                .expect("in-memory layer is writable");
+            layer
+        };
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut combo = sdf::Layer::new_in_memory("combo.usda");
+        combo.pseudo_root_mut().unwrap().set_sublayers(["s1.usda", "s2.usda"]);
+        // s1 and s2 relocate different sources to the same target, conflicting
+        // within combo's stack so both are dropped while combo is present.
+        let s1 = reloc("s1.usda", "/W/A", "/W/C");
+        let s2 = reloc("s2.usda", "/W/B", "/W/C");
+        let mut graph = LayerGraph::from_layers(vec![root, combo, s1, s2], 0, Box::new(DefaultResolver::new()), true);
+        let (s1_id, s2_id) = (graph.id_of("s1.usda").unwrap(), graph.id_of("s2.usda").unwrap());
+        assert!(
+            graph.get(s1_id).unwrap().relocates.is_empty(),
+            "the same-target conflict drops s1's relocate up front"
+        );
+
+        let affected = graph
+            .mute_layer("combo.usda".to_string())
+            .expect("muting combo changed the set");
+        assert!(
+            affected.contains(&s1_id) && affected.contains(&s2_id),
+            "muting the conflict scope re-validates s1/s2, so both must be in the fanout"
+        );
+        assert!(
+            !graph.get(s1_id).unwrap().relocates.is_empty(),
+            "s1's relocate is valid again once combo's stack no longer scopes the conflict"
+        );
     }
 }

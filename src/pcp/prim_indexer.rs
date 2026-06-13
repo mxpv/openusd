@@ -783,6 +783,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// returns its graph, so each call site handles only the `Option<graph>`.
     fn merge_subindex(&mut self, out: BuildOutput) -> Option<PrimIndexGraph> {
         self.errors.extend(out.errors);
+        // A muted target reached only inside the sub-build is still a dependency
+        // of this prim, so carry its trace up before the graph is grafted.
+        if let Some(graph) = &out.graph {
+            self.output
+                .muted_external_targets
+                .extend(graph.muted_external_targets.iter().copied());
+        }
         out.graph
     }
 
@@ -2530,7 +2537,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
         // Resolve the target layer stack. An internal reference targets the
         // referencing node's own layer stack (C++ `node.GetLayerStack()`); an
-        // external one resolves the asset's sublayer stack.
+        // external one resolves the asset's sublayer stack. `external_target`
+        // carries the resolved external root layer for the muted-target trace.
+        let mut external_target = None;
         let (target_stack, target_is_root) = if is_internal {
             let stack = self.node(parent).layer_stack().to_vec();
             let is_root = self.ambient_is_root_for(&stack);
@@ -2552,16 +2561,22 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 });
                 return Ok(());
             };
+            external_target = Some(layer_index);
             (self.inputs.stack.sublayer_stack(layer_index).to_vec(), false)
         };
 
         // A muted target root drops out of its own `sublayer_stack`, leaving the
         // stack empty. Skip the arc rather than indexing `target_stack[0]` on an
-        // empty vector.
+        // empty vector, but record the muted target so unmuting it can find this
+        // index to recompose — a skipped arc grafts no node, so the recorded id is
+        // the only other trace of the dependency.
         // TODO: record a `PcpErrorMutedAssetPath` analog here (C++
         // `primIndex.cpp`) so a muted reference/payload target surfaces a
         // composition error instead of silently contributing nothing.
         if target_stack.is_empty() {
+            if let Some(layer_index) = external_target {
+                self.output.muted_external_targets.push(layer_index);
+            }
             return Ok(());
         }
 

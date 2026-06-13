@@ -141,6 +141,15 @@
 //! targets) never invalidates the prim graph: those queries read live
 //! layer data on every call.
 //!
+//! Layer muting ([`Stage::mute_layer`](crate::usd::Stage::mute_layer) /
+//! [`unmute_layer`](crate::usd::Stage::unmute_layer)) recomposes incrementally
+//! rather than clearing the cache: the toggle drops only the indices whose
+//! composition reads a layer stack containing the (un)muted layer.
+//! `LayerGraph::mute_fanout` derives that layer set — the toggled layer, every
+//! layer whose subtree contains it, and the root layer when the stage root
+//! stack is touched — and `IndexCache`'s layer-muting drop evicts the indices a
+//! node (or a recorded muted reference/payload target) ties to it.
+//!
 //! # Relationship and connection targets
 //!
 //! A relationship/connection target translates through the contributing node's
@@ -229,11 +238,6 @@
 //!   is skipped silently. C++ records a `PcpErrorMutedAssetPath`
 //!   (`prim_indexer.rs`, the external-arc add); value resolution needs an error
 //!   channel to surface it.
-//! - Incremental recomposition on mute: `Stage::mute_layer` / `unmute_layer`
-//!   clear every cached index (a `SIGNIFICANT` layer-stack change). Re-indexing
-//!   only the prims whose indices depend on a layer stack containing the
-//!   (un)muted layer would match C++'s final result with less work
-//!   (`TODO(perf)` on `Stage::recompose_significant`).
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.

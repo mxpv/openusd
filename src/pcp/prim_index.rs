@@ -102,6 +102,15 @@ impl PrimIndex {
             .filter(|node| !node.is_inert() || node.is_relocate_source())
     }
 
+    /// Layer ids of reference/payload target roots this prim's composition
+    /// resolved to but skipped because they were muted. Their arcs grafted no
+    /// node, so these are the dependency on a muted target that toggling the mute
+    /// must fan out to (see
+    /// [`PrimIndexGraph::muted_external_targets`](super::prim_graph::PrimIndexGraph)).
+    pub(crate) fn muted_external_targets(&self) -> &[LayerId] {
+        &self.graph.muted_external_targets
+    }
+
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
     fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {

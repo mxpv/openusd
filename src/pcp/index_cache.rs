@@ -1078,6 +1078,66 @@ impl IndexCache {
         self.redirected_prims.clear();
     }
 
+    /// Applies a layer-muting change incrementally: advances the composition
+    /// revision (so cached value views rebuild) and drops only the cached indices
+    /// the toggle can have restructured, via
+    /// [`drop_indices_touching_layers`](Self::drop_indices_touching_layers). The
+    /// graph's layer-stack precomputed state is rebuilt by the muting mutation
+    /// itself, so the cache is all that remains. Matches the final composed result
+    /// of a [`clear_all_indices`](Self::clear_all_indices) with less recomposition.
+    pub(crate) fn recompose_muted(&mut self, affected: &HashSet<LayerId>) {
+        self.bump_revision();
+        self.drop_indices_touching_layers(affected);
+    }
+
+    /// Drop every cached prim index whose composition reads one of the
+    /// `affected` layers — together with its namespace descendants and any
+    /// prototype the drops touch — leaving indices that read none of them
+    /// cached. The incremental counterpart of [`clear_all_indices`](Self::clear_all_indices)
+    /// for a layer-muting change: muting or unmuting a layer can only restructure
+    /// prims that compose against a layer stack containing it (C++ `PcpChanges`
+    /// layer-stack fanout), so the rest of the cache stays warm.
+    ///
+    /// `affected` is [`LayerGraph::mute_fanout`](super::layer_graph::LayerGraph)'s
+    /// result: the toggled layer and every layer whose subtree contains it. A
+    /// node's layer stack lists the members it resolved against, and a stack
+    /// contains the toggled layer iff its root does, so an index whose dependency
+    /// nodes touch an `affected` layer is exactly one whose composition the toggle
+    /// can change. An index that skipped a reference/payload arc because the
+    /// target root was muted keeps no node for it, so its recorded muted targets
+    /// (see [`PrimIndex::muted_external_targets`]) are checked too — without that,
+    /// unmuting the target could not find the index to recompose.
+    fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
+        if affected.is_empty() {
+            return;
+        }
+        // Collect the roots first: `drop_index_subtree` mutates `indices`, and a
+        // dropped subtree may hold further matches that would be revisited.
+        //
+        // TODO(perf): this scans every cached index (the reverse `Dependencies`
+        // map can't scope it — its synthetic self-registration ties every prim to
+        // every layer), and the per-victim `drop_index_subtree` below is itself an
+        // O(n) cache scan. The scan's per-index predicate is independent
+        // (`TODO(rayon)`); the drops could batch into one prefix-filtered pass.
+        let victims: Vec<Path> = self
+            .indices
+            .iter()
+            .filter(|(_, index)| {
+                index
+                    .dependency_nodes()
+                    .any(|node| node.layer_stack().iter().any(|&(li, _)| affected.contains(&li)))
+                    || index.muted_external_targets().iter().any(|li| affected.contains(li))
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        // Evict prototypes whose instances or roots are among the victims, as the
+        // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
+        self.invalidate_prototypes(&victims);
+        for path in &victims {
+            self.drop_index_subtree(path);
+        }
+    }
+
     /// Returns `true` if any layer has a spec at the given composed path.
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property

@@ -1402,17 +1402,24 @@ impl Stage {
     }
 
     /// Applies a muted-set mutation to the layer graph and recomposes when it
-    /// reports a change, returning whether the set changed. The graph owns the
-    /// muted set and rejects the root layer; the borrows are released before the
-    /// caller notifies, so the listener may read the set or re-author.
-    fn apply_mute(&self, mutate: impl FnOnce(&mut pcp::LayerGraph) -> bool) -> bool {
+    /// reports a change, returning whether the set changed. The mutation returns
+    /// the layers whose cached indices the change can invalidate (`None` when the
+    /// set was unchanged), so only those indices are dropped rather than the whole
+    /// cache. The graph owns the muted set and rejects the root layer; the borrows
+    /// are released before the caller notifies, so the listener may read the set
+    /// or re-author.
+    fn apply_mute(&self, mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<HashSet<pcp::LayerId>>) -> bool {
         let mut graph = self.layers.borrow_mut();
         let mut cache = self.cache.borrow_mut();
-        let changed = mutate(&mut graph);
-        if changed {
-            Self::recompose_significant(&mut cache, &mut graph);
+        match mutate(&mut graph) {
+            Some(affected) => {
+                // The mutation already rebuilt the graph's sublayer stacks,
+                // relocates, and cycle diagnostics; only the cache needs work.
+                cache.recompose_muted(&affected);
+                true
+            }
+            None => false,
         }
-        changed
     }
 
     /// Whether the layer with the given identifier is currently muted.
@@ -1430,9 +1437,9 @@ impl Stage {
     /// value sources rebuild). The graph must already reflect the new stacks; the
     /// caller passes both borrows so the two `RefCell`s are taken once.
     ///
-    /// TODO(perf): recompose incrementally — re-index only prims whose indices
-    /// depend on the changed layer stacks, rather than clearing every cached
-    /// index. The coarse clear matches C++'s final composed result.
+    /// This is the conservative fallback used after a post-mutation failure may
+    /// have left a layer partially edited. Layer muting recomposes incrementally
+    /// instead (see [`apply_mute`](Self::apply_mute)).
     fn recompose_significant(cache: &mut pcp::IndexCache, graph: &mut pcp::LayerGraph) {
         let mut changes = pcp::Changes::new();
         changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
@@ -2893,6 +2900,46 @@ mod tests {
 
         stage.unmute_layer("target.usda");
         assert_eq!(read_px(&stage)?, Some(5.0), "unmuting restores the referenced opinion");
+        Ok(())
+    }
+
+    /// Toggling a reference target's mute recomposes only the prims that reach it:
+    /// the referencing prim's index is dropped while a sibling that does not
+    /// depend on the target keeps its cached index.
+    #[test]
+    fn mute_keeps_independent_index() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        sdf::PrimSpec::new(root.data_mut(), "/Ref", sdf::Specifier::Def, "")?;
+        root.data_mut().set_field(
+            &sdf::path("/Ref")?,
+            sdf::FieldKey::References.as_str(),
+            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                asset_path: "target.usda".into(),
+                prim_path: sdf::path("/Target")?,
+                ..Default::default()
+            }])),
+        );
+        sdf::PrimSpec::new(root.data_mut(), "/Indep", sdf::Specifier::Def, "")?;
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        sdf::PrimSpec::new(target.data_mut(), "/Target", sdf::Specifier::Def, "")?;
+
+        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
+        // Force both prim indices into the cache.
+        assert!(stage.prim(refp.clone()).is_valid()?);
+        assert!(stage.prim(indep.clone()).is_valid()?);
+        assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
+
+        stage.mute_layer("target.usda");
+        assert!(!stage.is_indexed(&refp), "the referencing prim is recomposed");
+        assert!(stage.is_indexed(&indep), "the independent prim keeps its cached index");
+
+        // Rebuild the referencing prim's index (now recording the muted target),
+        // then unmute and confirm it is dropped again while the sibling stays warm.
+        assert!(stage.prim(refp.clone()).is_valid()?);
+        stage.unmute_layer("target.usda");
+        assert!(!stage.is_indexed(&refp), "unmuting recomposes the referencing prim");
+        assert!(stage.is_indexed(&indep), "unmuting leaves the independent prim cached");
         Ok(())
     }
 
