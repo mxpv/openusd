@@ -21,6 +21,7 @@ For a detailed comparison with the C++ reference implementation and current prog
 - A fully featured [composition engine](src/pcp) — [LIVRPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering over a per-prim node graph, with [list editing](https://openusd.org/release/glossary.html#usdglossary-listediting), scene-graph [instancing](https://openusd.org/release/glossary.html#usdglossary-instancing), non-destructive [relocates](https://openusd.org/release/glossary.html#usdglossary-relocates), and [variable expressions](https://openusd.org/dev/user_guides/variable_expressions.html).
 - A composed [`Stage`](src/usd/stage.rs) — lazy cached per-prim composition with typed value resolution, predicate-based traversal, and full prim/property query API over the composed scene.
 - An authoring API — build scenes through [layer](src/sdf/layer.rs)- and [stage](src/usd/stage.rs)-tier APIs, with typed [spec views](src/sdf/spec.rs), composed [prim/attribute/relationship handles](src/usd/prim.rs) with chained fluent edits, `EditTarget` routing to a specific layer, in-memory anonymous-root stages, and applied API schema authoring.
+- Live sync / editor friendly — listen to `Stage` edit events and capture each edit as a transferable, replayable [`Diff`](src/usd/diff.rs): the building block for live mirroring across processes and undo/redo.
 
 If you encounter a file that can't be read, please open an [issue](https://github.com/mxpv/openusd/issues) and attach the USD file for investigation.
 

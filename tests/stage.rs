@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use openusd::usd::{
-    Deletion, EditTarget, EditTargetArc, InitialLoadSet, Notice, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    EditTarget, EditTargetArc, InitialLoadSet, Notice, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StagePopulationMask,
 };
 use openusd::{gf, pcp, sdf, tf, usd};
@@ -3529,69 +3529,6 @@ fn listener_resync_under_variant_target() -> Result<()> {
     Ok(())
 }
 
-/// `extract_diff` called from the callback captures the edited specs and their
-/// authored values into a layer that serializes to text and reads back equal —
-/// the source half of mirroring an edit.
-#[test]
-fn extract_diff_roundtrip() -> Result<()> {
-    let stage = in_memory_stage()?;
-    stage.define_prim("/World")?;
-    let attr = stage.create_attribute("/World.size", "double")?;
-    let exported = Rc::new(RefCell::new(String::new()));
-    let value: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
-    {
-        let (exported, value) = (exported.clone(), value.clone());
-        let size = sdf::Path::new("/World.size")?;
-        stage.set_listener(move |stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                let diff = stage.extract_diff(&oc).expect("extract diff");
-                *exported.borrow_mut() = diff.layer.export_to_string().expect("export");
-                *value.borrow_mut() = diff
-                    .layer
-                    .data()
-                    .try_field(&size, sdf::FieldKey::Default.as_str())
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.into_owned().try_as_double());
-            }
-        });
-    }
-    attr.set(2.0_f64)?;
-    assert!(exported.borrow().contains("double"));
-    assert_eq!(*value.borrow(), Some(2.0));
-    Ok(())
-}
-
-/// Clearing an attribute's connections erases the connectionPaths field; the
-/// diff reports it in `removed` as `(path, Some(field))` (an overlay layer can't
-/// express the erasure) so a mirror can drop its stale opinion.
-#[test]
-fn extract_diff_field_erasure() -> Result<()> {
-    let stage = in_memory_stage()?;
-    stage.define_prim("/World")?;
-    stage.create_attribute("/World.target", "double")?;
-    let attr = stage.create_attribute("/World.size", "double")?;
-    let attr = attr.set_connections([sdf::Path::new("/World.target")?])?;
-    // Field name erased on /World.size, captured from the diff's `removed`.
-    let erased: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    {
-        let erased = erased.clone();
-        stage.set_listener(move |stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                let diff = stage.extract_diff(&oc).expect("extract diff");
-                let size = sdf::Path::new("/World.size").unwrap();
-                erased.borrow_mut().extend(diff.removed.iter().filter_map(|r| match r {
-                    Deletion::Field(p, f) if *p == size => Some(f.as_str().to_string()),
-                    _ => None,
-                }));
-            }
-        });
-    }
-    attr.clear_connections()?;
-    assert!(erased.borrow().iter().any(|f| f == "connectionPaths"));
-    Ok(())
-}
-
 /// Switching the edit target delivers `EditTargetChanged`; re-setting the same
 /// target is a no-op and fires nothing.
 #[test]
@@ -3805,114 +3742,5 @@ fn remove_rejects_wrong_path_kind() -> Result<()> {
     // The rejected calls left both specs intact.
     assert!(stage.prim("/A").is_valid()?);
     assert!(stage.prim("/A").property_names()?.iter().any(|t| t == "size"));
-    Ok(())
-}
-
-/// Replaying every diff a listener captures from stage A onto stage B
-/// reconstructs A's edited subtree — the round trip through
-/// `extract_diff` / `apply_diff`.
-#[test]
-fn apply_diff_roundtrip() -> Result<()> {
-    let a = in_memory_stage()?;
-    let diffs: Rc<RefCell<Vec<usd::LayerDiff>>> = Rc::new(RefCell::new(Vec::new()));
-    {
-        let diffs = diffs.clone();
-        a.set_listener(move |stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                diffs.borrow_mut().push(stage.extract_diff(&oc).expect("extract diff"));
-            }
-        });
-    }
-    a.define_prim("/World")?.set_type_name("Xform")?;
-    a.define_prim("/World/Mesh")?.set_type_name("Mesh")?;
-    a.create_attribute("/World/Mesh.size", "double")?.set(2.0_f64)?;
-
-    let b = in_memory_stage()?;
-    for diff in diffs.borrow().iter() {
-        b.apply_diff(diff)?;
-    }
-    assert_eq!(child_names(&b, "/World")?, vec!["Mesh".to_string()]);
-    assert_eq!(b.prim("/World").type_name()?.as_deref(), Some("Xform"));
-    assert_eq!(b.attribute("/World/Mesh.size").get::<f64>()?, Some(2.0));
-    Ok(())
-}
-
-/// A diff's `removed` carries the deletions an overlay layer cannot express —
-/// a whole-spec removal and an erased field — and `apply_diff` replays them so
-/// stage B drops the prim and the connections, matching A.
-#[test]
-fn apply_diff_removal() -> Result<()> {
-    let a = in_memory_stage()?;
-    let diffs: Rc<RefCell<Vec<usd::LayerDiff>>> = Rc::new(RefCell::new(Vec::new()));
-    {
-        let diffs = diffs.clone();
-        a.set_listener(move |stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                diffs.borrow_mut().push(stage.extract_diff(&oc).expect("extract diff"));
-            }
-        });
-    }
-    a.define_prim("/World")?;
-    a.define_prim("/World/Doomed")?;
-    a.define_prim("/World/Target")?;
-    let attr = a.create_attribute("/World.size", "double")?;
-    let attr = attr.set_connections([sdf::Path::new("/World/Target.size")?])?;
-    assert!(a.remove_prim("/World/Doomed")?);
-    attr.clear_connections()?;
-
-    // The deletions surface in the captured diffs as a spec and a field removal.
-    let removed: Vec<Deletion> = diffs.borrow().iter().flat_map(|d| d.removed.clone()).collect();
-    assert!(removed
-        .iter()
-        .any(|d| matches!(d, Deletion::Spec(p) if *p == sdf::path("/World/Doomed").unwrap())));
-    assert!(removed
-        .iter()
-        .any(|d| matches!(d, Deletion::Field(p, _) if *p == sdf::path("/World.size").unwrap())));
-
-    let b = in_memory_stage()?;
-    for diff in diffs.borrow().iter() {
-        b.apply_diff(diff)?;
-    }
-    assert!(!b.prim("/World/Doomed").is_valid()?);
-    assert!(b.prim("/World/Target").is_valid()?);
-    assert!(connections(&b, &sdf::path("/World.size")?)?.is_empty());
-    Ok(())
-}
-
-/// `apply_diff` replays in the originating layer's namespace, so it refuses a
-/// non-identity edit target (a variant target here) rather than silently
-/// authoring at the wrong spec paths.
-#[test]
-fn apply_diff_rejects_variant_target() -> Result<()> {
-    let stage = in_memory_stage()?;
-    let root = stage.edit_target().layer_identifier().to_string();
-    stage.define_prim("/Prim")?;
-    stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
-    let diff = usd::LayerDiff {
-        layer: sdf::Layer::new_anonymous("diff"),
-        removed: Vec::new(),
-    };
-    assert!(matches!(
-        stage.apply_diff(&diff),
-        Err(StageAuthoringError::NonLocalEditTarget)
-    ));
-    Ok(())
-}
-
-/// A diff whose overlay cannot be authored surfaces as a layer-authoring error,
-/// not a composition error: `apply_diff` replays through `copy_spec_fields_from`,
-/// a `Layer`-tier operation, so its failure lands in `StageAuthoringError::Layer`.
-#[test]
-fn apply_diff_copy_layer_error() -> Result<()> {
-    let stage = in_memory_stage()?;
-    let mut layer = sdf::Layer::new_anonymous("diff");
-    // A prim spec at the absolute root is not authorable: `copy_spec_fields_from`
-    // runs `PrimSpecMut::over` on it, which rejects the root path.
-    layer.data_mut().create_spec(sdf::Path::abs_root(), sdf::SpecType::Prim);
-    let diff = usd::LayerDiff {
-        layer,
-        removed: Vec::new(),
-    };
-    assert!(matches!(stage.apply_diff(&diff), Err(StageAuthoringError::Layer(_))));
     Ok(())
 }

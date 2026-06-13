@@ -227,6 +227,13 @@ impl MapFunction {
         self.path_map.as_slice()
     }
 
+    /// Whether this mapping carries the `/ → /` catch-all that maps paths
+    /// outside the explicit pairs to themselves (C++
+    /// `PcpMapFunction::HasRootIdentity`).
+    pub fn has_root_identity(&self) -> bool {
+        self.has_root_identity
+    }
+
     /// Maps a path from the source namespace to the target namespace (C++
     /// `PcpMapFunction::MapSourceToTarget`, without the invertibility check).
     ///

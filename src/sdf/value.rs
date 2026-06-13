@@ -326,18 +326,30 @@ impl Value {
 
     /// Whether this value embeds namespace paths that [`remap_paths`](Self::remap_paths)
     /// rewrites — `PathVec`, `PathListOp` (relationship targets, attribute
-    /// connections, `inheritPaths`, `specializes`), and `Relocates`. The single
-    /// source of truth a copy value policy checks before remapping, so the set of
-    /// path-bearing variants lives only here.
+    /// connections, `inheritPaths`, `specializes`), `Relocates`, and
+    /// `ReferenceListOp` / `PayloadListOp` (whose internal entries target this
+    /// layer's own namespace). The single source of truth a copy value policy
+    /// checks before remapping, so the set of path-bearing variants lives only
+    /// here.
     pub fn has_embedded_paths(&self) -> bool {
-        matches!(self, Value::PathVec(_) | Value::PathListOp(_) | Value::Relocates(_))
+        matches!(
+            self,
+            Value::PathVec(_)
+                | Value::PathListOp(_)
+                | Value::Relocates(_)
+                | Value::ReferenceListOp(_)
+                | Value::PayloadListOp(_)
+        )
     }
 
     /// Returns a copy of this value with every embedded namespace path rewritten
     /// through `remap`. Paths live in `PathVec`, `PathListOp` (relationship
-    /// targets, attribute connections, `inheritPaths`, `specializes`), and
-    /// `Relocates` (source/target pairs); every other value kind is cloned
-    /// unchanged.
+    /// targets, attribute connections, `inheritPaths`, `specializes`),
+    /// `Relocates` (source/target pairs), and the prim paths of internal
+    /// (same-layer) `ReferenceListOp` / `PayloadListOp` entries. An external
+    /// reference or payload carries its prim path in the referenced layer's
+    /// namespace, and an empty prim path is the defaultPrim selector — both
+    /// are left untouched; every other value kind is cloned unchanged.
     ///
     /// The path-rewriting core behind [`copy_spec`](crate::sdf::copy_spec),
     /// exposed so callers building a custom copy value policy (flatten, namespace
@@ -351,6 +363,18 @@ impl Value {
             Value::Relocates(relocates) => {
                 Value::Relocates(relocates.iter().map(|(s, t)| (remap(s), remap(t))).collect())
             }
+            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().map(|mut reference| {
+                if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
+                    reference.prim_path = remap(&reference.prim_path);
+                }
+                reference
+            })),
+            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().map(|mut payload| {
+                if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
+                    payload.prim_path = remap(&payload.prim_path);
+                }
+                payload
+            })),
             other => other.clone(),
         }
     }

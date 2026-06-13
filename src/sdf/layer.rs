@@ -83,9 +83,8 @@ impl Layer {
         self.data.clear();
     }
 
-    /// Remove the spec at `path` from this layer, the structural inverse of
-    /// [`copy_spec_fields_from`](Self::copy_spec_fields_from). Removing a prim also erases its
-    /// descendant specs, and the leaf name is dropped from the owning prim's
+    /// Remove the spec at `path` from this layer. Removing a prim also erases
+    /// its descendant specs, and the leaf name is dropped from the owning prim's
     /// child-name list. Returns `Ok(true)` when a spec was present and removed,
     /// or an [`AuthoringError`] when the owning prim's child list cannot be read.
     ///

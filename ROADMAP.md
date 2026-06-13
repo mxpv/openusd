@@ -197,7 +197,7 @@ Features from the C++ reference implementation not covered by the core specifica
 | [Stage cache](https://openusd.org/release/api/class_usd_utils_stage_cache.html) | :thinking: | | Avoid redundant stage loading |
 | [Kind registry](https://openusd.org/release/api/class_kind_registry.html) | :thinking: | | Model/group/assembly/component taxonomy |
 | [Edit targets](https://openusd.org/release/api/class_usd_edit_target.html) | :white_check_mark: | `main` | Fully supported, see `usd::EditTarget` |
-| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | `Stage::set_listener` delivers a `Notice` per edit; `Stage::extract_diff` builds a `LayerDiff` for mirroring<br>Remaining — apply side |
+| [Change notification](https://openusd.org/release/api/class_usd_notice.html) | :white_check_mark: | `main` | Fully supported: `Stage::set_listener` delivers a `Notice` per edit; `extract_diff` / `apply_diff` carry edits as a transferable `Diff` and replay them on a mirror |
 | [Property stack queries](https://openusd.org/release/api/class_usd_resolve_info.html) | :thinking: | | Inspect all contributing opinions across layers |
 
 ## Tooling

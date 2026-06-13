@@ -5,9 +5,10 @@
 //! materializes as separate specs — `primChildren`, `propertyChildren`, and the
 //! variant scaffolding (`variantSetChildren` / `variantChildren`). Relationship
 //! targets and attribute connections live as list-op fields, not child specs, so
-//! their paths are remapped as values rather than recursed into. References and
-//! payloads carry paths in the *referenced* layer's namespace, so they are left
-//! untouched by the root remap.
+//! their paths are remapped as values rather than recursed into. An internal
+//! (same-layer) reference or payload has its prim path remapped too; an external
+//! one carries its prim path in the *referenced* layer's namespace and is left
+//! untouched.
 
 use crate::sdf;
 use crate::tf;
@@ -288,6 +289,52 @@ where
     }
 }
 
+/// Ensure a spec of `spec_type` exists at `path` and author `fields` on it.
+///
+/// An upsert: a spec already present with the matching kind keeps its state
+/// and only the given fields are written, so unrelated opinions survive.
+/// Otherwise the spec is created, with missing ancestors and variant
+/// scaffolding materialized as by [`copy_spec_with`].
+///
+/// An attribute spec requires a `typeName` (as C++ `SdfAttributeSpec::New`
+/// does — the text format cannot express an attribute without one), so
+/// creating one is rejected with [`InvalidPath`](sdf::AuthoringError::InvalidPath)
+/// unless `fields` authors it; writing onto an existing attribute has its
+/// `typeName` already.
+///
+/// Spec kinds with no own storage (targets, connections, mappers, expressions)
+/// cannot be authored and are rejected with
+/// [`InvalidPath`](sdf::AuthoringError::InvalidPath).
+pub(crate) fn author_spec<'a>(
+    dst: &mut dyn sdf::AbstractData,
+    path: &sdf::Path,
+    spec_type: sdf::SpecType,
+    fields: impl IntoIterator<Item = (&'a str, sdf::Value)>,
+) -> Result<(), sdf::AuthoringError> {
+    if !is_copyable(spec_type) {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "spec kind has no own storage to author",
+        });
+    }
+    let exists = dst.spec_type(path) == Some(spec_type);
+    if !exists {
+        create_dst_spec(dst, path, spec_type)?;
+    }
+    let mut authored_type_name = false;
+    for (field, value) in fields {
+        authored_type_name |= field == sdf::FieldKey::TypeName.as_str();
+        dst.set_field(path, field, value);
+    }
+    if !exists && spec_type == sdf::SpecType::Attribute && !authored_type_name {
+        return Err(sdf::AuthoringError::InvalidPath {
+            path: path.clone(),
+            reason: "an attribute spec cannot be authored without a typeName",
+        });
+    }
+    Ok(())
+}
+
 /// Whether a spec of `spec_type` has its own storage in this backend and is
 /// therefore a copy target. The non-copyable kinds (targets, connections,
 /// mappers, expressions) live as list-op fields on their owning property.
@@ -311,10 +358,15 @@ fn is_copyable(spec_type: sdf::SpecType) -> bool {
     }
 }
 
-/// Create the destination spec of `spec_type` at `dst_path`. Prim / attribute /
-/// relationship go through the typed constructors; variant and variant-set specs
-/// are scaffolding with no public constructor, so author them through the spec
-/// helpers; the pseudo-root already exists.
+/// Create the destination spec at `dst_path` for a source spec of `spec_type`.
+/// Attribute / relationship go through the typed constructors; the pseudo-root
+/// already exists.
+///
+/// Prim and variant specs copy onto each other, as in C++ `SdfCopySpec`: both
+/// hold the same prim-level fields, so the chain builder derives the spec kind
+/// to create from the shape of `dst_path` itself — a prim spec copied to a
+/// variant-selection `dst_path` materializes the variant chain, and vice
+/// versa.
 ///
 /// The match is exhaustive over [`sdf::SpecType`] so that adding a spec kind is a
 /// compile error here rather than a silent no-op.
@@ -324,16 +376,13 @@ fn create_dst_spec(
     spec_type: sdf::SpecType,
 ) -> Result<(), sdf::AuthoringError> {
     match spec_type {
-        sdf::SpecType::Prim => {
-            sdf::PrimSpecMut::over(dst, dst_path.clone())?;
-        }
+        sdf::SpecType::Prim | sdf::SpecType::Variant => sdf::spec::ensure_prim_chain(dst, dst_path)?,
         sdf::SpecType::Attribute => {
             sdf::AttributeSpecMut::new(dst, dst_path.clone(), "", sdf::Variability::Varying, false)?;
         }
         sdf::SpecType::Relationship => {
             sdf::RelationshipSpecMut::new(dst, dst_path.clone(), sdf::Variability::Varying, false)?;
         }
-        sdf::SpecType::Variant => sdf::spec::ensure_prim_chain(dst, dst_path)?,
         sdf::SpecType::VariantSet => sdf::spec::ensure_variant_set(dst, dst_path)?,
         sdf::SpecType::PseudoRoot => {}
         sdf::SpecType::Unknown
@@ -412,39 +461,13 @@ fn read_child_names(
 }
 
 /// `true` for the structural children fields the recursion rebuilds, so the
-/// value policy never sees them.
-fn is_children_field(field: &str) -> bool {
+/// value policy never sees them. Also the crate's shared test for "is this
+/// field child-name bookkeeping rather than an authored opinion".
+pub(crate) fn is_children_field(field: &str) -> bool {
     field == sdf::ChildrenKey::PrimChildren.as_str()
         || field == sdf::ChildrenKey::PropertyChildren.as_str()
         || field == sdf::ChildrenKey::VariantSetChildren.as_str()
         || field == sdf::ChildrenKey::VariantChildren.as_str()
-}
-
-impl sdf::Layer {
-    /// Copy just the spec at `path` from `src` into this layer at the same path —
-    /// exactly one spec, its field values verbatim, with no descendants and no
-    /// path remapping. The child-name lists are left for the surrounding copy
-    /// loop to rebuild as sibling specs land.
-    ///
-    /// Unlike the recursive [`copy_spec`], this neither recurses nor erases an
-    /// existing destination subtree, so a subset of `src`'s specs assembles into
-    /// a valid sparse layer — the basis of the diff layer in
-    /// [`Stage::extract_diff`](crate::usd::Stage::extract_diff). A spec absent
-    /// from `src` copies nothing; spec types with no own storage are skipped.
-    pub fn copy_spec_fields_from(
-        &mut self,
-        src: &dyn sdf::AbstractData,
-        path: &sdf::Path,
-    ) -> Result<(), sdf::AuthoringError> {
-        copy_spec_with(
-            src,
-            path,
-            self.data_mut(),
-            path,
-            |args| should_copy_value(args, path, path),
-            |_| CopyChildren::Skip,
-        )
-    }
 }
 
 #[cfg(test)]
@@ -674,6 +697,66 @@ mod tests {
             targets(&dst, "/V{set=sel}Model.rel", FieldKey::TargetPaths),
             vec!["/V{set=sel}Model/Child", "/Outside"]
         );
+    }
+
+    #[test]
+    fn copy_remaps_internal_reference() {
+        let mut src = Data::new();
+        sdf::PrimSpecMut::new(&mut src, path("/A").unwrap(), sdf::Specifier::Def, "").unwrap();
+        src.set_field(
+            &path("/A").unwrap(),
+            FieldKey::References.as_str(),
+            Value::ReferenceListOp(sdf::ReferenceListOp::prepended([
+                sdf::Reference {
+                    prim_path: path("/A/Inner").unwrap(),
+                    ..Default::default()
+                },
+                sdf::Reference {
+                    asset_path: "other.usda".into(),
+                    prim_path: path("/A/Ext").unwrap(),
+                    ..Default::default()
+                },
+                sdf::Reference::default(),
+            ])),
+        );
+
+        let mut dst = Data::new();
+        copy_spec(&src, &path("/A").unwrap(), &mut dst, &path("/B").unwrap()).unwrap();
+
+        // The internal (same-layer) reference re-roots; the external one keeps
+        // its prim path in the referenced layer's namespace, and the empty
+        // defaultPrim selector stays empty.
+        let references = dst
+            .try_field(&path("/B").unwrap(), FieldKey::References.as_str())
+            .unwrap()
+            .unwrap()
+            .into_owned()
+            .try_as_reference_list_op()
+            .unwrap();
+        assert_eq!(references.prepended_items[0].prim_path.as_str(), "/B/Inner");
+        assert_eq!(references.prepended_items[1].prim_path.as_str(), "/A/Ext");
+        assert!(references.prepended_items[2].prim_path.is_empty());
+    }
+
+    #[test]
+    fn copy_prim_onto_variant() {
+        // A prim spec copies onto a variant-selection destination: the variant
+        // chain materializes and the prim's fields land on the variant spec.
+        let src = sample();
+        let mut dst = Data::new();
+        copy_spec(&src, &path("/A").unwrap(), &mut dst, &path("/V{set=sel}").unwrap()).unwrap();
+
+        assert_eq!(dst.spec_type(&path("/V{set=}").unwrap()), Some(SpecType::VariantSet));
+        assert_eq!(dst.spec_type(&path("/V{set=sel}").unwrap()), Some(SpecType::Variant));
+        assert_eq!(dst.spec_type(&path("/V{set=sel}Child").unwrap()), Some(SpecType::Prim));
+        let type_name = dst
+            .try_field(&path("/V{set=sel}").unwrap(), FieldKey::TypeName.as_str())
+            .unwrap()
+            .unwrap()
+            .into_owned()
+            .try_as_token()
+            .unwrap();
+        assert_eq!(type_name.as_str(), "Xform");
     }
 
     #[test]

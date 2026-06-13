@@ -89,9 +89,31 @@ bitflags! {
         const NON_INERT_PRIM = Self::ADD_NON_INERT_PRIM.bits() | Self::REMOVE_NON_INERT_PRIM.bits();
         /// Set bit when the change adds or removes an inert (`over`) prim spec.
         const INERT_PRIM = Self::ADD_INERT_PRIM.bits() | Self::REMOVE_INERT_PRIM.bits();
+        /// Set bit when the change creates a prim or property spec outright.
+        const ADD = Self::ADD_NON_INERT_PRIM.bits() | Self::ADD_INERT_PRIM.bits() | Self::ADD_PROPERTY.bits();
         /// Set bit when the change removes a prim or property spec outright.
         const REMOVE =
             Self::REMOVE_NON_INERT_PRIM.bits() | Self::REMOVE_INERT_PRIM.bits() | Self::REMOVE_PROPERTY.bits();
+    }
+}
+
+impl ChangeEntry {
+    /// Whether this entry records only child-name bookkeeping: no structural
+    /// flags, and every authored field a child-name list (`primChildren`,
+    /// `propertyChildren`, or the variant-chain registration a descendant edit
+    /// stamps on its ancestors). Such an entry marks a spec whose own opinions
+    /// did not change.
+    pub fn is_child_bookkeeping(&self) -> bool {
+        self.flags.is_empty() && self.authored_fields().next().is_none()
+    }
+
+    /// The fields this entry authored as opinions —
+    /// [`info_changed`](Self::info_changed) without the structural child-name
+    /// lists.
+    pub fn authored_fields(&self) -> impl Iterator<Item = &tf::Token> {
+        self.info_changed
+            .iter()
+            .filter(|f| !super::is_children_field(f.as_str()))
     }
 }
 

@@ -8,6 +8,7 @@ mod attribute;
 mod clips;
 mod collection;
 mod connections;
+mod diff;
 mod interp;
 mod notice;
 mod prim;
@@ -23,8 +24,9 @@ pub use collection::{
     MembershipQuery, PathExpansionRuleMap, PathRule,
 };
 pub use connections::ConnectionGraph;
+pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use interp::InterpolationType;
-pub use notice::{Deletion, LayerDiff, LayerMutingChanged, Notice, ObjectsChanged};
+pub use notice::{LayerMutingChanged, Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};

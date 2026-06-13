@@ -27,6 +27,7 @@ mod value;
 
 pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, EditProxy};
+pub(crate) use copy::{author_spec, is_children_field};
 pub use copy::{
     copy_spec, copy_spec_with, should_copy_children, should_copy_value, CopyChildren, CopyChildrenArgs, CopyValue,
     CopyValueArgs,

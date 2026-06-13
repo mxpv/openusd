@@ -209,35 +209,3 @@ impl Payload {
         }
     }
 }
-
-/// A serializable, replayable diff of one stage edit, produced by
-/// [`Stage::extract_diff`](super::Stage::extract_diff) from an [`ObjectsChanged`]
-/// notice.
-///
-/// Together the two fields describe the whole edit: `layer` carries the new and
-/// changed scene description, `removed` carries the deletions an overlay layer
-/// cannot express. A mirror applies the diff by composing or authoring `layer`
-/// and then replaying each [`Deletion`].
-pub struct LayerDiff {
-    /// An anonymous layer holding the added and value/metadata/target edits —
-    /// including list-op deletions of references, targets, or apiSchemas, which
-    /// compose as authored. Serialize it with [`sdf::Layer::export`] /
-    /// [`sdf::Layer::export_to_string`].
-    pub layer: sdf::Layer,
-    /// Deletions the overlay `layer` cannot express — whole-spec removals and
-    /// erased fields. See [`Deletion`].
-    pub removed: Vec<Deletion>,
-}
-
-/// A deletion in a [`LayerDiff`] that the overlay [`LayerDiff::layer`] cannot
-/// express (it records "set", not "erase"). A mirror must replay these, or it
-/// keeps its stale opinion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Deletion {
-    /// The whole prim or property spec at this path was removed; a mirror
-    /// applies it with `remove_prim` / `remove_property`.
-    Spec(sdf::Path),
-    /// This field was erased while its spec survives (e.g. clearing an
-    /// attribute's connections); a mirror applies it with `erase_field`.
-    Field(sdf::Path, tf::Token),
-}
