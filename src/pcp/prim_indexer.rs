@@ -98,6 +98,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
+use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{
@@ -390,13 +391,13 @@ struct Inputs<'a> {
 
 /// The site this build composes (C++ `PcpLayerStackSite`): the layer stack the
 /// root `L` site scans together with the prim path, set per (sub-)build.
-struct Site<'a> {
-    /// Layer stack the root `L` site scans (the stage root layer stack for a
-    /// stage prim, or a referenced asset's sublayer stack for an arc target).
-    ambient: &'a [(LayerId, LayerOffset)],
-    /// Whether [`ambient`](Self::ambient) is the stage's root layer stack, the
-    /// only case where the stage-keyed `cached_indices` apply.
-    is_root: bool,
+struct Site {
+    /// Handle to the layer stack the root `L` site scans (the stage root layer
+    /// stack for a stage prim, or a referenced asset's sublayer stack for an arc
+    /// target). Resolve to members through [`Inputs::stack`]. When this is
+    /// [`LayerStackId::Root`] the build composes against the stage root layer
+    /// stack — the only case where the stage-keyed `cached_indices` apply.
+    ambient: LayerStackId,
     /// The path this build composes — the graph's local-root site path. Set at
     /// the start of [`build`](Indexer::build) and used as the current-graph root
     /// in cross-frame duplicate-node lookups.
@@ -413,7 +414,7 @@ pub(crate) struct Indexer<'a, 'f> {
     /// Shared read-only inputs (layer stack, context, cached indices).
     inputs: Inputs<'a>,
     /// The site (ambient layer stack + path) this build composes.
-    site: Site<'a>,
+    site: Site,
     /// The parent frame for a recursive sub-index build, or `None` at the
     /// top-level build (C++ `Pcp_PrimIndexer::previousFrame`).
     frame: Option<&'f Frame<'f>>,
@@ -457,8 +458,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         stack: &'a LayerGraph,
         ctx: &'a CompositionContext,
         cached_indices: &'a sdf::PathTable<PrimIndex>,
-        ambient: &'a [(LayerId, LayerOffset)],
-        ambient_is_root: bool,
+        ambient: LayerStackId,
     ) -> Self {
         Self {
             inputs: Inputs {
@@ -468,7 +468,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             },
             site: Site {
                 ambient,
-                is_root: ambient_is_root,
                 path: Path::abs_root(),
             },
             frame: None,
@@ -621,7 +620,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// never contributes opinions, so any ambient member serves; this keeps its
     /// `same_site`/dump identity sensible.
     fn root_layer_id(&self) -> LayerId {
-        self.site.ambient.first().map(|&(id, _)| id).unwrap_or(LayerId::INVALID)
+        self.inputs.stack.layer_stack_root(self.site.ambient)
     }
 
     fn seed(&mut self, path: &Path) -> BuildResult<bool> {
@@ -630,7 +629,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
         if !needs_ancestor {
             // Root prim: synthetic inert root plus a local site scanning ambient.
-            self.output.init_root(self.root_layer_id(), path.clone());
+            self.output
+                .init_root(self.site.ambient, self.root_layer_id(), path.clone());
             self.add_local_root(path);
             return Ok(true);
         }
@@ -642,7 +642,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // reusing the frame chain so duplicate-node skipping (C++
         // `_BuildInitialPrimIndexFromAncestor`'s else-branch
         // `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`) applies.
-        let graph = if self.frame.is_none() && self.site.is_root {
+        let graph = if self.frame.is_none() && self.site.ambient == LayerStackId::Root {
             let Some(parent_index) = self.inputs.cached_indices.get(&parent) else {
                 return Ok(false);
             };
@@ -696,9 +696,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// stack. Its `has_specs` is computed with every other node's in
     /// `scan_and_enqueue`.
     fn add_local_root(&mut self, path: &Path) {
-        self.output.add_site_child(
+        self.output.add_child(
             NodeId::INVALID,
-            self.site.ambient.to_vec(),
+            self.site.ambient,
+            self.root_layer_id(),
             path.clone(),
             ArcType::Root,
             MapFunction::identity(),
@@ -716,23 +717,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Builds a nested sub-indexer one frame deeper, sharing this build's layer
     /// stack, context, and cache. The caller supplies the ambient stack and the
     /// parent-frame chain (which carries the duplicate-node skip flag).
-    fn new_sub<'b, 'g>(
+    fn new_sub<'g>(
         &self,
-        ambient: &'b [(LayerId, LayerOffset)],
-        ambient_is_root: bool,
+        ambient: LayerStackId,
         frame: Option<&'g Frame<'g>>,
         root_contributes: bool,
-    ) -> Indexer<'b, 'g>
-    where
-        'a: 'b,
-    {
-        let mut sub = Indexer::new(
-            self.inputs.stack,
-            self.inputs.ctx,
-            self.inputs.cached_indices,
-            ambient,
-            ambient_is_root,
-        );
+    ) -> Indexer<'a, 'g> {
+        let mut sub = Indexer::new(self.inputs.stack, self.inputs.ctx, self.inputs.cached_indices, ambient);
         sub.frame = frame;
         sub.frame_depth = self.frame_depth + 1;
         sub.root_contributes = root_contributes;
@@ -746,8 +737,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// unestablished seed) and the sub-build's recoverable errors, which the
     /// caller merges into its own.
     fn compose_ancestral_subindex(&self, parent: &Path) -> BuildResult<BuildOutput> {
-        self.new_sub(self.site.ambient, self.site.is_root, self.frame, true)
-            .build(parent)
+        self.new_sub(self.site.ambient, self.frame, true).build(parent)
     }
 
     /// Composes an arc target as its own sub-index, including the ancestral
@@ -760,23 +750,22 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn compose_subindex(
         &self,
         target: &Path,
-        ambient: &[(LayerId, LayerOffset)],
-        ambient_is_root: bool,
+        ambient: LayerStackId,
         skip: bool,
         root_contributes: bool,
         arc: ArcType,
     ) -> BuildResult<BuildOutput> {
+        let requested_layer = self.inputs.stack.layer_stack_root(ambient);
         let frame = Frame {
             requested_path: target.clone(),
             root_path: self.site.path.clone(),
             graph: &self.output,
             arc,
-            requested_layer: ambient[0].0,
+            requested_layer,
             skip,
             previous: self.frame,
         };
-        self.new_sub(ambient, ambient_is_root, Some(&frame), root_contributes)
-            .build(target)
+        self.new_sub(ambient, Some(&frame), root_contributes).build(target)
     }
 
     /// Merges a completed sub-build's recoverable errors into this build and
@@ -805,8 +794,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn compose_and_graft(
         &mut self,
         target: &Path,
-        ambient: &[(LayerId, LayerOffset)],
-        ambient_is_root: bool,
+        ambient: LayerStackId,
         skip: bool,
         parent: NodeId,
         arc: ArcType,
@@ -814,9 +802,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         origin: NodeId,
         sibling: u16,
     ) -> BuildResult<Option<NodeId>> {
-        let Some(sub) =
-            self.merge_subindex(self.compose_subindex(target, ambient, ambient_is_root, skip, true, arc)?)
-        else {
+        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc)?) else {
             return Ok(None);
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
@@ -918,9 +904,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
                     grafted_origin,
                 )
             };
-            let new_id = self.output.add_site_child(
+            let new_id = self.output.add_child(
                 struct_parent,
-                node.layer_stack().to_vec(),
+                node.layer_stack_id(),
+                node.layer_id(),
                 node.path.clone(),
                 node_arc,
                 node_map,
@@ -961,7 +948,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 continue;
             }
             let node = NodeId(i as u32);
-            let has_specs = self.stack_has_spec(self.output.nodes[i].layer_stack(), &self.output.nodes[i].path);
+            let has_specs = self.stack_has_spec(self.output.nodes[i].layer_stack_id(), &self.output.nodes[i].path);
             self.output.nodes[i].has_specs = has_specs;
             if has_specs {
                 self.add_expressed_arc_tasks(node);
@@ -1180,9 +1167,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // by the node's path in that layer stack's namespace. This handles both
         // stage-level relocates and relocates authored inside a referenced asset
         // (the node then carries that asset's layers and namespace).
-        let node_ambient = self.node(node).layer_stack().to_vec();
+        let node_ambient = self.node(node).layer_stack_id();
         let node_path = self.node(node).path.clone();
-        let Some(source) = self.inputs.stack.relocation_source(&node_ambient, &node_path) else {
+        let Some(source) = self.inputs.stack.relocation_source(node_ambient, &node_path) else {
             return Ok(());
         };
 
@@ -1195,7 +1182,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let opinion_layer = if already_relocated {
             None
         } else {
-            node_ambient
+            self.inputs
+                .stack
+                .layer_stack(node_ambient)
                 .iter()
                 .find(|&&(li, _)| self.inputs.stack.layer(li).data().has_spec(&source))
                 .map(|&(li, _)| self.inputs.stack.layer(li).identifier.clone())
@@ -1214,11 +1203,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // the target). Its root is salted-earth inert; opinions and implied
         // classes carried up across the relocate node translate the source
         // namespace to the target.
-        let ambient_is_root = self.ambient_is_root_for(&node_ambient);
         let Some(sub) = self.merge_subindex(self.compose_subindex(
             &source,
-            &node_ambient,
-            ambient_is_root,
+            node_ambient,
             self.frame_skip(),
             false,
             ArcType::Relocate,
@@ -1243,7 +1230,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             {
                 self.inputs
                     .stack
-                    .relocation_source_layer(n.layer_stack(), &n.path)
+                    .relocation_source_layer(n.layer_stack_id(), &n.path)
                     .map(|l| (n.path.clone(), l.to_string()))
             } else {
                 None
@@ -1349,11 +1336,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Add the inert placeholder with an identity map and the relocate node as
         // its origin. Its site is exactly `(gp_layers, gp_reloc_source)`, so
         // `has_specs` is composed from those before they move into the node.
-        let gp_layers = self.node(gp).layer_stack().to_vec();
-        let has_specs = self.stack_has_spec(&gp_layers, &gp_reloc_source);
-        let new_node = self.output.add_site_child(
+        let (gp_stack, gp_rep) = self.node_site(gp);
+        let has_specs = self.stack_has_spec(gp_stack, &gp_reloc_source);
+        let new_node = self.output.add_child(
             gp,
-            gp_layers,
+            gp_stack,
+            gp_rep,
             gp_reloc_source,
             ArcType::Relocate,
             MapFunction::identity(),
@@ -1391,7 +1379,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if n.is_inert() || n.is_culled() {
             return false;
         }
-        self.inputs.stack.is_relocation_source(n.layer_stack(), &n.path)
+        self.inputs.stack.is_relocation_source(n.layer_stack_id(), &n.path)
     }
 
     /// Marks `root` and its whole subtree culled so they contribute no opinions
@@ -1552,7 +1540,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         while let Some(id) = cur {
             let n = &self.output.nodes[id.idx()];
             if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
-                composed.extend(self.layer_stack_expr_vars(n.layer_stack()));
+                composed.extend(self.layer_stack_expr_vars(n.layer_stack_id()));
             }
             cur = n.parent;
         }
@@ -1561,10 +1549,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
     /// Reads the `expressionVariables` authored by a layer stack's own layers,
     /// composing them across the stack with the strongest member winning.
-    fn layer_stack_expr_vars(&self, members: &[(LayerId, LayerOffset)]) -> HashMap<String, Value> {
+    fn layer_stack_expr_vars(&self, ambient: LayerStackId) -> HashMap<String, Value> {
         let mut vars = HashMap::new();
         // Members are strongest-first; apply weakest-first so the strongest wins.
-        for &(layer, _) in members.iter().rev() {
+        for &(layer, _) in self.inputs.stack.layer_stack(ambient).iter().rev() {
             if let Ok(dict) = expr::read_expression_variables(self.inputs.stack.layer(layer).data()) {
                 vars.extend(dict);
             }
@@ -1585,7 +1573,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
         let arcs = compose_arc_list_in::<Path>(self.node_slice(node), field, self.inputs.stack)?;
         let node_path = self.node(node).path.clone();
-        let node_ambient = self.node(node).layer_stack().to_vec();
+        let node_ambient = self.node(node).layer_stack_id();
         for (arc_num, class_path) in arcs.iter().enumerate() {
             let resolved = node_path.make_absolute(class_path);
             // A class arc must target a prim, not a variant selection. A target
@@ -1598,7 +1586,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // or a child of one — is prohibited (salted earth, C++
             // `PcpErrorArcToProhibitedChild`): the source is empty after
             // relocation, so the arc is dropped and reported.
-            if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(&node_ambient, &resolved) {
+            if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(node_ambient, &resolved) {
                 let site_layer = self.introducing_layer(node);
                 self.errors.push(Error::ProhibitedRelocationSource {
                     arc,
@@ -1810,7 +1798,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             } else {
                 path_in_node
             };
-            for &(layer, _) in node.layer_stack() {
+            for &(layer, _) in self.inputs.stack.layer_stack(node.layer_stack_id()) {
                 let Some(value) = self
                     .inputs
                     .stack
@@ -1928,15 +1916,16 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
         let n = self.node(node);
         let base = n.path.clone();
-        let layers = n.layer_stack().to_vec();
+        let stack_id = n.layer_stack_id();
+        let rep = n.layer_id();
         let var_path = base.append_variant_selection(&vt.vset_name, vsel);
-        let has_specs = self.stack_has_spec(&layers, &var_path);
+        let has_specs = self.stack_has_spec(stack_id, &var_path);
         // A variant does not remap the scenegraph namespace; the map only strips
         // the `{vset=vsel}` storage segment off the composed path.
         let map = MapFunction::from_pair_identity(var_path.clone(), base);
         let new_node = self
             .output
-            .add_site_child(node, layers, var_path, ArcType::Variant, map, false);
+            .add_child(node, stack_id, rep, var_path, ArcType::Variant, map, false);
         let n = &mut self.output.nodes[new_node.idx()];
         n.sibling_num_at_origin = vt.vset_num;
         n.has_specs = has_specs;
@@ -1951,8 +1940,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn add_ancestral_variant_arc(&mut self, node: NodeId, vt: &VariantTask, vsel: &str) -> BuildResult<()> {
         let n = self.node(node);
         let node_path = n.path.clone();
-        let layers = n.layer_stack().to_vec();
-        let ambient_is_root = self.ambient_is_root_for(&layers);
+        let stack_id = n.layer_stack_id();
+        let rep = n.layer_id();
         let selected = vt.vset_path.append_variant_selection(&vt.vset_name, vsel);
         let Some(var_path) = node_path.replace_prefix(&vt.vset_path, &selected) else {
             return Ok(());
@@ -1969,13 +1958,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // same `{set=sel}` target the direct class already grafted, and grafting
         // it again would duplicate that site (C++ `_AddArc`'s `skipDuplicateNodes`
         // covering the arc's own target node).
-        if skip && self.find_duplicate(layers[0].0, &var_path) {
+        if skip && self.find_duplicate(rep, &var_path) {
             return Ok(());
         }
         let grafted = self.compose_and_graft(
             &var_path,
-            &layers,
-            ambient_is_root,
+            stack_id,
             skip,
             node,
             ArcType::Variant,
@@ -2051,8 +2039,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(None);
         };
 
-        let parent_layers = self.node(parent).layer_stack().to_vec();
-        let rep = parent_layers[0].0;
+        let (parent_stack, rep) = self.node_site(parent);
 
         // A class arc whose target is nested with an ancestor node's site — in the
         // same layer stack, the target path being a prefix of, or prefixed by, that
@@ -2086,10 +2073,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if arc == ArcType::Specialize {
             let add_placeholder = parent != self.output.local_root() || self.frame.is_some();
             if add_placeholder {
-                let has_specs = self.stack_has_spec(&parent_layers, &inherit_path);
+                let has_specs = self.stack_has_spec(parent_stack, &inherit_path);
                 let placeholder =
                     self.output
-                        .add_site_child(parent, parent_layers, inherit_path, arc, inherit_map, true);
+                        .add_child(parent, parent_stack, rep, inherit_path, arc, inherit_map, true);
                 {
                     let n = &mut self.output.nodes[placeholder.idx()];
                     n.origin = Some(origin);
@@ -2138,11 +2125,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root class needs the opinions above it: compose the target as its
         // own ancestral sub-index and graft it under the parent.
         if direct_should && !inherit_path.is_root_prim() {
-            let target_is_root = self.ambient_is_root_for(&parent_layers);
             let grafted = self.compose_and_graft(
                 &inherit_path,
-                &parent_layers,
-                target_is_root,
+                parent_stack,
                 skip,
                 parent,
                 arc,
@@ -2158,10 +2143,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(grafted);
         }
 
-        let has_specs = self.stack_has_spec(&parent_layers, &inherit_path);
-        let new_node = self.output.add_site_child(
+        let has_specs = self.stack_has_spec(parent_stack, &inherit_path);
+        let new_node = self.output.add_child(
             parent,
-            parent_layers,
+            parent_stack,
+            rep,
             inherit_path,
             arc,
             inherit_map,
@@ -2446,8 +2432,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(None);
         }
         let map = self.node(src).map_to_root.clone();
-        let src_layers = self.node(src).layer_stack().to_vec();
-        let rep = src_layers[0].0;
+        let (src_stack, rep) = self.node_site(src);
         let src_path = self.node(src).path.clone();
         let sibling = self.node(src).sibling_num_at_origin;
 
@@ -2464,24 +2449,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root specialize target needs the opinions above it (C++
         // `includeAncestralOpinions = !IsRootPrimPath`).
         if !src_path.is_root_prim() {
-            let target_is_root = self.ambient_is_root_for(&src_layers);
-            return self.compose_and_graft(
-                &src_path,
-                &src_layers,
-                target_is_root,
-                true,
-                root,
-                ArcType::Specialize,
-                map,
-                src,
-                sibling,
-            );
+            return self.compose_and_graft(&src_path, src_stack, true, root, ArcType::Specialize, map, src, sibling);
         }
 
-        let has_specs = self.stack_has_spec(&src_layers, &src_path);
+        let has_specs = self.stack_has_spec(src_stack, &src_path);
         let new_node = self
             .output
-            .add_site_child(root, src_layers, src_path, ArcType::Specialize, map, true);
+            .add_child(root, src_stack, rep, src_path, ArcType::Specialize, map, true);
         {
             let n = &mut self.output.nodes[new_node.idx()];
             n.origin = Some(src);
@@ -2540,10 +2514,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // external one resolves the asset's sublayer stack. `external_target`
         // carries the resolved external root layer for the muted-target trace.
         let mut external_target = None;
-        let (target_stack, target_is_root) = if is_internal {
-            let stack = self.node(parent).layer_stack().to_vec();
-            let is_root = self.ambient_is_root_for(&stack);
-            (stack, is_root)
+        let target_stack = if is_internal {
+            self.node(parent).layer_stack_id()
         } else {
             let Some(layer_index) = self.inputs.stack.find(asset_path) else {
                 // An unresolvable asset is a recoverable error (C++ "Could not
@@ -2562,32 +2534,32 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 return Ok(());
             };
             external_target = Some(layer_index);
-            (self.inputs.stack.sublayer_stack(layer_index).to_vec(), false)
+            self.inputs.stack.sublayer_stack_id(layer_index)
         };
 
         // A muted target root drops out of its own `sublayer_stack`, leaving the
-        // stack empty. Skip the arc rather than indexing `target_stack[0]` on an
-        // empty vector, but record the muted target so unmuting it can find this
-        // index to recompose — a skipped arc grafts no node, so the recorded id is
-        // the only other trace of the dependency.
+        // stack empty. Skip the arc rather than indexing the empty stack, but
+        // record the muted target so unmuting it can find this index to recompose
+        // — a skipped arc grafts no node, so the recorded id is the only other
+        // trace of the dependency.
         // TODO: record a `PcpErrorMutedAssetPath` analog here (C++
         // `primIndex.cpp`) so a muted reference/payload target surfaces a
         // composition error instead of silently contributing nothing.
-        if target_stack.is_empty() {
+        let Some(rep) = self.inputs.stack.layer_stack(target_stack).first().map(|&(li, _)| li) else {
             if let Some(layer_index) = external_target {
                 self.output.muted_external_targets.push(layer_index);
             }
             return Ok(());
-        }
+        };
 
         // Resolve the source prim path, falling back to the target layer's
         // `defaultPrim` when the arc names no prim (C++ `_GetDefaultPrimPath`).
         let source = if prim_path.is_empty() {
-            let Some(p) = self.resolve_default_prim(&target_stack)? else {
+            let Some(p) = self.resolve_default_prim(target_stack)? else {
                 // Missing target `defaultPrim` is likewise recoverable: record it
                 // and skip the arc; the prim's other opinions still compose.
                 self.errors.push(Error::MissingDefaultPrim {
-                    layer_id: self.inputs.stack.layer(target_stack[0].0).identifier.clone(),
+                    layer_id: self.inputs.stack.layer(rep).identifier.clone(),
                     arc,
                     site_path: parent_path,
                 });
@@ -2598,7 +2570,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
             prim_path.clone()
         };
 
-        let rep = target_stack[0].0;
         // A duplicate site reached inside a skip sub-build is skipped, keeping a
         // class reached both directly and through this arc from grafting twice.
         if self.frame_skip() && self.find_duplicate(rep, &source) {
@@ -2617,7 +2588,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Referencing a prim that is a relocation source — or a child of one — is
         // prohibited (C++ `PcpErrorArcToProhibitedChild`, "CANNOT reference"): the
         // target is empty after relocation. Drop the arc and report it.
-        if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(&target_stack, &source) {
+        if let Some((reloc_source, reloc_layer)) = self.prohibiting_relocation_source(target_stack, &source) {
             self.errors.push(Error::ProhibitedRelocationSource {
                 arc,
                 site: parent_path.clone(),
@@ -2654,17 +2625,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `PcpErrorUnresolvedPrimPath`).
         if !source.is_root_prim() {
             let before = self.errors.len();
-            let grafted = self.compose_and_graft(
-                &source,
-                &target_stack,
-                target_is_root,
-                self.frame_skip(),
-                parent,
-                arc,
-                map,
-                parent,
-                0,
-            )?;
+            let grafted =
+                self.compose_and_graft(&source, target_stack, self.frame_skip(), parent, arc, map, parent, 0)?;
             // The target is unresolved only when composing it hit a cycle (its own
             // ancestral chain loops back) that left nothing — not when it is merely
             // empty so far (e.g. a variant supplies its opinions later).
@@ -2687,7 +2649,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // contributing no opinions to value resolution. A resolved-layer payload
         // to such a prim is additionally an unresolved-prim-path error (C++
         // `PcpErrorUnresolvedPrimPath`); the node is still culled.
-        let empty = !self.stack_has_spec(&target_stack, &source);
+        let empty = !self.stack_has_spec(target_stack, &source);
         if empty && !is_internal && arc == ArcType::Payload {
             self.errors.push(Error::UnresolvedPrimPath {
                 arc,
@@ -2699,7 +2661,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         }
         let new_node = self
             .output
-            .add_site_child(parent, target_stack, source, arc, map, false);
+            .add_child(parent, target_stack, rep, source, arc, map, false);
         if empty {
             let node = &mut self.output.nodes[new_node.idx()];
             node.flags |= NodeFlags::CULLED;
@@ -2723,12 +2685,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// session layers ahead of the root layer, so the lookup uses the strongest
     /// non-session member rather than `target_stack[0]` — which for an internal
     /// reference on a stage with a session layer would be the session.
-    fn resolve_default_prim(&self, target_stack: &[(LayerId, LayerOffset)]) -> BuildResult<Option<Path>> {
-        let root_layer = target_stack
+    fn resolve_default_prim(&self, target_stack: LayerStackId) -> BuildResult<Option<Path>> {
+        let members = self.inputs.stack.layer_stack(target_stack);
+        let root_layer = members
             .iter()
             .map(|&(li, _)| li)
             .find(|li| !self.inputs.stack.session_layers().contains(li))
-            .unwrap_or(target_stack[0].0);
+            .or_else(|| members.first().map(|&(li, _)| li))
+            .unwrap_or(LayerId::INVALID);
         let Some(value) = self
             .inputs
             .stack
@@ -2831,7 +2795,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// child in `ambient` — the path itself if it is relocated away, else the
     /// closest ancestor that is, paired with the layer authoring that relocation.
     /// `None` when neither `path` nor any ancestor is a relocation source.
-    fn prohibiting_relocation_source(&self, ambient: &[(LayerId, LayerOffset)], path: &Path) -> Option<(Path, String)> {
+    fn prohibiting_relocation_source(&self, ambient: LayerStackId, path: &Path) -> Option<(Path, String)> {
         let mut p = Some(path.clone());
         while let Some(cur) = p {
             if let Some(layer) = self.inputs.stack.relocation_source_layer(ambient, &cur) {
@@ -2915,15 +2879,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         depth <= MAX_DEPTH
     }
 
-    /// Whether `layers` is the stage root layer stack — the only ambient where
-    /// an arc target is composed at root and the stage-keyed `cached_indices`
-    /// apply. A sub-index composed in this ambient is keyed in the stage cache.
-    fn ambient_is_root_for(&self, layers: &[(LayerId, LayerOffset)]) -> bool {
-        self.site.is_root && layers == self.site.ambient
-    }
-
-    /// Whether any layer in `stack` authors a spec at `path`.
-    fn stack_has_spec(&self, stack: &[(LayerId, LayerOffset)], path: &Path) -> bool {
+    /// Whether any layer in the stack `stack` authors a spec at `path`.
+    fn stack_has_spec(&self, stack: LayerStackId, path: &Path) -> bool {
         stack_has_spec(self.inputs.stack, stack, path)
     }
 
@@ -2947,7 +2904,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if !self.inputs.stack.has_relocates() {
             return map;
         }
-        let layers = self.node(parent).layer_stack();
+        let layers = self.node(parent).layer_stack_id();
         let site = self.node(parent).path.strip_all_variant_selections();
         // A relocate-source sub-index must not fold the relocate that moves its
         // own root: that shift is applied by the relocate arc at graft time, and
@@ -2993,7 +2950,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// gather a site's variant set names and a set's variant options.
     fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
         let mut out: Vec<Token> = Vec::new();
-        for &(layer, _) in self.node(node).layer_stack() {
+        for &(layer, _) in self.inputs.stack.layer_stack(self.node(node).layer_stack_id()) {
             let Some(value) = self.inputs.stack.layer(layer).data().try_field(path, key.as_str())? else {
                 continue;
             };
@@ -3018,6 +2975,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn node_slice(&self, node: NodeId) -> &[super::prim_graph::Node] {
         &self.output[node.idx()..=node.idx()]
     }
+
+    /// A node's site identity — its layer-stack handle and representative layer —
+    /// the pair every added/grafted node is created from, read in one arena lookup.
+    fn node_site(&self, node: NodeId) -> (LayerStackId, LayerId) {
+        let n = self.node(node);
+        (n.layer_stack_id(), n.layer_id())
+    }
 }
 
 #[cfg(test)]
@@ -3037,8 +3001,8 @@ mod tests {
 
     fn build(stack: &LayerGraph, prim: &str) -> Option<PrimIndexGraph> {
         let ctx = CompositionContext::default();
-        let ambient = stack.root_layer_stack();
-        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
+        let ambient = stack.root_layer_stack_id();
+        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient)
             .build(&Path::from(prim))
             .expect("indexer build")
             .graph
@@ -3254,12 +3218,12 @@ mod tests {
             ),
         ]);
         let ctx = CompositionContext::default();
-        let ambient = s.root_layer_stack();
+        let ambient = s.root_layer_stack_id();
         // Seed the child build with the parent's composed index, as the cache does.
         let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
         let mut cached = sdf::PathTable::new();
         cached.insert(Path::from("/Root"), root_index);
-        let child = Indexer::new(&s, &ctx, &cached, ambient, true)
+        let child = Indexer::new(&s, &ctx, &cached, ambient)
             .build(&Path::from("/Root/Child"))
             .expect("indexer build")
             .graph

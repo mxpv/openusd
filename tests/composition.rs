@@ -345,8 +345,8 @@ mod pcp_txt {
             let walk = walk_nodes(&index);
             let has_offsets = walk.iter().any(|&id| {
                 let node = index.node(id);
-                !node.map_to_parent.time_offset().is_identity()
-                    || node.layer_stack().iter().any(|(_, off)| !off.is_identity())
+                !node.map_to_parent().time_offset().is_identity()
+                    || stage.node_layer_stack(node).iter().any(|(_, off)| !off.is_identity())
             });
             if has_offsets {
                 let _ = writeln!(out, "Time Offsets:");
@@ -354,7 +354,7 @@ mod pcp_txt {
                     let node = index.node(id);
                     let layer_id = stage.layer_identifier(node.layer_id()).unwrap_or_default();
                     // Lowercase arc name matching C++ `PcpArcType`'s `displayName`.
-                    let arc = match node.arc {
+                    let arc = match node.arc() {
                         pcp::ArcType::Root => "root",
                         pcp::ArcType::Inherit => "inherit",
                         pcp::ArcType::Variant => "variant",
@@ -367,11 +367,11 @@ mod pcp_txt {
                         &mut out,
                         base,
                         &layer_id,
-                        Some(&node.path),
+                        Some(node.path()),
                         arc,
-                        node.map_to_root.time_offset(),
+                        node.map_to_root().time_offset(),
                     );
-                    for &(layer, off) in node.layer_stack() {
+                    for &(layer, off) in stage.node_layer_stack(node).iter() {
                         if !off.is_identity() {
                             let layer_id = stage.layer_identifier(layer).unwrap_or_default();
                             time_offset_line(&mut out, base, &layer_id, None, "sublayer", off);

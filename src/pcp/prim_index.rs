@@ -15,6 +15,7 @@ use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
 
+use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_indexer::BuildResult;
@@ -189,11 +190,18 @@ impl PrimIndex {
     // TODO(perf): scans the whole node arena per call, and the caller
     // (`IndexCache::rescan_specs`) invokes it once per dependent index; a
     // site→node index keyed by `(layer, path)` would make this O(matching nodes).
+    //
+    // Each node's `layer_stack` handle is resolved against the live `graph`,
+    // which is sound because this rescan runs only on the spec-tier
+    // (non-significant) change path: an inert spec add/remove never edits
+    // `subLayers`, so the resolved members equal the node's composition-time
+    // stack. A path that rebuilds sublayer stacks goes through the significant
+    // branch, which drops the cached index instead of refreshing it.
     pub(crate) fn refresh_has_specs_at(&mut self, layer: LayerId, path: &Path, graph: &LayerGraph) -> SpecRefresh {
         let mut refresh = SpecRefresh::default();
         for node in &mut self.graph.nodes {
-            if node.path == *path && node.layer_stack.iter().any(|&(li, _)| li == layer) {
-                let has_specs = stack_has_spec(graph, &node.layer_stack, path);
+            if node.path == *path && graph.layer_stack(node.layer_stack).iter().any(|&(li, _)| li == layer) {
+                let has_specs = stack_has_spec(graph, node.layer_stack, path);
                 if node.is_culled() {
                     refresh.needs_rebuild |= has_specs && !node.has_specs;
                 } else {
@@ -407,7 +415,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
     ) -> BuildResult<(Self, Vec<Error>)> {
-        Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack(), true)
+        Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack_id())
     }
 
     /// Builds a prim index whose root `L` site scans the given `ambient` layer
@@ -415,18 +423,18 @@ impl PrimIndex {
     ///
     /// `ambient` is the layer stack the prim is composed in: the root layer
     /// stack for a stage prim, or a referenced asset's sublayer stack for an
-    /// arc target reached within that reference. `ambient_is_root` records
-    /// whether `ambient` is the stage's root layer stack, which is the only
-    /// case where the shared `cached_indices` (keyed by stage path) apply.
+    /// arc target reached within that reference. When `ambient` is the stage
+    /// root layer stack ([`LayerStackId::Root`]) the shared `cached_indices`
+    /// (keyed by stage path) apply; an arc-target sublayer stack is composed
+    /// fresh.
     pub(crate) fn build_with_cache_in(
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
-        ambient: &[(LayerId, LayerOffset)],
-        ambient_is_root: bool,
+        ambient: LayerStackId,
     ) -> BuildResult<(Self, Vec<Error>)> {
-        if ambient_is_root {
+        if ambient == LayerStackId::Root {
             if let Some(cached) = cached_indices.get(path) {
                 return Ok((cached.clone(), Vec::new()));
             }
@@ -435,7 +443,7 @@ impl PrimIndex {
         // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
-        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, ambient_is_root);
+        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient);
         let super::prim_indexer::BuildOutput { graph, errors } = indexer.build(path)?;
         Ok((
             PrimIndex {
@@ -594,8 +602,28 @@ pub(crate) struct AncestorArc {
 /// `PcpNode::HasSpecs`). The canonical definition of a node's `has_specs`, used
 /// both when the indexer builds a node and when [`PrimIndex::refresh_has_specs_at`]
 /// refreshes one after an inert spec edit, so the two never drift.
-pub(super) fn stack_has_spec(graph: &LayerGraph, stack: &[(LayerId, LayerOffset)], path: &Path) -> bool {
-    stack.iter().any(|&(li, _)| graph.layer(li).data().has_spec(path))
+pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Path) -> bool {
+    graph
+        .layer_stack(stack)
+        .iter()
+        .any(|&(li, _)| graph.layer(li).data().has_spec(path))
+}
+
+/// Iterates `node`'s contributing layers strongest first, each paired with its
+/// effective time offset to the root namespace: the node's arc offset
+/// (`map_to_root`) folded onto the member's sublayer offset (C++
+/// `PcpNodeRef`'s per-layer offset). The value-resolution view of a node's
+/// layer stack, resolved through `graph`; the single home for this offset
+/// composition so value resolution and introspection never drift.
+pub(super) fn node_layer_offsets<'g>(
+    node: &Node,
+    graph: &'g LayerGraph,
+) -> impl Iterator<Item = (LayerId, LayerOffset)> + 'g {
+    let arc_offset = node.map_to_root().time_offset();
+    graph
+        .layer_stack(node.layer_stack_id())
+        .iter()
+        .map(move |&(li, sub)| (li, arc_offset.concatenate(&sub)))
 }
 
 /// Resolves variant selections across a prim's composition nodes.
@@ -650,7 +678,7 @@ fn resolve_variant_selections_in<'a>(
     // Gather explicit selections for sets the seed did not already fix. Each
     // node fans out into its layer stack, strongest sublayer first.
     for node in &ordered {
-        for &(layer, _) in node.layer_stack() {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
             if let Ok(value) = graph
                 .layer(layer)
                 .data()
@@ -670,7 +698,7 @@ fn resolve_variant_selections_in<'a>(
     // set stays unselected (C++ `_EvalNodeFallbackVariant`); there is no implicit
     // first-variant default, matching the indexer.
     for node in &ordered {
-        for &(layer, _) in node.layer_stack() {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
             let data = graph.layer(layer).data();
             let Ok(value) = data.get_field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
@@ -743,7 +771,7 @@ where
         // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
         // single-valued per layer).
         let mut seen_layers: HashSet<LayerId> = HashSet::new();
-        for &(layer, sub) in node.layer_stack() {
+        for &(layer, sub) in graph.layer_stack(node.layer_stack_id()) {
             if !seen_layers.insert(layer) {
                 continue;
             }
@@ -1155,7 +1183,11 @@ pub(crate) mod tests {
         let ns: Vec<_> = index.nodes().collect();
         assert_eq!(ns.len(), 1, "one per-site node spans both sublayers");
         assert_eq!(ns[0].arc, ArcType::Root);
-        let layers: Vec<LayerId> = ns[0].layers().map(|(li, _)| li).collect();
+        let layers: Vec<LayerId> = stack
+            .layer_stack(ns[0].layer_stack_id())
+            .iter()
+            .map(|&(li, _)| li)
+            .collect();
         let expected: Vec<LayerId> = stack.root_layer_stack().iter().map(|&(id, _)| id).collect();
         assert_eq!(layers, expected, "stronger sublayer first");
         Ok(())
@@ -1929,11 +1961,12 @@ def "Prim" (
         let p = |s: &str| Path::from(s.to_string());
         let id = MapFunction::identity();
         let lid = LayerId::from_raw(0);
+        let lsid = LayerStackId::Sublayer(lid);
         let mut g = PrimIndexGraph::default();
-        let root = g.add_child(NodeId::INVALID, lid, p("/A"), ArcType::Root, id.clone(), false);
-        let inh = g.add_child(root, lid, p("/Class"), ArcType::Inherit, id.clone(), false);
-        let r1 = g.add_child(root, lid, p("/R1"), ArcType::Reference, id.clone(), false);
-        let r2 = g.add_child(root, lid, p("/R2"), ArcType::Reference, id.clone(), false);
+        let root = g.add_child(NodeId::INVALID, lsid, lid, p("/A"), ArcType::Root, id.clone(), false);
+        let inh = g.add_child(root, lsid, lid, p("/Class"), ArcType::Inherit, id.clone(), false);
+        let r1 = g.add_child(root, lsid, lid, p("/R1"), ArcType::Reference, id.clone(), false);
+        let r2 = g.add_child(root, lsid, lid, p("/R2"), ArcType::Reference, id.clone(), false);
 
         // Arc type: an inherit outranks a reference.
         assert_eq!(g.compare_sibling_node_strength(inh, r1), Ordering::Less);
@@ -1949,7 +1982,7 @@ def "Prim" (
         assert_eq!(g.compare_node_strength(r2, r2), Ordering::Equal);
 
         // Namespace depth: a deeper arc-introduction site is stronger.
-        let deep = g.add_child(root, lid, p("/D"), ArcType::Reference, id.clone(), false);
+        let deep = g.add_child(root, lsid, lid, p("/D"), ArcType::Reference, id.clone(), false);
         g.nodes[deep.idx()].namespace_depth = 5;
         assert_eq!(g.compare_sibling_node_strength(deep, r1), Ordering::Less);
     }
@@ -2123,10 +2156,9 @@ def "Prim" (
             .flat_map(|n| {
                 let path = n.path.to_string();
                 let arc = n.arc;
-                // Expand each per-site node into one row per contributing
-                // sublayer, carrying that layer's effective offset (the arc
-                // offset with the sublayer offset composed on top).
-                n.layers().map(move |(li, off)| {
+                // One row per contributing sublayer, carrying that layer's
+                // effective offset.
+                node_layer_offsets(n, stack).map(move |(li, off)| {
                     (
                         layer_name(stack.identifier(li)).to_owned(),
                         path.clone(),

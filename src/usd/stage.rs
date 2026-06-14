@@ -1415,7 +1415,7 @@ impl Stage {
             Some(affected) => {
                 // The mutation already rebuilt the graph's sublayer stacks,
                 // relocates, and cycle diagnostics; only the cache needs work.
-                cache.recompose_muted(&affected);
+                cache.recompose_muted(&graph, &affected);
                 true
             }
             None => false,
@@ -1789,6 +1789,17 @@ impl Stage {
     pub fn layer_identifier(&self, id: pcp::LayerId) -> Option<String> {
         let layers = self.layers();
         layers.contains(id).then(|| layers.identifier(id).to_string())
+    }
+
+    /// The raw `(layer id, sublayer offset)` members of `node`'s layer stack, in
+    /// strength order (C++ `PcpNodeRef::GetLayerStack`'s layers and offsets). A
+    /// composition [`Node`](pcp::Node) references its layer stack by handle and
+    /// leaves the members to the cache, so this resolves them through the stage's
+    /// layer graph for composition introspection. The offsets are the authored
+    /// sublayer offsets; the arc time offset is read separately from the node's
+    /// `map_to_root`.
+    pub fn node_layer_stack(&self, node: &pcp::Node) -> Vec<(pcp::LayerId, sdf::LayerOffset)> {
+        self.layers().layer_stack(node.layer_stack_id()).to_vec()
     }
 
     /// Returns the root layer's `customLayerData` dictionary, if authored.
@@ -2940,6 +2951,37 @@ mod tests {
         stage.unmute_layer("target.usda");
         assert!(!stage.is_indexed(&refp), "unmuting recomposes the referencing prim");
         assert!(stage.is_indexed(&indep), "unmuting leaves the independent prim cached");
+        Ok(())
+    }
+
+    /// Pins the resolved-members prong of the cache's mute fanout. A prim whose
+    /// only opinion lives in a sublayer of the root composes into a single local
+    /// node on the stage Root layer stack, whose frozen `representative` is the
+    /// strongest session layer. Muting that sublayer fans out to `{sublayer,
+    /// root}` — not the session layer — so the representative is not in the
+    /// affected set; the index is dropped only because the node's resolved
+    /// members still list the (surviving) root layer. A regression to a
+    /// representative-only check would leave this index stale.
+    #[test]
+    fn mute_sublayer_drops_root_stack_index() -> Result<()> {
+        let session = sdf::Layer::new_in_memory("session.usda");
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        root.pseudo_root_mut().unwrap().set_sublayers(["child.usda"]);
+        let mut child = sdf::Layer::new_in_memory("child.usda");
+        sdf::PrimSpec::new(child.data_mut(), "/P", sdf::Specifier::Def, "")?;
+
+        // session at index 0, root + its `child` sublayer after: /P's Root node
+        // spans [session, root, child], so its representative is the session layer.
+        let stage = Stage::builder().make_stage(vec![session, root, child], 1, Vec::new());
+        let p = sdf::path("/P")?;
+        assert!(stage.prim(p.clone()).is_valid()?);
+        assert!(stage.is_indexed(&p), "the sublayer opinion composes and caches");
+
+        stage.mute_layer("child.usda");
+        assert!(
+            !stage.is_indexed(&p),
+            "muting the root sublayer holding /P's opinion drops the cached index via the members prong"
+        );
         Ok(())
     }
 

@@ -9,8 +9,9 @@ use std::cmp::Ordering;
 
 use bitflags::bitflags;
 
-use crate::sdf::{LayerOffset, Path};
+use crate::sdf::Path;
 
+use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::LayerId;
 
@@ -124,21 +125,28 @@ bitflags! {
 /// [`PrimIndex`](crate::pcp::PrimIndex).
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// The layer stack contributing opinions at this site (C++
-    /// `PcpNode::GetLayerStack`): each member is a `(layer id, sublayer offset)`
-    /// pair, strongest sublayer first. A member's sublayer offset is composed
-    /// atop `map_to_root`'s arc offset during value resolution (see
-    /// [`layers`](Self::layers)).
-    pub(crate) layer_stack: Vec<(LayerId, LayerOffset)>,
+    /// Handle to the layer stack contributing opinions at this site (C++
+    /// `PcpNode::GetLayerStack`). Resolve it to members through the owning layer
+    /// graph's [`layer_stack`](crate::pcp::LayerGraph::layer_stack) rather than
+    /// storing them on each node; for value resolution fold each member's
+    /// sublayer offset onto this node's arc offset (`map_to_root.time_offset()`).
+    pub(crate) layer_stack: LayerStackId,
+    /// The strongest (representative) layer of [`layer_stack`](Self::layer_stack)
+    /// (C++ `PcpNode::GetLayerStack()->GetLayers().front()`). Cached so structural
+    /// identity ([`same_site`](PrimIndexGraph::same_site),
+    /// [`node_using_site`](PrimIndexGraph::node_using_site)) and
+    /// [`layer_id`](Self::layer_id) resolve without the layer graph; equals the
+    /// first member of the resolved `layer_stack`.
+    pub(crate) representative: LayerId,
     /// The path within that layer (may differ from composed path due to remapping).
-    pub path: Path,
+    pub(crate) path: Path,
     /// The composition arc that introduced this node.
-    pub arc: ArcType,
+    pub(crate) arc: ArcType,
     /// Maps paths from this node's namespace to its parent's namespace.
-    pub map_to_parent: MapFunction,
+    pub(crate) map_to_parent: MapFunction,
     /// Maps paths from this node's namespace directly to the root namespace.
     /// Computed as `parent.map_to_root.compose(self.map_to_parent)`.
-    pub map_to_root: MapFunction,
+    pub(crate) map_to_root: MapFunction,
     /// Structural parent in the composition tree, or `None` for a root node.
     pub(crate) parent: Option<NodeId>,
     /// Structural children, in the order they were introduced (strength order
@@ -194,7 +202,8 @@ impl Node {
     /// `parent`/`children` populated by the indexer; the relocate inserts and
     /// grafts set the links explicitly afterward.
     pub(crate) fn new(
-        layer_id: LayerId,
+        layer_stack: LayerStackId,
+        representative: LayerId,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
@@ -207,10 +216,8 @@ impl Node {
             NodeFlags::empty()
         };
         Self {
-            // A node lists one layer until the per-site model folds a whole
-            // sublayer stack into it; that lone layer's sublayer offset is
-            // already baked into `map_to_root`, so its entry offset is identity.
-            layer_stack: vec![(layer_id, LayerOffset::IDENTITY)],
+            layer_stack,
+            representative,
             path,
             arc,
             map_to_parent,
@@ -228,31 +235,41 @@ impl Node {
 
     /// Id of the strongest layer contributing at this site. A representative
     /// for callers that key on a single layer (dependencies, dumps); value
-    /// resolution iterates [`layers`](Self::layers) instead.
+    /// resolution iterates the node's resolved layer-stack members instead.
     pub fn layer_id(&self) -> LayerId {
-        self.layer_stack[0].0
+        self.representative
     }
 
-    /// The site's contributing layers as stored: `(layer id, sublayer offset)`
-    /// members, strongest first — the node's `(layerStack, path)` site (C++
-    /// `PcpNodeRef::GetLayerStack`'s layers and their offsets). The offsets are
-    /// the raw sublayer offsets; for value resolution use [`layers`](Self::layers),
-    /// which folds the arc offset on top. This raw form is for structural
-    /// introspection.
-    pub fn layer_stack(&self) -> &[(LayerId, LayerOffset)] {
-        &self.layer_stack
-    }
-
-    /// Iterates the site's contributing layers strongest first, each paired
-    /// with its effective time offset to the root namespace: `map_to_root`'s
-    /// arc offset with the member's sublayer offset composed on top. Value
-    /// resolution reads opinions through this iterator so one per-site node can
-    /// fold every sublayer.
-    pub fn layers(&self) -> impl Iterator<Item = (LayerId, LayerOffset)> + '_ {
-        let arc_offset = self.map_to_root.time_offset();
+    /// Handle to this node's layer stack (C++ `PcpNodeRef::GetLayerStack`).
+    /// Resolve it to members through the owning
+    /// [`LayerGraph::layer_stack`](crate::pcp::LayerGraph::layer_stack); for
+    /// value resolution fold each member's sublayer offset onto this node's arc
+    /// offset (`map_to_root.time_offset()`).
+    pub(crate) fn layer_stack_id(&self) -> LayerStackId {
         self.layer_stack
-            .iter()
-            .map(move |&(li, sub)| (li, arc_offset.concatenate(&sub)))
+    }
+
+    /// The path within this node's layer stack (C++ `PcpNodeRef::GetPath`); may
+    /// differ from the composed path due to arc remapping.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The composition arc that introduced this node (C++ `GetArcType`).
+    pub fn arc(&self) -> ArcType {
+        self.arc
+    }
+
+    /// Maps paths from this node's namespace to its parent's (C++
+    /// `GetMapToParent`).
+    pub fn map_to_parent(&self) -> &MapFunction {
+        &self.map_to_parent
+    }
+
+    /// Maps paths from this node's namespace directly to the root namespace (C++
+    /// `GetMapToRoot`).
+    pub fn map_to_root(&self) -> &MapFunction {
+        &self.map_to_root
     }
 
     /// Structural parent, or `None` for a root node.
@@ -414,12 +431,13 @@ impl PrimIndexGraph {
     /// (`identity ∘ child.map_to_parent == child.map_to_parent`), so a former
     /// forest root keeps the `map_to_root` it had with no parent. The node is
     /// flagged [`INERT`](NodeFlags::INERT) and skipped by value resolution.
-    pub(crate) fn init_root(&mut self, layer_id: LayerId, path: Path) -> NodeId {
+    pub(crate) fn init_root(&mut self, layer_stack: LayerStackId, representative: LayerId, path: Path) -> NodeId {
         debug_assert!(self.nodes.is_empty(), "synthetic root must be the first node");
         let id = NodeId(self.nodes.len() as u32);
         let depth = path.prim_element_count() as u16;
         let mut node = Node::new(
-            layer_id,
+            layer_stack,
+            representative,
             path,
             ArcType::Root,
             MapFunction::identity(),
@@ -444,10 +462,12 @@ impl PrimIndexGraph {
     /// is built once at the end of the build by
     /// [`finalize_strength_order`](Self::finalize_strength_order). The returned
     /// handle stays valid for the life of the index.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_child(
         &mut self,
         parent: NodeId,
-        layer_id: LayerId,
+        layer_stack: LayerStackId,
+        representative: LayerId,
         path: Path,
         arc: ArcType,
         map_to_parent: MapFunction,
@@ -475,7 +495,8 @@ impl PrimIndexGraph {
         } as u16;
         let idx = NodeId(self.nodes.len() as u32);
         let mut node = Node::new(
-            layer_id,
+            layer_stack,
+            representative,
             path,
             arc,
             map_to_parent,
@@ -493,33 +514,6 @@ impl PrimIndexGraph {
         }
         self.nodes.push(node);
         idx
-    }
-
-    /// Like [`add_child`](Self::add_child) but for a site spanning several
-    /// sublayers: `layer_stack` lists every contributing `(layer index,
-    /// sublayer offset)`, strongest sublayer first. The first member is the
-    /// site representative; the remaining members are folded into the node's
-    /// layer stack so value resolution reads each sublayer in turn. Panics on
-    /// an empty `layer_stack`.
-    pub(crate) fn add_site_child(
-        &mut self,
-        parent: NodeId,
-        layer_stack: Vec<(LayerId, LayerOffset)>,
-        path: Path,
-        arc: ArcType,
-        map_to_parent: MapFunction,
-        introduced_by_specialize: bool,
-    ) -> NodeId {
-        let id = self.add_child(
-            parent,
-            layer_stack[0].0,
-            path,
-            arc,
-            map_to_parent,
-            introduced_by_specialize,
-        );
-        self.nodes[id.idx()].layer_stack = layer_stack;
-        id
     }
 
     /// Finds a non-inert, non-culled node already on this graph whose site
@@ -995,6 +989,7 @@ mod tests {
 
     fn node(path: &str, namespace_depth: u16) -> Node {
         let mut n = Node::new(
+            LayerStackId::Sublayer(LayerId::from_raw(0)),
             LayerId::from_raw(0),
             Path::from(path),
             ArcType::Inherit,

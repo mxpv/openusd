@@ -19,7 +19,7 @@ use crate::tf::Token;
 use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
-use super::prim_index::PrimIndex;
+use super::prim_index::{node_layer_offsets, PrimIndex};
 use super::{LayerGraph, LayerId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
@@ -414,7 +414,7 @@ impl PrimIndex {
                     Err(err) => return vec![Err(err)],
                 };
                 let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
-                for (layer, offset) in node.layers() {
+                for (layer, offset) in node_layer_offsets(node, stack) {
                     match stack.layer(layer).data().try_field(&query_path, field) {
                         Ok(Some(value)) => out.push(Ok(Opinion {
                             node,
@@ -453,7 +453,7 @@ impl PrimIndex {
             let Ok(query_path) = Self::query_path(node, prop_suffix) else {
                 continue;
             };
-            for (layer, _) in node.layers() {
+            for &(layer, _) in stack.layer_stack(node.layer_stack_id()) {
                 if matches!(stack.layer(layer).data().try_field(&query_path, field), Ok(Some(_))) {
                     return Some((layer, node));
                 }
@@ -477,7 +477,7 @@ impl PrimIndex {
         while let Some(n) = cur {
             if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
                 // Members are strongest-first; apply weakest-first so the strongest wins.
-                for &(layer, _) in n.layer_stack().iter().rev() {
+                for &(layer, _) in stack.layer_stack(n.layer_stack_id()).iter().rev() {
                     if let Ok(dict) = crate::sdf::expr::read_expression_variables(stack.layer(layer).data()) {
                         composed.extend(dict);
                     }

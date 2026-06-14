@@ -57,6 +57,29 @@ impl LayerId {
     }
 }
 
+/// Internal handle to one of a [`LayerGraph`]'s canonical layer stacks: the
+/// stage root layer stack, or the sublayer stack rooted at a single layer.
+///
+/// Every composition [`Node`](super::prim_graph::Node) sits on one of these
+/// stacks — a top-level prim and its relocate/variant/class arcs scan the root
+/// stack, a reference or payload scans the target asset's sublayer stack — so a
+/// node stores this `Copy` handle instead of cloning the stack's members. The
+/// graph owns the members in [`root_stack`](LayerGraph::root_stack) and
+/// [`sublayer_stacks`](LayerGraph::sublayer_stacks); resolve a handle back to
+/// them with [`LayerGraph::layer_stack`].
+///
+/// Keyed by the stack's root (the stage root, or a layer id), so a handle stays
+/// valid across a mute or `subLayers` rebuild even though the resolved members
+/// change. Unlike [`LayerStackIdentifier`], this is not a cross-stage identity
+/// key — it is only meaningful within the [`LayerGraph`] that minted it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum LayerStackId {
+    /// The stage root layer stack (session layers, the root layer, its sublayers).
+    Root,
+    /// The sublayer stack rooted at this layer.
+    Sublayer(LayerId),
+}
+
 /// Stable identity of a stage's root layer stack, by composition input.
 ///
 /// The Rust analog of C++ `PcpLayerStackIdentifier`, which keys a
@@ -585,6 +608,39 @@ impl LayerGraph {
         &self.root_stack
     }
 
+    /// The handle for the stage root layer stack, the ambient a top-level prim
+    /// composes against.
+    pub(crate) fn root_layer_stack_id(&self) -> LayerStackId {
+        LayerStackId::Root
+    }
+
+    /// The handle for the sublayer stack rooted at `root`, the ambient a
+    /// reference or payload to that layer composes against.
+    pub(crate) fn sublayer_stack_id(&self, root: LayerId) -> LayerStackId {
+        LayerStackId::Sublayer(root)
+    }
+
+    /// Resolves a [`LayerStackId`] back to its members (the `(layer id, effective
+    /// offset)` pairs in strength order), reading the precomputed
+    /// [`root_stack`](Self::root_stack) or [`sublayer_stacks`](Self::sublayer_stacks).
+    /// Empty for the sublayer stack of an unknown or muted root layer.
+    pub(crate) fn layer_stack(&self, id: LayerStackId) -> &[(LayerId, LayerOffset)] {
+        match id {
+            LayerStackId::Root => &self.root_stack,
+            LayerStackId::Sublayer(root) => self.sublayer_stack(root),
+        }
+    }
+
+    /// The strongest (representative) layer of the stack `id` — its
+    /// [`layer_stack`](Self::layer_stack)'s first member — or
+    /// [`LayerId::INVALID`] when the stack is empty (an unknown or muted root).
+    pub(crate) fn layer_stack_root(&self, id: LayerStackId) -> LayerId {
+        self.layer_stack(id)
+            .first()
+            .map(|&(li, _)| li)
+            .unwrap_or(LayerId::INVALID)
+    }
+
     /// The layer ids of the stage's root layer stack, as a set (C++ "local"
     /// layers, spec 12.3.4.5). Opinions from these outrank value-clip data.
     pub(crate) fn local_layers(&self) -> HashSet<LayerId> {
@@ -605,15 +661,28 @@ impl LayerGraph {
     /// recoverable relocate diagnostics (C++ `PcpErrorInvalidAuthoredRelocates`
     /// and conflict diagnostics). Run once at construction and again whenever a
     /// `subLayers`/`layerRelocates` edit lands.
-    pub(crate) fn recompute_relocates(&mut self) {
-        let (validated, errors) = validate_layer_relocates(self);
+    ///
+    /// Returns the layers whose validated relocates changed, so a mute toggle
+    /// can fan out to the prims reading them (see
+    /// [`recompose_for_mute_with_fanout`](Self::recompose_for_mute_with_fanout))
+    /// without a separate before/after snapshot. Validation reads only authored
+    /// layer data, so each layer's new pairs are moved out of `validated` rather
+    /// than cloned.
+    pub(crate) fn recompute_relocates(&mut self) -> HashSet<LayerId> {
+        let (mut validated, errors) = validate_layer_relocates(self);
         self.has_relocates = false;
+        let mut changed = HashSet::new();
         for &id in &self.order {
-            let pairs = validated.get(&id).cloned().unwrap_or_default();
+            let pairs = validated.remove(&id).unwrap_or_default();
             self.has_relocates |= !pairs.is_empty();
-            self.nodes.get_mut(&id).expect("layer node exists").relocates = pairs;
+            let node = self.nodes.get_mut(&id).expect("layer node exists");
+            if node.relocates != pairs {
+                changed.insert(id);
+            }
+            node.relocates = pairs;
         }
         self.relocate_errors = errors;
+        changed
     }
 
     /// The current layer-graph diagnostics — sublayer cycles
@@ -641,8 +710,8 @@ impl LayerGraph {
     /// The relocation source for `target` if a layer in `ambient` relocates a
     /// prim onto it (C++ `GetIncrementalRelocatesTargetToSource`). The strongest
     /// layer wins a collision; a deletion relocate has no target and is skipped.
-    pub(crate) fn relocation_source(&self, ambient: &[(LayerId, LayerOffset)], target: &Path) -> Option<Path> {
-        for &(layer, _) in ambient {
+    pub(crate) fn relocation_source(&self, ambient: LayerStackId, target: &Path) -> Option<Path> {
+        for &(layer, _) in self.layer_stack(ambient) {
             let Some(node) = self.nodes.get(&layer) else {
                 continue;
             };
@@ -660,7 +729,7 @@ impl LayerGraph {
     /// drops the relocate whose source is exactly that path.
     pub(crate) fn relocates_expression_at(
         &self,
-        ambient: &[(LayerId, LayerOffset)],
+        ambient: LayerStackId,
         path: &Path,
         exclude_source: Option<&Path>,
     ) -> Option<MapFunction> {
@@ -678,9 +747,9 @@ impl LayerGraph {
 
     /// The as-authored relocates of `ambient`, strongest layer first, duplicate
     /// sources dropped (C++ `GetIncrementalRelocates*`). Not chained.
-    fn incremental_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> RelocateList {
+    fn incremental_relocates(&self, ambient: LayerStackId) -> RelocateList {
         let mut pairs: RelocateList = Vec::new();
-        for &(layer, _) in ambient {
+        for &(layer, _) in self.layer_stack(ambient) {
             let Some(node) = self.nodes.get(&layer) else {
                 continue;
             };
@@ -699,7 +768,7 @@ impl LayerGraph {
     /// authored *under* another's target contributes a combined
     /// pre-relocation-source → final-target pair so a single map application
     /// reaches the final location through nested relocates.
-    pub(crate) fn combined_relocates(&self, ambient: &[(LayerId, LayerOffset)]) -> RelocateList {
+    pub(crate) fn combined_relocates(&self, ambient: LayerStackId) -> RelocateList {
         let mut pairs = self.incremental_relocates(ambient);
         let snapshot = pairs.clone();
         for (source, target) in pairs.iter_mut() {
@@ -749,14 +818,14 @@ impl LayerGraph {
 
     /// Whether a layer in `ambient` authors a relocate whose SOURCE is `source`
     /// (the salted-earth prohibition test). Includes deletion relocates.
-    pub(crate) fn is_relocation_source(&self, ambient: &[(LayerId, LayerOffset)], source: &Path) -> bool {
+    pub(crate) fn is_relocation_source(&self, ambient: LayerStackId, source: &Path) -> bool {
         self.relocation_source_layer(ambient, source).is_some()
     }
 
     /// Identifier of the strongest layer in `ambient` that authors a relocate
     /// whose SOURCE is `source`, or `None`.
-    pub(crate) fn relocation_source_layer(&self, ambient: &[(LayerId, LayerOffset)], source: &Path) -> Option<&str> {
-        ambient.iter().find_map(|&(layer, _)| {
+    pub(crate) fn relocation_source_layer(&self, ambient: LayerStackId, source: &Path) -> Option<&str> {
+        self.layer_stack(ambient).iter().find_map(|&(layer, _)| {
             self.nodes
                 .get(&layer)
                 .filter(|node| node.relocates.iter().any(|(s, _)| s == source))
@@ -825,22 +894,12 @@ impl LayerGraph {
     /// stack become valid once it is pruned. A prim composing against such a layer
     /// through a separate arc keeps no muted layer in its node stacks, so the
     /// structural fanout alone would leave it cached with the old relocate
-    /// structure. Comparing each layer's relocates across the recompose surfaces
-    /// exactly the layers whose validity flipped, and the prims that read them are
-    /// then found by their node stacks.
+    /// structure. The recompose reports exactly the layers whose validated
+    /// relocates flipped, and the prims that read them are then found by their
+    /// node stacks.
     fn recompose_for_mute_with_fanout(&mut self, identifier: &str) -> HashSet<LayerId> {
         let mut affected = self.mute_fanout(identifier);
-        let before: HashMap<LayerId, RelocateList> = self
-            .order
-            .iter()
-            .map(|&id| (id, self.nodes[&id].relocates.clone()))
-            .collect();
-        self.recompose_for_mute();
-        for (id, pairs) in before {
-            if self.nodes[&id].relocates != pairs {
-                affected.insert(id);
-            }
-        }
+        affected.extend(self.recompose_for_mute());
         affected
     }
 
@@ -935,11 +994,12 @@ impl LayerGraph {
     /// changes: the sublayer stacks (rebuilding re-resolves the muted ids), the
     /// sublayer-cycle diagnostics (a cycle through a muted layer no longer
     /// composes), and the relocates, whose validation and conflict scopes both
-    /// drop muted layers.
-    fn recompose_for_mute(&mut self) {
+    /// drop muted layers. Returns the layers whose validated relocates changed
+    /// (from [`recompute_relocates`](Self::recompute_relocates)).
+    fn recompose_for_mute(&mut self) -> HashSet<LayerId> {
         self.rebuild_sublayer_stacks();
         self.recompute_cycle_errors();
-        self.recompute_relocates();
+        self.recompute_relocates()
     }
 
     /// Re-resolves [`muted_identifiers`](Self::muted_identifiers) to interned ids.

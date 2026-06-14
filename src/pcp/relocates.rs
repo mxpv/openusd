@@ -418,7 +418,7 @@ fn collect_layer_maps(
                 if node.arc == ArcType::Relocate {
                     continue;
                 }
-                for (layer, _) in node.layers() {
+                for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                     if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
                         maps.push((layer, node.map_to_root.clone()));
                     }
@@ -451,7 +451,7 @@ fn collect_layer_maps(
             if node.arc == ArcType::Relocate {
                 continue;
             }
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 if relocate_layers.contains(&layer)
                     && !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root)
                 {

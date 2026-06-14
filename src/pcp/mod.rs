@@ -753,7 +753,7 @@ mod tests {
             "recompute picks up the newly authored layerRelocates"
         );
         assert_eq!(
-            graph.relocation_source(&[(id, sdf::LayerOffset::default())], &Path::new("/Grp/B").unwrap()),
+            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/Grp/B").unwrap()),
             Some(Path::new("/Grp/A").unwrap()),
             "recompute re-extracts the per-layer relocate pairs the indexer reads"
         );

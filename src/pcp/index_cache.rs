@@ -690,7 +690,7 @@ impl IndexCache {
 
         for node in index.nodes() {
             let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 if !local_layers.contains(&layer) {
                     continue;
                 }
@@ -979,7 +979,7 @@ impl IndexCache {
         index: PrimIndex,
         context: CompositionContext,
     ) {
-        self.deps.add(path, &index, graph.all_ids());
+        self.deps.add(path, &index, graph);
         self.indices.insert(path.clone(), index);
         self.contexts.insert(path.clone(), context);
     }
@@ -1085,9 +1085,9 @@ impl IndexCache {
     /// graph's layer-stack precomputed state is rebuilt by the muting mutation
     /// itself, so the cache is all that remains. Matches the final composed result
     /// of a [`clear_all_indices`](Self::clear_all_indices) with less recomposition.
-    pub(crate) fn recompose_muted(&mut self, affected: &HashSet<LayerId>) {
+    pub(crate) fn recompose_muted(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         self.bump_revision();
-        self.drop_indices_touching_layers(affected);
+        self.drop_indices_touching_layers(graph, affected);
     }
 
     /// Drop every cached prim index whose composition reads one of the
@@ -1107,7 +1107,7 @@ impl IndexCache {
     /// target root was muted keeps no node for it, so its recorded muted targets
     /// (see [`PrimIndex::muted_external_targets`]) are checked too — without that,
     /// unmuting the target could not find the index to recompose.
-    fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
+    fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         if affected.is_empty() {
             return;
         }
@@ -1123,10 +1123,32 @@ impl IndexCache {
             .indices
             .iter()
             .filter(|(_, index)| {
-                index
-                    .dependency_nodes()
-                    .any(|node| node.layer_stack().iter().any(|&(li, _)| affected.contains(&li)))
-                    || index.muted_external_targets().iter().any(|li| affected.contains(li))
+                // A cached node resolves its `LayerStackId` against the
+                // already-mutated graph here, so the two prongs are both needed and
+                // complementary; correctness rests on the invariant that whenever a
+                // node's stack contained a toggled layer, one of these holds:
+                //   * the frozen `representative` (the stack's strongest member,
+                //     recorded at composition) is in `affected` — this catches a
+                //     toggle of a `Sublayer(L)` stack's own root `L`, whose live
+                //     stack now resolves empty so the member scan would miss it;
+                //   * a surviving resolved member is in `affected` — this catches a
+                //     toggle deeper in the stack (e.g. a root sublayer on a stage
+                //     with session layers, where the representative is a session
+                //     layer outside the fanout but the root layer remains and is in
+                //     `affected`).
+                // The invariant holds because [`mute_fanout`](super::layer_graph::LayerGraph)'s
+                // `ancestors_including` puts every layer whose subtree contains the
+                // toggled one into `affected` (so a sublayer stack's root is always
+                // in it), and the root anchor covers session-layer mutes. Pinned by
+                // `mute_sublayer_drops_root_stack_index` / `mute_keeps_independent_index`;
+                // do not narrow to a representative-only check.
+                index.dependency_nodes().any(|node| {
+                    affected.contains(&node.layer_id())
+                        || graph
+                            .layer_stack(node.layer_stack_id())
+                            .iter()
+                            .any(|&(li, _)| affected.contains(&li))
+                }) || index.muted_external_targets().iter().any(|li| affected.contains(li))
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -1172,7 +1194,7 @@ impl IndexCache {
             let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
                 continue;
             };
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 if let Some(found) = probe(graph.layer(layer), &prop_path) {
                     return Ok(Some(found));
                 }
@@ -1210,7 +1232,7 @@ impl IndexCache {
             return Ok(None);
         };
         for node in index.nodes() {
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 if let Some(ty) = graph.layer(layer).data().spec_type(&node.path) {
                     return Ok(Some(ty));
                 }
@@ -1617,10 +1639,11 @@ impl IndexCache {
                     continue;
                 }
                 let class_path = node.path_at_introduction();
-                let class_layers: Vec<LayerId> = node.layer_stack().iter().map(|(l, _)| *l).collect();
+                let members = graph.layer_stack(node.layer_stack_id());
+                let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
                 let map = index.map_to_root_for_targets(node);
                 let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
-                for (layer, _) in node.layers() {
+                for &(layer, _) in members {
                     let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
                         continue;
                     };
@@ -1660,7 +1683,7 @@ impl IndexCache {
         for c in candidates {
             let target_prim = c.translated.prim_path();
             self.ensure_index(graph, &target_prim)?;
-            if target_prim_inherits_class(self.cached(&target_prim), &c.class_layers, &c.class_path) {
+            if target_prim_inherits_class(self.cached(&target_prim), graph, &c.class_layers, &c.class_path) {
                 instance_targets.insert((c.target, c.property));
             }
         }
@@ -1834,14 +1857,14 @@ impl IndexCache {
             // `LayerGraph::recompute_relocates`, alongside `sublayer_stacks`, so
             // this becomes a lookup (C++ caches these on `PcpLayerStack`).
             if has_relocates {
-                let pairs = graph.combined_relocates(node.layer_stack());
+                let pairs = graph.combined_relocates(node.layer_stack_id());
                 apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);
             }
             // The node's contributing layers fold weakest-first; `layer_stack()`
             // is strongest-first, so it is reversed here. Only the layer index is
             // needed (the offset `layers()` folds in is irrelevant to name
             // composition), so the borrowed slice is reversed in place.
-            for &(layer, _) in node.layer_stack().iter().rev() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
                 let layer_data = graph.layer(layer);
                 append_unseen_names(
                     layer_data,
@@ -1923,7 +1946,7 @@ impl IndexCache {
             let Some(p) = prop_path.replace_prefix(prim_path, &node.path) else {
                 continue;
             };
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 let Some(spec_type) = graph.layer(layer).data().spec_type(&p) else {
                     continue;
                 };
@@ -1973,7 +1996,7 @@ impl IndexCache {
         for node in index.nodes() {
             // A node may carry its full site layer stack; only the layers that
             // author a spec at its path belong in the prim stack.
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 if graph.layer(layer).data().has_spec(&node.path) {
                     stack.push((graph.identifier(layer).to_string(), node.path.clone()));
                 }
@@ -2068,7 +2091,7 @@ impl IndexCache {
         // needed.
         let mut nodes_to_scan: Vec<(Path, LayerId)> = Vec::new();
         for node in parent_index.nodes() {
-            for (layer, _) in node.layers() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
                 nodes_to_scan.push((node.path.clone(), layer));
                 if let Some(name) = path.name() {
                     if let Ok(child_in_node) = node.path.append_path(name) {
@@ -2153,7 +2176,7 @@ impl IndexCache {
     /// Returns `true` when the strongest `permission` opinion at a direct arc's
     /// target site (read across the node's contributing layers) is `private`.
     fn target_is_private(&self, graph: &LayerGraph, node: &Node) -> bool {
-        for (layer, _) in node.layers() {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
             if let Ok(Some(value)) = graph
                 .layer(layer)
                 .data()
@@ -2372,7 +2395,7 @@ impl IndexCache {
         // (strongest first) reversed in place. `seen` dedups names in O(1) while
         // `result` preserves the weakest-position order.
         for node in index.nodes().rev() {
-            for &(layer, _) in node.layer_stack().iter().rev() {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter().rev() {
                 let layer_data = graph.layer(layer);
                 append_unseen_names(
                     layer_data,
@@ -2428,10 +2451,19 @@ struct InstanceCandidate {
 /// from the same `class_layers` layer stack (C++
 /// `_TargetInClassAndTargetsInstance`'s node scan): the target names an instance
 /// of the class.
-fn target_prim_inherits_class(index: &PrimIndex, class_layers: &[LayerId], class_path: &Path) -> bool {
+fn target_prim_inherits_class(
+    index: &PrimIndex,
+    graph: &LayerGraph,
+    class_layers: &[LayerId],
+    class_path: &Path,
+) -> bool {
     index.all_nodes().any(|n| {
         n.arc == ArcType::Inherit
-            && n.layer_stack().iter().map(|(l, _)| *l).eq(class_layers.iter().copied())
+            && graph
+                .layer_stack(n.layer_stack_id())
+                .iter()
+                .map(|(l, _)| *l)
+                .eq(class_layers.iter().copied())
             && n.path.has_prefix(class_path)
     })
 }
@@ -2793,7 +2825,11 @@ def "A" (
             .iter()
             .find(|n| n.flags().contains(NodeFlags::RELOCATE_SOURCE))
             .expect("relocated prim has a relocate source node");
-        let layers: Vec<LayerId> = relocate.layers().map(|(li, _)| li).collect();
+        let layers: Vec<LayerId> = graph
+            .layer_stack(relocate.layer_stack_id())
+            .iter()
+            .map(|&(li, _)| li)
+            .collect();
         let expected: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
         assert_eq!(
             layers, expected,
