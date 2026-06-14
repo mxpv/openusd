@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
+use crate::sdf;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{Path, PathElement, Value};
 
@@ -35,9 +36,15 @@ use super::LayerId;
 /// mints `/__Prototype_N` identities, and answers prototype/instance queries.
 #[derive(Default)]
 pub(super) struct PrototypeRegistry {
-    /// Prototypes keyed by their `/__Prototype_N` root path. Path-keyed so the
-    /// common query direction (path to prototype) is a single lookup.
-    by_root: HashMap<Path, Prototype>,
+    /// Prototypes keyed by their `/__Prototype_N` root path. A namespace-aware
+    /// table so the common query direction (path to prototype) is a single
+    /// lookup, while change invalidation can fan a touched path up to an
+    /// enclosing root and down to nested roots without scanning every entry.
+    by_root: sdf::PathTable<Prototype>,
+    /// Reverse index from each instance's stage path to its `/__Prototype_N`
+    /// root, so a changed path resolves to the prototypes whose instances it
+    /// touches via bounded ancestor/subtree lookups rather than a full scan.
+    by_instance: sdf::PathTable<Path>,
     /// Maps an instancing key to its prototype root, the lookup direction used
     /// only when registering an instance to dedup against an existing key.
     by_key: HashMap<InstanceKey, Path>,
@@ -111,6 +118,7 @@ impl PrototypeRegistry {
             let prototype = self.by_root.get_mut(&root).expect("key index points to a prototype");
             if !prototype.instances.contains(instance) {
                 prototype.instances.push(instance.clone());
+                self.by_instance.insert(instance.clone(), root.clone());
             }
             return (prototype.canonical.clone(), root, false);
         }
@@ -127,6 +135,7 @@ impl PrototypeRegistry {
                 instances: vec![instance.clone()],
             },
         );
+        self.by_instance.insert(instance.clone(), path.clone());
         (instance.clone(), path, true)
     }
 
@@ -174,18 +183,11 @@ impl PrototypeRegistry {
         self.enclosing_root(path.parent()).is_some()
     }
 
-    /// Walks the chain from `start` toward the root and returns the nearest
-    /// `/__Prototype_N` root on it, or `None`. Passing the queried prim starts
-    /// the walk inclusively; passing its parent excludes the prim itself.
+    /// Returns the nearest `/__Prototype_N` root at or above `start`, or `None`.
+    /// Passing the queried prim starts the walk inclusively; passing its parent
+    /// excludes the prim itself.
     fn enclosing_root(&self, start: Option<Path>) -> Option<Path> {
-        let mut node = start;
-        while let Some(current) = node {
-            if self.by_root.contains_key(&current) {
-                return Some(current);
-            }
-            node = current.parent();
-        }
-        None
+        self.by_root.nearest_ancestor(&start?).map(|(root, _)| root.clone())
     }
 
     /// Drops every prototype so stale instance-to-prototype mappings do not
@@ -193,6 +195,7 @@ impl PrototypeRegistry {
     /// instancing query. `count` stays monotonic (see its doc).
     pub(super) fn clear(&mut self) {
         self.by_root.clear();
+        self.by_instance.clear();
         self.by_key.clear();
     }
 
@@ -207,23 +210,30 @@ impl PrototypeRegistry {
     ///
     /// `count` stays monotonic (see its doc), so a re-registered instance mints
     /// a fresh identity rather than reusing a removed prototype's number.
-    //
-    // TODO(perf): the affectedness test scans every prototype's instance list
-    // against every changed path. A reverse `(instance prefix → prototype)`
-    // index would bound it by the change set; left simple while prototype
-    // counts are modest.
+    ///
+    /// Each changed path resolves to the prototypes it could affect through
+    /// bounded lookups: the [`by_root`](Self::by_root) entries nested with it
+    /// (an enclosing root above, or `/__Prototype_N` roots below) and, via the
+    /// [`by_instance`](Self::by_instance) reverse index, the prototypes whose
+    /// instances it is nested with. The cost scales with the change set and the
+    /// touched subtrees, not the total prototype count.
     fn remove_affected(&mut self, changed: &[Path]) -> Vec<Path> {
-        let affected: HashSet<Path> = self
-            .by_root
-            .iter()
-            .filter(|(root, prototype)| {
-                changed.iter().any(|p| {
-                    p.is_nested_with(root) || prototype.instances.iter().any(|instance| p.is_nested_with(instance))
-                })
-            })
-            .map(|(root, _)| root.clone())
-            .collect();
-        self.by_root.retain(|root, _| !affected.contains(root));
+        let mut affected: HashSet<Path> = HashSet::new();
+        for p in changed {
+            for (root, _) in self.by_root.ancestors(p).chain(self.by_root.subtree(p)) {
+                affected.insert(root.clone());
+            }
+            for (_, root) in self.by_instance.ancestors(p).chain(self.by_instance.subtree(p)) {
+                affected.insert(root.clone());
+            }
+        }
+        for root in &affected {
+            if let Some(prototype) = self.by_root.remove(root) {
+                for instance in &prototype.instances {
+                    self.by_instance.remove(instance);
+                }
+            }
+        }
         self.by_key.retain(|_, root| !affected.contains(root));
         affected.into_iter().collect()
     }

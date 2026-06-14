@@ -411,21 +411,20 @@ fn collect_layer_maps(
     // Walk up ancestors. A per-site node fans out into every contributing
     // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
     // through this node's namespace mapping, not just the representative.
-    let mut current = Some(path.clone());
-    while let Some(p) = current {
-        if let Some(cached_index) = indices.get(&p) {
-            for node in cached_index.nodes() {
-                if node.arc == ArcType::Relocate {
-                    continue;
-                }
-                for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
-                    if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
-                        maps.push((layer, node.map_to_root.clone()));
-                    }
+    for (p, cached_index) in indices.ancestors(path) {
+        if p.is_abs_root() {
+            continue;
+        }
+        for node in cached_index.nodes() {
+            if node.arc == ArcType::Relocate {
+                continue;
+            }
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+                if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
+                    maps.push((layer, node.map_to_root.clone()));
                 }
             }
         }
-        current = p.parent().filter(|pp| *pp != Path::abs_root());
     }
 
     // Also search cached prims in the same root subtree for layers with

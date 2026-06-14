@@ -145,6 +145,30 @@ impl<V> PathTable<V> {
         self.nodes.iter().filter_map(|(p, n)| n.value.as_ref().map(|v| (p, v)))
     }
 
+    /// Iterates `(path, &value)` for every value-bearing entry that is `path`
+    /// or an ancestor of it, walking from `path` upward toward the root.
+    ///
+    /// Intermediate ancestor-only nodes are skipped, so the walk yields just
+    /// the entries an inserted value actually sits at. The companion of
+    /// [`subtree`](Self::subtree), which fans out downward.
+    pub fn ancestors<'a>(&'a self, path: &Path) -> impl Iterator<Item = (&'a Path, &'a V)> {
+        path.ancestors().filter_map(move |p| {
+            let (key, node) = self.nodes.get_key_value(&p)?;
+            node.value.as_ref().map(|v| (key, v))
+        })
+    }
+
+    /// Returns the nearest value-bearing entry at or above `path`, or `None`
+    /// when neither `path` nor any ancestor holds a value.
+    pub fn nearest_ancestor(&self, path: &Path) -> Option<(&Path, &V)> {
+        self.ancestors(path).next()
+    }
+
+    /// Returns `true` if `path` or any of its ancestors holds a value.
+    pub fn contains_ancestor(&self, path: &Path) -> bool {
+        self.nearest_ancestor(path).is_some()
+    }
+
     /// Iterates `(path, &value)` for `prefix` and all of its namespace
     /// descendants (C++ `FindSubtreeRange`), depth-first in deterministic order.
     ///
@@ -333,6 +357,21 @@ mod tests {
         let mut got: Vec<&str> = t.subtree(&p("/A/B")).map(|(path, _)| path.as_str()).collect();
         got.sort();
         assert_eq!(got, vec!["/A/B/C", "/A/B/D"]);
+    }
+
+    #[test]
+    fn ancestors_skips_intermediate() {
+        // `/A` is value-bearing, `/A/B` is only an intermediate node, so the
+        // walk from `/A/B/C` yields the deepest value first, then `/A`.
+        let mut t: PathTable<i32> = PathTable::new();
+        t.insert(p("/A"), 1);
+        t.insert(p("/A/B/C"), 3);
+        let got: Vec<(&str, i32)> = t.ancestors(&p("/A/B/C")).map(|(path, v)| (path.as_str(), *v)).collect();
+        assert_eq!(got, vec![("/A/B/C", 3), ("/A", 1)]);
+        assert_eq!(t.nearest_ancestor(&p("/A/B/C")), Some((&p("/A/B/C"), &3)));
+        assert_eq!(t.nearest_ancestor(&p("/A/B")), Some((&p("/A"), &1)));
+        assert!(t.contains_ancestor(&p("/A/B")));
+        assert!(!t.contains_ancestor(&p("/X/Y")));
     }
 
     #[test]

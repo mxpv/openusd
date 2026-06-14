@@ -2210,7 +2210,7 @@ impl IndexCache {
         // so every strict ancestor is checked, not just the parent. Defer without
         // caching an under-seeded result; a later query composes it correctly once
         // the ancestor is cached, and the cycle-closing arc finds no cached target.
-        if self.in_progress.iter().any(|a| a != path && path.has_prefix(a)) {
+        if path.strict_ancestors().any(|a| self.in_progress.contains(&a)) {
             return Ok(());
         }
         // A re-entrant call for a path already mid-build is a class-hierarchy

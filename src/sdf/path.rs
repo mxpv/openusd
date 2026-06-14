@@ -391,6 +391,35 @@ impl Path {
         }
     }
 
+    /// Iterates `self` followed by each strict ancestor, ending with the
+    /// absolute root (C++ `SdfPath::GetAncestorsRange`).
+    ///
+    /// Each step is one [`parent`](Self::parent) hop, so the walk crosses
+    /// property, variant-selection, and prim boundaries exactly as `parent`
+    /// does. The pseudo-root and the empty path yield only themselves.
+    ///
+    /// ```text
+    /// "/A/B/C"  -> "/A/B/C", "/A/B", "/A", "/"
+    /// "/A.attr" -> "/A.attr", "/A", "/"
+    /// "/"       -> "/"
+    /// ```
+    pub fn ancestors(&self) -> impl Iterator<Item = Path> {
+        std::iter::successors(Some(self.clone()), Path::parent)
+    }
+
+    /// Iterates the strict ancestors of `self` — [`ancestors`](Self::ancestors)
+    /// without `self` itself — ending with the absolute root.
+    pub fn strict_ancestors(&self) -> impl Iterator<Item = Path> {
+        self.ancestors().skip(1)
+    }
+
+    /// Iterates `self` and its ancestors from leaf upward, stopping before the
+    /// absolute root — [`ancestors`](Self::ancestors) with the pseudo-root
+    /// trimmed. Empty when `self` is the absolute root.
+    pub fn ancestors_below_root(&self) -> impl Iterator<Item = Path> {
+        self.ancestors().take_while(|p| !p.is_abs_root())
+    }
+
     /// Returns the final component name, or `None` for the pseudo-root and empty paths.
     ///
     /// ```text
@@ -1245,6 +1274,23 @@ mod tests {
             // A parent must make progress — never return the path itself.
             assert_ne!(parent, Some(path), "self-parent on {path:?}");
         }
+    }
+
+    #[test]
+    fn ancestors_walk() {
+        let p = Path::new("/A/B/C.attr").unwrap();
+        let strs = |it: &mut dyn Iterator<Item = Path>| it.map(|a| a.as_str().to_string()).collect::<Vec<_>>();
+        assert_eq!(strs(&mut p.ancestors()), ["/A/B/C.attr", "/A/B/C", "/A/B", "/A", "/"]);
+        // `strict_ancestors` drops self; `ancestors_below_root` drops the root.
+        assert_eq!(strs(&mut p.strict_ancestors()), ["/A/B/C", "/A/B", "/A", "/"]);
+        assert_eq!(
+            strs(&mut p.ancestors_below_root()),
+            ["/A/B/C.attr", "/A/B/C", "/A/B", "/A"]
+        );
+        // The pseudo-root yields only itself, no strict ancestors, nothing below.
+        assert_eq!(Path::abs_root().ancestors().count(), 1);
+        assert_eq!(Path::abs_root().strict_ancestors().count(), 0);
+        assert_eq!(Path::abs_root().ancestors_below_root().count(), 0);
     }
 
     #[test]

@@ -1876,12 +1876,6 @@ impl Stage {
             .collect()
     }
 
-    /// Iterates the prim path and its ancestors from leaf to root, stopping
-    /// before the pseudo-root. Assumes `start` is already a prim path.
-    pub(crate) fn prim_ancestors_inclusive(start: sdf::Path) -> impl Iterator<Item = sdf::Path> {
-        std::iter::successors(Some(start), sdf::Path::parent).take_while(|p| *p != sdf::Path::abs_root())
-    }
-
     /// Borrows the stage's composition cache.
     pub(crate) fn cache(&self) -> Ref<'_, pcp::IndexCache> {
         self.cache.borrow()

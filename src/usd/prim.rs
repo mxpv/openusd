@@ -345,7 +345,7 @@ impl Prim {
         if self.stage.load().load_payloads() {
             return Ok(true);
         }
-        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+        for path in self.path.ancestors_below_root() {
             if has_payload(&self.stage, &path)? {
                 return Ok(false);
             }
@@ -369,7 +369,7 @@ impl Prim {
         if self.path == sdf::Path::abs_root() || !self.stage.has_spec(&self.path)? {
             return Ok(false);
         }
-        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+        for path in self.path.ancestors_below_root() {
             if self.stage.field::<sdf::Specifier>(&path, sdf::FieldKey::Specifier)? == Some(sdf::Specifier::Class) {
                 return Ok(true);
             }
@@ -498,7 +498,7 @@ impl Prim {
         let Some(parent) = self.path.parent() else {
             return Ok(Some(leaf));
         };
-        for ancestor in Stage::prim_ancestors_inclusive(parent) {
+        for ancestor in parent.ancestors_below_root() {
             let kind = self
                 .stage
                 .field::<sdf::Value>(&ancestor, sdf::FieldKey::Kind)?
@@ -524,7 +524,7 @@ impl Prim {
         if !self.stage.has_spec(&self.path)? {
             return Ok(false);
         }
-        for path in Stage::prim_ancestors_inclusive(self.path.clone()) {
+        for path in self.path.ancestors_below_root() {
             if !keep(&self.stage, &path)? {
                 return Ok(false);
             }

@@ -126,10 +126,7 @@ impl Dependencies {
         let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
-        let ancestors = std::iter::successors(Some(site_path.clone()), |p| {
-            (!p.is_abs_root()).then(|| p.parent()).flatten()
-        });
-        Self::dedup_paths(ancestors.filter_map(|p| map.get(&p)))
+        Self::dedup_paths(map.ancestors(site_path).map(|(_, deps)| deps))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
