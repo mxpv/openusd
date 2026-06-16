@@ -32,7 +32,7 @@ pub use copy::{
     copy_spec, copy_spec_with, should_copy_children, should_copy_value, CopyChildren, CopyChildrenArgs, CopyValue,
     CopyValueArgs,
 };
-pub use data::{AbstractData, Data, DataError};
+pub use data::{AbstractData, CowData, Data, DataError};
 pub use expr::Expr;
 pub use file_format::{find_by_extension, find_by_id, FileFormat, FileFormatCaps, WriteSeek};
 pub use layer::{AuthoringError, Layer};

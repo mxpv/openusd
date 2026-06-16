@@ -298,9 +298,10 @@ impl Stage {
     /// the target cannot express fails with
     /// [`StageAuthoringError::OutsideEditTarget`].
     ///
-    /// The replay is atomic: the operations are dry-run against a scratch copy
-    /// of the destination layer first, so an error surfaces before the live
-    /// layer — or any cached composition state — is touched.
+    /// The replay is atomic: every operation stages in the destination layer's
+    /// copy-on-write overlay, and the whole batch commits only once all have
+    /// applied. An operation that fails mid-batch rolls the overlay back, so the
+    /// live layer — and any cached composition state — is left untouched.
     ///
     /// `apply_diff` fires this stage's own `ObjectsChanged`. A bidirectional
     /// mirror that feeds those notices back to the origin must tag or suppress
@@ -315,7 +316,6 @@ impl Stage {
                     .ok_or_else(|| StageAuthoringError::LayerNotFound {
                         layer: identifier.to_string(),
                     })?;
-                self.dry_run(layer_id, |layer| apply_diff_verbatim(layer, diff))?;
                 // The replay authors at the diff's layer-namespace paths, so
                 // the diff's own mapping is what carries the resulting notice
                 // paths back to composed stage namespace — e.g. a
@@ -329,60 +329,12 @@ impl Stage {
                 let layer_id = self.edit_target_layer_id()?;
                 let target = self.edit_target();
                 let translated = translate_diff(diff, &target)?;
-                self.dry_run(layer_id, |layer| {
-                    apply_translated_diff(layer, diff, &target, &translated)
-                })?;
                 self.author_on_layer(layer_id, Some(target.map_function()), |layer| {
                     apply_translated_diff(layer, diff, &target, &translated)
                 })
             }
         }
     }
-
-    /// Run `apply` against a scratch copy of the identified layer's content,
-    /// so any authoring error surfaces before the live layer — and the
-    /// composition invalidation the authoring tail drives — is touched. The
-    /// dry run and the live replay compute the same operations from the same
-    /// starting content, so the live replay does not fail after a clean dry
-    /// run.
-    fn dry_run(
-        &self,
-        layer_id: pcp::LayerId,
-        apply: impl FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
-    ) -> Result<(), StageAuthoringError> {
-        let layers = self.layers();
-        let mut scratch = clone_content(layers.layer(layer_id).data())?;
-        apply(&mut scratch)?;
-        Ok(())
-    }
-}
-
-/// Faithful content copy of `data` into a fresh anonymous layer: every spec
-/// with every field verbatim (child-name lists included), through the raw
-/// [`sdf::AbstractData`] interface so no validation or remapping runs. The
-/// dry run of [`Stage::dry_run`] needs the copy to behave exactly like the
-/// live layer.
-//
-// TODO(perf): this clones the whole layer per `apply_diff`, and the dry run
-// also doubles every value translation and clone. The op-granular [`Edit`]
-// list is the seam for a transactional apply — record each operation's
-// inverse and roll back on failure — which would make atomicity proportional
-// to the diff instead of the layer and retire this dry run.
-fn clone_content(data: &dyn sdf::AbstractData) -> Result<sdf::Layer, sdf::AuthoringError> {
-    let mut scratch = sdf::Layer::new_anonymous("apply-diff-dry-run");
-    let dst = scratch.data_mut();
-    for path in data.spec_paths() {
-        let Some(spec_type) = data.spec_type(&path) else {
-            continue;
-        };
-        dst.create_spec(path.clone(), spec_type);
-        for field in data.list_fields(&path).unwrap_or_default() {
-            if let Some(value) = data.try_field(&path, &field)? {
-                dst.set_field(&path, &field, value.into_owned());
-            }
-        }
-    }
-    Ok(scratch)
 }
 
 /// Apply a [`Diff`]'s operations to `layer` verbatim, at their recorded

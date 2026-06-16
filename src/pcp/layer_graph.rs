@@ -261,13 +261,17 @@ impl LayerGraph {
     /// Returns `(id, fresh)`: an identifier already present is left untouched
     /// (its existing node, children, and relocates survive) and reported as not
     /// fresh, so a re-added layer collapses onto its existing id.
-    fn intern(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
+    fn intern(&mut self, mut layer: sdf::Layer) -> (LayerId, bool) {
         if let Some(&id) = self.by_identifier.get(layer.identifier()) {
             return (id, false);
         }
         let id = LayerId::from_raw(self.next_id);
         self.next_id += 1;
         self.by_identifier.insert(layer.identifier().to_string(), id);
+        // A layer's content is composed fresh as it joins the graph, so any
+        // change record left by prior write-through edits must not survive to
+        // be drained by a later transaction the stage runs on it.
+        layer.discard_changes();
         self.nodes.insert(id, LayerNode::new(layer));
         self.order.push(id);
         (id, true)

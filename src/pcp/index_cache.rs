@@ -3483,22 +3483,26 @@ def "Scope"
         assert!(!cache.has_composition_arc(&graph, &inst)?);
 
         // Author `over "Inst" ( references = </Class> )` through the recording proxy.
-        {
-            let data = graph.get_mut(root_id).unwrap().layer.data_mut();
-            data.create_spec(inst.clone(), sdf::SpecType::Prim);
-            data.set_field(
-                &inst,
-                sdf::FieldKey::Specifier.as_str(),
-                Value::Specifier(sdf::Specifier::Over),
-            );
-            let refs = sdf::ReferenceListOp::explicit([sdf::Reference {
-                prim_path: sdf::path("/Class")?,
-                ..Default::default()
-            }]);
-            data.set_field(&inst, sdf::FieldKey::References.as_str(), Value::ReferenceListOp(refs));
-        }
-        let mut cl = sdf::ChangeList::new();
-        graph.get_mut(root_id).unwrap().layer.drain_changes(&mut cl);
+        let cl = graph
+            .get_mut(root_id)
+            .unwrap()
+            .layer
+            .edit(|l| {
+                let data = l.data_mut();
+                data.create_spec(inst.clone(), sdf::SpecType::Prim);
+                data.set_field(
+                    &inst,
+                    sdf::FieldKey::Specifier.as_str(),
+                    Value::Specifier(sdf::Specifier::Over),
+                );
+                let refs = sdf::ReferenceListOp::explicit([sdf::Reference {
+                    prim_path: sdf::path("/Class").unwrap(),
+                    ..Default::default()
+                }]);
+                data.set_field(&inst, sdf::FieldKey::References.as_str(), Value::ReferenceListOp(refs));
+                Ok(())
+            })
+            .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
@@ -3522,9 +3526,15 @@ def "Scope"
         assert!(cache.has_composition_arc(&graph, &inst)?);
 
         // Erase the /Inst spec through the recording proxy and drive the removal.
-        graph.get_mut(root_id).unwrap().layer.data_mut().erase_spec(&inst);
-        let mut cl = sdf::ChangeList::new();
-        graph.get_mut(root_id).unwrap().layer.drain_changes(&mut cl);
+        let cl = graph
+            .get_mut(root_id)
+            .unwrap()
+            .layer
+            .edit(|l| {
+                l.data_mut().erase_spec(&inst);
+                Ok(())
+            })
+            .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(root_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
@@ -3555,17 +3565,21 @@ def "Scope"
         assert!(!cache.has_composition_arc(&graph, &a)?);
 
         // Author `over "Empty"` into the base layer so the target now exists.
-        {
-            let data = graph.get_mut(base_id).unwrap().layer.data_mut();
-            data.create_spec(sdf::path("/Empty")?, sdf::SpecType::Prim);
-            data.set_field(
-                &sdf::path("/Empty")?,
-                sdf::FieldKey::Specifier.as_str(),
-                Value::Specifier(sdf::Specifier::Over),
-            );
-        }
-        let mut cl = sdf::ChangeList::new();
-        graph.get_mut(base_id).unwrap().layer.drain_changes(&mut cl);
+        let cl = graph
+            .get_mut(base_id)
+            .unwrap()
+            .layer
+            .edit(|l| {
+                let data = l.data_mut();
+                data.create_spec(sdf::path("/Empty").unwrap(), sdf::SpecType::Prim);
+                data.set_field(
+                    &sdf::path("/Empty").unwrap(),
+                    sdf::FieldKey::Specifier.as_str(),
+                    Value::Specifier(sdf::Specifier::Over),
+                );
+                Ok(())
+            })
+            .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(base_id, &cl)]);
         // The inert add routes through the spec tier (not a significant fanout),
@@ -3601,14 +3615,16 @@ def "Scope"
         assert!(!cache.has_composition_arc(&graph, &a)?);
 
         // Author the nested target through the recording proxy.
-        graph
+        let cl = graph
             .get_mut(base_id)
             .unwrap()
             .layer
-            .data_mut()
-            .create_spec(sdf::path("/Parent/Empty")?, sdf::SpecType::Prim);
-        let mut cl = sdf::ChangeList::new();
-        graph.get_mut(base_id).unwrap().layer.drain_changes(&mut cl);
+            .edit(|l| {
+                l.data_mut()
+                    .create_spec(sdf::path("/Parent/Empty").unwrap(), sdf::SpecType::Prim);
+                Ok(())
+            })
+            .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(base_id, &cl)]);
         changes.apply(&mut cache, &mut graph);
@@ -3653,9 +3669,15 @@ def "Scope"
 
         // Erase the over spec on the strong layer through the recording proxy
         // and drive the change the EditProxy recorded.
-        graph.get_mut(strong_id).unwrap().layer.data_mut().erase_spec(&world);
-        let mut cl = sdf::ChangeList::new();
-        graph.get_mut(strong_id).unwrap().layer.drain_changes(&mut cl);
+        let cl = graph
+            .get_mut(strong_id)
+            .unwrap()
+            .layer
+            .edit(|l| {
+                l.data_mut().erase_spec(&world);
+                Ok(())
+            })
+            .unwrap();
         let mut changes = crate::pcp::Changes::new();
         changes.did_change(&cache, &[(strong_id, &cl)]);
         changes.apply(&mut cache, &mut graph);

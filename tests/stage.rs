@@ -3803,7 +3803,7 @@ fn listener_layer_stack_resync() -> Result<()> {
 }
 
 /// A listener may author another edit from within the callback: the re-entrant
-/// `finalize_layer` only takes shared borrows of the listener slot (and the
+/// the authoring tail only takes shared borrows of the listener slot (and the
 /// other cells are released before the fire), so it does not panic.
 #[test]
 fn listener_reentrant_author() -> Result<()> {

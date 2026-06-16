@@ -6,10 +6,12 @@
 //!
 //! Mirroring C++ `SdfChangeList` + `SdfLayerStateDelegateBase`, the list is
 //! produced natively by layer mutations: the recording delegate [`EditProxy`]
-//! wraps a layer's backing [`AbstractData`](super::AbstractData), forwards every
-//! read and write to it, and appends an entry for every write — so any author,
-//! not just `Stage`, yields an authoritative record. Drain it with
-//! [`Layer::drain_changes`](super::Layer::drain_changes).
+//! wraps a backing [`AbstractData`](super::AbstractData), forwards every read to
+//! it, and appends an entry for every write — so any author, not just `Stage`,
+//! yields an authoritative record. A [`Layer`](super::Layer) layers a
+//! [`CowData`](super::CowData) staging overlay over it, so a transaction's
+//! writes can be committed or rolled back; the proxy's [`take`](EditProxy::take)
+//! drains the recorded [`ChangeList`] for composition invalidation.
 //
 // TODO: add `old_path: Option<Path>` and a `RenameChanges` channel for
 // namespace edits once `Layer` exposes a rename API. C++
@@ -170,12 +172,19 @@ impl ChangeList {
     }
 }
 
-/// A write-recording wrapper around a layer's backing [`AbstractData`].
+/// A write-recording wrapper around a backing [`AbstractData`].
 ///
-/// Reads forward verbatim to `inner`. Writes record into a [`ChangeList`] and
-/// then forward. The recorded shape mirrors what composition needs:
-/// spec adds/removes become [`ChangeFlags`] (classified at drain time by the
-/// spec's final state) and field writes become `info_changed` entries.
+/// Reads forward verbatim to `inner`; writes record into a [`ChangeList`] and
+/// then forward. The recorded shape mirrors what composition needs: spec
+/// adds/removes become [`ChangeFlags`] (classified at drain time by the spec's
+/// final state) and field writes become `info_changed` entries. Drain the
+/// record with [`take`](Self::take).
+///
+/// A [`Layer`](super::Layer) wraps the proxy in a [`CowData`](super::CowData)
+/// overlay; outside a transaction the overlay passes writes straight through and
+/// the proxy records them immediately, while inside one the overlay stages them
+/// and replays them through the proxy at commit. The proxy itself is oblivious
+/// to staging — it just records whatever it sees.
 ///
 /// Idempotence is enforced at the source: a `set_field` that does not change
 /// the stored value records nothing, and re-creating an existing spec records
@@ -185,22 +194,23 @@ impl ChangeList {
 /// ancestors) and would otherwise leak as a spurious `specifier` change; its
 /// other field writes are still recorded so the classifier sees the
 /// composition-arc / instancing / activation opinions an `over` carries.
-pub struct EditProxy {
+pub struct EditProxy<T: AbstractData> {
     /// Changes accumulated since the last drain.
     changes: ChangeList,
     /// Specs created since the last drain. Classified into add flags at drain
     /// time from the inner spec's final state, and used to suppress
     /// `info_changed` for their own field writes.
     created: HashSet<Path>,
-    /// The real backend (in-memory [`Data`](super::Data), lazy crate reader, …).
-    inner: Box<dyn AbstractData>,
+    /// The wrapped backend (in-memory [`Data`](super::Data), lazy crate reader,
+    /// …).
+    inner: T,
 }
 
-impl EditProxy {
-    /// Wrap `inner`, starting with an empty change record. Construct the
-    /// backend fully *before* wrapping (the "wrap last" rule) so populating it
-    /// records nothing — only post-wrap edits are tracked.
-    pub fn new(inner: Box<dyn AbstractData>) -> Self {
+impl<T: AbstractData> EditProxy<T> {
+    /// Wrap `inner`, starting with an empty change record. Construct and
+    /// populate the backend fully *before* wrapping it (the "wrap last" rule) so
+    /// populating it records nothing — only post-wrap edits are tracked.
+    pub fn new(inner: T) -> Self {
         Self {
             changes: ChangeList::new(),
             created: HashSet::new(),
@@ -208,13 +218,17 @@ impl EditProxy {
         }
     }
 
-    /// Borrow the wrapped backend directly, bypassing the recording layer. The
-    /// read path ([`Layer::data`](super::Layer::data)) uses this so composition
-    /// reads dispatch straight to the backend instead of forwarding through the
-    /// proxy. There is deliberately no mutable counterpart — every write goes
-    /// through the recording proxy.
+    /// Borrow the wrapped backend for reads, bypassing the recording layer.
     pub fn inner(&self) -> &dyn AbstractData {
-        self.inner.as_ref()
+        &self.inner
+    }
+
+    /// Mutably borrow the wrapped backend, bypassing recording. A write made
+    /// through this is *not* captured in the change record, so it is for
+    /// out-of-band setup (or for a wrapper to reach its inner layer), not for
+    /// authoring scene description that composition must see.
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 
     /// Whether any change has been recorded since the last drain. Mirrors C++
@@ -224,7 +238,7 @@ impl EditProxy {
     }
 
     /// Finalize the recorded changes and move them into `out`, leaving this
-    /// proxy's buffers empty but allocation-warm for the next edit.
+    /// proxy's record empty but allocation-warm for the next edit.
     ///
     /// Finalization classifies each spec created since the last drain by its
     /// inner final state: a `def`/`class` prim is a non-inert add, an `over`
@@ -235,7 +249,7 @@ impl EditProxy {
         self.changes.append_to(out);
     }
 
-    /// Discard the recorded changes without applying them.
+    /// Discard the recorded changes without draining them.
     pub fn clear(&mut self) {
         self.changes.clear();
         self.created.clear();
@@ -248,7 +262,7 @@ impl EditProxy {
                 continue;
             };
             let flag = match ty {
-                SpecType::Prim => match specifier_of(&*self.inner, path) {
+                SpecType::Prim => match specifier_of(&self.inner, path) {
                     Some(Specifier::Over) | None => ChangeFlags::ADD_INERT_PRIM,
                     Some(_) => ChangeFlags::ADD_NON_INERT_PRIM,
                 },
@@ -289,7 +303,7 @@ impl EditProxy {
     }
 }
 
-impl AbstractData for EditProxy {
+impl<T: AbstractData> AbstractData for EditProxy<T> {
     fn has_spec(&self, path: &Path) -> bool {
         self.inner.has_spec(path)
     }
@@ -319,7 +333,7 @@ impl AbstractData for EditProxy {
         // the removal of the old spec, and — for a prim — surface its authored
         // fields the way `erase_spec` does, so a structural opinion the replace
         // tears down still reaches the classifier.
-        if let Some(flag) = remove_flag(&*self.inner, &path) {
+        if let Some(flag) = remove_flag(&self.inner, &path) {
             self.changes.entry_mut(&path).flags |= flag;
             if flag.intersects(ChangeFlags::REMOVE_INERT_PRIM | ChangeFlags::REMOVE_NON_INERT_PRIM) {
                 self.note_existing_fields(&path);
@@ -362,7 +376,7 @@ impl AbstractData for EditProxy {
             self.inner.erase_spec(path);
             return;
         }
-        if let Some(flag) = remove_flag(&*self.inner, path) {
+        if let Some(flag) = remove_flag(&self.inner, path) {
             self.changes.entry_mut(path).flags |= flag;
             // A removed prim spec surfaces its authored fields (except the
             // always-present `specifier`) so the classifier can tell a structural
@@ -461,9 +475,16 @@ mod tests {
         field == FieldKey::Specifier.as_str()
     }
 
+    /// Wrap `data` in a recording proxy. The recorder is what these tests
+    /// exercise, so the backend is a plain [`Data`]; the staging lifecycle is
+    /// tested on [`CowData`](super::CowData) in `data.rs`.
+    fn proxy(data: Data) -> EditProxy<Data> {
+        EditProxy::new(data)
+    }
+
     /// Authors an `over` carrying a `references` opinion through `proxy` in one
     /// window, the way `define_prim` / `override_prim` + `add_reference` do.
-    fn create_over_with_reference(proxy: &mut EditProxy, path: &Path) {
+    fn create_over_with_reference(proxy: &mut EditProxy<Data>, path: &Path) {
         proxy.create_spec(path.clone(), SpecType::Prim);
         proxy.set_field(path, FieldKey::Specifier.as_str(), Value::Specifier(Specifier::Over));
         proxy.set_field(
@@ -478,7 +499,7 @@ mod tests {
     /// `specifier`.
     #[test]
     fn created_over_records_arc_not_specifier() {
-        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        let mut proxy = proxy(Data::new());
         create_over_with_reference(&mut proxy, &p("/X"));
 
         let mut cl = ChangeList::new();
@@ -493,7 +514,7 @@ mod tests {
     /// and no spurious `specifier` change — the auto-created-ancestor case.
     #[test]
     fn created_over_suppresses_specifier() {
-        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        let mut proxy = proxy(Data::new());
         proxy.create_spec(p("/X"), SpecType::Prim);
         proxy.set_field(
             &p("/X"),
@@ -527,7 +548,7 @@ mod tests {
             Value::ReferenceListOp(ReferenceListOp::default()),
         );
 
-        let mut proxy = EditProxy::new(Box::new(data));
+        let mut proxy = proxy(data);
         proxy.erase_spec(&p("/X"));
 
         let mut cl = ChangeList::new();
@@ -557,7 +578,7 @@ mod tests {
             Value::ReferenceListOp(ReferenceListOp::default()),
         );
 
-        let mut proxy = EditProxy::new(Box::new(data));
+        let mut proxy = proxy(data);
         // Re-create /X as a plain `over` with no references, in one window.
         proxy.create_spec(p("/X"), SpecType::Prim);
         proxy.set_field(
@@ -578,7 +599,7 @@ mod tests {
     /// change.
     #[test]
     fn created_then_erased_cancels() {
-        let mut proxy = EditProxy::new(Box::new(Data::new()));
+        let mut proxy = proxy(Data::new());
         create_over_with_reference(&mut proxy, &p("/X"));
         proxy.erase_spec(&p("/X"));
 
@@ -601,7 +622,7 @@ mod tests {
             Value::Specifier(Specifier::Over),
         );
 
-        let mut proxy = EditProxy::new(Box::new(data));
+        let mut proxy = proxy(data);
         proxy.create_spec(p("/X"), SpecType::Prim);
         proxy.erase_spec(&p("/X"));
 

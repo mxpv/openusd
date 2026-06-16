@@ -3,7 +3,10 @@
 //! Parallels C++ `SdfData`. A flat map from [`Path`] to [`SpecData`] that can
 //! be populated programmatically and then handed to a writer.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use anyhow::Result;
 
@@ -253,6 +256,343 @@ impl AbstractData for Data {
     }
 }
 
+impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
+    fn has_spec(&self, path: &Path) -> bool {
+        (**self).has_spec(path)
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        (**self).has_field(path, field)
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        (**self).spec_type(path)
+    }
+
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        (**self).try_field(path, field)
+    }
+
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
+        (**self).list_fields(path)
+    }
+
+    fn spec_paths(&self) -> Vec<Path> {
+        (**self).spec_paths()
+    }
+
+    fn create_spec(&mut self, path: Path, ty: SpecType) {
+        (**self).create_spec(path, ty)
+    }
+
+    fn erase_spec(&mut self, path: &Path) {
+        (**self).erase_spec(path)
+    }
+
+    fn set_field(&mut self, path: &Path, field: &str, value: Value) {
+        (**self).set_field(path, field, value)
+    }
+
+    fn erase_field(&mut self, path: &Path, field: &str) {
+        (**self).erase_field(path, field)
+    }
+}
+
+/// A copy-on-write staging layer over a base [`AbstractData`].
+///
+/// Writes stage in an overlay, leaving `base` untouched until
+/// [`commit`](Self::commit) flushes the staged patch or
+/// [`rollback`](Self::rollback) discards it for free; reads return the
+/// staged-over-base view. A self-contained staging primitive — for example a
+/// layer wraps it (behind a recording proxy) so an authoring transaction can be
+/// applied or abandoned wholesale.
+///
+/// The overlay is field-granular: editing one field of a pre-existing spec
+/// stages only that field, so an untouched sibling field — even a large array or
+/// time-sample value — is never copied. A newly created spec stages its full
+/// field set, since it has no base to read through to.
+pub struct CowData<T: AbstractData> {
+    base: T,
+    /// Per-spec staged changes keyed by path; see [`Patch`]. Empty until a write
+    /// stages a change, so every read passes straight through to `base`.
+    overlay: HashMap<Path, Patch>,
+}
+
+/// A staged change to one spec in a [`CowData`] overlay.
+enum Patch {
+    /// A spec created (or re-created, replacing a base spec) this transaction.
+    /// Holds its whole field set, so reads ignore the base and commit
+    /// reproduces it wholesale.
+    Created(SpecData),
+    /// A pre-existing base spec erased in the overlay.
+    Tombstone,
+    /// A pre-existing base spec with field-level edits staged over it. Only the
+    /// touched fields are stored; untouched fields read through to the base.
+    Edited {
+        /// Fields set or overwritten this transaction, in first-touch order.
+        /// Disjoint from `erased`.
+        set: Vec<(String, Value)>,
+        /// Fields removed from the base this transaction. Disjoint from `set`.
+        erased: HashSet<String>,
+    },
+}
+
+impl Patch {
+    /// A fresh field-level edit over a pre-existing base spec, with no staged
+    /// field writes and the given erased fields.
+    fn edited(erased: HashSet<String>) -> Self {
+        Patch::Edited {
+            set: Vec::new(),
+            erased,
+        }
+    }
+}
+
+impl<T: AbstractData> CowData<T> {
+    /// Wrap `base` with an empty overlay.
+    pub fn new(base: T) -> Self {
+        Self {
+            base,
+            overlay: HashMap::new(),
+        }
+    }
+
+    /// Whether the overlay holds no staged change — every read passes straight
+    /// through to `base`.
+    pub fn is_empty(&self) -> bool {
+        self.overlay.is_empty()
+    }
+
+    /// Flush every staged patch into `base` and clear the overlay. A
+    /// [`Created`](Patch::Created) spec is recreated with its fields, an
+    /// [`Edited`](Patch::Edited) spec replays its set and erased fields onto the
+    /// base, and a [`Tombstone`](Patch::Tombstone) erases the base spec.
+    /// O(touched fields).
+    pub fn commit(&mut self) {
+        for (path, patch) in self.overlay.drain() {
+            match patch {
+                Patch::Created(spec) => {
+                    self.base.create_spec(path.clone(), spec.ty);
+                    for (field, value) in spec.fields {
+                        self.base.set_field(&path, &field, value);
+                    }
+                }
+                Patch::Tombstone => self.base.erase_spec(&path),
+                Patch::Edited { set, erased } => {
+                    for (field, value) in set {
+                        self.base.set_field(&path, &field, value);
+                    }
+                    for field in erased {
+                        self.base.erase_field(&path, &field);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drop the staged patch, restoring the base view. Free — `base` was never
+    /// written.
+    pub fn rollback(&mut self) {
+        self.overlay.clear();
+    }
+
+    /// Consume the staging layer and return the base backend. Pending staged
+    /// edits are discarded; [`commit`](Self::commit) first to keep them.
+    pub fn into_inner(self) -> T {
+        self.base
+    }
+
+    /// Borrow the base backend.
+    pub fn base(&self) -> &T {
+        &self.base
+    }
+
+    /// Mutably borrow the base backend, bypassing the overlay. A caller that
+    /// writes through this skips staging entirely; it must keep the overlay
+    /// empty (e.g. only write through here when no edit is staged), or a staged
+    /// change would shadow the write on reads.
+    pub fn base_mut(&mut self) -> &mut T {
+        &mut self.base
+    }
+
+    /// The staged patch for `path`, or `None` when the read should fall through
+    /// to `base` — both when the overlay is entirely empty (the committed steady
+    /// state, kept lookup-free) and when this path is simply unstaged.
+    fn staged(&self, path: &Path) -> Option<&Patch> {
+        if self.overlay.is_empty() {
+            None
+        } else {
+            self.overlay.get(path)
+        }
+    }
+}
+
+impl<T: AbstractData> AbstractData for CowData<T> {
+    fn has_spec(&self, path: &Path) -> bool {
+        match self.staged(path) {
+            Some(Patch::Tombstone) => false,
+            // `Edited` exists only over a base spec, so the spec is present.
+            Some(_) => true,
+            None => self.base.has_spec(path),
+        }
+    }
+
+    fn has_field(&self, path: &Path, field: &str) -> bool {
+        match self.staged(path) {
+            Some(Patch::Created(spec)) => spec.contains(field),
+            Some(Patch::Tombstone) => false,
+            Some(Patch::Edited { set, erased }) => {
+                !erased.contains(field) && (set.iter().any(|(f, _)| f == field) || self.base.has_field(path, field))
+            }
+            None => self.base.has_field(path, field),
+        }
+    }
+
+    fn spec_type(&self, path: &Path) -> Option<SpecType> {
+        match self.staged(path) {
+            Some(Patch::Created(spec)) => Some(spec.ty),
+            Some(Patch::Tombstone) => None,
+            Some(Patch::Edited { .. }) | None => self.base.spec_type(path),
+        }
+    }
+
+    fn try_field(&self, path: &Path, field: &str) -> Result<Option<Cow<'_, Value>>, DataError> {
+        match self.staged(path) {
+            Some(Patch::Created(spec)) => Ok(spec.get(field).map(Cow::Borrowed)),
+            Some(Patch::Tombstone) => Ok(None),
+            Some(Patch::Edited { set, erased }) => {
+                if erased.contains(field) {
+                    Ok(None)
+                } else if let Some((_, value)) = set.iter().find(|(f, _)| f == field) {
+                    Ok(Some(Cow::Borrowed(value)))
+                } else {
+                    self.base.try_field(path, field)
+                }
+            }
+            None => self.base.try_field(path, field),
+        }
+    }
+
+    fn list_fields(&self, path: &Path) -> Option<Vec<String>> {
+        match self.staged(path) {
+            Some(Patch::Created(spec)) => Some(spec.fields.iter().map(|(k, _)| k.clone()).collect()),
+            Some(Patch::Tombstone) => None,
+            Some(Patch::Edited { set, erased }) => {
+                // Base fields in authored order minus the erased ones, then the
+                // newly-set fields appended — the same order commit reproduces.
+                let mut names: Vec<String> = self
+                    .base
+                    .list_fields(path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|f| !erased.contains(f))
+                    .collect();
+                // TODO(perf): the dedup is `names.iter().any` per staged field,
+                // O(base × set). `set` is tiny for a typical edit (a handful of
+                // fields), and this only runs while the overlay is dirty; a
+                // name set would beat it only for specs edited many-fields-wide.
+                for (field, _) in set {
+                    if !names.iter().any(|n| n == field) {
+                        names.push(field.clone());
+                    }
+                }
+                Some(names)
+            }
+            None => self.base.list_fields(path),
+        }
+    }
+
+    fn spec_paths(&self) -> Vec<Path> {
+        if self.overlay.is_empty() {
+            return self.base.spec_paths();
+        }
+        // TODO(perf): `base.spec_paths()` is already sorted, but splicing in the
+        // staged-created paths forces a full re-sort of the merged list; a sorted
+        // merge would avoid it. Only runs mid-transaction, while the overlay is
+        // dirty.
+        let mut paths: Vec<Path> = self
+            .base
+            .spec_paths()
+            .into_iter()
+            .filter(|p| !matches!(self.overlay.get(p), Some(Patch::Tombstone)))
+            .collect();
+        for (path, patch) in &self.overlay {
+            if matches!(patch, Patch::Created(_)) && !self.base.has_spec(path) {
+                paths.push(path.clone());
+            }
+        }
+        paths.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        paths
+    }
+
+    fn create_spec(&mut self, path: Path, ty: SpecType) {
+        self.overlay.insert(path, Patch::Created(SpecData::new(ty)));
+    }
+
+    fn erase_spec(&mut self, path: &Path) {
+        if self.base.has_spec(path) {
+            self.overlay.insert(path.clone(), Patch::Tombstone);
+        } else {
+            // A spec that never reached the base needs no tombstone; dropping the
+            // staged entry restores the (absent) base view.
+            self.overlay.remove(path);
+        }
+    }
+
+    fn set_field(&mut self, path: &Path, field: &str, value: Value) {
+        // Ensure an overlay entry before the mutating match: a pre-existing base
+        // spec gets an empty `Edited` patch on first touch (no field copy), and
+        // a write to an absent spec is dropped (matching the eager backends).
+        if !self.overlay.contains_key(path) {
+            if self.base.has_spec(path) {
+                self.overlay.insert(path.clone(), Patch::edited(HashSet::new()));
+            } else {
+                debug_assert!(false, "set_field on absent spec at {path}");
+                return;
+            }
+        }
+        match self.overlay.get_mut(path).expect("entry ensured above") {
+            Patch::Created(spec) => spec.add(field, value),
+            Patch::Edited { set, erased } => {
+                erased.remove(field);
+                match set.iter_mut().find(|(f, _)| f == field) {
+                    Some(slot) => slot.1 = value,
+                    None => set.push((field.to_owned(), value)),
+                }
+            }
+            Patch::Tombstone => debug_assert!(false, "set_field on erased spec at {path}"),
+        }
+    }
+
+    fn erase_field(&mut self, path: &Path, field: &str) {
+        // Whether the base holds the field decides if the erase must outlive as a
+        // tombstone; read it before borrowing the overlay mutably.
+        let base_has_field = self.base.has_field(path, field);
+        if !self.overlay.contains_key(path) {
+            // First touch of a pre-existing spec: only a base field needs an
+            // erased entry; a staged-only spec has nothing to erase.
+            if base_has_field {
+                let mut erased = HashSet::new();
+                erased.insert(field.to_owned());
+                self.overlay.insert(path.clone(), Patch::edited(erased));
+            }
+            return;
+        }
+        match self.overlay.get_mut(path).expect("entry present") {
+            Patch::Created(spec) => {
+                spec.remove(field);
+            }
+            Patch::Tombstone => {}
+            Patch::Edited { set, erased } => {
+                set.retain(|(f, _)| f != field);
+                if base_has_field {
+                    erased.insert(field.to_owned());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +660,130 @@ mod tests {
         assert_eq!(copy.len(), 2);
         assert_eq!(copy.list_fields(&root).unwrap(), vec!["primChildren", "kind"]);
         assert_eq!(copy.get_field(&child, "specifier").unwrap().into_owned(), Value::Int(0));
+    }
+
+    /// Reads see the staged-over-base view while the base is left untouched
+    /// until commit.
+    #[test]
+    fn cow_reads_through() {
+        let mut base = Data::new();
+        let a = path("/A").unwrap();
+        base.create_spec(a.clone(), SpecType::Prim);
+        base.spec_mut(&a).unwrap().add("kind", Value::Token("group".into()));
+
+        let mut cow = CowData::new(base);
+        assert!(cow.is_empty());
+        assert!(cow.has_spec(&a));
+        assert_eq!(cow.get_field(&a, "kind").unwrap().into_owned(), Value::token("group"));
+
+        cow.set_field(&a, "kind", Value::token("component"));
+        assert!(!cow.is_empty());
+        assert_eq!(
+            cow.get_field(&a, "kind").unwrap().into_owned(),
+            Value::token("component")
+        );
+        // The base still holds the original opinion: the write only staged.
+        let base = cow.into_inner();
+        assert_eq!(base.get_field(&a, "kind").unwrap().into_owned(), Value::token("group"));
+    }
+
+    /// `commit` flushes the staged patch into the base — added specs, modified
+    /// fields, and tombstoned removals alike.
+    #[test]
+    fn cow_commit_flushes() {
+        let mut base = Data::new();
+        let keep = path("/Keep").unwrap();
+        let doomed = path("/Doomed").unwrap();
+        base.create_spec(keep.clone(), SpecType::Prim);
+        base.create_spec(doomed.clone(), SpecType::Prim);
+
+        let mut cow = CowData::new(base);
+        let fresh = path("/Fresh").unwrap();
+        cow.create_spec(fresh.clone(), SpecType::Prim);
+        cow.set_field(&keep, "kind", Value::token("group"));
+        cow.erase_spec(&doomed);
+        cow.commit();
+        assert!(cow.is_empty());
+
+        let base = cow.into_inner();
+        assert!(base.has_spec(&fresh));
+        assert!(!base.has_spec(&doomed));
+        assert_eq!(
+            base.get_field(&keep, "kind").unwrap().into_owned(),
+            Value::token("group")
+        );
+    }
+
+    /// `rollback` drops the staged patch, leaving the base exactly as it was.
+    #[test]
+    fn cow_rollback_restores() {
+        let mut base = Data::new();
+        let a = path("/A").unwrap();
+        base.create_spec(a.clone(), SpecType::Prim);
+
+        let mut cow = CowData::new(base);
+        cow.create_spec(path("/B").unwrap(), SpecType::Prim);
+        cow.erase_spec(&a);
+        cow.rollback();
+
+        assert!(cow.is_empty());
+        assert!(cow.has_spec(&a));
+        assert!(!cow.has_spec(&path("/B").unwrap()));
+    }
+
+    /// `spec_paths` is the base specs minus tombstones, plus staged additions,
+    /// in sorted order.
+    #[test]
+    fn cow_spec_paths_merge() {
+        let mut base = Data::new();
+        base.create_spec(path("/B").unwrap(), SpecType::Prim);
+        base.create_spec(path("/D").unwrap(), SpecType::Prim);
+
+        let mut cow = CowData::new(base);
+        cow.create_spec(path("/A").unwrap(), SpecType::Prim);
+        cow.erase_spec(&path("/D").unwrap());
+
+        let paths = cow.spec_paths();
+        let paths: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
+        assert_eq!(paths, vec!["/A", "/B"]);
+    }
+
+    /// Editing one field of a pre-existing spec stages only that field;
+    /// untouched fields still read through to the base, and `list_fields`
+    /// reports the base order with the new field appended. Erasing a base field
+    /// hides it from reads while leaving siblings intact.
+    #[test]
+    fn cow_field_granular() {
+        let mut base = Data::new();
+        let a = path("/A").unwrap();
+        base.create_spec(a.clone(), SpecType::Prim);
+        let spec = base.spec_mut(&a).unwrap();
+        spec.add("kind", Value::Token("group".into()));
+        spec.add("doc", Value::String("hi".into()));
+
+        let mut cow = CowData::new(base);
+        cow.set_field(&a, "kind", Value::token("component"));
+        cow.set_field(&a, "custom", Value::Bool(true));
+        cow.erase_field(&a, "doc");
+
+        // Touched field staged, untouched-but-present field reads through base,
+        // erased field hidden, new field visible.
+        assert_eq!(
+            cow.get_field(&a, "kind").unwrap().into_owned(),
+            Value::token("component")
+        );
+        assert_eq!(cow.get_field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
+        assert!(!cow.has_field(&a, "doc"));
+        assert_eq!(cow.list_fields(&a).unwrap(), vec!["kind", "custom"]);
+
+        cow.commit();
+        let base = cow.into_inner();
+        assert_eq!(
+            base.get_field(&a, "kind").unwrap().into_owned(),
+            Value::token("component")
+        );
+        assert_eq!(base.get_field(&a, "custom").unwrap().into_owned(), Value::Bool(true));
+        assert!(!base.has_field(&a, "doc"));
+        assert_eq!(base.list_fields(&a).unwrap(), vec!["kind", "custom"]);
     }
 }

@@ -28,15 +28,16 @@ fn change_list_empty_until_entry() {
     assert!(!cl.is_empty());
 }
 
-/// A blank in-memory backend with a pseudo-root, wrapped fresh in a proxy.
-fn proxy() -> sdf::EditProxy {
+/// A blank in-memory backend with a pseudo-root, wrapped fresh in a recording
+/// proxy.
+fn proxy() -> sdf::EditProxy<sdf::Data> {
     let mut data = sdf::Data::new();
     data.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
-    sdf::EditProxy::new(Box::new(data))
+    sdf::EditProxy::new(data)
 }
 
 /// Drain a proxy into a fresh list.
-fn drained(p: &mut sdf::EditProxy) -> sdf::ChangeList {
+fn drained(p: &mut sdf::EditProxy<sdf::Data>) -> sdf::ChangeList {
     let mut cl = sdf::ChangeList::new();
     p.take(&mut cl);
     cl
@@ -123,7 +124,7 @@ fn replacing_existing_spec_records() {
 /// pseudo-root must not swallow the `defaultPrim` write that follows.
 #[test]
 fn metadata_creating_pseudo_root_records() {
-    let mut p = sdf::EditProxy::new(Box::new(sdf::Data::new()));
+    let mut p = sdf::EditProxy::new(sdf::Data::new());
     p.create_spec(sdf::Path::abs_root(), sdf::SpecType::PseudoRoot);
     p.set_field(
         &sdf::Path::abs_root(),

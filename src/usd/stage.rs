@@ -605,12 +605,8 @@ pub struct StageInner {
     /// construction. Stamped onto stage-bound edit targets and read by the
     /// cross-stage guard, both without recomputing.
     layer_stack_id: pcp::LayerStackIdentifier,
-    /// Reusable buffer that each authoring op drains its layer's recorded
-    /// [`sdf::ChangeList`] into, so classification doesn't allocate a fresh
-    /// list per edit. Cleared at the start of every [`StageInner::finalize_layer`].
-    change_scratch: RefCell<sdf::ChangeList>,
     /// Optional change listener (C++ `UsdNotice` registration), fired by
-    /// [`Stage::finalize_layer`] after each successful edit. A single slot:
+    /// [`Stage::apply_change_set`] after each successful edit. A single slot:
     /// callers fan out to multiple sinks inside their own closure. Boxed for
     /// single ownership; the fire path holds a shared borrow across the call,
     /// so the callback must not install or clear the listener.
@@ -1092,7 +1088,9 @@ impl Stage {
     /// describes what was authored; an empty list means "no mutation
     /// happened" and skips invalidation.
     ///
-    /// On any post-mutation error the cache falls back to "blow the world".
+    /// On an authoring error the layer's [`edit`](sdf::Layer::edit) has already
+    /// rolled back — the staged edits vanish and the backend is untouched — so
+    /// the cache stays valid and no invalidation is needed.
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<(), sdf::AuthoringError>,
@@ -1100,7 +1098,7 @@ impl Stage {
         // Read the target identifier and mapped spec path under a short borrow
         // of `edit_target` (which owns a heap `MapFunction`), releasing it
         // before the layer borrow below. The mapping is cloned out (rather than
-        // borrowed across `finalize_layer`) because the listener it ultimately
+        // borrowed across the authoring call) because the listener it ultimately
         // feeds can re-author and re-target the stage; clone it only when a
         // listener is installed to consume it, keeping the common no-listener
         // authoring path allocation-free.
@@ -1119,15 +1117,15 @@ impl Stage {
                 notify.then(|| target.mapping.clone()),
             )
         };
-        let (layer_id, authored) = {
+        let (layer_id, edited) = {
             let mut layers = self.layers.borrow_mut();
             let layer_id = layers
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            (layer_id, f(&mut node.layer, spec_path))
+            (layer_id, node.layer.edit(|layer| f(layer, spec_path)))
         };
-        self.finalize_layer(layer_id, authored, mapping.as_ref())
+        self.apply_authored(layer_id, edited, mapping.as_ref())
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
@@ -1180,7 +1178,7 @@ impl Stage {
     /// [`Stage::apply_diff`].
     ///
     /// `mapping` is the edit target's namespace mapping forwarded to
-    /// [`Self::finalize_layer`] for the change notice, or `None` when the edit
+    /// [`Self::apply_authored`] for the change notice, or `None` when the edit
     /// authored at stage-namespace paths verbatim.
     pub(super) fn author_on_layer<F>(
         &self,
@@ -1191,103 +1189,78 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
     {
-        let authored = {
+        // Run `f` as one atomic transaction: a multi-edit replay (`apply_diff`)
+        // that fails midway rolls back wholesale, leaving the layer and cache
+        // untouched.
+        let edited = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            f(&mut node.layer)
+            node.layer.edit(f)
         };
-        self.finalize_layer(layer_id, authored, mapping).map(|_| ())
+        self.apply_authored(layer_id, edited, mapping).map(|_| ())
     }
 
-    /// Drain the layer's recorded changes after an authoring call and drive
-    /// composition invalidation from them. On success the layer's `EditProxy`
-    /// change list is taken and classified through [`pcp::Changes`]: an empty
-    /// list short-circuits with no invalidation, a non-empty one is applied. On
-    /// failure the partial record is discarded and the cache falls back to a
-    /// stage-wide blow-out, because the layer may be in a partial state.
+    /// Interpret a [`Layer::edit`](sdf::Layer::edit) result and drive
+    /// composition invalidation. An empty change list means nothing was authored
+    /// (`Ok(false)`); a non-empty one is applied through
+    /// [`Self::apply_change_set`] (`Ok(true)`); an authoring error — after
+    /// `edit` has already rolled the layer back, leaving it and the cache
+    /// untouched — surfaces as [`StageAuthoringError::Layer`]. The shared tail of
+    /// the stage authoring helpers.
     ///
     /// `mapping` is the edit target's namespace mapping (layer source to stage
     /// target), used to translate the change record's layer-namespace paths back
     /// to stage namespace for the notice. `None` means identity — a root or
     /// metadata edit whose paths are already in stage namespace.
-    //
-    // TODO: the error-path fallback to layer-stack-wide reset is
-    // conservative. Once `Layer` authoring methods either complete
-    // atomically or return a "partial mutation up to here" marker, the
-    // fallback can be narrowed to just the paths the closure touched
-    // before failing.
-    fn finalize_layer(
+    fn apply_authored(
         &self,
         layer_id: pcp::LayerId,
-        authored: Result<(), sdf::AuthoringError>,
+        edited: Result<sdf::ChangeList, sdf::AuthoringError>,
         mapping: Option<&pcp::MapFunction>,
     ) -> Result<bool, StageAuthoringError> {
-        // Drain the layer's record into the stage scratch buffer (reusing its
-        // allocation across edits) — or discard a partial record — under a short
-        // layer borrow, before re-borrowing the graph and cache for classification.
-        let mut scratch = self.change_scratch.borrow_mut();
-        scratch.clear();
-        let drained = {
-            let mut layers = self.layers.borrow_mut();
-            let node = layers
-                .get_mut(layer_id)
-                .expect("finalize_layer called with a live layer id");
-            match authored {
-                Ok(()) => {
-                    node.layer.drain_changes(&mut scratch);
-                    Ok(())
-                }
-                Err(e) => {
-                    node.layer.discard_changes();
-                    Err(e)
-                }
-            }
-        };
-        match drained {
-            Ok(()) if scratch.is_empty() => Ok(false),
-            Ok(()) => {
-                let mut changes = pcp::Changes::new();
-                let edits = [(layer_id, &*scratch)];
-                {
-                    let cache = self.cache.borrow();
-                    changes.did_change(&cache, &edits);
-                }
-                // Snapshot the notice payload before `apply` consumes `changes`,
-                // and only when a listener is installed — the no-listener path
-                // stays allocation-free.
-                let payload = self
-                    .listener
-                    .borrow()
-                    .is_some()
-                    .then(|| notice::Payload::new(&changes, &scratch, mapping));
-                {
-                    let mut graph = self.layers.borrow_mut();
-                    let mut cache = self.cache.borrow_mut();
-                    changes.apply(&mut cache, &mut graph);
-                }
-
-                if let Some(payload) = payload {
-                    let layer_identifier = self.layer_identifier(layer_id).unwrap_or_default();
-                    // Release the scratch borrow before invoking the listener:
-                    // it may re-author, which re-enters `finalize_layer` and
-                    // re-borrows this buffer.
-                    drop(scratch);
-                    self.notify(Notice::ObjectsChanged(
-                        payload.objects_changed(&layer_identifier, mapping),
-                    ));
-                }
+        match edited {
+            Ok(changes) if changes.is_empty() => Ok(false),
+            Ok(changes) => {
+                self.apply_change_set(layer_id, &changes, mapping);
                 Ok(true)
             }
-            Err(e) => {
-                // Conservatively drop every cached index on post-mutation
-                // failure (the layer may be in a partial state). `SIGNIFICANT`
-                // alone is enough — it clears every cached index and the layer
-                // graph cannot have been affected by a failing prim/property edit.
-                let mut graph = self.layers.borrow_mut();
-                let mut cache = self.cache.borrow_mut();
-                Self::recompose_significant(&mut cache, &mut graph);
-                Err(StageAuthoringError::Layer(e))
-            }
+            Err(e) => Err(StageAuthoringError::Layer(e)),
+        }
+    }
+
+    /// Classify a committed [`sdf::ChangeList`] through [`pcp::Changes`] and
+    /// apply the resulting cache invalidation, firing an
+    /// [`ObjectsChanged`](Notice::ObjectsChanged) notice when a listener is
+    /// installed. The PCP-driving tail shared by [`Self::apply_authored`].
+    ///
+    /// `mapping` translates the change record's layer-namespace paths back to
+    /// stage namespace for the notice; see [`Self::apply_authored`].
+    fn apply_change_set(&self, layer_id: pcp::LayerId, changes: &sdf::ChangeList, mapping: Option<&pcp::MapFunction>) {
+        let mut pcp_changes = pcp::Changes::new();
+        let edits = [(layer_id, changes)];
+        {
+            let cache = self.cache.borrow();
+            pcp_changes.did_change(&cache, &edits);
+        }
+        // Snapshot the notice payload before `apply` consumes `pcp_changes`, and
+        // only when a listener is installed — the no-listener path stays
+        // allocation-free.
+        let payload = self
+            .listener
+            .borrow()
+            .is_some()
+            .then(|| notice::Payload::new(&pcp_changes, changes, mapping));
+        {
+            let mut graph = self.layers.borrow_mut();
+            let mut cache = self.cache.borrow_mut();
+            pcp_changes.apply(&mut cache, &mut graph);
+        }
+
+        if let Some(payload) = payload {
+            let layer_identifier = self.layer_identifier(layer_id).unwrap_or_default();
+            self.notify(Notice::ObjectsChanged(
+                payload.objects_changed(&layer_identifier, mapping),
+            ));
         }
     }
 
@@ -1430,20 +1403,6 @@ impl Stage {
     /// The currently muted layer identifiers, sorted for a deterministic result.
     pub fn muted_layers(&self) -> Vec<String> {
         self.layers.borrow().muted_layers()
-    }
-
-    /// Applies a `SIGNIFICANT` layer-stack change: clears every cached index and
-    /// bumps the revision (so cached [`AttributeQuery`](super::AttributeQuery)
-    /// value sources rebuild). The graph must already reflect the new stacks; the
-    /// caller passes both borrows so the two `RefCell`s are taken once.
-    ///
-    /// This is the conservative fallback used after a post-mutation failure may
-    /// have left a layer partially edited. Layer muting recomposes incrementally
-    /// instead (see [`apply_mute`](Self::apply_mute)).
-    fn recompose_significant(cache: &mut pcp::IndexCache, graph: &mut pcp::LayerGraph) {
-        let mut changes = pcp::Changes::new();
-        changes.layer_stack |= pcp::LayerStackChanges::SIGNIFICANT;
-        changes.apply(cache, graph);
     }
 
     /// Returns the stage's initial payload loading behavior.
@@ -1916,21 +1875,24 @@ impl Stage {
         // Author the parent's metadata first; the child node is added only after
         // this succeeds (the authored asset path is a plain string, so the node
         // need not exist yet — only the later rebuild's `find()` needs it).
-        let parent_id = {
+        let (parent_id, edited) = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
             let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-            node.layer
-                .pseudo_root_mut()
-                .map(|mut root| root.insert_sublayer(pos, identifier, offset))
-                .map_err(StageAuthoringError::Layer)?;
-            parent_id
+            let edited = node.layer.edit(|l| {
+                l.pseudo_root_mut()
+                    .map(|mut root| root.insert_sublayer(pos, identifier, offset))
+            });
+            (parent_id, edited)
         };
-        self.layers.borrow_mut().ensure_layer(layer);
-        self.finalize_layer(parent_id, Ok(()), None)?;
-        Ok(())
+        // Add the child node only once the parent edit succeeded, so a failed
+        // insert never leaves an orphan node.
+        if edited.is_ok() {
+            self.layers.borrow_mut().ensure_layer(layer);
+        }
+        self.apply_authored(parent_id, edited, None).map(|_| ())
     }
 
     /// Removes the sublayer `child` from `parent`'s `subLayers` and its aligned
@@ -1947,7 +1909,7 @@ impl Stage {
     /// `parent` is not in the stage, and [`StageAuthoringError::Layer`] if
     /// `parent` is read-only.
     pub fn remove_sub_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
-        let (parent_id, removed) = {
+        let (parent_id, edited) = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
@@ -1962,22 +1924,22 @@ impl Stage {
                 subs.into_iter()
                     .find(|entry| layers.id_of(entry).or_else(|| layers.find(entry)) == Some(child_id))
             });
-            let removed = match authored {
-                Some(entry) => {
-                    let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-                    node.layer
-                        .pseudo_root_mut()
+            let edited = authored.map(|entry| {
+                let node = layers.get_mut(parent_id).expect("id_of returned a live id");
+                node.layer.edit(move |l| {
+                    l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
-                        .map_err(StageAuthoringError::Layer)?
-                }
-                None => false,
-            };
-            (parent_id, removed)
+                        .map(|_| ())
+                })
+            });
+            (parent_id, edited)
         };
-        if removed {
-            self.finalize_layer(parent_id, Ok(()), None)?;
+        // A removed entry changes `subLayers`, so a non-empty change set means a
+        // sublayer was removed; no authored entry means nothing to remove.
+        match edited {
+            Some(edited) => self.apply_authored(parent_id, edited, None),
+            None => Ok(false),
         }
-        Ok(removed)
     }
 
     /// Borrows the stage's layer graph.
@@ -2325,7 +2287,6 @@ impl<R: ar::Resolver> StageBuilder<R> {
             interpolation_type: Cell::new(self.interpolation_type),
             edit_target: RefCell::new(edit_target),
             layer_stack_id,
-            change_scratch: RefCell::new(sdf::ChangeList::new()),
             listener: RefCell::new(None),
         }))
     }
