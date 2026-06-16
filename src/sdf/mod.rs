@@ -29,13 +29,13 @@ pub use asset_path::AssetPath;
 pub use change::{ChangeEntry, ChangeFlags, ChangeList, EditProxy};
 pub(crate) use copy::{author_spec, is_children_field};
 pub use copy::{
-    copy_spec, copy_spec_with, should_copy_children, should_copy_value, CopyChildren, CopyChildrenArgs, CopyValue,
-    CopyValueArgs,
+    copy_spec, copy_spec_with, copy_spec_within, should_copy_children, should_copy_value, CopyChildren,
+    CopyChildrenArgs, CopyValue, CopyValueArgs,
 };
 pub use data::{AbstractData, CowData, Data, DataError};
 pub use expr::Expr;
 pub use file_format::{find_by_extension, find_by_id, FileFormat, FileFormatCaps, WriteSeek};
-pub use layer::{AuthoringError, Layer};
+pub use layer::{AuthoringError, Layer, Transaction};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
 pub use path_table::PathTable;

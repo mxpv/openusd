@@ -104,6 +104,22 @@ impl<T: Default + Clone + PartialEq> ListOp<T> {
         }
     }
 
+    /// Maps every item, dropping those for which `f` returns `None`, while
+    /// preserving the list-op structure. The retaining counterpart of
+    /// [`map`](Self::map) — namespace-edit deletion fixup uses it to drop the
+    /// items that point at a removed object.
+    pub fn filter_map(self, f: impl Fn(T) -> Option<T>) -> ListOp<T> {
+        ListOp {
+            explicit: self.explicit,
+            explicit_items: self.explicit_items.into_iter().filter_map(&f).collect(),
+            added_items: self.added_items.into_iter().filter_map(&f).collect(),
+            prepended_items: self.prepended_items.into_iter().filter_map(&f).collect(),
+            appended_items: self.appended_items.into_iter().filter_map(&f).collect(),
+            deleted_items: self.deleted_items.into_iter().filter_map(&f).collect(),
+            ordered_items: self.ordered_items.into_iter().filter_map(&f).collect(),
+        }
+    }
+
     /// Returns an iterator over all items that contribute opinions:
     /// explicit, prepended, appended, and added.
     ///

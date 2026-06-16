@@ -452,6 +452,22 @@ impl LayerGraph {
         self.nodes.get_mut(&id)
     }
 
+    /// Borrow the layers named by `ids` together, in `ids` order, skipping any
+    /// id with no live layer. Used to open a transaction on each layer of a
+    /// batched edit so they commit all-or-nothing.
+    pub(crate) fn layers_mut(&mut self, ids: &[LayerId]) -> Vec<(LayerId, &mut sdf::Layer)> {
+        let want: HashSet<LayerId> = ids.iter().copied().collect();
+        let mut by_id: HashMap<LayerId, &mut sdf::Layer> = self
+            .nodes
+            .iter_mut()
+            .filter(|(id, _)| want.contains(id))
+            .map(|(id, node)| (*id, &mut node.layer))
+            .collect();
+        ids.iter()
+            .filter_map(|id| by_id.remove(id).map(|layer| (*id, layer)))
+            .collect()
+    }
+
     /// The layer with the given id. Panics if the id is unknown.
     pub(crate) fn layer(&self, id: LayerId) -> &sdf::Layer {
         &self.nodes[&id].layer

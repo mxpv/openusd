@@ -9,6 +9,7 @@ mod clips;
 mod collection;
 mod connections;
 mod diff;
+mod editor;
 mod interp;
 mod notice;
 mod prim;
@@ -25,6 +26,7 @@ pub use collection::{
 };
 pub use connections::ConnectionGraph;
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
+pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::InterpolationType;
 pub use notice::{LayerMutingChanged, Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};

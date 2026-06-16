@@ -2,9 +2,9 @@
 //! identity + a backing [`AbstractData`] wrapped in a recording [`EditProxy`].
 //! Spec authoring lives on the views ([`PrimSpec::new`](super::PrimSpec::new)
 //! and friends); each edit is recorded into a [`ChangeList`] and applied
-//! write-through to the backend, unless wrapped in [`Layer::edit`], which stages
-//! the edits in a copy-on-write overlay and commits or rolls them back as one
-//! atomic transaction.
+//! write-through to the backend, unless wrapped in a [`Transaction::new`],
+//! which stages the edits in a copy-on-write overlay and commits or rolls them
+//! back as one atomic transaction.
 //!
 //! Cross-layer composition concerns (resolving sublayers, references,
 //! payloads) live separately in [`crate::layer`].
@@ -30,26 +30,71 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 /// in the process never collide.
 static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// RAII guard for a [`Layer::edit`] transaction. On construction it opens
-/// overlay mode; on drop it discards any still-staged edits and closes overlay
-/// mode, so a panic (or early return) mid-transaction can't strand the layer in
-/// overlay mode with orphaned staged edits. After a normal commit — which
-/// empties the overlay — the drop only clears the flag.
-struct OverlayGuard<'a> {
+/// An atomic copy-on-write transaction over a [`Layer`], created by
+/// [`Transaction::new`]. Edits authored through the guard (it derefs to the
+/// `Layer`) stage in the layer's overlay; [`commit`](Self::commit) flushes them
+/// to the backend and returns the recorded [`ChangeList`], while dropping the
+/// guard without committing rolls them back — so an error or panic
+/// mid-transaction cannot strand the layer in overlay mode with orphaned staged
+/// edits.
+///
+/// The building block several layers share to apply a namespace edit
+/// all-or-nothing: open a transaction on each, stage into all, and commit them
+/// only once every layer has authored cleanly (dropping the rest to roll back
+/// on the first failure).
+///
+/// Derefs to the [`Layer`] under transaction, so it is authored through (and
+/// read from) directly — reads see the staged-over-base state, with an edit
+/// staged earlier in the same transaction already visible.
+#[derive(derive_more::Deref, derive_more::DerefMut)]
+pub struct Transaction<'a> {
+    #[deref(forward)]
+    #[deref_mut(forward)]
     layer: &'a mut Layer,
+    committed: bool,
 }
 
-impl<'a> OverlayGuard<'a> {
-    fn new(layer: &'a mut Layer) -> Self {
+impl<'a> Transaction<'a> {
+    /// Open an atomic copy-on-write transaction on `layer`: its subsequent
+    /// writes stage in an overlay rather than reaching the backend until
+    /// [`commit`](Self::commit) (or roll back when the guard is dropped). The
+    /// `&mut Layer` borrow the guard holds prevents a second transaction on the
+    /// same layer for its lifetime.
+    ///
+    /// The sole entry point for atomic edits; this is an associated function
+    /// (not a `Layer` method) so it is not reachable through the guard's own
+    /// `Deref<Target = Layer>`, which would otherwise let a transaction nest on
+    /// an already-transacting layer. The assertion backs that up against the
+    /// remaining deref-coercion path (`Transaction::new(&mut tx)`); a nested
+    /// commit would flush the shared overlay and the outer guard could no longer
+    /// roll back, so this is a hard panic rather than a debug-only check.
+    pub fn new(layer: &'a mut Layer) -> Self {
+        assert!(!layer.overlay, "Transaction::new on a layer already in a transaction");
         layer.overlay = true;
-        Self { layer }
+        Self {
+            layer,
+            committed: false,
+        }
+    }
+
+    /// Flush the staged edits into the backend and return the recorded change
+    /// list for composition invalidation, leaving overlay mode.
+    pub fn commit(mut self) -> ChangeList {
+        self.layer.data.commit();
+        let mut changes = ChangeList::new();
+        self.layer.data.base_mut().take(&mut changes);
+        self.layer.overlay = false;
+        self.committed = true;
+        changes
     }
 }
 
-impl Drop for OverlayGuard<'_> {
+impl Drop for Transaction<'_> {
     fn drop(&mut self) {
-        self.layer.data.rollback();
-        self.layer.overlay = false;
+        if !self.committed {
+            self.layer.data.rollback();
+            self.layer.overlay = false;
+        }
     }
 }
 
@@ -60,16 +105,18 @@ pub struct Layer {
     /// The parsed scene description data: a recording [`EditProxy`] over the
     /// backend, wrapped in a copy-on-write [`CowData`] staging layer. The proxy
     /// sits under the overlay, so every write is recorded whether it stages
-    /// (inside an [`edit`](Self::edit)) or writes through (outside one). Private
+    /// (inside a [`Transaction`]) or writes through (outside
+    /// one). Private
     /// so external callers reach it only through [`data`](Self::data) /
     /// [`data_mut`](Self::data_mut), keeping recording — and the authoring API's
     /// bookkeeping invariants (`primChildren`, `propertyChildren`, ancestor
     /// specifiers, …) — in force.
     data: CowData<EditProxy<LayerData>>,
-    /// Whether overlay mode is on — set for the duration of an
-    /// [`edit`](Self::edit). Off (the default), [`data_mut`](Self::data_mut)
-    /// writes through to the backend directly (still recorded); on, it routes
-    /// through the overlay so the edits stage for atomic commit or rollback.
+    /// Whether overlay mode is on — set for the duration of a
+    /// [`Transaction`]. Off (the default),
+    /// [`data_mut`](Self::data_mut) writes through to the backend directly
+    /// (still recorded); on, it routes through the overlay so the edits stage
+    /// for atomic commit or rollback.
     overlay: bool,
 }
 
@@ -87,14 +134,14 @@ impl Layer {
     }
 
     /// Borrow the layer's data as a read-only [`AbstractData`]. Reads see the
-    /// staged-over-base view, so uncommitted edits made inside an
-    /// [`edit`](Self::edit) transaction are visible.
+    /// staged-over-base view, so uncommitted edits made inside a
+    /// [`Transaction`] are visible.
     pub fn data(&self) -> &dyn AbstractData {
         &self.data
     }
 
     /// Borrow the layer's backing data as a mutable [`AbstractData`] for
-    /// authoring. Inside an [`edit`](Self::edit) transaction this routes through
+    /// authoring. Inside a [`Transaction`] this routes through
     /// the staging overlay; outside one it writes through to the backend
     /// directly — applied immediately. Either way the write passes through the
     /// recording [`EditProxy`] and is captured in the [`ChangeList`].
@@ -104,44 +151,6 @@ impl Layer {
         } else {
             self.data.base_mut()
         }
-    }
-
-    /// Run `f` as an atomic transaction over this layer: while it runs, edits
-    /// stage in the copy-on-write overlay rather than reaching the backend, so
-    /// on success they commit wholesale and on failure roll back, leaving the
-    /// layer untouched. Returns the recorded [`ChangeList`] for composition
-    /// invalidation. The sole entry point for atomic edits; outside it, edits
-    /// authored through [`data_mut`](Self::data_mut) are write-through and
-    /// immediately visible.
-    ///
-    /// Nested calls join the enclosing transaction: a nested `edit` stages into
-    /// the same overlay and commits or rolls back with the outermost call, so it
-    /// returns no changes of its own (the outermost call drains them). An error
-    /// from a nested `edit` rolls the whole transaction back.
-    pub fn edit(
-        &mut self,
-        f: impl FnOnce(&mut Layer) -> Result<(), AuthoringError>,
-    ) -> Result<ChangeList, AuthoringError> {
-        if self.overlay {
-            // Already inside an `edit`: join the outer transaction. The writes
-            // stage in the shared overlay; only the outermost call completes it.
-            return f(&mut *self).map(|()| ChangeList::new());
-        }
-        // The guard opens overlay mode and, on drop, discards any still-staged
-        // edits and closes it — so an error or panic in `f` rolls back cleanly.
-        // After a successful commit the overlay is empty, so its drop is a no-op
-        // beyond clearing the flag.
-        let guard = OverlayGuard::new(self);
-        f(&mut *guard.layer)?;
-        // Commit: flush the staged edits into the backend (replaying them
-        // through the recording proxy), then drain the recorded changes.
-        guard.layer.data.commit();
-        // TODO(perf): this allocates a fresh `ChangeList` per edit, which `Stage`
-        // runs on every authoring op. Draining into a caller-owned reusable
-        // buffer would drop the per-op allocation on the authoring hot path.
-        let mut changes = ChangeList::new();
-        guard.layer.data.base_mut().take(&mut changes);
-        Ok(changes)
     }
 
     /// Whether the layer has been modified since it was loaded or last
@@ -711,105 +720,69 @@ mod tests {
         assert!(layer.is_dirty());
     }
 
-    /// `edit` commits a successful transaction: its edits land in the backend
-    /// and the recorded `ChangeList` is returned.
+    /// A committed transaction lands its edits in the backend and returns the
+    /// recorded `ChangeList`.
     #[test]
-    fn edit_commits_on_ok() {
+    fn transaction_commits() {
         use crate::sdf::{PrimSpec, Specifier};
         let mut layer = Layer::new_anonymous("test.usda");
-        let changes = layer
-            .edit(|l| {
-                PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
-                Ok(())
-            })
-            .expect("transaction committed");
+        let mut tx = Transaction::new(&mut layer);
+        PrimSpec::new(tx.data_mut(), "/World", Specifier::Def, "Xform").expect("authored");
+        let changes = tx.commit();
         assert!(!changes.is_empty());
         assert!(layer.prim(Path::from("/World")).is_some());
     }
 
-    /// `edit` rolls a failed transaction back wholesale: an edit applied before
-    /// the failure leaves no trace in the backend.
+    /// Dropping a transaction without committing rolls every staged edit back,
+    /// leaving no trace in the backend.
     #[test]
-    fn edit_rolls_back_on_err() {
+    fn transaction_rolls_back() {
         use crate::sdf::{PrimSpec, Specifier};
         let mut layer = Layer::new_anonymous("test.usda");
-        let result = layer.edit(|l| {
-            PrimSpec::new(l.data_mut(), "/A", Specifier::Def, "Xform")?;
-            // A prim spec at a property path is unauthorable, failing the batch.
-            PrimSpec::new(l.data_mut(), "/B.x", Specifier::Def, "Xform")?;
-            Ok(())
-        });
-        assert!(result.is_err());
-        assert!(layer.prim(Path::from("/A")).is_none(), "the first edit must roll back");
+        {
+            let mut tx = Transaction::new(&mut layer);
+            PrimSpec::new(tx.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
+            // Drop `tx` without committing.
+        }
+        assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
+        assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
     }
 
-    /// A nested `edit` joins the outer transaction: its edits commit together on
-    /// success, and an outer failure after a nested success rolls both back.
-    #[test]
-    fn nested_edit_joins_outer() {
-        use crate::sdf::{PrimSpec, Specifier};
-
-        // Both commit together when the outer succeeds.
-        let mut layer = Layer::new_anonymous("test.usda");
-        layer
-            .edit(|outer| {
-                outer.edit(|inner| {
-                    PrimSpec::new(inner.data_mut(), "/A", Specifier::Def, "Xform")?;
-                    Ok(())
-                })?;
-                PrimSpec::new(outer.data_mut(), "/B", Specifier::Def, "Xform")?;
-                Ok(())
-            })
-            .expect("outer transaction committed");
-        assert!(layer.prim(Path::from("/A")).is_some());
-        assert!(layer.prim(Path::from("/B")).is_some());
-
-        // An outer failure after a nested success rolls the nested edit back too.
-        let mut layer = Layer::new_anonymous("test.usda");
-        let result = layer.edit(|outer| {
-            outer.edit(|inner| {
-                PrimSpec::new(inner.data_mut(), "/A", Specifier::Def, "Xform")?;
-                Ok(())
-            })?;
-            // Unauthorable, failing the whole transaction.
-            PrimSpec::new(outer.data_mut(), "/B.x", Specifier::Def, "Xform")?;
-            Ok(())
-        });
-        assert!(result.is_err());
-        assert!(
-            layer.prim(Path::from("/A")).is_none(),
-            "the nested edit must roll back with the outer transaction"
-        );
-    }
-
-    /// A panic inside `edit` unwinds cleanly: the guard drops the staged edits
+    /// A panic mid-transaction unwinds cleanly: the guard drops the staged edits
     /// and closes overlay mode, so the layer is reusable afterwards rather than
     /// stuck in overlay mode with orphaned staged edits.
     #[test]
-    fn edit_recovers_on_panic() {
+    fn transaction_recovers_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let mut layer = Layer::new_anonymous("test.usda");
         let panicked = catch_unwind(AssertUnwindSafe(|| {
-            let _ = layer.edit(|l| {
-                PrimSpec::new(l.data_mut(), "/A", Specifier::Def, "Xform")?;
-                panic!("boom")
-            });
+            let mut tx = Transaction::new(&mut layer);
+            PrimSpec::new(tx.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
+            panic!("boom");
         }));
-        assert!(panicked.is_err(), "the panic propagates out of edit");
+        assert!(panicked.is_err(), "the panic propagates");
         assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
         assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
 
-        // The layer is still usable as the outermost transaction.
-        let changes = layer
-            .edit(|l| {
-                PrimSpec::new(l.data_mut(), "/B", Specifier::Def, "Xform")?;
-                Ok(())
-            })
-            .expect("layer usable after a panicked edit");
+        // The layer is still usable afterwards.
+        let mut tx = Transaction::new(&mut layer);
+        PrimSpec::new(tx.data_mut(), "/B", Specifier::Def, "Xform").expect("authored");
+        let changes = tx.commit();
         assert!(!changes.is_empty());
         assert!(layer.prim(Path::from("/B")).is_some());
+    }
+
+    /// Opening a transaction on a layer already in one is rejected — the only
+    /// remaining nesting path is `Transaction::new(&mut tx)` through the guard's
+    /// `DerefMut`, which the assertion catches.
+    #[test]
+    #[should_panic(expected = "already in a transaction")]
+    fn nested_transaction_panics() {
+        let mut layer = Layer::new_anonymous("test.usda");
+        let mut tx = Transaction::new(&mut layer);
+        let _nested = Transaction::new(&mut tx);
     }
 
     /// `discard_changes` drops the pending change record (so a later transaction
@@ -830,13 +803,12 @@ mod tests {
         );
     }
 
-    /// Authoring layer metadata directly (no `Stage`, so no `edit` transaction)
-    /// on a backend that lacks a pseudo-root spec writes through to the backend
-    /// rather than stranding the create in the overlay. Routing through
-    /// `self.data` directly used to stage the create in the overlay while the
-    /// follow-up read went to the (still rootless) backend, panicking.
+    /// Authoring layer metadata directly (no `Stage`, so no transaction) on a
+    /// backend that lacks a pseudo-root spec writes through to the backend, so a
+    /// follow-up read sees it. Outside a transaction `data_mut` targets the
+    /// backend directly, materializing the pseudo-root there.
     #[test]
-    fn standalone_metadata_on_rootless_backend() {
+    fn metadata_on_rootless_backend() {
         let root = Path::abs_root();
         let default_prim = FieldKey::DefaultPrim.as_str();
 

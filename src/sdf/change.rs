@@ -159,6 +159,23 @@ impl ChangeList {
         out.entries.append(&mut self.entries);
     }
 
+    /// Fold `other` into this list, combining entries at the same path — the
+    /// flags are unioned and the authored-field sets merged — rather than
+    /// duplicating the path. Used to merge several layers' records into one for
+    /// a batched edit's change notice, so a path edited in more than one layer
+    /// reports the union of its changes.
+    //
+    // TODO(perf): each merge is an `entry_mut` linear scan, so this is O(entries
+    // × distinct paths). Fine for the notice path (only when a listener is
+    // installed), but a path-keyed map would bound it for very large batches.
+    pub fn merge_from(&mut self, other: &ChangeList) {
+        for (path, entry) in &other.entries {
+            let merged = self.entry_mut(path);
+            merged.flags |= entry.flags;
+            merged.info_changed.extend(entry.info_changed.iter().cloned());
+        }
+    }
+
     /// Discard all recorded entries, retaining the backing allocation.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -497,6 +514,36 @@ mod tests {
     /// A created `over` surfaces its composition-arc field in `info_changed` so
     /// the classifier sees the structural opinion, but not the auto-stamped
     /// `specifier`.
+    /// `merge_from` combines entries at the same path rather than duplicating
+    /// it: one merged entry whose flags and authored-field set are the union.
+    #[test]
+    fn merge_combines_same_path() {
+        let mut a = ChangeList::new();
+        a.entry_mut(&p("/P")).flags |= ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
+        a.entry_mut(&p("/P"))
+            .info_changed
+            .insert(FieldKey::TargetPaths.as_str().into());
+
+        let mut b = ChangeList::new();
+        b.entry_mut(&p("/P")).flags |= ChangeFlags::ADD_PROPERTY;
+        b.entry_mut(&p("/P"))
+            .info_changed
+            .insert(FieldKey::ConnectionPaths.as_str().into());
+
+        a.merge_from(&b);
+
+        let same: Vec<_> = a.entries().iter().filter(|(path, _)| path == &p("/P")).collect();
+        assert_eq!(same.len(), 1, "the path is merged, not duplicated");
+        let entry = &same[0].1;
+        assert!(entry.flags.contains(ChangeFlags::CHANGE_RELATIONSHIP_TARGETS));
+        assert!(entry.flags.contains(ChangeFlags::ADD_PROPERTY));
+        assert!(entry.info_changed.iter().any(|t| t == FieldKey::TargetPaths.as_str()));
+        assert!(entry
+            .info_changed
+            .iter()
+            .any(|t| t == FieldKey::ConnectionPaths.as_str()));
+    }
+
     #[test]
     fn created_over_records_arc_not_specifier() {
         let mut proxy = proxy(Data::new());

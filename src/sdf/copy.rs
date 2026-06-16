@@ -32,12 +32,8 @@ use crate::tf;
 /// through their owning property's list-op fields, not as children.
 ///
 /// `src` and `dst` are distinct backends (`&dyn` vs `&mut dyn`), so an in-place
-/// move within a single layer cannot pass it as both; copy through a scratch
-/// [`Data`](crate::sdf::Data) and swap until a same-layer variant lands.
-//
-// TODO(namespace-edit): a same-layer `copy_spec_within(data, src_path, dst_path)`
-// that reads and writes one backend is the form reparent / rename need; add it
-// when the namespace-editing operation does.
+/// move within a single layer cannot pass it as both; use
+/// [`copy_spec_within`] for that.
 pub fn copy_spec(
     src: &dyn sdf::AbstractData,
     src_path: &sdf::Path,
@@ -62,6 +58,35 @@ pub fn copy_spec(
         |args| should_copy_value(args, src_path, dst_path),
         should_copy_children,
     )?;
+    Ok(true)
+}
+
+/// Copy the spec subtree at `src_path` to `dst_path` within a single backend,
+/// re-rooting every embedded namespace path from `src_path` to `dst_path`
+/// exactly as [`copy_spec`] does across two backends.
+///
+/// This is the same-layer form reparent / rename need: [`copy_spec`] takes a
+/// `&dyn` source and a `&mut dyn` destination and cannot alias one backend, so
+/// the source subtree is snapshotted into a scratch [`Data`](crate::sdf::Data)
+/// and copied back. Like [`copy_spec`], the destination subtree is erased first
+/// (replacement semantics) and a missing source authors nothing, returning
+/// `Ok(false)`.
+///
+/// This copies; it does not remove the source. A move is `copy_spec_within`
+/// followed by [`remove_spec`](super::spec::remove_spec) on `src_path`.
+pub fn copy_spec_within(
+    data: &mut dyn sdf::AbstractData,
+    src_path: &sdf::Path,
+    dst_path: &sdf::Path,
+) -> Result<bool, sdf::AuthoringError> {
+    // Snapshot the source subtree verbatim (src_root == dst_root, so no
+    // remapping), then copy the snapshot to `dst_path` — that second copy does
+    // the re-rooting and erases any existing destination subtree.
+    let mut scratch = sdf::Data::new();
+    if !copy_spec(data, src_path, &mut scratch, src_path)? {
+        return Ok(false);
+    }
+    copy_spec(&scratch, src_path, data, dst_path)?;
     Ok(true)
 }
 
@@ -757,6 +782,42 @@ mod tests {
             .try_as_token()
             .unwrap();
         assert_eq!(type_name.as_str(), "Xform");
+    }
+
+    #[test]
+    fn within_moves_subtree() {
+        let mut data = sample();
+        assert!(copy_spec_within(&mut data, &path("/A").unwrap(), &path("/B").unwrap()).unwrap());
+
+        assert_eq!(data.spec_type(&path("/B").unwrap()), Some(SpecType::Prim));
+        assert_eq!(data.spec_type(&path("/B/Child").unwrap()), Some(SpecType::Prim));
+        assert_eq!(data.spec_type(&path("/B.attr").unwrap()), Some(SpecType::Attribute));
+        // A copy, not a move: the source survives until the caller removes it.
+        assert_eq!(data.spec_type(&path("/A").unwrap()), Some(SpecType::Prim));
+    }
+
+    #[test]
+    fn within_reroots_paths() {
+        let mut data = sample();
+        copy_spec_within(&mut data, &path("/A").unwrap(), &path("/B").unwrap()).unwrap();
+
+        // In-subtree targets re-root; the out-of-subtree target is untouched.
+        assert_eq!(
+            targets(&data, "/B.rel", FieldKey::TargetPaths),
+            vec!["/B/Child", "/Outside"]
+        );
+        assert_eq!(
+            targets(&data, "/B.attr", FieldKey::ConnectionPaths),
+            vec!["/B/Child.attr"]
+        );
+        assert_eq!(targets(&data, "/B", FieldKey::InheritPaths), vec!["/B/Class"]);
+    }
+
+    #[test]
+    fn within_missing_source_noop() {
+        let mut data = Data::new();
+        assert!(!copy_spec_within(&mut data, &path("/Nope").unwrap(), &path("/B").unwrap()).unwrap());
+        assert_eq!(data.spec_type(&path("/B").unwrap()), None);
     }
 
     #[test]

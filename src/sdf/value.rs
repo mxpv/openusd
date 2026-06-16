@@ -356,24 +356,43 @@ impl Value {
     /// editing, rename) can remap paths with their own mapping rather than the
     /// default root-to-root prefix swap.
     pub fn remap_paths(&self, remap: impl Fn(&Path) -> Path) -> Value {
+        self.filter_map_paths(|path| Some(remap(path)))
+    }
+
+    /// Returns a copy of this value with every embedded namespace path mapped
+    /// through `remap`, dropping any path it maps to `None`. The dropping form
+    /// of [`remap_paths`](Self::remap_paths): namespace-edit deletion fixup maps
+    /// the targets/connections/internal references that point at a removed object
+    /// to `None` so the entries vanish, while moves map to `Some(new_path)`.
+    ///
+    /// A `PathVec` element or list-op item that maps to `None` is removed. An
+    /// external reference or payload (whose prim path lives in the referenced
+    /// layer's namespace) is never offered to `remap` and is always kept; a
+    /// relocate pair is dropped when its source maps to `None`.
+    pub fn filter_map_paths(&self, remap: impl Fn(&Path) -> Option<Path>) -> Value {
         let remap = &remap;
         match self {
-            Value::PathVec(paths) => Value::PathVec(paths.iter().map(remap).collect()),
-            Value::PathListOp(op) => Value::PathListOp(op.clone().map(|p| remap(&p))),
-            Value::Relocates(relocates) => {
-                Value::Relocates(relocates.iter().map(|(s, t)| (remap(s), remap(t))).collect())
-            }
-            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().map(|mut reference| {
+            Value::PathVec(paths) => Value::PathVec(paths.iter().filter_map(remap).collect()),
+            Value::PathListOp(op) => Value::PathListOp(op.clone().filter_map(|p| remap(&p))),
+            Value::Relocates(relocates) => Value::Relocates(
+                relocates
+                    .iter()
+                    // Drop a pair whose source maps away; a target that maps away
+                    // keeps its original (a relocate must keep both endpoints).
+                    .filter_map(|(s, t)| remap(s).map(|s| (s, remap(t).unwrap_or_else(|| t.clone()))))
+                    .collect(),
+            ),
+            Value::ReferenceListOp(op) => Value::ReferenceListOp(op.clone().filter_map(|mut reference| {
                 if reference.asset_path.is_empty() && !reference.prim_path.is_empty() {
-                    reference.prim_path = remap(&reference.prim_path);
+                    reference.prim_path = remap(&reference.prim_path)?;
                 }
-                reference
+                Some(reference)
             })),
-            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().map(|mut payload| {
+            Value::PayloadListOp(op) => Value::PayloadListOp(op.clone().filter_map(|mut payload| {
                 if payload.asset_path.is_empty() && !payload.prim_path.is_empty() {
-                    payload.prim_path = remap(&payload.prim_path);
+                    payload.prim_path = remap(&payload.prim_path)?;
                 }
-                payload
+                Some(payload)
             })),
             other => other.clone(),
         }

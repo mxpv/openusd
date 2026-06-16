@@ -37,7 +37,7 @@
 //!
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
@@ -1088,9 +1088,9 @@ impl Stage {
     /// describes what was authored; an empty list means "no mutation
     /// happened" and skips invalidation.
     ///
-    /// On an authoring error the layer's [`edit`](sdf::Layer::edit) has already
-    /// rolled back — the staged edits vanish and the backend is untouched — so
-    /// the cache stays valid and no invalidation is needed.
+    /// On an authoring error the layer's [`transaction`](sdf::Layer::transaction)
+    /// has already rolled back — the staged edits vanish and the backend is
+    /// untouched — so the cache stays valid and no invalidation is needed.
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<(), sdf::AuthoringError>,
@@ -1123,7 +1123,7 @@ impl Stage {
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            (layer_id, node.layer.edit(|layer| f(layer, spec_path)))
+            (layer_id, Self::edit_layer(&mut node.layer, |layer| f(layer, spec_path)))
         };
         self.apply_authored(layer_id, edited, mapping.as_ref())
     }
@@ -1195,16 +1195,39 @@ impl Stage {
         let edited = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            node.layer.edit(f)
+            Self::edit_layer(&mut node.layer, f)
         };
         self.apply_authored(layer_id, edited, mapping).map(|_| ())
     }
 
-    /// Interpret a [`Layer::edit`](sdf::Layer::edit) result and drive
-    /// composition invalidation. An empty change list means nothing was authored
-    /// (`Ok(false)`); a non-empty one is applied through
-    /// [`Self::apply_change_set`] (`Ok(true)`); an authoring error — after
-    /// `edit` has already rolled the layer back, leaving it and the cache
+    /// Run `f` as one atomic [`Transaction`](sdf::Transaction) on `layer`:
+    /// commit and return the recorded change list on success, or roll the layer
+    /// back on error (the dropped transaction guard discards the staged edits).
+    fn edit_layer<F>(layer: &mut sdf::Layer, f: F) -> Result<sdf::ChangeList, sdf::AuthoringError>
+    where
+        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+    {
+        let mut tx = sdf::Transaction::new(layer);
+        f(&mut tx)?;
+        Ok(tx.commit())
+    }
+
+    /// The layer ids of the root (local) layer stack, strongest first — the
+    /// layers a namespace edit authors into to move or delete a composed object.
+    pub(super) fn root_stack_layer_ids(&self) -> Vec<pcp::LayerId> {
+        self.layers
+            .borrow()
+            .root_layer_stack()
+            .iter()
+            .map(|&(id, _)| id)
+            .collect()
+    }
+
+    /// Interpret a layer-[`transaction`](sdf::Layer::transaction) result and
+    /// drive composition invalidation. An empty change list means nothing was
+    /// authored (`Ok(false)`); a non-empty one is applied through
+    /// [`Self::apply_change_set`] (`Ok(true)`); an authoring error — after the
+    /// transaction has already rolled the layer back, leaving it and the cache
     /// untouched — surfaces as [`StageAuthoringError::Layer`]. The shared tail of
     /// the stage authoring helpers.
     ///
@@ -1236,20 +1259,48 @@ impl Stage {
     /// `mapping` translates the change record's layer-namespace paths back to
     /// stage namespace for the notice; see [`Self::apply_authored`].
     fn apply_change_set(&self, layer_id: pcp::LayerId, changes: &sdf::ChangeList, mapping: Option<&pcp::MapFunction>) {
+        self.apply_change_sets(&[(layer_id, changes)], mapping);
+    }
+
+    /// Classify a batch of committed [`sdf::ChangeList`]s — one per edited layer
+    /// — through a single [`pcp::Changes`] cycle and apply the resulting cache
+    /// invalidation, firing one [`ObjectsChanged`](Notice::ObjectsChanged) notice
+    /// for the whole batch when a listener is installed.
+    ///
+    /// [`pcp::Changes::did_change`] takes the per-layer split because
+    /// classification is layer-relative; the notice instead reports the merged
+    /// record, attributed to the strongest edited layer. `mapping` translates the
+    /// records' layer-namespace paths back to stage namespace; see
+    /// [`Self::apply_authored`]. A batched namespace edit passes `None` — the
+    /// local layer stack shares the stage's namespace.
+    pub(super) fn apply_change_sets(
+        &self,
+        edits: &[(pcp::LayerId, &sdf::ChangeList)],
+        mapping: Option<&pcp::MapFunction>,
+    ) {
         let mut pcp_changes = pcp::Changes::new();
-        let edits = [(layer_id, changes)];
         {
             let cache = self.cache.borrow();
-            pcp_changes.did_change(&cache, &edits);
+            pcp_changes.did_change(&cache, edits);
         }
         // Snapshot the notice payload before `apply` consumes `pcp_changes`, and
         // only when a listener is installed — the no-listener path stays
-        // allocation-free.
-        let payload = self
-            .listener
-            .borrow()
-            .is_some()
-            .then(|| notice::Payload::new(&pcp_changes, changes, mapping));
+        // allocation-free. The per-layer records merge into one list for the
+        // notice, which reads paths in the (here identical) stage namespace.
+        //
+        // TODO(namespace-edit): merging discards per-layer provenance — the
+        // notice carries one layer identifier (the strongest edited layer), so a
+        // listener reading the raw change list per layer (e.g. `extract_diff`)
+        // mis-attributes records that landed in a sublayer. Carrying the
+        // per-layer records on the notice (or one notice per layer) would let a
+        // multi-layer namespace edit replicate faithfully.
+        let payload = self.listener.borrow().is_some().then(|| {
+            let mut merged = sdf::ChangeList::new();
+            for (_, changes) in edits {
+                merged.merge_from(changes);
+            }
+            notice::Payload::new(&pcp_changes, &merged, mapping)
+        });
         {
             let mut graph = self.layers.borrow_mut();
             let mut cache = self.cache.borrow_mut();
@@ -1257,7 +1308,10 @@ impl Stage {
         }
 
         if let Some(payload) = payload {
-            let layer_identifier = self.layer_identifier(layer_id).unwrap_or_default();
+            let layer_identifier = edits
+                .first()
+                .and_then(|(id, _)| self.layer_identifier(*id))
+                .unwrap_or_default();
             self.notify(Notice::ObjectsChanged(
                 payload.objects_changed(&layer_identifier, mapping),
             ));
@@ -1881,7 +1935,7 @@ impl Stage {
                 layer: parent.to_string(),
             })?;
             let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-            let edited = node.layer.edit(|l| {
+            let edited = Self::edit_layer(&mut node.layer, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
             });
@@ -1926,7 +1980,7 @@ impl Stage {
             });
             let edited = authored.map(|entry| {
                 let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-                node.layer.edit(move |l| {
+                Self::edit_layer(&mut node.layer, move |l| {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
                         .map(|_| ())
@@ -1945,6 +1999,15 @@ impl Stage {
     /// Borrows the stage's layer graph.
     pub(crate) fn layers(&self) -> Ref<'_, pcp::LayerGraph> {
         self.layers.borrow()
+    }
+
+    /// Borrows the stage's layer graph mutably, for an authoring helper that
+    /// opens its own layer [`Transaction`](sdf::Transaction)s — e.g. the
+    /// namespace editor's batched, atomic multi-layer edit. The caller drives
+    /// composition invalidation from the recorded change lists through
+    /// [`Self::apply_change_sets`].
+    pub(crate) fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
+        self.layers.borrow_mut()
     }
 
     /// Runs a composed query that needs both the layer graph and the
@@ -2244,8 +2307,9 @@ impl<R: ar::Resolver> StageBuilder<R> {
     /// Assemble a [`Stage`] from already-collected layers. Shared
     /// construction tail for [`StageBuilder::open`] and
     /// [`StageBuilder::in_memory`]; any new `Stage` field must be wired in
-    /// here once.
-    fn make_stage(
+    /// here once. Crate-visible so tests can assemble a multi-layer stage
+    /// (references, sublayers) from hand-built [`sdf::Layer`]s.
+    pub(crate) fn make_stage(
         self,
         layers: Vec<sdf::Layer>,
         session_layer_count: usize,
