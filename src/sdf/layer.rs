@@ -1,10 +1,12 @@
 //! A single scene-description layer (the Rust equivalent of C++ `SdfLayer`):
-//! identity + a backing [`AbstractData`] wrapped in a recording [`EditProxy`].
-//! Spec authoring lives on the views ([`PrimSpec::new`](super::PrimSpec::new)
-//! and friends); each edit is recorded into a [`ChangeList`] and applied
-//! write-through to the backend, unless wrapped in a [`Transaction::new`],
-//! which stages the edits in a copy-on-write overlay and commits or rolls them
-//! back as one atomic transaction.
+//! identity + a backing [`AbstractData`] under a copy-on-write [`CowData`]
+//! staging overlay. Spec authoring lives on the views
+//! ([`PrimSpec::new`](super::PrimSpec::new) and friends); every edit stages in
+//! the overlay. A [`Transaction`] commits a batch atomically — flushing the
+//! overlay into the backend and accumulating the derived [`ChangeList`] for
+//! composition invalidation — or rolls it back when the guard drops. Edits made
+//! outside a transaction stay staged (still visible to reads, which merge
+//! staged-over-base) until the next flush.
 //!
 //! Cross-layer composition concerns (resolving sublayers, references,
 //! payloads) live separately in [`crate::layer`].
@@ -16,7 +18,7 @@ use anyhow::{Context, Result};
 
 use super::schema::FieldKey;
 use super::{
-    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, EditProxy, LayerData, Path,
+    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Path,
     PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
     RelocateList, SpecError, SpecType,
 };
@@ -30,24 +32,31 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 /// in the process never collide.
 static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// An atomic copy-on-write transaction over a [`Layer`], created by
-/// [`Transaction::new`]. Edits authored through the guard (it derefs to the
-/// `Layer`) stage in the layer's overlay; [`commit`](Self::commit) flushes them
-/// to the backend and returns the recorded [`ChangeList`], while dropping the
-/// guard without committing rolls them back — so an error or panic
-/// mid-transaction cannot strand the layer in overlay mode with orphaned staged
-/// edits.
+/// An atomic batch of edits over a [`Layer`], created by [`Transaction::new`].
+/// Edits authored through the guard (it derefs to the `Layer`) stage in the
+/// layer's overlay; [`commit`](Self::commit) flushes them into the backend and
+/// returns the layer's accumulated [`ChangeList`], while dropping the guard
+/// without committing rolls them back — so an error or panic mid-transaction
+/// cannot strand the layer with orphaned staged edits.
 ///
 /// The building block several layers share to apply a namespace edit
 /// all-or-nothing: open a transaction on each, stage into all, and commit them
 /// only once every layer has authored cleanly (dropping the rest to roll back
 /// on the first failure).
 ///
+/// Crate-internal: a layer's transaction lifecycle is not part of the public
+/// API, and the `&mut Layer` borrow the guard holds prevents two live
+/// transactions on one layer — except through the guard's own
+/// `DerefMut<Target = Layer>`, which would let `Transaction::new(&mut tx)`
+/// coerce and nest. [`new`](Self::new) asserts against that: a nested open
+/// would flush the outer transaction's staged edits into the backend, leaving
+/// the outer guard unable to roll them back, so it is a hard panic.
+///
 /// Derefs to the [`Layer`] under transaction, so it is authored through (and
 /// read from) directly — reads see the staged-over-base state, with an edit
 /// staged earlier in the same transaction already visible.
 #[derive(derive_more::Deref, derive_more::DerefMut)]
-pub struct Transaction<'a> {
+pub(crate) struct Transaction<'a> {
     #[deref(forward)]
     #[deref_mut(forward)]
     layer: &'a mut Layer,
@@ -55,35 +64,37 @@ pub struct Transaction<'a> {
 }
 
 impl<'a> Transaction<'a> {
-    /// Open an atomic copy-on-write transaction on `layer`: its subsequent
-    /// writes stage in an overlay rather than reaching the backend until
-    /// [`commit`](Self::commit) (or roll back when the guard is dropped). The
-    /// `&mut Layer` borrow the guard holds prevents a second transaction on the
-    /// same layer for its lifetime.
+    /// Open a transaction on `layer`: its subsequent writes stage in the overlay
+    /// and reach the backend only at [`commit`](Self::commit) (or roll back when
+    /// the guard is dropped). Any edits already staged on the layer (authored
+    /// outside a transaction) are flushed into the backend first, so the
+    /// transaction starts from an empty overlay and its rollback discards only
+    /// its own edits.
     ///
-    /// The sole entry point for atomic edits; this is an associated function
-    /// (not a `Layer` method) so it is not reachable through the guard's own
-    /// `Deref<Target = Layer>`, which would otherwise let a transaction nest on
-    /// an already-transacting layer. The assertion backs that up against the
-    /// remaining deref-coercion path (`Transaction::new(&mut tx)`); a nested
-    /// commit would flush the shared overlay and the outer guard could no longer
-    /// roll back, so this is a hard panic rather than a debug-only check.
+    /// Panics if `layer` is already under a transaction — see the type's
+    /// re-entrancy note. The assertion runs before the flush so a nested open
+    /// cannot commit the outer transaction's edits.
     pub fn new(layer: &'a mut Layer) -> Self {
-        assert!(!layer.overlay, "Transaction::new on a layer already in a transaction");
-        layer.overlay = true;
+        assert!(
+            !layer.in_transaction,
+            "nested transaction on layer {}",
+            layer.identifier
+        );
+        layer.flush();
+        layer.in_transaction = true;
         Self {
             layer,
             committed: false,
         }
     }
 
-    /// Flush the staged edits into the backend and return the recorded change
-    /// list for composition invalidation, leaving overlay mode.
+    /// Flush the staged edits into the backend and return the layer's
+    /// accumulated change list for composition invalidation.
     pub fn commit(mut self) -> ChangeList {
-        self.layer.data.commit();
-        let mut changes = ChangeList::new();
-        self.layer.data.base_mut().take(&mut changes);
-        self.layer.overlay = false;
+        // Mark committed only once the flush has succeeded; a panic deriving or
+        // merging the record before then leaves `committed` false, so `Drop`
+        // rolls the still-intact overlay back.
+        let changes = self.layer.take_changes();
         self.committed = true;
         changes
     }
@@ -91,9 +102,9 @@ impl<'a> Transaction<'a> {
 
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
+        self.layer.in_transaction = false;
         if !self.committed {
             self.layer.data.rollback();
-            self.layer.overlay = false;
         }
     }
 }
@@ -102,22 +113,23 @@ impl Drop for Transaction<'_> {
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.
     pub identifier: String,
-    /// The parsed scene description data: a recording [`EditProxy`] over the
-    /// backend, wrapped in a copy-on-write [`CowData`] staging layer. The proxy
-    /// sits under the overlay, so every write is recorded whether it stages
-    /// (inside a [`Transaction`]) or writes through (outside
-    /// one). Private
-    /// so external callers reach it only through [`data`](Self::data) /
-    /// [`data_mut`](Self::data_mut), keeping recording — and the authoring API's
-    /// bookkeeping invariants (`primChildren`, `propertyChildren`, ancestor
-    /// specifiers, …) — in force.
-    data: CowData<EditProxy<LayerData>>,
-    /// Whether overlay mode is on — set for the duration of a
-    /// [`Transaction`]. Off (the default),
-    /// [`data_mut`](Self::data_mut) writes through to the backend directly
-    /// (still recorded); on, it routes through the overlay so the edits stage
-    /// for atomic commit or rollback.
-    overlay: bool,
+    /// The parsed scene description data, under a copy-on-write [`CowData`]
+    /// staging overlay. Every authoring write stages in the overlay; a
+    /// [`flush`](Self::flush) derives the composition record and commits the
+    /// overlay into the backend. Private so external callers reach it only
+    /// through [`data`](Self::data) / [`data_mut`](Self::data_mut), keeping the
+    /// authoring API's bookkeeping invariants (`primChildren`,
+    /// `propertyChildren`, ancestor specifiers, …) in force.
+    data: CowData<LayerData>,
+    /// The change record accumulated from flushed overlays since it was last
+    /// drained by [`take_changes`](Self::take_changes). Spans several
+    /// sequential transactions and any direct edits between them, so a stage
+    /// sees one combined record on its next drain.
+    pending: ChangeList,
+    /// Whether a [`Transaction`] is currently open on this layer. A re-entrancy
+    /// guard only — [`Transaction::new`] asserts against it to reject a nested
+    /// open through the guard's `DerefMut`; it does not gate `data_mut` routing.
+    in_transaction: bool,
 }
 
 impl Layer {
@@ -128,47 +140,68 @@ impl Layer {
     pub(crate) fn new(identifier: impl Into<String>, data: LayerData) -> Self {
         Self {
             identifier: identifier.into(),
-            data: CowData::new(EditProxy::new(data)),
-            overlay: false,
+            data: CowData::new(data),
+            pending: ChangeList::new(),
+            in_transaction: false,
         }
     }
 
     /// Borrow the layer's data as a read-only [`AbstractData`]. Reads see the
-    /// staged-over-base view, so uncommitted edits made inside a
-    /// [`Transaction`] are visible.
+    /// staged-over-base view, so edits staged but not yet flushed are visible.
     pub fn data(&self) -> &dyn AbstractData {
         &self.data
     }
 
     /// Borrow the layer's backing data as a mutable [`AbstractData`] for
-    /// authoring. Inside a [`Transaction`] this routes through
-    /// the staging overlay; outside one it writes through to the backend
-    /// directly — applied immediately. Either way the write passes through the
-    /// recording [`EditProxy`] and is captured in the [`ChangeList`].
+    /// authoring. The write stages in the copy-on-write overlay; it reaches the
+    /// backend, and its derived change is accumulated for composition
+    /// invalidation, at the next [`flush`](Self::flush) — implicitly when a
+    /// [`Transaction`] opens or commits, or when the layer joins a stage.
     pub fn data_mut(&mut self) -> &mut dyn AbstractData {
-        if self.overlay {
-            &mut self.data
-        } else {
-            self.data.base_mut()
-        }
+        &mut self.data
     }
 
-    /// Whether the layer has been modified since it was loaded or last
-    /// committed — either edits staged in an open transaction, or write-through
-    /// edits recorded by the proxy. Mirrors C++ `SdfLayer::IsDirty`.
+    /// Derive the composition record from the staged overlay (against the
+    /// still-pristine backend), accumulate it into [`pending`](Self::pending),
+    /// and commit the overlay into the backend. A no-op when nothing is staged.
+    /// The derivation must read the overlay before the commit drains it.
+    pub(crate) fn flush(&mut self) {
+        let derived = ChangeList::from_overlay(&self.data);
+        self.pending.merge_from(&derived);
+        self.data.commit();
+    }
+
+    /// Flush any staged edits and drain the accumulated change record, leaving
+    /// the layer clean. The stage calls this to drive composition invalidation.
+    pub(crate) fn take_changes(&mut self) -> ChangeList {
+        self.flush();
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Whether the layer has been modified since it was loaded or last drained —
+    /// either edits still staged in the overlay, or a change record accumulated
+    /// from earlier flushes. Mirrors C++ `SdfLayer::IsDirty`.
+    ///
+    /// Conservative about staged content: any uncommitted overlay write counts,
+    /// including an idempotent edit (a field re-set to the value the base
+    /// already holds) whose flush would derive no composition change. Such an
+    /// edit reports dirty here even though [`take_changes`](Self::take_changes)
+    /// would yield an empty record — the "needs save" question this answers is
+    /// distinct from the "needs recompose" question the change record answers.
     pub fn is_dirty(&self) -> bool {
-        !self.data.is_empty() || self.data.base().is_dirty()
+        !self.data.is_empty() || !self.pending.is_empty()
     }
 
-    /// Drop the layer's pending change record (and any staged overlay) without
-    /// applying composition invalidation. Called when a layer joins a stage:
-    /// its content is composed fresh by the layer-stack recompose, so a record
-    /// left by prior write-through edits is redundant — and, if left in place,
-    /// would be drained by (and mis-attributed to) the first transaction the
-    /// stage later runs on the layer.
+    /// Commit any staged edits into the backend to keep their content, then drop
+    /// the accumulated change record without applying composition invalidation.
+    /// Called when a layer joins a stage: its content is composed fresh by the
+    /// layer-stack recompose, so a record left by prior direct edits is
+    /// redundant — and, if left in place, would be drained by (and
+    /// mis-attributed to) the first transaction the stage later runs on the
+    /// layer.
     pub(crate) fn discard_changes(&mut self) {
-        self.data.rollback();
-        self.data.base_mut().clear();
+        self.data.commit();
+        self.pending.clear();
     }
 
     /// Remove the spec at `path` from this layer. Removing a prim also erases
@@ -176,8 +209,8 @@ impl Layer {
     /// child-name list. Returns `Ok(true)` when a spec was present and removed,
     /// or an [`AuthoringError`] when the owning prim's child list cannot be read.
     ///
-    /// The recording [`EditProxy`] captures each erase so composition can
-    /// invalidate.
+    /// The erase stages in the overlay, so the next flush derives a removal for
+    /// composition to invalidate.
     pub fn remove_spec(&mut self, path: &Path) -> Result<bool, AuthoringError> {
         super::spec::remove_spec(self.data_mut(), path)
     }
@@ -300,7 +333,7 @@ pub enum AuthoringError {
 /// Identity, persistence, and typed-view lookups. Spec authoring lives on the
 /// views themselves ([`PrimSpec::new`](crate::sdf::PrimSpec::new) and friends,
 /// mirroring C++ `Sdf*Spec::New`); they write through [`Layer::data_mut`], so
-/// the layer's [`EditProxy`] records every edit.
+/// every edit stages in the layer's overlay for the next flush to record.
 ///
 /// The typed-view lookups ([`Layer::prim`], [`Layer::attribute`],
 /// [`Layer::relationship`], [`Layer::pseudo_root`]) operate through the
@@ -709,10 +742,11 @@ mod tests {
         assert_eq!(layer.start_time_code(), 0.0);
     }
 
-    /// A direct edit (outside a transaction) is write-through: applied
-    /// immediately and visible, with no transaction to commit.
+    /// A direct edit (outside a transaction) stages in the overlay: visible to
+    /// reads straight away (which merge staged-over-base) and marking the layer
+    /// dirty, without a transaction to commit.
     #[test]
-    fn direct_edit_is_write_through() {
+    fn direct_edit_visible_and_dirty() {
         use crate::sdf::{PrimSpec, Specifier};
         let mut layer = Layer::new_anonymous("test.usda");
         PrimSpec::new(layer.data_mut(), "/World", Specifier::Def, "Xform").expect("authored");
@@ -748,9 +782,9 @@ mod tests {
         assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
     }
 
-    /// A panic mid-transaction unwinds cleanly: the guard drops the staged edits
-    /// and closes overlay mode, so the layer is reusable afterwards rather than
-    /// stuck in overlay mode with orphaned staged edits.
+    /// A panic mid-transaction unwinds cleanly: the guard drops the staged
+    /// edits, so the layer is reusable afterwards rather than left with orphaned
+    /// staged edits.
     #[test]
     fn transaction_recovers_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
@@ -774,19 +808,42 @@ mod tests {
         assert!(layer.prim(Path::from("/B")).is_some());
     }
 
-    /// Opening a transaction on a layer already in one is rejected — the only
-    /// remaining nesting path is `Transaction::new(&mut tx)` through the guard's
-    /// `DerefMut`, which the assertion catches.
+    /// Opening a transaction on a layer already under one panics rather than
+    /// silently committing the outer transaction's staged edits — the
+    /// `Transaction::new(&mut tx)` deref-coercion path the assertion guards.
     #[test]
-    #[should_panic(expected = "already in a transaction")]
+    #[should_panic(expected = "nested transaction")]
     fn nested_transaction_panics() {
         let mut layer = Layer::new_anonymous("test.usda");
         let mut tx = Transaction::new(&mut layer);
         let _nested = Transaction::new(&mut tx);
     }
 
-    /// `discard_changes` drops the pending change record (so a later transaction
-    /// can't drain it) while leaving the write-through content in the backend.
+    /// Direct edits made before a transaction opens are flushed into the backend
+    /// at `Transaction::new` and fold into the accumulated record, while the
+    /// transaction's own edits commit on top — one combined change list, all
+    /// content present.
+    #[test]
+    fn accumulates_direct_edits_then_tx() {
+        use crate::sdf::{PrimSpec, Specifier};
+        let mut layer = Layer::new_anonymous("test.usda");
+        PrimSpec::new(layer.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
+
+        let mut tx = Transaction::new(&mut layer);
+        PrimSpec::new(tx.data_mut(), "/B", Specifier::Def, "Xform").expect("authored");
+        let changes = tx.commit();
+
+        let touched = |s: &str| changes.iter().any(|(path, _)| path == &Path::from(s));
+        assert!(touched("/A"), "the pre-transaction direct edit folds into the record");
+        assert!(touched("/B"), "the transaction's own edit is recorded");
+        assert!(layer.prim(Path::from("/A")).is_some());
+        assert!(layer.prim(Path::from("/B")).is_some());
+        assert!(!layer.is_dirty(), "commit drained the accumulated record");
+    }
+
+    /// `discard_changes` drops the accumulated change record (so a later
+    /// transaction can't drain it) while flushing the staged content into the
+    /// backend so it survives.
     #[test]
     fn discard_changes_keeps_content() {
         use crate::sdf::{PrimSpec, Specifier};
@@ -804,9 +861,8 @@ mod tests {
     }
 
     /// Authoring layer metadata directly (no `Stage`, so no transaction) on a
-    /// backend that lacks a pseudo-root spec writes through to the backend, so a
-    /// follow-up read sees it. Outside a transaction `data_mut` targets the
-    /// backend directly, materializing the pseudo-root there.
+    /// backend that lacks a pseudo-root spec materializes the pseudo-root in the
+    /// overlay, so a follow-up read — merging staged-over-base — sees it.
     #[test]
     fn metadata_on_rootless_backend() {
         let root = Path::abs_root();

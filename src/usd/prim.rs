@@ -155,8 +155,8 @@ impl Prim {
         self.stage.with_target_layer_at(&self.path, |layer, path| {
             // Author an `over` for the prim (and any missing ancestors) when the
             // edit target has no local spec, matching C++ `UsdObject::SetMetadata`
-            // creating the spec for editing. The layer's `EditProxy` records the
-            // ancestor adds and the metadata write.
+            // creating the spec for editing. The layer records the ancestor
+            // adds and the metadata write.
             let mut spec = sdf::PrimSpec::over(layer.data_mut(), path)?;
             let value = f(spec.field(key).ok().flatten());
             spec.set(key, value);
@@ -645,9 +645,8 @@ impl Prim {
     }
 
     /// Borrow the prim spec at `self.path` on the edit target's layer, apply
-    /// `f`, and return `self` for chaining. The layer's `EditProxy` records
-    /// whatever fields `f` writes. Returns `InvalidPath` if no prim spec exists
-    /// at the path.
+    /// `f`, and return `self` for chaining. The layer records whatever fields
+    /// `f` writes. Returns `InvalidPath` if no prim spec exists at the path.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::PrimSpecMut<'_>),

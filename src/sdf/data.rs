@@ -319,7 +319,11 @@ pub struct CowData<T: AbstractData> {
 }
 
 /// A staged change to one spec in a [`CowData`] overlay.
-enum Patch {
+///
+/// Exposed (with [`CowData::overlay`]) so the change tracker can read what the
+/// overlay touched and derive a [`ChangeList`](super::ChangeList) from it; see
+/// [`ChangeList::from_overlay`](super::ChangeList::from_overlay).
+pub enum Patch {
     /// A spec created (or re-created, replacing a base spec) this transaction.
     /// Holds its whole field set, so reads ignore the base and commit
     /// reproduces it wholesale.
@@ -415,9 +419,24 @@ impl<T: AbstractData> CowData<T> {
         &mut self.base
     }
 
+    /// The staged changes keyed by path, for a consumer that needs to know what
+    /// the overlay touched without committing it — notably
+    /// [`ChangeList::from_overlay`](super::ChangeList::from_overlay), which
+    /// derives a composition-invalidation record by reading each [`Patch`]
+    /// against the still-pristine [`base`](Self::base).
+    pub fn overlay(&self) -> &HashMap<Path, Patch> {
+        &self.overlay
+    }
+
     /// The staged patch for `path`, or `None` when the read should fall through
     /// to `base` — both when the overlay is entirely empty (the committed steady
     /// state, kept lookup-free) and when this path is simply unstaged.
+    //
+    // TODO(perf): the empty-overlay fast path here is defeated while a layer
+    // holds uncommitted direct edits (those made outside a transaction stay
+    // staged until the next flush), so each read pays a `HashMap` lookup until
+    // then. Stage-managed layers flush at every transaction, so this only bites
+    // a standalone layer edited heavily without committing.
     fn staged(&self, path: &Path) -> Option<&Patch> {
         if self.overlay.is_empty() {
             None

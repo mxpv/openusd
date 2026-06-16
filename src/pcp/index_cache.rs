@@ -3481,7 +3481,7 @@ def "Scope"
     }
 
     /// An `over` authored together with a composition arc recomposes despite
-    /// the inert specifier: the `EditProxy` surfaces `references` in
+    /// the inert specifier: the change record surfaces `references` in
     /// `info_changed` (only the auto-stamped `specifier` folds into the add), so
     /// the classifier treats the inert add as significant.
     #[test]
@@ -3519,8 +3519,8 @@ def "Scope"
         Ok(())
     }
 
-    /// Erasing an `over` that carried a composition arc recomposes: the
-    /// `EditProxy` records the removed `references` field, so the classifier
+    /// Erasing an `over` that carried a composition arc recomposes: the change
+    /// record carries the removed `references` field, so the classifier
     /// treats the inert removal as significant and the arc is torn down.
     #[test]
     fn inert_remove_of_arc_recomposes() -> Result<()> {
@@ -3630,7 +3630,7 @@ def "Scope"
     }
 
     /// Removing an inert `over` carrying `active = false` reactivates the prim:
-    /// the `EditProxy` records the removed `active` field, so the classifier
+    /// the change record carries the removed `active` field, so the classifier
     /// treats the removal as significant, the subtree recomposes from the weaker
     /// `def`, and `active` resolves to its default — the subtree is not left
     /// inactive after the opinion is gone.
@@ -3662,8 +3662,8 @@ def "Scope"
         );
         assert!(has_child(&mut cache, &graph)?);
 
-        // Erase the over spec on the strong layer through the recording proxy
-        // and drive the change the EditProxy recorded.
+        // Erase the over spec on the strong layer and drive the change the
+        // layer derives from it.
         let cl = edit_layer(&mut graph.get_mut(strong_id).unwrap().layer, |l| {
             l.data_mut().erase_spec(&world);
             Ok(())

@@ -148,8 +148,8 @@ impl Changes {
         } else if entry.flags.intersects(sdf::ChangeFlags::INERT_PRIM) {
             // An inert add or remove with no significant field flips only whether
             // `(layer, path)` contributes an opinion; the graph structure is
-            // untouched. The `EditProxy` surfaces the structural fields an `over`
-            // carries into `info_changed`, so an arc / instancing / activation
+            // untouched. The change record surfaces the structural fields an
+            // `over` carries into `info_changed`, so an arc / instancing / activation
             // opinion is already caught by the significant branch above; what
             // reaches here is a genuinely inert change. The spec-tier rescan
             // refreshes the affected nodes' `has_specs` flag across the local prim
@@ -345,7 +345,7 @@ mod tests {
     }
 
     /// An inert prim add whose spec authors `instanceable` flips the prim's
-    /// instancing composition (spec 11.3.3); the `EditProxy` surfaces
+    /// instancing composition (spec 11.3.3); the change record surfaces
     /// `instanceable` in `info_changed`, so the classifier promotes it to
     /// significant despite the inert add flag.
     #[test]

@@ -256,9 +256,9 @@ impl Attribute {
         self.edit_connection(|spec| spec.clear_connection_paths())
     }
 
-    /// Run `f` on the attribute spec at the edit target's layer. The layer's
-    /// `EditProxy` records a `connectionPaths` change (driving cache
-    /// invalidation) only when `f` actually mutates the field. The shared
+    /// Run `f` on the attribute spec at the edit target's layer. The layer
+    /// records a `connectionPaths` change (driving cache invalidation) only
+    /// when `f` actually mutates the field. The shared
     /// helper for the connection authoring methods above.
     fn edit_connection<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
@@ -482,9 +482,9 @@ impl Attribute {
     }
 
     /// Borrow the attribute spec at `self.path` on the edit target's layer,
-    /// apply `f`, and return `self` for chaining. The layer's `EditProxy`
-    /// records whatever fields `f` writes. Returns `InvalidPath` if no
-    /// attribute spec exists at the path.
+    /// apply `f`, and return `self` for chaining. The layer records whatever
+    /// fields `f` writes. Returns `InvalidPath` if no attribute spec exists at
+    /// the path.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::AttributeSpecMut<'_>),

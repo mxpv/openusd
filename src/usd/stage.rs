@@ -840,9 +840,9 @@ impl Stage {
     pub fn define_prim(&self, path: impl Into<sdf::Path>) -> Result<super::Prim, StageAuthoringError> {
         let path = path.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
-            // The layer's `EditProxy` records the spec add and any auto-created
-            // ancestor `over`s; an idempotent call (existing def) records
-            // nothing because the value-diff suppresses the no-op write.
+            // The layer records the spec add and any auto-created ancestor
+            // `over`s; an idempotent call (existing def) records nothing because
+            // deriving the change skips the no-op write.
             sdf::PrimSpec::new(layer.data_mut(), layer_path, sdf::Specifier::Def, "")?;
             Ok(())
         })?;
@@ -877,8 +877,7 @@ impl Stage {
         let type_name = type_name.into();
         self.with_target_layer_at(&path, |layer, layer_path| {
             // The owning prim and any missing ancestors are auto-created as
-            // `over` specs; the layer's `EditProxy` records them and the
-            // property add.
+            // `over` specs; the layer records them and the property add.
             sdf::AttributeSpec::new(layer.data_mut(), layer_path, type_name, sdf::Variability::Varying, true)?;
             Ok(())
         })?;
@@ -963,8 +962,8 @@ impl Stage {
     pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
         let name = name.into();
         self.with_root_layer(|layer| {
-            // The layer's `EditProxy` records the `defaultPrim` change, and its
-            // value-diff skips cache invalidation when the value isn't changing.
+            // The layer records the `defaultPrim` change, and deriving it skips
+            // cache invalidation when the value isn't changing.
             layer.set_default_prim(name)?;
             Ok(())
         })

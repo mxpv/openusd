@@ -186,9 +186,9 @@ impl Relationship {
     }
 
     /// Borrow the relationship spec at `self.path` on the edit target's
-    /// layer, apply `f`, and return `self` for chaining. The layer's
-    /// `EditProxy` records whatever fields `f` writes, setting
-    /// `CHANGE_RELATIONSHIP_TARGETS` when the write touches `targetPaths`.
+    /// layer, apply `f`, and return `self` for chaining. The layer records
+    /// whatever fields `f` writes, setting `CHANGE_RELATIONSHIP_TARGETS` when
+    /// the write touches `targetPaths`.
     /// Returns `InvalidPath` if no relationship spec exists at the path.
     //
     // The change-list entry is recorded at the relationship's property

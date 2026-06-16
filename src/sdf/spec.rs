@@ -311,9 +311,9 @@ impl<'a> PrimSpecMut<'a> {
     /// Create or upgrade the prim spec at `path` with `specifier` and
     /// `type_name`, mirroring C++ `SdfPrimSpec::New`. An empty `type_name`
     /// leaves `typeName` unauthored. Missing ancestor specs are created as
-    /// `over` and each parent's `primChildren` is updated. When `data` is the
-    /// layer's recording [`EditProxy`](sdf::EditProxy) the structural change is
-    /// captured in its [`ChangeList`](sdf::ChangeList).
+    /// `over` and each parent's `primChildren` is updated. When `data` is a
+    /// layer's staging overlay, the structural change is captured when the layer
+    /// derives its [`ChangeList`](sdf::ChangeList) at flush.
     pub fn new(
         data: &'a mut dyn sdf::AbstractData,
         path: impl Into<sdf::Path>,
@@ -1554,8 +1554,8 @@ fn remove_from_token_vec(
 /// pseudo-root and variant scaffolding are not removable here and yield
 /// `Ok(false)`; a child-list read failure yields an [`sdf::AuthoringError`].
 ///
-/// Driven through the layer's recording [`EditProxy`](sdf::EditProxy), each
-/// erase records a `REMOVE_*` flag so composition invalidates.
+/// Staged in the layer's overlay, each erase yields a `REMOVE_*` flag when the
+/// layer derives its change list at flush, so composition invalidates.
 pub(crate) fn remove_spec(data: &mut dyn sdf::AbstractData, path: &sdf::Path) -> Result<bool, sdf::AuthoringError> {
     let (owner, name, child_key) = match data.spec_type(path) {
         Some(sdf::SpecType::Prim) => {
