@@ -12,7 +12,7 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`tf/`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent API. Start at `tf/mod.rs`.
 
-- **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model. `AbstractData` is the unified read/write backend interface the text, binary, and archive readers all implement; `Value`, `Path`, and `Layer` (C++ `SdfLayer`) are the everyday types. A `Layer` stages edits in a copy-on-write `CowData` overlay and derives a `ChangeList` from it for composition invalidation (`sdf/layer.rs`, `sdf/change.rs`); spec authoring lives on the typed views (`PrimSpec::new` and friends). Also here: the pluggable `FileFormat` read/write seam, the variable-expression engine (`sdf/expr.rs`), and the namespace-aware spec-copy primitive (`sdf/copy.rs`). Start at `sdf/mod.rs`.
+- **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model. `AbstractData` is the unified read/write backend interface the text, binary, and archive readers all implement; `Value`, `Path`, and `Layer` (C++ `SdfLayer`) are the everyday types. A `Layer`'s edits run through `Layer::edit` / `edit_layers` (a closure over a `LayerEdit` view) as atomic copy-on-write transactions that derive a `ChangeList` for composition invalidation and fire per-layer `LayerSink`s at the commit seam (`sdf/layer.rs`, `sdf/change.rs`, `sdf/sink.rs`); spec authoring lives on the typed views (`PrimSpec::new` and friends). Also here: the pluggable `FileFormat` read/write seam, the variable-expression engine (`sdf/expr.rs`), and the namespace-aware spec-copy primitive (`sdf/copy.rs`). Start at `sdf/mod.rs`.
 
 - **`usda/`** - Text format `.usda`: logos lexer + recursive-descent parser. `TextReader` / `TextWriter`.
 
@@ -26,7 +26,7 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`): LIVERPS strength ordering across layers, kept a pure function of `(graph, context, cached indices)` so it stays parallelizable. Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure table.
 
-- **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`. Notable sub-surfaces: `usd/notice.rs` (change notifications), `usd/diff.rs` (edit replication), `usd/editor.rs` (namespace editing). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`), not root-level re-exports.
+- **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`. Notable sub-surfaces: `usd/sink.rs` (`StageSink` composed-change observers), `usd/diff.rs` (edit replication), `usd/editor.rs` (namespace editing). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`), not root-level re-exports.
 
 - **`schemas/`** - Domain schemas layered on `sdf` / `usd`, not part of the AOUSD core spec. Feature-gated per family (`geom`, `lux`, `media`, `physics`, `proc`, `render`, `shade`, `skel`, `ui`, `vol`; some enable `geom` transitively). See the table in `schemas/mod.rs`.
 
@@ -95,6 +95,7 @@ When implementing a new feature from the spec:
 - Re-export key types from module roots so users can access them without deep paths (e.g. `sdf::FieldKey` not `sdf::schema::FieldKey`)
 - Reference types through their module, not a fully-qualified or bare path: `use crate::{sdf, gf, tf};` then write `sdf::TimeCode`, `gf::Vec3f`, `tf::Token`. Don't write inline `crate::tf::Token::from(...)` (or `openusd::tf::Token` in tests), and don't `use crate::tf::Token;` to get a bare `Token` when `tf::Token` reads clearly (it also avoids clashes, e.g. the `usda` lexer's own `Token`)
 - Avoid raw path string manipulations; use `Path` methods instead of building or parsing path strings manually
+- Mutate a `Cell` / `RefCell` through its own methods, not a deref-assignment: prefer `cell.replace(v)`, `cell.replace_with(|old| …)`, `cell.take()`, and (for `Cell`) `cell.set(v)` / `cell.get()` over `*cell.borrow_mut() = v` or `*cell.borrow_mut() += …`; when you hold `&mut self`, reach the value with `cell.get_mut()` to skip the runtime borrow entirely. Use a `Cell` (not a `RefCell`) for a `Copy` field like a counter or flag
 - Don't add "Generated with Claude Code" or "Co-Authored-By: Claude" to commits, PRs, or release notes
 
 ## Testing

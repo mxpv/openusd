@@ -11,10 +11,10 @@ mod connections;
 mod diff;
 mod editor;
 mod interp;
-mod notice;
 mod prim;
 mod relationship;
 mod schema;
+mod sink;
 mod stage;
 mod timecode;
 
@@ -28,10 +28,10 @@ pub use connections::ConnectionGraph;
 pub use diff::{ApplyMode, Diff, Edit, FieldValue};
 pub use editor::{NamespaceEditError, NamespaceEditor};
 pub use interp::InterpolationType;
-pub use notice::{LayerMutingChanged, Notice, ObjectsChanged};
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
+pub use sink::{CommittedChange, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask, WeakStage,

@@ -2508,15 +2508,26 @@ mod tests {
         (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
     }
 
-    /// Run `f` as one atomic transaction on `layer` and return the recorded
-    /// change list, the test-side spelling of an [`sdf::Layer`] edit.
+    /// Run `f` as one atomic transaction on `layer` and return the recorded change
+    /// list, the test-side spelling of an [`sdf::Layer`] edit. Captures the record
+    /// the way any observer would — through an `after_commit` sink — since `edit`
+    /// itself returns only whether anything changed.
     fn edit_layer(
         layer: &mut sdf::Layer,
-        f: impl FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     ) -> Result<sdf::ChangeList, sdf::AuthoringError> {
-        let mut tx = sdf::Transaction::new(layer);
-        f(&mut tx)?;
-        Ok(tx.commit())
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(sdf::ChangeList::new()));
+        let slot = captured.clone();
+        let id = layer.add_sink(move |_: &str, changes: &sdf::ChangeList| {
+            slot.replace(changes.clone());
+        });
+        let result = layer.edit(f);
+        layer.remove_sink(id);
+        match result {
+            Ok(_) => Ok(std::rc::Rc::try_unwrap(captured).expect("sink dropped").into_inner()),
+            Err(sdf::EditError::Author(e)) => Err(e),
+            Err(sdf::EditError::Rejected(_)) => panic!("no layer sink to veto in tests"),
+        }
     }
 
     /// Builds a one-layer graph + cache whose root is loaded from a real path,
@@ -3461,12 +3472,11 @@ def "Scope"
         assert!(!cache.has_spec(&graph, &sdf::path("/Foo")?)?);
 
         // Author an inert `over "Foo"` into the root layer.
-        sdf::PrimSpec::new(
-            graph.get_mut(root_id).unwrap().layer.data_mut(),
-            "/Foo",
-            sdf::Specifier::Over,
-            "",
-        )?;
+        let node = graph.get_mut(root_id).unwrap();
+        edit_layer(&mut node.layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Foo", sdf::Specifier::Over, "")?;
+            Ok(())
+        })?;
 
         // Drive the inert add through the change pipeline.
         let mut cl = sdf::ChangeList::new();

@@ -446,11 +446,23 @@ pub fn open_layer(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> R
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
     use crate::ar::{DefaultResolver, Resolver};
     use crate::sdf::AbstractData;
+
+    /// Author through a layer's `edit` API and commit, for the authoring tests
+    /// below. The closure authors with `unwrap`/`expect`; the edit commits when it
+    /// returns.
+    fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
+        layer
+            .edit(|e| {
+                f(e);
+                Ok(())
+            })
+            .expect("authored");
+    }
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -621,17 +633,17 @@ mod tests {
         assert_eq!(layers.len(), 1);
         assert!(layers[0].identifier.contains("payload_same_folder.usda"));
 
-        let errors = RefCell::new(0);
+        let errors = Cell::new(0);
         let path = composition_path("payload/payload_invalid.usda");
         let layers = Collector::new(&resolver)
             .load_payloads(false)
             .on_error(|_| {
-                *errors.borrow_mut() += 1;
+                errors.set(errors.get() + 1);
                 Ok(())
             })
             .collect(&path)?;
         assert_eq!(layers.len(), 1);
-        assert_eq!(*errors.borrow(), 0);
+        assert_eq!(errors.get(), 0);
         Ok(())
     }
 
@@ -762,18 +774,18 @@ mod tests {
     fn filter_skips_dependency() -> Result<()> {
         let path = composition_path("references/reference_invalid.usda");
         let resolver = DefaultResolver::new();
-        let errors = RefCell::new(0);
+        let errors = Cell::new(0);
         let include = |path: &sdf::Path| path.as_str() == "/World/cube";
         let layers = Collector::new(&resolver)
             .prim_dependency_filter(&include)
             .on_error(|_| {
-                *errors.borrow_mut() += 1;
+                errors.set(errors.get() + 1);
                 Ok(())
             })
             .collect(&path)?;
 
         assert_eq!(layers.len(), 1);
-        assert_eq!(*errors.borrow(), 0);
+        assert_eq!(errors.get(), 0);
         assert!(layers[0].identifier.contains("reference_invalid.usda"));
         Ok(())
     }
@@ -939,8 +951,11 @@ mod tests {
     #[test]
     fn create_prim_basic() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        let mut prim = sdf::PrimSpec::new(layer.data_mut(), "/World", sdf::Specifier::Def, "Xform")?;
-        prim.set_kind("group");
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/World", sdf::Specifier::Def, "Xform")
+                .unwrap()
+                .set_kind("group");
+        });
 
         let world = layer.prim("/World").expect("prim authored");
         assert_eq!(world.type_name().as_deref(), Some("Xform"));
@@ -952,7 +967,9 @@ mod tests {
     #[test]
     fn auto_ancestor_chain() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/A/B/C", sdf::Specifier::Def, "Mesh")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A/B/C", sdf::Specifier::Def, "Mesh").unwrap();
+        });
 
         // Leaf is Def; ancestors are Over.
         assert_eq!(
@@ -970,9 +987,11 @@ mod tests {
     #[test]
     fn prim_children() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/World", sdf::Specifier::Def, "Xform")?;
-        sdf::PrimSpec::new(layer.data_mut(), "/World/Mesh", sdf::Specifier::Def, "Mesh")?;
-        sdf::PrimSpec::new(layer.data_mut(), "/World/Cube", sdf::Specifier::Def, "Cube")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/World", sdf::Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/World/Mesh", sdf::Specifier::Def, "Mesh").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/World/Cube", sdf::Specifier::Def, "Cube").unwrap();
+        });
 
         let root = layer.pseudo_root().expect("pseudo-root present");
         let root_children = root.prim_children().unwrap();
@@ -989,27 +1008,27 @@ mod tests {
     #[test]
     fn property_children() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Mesh", sdf::Specifier::Def, "Mesh")?;
-        sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/Mesh.points",
-            "point3f[]",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/Mesh.normals",
-            "normal3f[]",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        sdf::RelationshipSpec::new(
-            layer.data_mut(),
-            "/Mesh.material:binding",
-            sdf::Variability::Varying,
-            false,
-        )?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Mesh", sdf::Specifier::Def, "Mesh").unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mesh.points",
+                "point3f[]",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mesh.normals",
+                "normal3f[]",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)
+                .unwrap();
+        });
 
         let mesh = layer.prim("/Mesh").expect("prim");
         let props = mesh.property_children().unwrap();
@@ -1021,22 +1040,18 @@ mod tests {
     #[test]
     fn relationship_variability() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::RelationshipSpec::new(
-            layer.data_mut(),
-            "/Mesh.material:binding",
-            sdf::Variability::Uniform,
-            false,
-        )?;
+        edit_layer(&mut layer, |e| {
+            sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Uniform, false)
+                .unwrap();
+        });
 
         let rel = layer.relationship("/Mesh.material:binding").expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Uniform);
 
-        sdf::RelationshipSpec::new(
-            layer.data_mut(),
-            "/Mesh.material:binding",
-            sdf::Variability::Varying,
-            false,
-        )?;
+        edit_layer(&mut layer, |e| {
+            sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)
+                .unwrap();
+        });
         let rel = layer.relationship("/Mesh.material:binding").expect("relationship");
         assert_eq!(rel.variability(), sdf::Variability::Varying);
         assert!(rel.field(sdf::FieldKey::Variability.as_str()).ok().flatten().is_none());
@@ -1046,14 +1061,24 @@ mod tests {
     #[test]
     fn bad_prim_children_errors() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        layer.data_mut().set_field(
-            &sdf::Path::abs_root(),
-            sdf::ChildrenKey::PrimChildren.as_str(),
-            sdf::Value::String("bad".into()),
-        );
+        edit_layer(&mut layer, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                sdf::ChildrenKey::PrimChildren.as_str(),
+                sdf::Value::String("bad".into()),
+            );
+        });
 
-        let err = sdf::PrimSpec::new(layer.data_mut(), "/A", sdf::Specifier::Def, "Xform").unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
+        let err = layer
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+        ));
 
         let value = layer
             .data()
@@ -1066,21 +1091,25 @@ mod tests {
     #[test]
     fn bad_property_children_errors() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Mesh", sdf::Specifier::Def, "Mesh")?;
-        layer.data_mut().set_field(
-            &sdf::path("/Mesh").unwrap(),
-            sdf::ChildrenKey::PropertyChildren.as_str(),
-            sdf::Value::String("bad".into()),
-        );
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Mesh", sdf::Specifier::Def, "Mesh").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/Mesh").unwrap(),
+                sdf::ChildrenKey::PropertyChildren.as_str(),
+                sdf::Value::String("bad".into()),
+            );
+        });
 
-        let err = sdf::RelationshipSpec::new(
-            layer.data_mut(),
-            "/Mesh.material:binding",
-            sdf::Variability::Varying,
-            false,
-        )
-        .unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
+        let err = layer
+            .edit(|e| {
+                sdf::RelationshipSpec::new(e.data_mut(), "/Mesh.material:binding", sdf::Variability::Varying, false)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+        ));
 
         assert!(!layer.data().has_spec(&sdf::path("/Mesh.material:binding").unwrap()));
         let value = layer
@@ -1098,20 +1127,22 @@ mod tests {
     #[test]
     fn attr_samples() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Sphere", sdf::Specifier::Def, "Sphere")?;
-
-        let mut radius = sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/Sphere.radius",
-            "double",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        radius.set_default(sdf::Value::Double(2.5));
-        radius.set_time_sample(0.0, sdf::Value::Double(1.0));
-        radius.set_time_sample(10.0, sdf::Value::Double(3.0));
-        // Out-of-order insert lands in sorted position.
-        radius.set_time_sample(5.0, sdf::Value::Double(2.0));
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Sphere", sdf::Specifier::Def, "Sphere").unwrap();
+            let mut radius = sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Sphere.radius",
+                "double",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            radius.set_default(sdf::Value::Double(2.5));
+            radius.set_time_sample(0.0, sdf::Value::Double(1.0));
+            radius.set_time_sample(10.0, sdf::Value::Double(3.0));
+            // Out-of-order insert lands in sorted position.
+            radius.set_time_sample(5.0, sdf::Value::Double(2.0));
+        });
 
         let read = layer.attribute("/Sphere.radius").expect("attr");
         assert_eq!(read.type_name().as_deref(), Some("double"));
@@ -1125,26 +1156,52 @@ mod tests {
     #[test]
     fn wrong_ancestor_type() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        // Plant a non-Prim spec at a prim-shaped path through the public data API.
-        layer
-            .data_mut()
-            .create_spec(sdf::path("/A").unwrap(), sdf::SpecType::Attribute);
+        // Plant a non-Prim spec at a prim-shaped path through the data API.
+        edit_layer(&mut layer, |e| {
+            e.data_mut()
+                .create_spec(sdf::path("/A").unwrap(), sdf::SpecType::Attribute);
+        });
 
-        let err = sdf::PrimSpec::new(layer.data_mut(), "/A/B", sdf::Specifier::Def, "Xform").unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
-        let err =
-            sdf::AttributeSpec::new(layer.data_mut(), "/A.x", "double", sdf::Variability::Varying, false).unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
+        let err = layer
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), "/A/B", sdf::Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+        ));
+        let err = layer
+            .edit(|e| {
+                sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, false)?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+        ));
     }
 
     #[test]
     fn failed_prim_chain_creation_is_atomic() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
         let bad_child = sdf::path("/A/B").unwrap();
-        layer.data_mut().create_spec(bad_child, sdf::SpecType::Attribute);
+        edit_layer(&mut layer, |e| {
+            e.data_mut().create_spec(bad_child, sdf::SpecType::Attribute);
+        });
 
-        let err = sdf::PrimSpec::new(layer.data_mut(), "/A/B", sdf::Specifier::Def, "Xform").unwrap_err();
-        assert!(matches!(err, sdf::AuthoringError::InvalidPath { .. }));
+        let err = layer
+            .edit(|e| {
+                sdf::PrimSpec::new(e.data_mut(), "/A/B", sdf::Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+        ));
 
         assert!(!layer.data().has_spec(&sdf::path("/A").unwrap()));
         assert!(layer
@@ -1157,18 +1214,20 @@ mod tests {
     #[test]
     fn nan_time_sample() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Sphere", sdf::Specifier::Def, "Sphere")?;
-        let mut r = sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/Sphere.radius",
-            "double",
-            sdf::Variability::Varying,
-            false,
-        )?;
-
-        r.set_time_sample(1.0, sdf::Value::Double(1.0));
-        r.set_time_sample(f64::NAN, sdf::Value::Double(99.0));
-        r.set_time_sample(2.0, sdf::Value::Double(2.0));
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Sphere", sdf::Specifier::Def, "Sphere").unwrap();
+            let mut r = sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Sphere.radius",
+                "double",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            r.set_time_sample(1.0, sdf::Value::Double(1.0));
+            r.set_time_sample(f64::NAN, sdf::Value::Double(99.0));
+            r.set_time_sample(2.0, sdf::Value::Double(2.0));
+        });
         // NaN does not collide with finite samples — both finite values survive.
         let samples = layer
             .attribute("/Sphere.radius")
@@ -1180,10 +1239,11 @@ mod tests {
         assert_eq!(finite, vec![1.0, 2.0]);
 
         // erase_time_sample(NaN) can find the NaN entry via total_cmp.
-        assert!(layer
-            .attribute_mut("/Sphere.radius")
-            .unwrap()
-            .erase_time_sample(f64::NAN));
+        let mut erased = false;
+        edit_layer(&mut layer, |e| {
+            erased = e.attribute_mut("/Sphere.radius").unwrap().erase_time_sample(f64::NAN);
+        });
+        assert!(erased);
         let times: Vec<f64> = layer
             .attribute("/Sphere.radius")
             .unwrap()
@@ -1199,7 +1259,9 @@ mod tests {
     #[test]
     fn override_prim() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        sdf::PrimSpec::over(layer.data_mut(), "/A/B")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::over(e.data_mut(), "/A/B").unwrap();
+        });
 
         assert_eq!(layer.prim("/A").and_then(|p| p.specifier()), Some(sdf::Specifier::Over));
         assert_eq!(
@@ -1208,8 +1270,10 @@ mod tests {
         );
 
         // override_prim on an existing def leaves the specifier untouched.
-        sdf::PrimSpec::new(layer.data_mut(), "/Defined", sdf::Specifier::Def, "Xform")?;
-        sdf::PrimSpec::over(layer.data_mut(), "/Defined")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Defined", sdf::Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::over(e.data_mut(), "/Defined").unwrap();
+        });
         assert_eq!(
             layer.prim("/Defined").and_then(|p| p.specifier()),
             Some(sdf::Specifier::Def)
@@ -1220,15 +1284,15 @@ mod tests {
     #[test]
     fn pseudo_root_metadata() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        {
-            let mut root = layer.pseudo_root_mut().expect("writable");
+        edit_layer(&mut layer, |e| {
+            let mut root = e.pseudo_root_mut().expect("writable");
             root.set_default_prim("World");
             root.set_documentation("auto-generated");
             root.set_start_time_code(1.0);
             root.set_end_time_code(24.0);
             root.add_sublayer("./over.usda");
             root.add_sublayer("./over.usda");
-        }
+        });
         let root = layer.pseudo_root().expect("present");
         assert_eq!(root.default_prim().as_deref(), Some("World"));
         assert_eq!(root.documentation().as_deref(), Some("auto-generated"));
@@ -1244,52 +1308,61 @@ mod tests {
     #[test]
     fn invalid_paths() {
         let mut layer = sdf::Layer::new_anonymous("anon.usda");
-        assert!(matches!(
-            sdf::PrimSpec::new(layer.data_mut(), "/", sdf::Specifier::Def, "Xform").unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
-        assert!(matches!(
-            sdf::PrimSpec::new(layer.data_mut(), "/A.foo", sdf::Specifier::Def, "Xform").unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
-        assert!(matches!(
-            sdf::AttributeSpec::new(layer.data_mut(), "/A", "double", sdf::Variability::Varying, false).unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
+        // Whether authoring `f` fails with an `InvalidPath` authoring error.
+        fn invalid(
+            layer: &mut sdf::Layer,
+            f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
+        ) -> bool {
+            matches!(
+                layer.edit(f).unwrap_err(),
+                sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
+            )
+        }
+        assert!(invalid(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        }));
+        assert!(invalid(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A.foo", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        }));
+        assert!(invalid(&mut layer, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "/A", "double", sdf::Variability::Varying, false)?;
+            Ok(())
+        }));
         // Relative property paths must error, not panic in ensure_prim_chain.
-        assert!(matches!(
-            sdf::AttributeSpec::new(layer.data_mut(), "A.foo", "double", sdf::Variability::Varying, false).unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
-        assert!(matches!(
-            sdf::RelationshipSpec::new(layer.data_mut(), "A.foo", sdf::Variability::Varying, false).unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
+        assert!(invalid(&mut layer, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "A.foo", "double", sdf::Variability::Varying, false)?;
+            Ok(())
+        }));
+        assert!(invalid(&mut layer, |e| {
+            sdf::RelationshipSpec::new(e.data_mut(), "A.foo", sdf::Variability::Varying, false)?;
+            Ok(())
+        }));
         // Root-level property paths (`/.foo`) must also error, not panic.
-        assert!(matches!(
-            sdf::AttributeSpec::new(layer.data_mut(), "/.foo", "double", sdf::Variability::Varying, false).unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
+        assert!(invalid(&mut layer, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "/.foo", "double", sdf::Variability::Varying, false)?;
+            Ok(())
+        }));
         // Target-bracket property paths slip past `is_property_path` because the
         // tail after the last `.` is alphanumeric — split_property_path must reject them.
-        assert!(matches!(
+        assert!(invalid(&mut layer, |e| {
             sdf::AttributeSpec::new(
-                layer.data_mut(),
+                e.data_mut(),
                 "/A.rel[/Target].attr",
                 "double",
                 sdf::Variability::Varying,
-                false
-            )
-            .unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
+                false,
+            )?;
+            Ok(())
+        }));
         // Well-formed variant selections are authorable (they build the variant
         // set / variant scaffolding), but malformed ones — here an empty
         // selection — must still be rejected.
-        assert!(matches!(
-            sdf::PrimSpec::new(layer.data_mut(), "/A{x=}child", sdf::Specifier::Def, "Xform").unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
-        ));
+        assert!(invalid(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A{x=}child", sdf::Specifier::Def, "Xform")?;
+            Ok(())
+        }));
     }
 
     /// Authoring a prim inside a variant builds the full variant set / variant
@@ -1297,8 +1370,10 @@ mod tests {
     #[test]
     fn variant_authoring() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("variants.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Prim", sdf::Specifier::Def, "Xform")?;
-        sdf::PrimSpec::new(layer.data_mut(), "/Prim{set=sel}child", sdf::Specifier::Def, "Scope")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Prim", sdf::Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Prim{set=sel}child", sdf::Specifier::Def, "Scope").unwrap();
+        });
 
         assert_eq!(layer.data().spec_type(&sdf::path("/Prim")?), Some(sdf::SpecType::Prim));
         assert_eq!(
@@ -1338,14 +1413,26 @@ mod tests {
     #[test]
     fn prim_authoring_rejects_variant_leaf() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("variants.usda");
-        sdf::PrimSpec::new(layer.data_mut(), "/Prim", sdf::Specifier::Def, "Xform")?;
+        edit_layer(&mut layer, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Prim", sdf::Specifier::Def, "Xform").unwrap();
+        });
         assert!(matches!(
-            sdf::PrimSpec::new(layer.data_mut(), "/Prim{set=sel}", sdf::Specifier::Def, "Xform").unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
+            layer
+                .edit(|e| {
+                    sdf::PrimSpec::new(e.data_mut(), "/Prim{set=sel}", sdf::Specifier::Def, "Xform")?;
+                    Ok(())
+                })
+                .unwrap_err(),
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
         ));
         assert!(matches!(
-            sdf::PrimSpec::over(layer.data_mut(), "/Prim{set=sel}").unwrap_err(),
-            sdf::AuthoringError::InvalidPath { .. }
+            layer
+                .edit(|e| {
+                    sdf::PrimSpec::over(e.data_mut(), "/Prim{set=sel}")?;
+                    Ok(())
+                })
+                .unwrap_err(),
+            sdf::EditError::Author(sdf::AuthoringError::InvalidPath { .. })
         ));
         // The rejected calls must not have authored a variant spec.
         assert_eq!(layer.data().spec_type(&sdf::path("/Prim{set=sel}")?), None);
@@ -1355,35 +1442,40 @@ mod tests {
     #[test]
     fn usda_roundtrip() -> Result<()> {
         let mut layer = sdf::Layer::new_anonymous("scene.usda");
-        layer.pseudo_root_mut().unwrap().set_default_prim("World");
-        sdf::PrimSpec::new(layer.data_mut(), "/World", sdf::Specifier::Def, "Xform")?;
-        let mut sphere = sdf::PrimSpec::new(layer.data_mut(), "/World/Sphere", sdf::Specifier::Def, "Sphere")?;
-        sphere.set_kind("component");
-        let mut radius = sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/World/Sphere.radius",
-            "double",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        radius.set_default(sdf::Value::Double(1.5));
         let material = sdf::path("/World/Material")?;
-        sdf::PrimSpec::new(layer.data_mut(), &material, sdf::Specifier::Def, "Material")?;
-        let mut binding = sdf::RelationshipSpec::new(
-            layer.data_mut(),
-            "/World/Sphere.material:binding",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        binding.add_target(material.clone());
-        let mut surface = sdf::AttributeSpec::new(
-            layer.data_mut(),
-            "/World/Sphere.inputs:surface",
-            "token",
-            sdf::Variability::Varying,
-            false,
-        )?;
-        surface.set_connection_paths([sdf::path("/World/Material.outputs:surface")?]);
+        edit_layer(&mut layer, |e| {
+            e.pseudo_root_mut().unwrap().set_default_prim("World");
+            sdf::PrimSpec::new(e.data_mut(), "/World", sdf::Specifier::Def, "Xform").unwrap();
+            let mut sphere = sdf::PrimSpec::new(e.data_mut(), "/World/Sphere", sdf::Specifier::Def, "Sphere").unwrap();
+            sphere.set_kind("component");
+            let mut radius = sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/World/Sphere.radius",
+                "double",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            radius.set_default(sdf::Value::Double(1.5));
+            sdf::PrimSpec::new(e.data_mut(), &material, sdf::Specifier::Def, "Material").unwrap();
+            let mut binding = sdf::RelationshipSpec::new(
+                e.data_mut(),
+                "/World/Sphere.material:binding",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            binding.add_target(material.clone());
+            let mut surface = sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/World/Sphere.inputs:surface",
+                "token",
+                sdf::Variability::Varying,
+                false,
+            )
+            .unwrap();
+            surface.set_connection_paths([sdf::path("/World/Material.outputs:surface").unwrap()]);
+        });
 
         let tmp = std::env::temp_dir().join("openusd_authoring_roundtrip.usda");
         layer.export(tmp.to_str().unwrap())?;

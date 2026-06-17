@@ -48,7 +48,7 @@ use crate::tf::Token;
 use crate::{ar, layer, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
-use super::notice::{self, LayerMutingChanged, Notice};
+use super::sink::{Payload, StageSink, StageSinkId};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -518,6 +518,12 @@ pub enum StageAuthoringError {
     #[error(transparent)]
     Layer(#[from] sdf::AuthoringError),
 
+    /// A [`sdf::LayerSink`] rejected the staged edit from its
+    /// [`before_commit`](sdf::LayerSink::before_commit), so the whole edit rolled
+    /// back.
+    #[error(transparent)]
+    Rejected(#[from] sdf::sink::Error),
+
     /// A composed-stage query needed to route or validate the authoring call failed.
     #[error(transparent)]
     Composition(#[from] anyhow::Error),
@@ -571,6 +577,15 @@ pub enum StageAuthoringError {
     },
 }
 
+impl From<sdf::EditError> for StageAuthoringError {
+    fn from(error: sdf::EditError) -> Self {
+        match error {
+            sdf::EditError::Author(e) => Self::Layer(e),
+            sdf::EditError::Rejected(e) => Self::Rejected(e),
+        }
+    }
+}
+
 /// Shared state behind a [`Stage`] handle.
 ///
 /// Owns the loaded layer stack and the composed-scene state. Composition
@@ -605,18 +620,48 @@ pub struct StageInner {
     /// construction. Stamped onto stage-bound edit targets and read by the
     /// cross-stage guard, both without recomputing.
     layer_stack_id: pcp::LayerStackIdentifier,
-    /// Optional change listener (C++ `UsdNotice` registration), fired by
-    /// [`Stage::apply_change_set`] after each successful edit. A single slot:
-    /// callers fan out to multiple sinks inside their own closure. Boxed for
-    /// single ownership; the fire path holds a shared borrow across the call,
-    /// so the callback must not install or clear the listener.
-    listener: RefCell<Option<ChangeListener>>,
+    /// Installed stage-tier change sinks (C++ `UsdNotice` registrations,
+    /// generalized), fanned out after each recompose and on lifecycle changes.
+    /// Empty by default, so the no-sink path allocates nothing extra.
+    ///
+    /// Held under a shared borrow for the duration of a fan-out, so a sink may
+    /// re-author the stage (a re-entrant fan-out takes its own shared borrow), but
+    /// must not add or remove sinks from within a callback — that would borrow the
+    /// set mutably while the fan-out holds it shared, and panic.
+    sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
+    /// Layer edits recorded by each layer's aggregator sink (installed by
+    /// [`add_layer`](Stage::add_layer)), awaiting composed processing by
+    /// [`process_pending`](Stage::process_pending). Each entry carries the edit
+    /// target's namespace mapping so the composed change keeps full path precision
+    /// under an arc or variant target.
+    ///
+    /// Recording an edit and recomposing for it are deliberately split across this
+    /// queue rather than recomposing straight from the aggregator callback,
+    /// because:
+    ///
+    /// - Borrows. The aggregator fires inside [`Layer::commit`](sdf::Layer::commit),
+    ///   which the stage reaches by holding [`layers`](Self::layers) borrowed
+    ///   mutably (the layer lives in the graph). Recomposing needs that same
+    ///   borrow, plus [`cache`](Self::cache) — so the callback can only append to
+    ///   this independent cell; [`process_pending`](Stage::process_pending) runs
+    ///   the recompose once the graph borrow is released. A layer cannot recompose
+    ///   the stage from the middle of its own mutation.
+    /// - Batching. A multi-layer edit (a namespace edit across the local stack)
+    ///   commits N layers, each firing its aggregator, so N records accumulate and
+    ///   [`process_pending`](Stage::process_pending) drives one recompose for the
+    ///   whole batch instead of N.
+    /// - One path for every editor. A direct edit through
+    ///   [`layer_mut`](Stage::layer_mut) fires the same aggregator with no stage
+    ///   borrow held; the callback can't tell, so it records uniformly and the
+    ///   recompose happens on the next composed read (drain-on-read). Stage-routed
+    ///   and raw layer edits flow through the identical path.
+    pending: RefCell<Vec<(pcp::LayerId, sdf::ChangeList, Option<pcp::MapFunction>)>>,
+    /// The edit target's namespace mapping in effect for the commit currently
+    /// underway, read by the aggregator as it records into
+    /// [`pending`](Self::pending). `None` for a direct edit in the layer's own
+    /// namespace.
+    edit_mapping: RefCell<Option<pcp::MapFunction>>,
 }
-
-/// A stage change-listener callback, installed with
-/// [`Stage::set_listener`]. Receives the originating stage (so it can call
-/// [`Stage::extract_diff`] without capturing a handle) and the [`Notice`].
-type ChangeListener = Box<dyn Fn(&Stage, Notice<'_>)>;
 
 /// A composed USD stage.
 ///
@@ -651,6 +696,17 @@ impl WeakStage {
     /// been dropped.
     pub fn upgrade(&self) -> Option<Stage> {
         self.0.upgrade().map(Stage)
+    }
+}
+
+/// Resets [`StageInner::edit_mapping`] to `None` on drop, so the mapping a stage
+/// edit publishes for its aggregator is cleared on every exit — including a
+/// panicking sink — and never leaks into a later commit.
+struct ClearEditMapping<'a>(&'a RefCell<Option<pcp::MapFunction>>);
+
+impl Drop for ClearEditMapping<'_> {
+    fn drop(&mut self) {
+        self.0.take();
     }
 }
 
@@ -802,8 +858,9 @@ impl Stage {
         Ok(())
     }
 
-    /// Store `target` as the edit target, delivering [`Notice::EditTargetChanged`]
-    /// when it differs from the current one. The shared core of
+    /// Store `target` as the edit target, notifying sinks via
+    /// [`StageSink::edit_target_changed`] when it differs from the current one.
+    /// The shared core of
     /// [`set_edit_target`](Self::set_edit_target) and the [`EditContext`] restore;
     /// it performs no validation. The notification is skipped while the thread is
     /// unwinding — an [`EditContext`] may restore during a panic, where a
@@ -815,7 +872,9 @@ impl Stage {
             target
         });
         if changed && !std::thread::panicking() {
-            self.notify(Notice::EditTargetChanged);
+            for sink in self.sinks.borrow().iter() {
+                sink.edit_target_changed(self);
+            }
         }
     }
 
@@ -902,7 +961,7 @@ impl Stage {
     ///
     /// Returns `true` when a spec was present and removed, `false` when the
     /// edit-target layer had nothing at `path`. The removal is authored on the
-    /// current [`EditTarget`], fires [`Notice::ObjectsChanged`], and invalidates
+    /// current [`EditTarget`], delivers a `CommittedChange` to sinks, and invalidates
     /// the affected composition subtree — a prim removed from the edit-target
     /// layer drops out of the composed stage when no weaker layer still defines
     /// it.
@@ -923,7 +982,7 @@ impl Stage {
     ///
     /// Returns `true` when a spec was present and removed, `false` when the
     /// edit-target layer had nothing at `path`. The removal is authored on the
-    /// current [`EditTarget`], fires [`Notice::ObjectsChanged`], and invalidates
+    /// current [`EditTarget`], delivers a `CommittedChange` to sinks, and invalidates
     /// the owning prim.
     pub fn remove_property(&self, path: impl Into<sdf::Path>) -> Result<bool, StageAuthoringError> {
         let path = path.into();
@@ -958,7 +1017,7 @@ impl Stage {
     /// `UsdStage::SetDefaultPrim` which routes through `GetRootLayer()`.
     ///
     /// `name` must be a valid USD identifier or nested prim path — see
-    /// [`sdf::Layer::set_default_prim`].
+    /// [`sdf::LayerEdit::set_default_prim`].
     pub fn set_default_prim(&self, name: impl Into<String>) -> Result<(), StageAuthoringError> {
         let name = name.into();
         self.with_root_layer(|layer| {
@@ -990,45 +1049,36 @@ impl Stage {
         WeakStage(Rc::downgrade(&self.0))
     }
 
-    /// Install this stage's change listener, replacing any previous one
-    /// (C++ `TfNotice::Register`).
+    /// Install a [`StageSink`] (C++ `TfNotice::Register`, generalized) and
+    /// return its [`StageSinkId`] for a later [`remove_sink`](Self::remove_sink).
+    /// The sink stays installed until removed or the stage drops. A bare
+    /// `Fn(&Stage, &CommittedChange)` closure is a sink, so this takes either a
+    /// full sink type or a closure observer.
     ///
-    /// The callback fires after every successful, non-empty edit with the
-    /// originating stage and a [`Notice`]. It may read the stage, call
-    /// [`extract_diff`](Self::extract_diff), or author further edits.
-    ///
-    /// It must not call `set_listener` / `unset_listener`, though: the listener
-    /// slot is held borrowed across the call, so mutating it from inside the
-    /// callback (e.g. a "fire once then detach" pattern) panics with a
-    /// [`RefCell`](std::cell::RefCell) double borrow. Detach from outside the
-    /// callback, or have the closure gate itself on captured state instead.
-    ///
-    /// A single slot: register one closure and fan out to multiple sinks inside
-    /// it. The stage is passed to the callback as an argument so the closure
-    /// need not capture one; capturing a [`Stage`] clone forms a reference
-    /// cycle that leaks the stage, so capture a [`WeakStage`] from
-    /// [`downgrade`](Self::downgrade) if you must retain stage access.
-    ///
-    /// Returns the previously installed listener, if any, so a caller can
-    /// temporarily swap in a listener and later restore the old one.
-    pub fn set_listener(&self, f: impl Fn(&Stage, Notice<'_>) + 'static) -> Option<ChangeListener> {
-        self.listener.replace(Some(Box::new(f)))
+    /// Sinks observe each recompose ([`after_commit`](StageSink::after_commit))
+    /// and lifecycle changes, fired after composition is invalidated and the
+    /// stage borrows are released, so a sink may read or re-author the stage — but
+    /// must not add or remove sinks from within a callback. A sink that retains
+    /// stage access should capture a [`WeakStage`] from
+    /// [`downgrade`](Self::downgrade), not a [`Stage`] clone (which would leak the
+    /// stage through a reference cycle). To observe a single layer's edits
+    /// regardless of composition, install an [`sdf::LayerSink`] on the layer
+    /// instead.
+    pub fn add_sink<S: StageSink + 'static>(&self, sink: S) -> StageSinkId {
+        // Deliver any edit already committed (e.g. a direct `layer_mut` commit
+        // awaiting drain) to the current set before this sink joins, so a sink
+        // only ever observes edits committed after it was installed.
+        self.process_pending();
+        self.sinks.borrow_mut().add(Box::new(sink))
     }
 
-    /// Remove this stage's change listener and return it, if one was installed.
-    pub fn unset_listener(&self) -> Option<ChangeListener> {
-        self.listener.take()
-    }
-
-    /// Deliver `notice` to the installed listener, if any. The listener slot is
-    /// borrowed across the call, so the callback must not set/unset the listener
-    /// (see [`set_listener`](Self::set_listener)); reading or re-authoring the
-    /// stage is fine. Callers must release any other stage borrow first, since
-    /// the callback may read or mutate the stage.
-    fn notify(&self, notice: Notice<'_>) {
-        if let Some(listener) = self.listener.borrow().as_ref() {
-            listener(self, notice);
-        }
+    /// Remove the sink with the given [`StageSinkId`]; the inverse of
+    /// [`add_sink`](Self::add_sink). A no-op if it was already removed.
+    pub fn remove_sink(&self, id: StageSinkId) {
+        // Deliver any already-committed edit to the full set, including this sink,
+        // before it leaves — so it sees every edit committed while it was installed.
+        self.process_pending();
+        self.sinks.borrow_mut().remove(id);
     }
 
     /// The id of the layer the current edit target writes to, or
@@ -1087,21 +1137,21 @@ impl Stage {
     /// describes what was authored; an empty list means "no mutation
     /// happened" and skips invalidation.
     ///
-    /// On an authoring error the layer's [`transaction`](sdf::Layer::transaction)
-    /// has already rolled back — the staged edits vanish and the backend is
-    /// untouched — so the cache stays valid and no invalidation is needed.
+    /// On an authoring error [`Layer::edit`](sdf::Layer::edit) has already rolled
+    /// the layer back — the staged edits vanish and the backend is untouched — so
+    /// the cache stays valid and no invalidation is needed.
     pub(super) fn with_target_layer_at<F>(&self, scene_path: &sdf::Path, f: F) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer, sdf::Path) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>, sdf::Path) -> Result<(), sdf::AuthoringError>,
     {
         // Read the target identifier and mapped spec path under a short borrow
         // of `edit_target` (which owns a heap `MapFunction`), releasing it
         // before the layer borrow below. The mapping is cloned out (rather than
-        // borrowed across the authoring call) because the listener it ultimately
-        // feeds can re-author and re-target the stage; clone it only when a
-        // listener is installed to consume it, keeping the common no-listener
-        // authoring path allocation-free.
-        let notify = self.listener.borrow().is_some();
+        // borrowed across the authoring call) because the sinks it ultimately
+        // feeds can re-author and re-target the stage; clone it only when a sink
+        // is installed to consume it, keeping the common no-sink authoring path
+        // allocation-free.
+        let notify = !self.sinks.borrow().is_empty();
         let (identifier, spec_path, mapping) = {
             let target = self.edit_target.borrow();
             let spec_path =
@@ -1116,15 +1166,17 @@ impl Stage {
                 notify.then(|| target.mapping.clone()),
             )
         };
-        let (layer_id, edited) = {
+        let edited = {
             let mut layers = self.layers.borrow_mut();
             let layer_id = layers
                 .id_of(&identifier)
                 .ok_or(StageAuthoringError::LayerNotFound { layer: identifier })?;
             let node = layers.get_mut(layer_id).expect("id_of returned a live id");
-            (layer_id, Self::edit_layer(&mut node.layer, |layer| f(layer, spec_path)))
+            self.edit_layer(&mut node.layer, mapping.as_ref(), |layer| f(layer, spec_path))
         };
-        self.apply_authored(layer_id, edited, mapping.as_ref())
+        // `edit_layer` reports whether the edit produced a composition change.
+        self.process_pending();
+        edited
     }
 
     /// Borrow the stage's root layer, hand it to `f`, then drive cache
@@ -1134,7 +1186,7 @@ impl Stage {
     /// root-layer field authored at `abs_root` verbatim.
     fn with_root_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
         let layer_id = self
             .layers
@@ -1157,7 +1209,7 @@ impl Stage {
     /// mapping is irrelevant for layer-wide metadata.
     fn with_stage_metadata_layer<F>(&self, f: F) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
         let layer_id = self.edit_target_layer_id()?;
         {
@@ -1176,8 +1228,8 @@ impl Stage {
     /// [`Self::with_root_layer`], [`Self::with_stage_metadata_layer`], and
     /// [`Stage::apply_diff`].
     ///
-    /// `mapping` is the edit target's namespace mapping forwarded to
-    /// [`Self::apply_authored`] for the change notice, or `None` when the edit
+    /// `mapping` is the edit target's namespace mapping, recorded with the edit
+    /// so the composed change keeps full path precision, or `None` when the edit
     /// authored at stage-namespace paths verbatim.
     pub(super) fn author_on_layer<F>(
         &self,
@@ -1186,7 +1238,7 @@ impl Stage {
         f: F,
     ) -> Result<(), StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
         // Run `f` as one atomic transaction: a multi-edit replay (`apply_diff`)
         // that fails midway rolls back wholesale, leaving the layer and cache
@@ -1194,21 +1246,39 @@ impl Stage {
         let edited = {
             let mut layers = self.layers.borrow_mut();
             let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            Self::edit_layer(&mut node.layer, f)
+            self.edit_layer(&mut node.layer, mapping, f)
         };
-        self.apply_authored(layer_id, edited, mapping).map(|_| ())
+        self.process_pending();
+        edited.map(|_| ())
     }
 
-    /// Run `f` as one atomic [`Transaction`](sdf::Transaction) on `layer`:
-    /// commit and return the recorded change list on success, or roll the layer
-    /// back on error (the dropped transaction guard discards the staged edits).
-    fn edit_layer<F>(layer: &mut sdf::Layer, f: F) -> Result<sdf::ChangeList, sdf::AuthoringError>
+    /// Run `f` as one atomic [`Layer::edit`](sdf::Layer::edit) on `layer`: commit
+    /// and return the recorded change list on success, or roll the layer back on
+    /// error (`f`'s authoring error, or a sink veto).
+    ///
+    /// Committing fires the layer's sinks — including the stage's aggregator
+    /// (installed by [`add_layer`](Self::add_layer)), which records the edit into
+    /// [`pending`](StageInner::pending) for [`process_pending`](Self::process_pending)
+    /// to recompose. A [`before_commit`](sdf::LayerSink::before_commit) rejection
+    /// surfaces as [`StageAuthoringError::Rejected`]. `mapping` is the edit
+    /// target's namespace mapping, published through
+    /// [`edit_mapping`](StageInner::edit_mapping) for the aggregator to tag the
+    /// recorded edit with.
+    fn edit_layer<F>(
+        &self,
+        layer: &mut sdf::Layer,
+        mapping: Option<&pcp::MapFunction>,
+        f: F,
+    ) -> Result<bool, StageAuthoringError>
     where
-        F: FnOnce(&mut sdf::Layer) -> Result<(), sdf::AuthoringError>,
+        F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
-        let mut tx = sdf::Transaction::new(layer);
-        f(&mut tx)?;
-        Ok(tx.commit())
+        // Publish the mapping for the aggregator firing inside `edit`'s commit,
+        // under a guard that clears it on the way out — including if the edit
+        // panics — so a later commit never inherits a stale mapping.
+        self.edit_mapping.replace(mapping.cloned());
+        let _clear = ClearEditMapping(&self.edit_mapping);
+        layer.edit(f).map_err(StageAuthoringError::from)
     }
 
     /// The layer ids of the root (local) layer stack, strongest first — the
@@ -1222,83 +1292,107 @@ impl Stage {
             .collect()
     }
 
-    /// Interpret a layer-[`transaction`](sdf::Layer::transaction) result and
-    /// drive composition invalidation. An empty change list means nothing was
-    /// authored (`Ok(false)`); a non-empty one is applied through
-    /// [`Self::apply_change_set`] (`Ok(true)`); an authoring error — after the
-    /// transaction has already rolled the layer back, leaving it and the cache
-    /// untouched — surfaces as [`StageAuthoringError::Layer`]. The shared tail of
-    /// the stage authoring helpers.
-    ///
-    /// `mapping` is the edit target's namespace mapping (layer source to stage
-    /// target), used to translate the change record's layer-namespace paths back
-    /// to stage namespace for the notice. `None` means identity — a root or
-    /// metadata edit whose paths are already in stage namespace.
-    fn apply_authored(
-        &self,
-        layer_id: pcp::LayerId,
-        edited: Result<sdf::ChangeList, sdf::AuthoringError>,
-        mapping: Option<&pcp::MapFunction>,
-    ) -> Result<bool, StageAuthoringError> {
-        match edited {
-            Ok(changes) if changes.is_empty() => Ok(false),
-            Ok(changes) => {
-                self.apply_change_set(layer_id, &changes, mapping);
-                Ok(true)
-            }
-            Err(e) => Err(StageAuthoringError::Layer(e)),
+    /// Add `layer` to the stage's graph, returning its id and whether it newly
+    /// joined (a duplicate identifier collapses onto the existing node). The one
+    /// seam by which a layer joins the stage — both opening (`make_stage`) and
+    /// [`insert_layer`](Self::insert_layer) go through it. A freshly-added layer
+    /// gets the stage's change aggregator: a [`sdf::LayerSink`] that records the
+    /// layer's commits into [`pending`](StageInner::pending) for
+    /// [`process_pending`](Self::process_pending) to recompose, so every layer the
+    /// stage owns reports its edits no matter who authors them. The sink holds a
+    /// [`WeakStage`], so it does not form a reference cycle (the stage owns the
+    /// layer, which owns the sink).
+    fn add_layer(&self, layer: sdf::Layer) -> (pcp::LayerId, bool) {
+        let stage = self.downgrade();
+        let mut layers = self.layers.borrow_mut();
+        let (id, fresh) = layers.ensure_layer(layer);
+        if fresh {
+            let node = layers.get_mut(id).expect("just-interned layer is live");
+            node.layer.add_sink(move |_: &str, changes: &sdf::ChangeList| {
+                if let Some(stage) = stage.upgrade() {
+                    stage.record_pending(id, changes.clone());
+                }
+            });
         }
+        (id, fresh)
     }
 
-    /// Classify a committed [`sdf::ChangeList`] through [`pcp::Changes`] and
-    /// apply the resulting cache invalidation, firing an
-    /// [`ObjectsChanged`](Notice::ObjectsChanged) notice when a listener is
-    /// installed. The PCP-driving tail shared by [`Self::apply_authored`].
-    ///
-    /// `mapping` translates the change record's layer-namespace paths back to
-    /// stage namespace for the notice; see [`Self::apply_authored`].
-    fn apply_change_set(&self, layer_id: pcp::LayerId, changes: &sdf::ChangeList, mapping: Option<&pcp::MapFunction>) {
-        self.apply_change_sets(&[(layer_id, changes)], mapping);
+    /// Record a committed layer edit for [`process_pending`](Self::process_pending),
+    /// tagged with the edit target's mapping in effect (read from
+    /// [`edit_mapping`](StageInner::edit_mapping)). Called by the per-layer
+    /// aggregator sink (installed by [`add_layer`](Self::add_layer)) as a layer
+    /// commits — while the layer graph is borrowed for the edit, which is why it
+    /// appends to the independent [`pending`](StageInner::pending) cell rather than
+    /// recomposing inline.
+    pub(super) fn record_pending(&self, layer_id: pcp::LayerId, changes: sdf::ChangeList) {
+        let mapping = self.edit_mapping.take();
+        self.pending.borrow_mut().push((layer_id, changes, mapping));
+    }
+
+    /// Drain the layer edits recorded by the aggregators and drive one composition
+    /// recompose, delivering the composed [`CommittedChange`](super::CommittedChange)
+    /// to the stage sinks. The deferred counterpart to a layer commit: an
+    /// aggregator records the edit while the layer graph is borrowed, and this
+    /// runs once that borrow is released — after each authoring call, and before
+    /// any composed read. A no-op when nothing is pending, so a read on a clean
+    /// stage costs only the empty check.
+    pub(crate) fn process_pending(&self) {
+        let drained = {
+            let mut queue = self.pending.borrow_mut();
+            if queue.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *queue)
+        };
+        // A single stage edit records one entry (its edit-target mapping); a
+        // batched namespace edit records many, all authored in the local (stage)
+        // namespace with no mapping. So one mapping applies to the whole drain.
+        // Several distinct non-`None` mappings are only reachable by interleaving
+        // a raw layer edit with a targeted one; there the dependency-derived
+        // composed paths stay correct and only the literal-path translation drops.
+        let mapping = if drained.len() == 1 {
+            drained[0].2.as_ref()
+        } else {
+            None
+        };
+        let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
+            drained.iter().map(|(id, changes, _)| (*id, changes)).collect();
+        self.apply_change_sets(&edits, mapping);
     }
 
     /// Classify a batch of committed [`sdf::ChangeList`]s — one per edited layer
     /// — through a single [`pcp::Changes`] cycle and apply the resulting cache
-    /// invalidation, firing one [`ObjectsChanged`](Notice::ObjectsChanged) notice
-    /// for the whole batch when a listener is installed.
+    /// invalidation, delivering one [`CommittedChange`](super::CommittedChange)
+    /// for the whole batch to the installed sinks.
     ///
     /// [`pcp::Changes::did_change`] takes the per-layer split because
-    /// classification is layer-relative; the notice instead reports the merged
+    /// classification is layer-relative; the event instead reports the merged
     /// record, attributed to the strongest edited layer. `mapping` translates the
-    /// records' layer-namespace paths back to stage namespace; see
-    /// [`Self::apply_authored`]. A batched namespace edit passes `None` — the
-    /// local layer stack shares the stage's namespace.
-    pub(super) fn apply_change_sets(
-        &self,
-        edits: &[(pcp::LayerId, &sdf::ChangeList)],
-        mapping: Option<&pcp::MapFunction>,
-    ) {
+    /// records' layer-namespace paths back to stage namespace. A batched namespace
+    /// edit passes `None` — the local layer stack shares the stage's namespace.
+    fn apply_change_sets(&self, edits: &[(pcp::LayerId, &sdf::ChangeList)], mapping: Option<&pcp::MapFunction>) {
         let mut pcp_changes = pcp::Changes::new();
         {
             let cache = self.cache.borrow();
             pcp_changes.did_change(&cache, edits);
         }
-        // Snapshot the notice payload before `apply` consumes `pcp_changes`, and
-        // only when a listener is installed — the no-listener path stays
-        // allocation-free. The per-layer records merge into one list for the
-        // notice, which reads paths in the (here identical) stage namespace.
+        // Snapshot the after-commit payload before `apply` consumes
+        // `pcp_changes`, and only when a sink is installed — the no-sink path
+        // stays allocation-free. The per-layer records merge into one list for
+        // the event, which reads paths in the (here identical) stage namespace.
         //
-        // TODO(namespace-edit): merging discards per-layer provenance — the
-        // notice carries one layer identifier (the strongest edited layer), so a
-        // listener reading the raw change list per layer (e.g. `extract_diff`)
-        // mis-attributes records that landed in a sublayer. Carrying the
-        // per-layer records on the notice (or one notice per layer) would let a
-        // multi-layer namespace edit replicate faithfully.
-        let payload = self.listener.borrow().is_some().then(|| {
+        // TODO(namespace-edit): merging discards per-layer provenance — the event
+        // carries one layer identifier (the strongest edited layer), so a sink
+        // reading the raw change list per layer mis-attributes records that
+        // landed in a sublayer. Carrying the per-layer records on the event (or
+        // one event per layer) would let a multi-layer namespace edit replicate
+        // faithfully.
+        let payload = (!self.sinks.borrow().is_empty()).then(|| {
             let mut merged = sdf::ChangeList::new();
             for (_, changes) in edits {
                 merged.merge_from(changes);
             }
-            notice::Payload::new(&pcp_changes, &merged, mapping)
+            Payload::new(&pcp_changes, &merged, mapping)
         });
         {
             let mut graph = self.layers.borrow_mut();
@@ -1311,9 +1405,10 @@ impl Stage {
                 .first()
                 .and_then(|(id, _)| self.layer_identifier(*id))
                 .unwrap_or_default();
-            self.notify(Notice::ObjectsChanged(
-                payload.objects_changed(&layer_identifier, mapping),
-            ));
+            let change = payload.committed_change(&layer_identifier, mapping);
+            for sink in self.sinks.borrow().iter() {
+                sink.after_commit(self, &change);
+            }
         }
     }
 
@@ -1361,9 +1456,9 @@ impl Stage {
     /// which `StageBuilder` never produces).
     ///
     /// The returned [`Ref`] borrows the layer graph, and a `&self` authoring
-    /// call (`insert_sub_layer`, `define_prim`, …) takes `self.layers` mutably,
+    /// call (`insert_layer`, `define_prim`, …) takes `self.layers` mutably,
     /// so a live `Ref` held across one panics with a `RefCell` double-borrow. In
-    /// particular `stage.insert_sub_layer(stage.root_layer().identifier(), …)`
+    /// particular `stage.insert_layer(stage.root_layer().identifier(), …)`
     /// panics — the `Ref` temporary lives to the end of the statement. Bind the
     /// identifier first so the borrow is released:
     ///
@@ -1371,13 +1466,45 @@ impl Stage {
     /// # use openusd::{sdf, usd};
     /// # fn f(stage: &usd::Stage, layer: sdf::Layer) {
     /// let id = stage.root_layer().identifier().to_owned();
-    /// stage.insert_sub_layer(&id, 0, layer, sdf::LayerOffset::IDENTITY).unwrap();
+    /// stage.insert_layer(&id, 0, layer, sdf::LayerOffset::IDENTITY).unwrap();
     /// # }
     /// ```
     pub fn root_layer(&self) -> Ref<'_, sdf::Layer> {
         Ref::map(self.layers(), |layers| {
             layers.root_layer().expect("stage has a root layer")
         })
+    }
+
+    /// Borrow the stage's layer named `identifier`, or `None` if no such layer is
+    /// in the stage. `identifier` is matched by canonical identifier.
+    pub fn layer(&self, identifier: &str) -> Option<Ref<'_, sdf::Layer>> {
+        Ref::filter_map(self.layers(), |layers| {
+            let id = layers.id_of(identifier)?;
+            layers.get(id).map(|node| &node.layer)
+        })
+        .ok()
+    }
+
+    /// Borrow the stage's layer named `identifier` mutably, or `None` if no such
+    /// layer is in the stage — an advanced escape hatch for editing a layer
+    /// directly, or installing an [`sdf::LayerSink`] on it with
+    /// [`Layer::add_sink`](sdf::Layer::add_sink). Prefer the stage's authoring
+    /// methods, which integrate the edit into composition before they return.
+    ///
+    /// An edit committed through the returned layer is recorded and integrated
+    /// lazily — the next composed-value read brings the cache up to date — so
+    /// graph-structure queries ([`sub_layers`](Self::sub_layers),
+    /// [`layer_stack`](Self::layer_stack)) can read stale state until then. And a
+    /// direct edit to a non-local (referenced or payload) layer reports its
+    /// [`CommittedChange`](super::CommittedChange) paths in that layer's own
+    /// namespace, not composed stage namespace. Holds the layer graph borrowed for
+    /// the guard's lifetime; drop it before any other stage call.
+    pub fn layer_mut(&self, identifier: &str) -> Option<RefMut<'_, sdf::Layer>> {
+        RefMut::filter_map(self.layers_mut(), |layers| {
+            let id = layers.id_of(identifier)?;
+            layers.get_mut(id).map(|node| &mut node.layer)
+        })
+        .ok()
     }
 
     /// The identifiers of the layers contributing to `parent`'s sublayer stack,
@@ -1409,10 +1536,9 @@ impl Stage {
     pub fn mute_layer(&self, identifier: impl Into<String>) {
         let identifier = identifier.into();
         if self.apply_mute(|graph| graph.mute_layer(identifier.clone())) {
-            self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
-                layer: &identifier,
-                muted: true,
-            }));
+            for sink in self.sinks.borrow().iter() {
+                sink.layer_muting_changed(self, &identifier, true);
+            }
         }
     }
 
@@ -1420,10 +1546,9 @@ impl Stage {
     /// composition (C++ `UsdStage::UnmuteLayer`).
     pub fn unmute_layer(&self, identifier: &str) {
         if self.apply_mute(|graph| graph.unmute_layer(identifier)) {
-            self.notify(Notice::LayerMutingChanged(LayerMutingChanged {
-                layer: identifier,
-                muted: false,
-            }));
+            for sink in self.sinks.borrow().iter() {
+                sink.layer_muting_changed(self, identifier, false);
+            }
         }
     }
 
@@ -1640,6 +1765,7 @@ impl Stage {
     /// [`AttributeQuery`](super::AttributeQuery) snapshots this and rebuilds its
     /// cached source when it advances.
     pub(crate) fn cache_revision(&self) -> u64 {
+        self.process_pending();
         self.cache.borrow().revision()
     }
 
@@ -1888,8 +2014,10 @@ impl Stage {
             .collect()
     }
 
-    /// Borrows the stage's composition cache.
+    /// Borrows the stage's composition cache, first draining any pending layer
+    /// edits so the cache reflects every commit before it is read.
     pub(crate) fn cache(&self) -> Ref<'_, pcp::IndexCache> {
+        self.process_pending();
         self.cache.borrow()
     }
 
@@ -1917,7 +2045,7 @@ impl Stage {
     // TODO: run the collector on `layer` so its sublayer/reference/payload
     // dependencies load (and unresolved ones surface as `UnresolvedSublayer`),
     // matching what `StageBuilder::open` does for the root layer.
-    pub fn insert_sub_layer(
+    pub fn insert_layer(
         &self,
         parent: &str,
         pos: usize,
@@ -1928,24 +2056,26 @@ impl Stage {
         // Author the parent's metadata first; the child node is added only after
         // this succeeds (the authored asset path is a plain string, so the node
         // need not exist yet — only the later rebuild's `find()` needs it).
-        let (parent_id, edited) = {
+        let edited = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
             let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-            let edited = Self::edit_layer(&mut node.layer, |l| {
+            self.edit_layer(&mut node.layer, None, |l| {
                 l.pseudo_root_mut()
                     .map(|mut root| root.insert_sublayer(pos, identifier, offset))
-            });
-            (parent_id, edited)
+            })
         };
         // Add the child node only once the parent edit succeeded, so a failed
-        // insert never leaves an orphan node.
+        // insert never leaves an orphan node. `add_layer` interns it and attaches
+        // the aggregator (skipping a duplicate identifier that collapses onto an
+        // already-loaded node), the same path opening a stage uses.
         if edited.is_ok() {
-            self.layers.borrow_mut().ensure_layer(layer);
+            self.add_layer(layer);
         }
-        self.apply_authored(parent_id, edited, None).map(|_| ())
+        self.process_pending();
+        edited.map(|_| ())
     }
 
     /// Removes the sublayer `child` from `parent`'s `subLayers` and its aligned
@@ -1961,8 +2091,8 @@ impl Stage {
     /// not a sublayer of `parent`, [`StageAuthoringError::LayerNotFound`] if
     /// `parent` is not in the stage, and [`StageAuthoringError::Layer`] if
     /// `parent` is read-only.
-    pub fn remove_sub_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
-        let (parent_id, edited) = {
+    pub fn remove_layer(&self, parent: &str, child: &str) -> Result<bool, StageAuthoringError> {
+        let edited = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
@@ -1977,20 +2107,23 @@ impl Stage {
                 subs.into_iter()
                     .find(|entry| layers.id_of(entry).or_else(|| layers.find(entry)) == Some(child_id))
             });
-            let edited = authored.map(|entry| {
+            authored.map(|entry| {
                 let node = layers.get_mut(parent_id).expect("id_of returned a live id");
-                Self::edit_layer(&mut node.layer, move |l| {
+                self.edit_layer(&mut node.layer, None, move |l| {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
                         .map(|_| ())
                 })
-            });
-            (parent_id, edited)
+            })
         };
         // A removed entry changes `subLayers`, so a non-empty change set means a
         // sublayer was removed; no authored entry means nothing to remove.
         match edited {
-            Some(edited) => self.apply_authored(parent_id, edited, None),
+            Some(edited) => {
+                // `edit_layer` reports whether the edit changed anything.
+                self.process_pending();
+                edited
+            }
             None => Ok(false),
         }
     }
@@ -2001,10 +2134,9 @@ impl Stage {
     }
 
     /// Borrows the stage's layer graph mutably, for an authoring helper that
-    /// opens its own layer [`Transaction`](sdf::Transaction)s — e.g. the
-    /// namespace editor's batched, atomic multi-layer edit. The caller drives
-    /// composition invalidation from the recorded change lists through
-    /// [`Self::apply_change_sets`].
+    /// edits its layers directly — e.g. the namespace editor's batched, atomic
+    /// multi-layer edit. The caller drives composition invalidation from the
+    /// recorded change lists through [`Self::process_pending`].
     pub(crate) fn layers_mut(&self) -> RefMut<'_, pcp::LayerGraph> {
         self.layers.borrow_mut()
     }
@@ -2017,6 +2149,7 @@ impl Stage {
         &self,
         query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
+        self.process_pending();
         let graph = self.layers.borrow();
         let mut cache = self.cache.borrow_mut();
         query(&graph, &mut cache)
@@ -2318,11 +2451,57 @@ impl<R: ar::Resolver> StageBuilder<R> {
         R: 'static,
     {
         let load_payloads = self.initial_load_set.load_payloads();
+        // The root layer stack's identity, from the collected inputs: the root is
+        // the first non-session layer, the session layer the first of any. The
+        // graph below is populated layer by layer, so this is read from the inputs
+        // rather than the (initially empty) graph.
+        let layer_stack_id = pcp::LayerStackIdentifier {
+            root_layer: layers
+                .get(session_layer_count)
+                .map(|l| l.identifier().to_string())
+                .unwrap_or_default(),
+            session_layer: (session_layer_count > 0).then(|| layers[0].identifier().to_string()),
+            resolver: self.resolver.identity(),
+        };
+        // The root layer is the strongest authoring target by default; an empty
+        // stack names no layer, so the target resolves to nothing at author time.
+        let edit_target = EditTarget {
+            layer_stack: Some(layer_stack_id.clone()),
+            ..EditTarget::for_layer(layer_stack_id.root_layer.clone())
+        };
         // The graph keeps its own regenerable diagnostics (sublayer cycles,
-        // invalid relocates); the cache holds only the one-shot collection
-        // errors. `Stage::composition_errors` concatenates the two.
-        let mut graph =
-            pcp::LayerGraph::from_layers(layers, session_layer_count, Box::new(self.resolver), load_payloads);
+        // invalid relocates); the cache holds only the one-shot collection errors.
+        // `Stage::composition_errors` concatenates the two.
+        let stage = Stage(Rc::new(StageInner {
+            layers: RefCell::new(pcp::LayerGraph::new(Box::new(self.resolver), load_payloads)),
+            cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
+            initial_load_set: self.initial_load_set,
+            population_mask: self.population_mask,
+            interpolation_type: Cell::new(self.interpolation_type),
+            edit_target: RefCell::new(edit_target),
+            layer_stack_id,
+            sinks: RefCell::default(),
+            pending: RefCell::new(Vec::new()),
+            edit_mapping: RefCell::new(None),
+        }));
+        // Add every collected layer through the one join seam, so each gets its
+        // change aggregator as it joins; then wire the sublayer DAG from the
+        // authored `subLayers` metadata. The root is the first non-session layer;
+        // a duplicate identifier (a dependency reached through both the session and
+        // root collections) collapses onto one node, so only fresh session layers
+        // count and the root is captured at its original slot.
+        let mut root = None;
+        let mut session_count = 0;
+        for (i, layer) in layers.into_iter().enumerate() {
+            let (id, fresh) = stage.add_layer(layer);
+            if i == session_layer_count {
+                root = Some(id);
+            }
+            if fresh && i < session_layer_count {
+                session_count += 1;
+            }
+        }
+        stage.layers.borrow_mut().finalize(session_count, root);
         if !self.muted.is_empty() {
             // Seed the graph's muted set (it drops any root-layer request and
             // re-resolves identifiers on each later rebuild). The cache is still
@@ -2331,33 +2510,26 @@ impl<R: ar::Resolver> StageBuilder<R> {
             // an `UnresolvedSublayer` collection error before this seeding, so
             // `composition_errors` still reports a muted branch. Apply the muted
             // set during collection to suppress those.
-            graph.set_muted_identifiers(self.muted);
+            stage.layers.borrow_mut().set_muted_identifiers(self.muted);
         }
-        let layer_stack_id = graph.layer_stack_id();
-        // The root layer is the strongest authoring target by default; an
-        // empty graph (no layers) has none, so the target names no layer and
-        // resolves to nothing at author time. Tagged with the stack identity so
-        // it matches [`Stage::edit_target_root`].
-        let edit_target = EditTarget {
-            layer_stack: Some(layer_stack_id.clone()),
-            ..EditTarget::for_layer(graph.root_layer().map(sdf::Layer::identifier).unwrap_or_default())
-        };
-        Stage(Rc::new(StageInner {
-            layers: RefCell::new(graph),
-            cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
-            initial_load_set: self.initial_load_set,
-            population_mask: self.population_mask,
-            interpolation_type: Cell::new(self.interpolation_type),
-            edit_target: RefCell::new(edit_target),
-            layer_stack_id,
-            listener: RefCell::new(None),
-        }))
+        stage
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Author through a layer's `edit` API and commit, for building test fixtures
+    /// before they join a stage.
+    fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
+        layer
+            .edit(|e| {
+                f(e);
+                Ok(())
+            })
+            .expect("authored");
+    }
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -2411,25 +2583,31 @@ mod tests {
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
         let mut strong = sdf::Layer::new_in_memory("root.usda");
-        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+        edit_layer(&mut strong, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.outputs:out",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.inputs:in",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?
-        .set_connection_paths([target.clone()]);
+        edit_layer(&mut weak, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Mat", sdf::Specifier::Def, "Shader").unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.outputs:out",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.inputs:in",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap()
+            .set_connection_paths([target.clone()]);
+        });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -2453,25 +2631,31 @@ mod tests {
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
         let mut strong = sdf::Layer::new_in_memory("root.usda");
-        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+        edit_layer(&mut strong, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.outputs:out",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.inputs:in",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?
-        .set_connection_paths([target.clone()]);
+        edit_layer(&mut weak, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Mat", sdf::Specifier::Def, "Shader").unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.outputs:out",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.inputs:in",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap()
+            .set_connection_paths([target.clone()]);
+        });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -2494,25 +2678,31 @@ mod tests {
         let input = sdf::Path::new("/Mat.inputs:in")?;
 
         let mut strong = sdf::Layer::new_in_memory("root.usda");
-        strong.pseudo_root_mut()?.set_sublayers(["weak.usda"]);
+        edit_layer(&mut strong, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
 
         let mut weak = sdf::Layer::new_in_memory("weak.usda");
-        sdf::PrimSpec::new(weak.data_mut(), "/Mat", sdf::Specifier::Def, "Shader")?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.outputs:out",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?;
-        sdf::AttributeSpec::new(
-            weak.data_mut(),
-            "/Mat.inputs:in",
-            "color3f",
-            sdf::Variability::Varying,
-            true,
-        )?
-        .set_connection_paths([target.clone()]);
+        edit_layer(&mut weak, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Mat", sdf::Specifier::Def, "Shader").unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.outputs:out",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap();
+            sdf::AttributeSpec::new(
+                e.data_mut(),
+                "/Mat.inputs:in",
+                "color3f",
+                sdf::Variability::Varying,
+                true,
+            )
+            .unwrap()
+            .set_connection_paths([target.clone()]);
+        });
 
         let stage = Stage::builder().make_stage(vec![strong, weak], 0, Vec::new());
         let attr = crate::usd::Attribute::new(&stage, input.clone());
@@ -2591,8 +2781,11 @@ mod tests {
     /// resolves by exact or suffix match.
     fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
         let mut layer = sdf::Layer::new_in_memory(identifier);
-        sdf::AttributeSpec::new(layer.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
-            .set_default(sdf::Value::Double(value));
+        edit_layer(&mut layer, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
+                .unwrap()
+                .set_default(sdf::Value::Double(value));
+        });
         Ok(layer)
     }
 
@@ -2608,15 +2801,15 @@ mod tests {
     /// layer passed in. Anonymous layers are unique, so the colliding identifier
     /// is fabricated with [`sdf::Layer::new_in_memory`].
     #[test]
-    fn insert_sub_layer_keeps_loaded_node() -> Result<()> {
+    fn insert_layer_keeps_loaded_node() -> Result<()> {
         // Build root → mid → leaf incrementally so `mid` is a loaded node with a
         // derived child edge to `leaf`, and `leaf`'s opinion composes.
         let stage = Stage::builder().in_memory("root.usda")?;
         let root_id = stage.root_layer().identifier().to_string();
         let mid = sdf::Layer::new_in_memory("mid.usda");
         let mid_id = mid.identifier().to_string();
-        stage.insert_sub_layer(&root_id, 0, mid, sdf::LayerOffset::IDENTITY)?;
-        stage.insert_sub_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
+        stage.insert_layer(&root_id, 0, mid, sdf::LayerOffset::IDENTITY)?;
+        stage.insert_layer(&mid_id, 0, opinion_layer("leaf.usda", 5.0)?, sdf::LayerOffset::IDENTITY)?;
         assert_eq!(
             stage
                 .attribute("/A.x")
@@ -2627,7 +2820,7 @@ mod tests {
         // Re-insert `mid` by its identifier, passing a fresh empty layer with the
         // same identifier. The graph must keep the loaded `mid` (whose
         // `subLayers` still names `leaf`), so `leaf`'s opinion survives.
-        stage.insert_sub_layer(
+        stage.insert_layer(
             &root_id,
             0,
             sdf::Layer::new_in_memory(&mid_id),
@@ -2643,17 +2836,19 @@ mod tests {
         Ok(())
     }
 
-    /// `remove_sub_layer` resolves `child` to a layer before matching, so a
+    /// `remove_layer` resolves `child` to a layer before matching, so a
     /// sublayer authored with a relative path (whose canonical identifier
     /// differs from the authored entry) is still removed when named by the
     /// canonical identifier `sub_layers` returns.
     #[test]
-    fn remove_sub_layer_resolves_relative() -> Result<()> {
+    fn remove_layer_resolves_relative() -> Result<()> {
         // root authors `subLayers = ["sub.usda"]`, but the child layer's
         // canonical identifier is `dir/sub.usda` (find() resolves the relative
         // entry to it by suffix).
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut()?.set_sublayers(["sub.usda"]);
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        });
         let child = opinion_layer("dir/sub.usda", 5.0)?;
         let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
         assert_eq!(
@@ -2670,7 +2865,7 @@ mod tests {
         // Removing by that canonical identifier must still drop the relative
         // `sub.usda` entry (exact-string matching would have missed it).
         assert!(
-            stage.remove_sub_layer("root.usda", "dir/sub.usda")?,
+            stage.remove_layer("root.usda", "dir/sub.usda")?,
             "the relative sublayer is removed when named by canonical identifier"
         );
         assert_eq!(
@@ -2697,8 +2892,11 @@ mod tests {
     /// or a configured builder in the muting tests.
     fn sublayer_layers(opinions: &[(&str, f64)]) -> Result<Vec<sdf::Layer>> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut()?
-            .set_sublayers(opinions.iter().map(|(id, _)| *id));
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut()
+                .unwrap()
+                .set_sublayers(opinions.iter().map(|(id, _)| *id));
+        });
         let mut layers = vec![root];
         for &(id, value) in opinions {
             layers.push(opinion_layer(id, value)?);
@@ -2732,9 +2930,13 @@ mod tests {
     #[test]
     fn mute_session_metadata() -> Result<()> {
         let mut session = sdf::Layer::new_in_memory("session.usda");
-        session.set_start_time_code(10.0)?;
+        edit_layer(&mut session, |e| {
+            e.set_start_time_code(10.0).unwrap();
+        });
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.set_start_time_code(1.0)?;
+        edit_layer(&mut root, |e| {
+            e.set_start_time_code(1.0).unwrap();
+        });
         let stage = Stage::builder().make_stage(vec![session, root], 1, Vec::new());
         assert_eq!(stage.start_time_code(), 10.0, "the session opinion wins");
 
@@ -2752,7 +2954,9 @@ mod tests {
     #[test]
     fn mute_session_prunes_subtree() -> Result<()> {
         let mut session = sdf::Layer::new_in_memory("session.usda");
-        session.pseudo_root_mut()?.set_sublayers(["subsession.usda"]);
+        edit_layer(&mut session, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["subsession.usda"]);
+        });
         let subsession = opinion_layer("subsession.usda", 7.0)?;
         let root = sdf::Layer::new_in_memory("root.usda");
         let stage = Stage::builder().make_stage(vec![session, subsession, root], 2, Vec::new());
@@ -2801,9 +3005,13 @@ mod tests {
     #[test]
     fn mute_prunes_subtree() -> Result<()> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut()?.set_sublayers(["mid.usda"]);
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["mid.usda"]);
+        });
         let mut mid = sdf::Layer::new_in_memory("mid.usda");
-        mid.pseudo_root_mut()?.set_sublayers(["leaf.usda"]);
+        edit_layer(&mut mid, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
+        });
         let stage = Stage::builder().make_stage(vec![root, mid, opinion_layer("leaf.usda", 5.0)?], 0, Vec::new());
         assert_eq!(read_ax(&stage)?, Some(5.0));
 
@@ -2864,7 +3072,7 @@ mod tests {
     }
 
     /// Muting an identifier before its layer is loaded takes effect once a later
-    /// `insert_sub_layer` interns a matching layer; unmuting restores it.
+    /// `insert_layer` interns a matching layer; unmuting restores it.
     #[test]
     fn mute_before_load_excludes() -> Result<()> {
         let stage = Stage::builder().in_memory("root.usda")?;
@@ -2873,7 +3081,7 @@ mod tests {
         stage.mute_layer("late.usda");
         assert!(stage.is_layer_muted("late.usda"));
 
-        stage.insert_sub_layer(
+        stage.insert_layer(
             &root_id,
             0,
             opinion_layer("late.usda", 5.0)?,
@@ -2895,26 +3103,25 @@ mod tests {
     #[test]
     fn mute_reference_target() -> Result<()> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        sdf::PrimSpec::new(root.data_mut(), "/P", sdf::Specifier::Def, "")?;
-        root.data_mut().set_field(
-            &sdf::path("/P")?,
-            sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-                asset_path: "target.usda".into(),
-                prim_path: sdf::path("/Target")?,
-                ..Default::default()
-            }])),
-        );
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/P", sdf::Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/P").unwrap(),
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "target.usda".into(),
+                    prim_path: sdf::path("/Target").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
         let mut target = sdf::Layer::new_in_memory("target.usda");
-        sdf::PrimSpec::new(target.data_mut(), "/Target", sdf::Specifier::Def, "")?;
-        sdf::AttributeSpec::new(
-            target.data_mut(),
-            "/Target.x",
-            "double",
-            sdf::Variability::Varying,
-            true,
-        )?
-        .set_default(sdf::Value::Double(5.0));
+        edit_layer(&mut target, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Target.x", "double", sdf::Variability::Varying, true)
+                .unwrap()
+                .set_default(sdf::Value::Double(5.0));
+        });
 
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
         let read_px = |stage: &Stage| stage.attribute("/P.x").get_at::<f64>(crate::usd::TimeCode::new(0.0));
@@ -2938,19 +3145,23 @@ mod tests {
     #[test]
     fn mute_keeps_independent_index() -> Result<()> {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        sdf::PrimSpec::new(root.data_mut(), "/Ref", sdf::Specifier::Def, "")?;
-        root.data_mut().set_field(
-            &sdf::path("/Ref")?,
-            sdf::FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-                asset_path: "target.usda".into(),
-                prim_path: sdf::path("/Target")?,
-                ..Default::default()
-            }])),
-        );
-        sdf::PrimSpec::new(root.data_mut(), "/Indep", sdf::Specifier::Def, "")?;
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", sdf::Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/Ref").unwrap(),
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "target.usda".into(),
+                    prim_path: sdf::path("/Target").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Indep", sdf::Specifier::Def, "").unwrap();
+        });
         let mut target = sdf::Layer::new_in_memory("target.usda");
-        sdf::PrimSpec::new(target.data_mut(), "/Target", sdf::Specifier::Def, "")?;
+        edit_layer(&mut target, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
+        });
 
         let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
         let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
@@ -2984,9 +3195,13 @@ mod tests {
     fn mute_sublayer_drops_root_stack_index() -> Result<()> {
         let session = sdf::Layer::new_in_memory("session.usda");
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut().unwrap().set_sublayers(["child.usda"]);
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["child.usda"]);
+        });
         let mut child = sdf::Layer::new_in_memory("child.usda");
-        sdf::PrimSpec::new(child.data_mut(), "/P", sdf::Specifier::Def, "")?;
+        edit_layer(&mut child, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/P", sdf::Specifier::Def, "").unwrap();
+        });
 
         // session at index 0, root + its `child` sublayer after: /P's Root node
         // spans [session, root, child], so its representative is the session layer.
@@ -3081,7 +3296,7 @@ mod tests {
         let root = stage.root_layer().identifier().to_string();
         let sub = sdf::Layer::new_anonymous("sub.usda");
         let sub_id = sub.identifier().to_string();
-        stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+        stage.insert_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
 
         stage.set_edit_target(EditTarget::for_layer(sub_id.clone()))?;
         let err = stage

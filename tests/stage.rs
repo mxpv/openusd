@@ -8,10 +8,62 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use openusd::usd::{
-    EditTarget, EditTargetArc, InitialLoadSet, Notice, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
-    StagePopulationMask,
+    CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
+    StagePopulationMask, StageSink,
 };
 use openusd::{gf, pcp, sdf, tf, usd};
+
+/// A [`StageSink`] for tests: holds optional closures for the composed-change and
+/// lifecycle hooks a test cares about, recording into shared state it inspects
+/// afterward.
+#[derive(Default)]
+#[allow(clippy::type_complexity)]
+struct RecordingSink {
+    after: Option<Box<dyn Fn(&Stage, &CommittedChange<'_>)>>,
+    edit_target: Option<Box<dyn Fn(&Stage)>>,
+    muting: Option<Box<dyn Fn(&Stage, &str, bool)>>,
+}
+
+impl StageSink for RecordingSink {
+    fn after_commit(&self, stage: &Stage, change: &CommittedChange<'_>) {
+        if let Some(f) = &self.after {
+            f(stage, change);
+        }
+    }
+    fn edit_target_changed(&self, stage: &Stage) {
+        if let Some(f) = &self.edit_target {
+            f(stage);
+        }
+    }
+    fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool) {
+        if let Some(f) = &self.muting {
+            f(stage, layer, muted);
+        }
+    }
+}
+
+/// An [`sdf::LayerSink`] for tests: optional closures for the layer-tier
+/// pre-commit (with veto) and post-commit hooks.
+#[allow(clippy::type_complexity)]
+#[derive(Default)]
+struct RecordingLayerSink {
+    before: Option<Box<dyn Fn(&sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error>>>,
+    after: Option<Box<dyn Fn(&str, &sdf::ChangeList)>>,
+}
+
+impl sdf::LayerSink for RecordingLayerSink {
+    fn before_commit(&self, change: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+        match &self.before {
+            Some(f) => f(change),
+            None => Ok(()),
+        }
+    }
+    fn after_commit(&self, layer: &str, changes: &sdf::ChangeList) {
+        if let Some(f) = &self.after {
+            f(layer, changes);
+        }
+    }
+}
 
 const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -2755,8 +2807,11 @@ fn clip_timings_curve() -> Result<()> {
 /// A weak sublayer carrying one opinion, for the sublayer-mutation tests.
 fn opinion_layer(identifier: &str, value: f64) -> Result<sdf::Layer> {
     let mut layer = sdf::Layer::new_anonymous(identifier);
-    sdf::AttributeSpec::new(layer.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
-        .set_default(sdf::Value::Double(value));
+    layer.edit(|e| {
+        sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)?
+            .set_default(sdf::Value::Double(value));
+        Ok(())
+    })?;
     Ok(layer)
 }
 
@@ -2766,16 +2821,16 @@ fn authored_sublayers(stage: &Stage) -> Vec<String> {
     root.pseudo_root().and_then(|pr| pr.sublayers()).unwrap_or_default()
 }
 
-/// `insert_sub_layer` both composes the new layer's opinion and authors the
+/// `insert_layer` both composes the new layer's opinion and authors the
 /// parent's `subLayers` metadata, so the edit persists on save.
 #[test]
-fn insert_sub_layer_authors_metadata() -> Result<()> {
+fn insert_layer_authors_metadata() -> Result<()> {
     let stage = Stage::builder().in_memory("root.usda")?;
     let root_id = stage.root_layer().identifier().to_string();
 
     let weak = opinion_layer("weak.usda", 5.0)?;
     let weak_id = weak.identifier().to_string();
-    stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
+    stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
 
     assert_eq!(
         stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
@@ -2785,21 +2840,21 @@ fn insert_sub_layer_authors_metadata() -> Result<()> {
     Ok(())
 }
 
-/// `remove_sub_layer` drops both the composed opinion and the parent's
+/// `remove_layer` drops both the composed opinion and the parent's
 /// authored `subLayers` entry.
 #[test]
-fn remove_sub_layer_clears_metadata() -> Result<()> {
+fn remove_layer_clears_metadata() -> Result<()> {
     let stage = Stage::builder().in_memory("root.usda")?;
     let root_id = stage.root_layer().identifier().to_string();
     let weak = opinion_layer("weak.usda", 5.0)?;
     let weak_id = weak.identifier().to_string();
-    stage.insert_sub_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
+    stage.insert_layer(&root_id, 0, weak, sdf::LayerOffset::IDENTITY)?;
     assert_eq!(
         stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(5.0))
     );
 
-    assert!(stage.remove_sub_layer(&root_id, &weak_id)?, "a sublayer was removed");
+    assert!(stage.remove_layer(&root_id, &weak_id)?, "a sublayer was removed");
 
     assert_eq!(
         stage.attribute("/A.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
@@ -2816,7 +2871,7 @@ fn remove_sub_layer_clears_metadata() -> Result<()> {
 /// Inserting a sublayer under a file-loaded (and thus editable) parent
 /// succeeds and adds exactly one node to the graph.
 #[test]
-fn insert_sub_layer_into_file_loaded_parent() -> Result<()> {
+fn insert_layer_into_file_loaded_parent() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     std::fs::write(&root, "#usda 1.0\n")?;
@@ -2824,7 +2879,7 @@ fn insert_sub_layer_into_file_loaded_parent() -> Result<()> {
     let root_id = stage.root_layer().identifier().to_string();
     let before = stage.layer_count();
 
-    stage.insert_sub_layer(
+    stage.insert_layer(
         &root_id,
         0,
         opinion_layer("weak.usda", 5.0)?,
@@ -2842,11 +2897,11 @@ fn insert_sub_layer_into_file_loaded_parent() -> Result<()> {
 /// Inserting under a parent that is not in the stage fails with
 /// `LayerNotFound` and adds no node.
 #[test]
-fn insert_sub_layer_missing_parent() -> Result<()> {
+fn insert_layer_missing_parent() -> Result<()> {
     let stage = Stage::builder().in_memory("root.usda")?;
 
     let err = stage
-        .insert_sub_layer(
+        .insert_layer(
             "nope.usda",
             0,
             opinion_layer("weak.usda", 5.0)?,
@@ -3575,15 +3630,13 @@ fn listener_fires_on_define() -> Result<()> {
     let stage = in_memory_stage()?;
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let count = Rc::new(Cell::new(0u32));
-    {
+    let _token = {
         let (resynced, count) = (resynced.clone(), count.clone());
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                count.set(count.get() + 1);
-                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-            }
-        });
-    }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            count.set(count.get() + 1);
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
     stage.define_prim("/World")?;
     assert_eq!(count.get(), 1);
     assert!(resynced.borrow().contains(&sdf::Path::new("/World")?));
@@ -3600,19 +3653,17 @@ fn listener_info_only() -> Result<()> {
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let has_default = Rc::new(Cell::new(false));
-    {
+    let _token = {
         let (info, resynced, has_default) = (info.clone(), resynced.clone(), has_default.clone());
         let size = sdf::Path::new("/World.size")?;
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
-                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-                if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
-                    has_default.set(true);
-                }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+                has_default.set(true);
             }
-        });
-    }
+        })
+    };
     attr.set(2.0_f64)?;
     assert!(info.borrow().contains(&sdf::Path::new("/World.size")?));
     assert!(resynced.borrow().is_empty());
@@ -3637,20 +3688,18 @@ fn listener_info_under_variant_target() -> Result<()> {
 
     let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
     let has_default = Rc::new(Cell::new(false));
-    {
+    let _token = {
         let (info, has_default) = (info.clone(), has_default.clone());
         let size = sdf::path("/Prim.size")?;
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
-                // `changed_fields` takes the stage-namespace path from
-                // `changed_info_only` and finds the field under the layer key.
-                if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
-                    has_default.set(true);
-                }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+            // `changed_fields` takes the stage-namespace path from
+            // `changed_info_only` and finds the field under the layer key.
+            if oc.changed_fields(&size).iter().any(|t| t.as_str() == "default") {
+                has_default.set(true);
             }
-        });
-    }
+        })
+    };
     attr.set(2.0_f64)?;
 
     assert!(info.borrow().contains(&sdf::path("/Prim.size")?));
@@ -3670,14 +3719,12 @@ fn listener_resync_under_variant_target() -> Result<()> {
     stage.set_edit_target(EditTarget::for_local_direct_variant(root, sdf::path("/Prim{set=sel}")?))?;
 
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    {
+    let _token = {
         let resynced = resynced.clone();
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-            }
-        });
-    }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
     stage.define_prim("/Prim/child")?;
 
     assert!(resynced.borrow().contains(&sdf::path("/Prim/child")?));
@@ -3693,16 +3740,15 @@ fn listener_edit_target_changed() -> Result<()> {
     let root = stage.root_layer().identifier().to_string();
     let sub = sdf::Layer::new_anonymous("sub.usda");
     let sub_id = sub.identifier().to_string();
-    stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+    stage.insert_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
     let count = Rc::new(Cell::new(0u32));
-    {
+    let _token = {
         let count = count.clone();
-        stage.set_listener(move |_stage, notice| {
-            if matches!(notice, Notice::EditTargetChanged) {
-                count.set(count.get() + 1);
-            }
-        });
-    }
+        stage.add_sink(RecordingSink {
+            edit_target: Some(Box::new(move |_stage| count.set(count.get() + 1))),
+            ..Default::default()
+        })
+    };
     stage.set_edit_target(EditTarget::for_layer(sub_id.clone()))?;
     assert_eq!(count.get(), 1);
     stage.set_edit_target(EditTarget::for_layer(sub_id))?;
@@ -3718,16 +3764,15 @@ fn listener_edit_context_restore() -> Result<()> {
     let root = stage.root_layer().identifier().to_string();
     let sub = sdf::Layer::new_anonymous("sub.usda");
     let sub_id = sub.identifier().to_string();
-    stage.insert_sub_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
+    stage.insert_layer(&root, 0, sub, sdf::LayerOffset::IDENTITY)?;
     let count = Rc::new(Cell::new(0u32));
-    {
+    let _token = {
         let count = count.clone();
-        stage.set_listener(move |_stage, notice| {
-            if matches!(notice, Notice::EditTargetChanged) {
-                count.set(count.get() + 1);
-            }
-        });
-    }
+        stage.add_sink(RecordingSink {
+            edit_target: Some(Box::new(move |_stage| count.set(count.get() + 1))),
+            ..Default::default()
+        })
+    };
     {
         let _ctx = stage.edit_context(EditTarget::for_layer(sub_id))?;
         assert_eq!(count.get(), 1); // entry fired
@@ -3743,18 +3788,19 @@ fn listener_layer_muting() -> Result<()> {
     let stage = in_memory_stage()?;
     let muted = Rc::new(RefCell::new(Vec::<String>::new()));
     let unmuted = Rc::new(RefCell::new(Vec::<String>::new()));
-    {
+    let _token = {
         let (muted, unmuted) = (muted.clone(), unmuted.clone());
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::LayerMutingChanged(m) = notice {
-                if m.muted {
-                    muted.borrow_mut().push(m.layer.to_string());
+        stage.add_sink(RecordingSink {
+            muting: Some(Box::new(move |_stage, layer, is_muted| {
+                if is_muted {
+                    muted.borrow_mut().push(layer.to_string());
                 } else {
-                    unmuted.borrow_mut().push(m.layer.to_string());
+                    unmuted.borrow_mut().push(layer.to_string());
                 }
-            }
-        });
-    }
+            })),
+            ..Default::default()
+        })
+    };
     stage.mute_layer("weak.usda");
     stage.mute_layer("weak.usda"); // already muted — no notice
     stage.unmute_layer("weak.usda");
@@ -3764,20 +3810,154 @@ fn listener_layer_muting() -> Result<()> {
     Ok(())
 }
 
-/// After `unset_listener`, no further notices are delivered.
+/// After `remove_sink`, no further changes are delivered.
 #[test]
 fn unset_stops_delivery() -> Result<()> {
     let stage = in_memory_stage()?;
     let count = Rc::new(Cell::new(0u32));
-    {
+    let id = {
         let count = count.clone();
-        stage.set_listener(move |_, _| count.set(count.get() + 1));
-    }
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))
+    };
     stage.define_prim("/A")?;
     assert_eq!(count.get(), 1);
-    stage.unset_listener();
+    stage.remove_sink(id);
     stage.define_prim("/B")?;
     assert_eq!(count.get(), 1);
+    Ok(())
+}
+
+/// A layer sink's `before_commit` sees the staged edit — the edited layer, its
+/// non-empty overlay, and the derived change record — before the overlay
+/// commits, fired by an edit routed through the stage.
+#[test]
+fn layer_sink_sees_staged() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.root_layer().identifier().to_string();
+    let seen = Rc::new(RefCell::new(String::new()));
+    let staged = Rc::new(Cell::new(false));
+    {
+        let (seen, staged) = (seen.clone(), staged.clone());
+        stage
+            .layer_mut(&root)
+            .expect("root layer")
+            .add_sink(RecordingLayerSink {
+                before: Some(Box::new(move |change| {
+                    seen.replace(change.layer_identifier.to_string());
+                    if !change.overlay.is_empty() && !change.change_list.is_empty() {
+                        staged.set(true);
+                    }
+                    Ok(())
+                })),
+                ..Default::default()
+            });
+    }
+    stage.define_prim("/World")?;
+    assert_eq!(*seen.borrow(), root, "before_commit saw the edited layer");
+    assert!(
+        staged.get(),
+        "the staged overlay and change list are populated pre-commit"
+    );
+    Ok(())
+}
+
+/// A layer sink's `before_commit` rejection aborts the edit: the error surfaces
+/// as [`StageAuthoringError::Rejected`] and the staged change rolls back,
+/// leaving the prim uncreated.
+#[test]
+fn layer_sink_veto_rolls_back() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let root = stage.root_layer().identifier().to_string();
+    stage
+        .layer_mut(&root)
+        .expect("root layer")
+        .add_sink(RecordingLayerSink {
+            before: Some(Box::new(|_change| {
+                Err(sdf::sink::Error::new("policy forbids this edit"))
+            })),
+            ..Default::default()
+        });
+    let result = stage.define_prim("/World");
+    assert!(matches!(result, Err(StageAuthoringError::Rejected(_))));
+    assert!(!stage.prim("/World").is_valid()?, "the rejected edit rolled back");
+    Ok(())
+}
+
+/// A batched namespace edit delivers one composed `after_commit` for the whole
+/// batch, and a dry run fires nothing.
+#[test]
+fn namespace_edit_fires_sink() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A/B")?;
+    let after = Rc::new(Cell::new(0u32));
+    {
+        let after = after.clone();
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| after.set(after.get() + 1));
+    }
+    let mut editor = usd::NamespaceEditor::new(&stage);
+    editor.delete_prim("/A/B");
+    // A dry run proves the batch applies but commits nothing — no sink fires.
+    editor.can_apply().unwrap();
+    assert_eq!(after.get(), 0, "a dry run does not reach after_commit");
+    editor.apply()?;
+    assert_eq!(after.get(), 1, "the namespace edit delivered after_commit once");
+    assert!(!stage.prim("/A/B").is_valid()?);
+    Ok(())
+}
+
+/// A layer sink's veto on any layer aborts a multi-layer namespace edit
+/// wholesale: every layer rolls back, leaving the composed scene untouched.
+#[test]
+fn namespace_edit_veto_atomic() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A/B")?;
+    let root = stage.root_layer().identifier().to_string();
+    stage
+        .layer_mut(&root)
+        .expect("root layer")
+        .add_sink(RecordingLayerSink {
+            before: Some(Box::new(|_| Err(sdf::sink::Error::new("locked")))),
+            ..Default::default()
+        });
+    let mut editor = usd::NamespaceEditor::new(&stage);
+    editor.delete_prim("/A/B");
+    assert!(matches!(
+        editor.apply(),
+        Err(usd::NamespaceEditError::Stage(StageAuthoringError::Rejected(_)))
+    ));
+    assert!(stage.prim("/A/B").is_valid()?, "the vetoed batch left the prim intact");
+    Ok(())
+}
+
+/// An edit authored through a `Prim` handle (not a `Stage` method) still fires
+/// the sink — capture is stage-level, not method-level.
+#[test]
+fn sink_handle_edit_fires() -> Result<()> {
+    let stage = in_memory_stage()?;
+    let prim = stage.define_prim("/World")?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1));
+    }
+    prim.set_type_name("Xform")?;
+    assert_eq!(count.get(), 1, "a handle edit reaches the stage's sink");
+    Ok(())
+}
+
+/// A sink observes only edits committed after it was installed; a prior edit is
+/// not replayed to it.
+#[test]
+fn sink_only_sees_edits_after_install() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Before")?;
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1));
+    }
+    stage.define_prim("/After")?;
+    assert_eq!(count.get(), 1, "only the post-install edit is observed");
     Ok(())
 }
 
@@ -3789,49 +3969,47 @@ fn listener_layer_stack_resync() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/World")?;
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    {
+    let _token = {
         let resynced = resynced.clone();
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-            }
-        });
-    }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
     stage.set_time_codes_per_second(48.0)?;
     assert!(resynced.borrow().contains(&sdf::Path::abs_root()));
     Ok(())
 }
 
-/// A listener may author another edit from within the callback: the re-entrant
-/// the authoring tail only takes shared borrows of the listener slot (and the
-/// other cells are released before the fire), so it does not panic.
+/// A sink may author another edit from within `after_commit`: the re-entrant
+/// authoring tail takes only a snapshot of the sink list (and the other cells
+/// are released before the fire), so it does not panic.
 #[test]
 fn listener_reentrant_author() -> Result<()> {
     let stage = in_memory_stage()?;
     let done = Rc::new(Cell::new(false));
-    {
+    let _token = {
         let done = done.clone();
-        stage.set_listener(move |stage, _notice| {
+        stage.add_sink(move |stage: &Stage, _change: &CommittedChange<'_>| {
             if !done.replace(true) {
                 stage.define_prim("/Nested").unwrap();
             }
-        });
-    }
+        })
+    };
     stage.define_prim("/World")?;
     assert!(stage.prim("/Nested").is_valid()?);
     Ok(())
 }
 
-/// An idempotent author records no change, so the listener does not fire.
+/// An idempotent author records no change, so the sink does not fire.
 #[test]
 fn empty_edit_no_fire() -> Result<()> {
     let stage = in_memory_stage()?;
     stage.define_prim("/A")?;
     let count = Rc::new(Cell::new(0u32));
-    {
+    let _token = {
         let count = count.clone();
-        stage.set_listener(move |_, _| count.set(count.get() + 1));
-    }
+        stage.add_sink(move |_: &Stage, _: &CommittedChange<'_>| count.set(count.get() + 1))
+    };
     stage.define_prim("/A")?;
     assert_eq!(count.get(), 0);
     Ok(())
@@ -3845,14 +4023,12 @@ fn remove_prim_drops_spec() -> Result<()> {
     stage.define_prim("/A/B")?;
     assert!(stage.prim("/A/B").is_valid()?);
     let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-    {
+    let _token = {
         let resynced = resynced.clone();
-        stage.set_listener(move |_stage, notice| {
-            if let Notice::ObjectsChanged(oc) = notice {
-                resynced.borrow_mut().extend(oc.resynced.iter().cloned());
-            }
-        });
-    }
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+        })
+    };
     assert!(stage.remove_prim("/A/B")?);
     assert!(!stage.prim("/A/B").is_valid()?);
     assert!(!child_names(&stage, "/A")?.contains(&"B".to_string()));

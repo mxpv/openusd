@@ -190,8 +190,18 @@ impl ChangeList {
     /// then erased within the same window — leaves no entry here, since it never
     /// changes what composition would resolve.
     pub fn from_overlay<T: AbstractData>(cow: &CowData<T>) -> ChangeList {
-        let base = cow.base();
         let mut changes = ChangeList::new();
+        changes.update(cow);
+        changes
+    }
+
+    /// Refresh this list from `cow`'s staged overlay, clearing it first and reusing
+    /// its buffer. The in-place counterpart of [`from_overlay`](Self::from_overlay):
+    /// a layer keeps one record and refreshes it on each commit rather than
+    /// allocating a fresh list.
+    pub(crate) fn update<T: AbstractData>(&mut self, cow: &CowData<T>) {
+        self.entries.clear();
+        let base = cow.base();
         for (path, patch) in cow.overlay() {
             let mut entry = ChangeEntry::default();
             match patch {
@@ -246,10 +256,9 @@ impl ChangeList {
             // Each overlay path is distinct, so the derived entry is new — push it
             // directly (a patch that nets to nothing leaves an empty entry to drop).
             if !entry.is_empty() {
-                changes.entries.push((path.clone(), entry));
+                self.entries.push((path.clone(), entry));
             }
         }
-        changes
     }
 }
 

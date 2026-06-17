@@ -311,6 +311,9 @@ impl<T: AbstractData + ?Sized> AbstractData for Box<T> {
 /// stages only that field, so an untouched sibling field — even a large array or
 /// time-sample value — is never copied. A newly created spec stages its full
 /// field set, since it has no base to read through to.
+///
+/// See the `sdf::layer` module documentation for why a layer's edits stage
+/// copy-on-write rather than applying immediately.
 pub struct CowData<T: AbstractData> {
     base: T,
     /// Per-spec staged changes keyed by path; see [`Patch`]. Empty until a write

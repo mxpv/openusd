@@ -1,16 +1,45 @@
 //! A single scene-description layer (the Rust equivalent of C++ `SdfLayer`):
-//! identity + a backing [`AbstractData`] under a copy-on-write [`CowData`]
-//! staging overlay. Spec authoring lives on the views
-//! ([`PrimSpec::new`](super::PrimSpec::new) and friends); every edit stages in
-//! the overlay. A [`Transaction`] commits a batch atomically — flushing the
-//! overlay into the backend and accumulating the derived [`ChangeList`] for
-//! composition invalidation — or rolls it back when the guard drops. Edits made
-//! outside a transaction stay staged (still visible to reads, which merge
-//! staged-over-base) until the next flush.
+//! identity plus a backing [`AbstractData`] under a copy-on-write [`CowData`]
+//! staging overlay.
 //!
-//! Cross-layer composition concerns (resolving sublayers, references,
-//! payloads) live separately in [`crate::layer`].
+//! # Editing
+//!
+//! A layer is mutated only through [`Layer::edit`] (one layer) or [`edit_layers`]
+//! (several at once, atomically): the closure authors through a [`LayerEdit`]
+//! view — [`PrimSpec::new`](super::PrimSpec::new) and friends write through
+//! [`LayerEdit::data_mut`] — and the whole batch commits when the closure returns
+//! `Ok`, or rolls back on its error or a panic. Committing drains the overlay into
+//! the backend and yields the derived [`ChangeList`] for composition
+//! invalidation. [`dry_run_layers`] runs the same staging but always discards it,
+//! to check an edit applies without keeping it. Reads merge staged-over-base, so
+//! an in-progress edit is visible to reads inside its closure.
+//!
+//! # Why copy-on-write
+//!
+//! Staging is the primitive that makes three things the editing pipeline relies on
+//! cheap and correct (the alternative is to edit the backend immediately and track
+//! changes as they happen):
+//!
+//! - Net-effect change records. A composition invalidation should reflect the
+//!   final state of an edit, not the churn along the way. Because the overlay holds
+//!   the net staged state, the [`ChangeList`] derived from it at commit reflects
+//!   only that final result: a field set twice records once, and a spec created
+//!   then deleted within one edit records nothing — never the in-between steps an
+//!   immediate-edit log would carry.
+//! - Old and new values side by side. At commit the pristine base and the staged
+//!   overlay both exist, so a forward log (the new values) and an inverse log (the
+//!   old values, for undo) fall out directly from the diff — no need to snapshot
+//!   the old value at each mutation before it is overwritten.
+//! - All-or-nothing edits. A multi-step edit — or a multi-layer one, where a
+//!   namespace edit must apply across several layers together — either commits
+//!   whole or rolls back whole. Rolling back is just dropping the overlay, so
+//!   abandoning a half-built or vetoed edit costs nothing and leaves no partial
+//!   state behind.
+//!
+//! Cross-layer composition concerns (resolving sublayers, references, payloads)
+//! live separately in [`crate::layer`].
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,10 +47,13 @@ use anyhow::{Context, Result};
 
 use super::schema::FieldKey;
 use super::{
-    AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Path,
-    PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
+    sink, AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch,
+    Path, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
     RelocateList, SpecError, SpecType,
 };
+
+/// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
+pub type LayerSinkId = sink::Id<dyn LayerSink>;
 
 /// Prefix marking an anonymous layer identifier (`anon:<n>:<tag>`), the single
 /// source of truth shared by minting and [`Layer::is_anonymous`].
@@ -32,104 +64,26 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 /// in the process never collide.
 static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// An atomic batch of edits over a [`Layer`], created by [`Transaction::new`].
-/// Edits authored through the guard (it derefs to the `Layer`) stage in the
-/// layer's overlay; [`commit`](Self::commit) flushes them into the backend and
-/// returns the layer's accumulated [`ChangeList`], while dropping the guard
-/// without committing rolls them back — so an error or panic mid-transaction
-/// cannot strand the layer with orphaned staged edits.
-///
-/// The building block several layers share to apply a namespace edit
-/// all-or-nothing: open a transaction on each, stage into all, and commit them
-/// only once every layer has authored cleanly (dropping the rest to roll back
-/// on the first failure).
-///
-/// Crate-internal: a layer's transaction lifecycle is not part of the public
-/// API, and the `&mut Layer` borrow the guard holds prevents two live
-/// transactions on one layer — except through the guard's own
-/// `DerefMut<Target = Layer>`, which would let `Transaction::new(&mut tx)`
-/// coerce and nest. [`new`](Self::new) asserts against that: a nested open
-/// would flush the outer transaction's staged edits into the backend, leaving
-/// the outer guard unable to roll them back, so it is a hard panic.
-///
-/// Derefs to the [`Layer`] under transaction, so it is authored through (and
-/// read from) directly — reads see the staged-over-base state, with an edit
-/// staged earlier in the same transaction already visible.
-#[derive(derive_more::Deref, derive_more::DerefMut)]
-pub(crate) struct Transaction<'a> {
-    #[deref(forward)]
-    #[deref_mut(forward)]
-    layer: &'a mut Layer,
-    committed: bool,
-}
-
-impl<'a> Transaction<'a> {
-    /// Open a transaction on `layer`: its subsequent writes stage in the overlay
-    /// and reach the backend only at [`commit`](Self::commit) (or roll back when
-    /// the guard is dropped). Any edits already staged on the layer (authored
-    /// outside a transaction) are flushed into the backend first, so the
-    /// transaction starts from an empty overlay and its rollback discards only
-    /// its own edits.
-    ///
-    /// Panics if `layer` is already under a transaction — see the type's
-    /// re-entrancy note. The assertion runs before the flush so a nested open
-    /// cannot commit the outer transaction's edits.
-    pub fn new(layer: &'a mut Layer) -> Self {
-        assert!(
-            !layer.in_transaction,
-            "nested transaction on layer {}",
-            layer.identifier
-        );
-        layer.flush();
-        layer.in_transaction = true;
-        Self {
-            layer,
-            committed: false,
-        }
-    }
-
-    /// Flush the staged edits into the backend and return the layer's
-    /// accumulated change list for composition invalidation.
-    pub fn commit(mut self) -> ChangeList {
-        // Mark committed only once the flush has succeeded; a panic deriving or
-        // merging the record before then leaves `committed` false, so `Drop`
-        // rolls the still-intact overlay back.
-        let changes = self.layer.take_changes();
-        self.committed = true;
-        changes
-    }
-}
-
-impl Drop for Transaction<'_> {
-    fn drop(&mut self) {
-        self.layer.in_transaction = false;
-        if !self.committed {
-            self.layer.data.rollback();
-        }
-    }
-}
-
 /// A single loaded layer in the composition.
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.
     pub identifier: String,
     /// The parsed scene description data, under a copy-on-write [`CowData`]
-    /// staging overlay. Every authoring write stages in the overlay; a
-    /// [`flush`](Self::flush) derives the composition record and commits the
-    /// overlay into the backend. Private so external callers reach it only
-    /// through [`data`](Self::data) / [`data_mut`](Self::data_mut), keeping the
-    /// authoring API's bookkeeping invariants (`primChildren`,
-    /// `propertyChildren`, ancestor specifiers, …) in force.
+    /// staging overlay. Every authoring write stages in the overlay; committing an
+    /// edit derives the composition record and drains the overlay into the backend.
+    /// Private so external callers reach it only through [`data`](Self::data) for
+    /// reads or a [`LayerEdit`] for authoring, keeping the authoring API's
+    /// bookkeeping invariants (`primChildren`, `propertyChildren`, ancestor
+    /// specifiers, …) in force.
     data: CowData<LayerData>,
-    /// The change record accumulated from flushed overlays since it was last
-    /// drained by [`take_changes`](Self::take_changes). Spans several
-    /// sequential transactions and any direct edits between them, so a stage
-    /// sees one combined record on its next drain.
-    pending: ChangeList,
-    /// Whether a [`Transaction`] is currently open on this layer. A re-entrancy
-    /// guard only — [`Transaction::new`] asserts against it to reject a nested
-    /// open through the guard's `DerefMut`; it does not gate `data_mut` routing.
-    in_transaction: bool,
+    /// The change record for the edit in progress, derived from the overlay at
+    /// commit and handed to the layer's sinks. Owned and refilled in place each
+    /// commit (reusing its buffer) rather than reallocated; empty between edits.
+    changes: ChangeList,
+    /// Per-layer change sinks fired at the commit seam — the low tier of the
+    /// change pipeline, where a stage installs an aggregator so it stays in sync
+    /// with any edit. Empty by default.
+    sinks: sink::Set<dyn LayerSink>,
 }
 
 impl Layer {
@@ -141,9 +95,24 @@ impl Layer {
         Self {
             identifier: identifier.into(),
             data: CowData::new(data),
-            pending: ChangeList::new(),
-            in_transaction: false,
+            changes: ChangeList::new(),
+            sinks: sink::Set::default(),
         }
+    }
+
+    /// Install a [`LayerSink`] fired at this layer's commit seam, returning its
+    /// [`LayerSinkId`] for a later [`remove_sink`](Self::remove_sink). Any
+    /// editor of this layer — a stage, the namespace editor, raw authoring —
+    /// fires the sink, so an external observer sees every committed edit. A bare
+    /// `Fn(&str, &ChangeList)` closure is a `LayerSink`, so this takes either a
+    /// full sink type or a closure observer.
+    pub fn add_sink<S: LayerSink + 'static>(&mut self, sink: S) -> LayerSinkId {
+        self.sinks.add(Box::new(sink))
+    }
+
+    /// Remove the layer sink with `id`; a no-op if it was already removed.
+    pub fn remove_sink(&mut self, id: LayerSinkId) {
+        self.sinks.remove(id);
     }
 
     /// Borrow the layer's data as a read-only [`AbstractData`]. Reads see the
@@ -152,67 +121,114 @@ impl Layer {
         &self.data
     }
 
-    /// Borrow the layer's backing data as a mutable [`AbstractData`] for
-    /// authoring. The write stages in the copy-on-write overlay; it reaches the
-    /// backend, and its derived change is accumulated for composition
-    /// invalidation, at the next [`flush`](Self::flush) — implicitly when a
-    /// [`Transaction`] opens or commits, or when the layer joins a stage.
-    pub fn data_mut(&mut self) -> &mut dyn AbstractData {
-        &mut self.data
+    /// Discard the layer's staged (uncommitted) edits, restoring the backend to
+    /// its last-committed state. Already-committed content is unaffected. Private:
+    /// staging and committing are driven only through [`edit`](Self::edit) /
+    /// [`edit_layers`], which roll back automatically on failure, so a caller
+    /// never sequences a rollback by hand.
+    fn rollback(&mut self) {
+        self.data.rollback();
     }
 
-    /// Derive the composition record from the staged overlay (against the
-    /// still-pristine backend), accumulate it into [`pending`](Self::pending),
-    /// and commit the overlay into the backend. A no-op when nothing is staged.
-    /// The derivation must read the overlay before the commit drains it.
-    pub(crate) fn flush(&mut self) {
-        let derived = ChangeList::from_overlay(&self.data);
-        self.pending.merge_from(&derived);
+    /// Author a batch of edits as one atomic unit: run `f` against the layer's
+    /// [`LayerEdit`] view, then commit on success, or roll back on `f`'s error, a
+    /// sink veto, or a panic. Returns whether the edit produced a composition
+    /// change. This is the only way to mutate a layer — the commit is the closing
+    /// brace, not a separate call a caller can omit — so an edit is never left
+    /// staged-but-uncommitted. The single-layer case of [`edit_layers`]; mirrors
+    /// C++ scene description committing through `Sdf_ChangeManager`.
+    ///
+    /// Panics if called re-entrantly on the same layer.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use openusd::sdf::{self, PrimSpec, Specifier};
+    ///
+    /// let mut layer = sdf::Layer::new_anonymous("example.usda");
+    /// // On success the batch commits and the change record is returned.
+    /// layer
+    ///     .edit(|l| {
+    ///         PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
+    ///         Ok(())
+    ///     })
+    ///     .expect("authored and committed");
+    /// assert!(layer.prim("/World").is_some());
+    ///
+    /// // If the closure returns an error, the whole batch rolls back — neither
+    /// // spec below survives, because the second authoring call fails.
+    /// let result = layer.edit(|l| {
+    ///     PrimSpec::new(l.data_mut(), "/Good", Specifier::Def, "Xform")?;
+    ///     PrimSpec::new(l.data_mut(), "/Good.prop", Specifier::Def, "Xform")?; // property path: invalid for a prim
+    ///     Ok(())
+    /// });
+    /// assert!(result.is_err());
+    /// assert!(layer.prim("/Good").is_none());
+    /// ```
+    pub fn edit(
+        &mut self,
+        f: impl FnOnce(&mut LayerEdit<'_>) -> Result<(), AuthoringError>,
+    ) -> Result<bool, EditError> {
+        edit_layers(&mut [self], |edits| f(&mut edits[0]).map_err(EditError::from))
+    }
+
+    /// Refill this layer's change record from the staged overlay against the
+    /// still-pristine base, and offer it to each sink's
+    /// [`before_commit`](LayerSink::before_commit) while the overlay is intact. A
+    /// sink's rejection leaves the overlay staged for the caller to roll back. Does
+    /// not touch the backend.
+    fn prepare_commit(&mut self) -> Result<(), sink::Error> {
+        self.changes.update(&self.data);
+        if !self.changes.is_empty() && !self.sinks.is_empty() {
+            let change = PendingLayerChange {
+                layer_identifier: &self.identifier,
+                base: &**self.data.base(),
+                overlay: self.data.overlay(),
+                change_list: &self.changes,
+            };
+            self.sinks.iter().try_for_each(|sink| sink.before_commit(&change))?;
+        }
+        Ok(())
+    }
+
+    /// Drain the overlay into the backend — the irreversible half of a commit,
+    /// run once [`prepare_commit`](Self::prepare_commit) has accepted the edit.
+    /// Returns whether the edit produced any composition change. The derived
+    /// record stays in [`changes`](Self::changes) for a following
+    /// [`notify_after_commit`](Self::notify_after_commit).
+    fn commit_data(&mut self) -> bool {
         self.data.commit();
+        !self.changes.is_empty()
     }
 
-    /// Flush any staged edits and drain the accumulated change record, leaving
-    /// the layer clean. The stage calls this to drive composition invalidation.
-    pub(crate) fn take_changes(&mut self) -> ChangeList {
-        self.flush();
-        std::mem::take(&mut self.pending)
+    /// Fire each sink's [`after_commit`](LayerSink::after_commit) with the record
+    /// [`prepare_commit`](Self::prepare_commit) derived. Run only after every layer
+    /// in a group has committed its data, so a panicking sink cannot strand a
+    /// partially committed group.
+    fn notify_after_commit(&self) {
+        if !self.changes.is_empty() {
+            for sink in self.sinks.iter() {
+                sink.after_commit(&self.identifier, &self.changes);
+            }
+        }
     }
 
-    /// Whether the layer has been modified since it was loaded or last drained —
-    /// either edits still staged in the overlay, or a change record accumulated
-    /// from earlier flushes. Mirrors C++ `SdfLayer::IsDirty`.
+    /// Whether the layer has edits staged in its overlay but not yet committed.
+    /// Mirrors C++ `SdfLayer::IsDirty` for the in-flight-edit case.
     ///
     /// Conservative about staged content: any uncommitted overlay write counts,
-    /// including an idempotent edit (a field re-set to the value the base
-    /// already holds) whose flush would derive no composition change. Such an
-    /// edit reports dirty here even though [`take_changes`](Self::take_changes)
-    /// would yield an empty record — the "needs save" question this answers is
-    /// distinct from the "needs recompose" question the change record answers.
+    /// including an idempotent edit (a field re-set to the value the base already
+    /// holds) whose commit would derive no composition change.
     pub fn is_dirty(&self) -> bool {
-        !self.data.is_empty() || !self.pending.is_empty()
+        !self.data.is_empty()
     }
 
-    /// Commit any staged edits into the backend to keep their content, then drop
-    /// the accumulated change record without applying composition invalidation.
-    /// Called when a layer joins a stage: its content is composed fresh by the
-    /// layer-stack recompose, so a record left by prior direct edits is
-    /// redundant — and, if left in place, would be drained by (and
-    /// mis-attributed to) the first transaction the stage later runs on the
-    /// layer.
+    /// Commit any staged edits into the backend to keep their content, without
+    /// deriving a change record or notifying sinks. Called when a layer joins a
+    /// stage: its content is composed fresh by the layer-stack recompose, so a
+    /// record from prior direct edits would be redundant.
     pub(crate) fn discard_changes(&mut self) {
         self.data.commit();
-        self.pending.clear();
-    }
-
-    /// Remove the spec at `path` from this layer. Removing a prim also erases
-    /// its descendant specs, and the leaf name is dropped from the owning prim's
-    /// child-name list. Returns `Ok(true)` when a spec was present and removed,
-    /// or an [`AuthoringError`] when the owning prim's child list cannot be read.
-    ///
-    /// The erase stages in the overlay, so the next flush derives a removal for
-    /// composition to invalidate.
-    pub fn remove_spec(&mut self, path: &Path) -> Result<bool, AuthoringError> {
-        super::spec::remove_spec(self.data_mut(), path)
     }
 
     /// The layer's resolved, canonical identifier.
@@ -330,9 +346,76 @@ pub enum AuthoringError {
     },
 }
 
+/// An error from [`Layer::edit`]: the closure's authoring error, or a sink's
+/// rejection of the staged edit.
+#[derive(Debug, thiserror::Error)]
+pub enum EditError {
+    /// The edit closure failed to author; nothing was committed.
+    #[error(transparent)]
+    Author(#[from] AuthoringError),
+
+    /// A [`LayerSink`] rejected the staged edit from its
+    /// [`before_commit`](LayerSink::before_commit).
+    #[error(transparent)]
+    Rejected(#[from] sink::Error),
+}
+
+/// An observer of a single [`Layer`]'s committed edits — the low tier of the
+/// change pipeline, fired synchronously at the layer's commit seam so a sink
+/// sees every edit, by any editor, the moment it lands. A [`Stage`](crate::usd::Stage)
+/// installs an aggregating sink on each layer it owns to stay in sync;
+/// composition-level observation lives one tier up on the stage.
+///
+/// Both methods default to doing nothing, so a sink implements only the phase it
+/// cares about. Sinks fire in installation order.
+pub trait LayerSink {
+    /// Inspect a staged edit before it commits. Returning `Err` rolls the edit
+    /// back: the overlay is discarded and the error surfaces to the author. The
+    /// pristine base and the staged overlay are both visible, which is what lets
+    /// a sink derive an inverse (undo) record here.
+    fn before_commit(&self, change: &PendingLayerChange<'_>) -> Result<(), sink::Error> {
+        let _ = change;
+        Ok(())
+    }
+
+    /// Observe a committed edit, after the overlay has drained into the backend.
+    /// `layer` is the committing layer's identifier and `changes` the record
+    /// derived from the edit.
+    fn after_commit(&self, layer: &str, changes: &ChangeList) {
+        let _ = (layer, changes);
+    }
+}
+
+/// A bare closure is a [`LayerSink`] that only observes committed edits — the
+/// ergonomic "just record commits" case, installed straight through
+/// [`Layer::add_sink`] with no wrapper type. `Fn` (not `FnMut`) because a sink is
+/// invoked through a shared `&self`; capture interior-mutable state to accumulate.
+impl<F: Fn(&str, &ChangeList)> LayerSink for F {
+    fn after_commit(&self, layer: &str, changes: &ChangeList) {
+        self(layer, changes);
+    }
+}
+
+/// A staged, not-yet-committed edit on one layer, handed to
+/// [`LayerSink::before_commit`]: the pre-edit base, the staged overlay, and the
+/// derived change record — enough for a sink to derive a forward or inverse
+/// [`Edit`](crate::usd::Edit) log without committing.
+pub struct PendingLayerChange<'a> {
+    /// Canonical identifier of the edited layer.
+    pub layer_identifier: &'a str,
+    /// The layer's pre-edit values (the overlay's base).
+    pub base: &'a dyn AbstractData,
+    /// The staged changes keyed by path — the new values, as [`Patch`]es.
+    pub overlay: &'a HashMap<Path, Patch>,
+    /// The composition record derived from this layer's overlay. A sink that
+    /// needs to retain it past the callback clones it ([`ChangeList`] is
+    /// [`Clone`]).
+    pub change_list: &'a ChangeList,
+}
+
 /// Identity, persistence, and typed-view lookups. Spec authoring lives on the
 /// views themselves ([`PrimSpec::new`](crate::sdf::PrimSpec::new) and friends,
-/// mirroring C++ `Sdf*Spec::New`); they write through [`Layer::data_mut`], so
+/// mirroring C++ `Sdf*Spec::New`); they write through [`LayerEdit::data_mut`], so
 /// every edit stages in the layer's overlay for the next flush to record.
 ///
 /// The typed-view lookups ([`Layer::prim`], [`Layer::attribute`],
@@ -349,7 +432,7 @@ impl Layer {
     ///
     /// The layer's pseudo-root spec is pre-populated so layer-level metadata
     /// (`defaultPrim`, `subLayers`, time codes, …) can be authored via
-    /// [`Layer::pseudo_root_mut`] immediately.
+    /// [`LayerEdit::pseudo_root_mut`] immediately.
     pub fn new_anonymous(tag: impl std::fmt::Display) -> Self {
         let n = ANONYMOUS_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self::new_in_memory(format!("{ANONYMOUS_PREFIX}{n}:{tag}"))
@@ -379,19 +462,9 @@ impl Layer {
         PrimSpecRef::get(self.data(), path.into())
     }
 
-    /// Mutably look up a prim spec at `path`.
-    pub fn prim_mut(&mut self, path: impl Into<Path>) -> Option<PrimSpecMut<'_>> {
-        PrimSpecMut::get(self.data_mut(), path.into())
-    }
-
     /// Look up an attribute spec at a property path.
     pub fn attribute(&self, path: impl Into<Path>) -> Option<AttributeSpecRef<'_>> {
         AttributeSpecRef::get(self.data(), path.into())
-    }
-
-    /// Mutably look up an attribute spec at a property path.
-    pub fn attribute_mut(&mut self, path: impl Into<Path>) -> Option<AttributeSpecMut<'_>> {
-        AttributeSpecMut::get(self.data_mut(), path.into())
     }
 
     /// Look up a relationship spec at a property path.
@@ -399,47 +472,10 @@ impl Layer {
         RelationshipSpecRef::get(self.data(), path.into())
     }
 
-    /// Mutably look up a relationship spec at a property path.
-    pub fn relationship_mut(&mut self, path: impl Into<Path>) -> Option<RelationshipSpecMut<'_>> {
-        RelationshipSpecMut::get(self.data_mut(), path.into())
-    }
-
     /// View this layer's root pseudo-spec, which carries layer-wide metadata
     /// (`defaultPrim`, `subLayers`, time codes, …).
     pub fn pseudo_root(&self) -> Option<PseudoRootSpecRef<'_>> {
         PseudoRootSpecRef::get(self.data())
-    }
-
-    /// Set the layer's `defaultPrim` metadata to `name`.
-    ///
-    /// `name` must be a USD identifier or nested prim path (without leading
-    /// `/`). Modern OpenUSD (≥ 23.05) allows `defaultPrim` to address a
-    /// nested prim such as `"World/Char"`; both shapes are accepted here so
-    /// the write contract matches the read path in
-    /// [`crate::pcp::IndexCache::default_prim`].
-    ///
-    /// Mirrors C++ `SdfLayer::SetDefaultPrim`.
-    ///
-    /// Note: [`crate::sdf::PseudoRootSpecMut::set_default_prim`] writes the
-    /// raw token without validation — that is the spec-tier escape hatch.
-    /// This Layer-tier method is the validating front door.
-    pub fn set_default_prim(&mut self, name: impl Into<String>) -> Result<(), AuthoringError> {
-        let name = name.into();
-        if name.is_empty() || name.starts_with('/') || Path::new(&format!("/{name}")).is_err() {
-            return Err(AuthoringError::InvalidPath {
-                path: Path::abs_root(),
-                reason: "defaultPrim must be a relative prim identifier or nested prim path",
-            });
-        }
-        self.pseudo_root_mut()?.set_default_prim(name);
-        Ok(())
-    }
-
-    /// Remove the layer's `defaultPrim` metadata. Mirrors C++
-    /// `SdfLayer::ClearDefaultPrim`. No-op when no pseudo-root spec exists
-    /// (clearing what isn't there must not materialize state).
-    pub fn clear_default_prim(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::DefaultPrim)
     }
 
     /// The list of namespace relocations authored in this layer's metadata,
@@ -457,21 +493,6 @@ impl Layer {
         self.has_root_field(FieldKey::LayerRelocates)
     }
 
-    /// Set this layer's entire list of namespace relocations to `relocates`.
-    /// An empty list authors an explicit "no relocates" opinion (see
-    /// [`Layer::has_relocates`]); use [`Layer::clear_relocates`] to remove the
-    /// opinion entirely. Mirrors C++ `SdfLayer::SetRelocates`.
-    pub fn set_relocates(&mut self, relocates: RelocateList) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_relocates(relocates);
-        Ok(())
-    }
-
-    /// Clear this layer's `relocates` opinion from its metadata. Mirrors C++
-    /// `SdfLayer::ClearRelocates`. No-op when no pseudo-root spec exists.
-    pub fn clear_relocates(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::LayerRelocates)
-    }
-
     /// The layer's `startTimeCode`, or `0.0` when unauthored. Mirrors C++
     /// `SdfLayer::GetStartTimeCode`.
     pub fn start_time_code(&self) -> f64 {
@@ -480,22 +501,10 @@ impl Layer {
             .unwrap_or(0.0)
     }
 
-    /// Set the layer's `startTimeCode`. Mirrors C++ `SdfLayer::SetStartTimeCode`.
-    pub fn set_start_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_start_time_code(time);
-        Ok(())
-    }
-
     /// Whether this layer authors a `startTimeCode` opinion. Mirrors C++
     /// `SdfLayer::HasStartTimeCode`.
     pub fn has_start_time_code(&self) -> bool {
         self.has_root_field(FieldKey::StartTimeCode)
-    }
-
-    /// Clear this layer's `startTimeCode` opinion. Mirrors C++
-    /// `SdfLayer::ClearStartTimeCode`. No-op when no pseudo-root spec exists.
-    pub fn clear_start_time_code(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::StartTimeCode)
     }
 
     /// The layer's `endTimeCode`, or `0.0` when unauthored. Mirrors C++
@@ -504,22 +513,10 @@ impl Layer {
         self.pseudo_root().and_then(|root| root.end_time_code()).unwrap_or(0.0)
     }
 
-    /// Set the layer's `endTimeCode`. Mirrors C++ `SdfLayer::SetEndTimeCode`.
-    pub fn set_end_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_end_time_code(time);
-        Ok(())
-    }
-
     /// Whether this layer authors an `endTimeCode` opinion. Mirrors C++
     /// `SdfLayer::HasEndTimeCode`.
     pub fn has_end_time_code(&self) -> bool {
         self.has_root_field(FieldKey::EndTimeCode)
-    }
-
-    /// Clear this layer's `endTimeCode` opinion. Mirrors C++
-    /// `SdfLayer::ClearEndTimeCode`. No-op when no pseudo-root spec exists.
-    pub fn clear_end_time_code(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::EndTimeCode)
     }
 
     /// The layer's `timeCodesPerSecond`. Falls back to the authored
@@ -533,23 +530,10 @@ impl Layer {
             .unwrap_or(24.0)
     }
 
-    /// Set the layer's `timeCodesPerSecond`. Mirrors C++
-    /// `SdfLayer::SetTimeCodesPerSecond`.
-    pub fn set_time_codes_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_time_codes_per_second(rate);
-        Ok(())
-    }
-
     /// Whether this layer authors a `timeCodesPerSecond` opinion. Mirrors C++
     /// `SdfLayer::HasTimeCodesPerSecond`.
     pub fn has_time_codes_per_second(&self) -> bool {
         self.has_root_field(FieldKey::TimeCodesPerSecond)
-    }
-
-    /// Clear this layer's `timeCodesPerSecond` opinion. Mirrors C++
-    /// `SdfLayer::ClearTimeCodesPerSecond`. No-op when no pseudo-root spec exists.
-    pub fn clear_time_codes_per_second(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::TimeCodesPerSecond)
     }
 
     /// The layer's `framesPerSecond`, or `24.0` when unauthored. Mirrors C++
@@ -560,23 +544,10 @@ impl Layer {
             .unwrap_or(24.0)
     }
 
-    /// Set the layer's `framesPerSecond`. Mirrors C++
-    /// `SdfLayer::SetFramesPerSecond`.
-    pub fn set_frames_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_frames_per_second(rate);
-        Ok(())
-    }
-
     /// Whether this layer authors a `framesPerSecond` opinion. Mirrors C++
     /// `SdfLayer::HasFramesPerSecond`.
     pub fn has_frames_per_second(&self) -> bool {
         self.has_root_field(FieldKey::FramesPerSecond)
-    }
-
-    /// Clear this layer's `framesPerSecond` opinion. Mirrors C++
-    /// `SdfLayer::ClearFramesPerSecond`. No-op when no pseudo-root spec exists.
-    pub fn clear_frames_per_second(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::FramesPerSecond)
     }
 
     /// The layer's `framePrecision`, or `3` when unauthored. Mirrors C++
@@ -585,23 +556,10 @@ impl Layer {
         self.pseudo_root().and_then(|root| root.frame_precision()).unwrap_or(3)
     }
 
-    /// Set the layer's `framePrecision`. Mirrors C++
-    /// `SdfLayer::SetFramePrecision`.
-    pub fn set_frame_precision(&mut self, precision: i32) -> Result<(), AuthoringError> {
-        self.pseudo_root_mut()?.set_frame_precision(precision);
-        Ok(())
-    }
-
     /// Whether this layer authors a `framePrecision` opinion. Mirrors C++
     /// `SdfLayer::HasFramePrecision`.
     pub fn has_frame_precision(&self) -> bool {
         self.has_root_field(FieldKey::FramePrecision)
-    }
-
-    /// Clear this layer's `framePrecision` opinion. Mirrors C++
-    /// `SdfLayer::ClearFramePrecision`. No-op when no pseudo-root spec exists.
-    pub fn clear_frame_precision(&mut self) -> Result<(), AuthoringError> {
-        self.clear_root_field(FieldKey::FramePrecision)
     }
 
     /// Whether the pseudo-root spec authors `key`, including an explicit
@@ -609,20 +567,65 @@ impl Layer {
     fn has_root_field(&self, key: FieldKey) -> bool {
         self.data.has_field(&Path::abs_root(), key.as_str())
     }
+}
 
-    /// Remove a metadata field from the pseudo-root spec, if that spec exists.
-    /// No-op otherwise — clearing what isn't there must not materialize state.
-    fn clear_root_field(&mut self, key: FieldKey) -> Result<(), AuthoringError> {
-        // `erase_field` is a no-op when the pseudo-root spec is absent.
-        self.data_mut().erase_field(&Path::abs_root(), key.as_str());
-        Ok(())
+/// The authoring view of a [`Layer`] handed to an [`edit`](Layer::edit) /
+/// [`edit_layers`] closure — the only surface through which a layer is mutated.
+///
+/// Derefs to the [`Layer`] for reads, and exposes the layer's authoring
+/// operations directly. A layer's `commit` and `rollback` are deliberately absent:
+/// the edit commits when the closure returns and rolls back on its error or a
+/// panic, so an edit can never be left staged-but-uncommitted, and a multi-layer
+/// edit stays atomic across its layers.
+pub struct LayerEdit<'a> {
+    layer: &'a mut Layer,
+}
+
+impl std::ops::Deref for LayerEdit<'_> {
+    type Target = Layer;
+
+    fn deref(&self) -> &Layer {
+        &*self.layer
+    }
+}
+
+impl LayerEdit<'_> {
+    /// Borrow the layer's backing data mutably for authoring; the write stages in
+    /// the copy-on-write overlay and commits with the enclosing edit. The typed
+    /// spec constructors ([`PrimSpec::new`](crate::sdf::PrimSpec::new) and friends)
+    /// write through this.
+    pub fn data_mut(&mut self) -> &mut dyn AbstractData {
+        &mut self.layer.data
     }
 
-    /// Mutably view this layer's root pseudo-spec. The spec is created on
-    /// first access if missing.
+    /// Remove the spec at `path`. Removing a prim also erases its descendant specs
+    /// and drops the leaf name from the owning prim's child-name list. Returns
+    /// `Ok(true)` when a spec was present and removed.
+    pub fn remove_spec(&mut self, path: &Path) -> Result<bool, AuthoringError> {
+        super::spec::remove_spec(self.data_mut(), path)
+    }
+
+    /// Mutably look up the prim spec at `path`.
+    pub fn prim_mut(&mut self, path: impl Into<Path>) -> Option<PrimSpecMut<'_>> {
+        PrimSpecMut::get(self.data_mut(), path.into())
+    }
+
+    /// Mutably look up the attribute spec at a property path.
+    pub fn attribute_mut(&mut self, path: impl Into<Path>) -> Option<AttributeSpecMut<'_>> {
+        AttributeSpecMut::get(self.data_mut(), path.into())
+    }
+
+    /// Mutably look up the relationship spec at a property path.
+    pub fn relationship_mut(&mut self, path: impl Into<Path>) -> Option<RelationshipSpecMut<'_>> {
+        RelationshipSpecMut::get(self.data_mut(), path.into())
+    }
+
+    /// Mutably view the root pseudo-spec, which carries layer-wide metadata
+    /// (`defaultPrim`, `subLayers`, time codes, …). The spec is created on first
+    /// access if missing.
     pub fn pseudo_root_mut(&mut self) -> Result<PseudoRootSpecMut<'_>, AuthoringError> {
         let root = Path::abs_root();
-        match self.data().spec_type(&root) {
+        match self.layer.data().spec_type(&root) {
             Some(SpecType::PseudoRoot) => {}
             Some(_) => {
                 return Err(AuthoringError::InvalidPath {
@@ -634,6 +637,104 @@ impl Layer {
         }
         Ok(PseudoRootSpecMut::get(self.data_mut()).expect("just ensured a pseudo-root spec"))
     }
+
+    /// Set the layer's `defaultPrim` metadata to `name`, a USD identifier or
+    /// nested prim path without a leading `/` (e.g. `"World/Char"`). Mirrors C++
+    /// `SdfLayer::SetDefaultPrim`, validating the name; the spec-tier
+    /// [`PseudoRootSpecMut::set_default_prim`] is the unvalidated escape hatch.
+    pub fn set_default_prim(&mut self, name: impl Into<String>) -> Result<(), AuthoringError> {
+        let name = name.into();
+        if name.is_empty() || name.starts_with('/') || Path::new(&format!("/{name}")).is_err() {
+            return Err(AuthoringError::InvalidPath {
+                path: Path::abs_root(),
+                reason: "defaultPrim must be a relative prim identifier or nested prim path",
+            });
+        }
+        self.pseudo_root_mut()?.set_default_prim(name);
+        Ok(())
+    }
+
+    /// Remove the layer's `defaultPrim` metadata. No-op when no pseudo-root spec
+    /// exists.
+    pub fn clear_default_prim(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::DefaultPrim)
+    }
+
+    /// Set the layer's entire list of namespace relocations. An empty list authors
+    /// an explicit "no relocates" opinion; use [`clear_relocates`](Self::clear_relocates)
+    /// to remove the opinion entirely.
+    pub fn set_relocates(&mut self, relocates: RelocateList) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_relocates(relocates);
+        Ok(())
+    }
+
+    /// Clear the layer's `relocates` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_relocates(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::LayerRelocates)
+    }
+
+    /// Set the layer's `startTimeCode`.
+    pub fn set_start_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_start_time_code(time);
+        Ok(())
+    }
+
+    /// Clear the layer's `startTimeCode` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_start_time_code(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::StartTimeCode)
+    }
+
+    /// Set the layer's `endTimeCode`.
+    pub fn set_end_time_code(&mut self, time: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_end_time_code(time);
+        Ok(())
+    }
+
+    /// Clear the layer's `endTimeCode` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_end_time_code(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::EndTimeCode)
+    }
+
+    /// Set the layer's `timeCodesPerSecond`.
+    pub fn set_time_codes_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_time_codes_per_second(rate);
+        Ok(())
+    }
+
+    /// Clear the layer's `timeCodesPerSecond` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_time_codes_per_second(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::TimeCodesPerSecond)
+    }
+
+    /// Set the layer's `framesPerSecond`.
+    pub fn set_frames_per_second(&mut self, rate: f64) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_frames_per_second(rate);
+        Ok(())
+    }
+
+    /// Clear the layer's `framesPerSecond` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_frames_per_second(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::FramesPerSecond)
+    }
+
+    /// Set the layer's `framePrecision`.
+    pub fn set_frame_precision(&mut self, precision: i32) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_frame_precision(precision);
+        Ok(())
+    }
+
+    /// Clear the layer's `framePrecision` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_frame_precision(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::FramePrecision)
+    }
+
+    /// Remove a metadata field from the pseudo-root spec, if that spec exists. No-op
+    /// otherwise — clearing what isn't there must not materialize state.
+    fn clear_root_field(&mut self, key: FieldKey) -> Result<(), AuthoringError> {
+        // `erase_field` is a no-op when the pseudo-root spec is absent.
+        self.data_mut().erase_field(&Path::abs_root(), key.as_str());
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Layer {
@@ -644,9 +745,105 @@ impl std::fmt::Debug for Layer {
     }
 }
 
+/// Author across several layers as one atomic transaction: run `f` to stage
+/// edits into every layer through its [`LayerEdit`] view, then commit them
+/// together. Commit is two-phase — every layer's
+/// [`before_commit`](LayerSink::before_commit) runs first, and only once all
+/// accept does any layer's overlay drain into its backend — so a single vetoing
+/// sink, an authoring error from `f`, or a panic rolls every layer back, leaving
+/// none partially applied. Returns whether any layer's edit produced a
+/// composition change. Each committed layer fires its sinks, so the change records
+/// reach a stage through its aggregator rather than through this return.
+///
+/// [`Layer::edit`] is the single-layer case of this.
+pub fn edit_layers<E: From<sink::Error>>(
+    layers: &mut [&mut Layer],
+    f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
+) -> Result<bool, E> {
+    let mut guard = GroupEditGuard {
+        layers,
+        committed: false,
+    };
+    {
+        let mut edits: Vec<LayerEdit<'_>> = guard.layers.iter_mut().map(|layer| LayerEdit { layer }).collect();
+        f(&mut edits)?;
+        // `edits` drops at the block end, releasing the per-layer borrows for the
+        // commit phase below.
+    }
+    // Phase 1: refill each layer's record and offer it to that layer's
+    // `before_commit`; a veto aborts before any layer commits.
+    for layer in guard.layers.iter_mut() {
+        layer.prepare_commit()?;
+    }
+    // Phase 2: every layer accepted, so drain each overlay into its backend. Commit
+    // all layers before notifying any, so the whole group's data lands even if a
+    // later `after_commit` panics.
+    let mut changed = false;
+    for layer in guard.layers.iter_mut() {
+        changed |= layer.commit_data();
+    }
+    // The group is committed, so the guard's drop leaves every overlay in place.
+    guard.committed = true;
+    // Phase 3: deliver each layer's `after_commit`. A panic here interrupts only
+    // notification — the group's data is already committed.
+    for layer in guard.layers.iter() {
+        layer.notify_after_commit();
+    }
+    Ok(changed)
+}
+
+/// Stage edits across `layers` to verify they apply, then discard them all — the
+/// dry-run counterpart of [`edit_layers`]. Returns `f`'s authoring result while
+/// committing nothing and firing no sink, so a caller can check that an edit is
+/// valid (e.g. a namespace edit's `can_apply`) without mutating the layers or
+/// notifying observers.
+pub fn dry_run_layers<E>(
+    layers: &mut [&mut Layer],
+    f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
+) -> Result<(), E> {
+    // `committed` stays false, so the guard rolls every layer back on the way out,
+    // whether `f` succeeds or fails — a dry run leaves no staged state behind.
+    let guard = GroupEditGuard {
+        layers,
+        committed: false,
+    };
+    let mut edits: Vec<LayerEdit<'_>> = guard.layers.iter_mut().map(|layer| LayerEdit { layer }).collect();
+    f(&mut edits)
+}
+
+/// Rolls every layer in an [`edit_layers`] group back unless the group commits —
+/// on an authoring error, a sink veto, or a panic — so a failed multi-layer edit
+/// strands no layer with a half-applied overlay.
+struct GroupEditGuard<'a, 'b> {
+    layers: &'b mut [&'a mut Layer],
+    committed: bool,
+}
+
+impl Drop for GroupEditGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for layer in self.layers.iter_mut() {
+            layer.rollback();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Author through the layer's `edit` API and commit, for tests that build a
+    /// layer's content or metadata directly.
+    fn edit_layer(layer: &mut Layer, f: impl FnOnce(&mut LayerEdit<'_>)) {
+        layer
+            .edit(|e| {
+                f(e);
+                Ok(())
+            })
+            .expect("authored");
+    }
 
     /// `new_anonymous` mints a unique `anon:<n>:<tag>` identifier each call, so
     /// two layers given the same tag never alias; `is_anonymous` recognizes them
@@ -673,7 +870,9 @@ mod tests {
             (Path::from("/Rig/Model"), Path::from("/Group/Model")),
             (Path::from("/Rig/Dead"), Path::from("")),
         ];
-        layer.set_relocates(pairs.clone()).expect("in-memory layer is writable");
+        edit_layer(&mut layer, |e| {
+            e.set_relocates(pairs.clone()).unwrap();
+        });
 
         assert!(layer.has_relocates());
         assert_eq!(layer.relocates(), pairs);
@@ -685,11 +884,15 @@ mod tests {
     fn empty_opinion_vs_cleared() {
         let mut layer = Layer::new_anonymous("test.usda");
 
-        layer.set_relocates(RelocateList::new()).expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.set_relocates(RelocateList::new()).unwrap();
+        });
         assert!(layer.has_relocates());
         assert!(layer.relocates().is_empty());
 
-        layer.clear_relocates().expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.clear_relocates().unwrap();
+        });
         assert!(!layer.has_relocates());
         assert!(layer.relocates().is_empty());
     }
@@ -704,9 +907,11 @@ mod tests {
         assert_eq!(layer.end_time_code(), 0.0);
         assert_eq!(layer.frame_precision(), 3);
 
-        layer.set_start_time_code(1.0).expect("writable");
-        layer.set_end_time_code(48.0).expect("writable");
-        layer.set_frame_precision(6).expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.set_start_time_code(1.0).unwrap();
+            e.set_end_time_code(48.0).unwrap();
+            e.set_frame_precision(6).unwrap();
+        });
 
         assert!(layer.has_start_time_code());
         assert_eq!(layer.start_time_code(), 1.0);
@@ -722,10 +927,14 @@ mod tests {
         assert_eq!(layer.time_codes_per_second(), 24.0);
         assert_eq!(layer.frames_per_second(), 24.0);
 
-        layer.set_frames_per_second(30.0).expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.set_frames_per_second(30.0).unwrap();
+        });
         assert_eq!(layer.time_codes_per_second(), 30.0);
 
-        layer.set_time_codes_per_second(48.0).expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.set_time_codes_per_second(48.0).unwrap();
+        });
         assert_eq!(layer.time_codes_per_second(), 48.0);
     }
 
@@ -734,147 +943,229 @@ mod tests {
     #[test]
     fn clear_time_code() {
         let mut layer = Layer::new_anonymous("test.usda");
-        layer.set_start_time_code(5.0).expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.set_start_time_code(5.0).unwrap();
+        });
         assert!(layer.has_start_time_code());
 
-        layer.clear_start_time_code().expect("writable");
+        edit_layer(&mut layer, |e| {
+            e.clear_start_time_code().unwrap();
+        });
         assert!(!layer.has_start_time_code());
         assert_eq!(layer.start_time_code(), 0.0);
     }
 
-    /// A direct edit (outside a transaction) stages in the overlay: visible to
-    /// reads straight away (which merge staged-over-base) and marking the layer
-    /// dirty, without a transaction to commit.
+    /// `edit` commits the batch and returns the recorded `ChangeList`.
     #[test]
-    fn direct_edit_visible_and_dirty() {
+    fn edit_commits() {
         use crate::sdf::{PrimSpec, Specifier};
         let mut layer = Layer::new_anonymous("test.usda");
-        PrimSpec::new(layer.data_mut(), "/World", Specifier::Def, "Xform").expect("authored");
-        assert!(layer.prim(Path::from("/World")).is_some());
-        assert!(layer.is_dirty());
-    }
-
-    /// A committed transaction lands its edits in the backend and returns the
-    /// recorded `ChangeList`.
-    #[test]
-    fn transaction_commits() {
-        use crate::sdf::{PrimSpec, Specifier};
-        let mut layer = Layer::new_anonymous("test.usda");
-        let mut tx = Transaction::new(&mut layer);
-        PrimSpec::new(tx.data_mut(), "/World", Specifier::Def, "Xform").expect("authored");
-        let changes = tx.commit();
-        assert!(!changes.is_empty());
+        let changed = layer
+            .edit(|l| {
+                PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .expect("no error or veto");
+        assert!(changed);
         assert!(layer.prim(Path::from("/World")).is_some());
     }
 
-    /// Dropping a transaction without committing rolls every staged edit back,
-    /// leaving no trace in the backend.
+    /// `edit` rolls the batch back when the closure returns an error, leaving the
+    /// layer untouched and reusable.
     #[test]
-    fn transaction_rolls_back() {
+    fn edit_rolls_back_on_error() {
         use crate::sdf::{PrimSpec, Specifier};
         let mut layer = Layer::new_anonymous("test.usda");
-        {
-            let mut tx = Transaction::new(&mut layer);
-            PrimSpec::new(tx.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
-            // Drop `tx` without committing.
-        }
+        let result: Result<bool, EditError> = layer.edit(|l| {
+            PrimSpec::new(l.data_mut(), "/A", Specifier::Def, "Xform")?;
+            Err(AuthoringError::InvalidPath {
+                path: Path::abs_root(),
+                reason: "test",
+            })
+        });
+        assert!(result.is_err());
         assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
-        assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
+        assert!(!layer.is_dirty());
     }
 
-    /// A panic mid-transaction unwinds cleanly: the guard drops the staged
-    /// edits, so the layer is reusable afterwards rather than left with orphaned
-    /// staged edits.
+    /// A panic mid-`edit` unwinds cleanly: the guard rolls the staged edits back,
+    /// so the layer is reusable afterwards.
     #[test]
-    fn transaction_recovers_on_panic() {
+    fn edit_recovers_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let mut layer = Layer::new_anonymous("test.usda");
         let panicked = catch_unwind(AssertUnwindSafe(|| {
-            let mut tx = Transaction::new(&mut layer);
-            PrimSpec::new(tx.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
-            panic!("boom");
+            let _: Result<bool, EditError> = layer.edit(|l| {
+                PrimSpec::new(l.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
+                panic!("boom");
+            });
         }));
         assert!(panicked.is_err(), "the panic propagates");
         assert!(layer.prim(Path::from("/A")).is_none(), "the staged edit rolled back");
         assert!(!layer.is_dirty(), "no staged edits or recorded changes remain");
 
         // The layer is still usable afterwards.
-        let mut tx = Transaction::new(&mut layer);
-        PrimSpec::new(tx.data_mut(), "/B", Specifier::Def, "Xform").expect("authored");
-        let changes = tx.commit();
-        assert!(!changes.is_empty());
+        let changed = layer
+            .edit(|l| {
+                PrimSpec::new(l.data_mut(), "/B", Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .expect("no error");
+        assert!(changed);
         assert!(layer.prim(Path::from("/B")).is_some());
     }
 
-    /// Opening a transaction on a layer already under one panics rather than
-    /// silently committing the outer transaction's staged edits — the
-    /// `Transaction::new(&mut tx)` deref-coercion path the assertion guards.
+    /// A panicking `after_commit` cannot strand a partially committed group:
+    /// `edit_layers` commits every layer's data before notifying any sink, so both
+    /// layers land even when one's `after_commit` unwinds.
     #[test]
-    #[should_panic(expected = "nested transaction")]
-    fn nested_transaction_panics() {
-        let mut layer = Layer::new_anonymous("test.usda");
-        let mut tx = Transaction::new(&mut layer);
-        let _nested = Transaction::new(&mut tx);
-    }
-
-    /// Direct edits made before a transaction opens are flushed into the backend
-    /// at `Transaction::new` and fold into the accumulated record, while the
-    /// transaction's own edits commit on top — one combined change list, all
-    /// content present.
-    #[test]
-    fn accumulates_direct_edits_then_tx() {
+    fn group_commit_atomic_on_panic() {
         use crate::sdf::{PrimSpec, Specifier};
-        let mut layer = Layer::new_anonymous("test.usda");
-        PrimSpec::new(layer.data_mut(), "/A", Specifier::Def, "Xform").expect("authored");
+        use std::panic::{catch_unwind, AssertUnwindSafe};
 
-        let mut tx = Transaction::new(&mut layer);
-        PrimSpec::new(tx.data_mut(), "/B", Specifier::Def, "Xform").expect("authored");
-        let changes = tx.commit();
+        let mut a = Layer::new_anonymous("a.usda");
+        let mut b = Layer::new_anonymous("b.usda");
+        a.add_sink(|_: &str, _: &ChangeList| panic!("boom"));
 
-        let touched = |s: &str| changes.iter().any(|(path, _)| path == &Path::from(s));
-        assert!(touched("/A"), "the pre-transaction direct edit folds into the record");
-        assert!(touched("/B"), "the transaction's own edit is recorded");
-        assert!(layer.prim(Path::from("/A")).is_some());
-        assert!(layer.prim(Path::from("/B")).is_some());
-        assert!(!layer.is_dirty(), "commit drained the accumulated record");
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            let _ = edit_layers(&mut [&mut a, &mut b], |edits| {
+                PrimSpec::new(edits[0].data_mut(), "/A", Specifier::Def, "Xform").expect("authored a");
+                PrimSpec::new(edits[1].data_mut(), "/B", Specifier::Def, "Xform").expect("authored b");
+                Ok::<(), EditError>(())
+            });
+        }));
+        assert!(panicked.is_err(), "the after_commit panic propagates");
+        assert!(
+            a.prim(Path::from("/A")).is_some(),
+            "layer a committed despite the panic"
+        );
+        assert!(
+            b.prim(Path::from("/B")).is_some(),
+            "layer b committed despite the panic"
+        );
     }
 
-    /// `discard_changes` drops the accumulated change record (so a later
-    /// transaction can't drain it) while flushing the staged content into the
-    /// backend so it survives.
+    /// `discard_changes` keeps committed content in the backend and leaves the
+    /// layer non-dirty, so a layer joining a stage is composed fresh with no stale
+    /// change record.
     #[test]
     fn discard_changes_keeps_content() {
         use crate::sdf::{PrimSpec, Specifier};
 
         let mut layer = Layer::new_anonymous("test.usda");
-        PrimSpec::new(layer.data_mut(), "/World", Specifier::Def, "Xform").expect("authored");
-        assert!(layer.is_dirty());
+        edit_layer(&mut layer, |e| {
+            PrimSpec::new(e.data_mut(), "/World", Specifier::Def, "Xform").unwrap();
+        });
 
         layer.discard_changes();
-        assert!(!layer.is_dirty(), "the pending record is dropped");
+        assert!(!layer.is_dirty());
         assert!(
             layer.prim(Path::from("/World")).is_some(),
             "the authored content survives"
         );
     }
 
-    /// Authoring layer metadata directly (no `Stage`, so no transaction) on a
-    /// backend that lacks a pseudo-root spec materializes the pseudo-root in the
-    /// overlay, so a follow-up read — merging staged-over-base — sees it.
+    /// Authoring layer metadata on a backend that lacks a pseudo-root spec
+    /// materializes the pseudo-root, so a follow-up read sees the field; clearing
+    /// the opinion removes it again.
     #[test]
     fn metadata_on_rootless_backend() {
         let root = Path::abs_root();
         let default_prim = FieldKey::DefaultPrim.as_str();
 
         let mut layer = Layer::new("rootless.usda", Box::new(Data::new()));
-        layer
-            .set_default_prim("World")
-            .expect("authors the pseudo-root write-through");
+        edit_layer(&mut layer, |e| {
+            e.set_default_prim("World").unwrap();
+        });
         assert!(layer.data().has_field(&root, default_prim));
 
-        layer.clear_default_prim().expect("clears write-through");
+        edit_layer(&mut layer, |e| {
+            e.clear_default_prim().unwrap();
+        });
         assert!(!layer.data().has_field(&root, default_prim));
+    }
+
+    /// A recording [`LayerSink`] for the tests below.
+    #[derive(Default)]
+    struct Recorder {
+        before: std::cell::Cell<u32>,
+        after: std::cell::Cell<u32>,
+        veto: bool,
+    }
+
+    impl LayerSink for std::rc::Rc<Recorder> {
+        fn before_commit(&self, _change: &PendingLayerChange<'_>) -> Result<(), sink::Error> {
+            self.before.set(self.before.get() + 1);
+            if self.veto {
+                return Err(sink::Error::new("vetoed"));
+            }
+            Ok(())
+        }
+        fn after_commit(&self, _layer: &str, _changes: &ChangeList) {
+            self.after.set(self.after.get() + 1);
+        }
+    }
+
+    /// A committed edit fires the layer sink's `before_commit` then
+    /// `after_commit` once, with the edit landed.
+    #[test]
+    fn layer_sink_fires() {
+        use crate::sdf::{PrimSpec, Specifier};
+        let mut layer = Layer::new_anonymous("test.usda");
+        let rec = std::rc::Rc::new(Recorder::default());
+        layer.add_sink(rec.clone());
+
+        layer
+            .edit(|l| {
+                PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .expect("sink accepts");
+
+        assert_eq!((rec.before.get(), rec.after.get()), (1, 1));
+        assert!(layer.prim(Path::from("/World")).is_some());
+    }
+
+    /// A `before_commit` rejection rolls the edit back: `after_commit` never
+    /// fires and the backend is untouched.
+    #[test]
+    fn layer_sink_veto_rolls_back() {
+        use crate::sdf::{PrimSpec, Specifier};
+        let mut layer = Layer::new_anonymous("test.usda");
+        let rec = std::rc::Rc::new(Recorder {
+            veto: true,
+            ..Default::default()
+        });
+        layer.add_sink(rec.clone());
+
+        let result = layer.edit(|l| {
+            PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
+            Ok(())
+        });
+        assert!(matches!(result, Err(EditError::Rejected(_))), "the sink vetoes");
+
+        assert_eq!((rec.before.get(), rec.after.get()), (1, 0), "after_commit never fired");
+        assert!(layer.prim(Path::from("/World")).is_none(), "the edit rolled back");
+        assert!(!layer.is_dirty());
+    }
+
+    /// A removed sink no longer fires.
+    #[test]
+    fn layer_sink_removed() {
+        use crate::sdf::{PrimSpec, Specifier};
+        let mut layer = Layer::new_anonymous("test.usda");
+        let rec = std::rc::Rc::new(Recorder::default());
+        let id = layer.add_sink(rec.clone());
+        layer.remove_sink(id);
+
+        layer
+            .edit(|l| {
+                PrimSpec::new(l.data_mut(), "/World", Specifier::Def, "Xform")?;
+                Ok(())
+            })
+            .expect("no sink");
+        assert_eq!((rec.before.get(), rec.after.get()), (0, 0));
     }
 }

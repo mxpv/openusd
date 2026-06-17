@@ -16,8 +16,8 @@
 //! `PcpLayerStack`. The edges are always derived from each layer's `subLayers`
 //! metadata by [`recompute_sublayers`](LayerGraph::recompute_sublayers): both an
 //! ordinary `subLayers` authoring edit and the public
-//! [`Stage::insert_sub_layer`](crate::usd::Stage::insert_sub_layer) /
-//! [`remove_sub_layer`](crate::usd::Stage::remove_sub_layer) route through it, so
+//! [`Stage::insert_layer`](crate::usd::Stage::insert_layer) /
+//! [`remove_layer`](crate::usd::Stage::remove_layer) route through it, so
 //! editing `subLayers` updates the edges and the metadata stays the single
 //! source of truth — no DFS on every query, and no edge that fails to persist on
 //! save.
@@ -200,17 +200,17 @@ impl LayerGraph {
     /// first, then the root layer and the rest). The recoverable layer-stack
     /// errors it detects (sublayer cycles, invalid relocates) are stored on the
     /// graph and read back through [`errors`](Self::errors).
-    pub(crate) fn from_layers(
-        layers: Vec<sdf::Layer>,
-        session_layer_count: usize,
-        resolver: Box<dyn Resolver>,
-        load_payloads: bool,
-    ) -> Self {
-        let mut graph = Self {
+    /// An empty graph that resolves asset paths through `resolver`. Layers join
+    /// via [`ensure_layer`](Self::ensure_layer); [`finalize`](Self::finalize)
+    /// wires the sublayer DAG once they are all added. The stage builds a graph
+    /// this way so it can attach a change sink to each layer as it joins;
+    /// [`from_layers`](Self::from_layers) is the all-at-once convenience.
+    pub(crate) fn new(resolver: Box<dyn Resolver>, load_payloads: bool) -> Self {
+        Self {
             nodes: HashMap::new(),
             by_identifier: HashMap::new(),
             next_id: 0,
-            order: Vec::with_capacity(layers.len()),
+            order: Vec::new(),
             session_layer_count: 0,
             root: None,
             muted_identifiers: HashSet::new(),
@@ -222,38 +222,28 @@ impl LayerGraph {
             relocate_errors: Vec::new(),
             resolver,
             load_payloads,
-        };
-
-        // Mint ids and collapse duplicate identifiers (the same layer reached
-        // two ways, e.g. a dependency shared by the session and root
-        // collections), keeping the first occurrence.
-        //
-        // `session_count` tracks only the distinct session-region layers that
-        // survive into `order`, so `session_layers()` (which slices the prefix)
-        // can never over-read even if the caller passes duplicate identifiers
-        // within the session region. The root id is captured from the original
-        // root slot's `intern`, not derived from `order` afterward: if the root
-        // identifier already appeared in the session collection, the root
-        // occurrence collapses onto that node and `intern` returns its id, so
-        // `root` still points at the right layer instead of slipping to the next
-        // dependency.
-        let mut root = None;
-        let mut session_count = 0;
-        for (i, layer) in layers.into_iter().enumerate() {
-            let (id, fresh) = graph.intern(layer);
-            if i == session_layer_count {
-                root = Some(id);
-            }
-            if fresh && i < session_layer_count {
-                session_count += 1;
-            }
         }
-        graph.session_layer_count = session_count;
-        graph.root = root;
+    }
 
-        graph.build_sublayer_edges();
-        graph.recompute_relocates();
-        graph
+    /// Set the session/root layers and wire the sublayer DAG from each layer's
+    /// authored `subLayers` metadata (resolving relocates), after the layers have
+    /// been added. `root` is the stage root layer's id and `session_layer_count`
+    /// the number of distinct session layers at the front of the collection. The
+    /// post-add half of construction, shared by [`from_layers`](Self::from_layers)
+    /// and the stage builder, which adds layers one at a time.
+    ///
+    /// `session_count` counts only the distinct session-region layers that
+    /// survive into [`order`](Self::order), so [`session_layers`](Self::session_layers)
+    /// (which slices the prefix) never over-reads when the caller passed duplicate
+    /// identifiers (the same dependency reached through both the session and root
+    /// collections). `root` is captured at the original root slot rather than
+    /// derived from `order`, so a root identifier that already appeared in the
+    /// session collection still points at the right layer.
+    pub(crate) fn finalize(&mut self, session_layer_count: usize, root: Option<LayerId>) {
+        self.session_layer_count = session_layer_count;
+        self.root = root;
+        self.build_sublayer_edges();
+        self.recompute_relocates();
     }
 
     /// Adds `layer` as a node, minting a fresh [`LayerId`] and recording it in
@@ -537,20 +527,6 @@ impl LayerGraph {
     /// pseudo-root layer metadata resolves from this layer alone.
     pub(crate) fn root_layer(&self) -> Option<&sdf::Layer> {
         self.root.map(|id| self.layer(id))
-    }
-
-    /// This stage's root layer stack identity, built from the root layer, the
-    /// strongest session layer, and the resolver's identity. An empty graph (no
-    /// root layer) yields an empty `root_layer`.
-    pub(crate) fn layer_stack_id(&self) -> LayerStackIdentifier {
-        LayerStackIdentifier {
-            root_layer: self
-                .root_layer()
-                .map(|l| l.identifier().to_string())
-                .unwrap_or_default(),
-            session_layer: self.session_layers().first().map(|&id| self.identifier(id).to_string()),
-            resolver: self.resolver.identity(),
-        }
     }
 
     /// All layer ids in collection order (session layers first).
@@ -853,17 +829,19 @@ impl LayerGraph {
         })
     }
 
-    /// Ensures `layer` is present as a graph node, returning its id. An
-    /// already-loaded layer (matched by identifier) is left untouched (its
-    /// existing children and relocates survive, since the same layer may be
-    /// sublayered from several places); an absent one joins the graph with a
-    /// freshly minted id.
+    /// Ensures `layer` is present as a graph node, returning `(id, fresh)` where
+    /// `fresh` is `true` when the layer newly joined the graph. An already-loaded
+    /// layer (matched by identifier) is left untouched (its existing children and
+    /// relocates survive, since the same layer may be sublayered from several
+    /// places) and reported as not fresh; an absent one joins with a freshly
+    /// minted id. Callers key one-time per-layer setup (e.g. attaching a change
+    /// aggregator) off `fresh` so a re-added identifier is not set up twice.
     ///
     /// The node must exist before a `subLayers` edit naming its asset path is
     /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
     /// `find()` resolves the path to it.
-    pub(crate) fn ensure_layer(&mut self, layer: sdf::Layer) -> LayerId {
-        self.intern(layer).0
+    pub(crate) fn ensure_layer(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
+        self.intern(layer)
     }
 
     /// The id of the layer whose canonical identifier is exactly `identifier`,
@@ -1076,13 +1054,57 @@ mod tests {
     use super::*;
     use crate::ar::DefaultResolver;
 
+    /// Author through a layer's `edit` API and commit, for building test fixtures.
+    fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
+        layer
+            .edit(|e| {
+                f(e);
+                Ok(())
+            })
+            .expect("authored");
+    }
+
+    impl LayerGraph {
+        /// Build a graph from `layers` in one step: intern each, then
+        /// [`finalize`](Self::finalize). The first `session_layer_count` layers
+        /// are the session layers; the next is the root. A test convenience — the
+        /// stage builds its graph through [`new`](Self::new) +
+        /// [`ensure_layer`](Self::ensure_layer) so it can attach a change sink to
+        /// each layer as it joins.
+        pub(crate) fn from_layers(
+            layers: Vec<sdf::Layer>,
+            session_layer_count: usize,
+            resolver: Box<dyn Resolver>,
+            load_payloads: bool,
+        ) -> Self {
+            let mut graph = Self::new(resolver, load_payloads);
+            let mut root = None;
+            let mut session_count = 0;
+            for (i, layer) in layers.into_iter().enumerate() {
+                let (id, fresh) = graph.intern(layer);
+                if i == session_layer_count {
+                    root = Some(id);
+                }
+                if fresh && i < session_layer_count {
+                    session_count += 1;
+                }
+            }
+            graph.finalize(session_count, root);
+            graph
+        }
+    }
+
     /// A `root → sub → leaf` sublayer chain, each layer named verbatim so the
     /// authored `subLayers` entries resolve by exact identifier match.
     fn chain_graph() -> LayerGraph {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        });
         let mut sub = sdf::Layer::new_in_memory("sub.usda");
-        sub.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
+        edit_layer(&mut sub, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
+        });
         let leaf = sdf::Layer::new_in_memory("leaf.usda");
         LayerGraph::from_layers(vec![root, sub, leaf], 0, Box::new(DefaultResolver::new()), true)
     }
@@ -1130,11 +1152,17 @@ mod tests {
     #[test]
     fn muted_cycle_clears_error() {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        root.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        });
         let mut a = sdf::Layer::new_in_memory("a.usda");
-        a.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        edit_layer(&mut a, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        });
         let mut b = sdf::Layer::new_in_memory("b.usda");
-        b.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        edit_layer(&mut b, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        });
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, Box::new(DefaultResolver::new()), true);
         assert!(!graph.errors().is_empty(), "the a → b → a sublayer cycle is reported");
 
@@ -1157,14 +1185,17 @@ mod tests {
     fn mute_fanout_includes_relocate_revalidated() {
         let reloc = |id: &str, source: &str, target: &str| {
             let mut layer = sdf::Layer::new_in_memory(id);
-            layer
-                .set_relocates(vec![(Path::new(source).unwrap(), Path::new(target).unwrap())])
-                .expect("in-memory layer is writable");
+            edit_layer(&mut layer, |e| {
+                e.set_relocates(vec![(Path::new(source).unwrap(), Path::new(target).unwrap())])
+                    .unwrap();
+            });
             layer
         };
         let root = sdf::Layer::new_in_memory("root.usda");
         let mut combo = sdf::Layer::new_in_memory("combo.usda");
-        combo.pseudo_root_mut().unwrap().set_sublayers(["s1.usda", "s2.usda"]);
+        edit_layer(&mut combo, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["s1.usda", "s2.usda"]);
+        });
         // s1 and s2 relocate different sources to the same target, conflicting
         // within combo's stack so both are dropped while combo is present.
         let s1 = reloc("s1.usda", "/W/A", "/W/C");

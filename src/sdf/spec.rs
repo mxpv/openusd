@@ -597,7 +597,7 @@ where
     /// Set the `defaultPrim` token without validation.
     ///
     /// This spec-tier setter writes whatever token it is given. The
-    /// validating front door is [`crate::sdf::Layer::set_default_prim`],
+    /// validating front door is [`crate::sdf::LayerEdit::set_default_prim`],
     /// which rejects malformed values; use this method when you need to
     /// bypass that check (e.g. round-tripping spec data verbatim).
     pub fn set_default_prim(&mut self, name: impl Into<tf::Token>) {

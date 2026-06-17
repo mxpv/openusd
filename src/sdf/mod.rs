@@ -22,6 +22,7 @@ mod ordering;
 mod path;
 mod path_table;
 pub mod schema;
+pub mod sink;
 mod spec;
 mod value;
 
@@ -35,8 +36,10 @@ pub use copy::{
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::Expr;
 pub use file_format::{find_by_extension, find_by_id, FileFormat, FileFormatCaps, WriteSeek};
-pub(crate) use layer::Transaction;
-pub use layer::{AuthoringError, Layer};
+pub use layer::{
+    dry_run_layers, edit_layers, AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId,
+    PendingLayerChange,
+};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
 pub use path_table::PathTable;

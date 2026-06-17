@@ -1,13 +1,13 @@
 //! Edit replication between stages: extract a stage edit as a transferable
 //! diff and replay it on a mirror.
 //!
-//! Every successful edit on a listening [`Stage`] fires an
-//! [`ObjectsChanged`] notice; [`Stage::extract_diff`] turns one notice into a
-//! [`Diff`] — an ordered list of [`Edit`] operations (a spec created with
-//! its fields, a field set or erased, a spec removed) plus the namespace
-//! mapping of the edit target the edit was authored through. Everything in it
-//! is plain value data, so a diff can cross a process or machine boundary and
-//! be rebuilt on the other side.
+//! A [`StageSink`](super::StageSink) installed on a [`Stage`] observes every
+//! committed edit as a [`CommittedChange`](super::CommittedChange);
+//! [`Stage::extract_diff`] turns one into a [`Diff`] — an ordered list of
+//! [`Edit`] operations (a spec created with its fields, a field set or erased, a
+//! spec removed) plus the namespace mapping of the edit target the edit was
+//! authored through. Everything in it is plain value data, so a diff can cross a
+//! process or machine boundary and be rebuilt on the other side.
 //!
 //! [`Stage::apply_diff`] is the consume half. [`ApplyMode`] names the two
 //! replication flavors:
@@ -28,18 +28,16 @@
 //! use std::cell::RefCell;
 //! use std::rc::Rc;
 //!
-//! use openusd::usd::{ApplyMode, Notice, Stage};
+//! use openusd::usd::{ApplyMode, CommittedChange, Stage};
 //!
 //! # fn main() -> anyhow::Result<()> {
-//! // Producer: capture every edit as a transferable diff.
+//! // Producer: capture every committed edit as a transferable diff.
 //! let producer = Stage::builder().in_memory("producer.usda")?;
 //! let diffs = Rc::new(RefCell::new(Vec::new()));
 //! {
 //!     let diffs = diffs.clone();
-//!     producer.set_listener(move |stage, notice| {
-//!         if let Notice::ObjectsChanged(objects) = notice {
-//!             diffs.borrow_mut().push(stage.extract_diff(&objects).expect("extract diff"));
-//!         }
+//!     producer.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+//!         diffs.borrow_mut().push(stage.extract_diff(change).expect("extract diff"));
 //!     });
 //! }
 //! producer.define_prim("/World")?.set_type_name("Xform")?;
@@ -59,7 +57,7 @@ use anyhow::Result;
 
 use crate::{pcp, sdf, tf};
 
-use super::notice::ObjectsChanged;
+use super::sink::CommittedChange;
 use super::stage::{EditTarget, Stage, StageAuthoringError};
 
 /// A transferable diff of one stage edit, produced by [`Stage::extract_diff`]
@@ -129,7 +127,7 @@ pub enum Edit {
         field: tf::Token,
     },
     /// The edit removed the whole prim or property spec; a replay applies it
-    /// with [`sdf::Layer::remove_spec`].
+    /// with [`sdf::LayerEdit::remove_spec`].
     RemoveSpec {
         /// The removed spec's path.
         path: sdf::Path,
@@ -185,13 +183,14 @@ pub enum ApplyMode<'a> {
 }
 
 impl Stage {
-    /// Extract a transferable diff for the edit described by `objects`.
+    /// Extract a transferable diff for the edit described by `change`.
     ///
     /// Turns each entry of
-    /// [`objects.change_list`](ObjectsChanged::change_list) into [`Edit`]
+    /// [`change.change_list`](CommittedChange::change_list) into [`Edit`]
     /// operations, reading the authored values out of the originating layer.
-    /// Call it synchronously from the listener callback: the notice borrows
-    /// the transient change record and the layer keeps mutating afterward.
+    /// Call it synchronously from a sink's
+    /// [`after_commit`](super::StageSink::after_commit): the event borrows the
+    /// transient change record and the layer keeps mutating afterward.
     ///
     /// List-valued field edits (reference / target / apiSchema removals
     /// included) ride along as their authored list-op values.
@@ -209,8 +208,8 @@ impl Stage {
     /// namespace mapping so [`apply_diff`](Self::apply_diff) can lift the
     /// paths back to stage namespace when replaying through a different
     /// target; the composed stage paths the edit touched are reported
-    /// separately on [`ObjectsChanged`] (`resynced` / `changed_info_only`).
-    pub fn extract_diff(&self, objects: &ObjectsChanged<'_>) -> Result<Diff> {
+    /// separately on [`CommittedChange`] (`resynced` / `changed_info_only`).
+    pub fn extract_diff(&self, objects: &CommittedChange<'_>) -> Result<Diff> {
         let mut edits = Vec::new();
         let layers = self.layers();
         let layer_id = layers
@@ -282,8 +281,8 @@ impl Stage {
     /// half of [`extract_diff`](Self::extract_diff): each [`Edit`] is
     /// interpreted — creations and set fields authoring their recorded values,
     /// removals and erasures applied destructively. The whole
-    /// replay drains as a single edit, firing one
-    /// [`Notice::ObjectsChanged`](super::Notice::ObjectsChanged) and
+    /// replay drains as a single edit, delivering one
+    /// [`CommittedChange`](super::CommittedChange) to the stage's sinks and
     /// invalidating composition for every path it touched.
     ///
     /// `mode` selects where and in which namespace the diff lands — exact
@@ -303,10 +302,10 @@ impl Stage {
     /// applied. An operation that fails mid-batch rolls the overlay back, so the
     /// live layer — and any cached composition state — is left untouched.
     ///
-    /// `apply_diff` fires this stage's own `ObjectsChanged`. A bidirectional
-    /// mirror that feeds those notices back to the origin must tag or suppress
-    /// the echo itself — that is an application-level concern this method does
-    /// not arbitrate.
+    /// `apply_diff` fires this stage's own [`CommittedChange`](super::CommittedChange).
+    /// A bidirectional mirror that feeds those changes back to the origin must
+    /// tag or suppress the echo itself — that is an application-level concern
+    /// this method does not arbitrate.
     pub fn apply_diff(&self, diff: &Diff, mode: ApplyMode<'_>) -> Result<(), StageAuthoringError> {
         match mode {
             ApplyMode::ExactLayer(identifier) => {
@@ -345,7 +344,7 @@ impl Stage {
 /// translated replay uses; an extracted edit never authors and removes the
 /// same path (the change record collapses per path), so the partition
 /// preserves an extracted diff's semantics.
-fn apply_diff_verbatim(layer: &mut sdf::Layer, diff: &Diff) -> Result<(), sdf::AuthoringError> {
+fn apply_diff_verbatim(layer: &mut sdf::LayerEdit<'_>, diff: &Diff) -> Result<(), sdf::AuthoringError> {
     for edit in &diff.edits {
         if !matches!(edit, Edit::RemoveSpec { .. }) {
             apply_edit(layer, edit.path(), edit, &sdf::Value::clone)?;
@@ -370,7 +369,7 @@ fn apply_diff_verbatim(layer: &mut sdf::Layer, diff: &Diff) -> Result<(), sdf::A
 /// kind), so a replay never writes a field without its spec — both through
 /// [`sdf::author_spec`]'s upsert.
 fn apply_edit(
-    layer: &mut sdf::Layer,
+    layer: &mut sdf::LayerEdit<'_>,
     dst: &sdf::Path,
     edit: &Edit,
     translate: &impl Fn(&sdf::Value) -> sdf::Value,
@@ -427,12 +426,12 @@ fn apply_edit(
 }
 
 /// Remove the spec at `path` from `layer`, clearing its authored opinions
-/// instead when the spec is of a kind [`sdf::Layer::remove_spec`] cannot
+/// instead when the spec is of a kind [`sdf::LayerEdit::remove_spec`] cannot
 /// erase. A removal routed onto variant scaffolding — e.g. a prim removal
 /// translated through a variant edit target lands on the variant spec — must
 /// still drop the opinions the producer deleted; the scaffolding spec itself
 /// stays.
-fn remove_or_clear(layer: &mut sdf::Layer, path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
+fn remove_or_clear(layer: &mut sdf::LayerEdit<'_>, path: &sdf::Path) -> Result<(), sdf::AuthoringError> {
     if layer.remove_spec(path)? || layer.data().spec_type(path).is_none() {
         return Ok(());
     }
@@ -541,7 +540,7 @@ fn translate_diff<'a>(diff: &'a Diff, target: &EditTarget) -> Result<TranslatedD
 /// the translated removals. The mutating core of the
 /// [`ApplyMode::CurrentEditTarget`] replay.
 fn apply_translated_diff(
-    layer: &mut sdf::Layer,
+    layer: &mut sdf::LayerEdit<'_>,
     diff: &Diff,
     target: &EditTarget,
     translated: &TranslatedDiff<'_>,
@@ -643,7 +642,7 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::usd::{EditTargetArc, Notice, TimeCode};
+    use crate::usd::{EditTargetArc, TimeCode};
 
     fn in_memory_stage() -> Result<Stage> {
         Stage::builder().in_memory("anon.usda")
@@ -654,8 +653,9 @@ mod tests {
     }
 
     /// `extract_diff` turns a whole-spec removal into a `RemoveSpec` operation.
-    /// Driven with a synthetic notice to unit-test the routing in isolation;
-    /// the end-to-end `remove_prim` / `apply_diff` path is covered below.
+    /// Driven with a synthetic committed change to unit-test the routing in
+    /// isolation; the end-to-end `remove_prim` / `apply_diff` path is covered
+    /// below.
     #[test]
     fn extract_diff_removal() -> Result<()> {
         let stage = in_memory_stage()?;
@@ -664,23 +664,23 @@ mod tests {
         let size = sdf::path("/World.size")?;
         let root = stage.root_layer().identifier().to_string();
         // Remove the spec, as a real removal edit would, so it is gone from the
-        // layer when the synthetic notice is processed.
+        // layer when the synthetic change is processed.
         stage.remove_property(size.clone())?;
         let mut change_list = sdf::ChangeList::new();
         change_list.entry_mut(&size).flags |= sdf::ChangeFlags::REMOVE_PROPERTY;
-        let objects = ObjectsChanged {
+        let change = CommittedChange {
             resynced: &[],
             changed_info_only: std::slice::from_ref(&size),
             layer_identifier: &root,
             change_list: &change_list,
             mapping: None,
         };
-        let diff = stage.extract_diff(&objects)?;
+        let diff = stage.extract_diff(&change)?;
         assert_eq!(diff.edits, vec![Edit::RemoveSpec { path: size.clone() }]);
         Ok(())
     }
 
-    /// `extract_diff` called from the callback captures the authored value inline:
+    /// `extract_diff` called from a sink captures the authored value inline:
     /// setting an attribute default yields a `SetField` operation carrying it —
     /// the source half of mirroring an edit.
     #[test]
@@ -689,23 +689,21 @@ mod tests {
         stage.define_prim("/World")?;
         let attr = stage.create_attribute("/World.size", "double")?;
         let value: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
-        {
+        let _id = {
             let value = value.clone();
             let size = sdf::Path::new("/World.size")?;
-            stage.set_listener(move |stage, notice| {
-                if let Notice::ObjectsChanged(oc) = notice {
-                    let diff = stage.extract_diff(&oc).expect("extract diff");
-                    *value.borrow_mut() = diff.edits.iter().find_map(|e| match e {
-                        Edit::SetField { path, field, value, .. }
-                            if *path == size && field == sdf::FieldKey::Default.as_str() =>
-                        {
-                            value.clone().try_as_double()
-                        }
-                        _ => None,
-                    });
-                }
-            });
-        }
+            stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+                let diff = stage.extract_diff(change).expect("extract diff");
+                value.replace(diff.edits.iter().find_map(|e| match e {
+                    Edit::SetField { path, field, value, .. }
+                        if *path == size && field == sdf::FieldKey::Default.as_str() =>
+                    {
+                        value.clone().try_as_double()
+                    }
+                    _ => None,
+                }));
+            })
+        };
         attr.set(2.0_f64)?;
         assert_eq!(*value.borrow(), Some(2.0));
         Ok(())
@@ -723,34 +721,33 @@ mod tests {
         let attr = attr.set_connections([sdf::Path::new("/World.target")?])?;
         // Field name erased on /World.size, captured from the diff's edits.
         let erased: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        {
+        let _id = {
             let erased = erased.clone();
-            stage.set_listener(move |stage, notice| {
-                if let Notice::ObjectsChanged(oc) = notice {
-                    let diff = stage.extract_diff(&oc).expect("extract diff");
-                    let size = sdf::Path::new("/World.size").unwrap();
-                    erased.borrow_mut().extend(diff.edits.iter().filter_map(|e| match e {
-                        Edit::EraseField { path, field } if *path == size => Some(field.as_str().to_string()),
-                        _ => None,
-                    }));
-                }
-            });
-        }
+            stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+                let diff = stage.extract_diff(change).expect("extract diff");
+                let size = sdf::Path::new("/World.size").unwrap();
+                erased.borrow_mut().extend(diff.edits.iter().filter_map(|e| match e {
+                    Edit::EraseField { path, field } if *path == size => Some(field.as_str().to_string()),
+                    _ => None,
+                }));
+            })
+        };
         attr.clear_connections()?;
         assert!(erased.borrow().iter().any(|f| f == "connectionPaths"));
         Ok(())
     }
 
-    /// Install a listener on `stage` that extracts a [`Diff`] from every
-    /// `ObjectsChanged` notice, collecting them for a mirror to replay.
+    /// Install a sink on `stage` that extracts a [`Diff`] from every committed
+    /// edit, collecting them for a mirror to replay. The sink stays installed for
+    /// the stage's lifetime (the returned [`StageSinkId`](super::StageSinkId) is unused).
     fn capture_diffs(stage: &Stage) -> Rc<RefCell<Vec<Diff>>> {
         let diffs: Rc<RefCell<Vec<Diff>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let diffs = diffs.clone();
-            stage.set_listener(move |stage, notice| {
-                if let Notice::ObjectsChanged(oc) = notice {
-                    diffs.borrow_mut().push(stage.extract_diff(&oc).expect("extract diff"));
-                }
+            stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
+                diffs
+                    .borrow_mut()
+                    .push(stage.extract_diff(change).expect("extract diff"));
             });
         }
         diffs
@@ -1366,14 +1363,12 @@ mod tests {
         let b = in_memory_stage()?;
         let root_b = b.root_layer().identifier().to_string();
         let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
-        {
+        let _id = {
             let resynced = resynced.clone();
-            b.set_listener(move |_, notice| {
-                if let Notice::ObjectsChanged(objects) = notice {
-                    resynced.borrow_mut().extend(objects.resynced.iter().cloned());
-                }
-            });
-        }
+            b.add_sink(move |_: &Stage, change: &CommittedChange<'_>| {
+                resynced.borrow_mut().extend(change.resynced.iter().cloned());
+            })
+        };
         for diff in diffs.borrow().iter() {
             b.apply_diff(diff, ApplyMode::ExactLayer(&root_b))?;
         }

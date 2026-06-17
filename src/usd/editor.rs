@@ -11,9 +11,9 @@
 //! appends to an ordered queue and [`apply`](NamespaceEditor::apply) commits the
 //! whole batch. The batch is sequential — a later edit sees the result of the
 //! earlier ones, so `move /A → /B` then `delete /B/Child` resolves naturally.
-//! This falls out of the atomic copy-on-write
-//! [`Transaction`](crate::sdf::Transaction): structural ops stage in an overlay
-//! whose reads already reflect the prior edits.
+//! This falls out of the atomic copy-on-write staging: structural ops stage in
+//! each layer's overlay, whose reads already reflect the prior edits, and all
+//! layers commit together once the batch authors cleanly.
 //!
 //! Edits author across the whole local layer stack of the current edit target,
 //! as C++ does. The structural move is [`copy_spec_within`](crate::sdf::copy_spec_within)
@@ -138,6 +138,12 @@ pub enum NamespaceEditError {
     Stage(#[from] StageAuthoringError),
 }
 
+impl From<sdf::sink::Error> for NamespaceEditError {
+    fn from(error: sdf::sink::Error) -> Self {
+        NamespaceEditError::Stage(StageAuthoringError::Rejected(error))
+    }
+}
+
 impl NamespaceEditor {
     /// Create an editor with an empty edit queue targeting `stage`.
     pub fn new(stage: &Stage) -> Self {
@@ -234,20 +240,20 @@ impl NamespaceEditor {
     /// objects composed across an arc. On success the edit queue is cleared.
     /// Mirrors C++ `ApplyEdits`.
     ///
-    /// The whole batch is transactional: a [`Transaction`](sdf::Transaction)
-    /// opens on each affected layer, the edits stage into all of them in order,
-    /// and the transactions commit only once every layer has authored cleanly.
-    /// An authoring error rolls every layer back, so a failed apply leaves the
-    /// stage exactly as it was. This atomicity is only against authoring errors,
+    /// The whole batch is atomic: the edits stage into every affected layer's
+    /// overlay in order, and the layers commit together only once every one has
+    /// authored cleanly. An authoring error rolls every layer back, so a failed
+    /// apply leaves the stage exactly as it was. This atomicity is only against
+    /// authoring errors,
     /// not a database-style guarantee: a layer's backing
     /// [`AbstractData`](sdf::AbstractData) can be any implementation (an
     /// in-memory store, `CrateData`, a custom backend), and committing a staged
     /// edit into it is not assumed to itself be atomic or recoverable.
     ///
     /// When the batch touches more than one layer, the single
-    /// [`ObjectsChanged`](super::Notice::ObjectsChanged) notice merges the
+    /// [`CommittedChange`](super::CommittedChange) delivered to sinks merges the
     /// per-layer change records and attributes them to the strongest edited
-    /// layer. Composed-path reporting is exact, but a listener that reads the raw
+    /// layer. Composed-path reporting is exact, but a sink that reads the raw
     /// change list per layer — notably [`Stage::extract_diff`](super::Stage::extract_diff) —
     /// cannot recover which layer each record landed in, so diff replication of a
     /// multi-layer namespace edit is not supported yet.
@@ -257,21 +263,20 @@ impl NamespaceEditor {
         Ok(())
     }
 
-    /// Stage the batch onto the local layer stack in one atomic multi-layer
-    /// transaction. Open a [`Transaction`](sdf::Transaction) on each layer, then
-    /// apply the edits in order: each is validated against the staged state the
-    /// prior edits produced — the transactions already reflect them, so a
-    /// collision or missing source is read from the precise staged data, not a
-    /// simulated projection — and staged into every layer. After the structural
-    /// edits, embedded paths are remapped and relocates authored. Then the
-    /// transactions either commit together (driving one composition-invalidation
-    /// cycle) or — when `commit` is false — roll back for a dry run. The shared
-    /// path behind [`can_apply`](Self::can_apply) and [`apply`](Self::apply).
+    /// Stage the batch onto the local layer stack as one atomic multi-layer edit.
+    /// Each edit applies in order against every affected layer, validated against
+    /// the staged state the prior edits produced — so a collision or missing
+    /// source is read from the precise staged data, not a simulated projection.
+    /// After the structural edits, embedded paths are remapped and relocates
+    /// authored. Then the layers either commit together (driving one
+    /// composition-invalidation cycle) or — when `commit` is false — roll back for
+    /// a dry run. The shared path behind [`can_apply`](Self::can_apply) and
+    /// [`apply`](Self::apply).
     ///
-    /// Any failure — an invalid edit or an authoring error — returns, dropping the
-    /// still-open transactions and rolling every layer back, so a failed batch
-    /// leaves the stage untouched and the cache valid. A dry run runs this same
-    /// path, so [`can_apply`](Self::can_apply) reports an error exactly as
+    /// Any failure — an invalid edit or an authoring error — rolls every layer
+    /// back, so a failed batch leaves the stage untouched and the cache valid. A
+    /// dry run runs this same path, so [`can_apply`](Self::can_apply) reports an
+    /// error exactly as
     /// [`apply`](Self::apply) would hit it.
     fn execute(&self, commit: bool) -> Result<(), NamespaceEditError> {
         if self.edits.is_empty() {
@@ -321,48 +326,51 @@ impl NamespaceEditor {
                 occupied_dsts.insert(dst.clone());
             }
         }
-        let collected: Vec<(pcp::LayerId, sdf::ChangeList)> = {
+        {
             let mut graph = self.stage.layers_mut();
-            let mut txs: Vec<(pcp::LayerId, sdf::Transaction<'_>)> = graph
-                .layers_mut(&layer_ids)
-                .into_iter()
-                .map(|(id, layer)| (id, sdf::Transaction::new(layer)))
-                .collect();
-            for edit in &self.edits {
-                apply_edit(&mut txs, edit, &cross_arc, &occupied_dsts)?;
-            }
-            // After every structural edit, remap embedded paths against the whole
-            // batch and author relocates on the edit-target layer (guaranteed to
-            // be in the local stack by the check above).
+            let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(&layer_ids).into_iter().collect();
+            let ids: Vec<pcp::LayerId> = layers.iter().map(|(id, _)| *id).collect();
+            let mut batch: Vec<&mut sdf::Layer> = layers.iter_mut().map(|(_, layer)| &mut **layer).collect();
+            // Stage every edit into the batch's layers through their `LayerEdit`
+            // views. The whole batch commits atomically (`edit_layers`): every
+            // layer's sinks run their veto first, then all commit — so a
+            // multi-layer namespace edit is all-or-nothing even under a rejecting
+            // layer sink, and each commit fires the stage's aggregator, recording
+            // the edit for the recompose below. A dry run (`dry_run_layers`) stages
+            // the same way to prove the batch applies, then discards it without
+            // committing or firing a sink. The batch assumes its layers carry no
+            // uncommitted direct edits — a discard drops the whole overlay.
             //
             // TODO(namespace-edit): the appended relocates are not folded through
             // ones already authored. Editing a prim that is itself the target of
             // an existing relocate (e.g. `/B -> /A` then moving `/A`) can leave
             // two pairs with the same target, which Pcp rejects as invalid.
-            for (id, tx) in txs.iter_mut() {
-                fixup_embedded_paths(tx, &self.edits).map_err(StageAuthoringError::Layer)?;
-                if *id == edit_target && !relocates.is_empty() {
-                    let mut authored = tx.relocates();
-                    authored.extend(relocates.iter().cloned());
-                    tx.set_relocates(authored).map_err(StageAuthoringError::Layer)?;
+            let stage_edits = |edits: &mut [sdf::LayerEdit<'_>]| -> Result<(), NamespaceEditError> {
+                {
+                    let mut refs: Vec<&mut sdf::LayerEdit<'_>> = edits.iter_mut().collect();
+                    for edit in &self.edits {
+                        apply_edit(&mut refs, edit, &cross_arc, &occupied_dsts)?;
+                    }
                 }
+                for (id, layer) in ids.iter().zip(edits.iter_mut()) {
+                    fixup_embedded_paths(layer, &self.edits).map_err(StageAuthoringError::Layer)?;
+                    if *id == edit_target && !relocates.is_empty() {
+                        let mut authored = layer.relocates();
+                        authored.extend(relocates.iter().cloned());
+                        layer.set_relocates(authored).map_err(StageAuthoringError::Layer)?;
+                    }
+                }
+                Ok(())
+            };
+            if commit {
+                sdf::edit_layers(&mut batch, stage_edits)?;
+            } else {
+                // Dry run: stage to prove the batch applies cleanly, then discard.
+                // No sink sees a dry run.
+                return sdf::dry_run_layers(&mut batch, stage_edits);
             }
-            if !commit {
-                // Dry run: drop the transactions to roll every layer back, having
-                // proven the batch applies cleanly.
-                return Ok(());
-            }
-            txs.into_iter()
-                .filter_map(|(id, tx)| {
-                    let changes = tx.commit();
-                    (!changes.is_empty()).then_some((id, changes))
-                })
-                .collect()
-        };
-        if !collected.is_empty() {
-            let refs: Vec<(pcp::LayerId, &sdf::ChangeList)> = collected.iter().map(|(id, c)| (*id, c)).collect();
-            self.stage.apply_change_sets(&refs, None);
         }
+        self.stage.process_pending();
         Ok(())
     }
 
@@ -410,7 +418,7 @@ impl NamespaceEditor {
 /// move, so an edit on one is realized by a relocate and counts as present even
 /// when no layer authors it.
 fn apply_edit(
-    txs: &mut [(pcp::LayerId, sdf::Transaction<'_>)],
+    layers: &mut [&mut sdf::LayerEdit<'_>],
     edit: &NamespaceEdit,
     cross_arc: &HashSet<sdf::Path>,
     occupied_dsts: &HashSet<sdf::Path>,
@@ -427,20 +435,20 @@ fn apply_edit(
             }
             // A pre-existing composed object (occupied_dsts) or one staged by an
             // earlier edit in this batch (the per-layer check) blocks the move.
-            if occupied_dsts.contains(dst) || txs.iter().any(|(_, tx)| tx.data().has_spec(dst)) {
+            if occupied_dsts.contains(dst) || layers.iter().any(|layer| layer.data().has_spec(dst)) {
                 return Err(NamespaceEditError::DestinationExists(dst.clone()));
             }
-            stage_across_layers(txs, src, cross_arc, |tx| {
-                let moved = sdf::copy_spec_within(tx.data_mut(), src, dst)?;
+            stage_across_layers(layers, src, cross_arc, |layer| {
+                let moved = sdf::copy_spec_within(layer.data_mut(), src, dst)?;
                 if moved {
-                    tx.remove_spec(src)?;
+                    layer.remove_spec(src)?;
                 }
                 Ok(moved)
             })?;
         }
         NamespaceEdit::Delete { path, kind } => {
             check_editable(path, *kind, NamespaceEditError::InvalidSource)?;
-            stage_across_layers(txs, path, cross_arc, |tx| tx.remove_spec(path))?;
+            stage_across_layers(layers, path, cross_arc, |layer| layer.remove_spec(path))?;
         }
     }
     Ok(())
@@ -450,14 +458,14 @@ fn apply_edit(
 /// Errors with [`SourceNotFound`](NamespaceEditError::SourceNotFound) when no
 /// layer did and `path` is not realized through a relocate (`cross_arc`).
 fn stage_across_layers(
-    txs: &mut [(pcp::LayerId, sdf::Transaction<'_>)],
+    layers: &mut [&mut sdf::LayerEdit<'_>],
     path: &sdf::Path,
     cross_arc: &HashSet<sdf::Path>,
-    mut op: impl FnMut(&mut sdf::Transaction<'_>) -> Result<bool, sdf::AuthoringError>,
+    mut op: impl FnMut(&mut sdf::LayerEdit<'_>) -> Result<bool, sdf::AuthoringError>,
 ) -> Result<(), NamespaceEditError> {
     let mut authored = false;
-    for (_, tx) in txs.iter_mut() {
-        if op(tx).map_err(StageAuthoringError::Layer)? {
+    for layer in layers.iter_mut() {
+        if op(layer).map_err(StageAuthoringError::Layer)? {
             authored = true;
         }
     }
@@ -474,7 +482,7 @@ fn stage_across_layers(
 // TODO(perf): scans every spec and field in the layer. A path-keyed index of
 // specs carrying target/connection/reference opinions would bound this to the
 // opinions that can actually reference a moved object.
-fn fixup_embedded_paths(layer: &mut sdf::Layer, edits: &[NamespaceEdit]) -> Result<(), sdf::AuthoringError> {
+fn fixup_embedded_paths(layer: &mut sdf::LayerEdit<'_>, edits: &[NamespaceEdit]) -> Result<(), sdf::AuthoringError> {
     for path in layer.data().spec_paths() {
         let fields = layer.data().list_fields(&path).unwrap_or_default();
         for field in &fields {
@@ -552,6 +560,17 @@ mod tests {
     use super::*;
     use crate::sdf::{self, path, FieldKey, LayerOffset, Specifier, Variability};
     use crate::usd::Stage;
+
+    /// Author into `layer` and commit, for building a test layer before it joins a
+    /// stage.
+    fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
+        layer
+            .edit(|e| {
+                f(e);
+                Ok(())
+            })
+            .expect("authored");
+    }
 
     /// A stage with `/A` (Xform) → `/A/Child`, a relationship `/Other.rel`
     /// targeting `[/A, /Keep]`, and an attribute `/Other.con` connected to
@@ -677,16 +696,18 @@ mod tests {
     #[test]
     fn rename_fixes_internal_ref() {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        sdf::PrimSpec::new(root.data_mut(), "/A", Specifier::Def, "Xform").unwrap();
-        sdf::PrimSpec::new(root.data_mut(), "/Other", Specifier::Def, "").unwrap();
-        root.data_mut().set_field(
-            &path("/Other").unwrap(),
-            FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-                prim_path: path("/A").unwrap(),
-                ..Default::default()
-            }])),
-        );
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Other", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Other").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    prim_path: path("/A").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
 
         NamespaceEditor::new(&stage)
@@ -711,14 +732,16 @@ mod tests {
     fn rename_preserves_listop() {
         // A prepended (not explicit) target survives the fixup as prepended.
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        sdf::PrimSpec::new(root.data_mut(), "/A", Specifier::Def, "").unwrap();
-        sdf::PrimSpec::new(root.data_mut(), "/Other", Specifier::Def, "").unwrap();
-        sdf::RelationshipSpec::new(root.data_mut(), "/Other.rel", Variability::Varying, false).unwrap();
-        root.data_mut().set_field(
-            &path("/Other.rel").unwrap(),
-            FieldKey::TargetPaths.as_str(),
-            sdf::Value::PathListOp(sdf::PathListOp::prepended([path("/A").unwrap()])),
-        );
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Other", Specifier::Def, "").unwrap();
+            sdf::RelationshipSpec::new(e.data_mut(), "/Other.rel", Variability::Varying, false).unwrap();
+            e.data_mut().set_field(
+                &path("/Other.rel").unwrap(),
+                FieldKey::TargetPaths.as_str(),
+                sdf::Value::PathListOp(sdf::PathListOp::prepended([path("/A").unwrap()])),
+            );
+        });
         let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
 
         NamespaceEditor::new(&stage)
@@ -824,9 +847,11 @@ mod tests {
     fn fixup_across_sublayers() {
         let stage = Stage::builder().in_memory("root.usda").unwrap();
         let mut sub = sdf::Layer::new_in_memory("sub.usda");
-        sdf::PrimSpec::new(sub.data_mut(), "/A", Specifier::Def, "Xform").unwrap();
+        edit_layer(&mut sub, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "Xform").unwrap();
+        });
         let root_id = stage.root_layer().identifier().to_string();
-        stage.insert_sub_layer(&root_id, 0, sub, LayerOffset::IDENTITY).unwrap();
+        stage.insert_layer(&root_id, 0, sub, LayerOffset::IDENTITY).unwrap();
         stage.define_prim("/Other").unwrap();
         stage
             .create_relationship("/Other.rel")
@@ -849,19 +874,23 @@ mod tests {
     /// with no local spec — the case that needs a relocate to edit.
     fn referenced_stage() -> Stage {
         let mut root = sdf::Layer::new_in_memory("root.usda");
-        sdf::PrimSpec::new(root.data_mut(), "/Ref", Specifier::Def, "").unwrap();
-        root.data_mut().set_field(
-            &path("/Ref").unwrap(),
-            FieldKey::References.as_str(),
-            sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
-                asset_path: "model.usda".into(),
-                prim_path: path("/Model").unwrap(),
-                ..Default::default()
-            }])),
-        );
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
         let mut model = sdf::Layer::new_in_memory("model.usda");
-        sdf::PrimSpec::new(model.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
-        sdf::PrimSpec::new(model.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        });
         Stage::builder().make_stage(vec![root, model], 0, Vec::new())
     }
 
