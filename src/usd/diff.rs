@@ -273,7 +273,7 @@ impl Stage {
         }
         Ok(Diff {
             edits,
-            mapping: objects.mapping.filter(|m| !m.is_identity()).cloned(),
+            mapping: objects.provenance.mapping().cloned(),
         })
     }
 
@@ -641,6 +641,7 @@ mod tests {
 
     use anyhow::Result;
 
+    use super::super::sink::Provenance;
     use super::*;
     use crate::usd::{EditTargetArc, TimeCode};
 
@@ -668,12 +669,13 @@ mod tests {
         stage.remove_property(size.clone())?;
         let mut change_list = sdf::ChangeList::new();
         change_list.entry_mut(&size).flags |= sdf::ChangeFlags::REMOVE_PROPERTY;
+        let provenance = Provenance::LocalStack;
         let change = CommittedChange {
             resynced: &[],
             changed_info_only: std::slice::from_ref(&size),
             layer_identifier: &root,
             change_list: &change_list,
-            mapping: None,
+            provenance: &provenance,
         };
         let diff = stage.extract_diff(&change)?;
         assert_eq!(diff.edits, vec![Edit::RemoveSpec { path: size.clone() }]);

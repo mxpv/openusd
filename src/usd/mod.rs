@@ -31,7 +31,7 @@ pub use interp::InterpolationType;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
-pub use sink::{CommittedChange, StageSink, StageSinkId};
+pub use sink::{CommittedChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StageBuilder, StagePopulationMask, WeakStage,

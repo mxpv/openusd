@@ -65,6 +65,54 @@ pub trait StageSink {
     }
 }
 
+/// Where a committed edit originated, which determines the namespace its
+/// [`CommittedChange`] paths are reported in.
+///
+/// Distinguishing the three cases removes the ambiguity of a bare "no mapping"
+/// signal: a local edit and a direct non-local edit both translate no paths, but
+/// a sink must treat their paths differently — the first are composed (stage)
+/// paths, the second are the edited layer's own.
+#[derive(Debug, Clone)]
+pub enum Provenance {
+    /// An edit to a layer of the local (root) layer stack: stage authoring
+    /// through the root edit target, a [`Stage::batch_edit`](super::Stage::batch_edit),
+    /// or a direct [`Stage::layer_mut`](super::Stage::layer_mut) edit to a local
+    /// layer. The local layer stack shares the stage's namespace, so paths are
+    /// already composed (stage) paths.
+    LocalStack,
+    /// Stage authoring through an edit target that remaps paths — a reference,
+    /// payload, or variant arc. The carried mapping translates the authored
+    /// (layer-namespace) paths to composed stage namespace. This is keyed on the
+    /// mapping, not on locality: a variant edit target authors into a local layer
+    /// yet still remaps (`/Prim{set=sel}child` to `/Prim/child`), so it is
+    /// `EditTarget` too; an identity-mapped target needs no translation and is
+    /// instead [`LocalStack`](Self::LocalStack) or [`DirectLayerEdit`](Self::DirectLayerEdit).
+    EditTarget(pcp::MapFunction),
+    /// A direct [`Stage::layer_mut`](super::Stage::layer_mut) edit to a non-local
+    /// (referenced or payload) layer. Nothing is translated
+    /// ([`mapping`](Self::mapping) is `None`): the literal authored paths stay in
+    /// the edited layer's own namespace, while the dependency-derived
+    /// [`resynced`](CommittedChange::resynced) paths (the composed prims that
+    /// reference the layer) are already in stage namespace. The two coexist
+    /// untranslated in one [`CommittedChange`], reaching the stage through
+    /// composition dependencies rather than a single path mapping.
+    DirectLayerEdit,
+}
+
+impl Provenance {
+    /// The namespace mapping that carries this edit's paths to composed stage
+    /// namespace, or `None` when paths need no translation — either because they
+    /// are already stage paths ([`LocalStack`](Self::LocalStack)) or because they
+    /// are reported in the edited layer's own namespace
+    /// ([`DirectLayerEdit`](Self::DirectLayerEdit)).
+    pub fn mapping(&self) -> Option<&pcp::MapFunction> {
+        match self {
+            Provenance::EditTarget(m) => Some(m),
+            Provenance::LocalStack | Provenance::DirectLayerEdit => None,
+        }
+    }
+}
+
 /// A committed edit handed to [`StageSink::after_commit`] (the data the former
 /// `ObjectsChanged` notice carried).
 ///
@@ -73,10 +121,9 @@ pub trait StageSink {
 ///
 /// [`resynced`](Self::resynced) and [`changed_info_only`](Self::changed_info_only)
 /// are in composed stage namespace for stage-authored edits and edits to a local
-/// layer. A direct edit to a non-local (referenced or payload) layer through
-/// [`Stage::layer_mut`](super::Stage::layer_mut) carries no stage-namespace
-/// mapping, so for it those paths are reported in the edited layer's own
-/// namespace instead.
+/// layer. A direct edit to a non-local (referenced or payload) layer is reported
+/// in the edited layer's own namespace instead; [`provenance`](Self::provenance)
+/// says which.
 pub struct CommittedChange<'a> {
     /// Paths whose composition was resynced — the prim index and its namespace
     /// descendants were dropped (C++ `ResyncedPaths`). Composed/stage namespace.
@@ -93,9 +140,11 @@ pub struct CommittedChange<'a> {
     /// [`changed_info_only`](Self::changed_info_only) paths;
     /// [`changed_fields`](Self::changed_fields) bridges the two).
     pub change_list: &'a sdf::ChangeList,
-    /// Namespace mapping (layer source to stage target) of the producing edit
-    /// target, or `None` for a local/root edit.
-    pub mapping: Option<&'a pcp::MapFunction>,
+    /// Where this edit originated, which determines the namespace
+    /// [`resynced`](Self::resynced) and
+    /// [`changed_info_only`](Self::changed_info_only) are reported in (see
+    /// [`Provenance`]).
+    pub provenance: &'a Provenance,
 }
 
 impl CommittedChange<'_> {
@@ -107,7 +156,7 @@ impl CommittedChange<'_> {
     /// [`change_list`](Self::change_list) records it under.
     pub fn changed_fields(&self, path: &sdf::Path) -> &BTreeSet<tf::Token> {
         static EMPTY: BTreeSet<tf::Token> = BTreeSet::new();
-        let key = match self.mapping {
+        let key = match self.provenance.mapping() {
             Some(m) => match m.map_target_to_source(path) {
                 Some(key) => key,
                 None => return &EMPTY,
@@ -152,15 +201,16 @@ impl Payload {
     /// Classify one edit into the composed path-sets a sink reports.
     ///
     /// `changes` is the edit's invalidation plan and `scratch` its raw change
-    /// list, in the edited layer's namespace. `mapping` is the edit target's
-    /// namespace mapping (layer source to stage target), or `None` for a
-    /// local/root edit that needs no translation.
+    /// list, in the edited layer's namespace. `provenance` says how those paths
+    /// reach composed stage namespace — its [`mapping`](Provenance::mapping)
+    /// translates them, or leaves them untranslated for a local or direct edit.
     ///
     /// [`resynced`](CommittedChange::resynced) is the union of the significant and
     /// prim-tier composed paths; [`changed_info_only`](CommittedChange::changed_info_only)
     /// is every other edited path that authored a field value or edited
     /// relationship/connection targets.
-    pub(super) fn new(changes: &pcp::Changes, scratch: &sdf::ChangeList, mapping: Option<&pcp::MapFunction>) -> Self {
+    pub(super) fn new(changes: &pcp::Changes, scratch: &sdf::ChangeList, provenance: &Provenance) -> Self {
+        let mapping = provenance.mapping();
         // `resynced_paths` mixes composed dependency paths (already stage
         // namespace) with the literal authored path, which under an arc or
         // variant edit target is in the edited layer's namespace (e.g.
@@ -224,14 +274,14 @@ impl Payload {
     pub(super) fn committed_change<'a>(
         &'a self,
         layer_identifier: &'a str,
-        mapping: Option<&'a pcp::MapFunction>,
+        provenance: &'a Provenance,
     ) -> CommittedChange<'a> {
         CommittedChange {
             resynced: &self.resynced,
             changed_info_only: &self.changed_info_only,
             layer_identifier,
             change_list: &self.change_list,
-            mapping,
+            provenance,
         }
     }
 }

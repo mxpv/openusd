@@ -36,10 +36,8 @@ pub use copy::{
 pub use data::{AbstractData, CowData, Data, DataError, Patch};
 pub use expr::Expr;
 pub use file_format::{find_by_extension, find_by_id, FileFormat, FileFormatCaps, WriteSeek};
-pub use layer::{
-    dry_run_layers, edit_layers, AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId,
-    PendingLayerChange,
-};
+pub(crate) use layer::{dry_run_layers, edit_layers};
+pub use layer::{AuthoringError, EditError, Layer, LayerEdit, LayerSink, LayerSinkId, PendingLayerChange};
 pub use ordering::{apply_ordering, element_cmp};
 pub use path::{path, Path, PathComponent, PathComponents, PathElement};
 pub use path_table::PathTable;

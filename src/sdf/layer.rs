@@ -135,8 +135,9 @@ impl Layer {
     /// sink veto, or a panic. Returns whether the edit produced a composition
     /// change. This is the only way to mutate a layer — the commit is the closing
     /// brace, not a separate call a caller can omit — so an edit is never left
-    /// staged-but-uncommitted. The single-layer case of [`edit_layers`]; mirrors
-    /// C++ scene description committing through `Sdf_ChangeManager`.
+    /// staged-but-uncommitted. Mirrors C++ scene description committing through
+    /// `Sdf_ChangeManager`. To edit several of a stage's layers atomically, use
+    /// [`Stage::batch_edit`](crate::usd::Stage::batch_edit).
     ///
     /// Panics if called re-entrantly on the same layer.
     ///
@@ -569,8 +570,8 @@ impl Layer {
     }
 }
 
-/// The authoring view of a [`Layer`] handed to an [`edit`](Layer::edit) /
-/// [`edit_layers`] closure — the only surface through which a layer is mutated.
+/// The authoring view of a [`Layer`] handed to an [`edit`](Layer::edit) closure
+/// — the only surface through which a layer is mutated.
 ///
 /// Derefs to the [`Layer`] for reads, and exposes the layer's authoring
 /// operations directly. A layer's `commit` and `rollback` are deliberately absent:
@@ -756,7 +757,7 @@ impl std::fmt::Debug for Layer {
 /// reach a stage through its aggregator rather than through this return.
 ///
 /// [`Layer::edit`] is the single-layer case of this.
-pub fn edit_layers<E: From<sink::Error>>(
+pub(crate) fn edit_layers<E: From<sink::Error>>(
     layers: &mut [&mut Layer],
     f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
 ) -> Result<bool, E> {
@@ -797,7 +798,7 @@ pub fn edit_layers<E: From<sink::Error>>(
 /// committing nothing and firing no sink, so a caller can check that an edit is
 /// valid (e.g. a namespace edit's `can_apply`) without mutating the layers or
 /// notifying observers.
-pub fn dry_run_layers<E>(
+pub(crate) fn dry_run_layers<E>(
     layers: &mut [&mut Layer],
     f: impl FnOnce(&mut [LayerEdit<'_>]) -> Result<(), E>,
 ) -> Result<(), E> {
