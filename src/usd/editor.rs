@@ -21,7 +21,7 @@
 //! embedded paths in place through [`Value::filter_map_paths`](crate::sdf::Value::filter_map_paths),
 //! preserving list-op structure rather than flattening opinions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{Prim, Stage, StageAuthoringError};
 use crate::{pcp, sdf};
@@ -107,6 +107,14 @@ pub enum NamespaceEditError {
     /// An object already exists at a destination path.
     #[error("an object already exists at the destination {0}")]
     DestinationExists(sdf::Path),
+
+    /// The batch cannot be expressed as a valid relocate set: deleting a
+    /// cross-arc prim would orphan a descendant an earlier edit relocated out of
+    /// it, or the synthesized relocates violate Pcp's structural/conflict rules.
+    /// USD relocates cannot represent the requested namespace, so the batch is
+    /// rejected rather than authored as relocates Pcp would silently drop.
+    #[error("the requested edits cannot be represented as valid relocates (at {0})")]
+    UnrepresentableRelocateBatch(sdf::Path),
 
     /// A destination is the source itself or a descendant of it, so the move
     /// would nest a subtree inside itself.
@@ -264,14 +272,18 @@ impl NamespaceEditor {
     }
 
     /// Stage the batch onto the local layer stack as one atomic multi-layer edit.
-    /// Each edit applies in order against every affected layer, validated against
-    /// the staged state the prior edits produced — so a collision or missing
-    /// source is read from the precise staged data, not a simulated projection.
-    /// After the structural edits, embedded paths are remapped and relocates
-    /// authored. Then the layers either commit together (driving one
-    /// composition-invalidation cycle) or — when `commit` is false — roll back for
-    /// a dry run. The shared path behind [`can_apply`](Self::can_apply) and
-    /// [`apply`](Self::apply).
+    /// Runs in two phases. First a [`NamespaceProjection`] replays the batch over
+    /// the composed pre-batch namespace to settle the cross-arc facts the staged
+    /// overlays cannot see — whether each source/destination resolves to content
+    /// realized by a relocate — and to build the relocate plan; this must finish
+    /// before the layer graph is borrowed mutably, since composition queries and
+    /// layer mutation cannot borrow the stage at once. Then each edit stages in
+    /// order against every affected layer, combining its projected facts with the
+    /// staged overlays (which reflect the prior edits), embedded paths are
+    /// remapped, and the relocates authored. The layers either commit together
+    /// (driving one composition-invalidation cycle) or — when `commit` is false —
+    /// roll back for a dry run. The shared path behind
+    /// [`can_apply`](Self::can_apply) and [`apply`](Self::apply).
     ///
     /// Any failure — an invalid edit or an authoring error — rolls every layer
     /// back, so a failed batch leaves the stage untouched and the cache valid. A
@@ -282,82 +294,40 @@ impl NamespaceEditor {
         if self.edits.is_empty() {
             return Err(NamespaceEditError::NoEdits);
         }
-        let edit_target = self.stage.edit_target_layer_id()?;
-        let layer_ids = self.stage.root_stack_layer_ids();
-        // Namespace editing authors verbatim into the local layer stack, so it
-        // requires the current edit target to be one of those layers with an
-        // identity mapping. A variant or cross-arc target would need every edit
-        // path (and the relocates) mapped through it, which v1 does not do.
-        if !layer_ids.contains(&edit_target) || !self.stage.edit_target().map_function().is_identity() {
-            return Err(NamespaceEditError::NonLocalEditTarget);
-        }
-        let relocates = self.relocate_plan(&self.stage)?;
-        // The sources whose opinions arrive across an arc: they have no local
-        // spec to move, so an edit on one counts as present even when no layer
-        // authors it (the move/delete is realized by a relocate instead).
-        //
-        // TODO(namespace-edit): `relocates`/`cross_arc` are computed once from
-        // the pre-batch stage, so a later edit on a path produced by an earlier
-        // *cross-arc* move (e.g. move referenced /Ref/Geom→/Ref/Renamed then
-        // delete /Ref/Renamed) is not recognized. Direct-spec edits chain (their
-        // staged specs are visible); cross-arc chaining within one batch is not
-        // yet supported.
-        let cross_arc: HashSet<sdf::Path> = relocates.iter().map(|(src, _)| src.clone()).collect();
-        // Destinations occupied by a composed object that has no local spec in the
-        // root stack — a referenced/payload prim the staged per-layer check inside
-        // the transaction cannot see, and which no earlier local edit in the batch
-        // can vacate. A destination that has a local spec, or is produced by an
-        // earlier edit, is left to that staged check, which reflects prior edits.
-        let mut occupied_dsts: HashSet<sdf::Path> = HashSet::new();
-        for edit in &self.edits {
-            let NamespaceEdit::Move { dst, .. } = edit else {
-                continue;
-            };
-            if !dst.is_abs() || dst.is_abs_root() {
-                continue;
-            }
-            let has_local_spec = {
-                let graph = self.stage.layers();
-                layer_ids
-                    .iter()
-                    .any(|id| graph.get(*id).is_some_and(|node| node.layer.data().has_spec(dst)))
-            };
-            if !has_local_spec && self.stage.has_spec(dst.clone())? {
-                occupied_dsts.insert(dst.clone());
-            }
-        }
+        let BatchPlan {
+            layer_ids,
+            seeds,
+            relocates: relocate_plan,
+            per_edit: plan,
+        } = self.plan()?;
+        let resolved = relocate_plan.resolve(seeds)?;
+
+        // Stage the structural edits atomically across the layer
+        // stack. The whole batch commits through `edit_layers`: every layer's
+        // sinks veto first, then all commit, so a multi-layer namespace edit is
+        // all-or-nothing even under a rejecting sink, and each commit feeds the
+        // stage's aggregator for the recompose below. A dry run (`dry_run_layers`)
+        // stages the same way to prove the batch applies, then discards it. The
+        // batch assumes its layers carry no uncommitted direct edits — a discard
+        // drops the whole overlay.
         {
             let mut graph = self.stage.layers_mut();
             let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(&layer_ids).into_iter().collect();
             let ids: Vec<pcp::LayerId> = layers.iter().map(|(id, _)| *id).collect();
             let mut batch: Vec<&mut sdf::Layer> = layers.iter_mut().map(|(_, layer)| &mut **layer).collect();
-            // Stage every edit into the batch's layers through their `LayerEdit`
-            // views. The whole batch commits atomically (`edit_layers`): every
-            // layer's sinks run their veto first, then all commit — so a
-            // multi-layer namespace edit is all-or-nothing even under a rejecting
-            // layer sink, and each commit fires the stage's aggregator, recording
-            // the edit for the recompose below. A dry run (`dry_run_layers`) stages
-            // the same way to prove the batch applies, then discards it without
-            // committing or firing a sink. The batch assumes its layers carry no
-            // uncommitted direct edits — a discard drops the whole overlay.
-            //
-            // TODO(namespace-edit): the appended relocates are not folded through
-            // ones already authored. Editing a prim that is itself the target of
-            // an existing relocate (e.g. `/B -> /A` then moving `/A`) can leave
-            // two pairs with the same target, which Pcp rejects as invalid.
             let stage_edits = |edits: &mut [sdf::LayerEdit<'_>]| -> Result<(), NamespaceEditError> {
                 {
                     let mut refs: Vec<&mut sdf::LayerEdit<'_>> = edits.iter_mut().collect();
-                    for edit in &self.edits {
-                        apply_edit(&mut refs, edit, &cross_arc, &occupied_dsts)?;
+                    for (edit, plan) in self.edits.iter().zip(&plan) {
+                        apply_edit(&mut refs, edit, plan)?;
                     }
                 }
                 for (id, layer) in ids.iter().zip(edits.iter_mut()) {
                     fixup_embedded_paths(layer, &self.edits).map_err(StageAuthoringError::Layer)?;
-                    if *id == edit_target && !relocates.is_empty() {
-                        let mut authored = layer.relocates();
-                        authored.extend(relocates.iter().cloned());
-                        layer.set_relocates(authored).map_err(StageAuthoringError::Layer)?;
+                    // The plan is the sole authority for relocates; the generic
+                    // fixup above leaves them alone.
+                    if let Some(next) = resolved.change_for(*id) {
+                        layer.set_relocates(next).map_err(StageAuthoringError::Layer)?;
                     }
                 }
                 Ok(())
@@ -374,55 +344,629 @@ impl NamespaceEditor {
         Ok(())
     }
 
-    /// The identifiers of the local-stack layers a successful apply would
-    /// author into: every layer holding a spec at a source path. Mirrors C++
+    /// Project the batch over the composed pre-batch namespace and build the
+    /// relocate stack plan — the read-only first half of [`execute`](Self::execute),
+    /// shared with [`layers_to_edit`](Self::layers_to_edit). Resolves the edit
+    /// target (rejecting a non-local one), seeds every local-stack layer's
+    /// relocates, and evolves them through the edits, deciding per edit whether
+    /// its source and destination resolve to cross-arc content. Runs before the
+    /// layer graph is borrowed mutably for staging: composition queries and layer
+    /// mutation cannot borrow the stage at once, so cross-arc facts are settled up
+    /// front.
+    fn plan(&self) -> Result<BatchPlan, NamespaceEditError> {
+        let edit_target = self.stage.edit_target_layer_id()?;
+        let layer_ids = self.stage.root_stack_layer_ids();
+        // Namespace editing authors verbatim into the local layer stack, so it
+        // requires the current edit target to be one of those layers with an
+        // identity mapping. A variant or cross-arc target would need every edit
+        // path (and the relocates) mapped through it, which v1 does not do.
+        if !layer_ids.contains(&edit_target) || !self.stage.edit_target().map_function().is_identity() {
+            return Err(NamespaceEditError::NonLocalEditTarget);
+        }
+        // `seeds` (per layer) is the baseline each layer's final list is compared
+        // against; the plan tracks per-occurrence freshness so validation blames
+        // only the pairs this batch created or changed.
+        let seeds = {
+            let layers = self.stage.layers();
+            let mut seeds: HashMap<pcp::LayerId, sdf::RelocateList> = HashMap::new();
+            for id in &layer_ids {
+                if let Some(node) = layers.get(*id) {
+                    let pairs = node.layer.relocates();
+                    if !pairs.is_empty() {
+                        seeds.insert(*id, pairs);
+                    }
+                }
+            }
+            seeds
+        };
+        let projection = NamespaceProjection::new(&self.stage);
+        let mut relocates = RelocateStackPlan::new(&layer_ids, &seeds, edit_target);
+        let mut per_edit: Vec<EditPlan> = Vec::with_capacity(self.edits.len());
+        // TODO(perf): each edit replays the growing `earlier` prefix through
+        // `cross_arc_facts`/`occupied` (premove/project over all prior edits),
+        // making the projection work O(edits^2); a forward cumulative path
+        // projection would make it linear if batches ever grow large.
+        for (i, edit) in self.edits.iter().enumerate() {
+            validate_edit_shape(edit)?;
+            let earlier = &self.edits[..i];
+            let entry = match edit {
+                NamespaceEdit::Move { src, dst, .. } => {
+                    let occupied = projection.occupied(dst, earlier)?;
+                    let (present, masks) = projection.cross_arc_facts(src, earlier)?;
+                    if present && masks {
+                        return Err(NamespaceEditError::UnrepresentableRelocateBatch(src.clone()));
+                    }
+                    relocates.record_move(src, dst, present)?;
+                    EditPlan { present, occupied }
+                }
+                NamespaceEdit::Delete { path, .. } => {
+                    let (present, masks) = projection.cross_arc_facts(path, earlier)?;
+                    if present && masks {
+                        return Err(NamespaceEditError::UnrepresentableRelocateBatch(path.clone()));
+                    }
+                    relocates.record_delete(path, present)?;
+                    EditPlan {
+                        present,
+                        occupied: false,
+                    }
+                }
+            };
+            per_edit.push(entry);
+        }
+        Ok(BatchPlan {
+            layer_ids,
+            seeds,
+            relocates,
+            per_edit,
+        })
+    }
+
+    /// The identifiers of the local-stack layers a successful apply would write:
+    /// a layer holding a spec at a source path (the structural move or delete) or
+    /// one whose `layerRelocates` the batch would change — including a sublayer
+    /// whose relocate follows a moved or deleted prim. Mirrors C++
     /// `GetLayersToEdit`.
     pub fn layers_to_edit(&self) -> Result<Vec<String>, NamespaceEditError> {
+        if self.edits.is_empty() {
+            return Ok(Vec::new());
+        }
+        // TODO(perf): this preflight runs the full `plan()` — composed-index
+        // builds and relocate analysis per edit — because the evolved relocates
+        // decide which layers' `layerRelocates` change. A future fast path could
+        // skip the composition projection when no edit is cross-arc and no layer
+        // authors relocates, leaving only the cheap per-layer spec scan.
+        let BatchPlan {
+            layer_ids,
+            seeds,
+            relocates,
+            ..
+        } = self.plan()?;
+        let resolved = relocates.resolve(seeds)?;
         let layers = self.stage.layers();
         let mut result = Vec::new();
-        for id in self.stage.root_stack_layer_ids() {
-            let Some(node) = layers.get(id) else { continue };
-            let touches = self.edits.iter().any(|edit| node.layer.data().has_spec(edit.source()));
-            if touches {
-                result.push(layers.identifier(id).to_string());
+        // TODO(perf): each layer is independent — the spec scan and the
+        // relocate comparison for the layers in `layer_ids` can run in parallel.
+        for id in &layer_ids {
+            let Some(node) = layers.get(*id) else { continue };
+            let touches_spec = self.edits.iter().any(|edit| node.layer.data().has_spec(edit.source()));
+            if touches_spec || resolved.change_for(*id).is_some() {
+                result.push(layers.identifier(*id).to_string());
             }
         }
         Ok(result)
     }
+}
 
-    /// The relocates to author so objects composed across an arc move or delete:
-    /// a prim with any opinion arriving across a reference/payload gets a
-    /// `(source, destination)` pair (or `(source, empty)` for a deletion).
-    fn relocate_plan(&self, stage: &Stage) -> Result<Vec<(sdf::Path, sdf::Path)>, NamespaceEditError> {
-        let mut plan = Vec::new();
-        for edit in &self.edits {
-            let path = edit.source();
-            if path.is_property_path() || !crosses_arc(stage, path)? {
+/// The read-only result of [`NamespaceEditor::plan`]: the local-stack layer ids,
+/// each layer's seed relocates, the evolved relocate stack plan, and the per-edit
+/// cross-arc facts. Consumed by `execute` to validate and stage, and by
+/// `layers_to_edit` to report which layers a successful apply would write.
+struct BatchPlan {
+    layer_ids: Vec<pcp::LayerId>,
+    seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
+    relocates: RelocateStackPlan,
+    per_edit: Vec<EditPlan>,
+}
+
+/// Answers composed-namespace questions the staged layer overlays cannot.
+///
+/// A referenced or payload prim has no local spec, and relocates take effect
+/// only on recomposition — which does not happen between the edits of a batch —
+/// so the overlays alone cannot tell whether a source composes or a destination
+/// is occupied after the earlier edits. Each query replays the edit prefix
+/// against the pre-batch `stage`, mapping a path back to its pre-batch location
+/// and confirming the content still lands there.
+struct NamespaceProjection<'a> {
+    stage: &'a Stage,
+}
+
+impl<'a> NamespaceProjection<'a> {
+    fn new(stage: &'a Stage) -> Self {
+        Self { stage }
+    }
+
+    /// The cross-arc facts for a move or delete of `path` after the `earlier`
+    /// edits, read from one composed-index build.
+    ///
+    /// `realized` is whether the edit must be realized by a relocate: its opinion
+    /// arrives across an arc rooted away from `path`, so it has no local spec of
+    /// its own to move. `masks` is whether `path` is a relocate target that also
+    /// masks its own direct ancestral content — content composed directly at
+    /// `path` (through a plain arc) that a relocate happens to shadow. Moving or
+    /// deleting such a path would reveal the masked content, leaving `path` still
+    /// composed, so the edit cannot be expressed as a single relocate and the
+    /// batch is rejected. In the composed index the relocated-in content sits
+    /// under a `Relocate` arc while the masked content reaches `path` through a
+    /// plain arc; both kinds present means a masking relocate target. Property
+    /// paths are never realized by a relocate.
+    fn cross_arc_facts(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<(bool, bool), NamespaceEditError> {
+        if path.is_property_path() {
+            return Ok((false, false));
+        }
+        let origin = premove_path(path, earlier);
+        if project_path(&origin, earlier).as_ref() != Some(path) {
+            return Ok((false, false));
+        }
+        let index = self.stage.prim(origin.clone()).prim_index().graph()?;
+        let mut realized = false;
+        let mut via_relocate = false;
+        let mut direct_ancestral = false;
+        for (id, node) in index.nodes_with_ids() {
+            if !node.has_specs() {
                 continue;
             }
-            match edit {
-                NamespaceEdit::Move { src, dst, .. } => plan.push((src.clone(), dst.clone())),
-                NamespaceEdit::Delete { path, .. } => plan.push((path.clone(), sdf::Path::default())),
+            let introduced_away = node
+                .map_to_root()
+                .map_source_to_target(&node.path_at_introduction())
+                .is_some_and(|intro| intro != origin);
+            if node.arc() != pcp::ArcType::Root && introduced_away {
+                realized = true;
+            }
+            if node_under_relocate(&index, id) {
+                via_relocate = true;
+            } else if introduced_away {
+                direct_ancestral = true;
             }
         }
-        Ok(plan)
+        Ok((realized, via_relocate && direct_ancestral))
+    }
+
+    /// Whether a composed object (prim or property) occupies `path` after the
+    /// `earlier` edits and so blocks a move onto it. A destination an earlier
+    /// edit vacated round-trips to a different path and is free. Catches
+    /// composed-only occupants the staged per-layer check cannot see, including a
+    /// property arriving across a reference.
+    fn occupied(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<bool, NamespaceEditError> {
+        let origin = premove_path(path, earlier);
+        if project_path(&origin, earlier).as_ref() != Some(path) {
+            return Ok(false);
+        }
+        Ok(self.stage.has_spec(origin)?)
     }
 }
 
-/// Validate `edit` against the staged state, then stage it into every layer.
-/// The transactions already reflect the edits applied before this one, so the
-/// checks read the precise staged data rather than a simulated projection: a
-/// destination collision is an existing spec at `dst`, and a missing source is
-/// an edit that moves or removes nothing in any layer. `cross_arc` names the
-/// sources whose opinions arrive across an arc — they have no local spec to
-/// move, so an edit on one is realized by a relocate and counts as present even
-/// when no layer authors it.
+/// Whether `node` (or any ancestor in the composed index) was introduced by a
+/// `Relocate` arc, so its content reaches the prim through a relocate rather
+/// than directly.
+fn node_under_relocate(index: &pcp::PrimIndex, node: pcp::NodeId) -> bool {
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if index.node(id).arc() == pcp::ArcType::Relocate {
+            return true;
+        }
+        current = index.parent(id);
+    }
+    false
+}
+
+/// One relocate pair as the batch evolves it, tagged with the layer that owns
+/// it. `source` is the path Pcp sees as the relocate source — in the current,
+/// possibly already-relocated, parent namespace — and `target` the live composed
+/// destination, or empty for a deletion.
+struct RelocatedEntry {
+    source: sdf::Path,
+    target: sdf::Path,
+    layer: pcp::LayerId,
+    /// The pair as it was seeded from the layer, or `None` when the batch
+    /// synthesized this occurrence. An occurrence is fresh — created or changed
+    /// by the batch — when this is `None` or differs from the current pair, even
+    /// if the current pair's value happens to coincide with another layer's
+    /// pre-existing one. Validation blames fresh occurrences by identity, not by
+    /// value.
+    original: Option<sdf::Relocate>,
+    /// Whether Pcp dropped this seed when classifying the pre-batch relocate set,
+    /// for any reason — structurally invalid, duplicate source, or conflict. An
+    /// immutable before-snapshot, used only to reject a batch that would make a
+    /// previously-dropped pair live again; it is never consulted to decide how a
+    /// pair evolves (that uses the live classification of the current pairs).
+    ///
+    /// Frozen at seed time, not recomputed at validation: a pair's seed-time
+    /// status depends on the whole initial set, including pairs the batch later
+    /// deletes (duplicate-source and conflict groups drop together), so it cannot
+    /// be reconstructed from the surviving entries alone. This bool is the minimal
+    /// record of the "before" half of the resurrection check; the live analysis
+    /// over the current pairs supplies the "after" half.
+    dropped_at_seed: bool,
+}
+
+impl RelocatedEntry {
+    /// Whether the batch created or changed this occurrence, so validation may
+    /// blame it for being invalid or conflicting.
+    fn is_fresh(&self) -> bool {
+        self.original
+            .as_ref()
+            .is_none_or(|(s, t)| s != &self.source || t != &self.target)
+    }
+
+    /// Whether the batch collapsed a created or non-identity seed pair to an
+    /// identity relocate omitted from authored metadata.
+    fn drops_as_identity(&self) -> bool {
+        self.source == self.target
+            && match &self.original {
+                None => true,
+                Some((source, target)) => source != target,
+            }
+    }
+}
+
+/// The evolving `layerRelocates` of the whole local root stack.
+///
+/// Pcp validates relocates over the combined layer stack, not the edit target
+/// alone, so the plan owns every local-stack layer's pairs (tagged by owning
+/// layer) and evolves them through each edit: a move reprojects endpoints, a
+/// delete empties a target or drops a source, and a cross-arc move or delete
+/// synthesizes a new pair — always on the edit target, the only layer the editor
+/// authors into. Authoring writes each layer's evolved list back to that layer;
+/// validation runs over the combined set. Tracking every layer (not just the
+/// edit target) lets a later edit recognize a relocate target an earlier edit
+/// moved, and lets a delete reject an orphaned cross-layer relocate.
+struct RelocateStackPlan {
+    entries: Vec<RelocatedEntry>,
+    edit_target: pcp::LayerId,
+    layer_rank: HashMap<pcp::LayerId, usize>,
+}
+
+impl RelocateStackPlan {
+    /// Seed the plan with each local-stack layer's existing relocates, tagged by
+    /// owning layer. New pairs synthesized by the batch land on `edit_target`.
+    fn new(
+        layer_ids: &[pcp::LayerId],
+        seeds: &HashMap<pcp::LayerId, sdf::RelocateList>,
+        edit_target: pcp::LayerId,
+    ) -> Self {
+        let mut seen_layers: HashSet<pcp::LayerId> = HashSet::new();
+        let ordered_layers: Vec<pcp::LayerId> = layer_ids
+            .iter()
+            .copied()
+            .filter(|layer| seen_layers.insert(*layer))
+            .collect();
+        let layer_rank: HashMap<pcp::LayerId, usize> = ordered_layers
+            .iter()
+            .enumerate()
+            .map(|(rank, layer)| (*layer, rank))
+            .collect();
+        let seeded: Vec<(pcp::LayerId, sdf::Relocate)> = ordered_layers
+            .iter()
+            .filter_map(|layer| seeds.get(layer).map(|pairs| (*layer, pairs)))
+            .flat_map(|(layer, pairs)| pairs.iter().map(move |pair| (layer, (pair.0.clone(), pair.1.clone()))))
+            .collect();
+        let pairs: sdf::RelocateList = seeded.iter().map(|(_, pair)| pair.clone()).collect();
+        let status = pcp::analyze_relocate_occurrences(&pairs);
+        let entries = seeded
+            .into_iter()
+            .zip(status)
+            .map(|((layer, pair), status)| RelocatedEntry {
+                source: pair.0.clone(),
+                target: pair.1.clone(),
+                layer,
+                // Pcp did not apply this seed over the initial stack: the
+                // before-snapshot for the resurrection check.
+                dropped_at_seed: !status.is_active(),
+                original: Some(pair),
+            })
+            .collect();
+        Self {
+            entries,
+            edit_target,
+            layer_rank,
+        }
+    }
+
+    /// Record a move `src -> dst`. Always follows the moved subtree through every
+    /// entry, so a relocate on any layer whose endpoint sits under `src` tracks
+    /// the edit. When `cross_arc`, the move is realized by a relocate, so a fresh
+    /// pair is appended on the edit target unless `src` is already a live target
+    /// (then [`reproject`](Self::reproject) just retargets it, chain-free).
+    // TODO(perf): this recomputes the active classification several times for one
+    // edit — `continuation_source` and `prohibiting_source` each call
+    // `active_relocates` -> `active_flags`, and `reproject` calls `active_flags`
+    // again — all O(n^2) over an entry set that does not change until the
+    // reproject. Compute `active_flags()` once here and thread the mask into
+    // those helpers.
+    fn record_move(&mut self, src: &sdf::Path, dst: &sdf::Path, cross_arc: bool) -> Result<(), NamespaceEditError> {
+        let continues_source = self.continuation_source(src);
+        if let Some(source) = self.prohibiting_source(dst) {
+            if continues_source.as_ref() != Some(&source) || dst != &source {
+                return Err(NamespaceEditError::UnrepresentableRelocateBatch(source));
+            }
+        }
+        let continues = continues_source.is_some();
+        self.reproject(src, dst);
+        if cross_arc && !continues {
+            self.insert_edit_target_entry(RelocatedEntry {
+                source: src.clone(),
+                target: dst.clone(),
+                layer: self.edit_target,
+                original: None,
+                dropped_at_seed: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record a delete of `path`. Evolves every entry against the live
+    /// classification: an active relocate wholly inside the deleted subtree
+    /// (sourced under `path`) is removed with it, and an active relocate whose
+    /// target is under `path` collapses to a deletion. Inert (dropped) pairs are
+    /// left exactly as authored — they place no content, so deleting a directly
+    /// composed prim must not rewrite them. When `cross_arc`, a deletion pair is
+    /// appended on the edit target unless an active pair already targets `path`.
+    /// Rejected as
+    /// [`UnrepresentableRelocateBatch`](NamespaceEditError::UnrepresentableRelocateBatch)
+    /// when an active relocate was sourced under `path` but targets outside it: a
+    /// descendant relocated out of the deleted subtree would lose its source, and
+    /// no valid relocate set keeps the moved child while deleting its parent.
+    fn record_delete(&mut self, path: &sdf::Path, cross_arc: bool) -> Result<(), NamespaceEditError> {
+        let active = self.active_flags();
+        let orphans_child = self.entries.iter().zip(&active).any(|(e, &a)| {
+            a && &e.source != path && e.source.has_prefix(path) && !e.target.is_empty() && !e.target.has_prefix(path)
+        });
+        if orphans_child {
+            return Err(NamespaceEditError::UnrepresentableRelocateBatch(path.clone()));
+        }
+        let mut continues = false;
+        let kept: Vec<RelocatedEntry> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .zip(active)
+            .filter_map(|(mut e, a)| {
+                if a && &e.source != path && e.source.has_prefix(path) {
+                    return None;
+                }
+                if a && &e.target == path {
+                    continues = true;
+                }
+                if a && !e.target.is_empty() && e.target.has_prefix(path) {
+                    e.target = sdf::Path::default();
+                }
+                Some(e)
+            })
+            .collect();
+        self.entries = kept;
+        if cross_arc && !continues {
+            self.insert_edit_target_entry(RelocatedEntry {
+                source: path.clone(),
+                target: sdf::Path::default(),
+                layer: self.edit_target,
+                original: None,
+                dropped_at_seed: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Insert a synthesized edit-target pair at the edit target's layer-stack
+    /// strength, after any earlier pairs from the same layer.
+    fn insert_edit_target_entry(&mut self, entry: RelocatedEntry) {
+        debug_assert_eq!(entry.layer, self.edit_target);
+        let edit_rank = self.layer_rank[&self.edit_target];
+        let insert_at = self
+            .entries
+            .iter()
+            .position(|e| self.layer_rank[&e.layer] > edit_rank)
+            .unwrap_or(self.entries.len());
+        self.entries.insert(insert_at, entry);
+    }
+
+    /// The live Pcp classification of the current entries, index-aligned: whether
+    /// each occurrence is active over the current `(source, target)` set. Derived
+    /// on demand from the current values — not cached — so it stays correct as the
+    /// batch evolves the entries.
+    // TODO(perf): re-analyzes the whole set (O(n^2)) on each call; n is small and
+    // this is a cold authoring path, but a cached-and-invalidated mask would help.
+    fn active_flags(&self) -> Vec<bool> {
+        let pairs: sdf::RelocateList = self
+            .entries
+            .iter()
+            .map(|e| (e.source.clone(), e.target.clone()))
+            .collect();
+        pcp::analyze_relocate_occurrences(&pairs)
+            .into_iter()
+            .map(|status| status.is_active())
+            .collect()
+    }
+
+    fn active_relocates(&self) -> sdf::RelocateList {
+        self.entries
+            .iter()
+            .zip(self.active_flags())
+            .filter(|(_, active)| *active)
+            .map(|(e, _)| (e.source.clone(), e.target.clone()))
+            .collect()
+    }
+
+    fn continuation_source(&self, path: &sdf::Path) -> Option<sdf::Path> {
+        self.active_relocates()
+            .into_iter()
+            .find_map(|(source, target)| (!target.is_empty() && target == *path).then_some(source))
+    }
+
+    /// The active relocate source that prohibits authoring at `path`, if any.
+    fn prohibiting_source(&self, path: &sdf::Path) -> Option<sdf::Path> {
+        self.active_relocates()
+            .into_iter()
+            .filter_map(|(source, _)| path.has_prefix(&source).then_some(source))
+            .max_by_key(|source| source.element_count())
+    }
+
+    /// Follow a subtree moved from `old` to `new` through every entry. A target
+    /// strictly under `old` is inside a renamed subtree and follows regardless of
+    /// whether the pair is active. A target exactly equal to `old` follows only
+    /// for the active relocate that actually places content there — an inert
+    /// (dropped) pair that merely names `old` does not place the moved prim, so
+    /// re-rooting it would manufacture a spurious conflict. A source strictly
+    /// under `old` (a child already relocated out) follows; the pair whose source
+    /// is exactly `old` keeps it (the pre-relocation location).
+    fn reproject(&mut self, old: &sdf::Path, new: &sdf::Path) {
+        let active = self.active_flags();
+        for (e, is_active) in self.entries.iter_mut().zip(active) {
+            if !e.target.is_empty() {
+                if e.target == *old {
+                    if is_active {
+                        e.target = new.clone();
+                    }
+                } else {
+                    e.target = rebased(&e.target, old, new);
+                }
+            }
+            if &e.source != old {
+                e.source = rebased(&e.source, old, new);
+            }
+        }
+    }
+
+    /// Every current pair across the stack, tagged with its freshness and
+    /// dropped-seed provenance and with no-op `source == target` pairs dropped,
+    /// for the combined Pcp-equivalent validation.
+    fn combined(&self) -> Vec<pcp::BatchRelocate> {
+        self.entries
+            .iter()
+            .filter(|e| e.source != e.target)
+            .map(|e| pcp::BatchRelocate {
+                pair: (e.source.clone(), e.target.clone()),
+                fresh: e.is_fresh(),
+                dropped_seed: e.dropped_at_seed,
+            })
+            .collect()
+    }
+
+    /// Validate the relocates Pcp will see: the combined set across the whole
+    /// local stack. Pcp validates the layer stack as a whole, not the edit target
+    /// alone, and a cross-layer conflict only appears in the combined list. Fresh
+    /// occurrences are blamed for being dropped; seed occurrences that Pcp dropped
+    /// before the batch are rejected if the edit would make them active.
+    fn validate(&self) -> Result<(), NamespaceEditError> {
+        let combined = self.combined();
+        let pairs: sdf::RelocateList = combined.iter().map(|r| r.pair.clone()).collect();
+        let status = pcp::analyze_relocate_occurrences(&pairs);
+        if let Some(path) = pcp::first_unrepresentable_relocate(&combined, &status) {
+            return Err(NamespaceEditError::UnrepresentableRelocateBatch(path));
+        }
+        if let Some((r, _)) = combined
+            .iter()
+            .zip(&status)
+            .find(|(r, s)| r.dropped_seed && s.is_active())
+        {
+            return Err(NamespaceEditError::UnrepresentableRelocateBatch(r.pair.0.clone()));
+        }
+        Ok(())
+    }
+
+    /// The final relocate list per owning layer. A no-op `source == target` the
+    /// batch produced (a pair folded to identity) is dropped, but one the batch
+    /// left untouched is preserved as authored — an unrelated edit must not
+    /// rewrite a layer's existing metadata away. A layer that had relocates but
+    /// is absent from the result has had all its pairs removed and must be
+    /// cleared by the caller.
+    fn into_by_layer(self) -> HashMap<pcp::LayerId, sdf::RelocateList> {
+        let mut by_layer: HashMap<pcp::LayerId, sdf::RelocateList> = HashMap::new();
+        for e in self.entries {
+            if e.drops_as_identity() {
+                continue;
+            }
+            by_layer.entry(e.layer).or_default().push((e.source, e.target));
+        }
+        by_layer
+    }
+
+    /// Validate the combined stack and resolve each layer's final
+    /// `layerRelocates` against the `seeds` baseline. The shared back half of
+    /// [`execute`](NamespaceEditor::execute) and
+    /// [`layers_to_edit`](NamespaceEditor::layers_to_edit): both validate, fold
+    /// the plan to per-layer lists, and compare against the seeds to touch a
+    /// layer only when its relocates change.
+    fn resolve(self, seeds: HashMap<pcp::LayerId, sdf::RelocateList>) -> Result<ResolvedRelocates, NamespaceEditError> {
+        self.validate()?;
+        Ok(ResolvedRelocates {
+            seeds,
+            final_by_layer: self.into_by_layer(),
+        })
+    }
+}
+
+/// Per-layer relocate authoring resolved from a validated [`RelocateStackPlan`]:
+/// the final `layerRelocates` each layer should hold and the seed baseline to
+/// compare against.
+struct ResolvedRelocates {
+    seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
+    final_by_layer: HashMap<pcp::LayerId, sdf::RelocateList>,
+}
+
+impl ResolvedRelocates {
+    /// The relocate list `id` should hold after the batch when it differs from
+    /// the layer's seed baseline, or `None` when unchanged. Authoring on a change
+    /// covers clearing pairs the batch folded away, while skipping an unchanged
+    /// layer leaves a pre-existing (possibly invalid) pair exactly as authored.
+    fn change_for(&self, id: pcp::LayerId) -> Option<sdf::RelocateList> {
+        let next = self.final_by_layer.get(&id).cloned().unwrap_or_default();
+        let prev = self.seeds.get(&id).cloned().unwrap_or_default();
+        (next != prev).then_some(next)
+    }
+}
+
+/// The cross-arc facts the [`NamespaceProjection`] settles for one edit, read
+/// during staging: whether the source resolves to composed content realized by
+/// a relocate (so it has no local spec yet counts as present), and whether the
+/// destination is occupied by such content. Both account for the earlier edits.
+struct EditPlan {
+    present: bool,
+    occupied: bool,
+}
+
+/// Validate `edit` against the staged state and its [`EditPlan`], then stage it
+/// into every layer. The staged overlays already reflect the earlier edits, so
+/// local-spec checks read precise data: a destination collision is a local spec
+/// at `dst` (or a composed cross-arc occupant from `plan`), and a missing source
+/// is an edit that moves or removes nothing in any layer and is not realized by
+/// a relocate (`plan.present`).
 fn apply_edit(
     layers: &mut [&mut sdf::LayerEdit<'_>],
     edit: &NamespaceEdit,
-    cross_arc: &HashSet<sdf::Path>,
-    occupied_dsts: &HashSet<sdf::Path>,
+    plan: &EditPlan,
 ) -> Result<(), NamespaceEditError> {
+    validate_edit_shape(edit)?;
+    match edit {
+        NamespaceEdit::Move { src, dst, .. } => {
+            // A composed cross-arc occupant (`plan.occupied`) or a local spec
+            // staged by an earlier edit in this batch blocks the move.
+            if plan.occupied || layers.iter().any(|layer| layer.data().has_spec(dst)) {
+                return Err(NamespaceEditError::DestinationExists(dst.clone()));
+            }
+            stage_across_layers(layers, src, plan.present, |layer| {
+                let moved = sdf::copy_spec_within(layer.data_mut(), src, dst)?;
+                if moved {
+                    layer.remove_spec(src)?;
+                }
+                Ok(moved)
+            })?;
+        }
+        NamespaceEdit::Delete { path, .. } => {
+            stage_across_layers(layers, path, plan.present, |layer| layer.remove_spec(path))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_edit_shape(edit: &NamespaceEdit) -> Result<(), NamespaceEditError> {
     match edit {
         NamespaceEdit::Move { src, dst, kind } => {
             check_editable(src, *kind, NamespaceEditError::InvalidSource)?;
@@ -433,22 +977,9 @@ fn apply_edit(
                     dst: dst.clone(),
                 });
             }
-            // A pre-existing composed object (occupied_dsts) or one staged by an
-            // earlier edit in this batch (the per-layer check) blocks the move.
-            if occupied_dsts.contains(dst) || layers.iter().any(|layer| layer.data().has_spec(dst)) {
-                return Err(NamespaceEditError::DestinationExists(dst.clone()));
-            }
-            stage_across_layers(layers, src, cross_arc, |layer| {
-                let moved = sdf::copy_spec_within(layer.data_mut(), src, dst)?;
-                if moved {
-                    layer.remove_spec(src)?;
-                }
-                Ok(moved)
-            })?;
         }
         NamespaceEdit::Delete { path, kind } => {
             check_editable(path, *kind, NamespaceEditError::InvalidSource)?;
-            stage_across_layers(layers, path, cross_arc, |layer| layer.remove_spec(path))?;
         }
     }
     Ok(())
@@ -456,11 +987,11 @@ fn apply_edit(
 
 /// Stage `op` into every layer, tracking whether any layer authored a change.
 /// Errors with [`SourceNotFound`](NamespaceEditError::SourceNotFound) when no
-/// layer did and `path` is not realized through a relocate (`cross_arc`).
+/// layer did and the source is not realized through a relocate (`present`).
 fn stage_across_layers(
     layers: &mut [&mut sdf::LayerEdit<'_>],
     path: &sdf::Path,
-    cross_arc: &HashSet<sdf::Path>,
+    present: bool,
     mut op: impl FnMut(&mut sdf::LayerEdit<'_>) -> Result<bool, sdf::AuthoringError>,
 ) -> Result<(), NamespaceEditError> {
     let mut authored = false;
@@ -469,7 +1000,7 @@ fn stage_across_layers(
             authored = true;
         }
     }
-    if !authored && !cross_arc.contains(path) {
+    if !authored && !present {
         return Err(NamespaceEditError::SourceNotFound(path.clone()));
     }
     Ok(())
@@ -478,6 +1009,12 @@ fn stage_across_layers(
 /// Rewrite every embedded namespace path in the layer through the batch: a
 /// path under a move source re-roots onto the destination, and one under a
 /// deletion source drops out of its list op. Preserves list-op structure.
+///
+/// Only `layerRelocates` is left to [`RelocateStackPlan`]: a layer-level
+/// relocate's source and target carry different meaning, and a deleted target
+/// becomes the empty sentinel rather than dropping out, so it cannot be remapped
+/// as ordinary path-bearing metadata. Spec-level `relocates` are not modeled by
+/// the plan, so they remain ordinary embedded paths here.
 //
 // TODO(perf): scans every spec and field in the layer. A path-keyed index of
 // specs carrying target/connection/reference opinions would bound this to the
@@ -486,6 +1023,10 @@ fn fixup_embedded_paths(layer: &mut sdf::LayerEdit<'_>, edits: &[NamespaceEdit])
     for path in layer.data().spec_paths() {
         let fields = layer.data().list_fields(&path).unwrap_or_default();
         for field in &fields {
+            // `layerRelocates` is layer metadata owned by `RelocateStackPlan`.
+            if field == sdf::FieldKey::LayerRelocates.as_str() {
+                continue;
+            }
             let Some(value) = layer.data().try_field(&path, field)? else {
                 continue;
             };
@@ -502,6 +1043,12 @@ fn fixup_embedded_paths(layer: &mut sdf::LayerEdit<'_>, edits: &[NamespaceEdit])
     Ok(())
 }
 
+/// `path` with prefix `from` rewritten to `to`, or `path` unchanged when it does
+/// not start with `from`.
+fn rebased(path: &sdf::Path, from: &sdf::Path, to: &sdf::Path) -> sdf::Path {
+    path.replace_prefix(from, to).unwrap_or_else(|| path.clone())
+}
+
 /// Apply the batch in order to one path, returning its post-batch path or
 /// `None` if a deletion removed it.
 fn project_path(path: &sdf::Path, edits: &[NamespaceEdit]) -> Option<sdf::Path> {
@@ -514,24 +1061,27 @@ fn project_path(path: &sdf::Path, edits: &[NamespaceEdit]) -> Option<sdf::Path> 
                 }
             }
             NamespaceEdit::Move { src, dst, .. } => {
-                if let Some(moved) = current.replace_prefix(src, dst) {
-                    current = moved;
-                }
+                current = rebased(&current, src, dst);
             }
         }
     }
     Some(current)
 }
 
-/// Whether the composed prim at `path` has any opinion arriving across a
-/// reference or payload arc, so moving or deleting it needs a relocate. Such a
-/// site contributes a spec at a path other than the composed one.
-fn crosses_arc(stage: &Stage, path: &sdf::Path) -> anyhow::Result<bool> {
-    Ok(stage
-        .prim(path.clone())
-        .prim_stack()?
-        .iter()
-        .any(|(_, spec)| spec != path))
+/// Map `path` back through `earlier` moves, in reverse, to the namespace it
+/// occupied before those edits ran. The inverse of [`project_path`] over the
+/// move subsequence: each earlier move `src -> dst` is undone by rewriting the
+/// `dst` prefix back to `src`, so a path that an earlier move landed under a
+/// relocated subtree resolves to its pre-batch location (where its cross-arc
+/// opinions can be looked up).
+fn premove_path(path: &sdf::Path, earlier: &[NamespaceEdit]) -> sdf::Path {
+    let mut original = path.clone();
+    for edit in earlier.iter().rev() {
+        if let NamespaceEdit::Move { src, dst, .. } = edit {
+            original = rebased(&original, dst, src);
+        }
+    }
+    original
 }
 
 /// Validate that `path` is an absolute, non-pseudo-root object path of the
@@ -557,6 +1107,8 @@ fn check_editable(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::sdf::{self, path, FieldKey, LayerOffset, Specifier, Variability};
     use crate::usd::Stage;
@@ -620,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_moves_subtree() {
+    fn rename_subtree_targets() {
         let stage = sample();
         NamespaceEditor::new(&stage)
             .rename_prim(&stage.prim(path("/A").unwrap()), "B")
@@ -628,9 +1180,13 @@ mod tests {
             .apply()
             .unwrap();
 
+        // The subtree moves, and every external opinion that named the prim — a
+        // relationship target and an attribute connection — follows it.
         assert!(valid(&stage, "/B"));
         assert!(valid(&stage, "/B/Child"));
         assert!(!valid(&stage, "/A"));
+        assert_eq!(rel_targets(&stage, "/Other.rel"), vec!["/B", "/Keep"]);
+        assert_eq!(connections(&stage, "/Other.con"), vec!["/B.out"]);
     }
 
     #[test]
@@ -648,47 +1204,16 @@ mod tests {
     }
 
     #[test]
-    fn delete_prim_subtree() {
+    fn delete_subtree_targets() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
         editor.delete_prim(path("/A").unwrap());
         editor.apply().unwrap();
 
+        // The subtree is removed, and every external opinion that named the prim
+        // is cleared: the relationship target drops, the connection empties.
         assert!(!valid(&stage, "/A"));
         assert!(!valid(&stage, "/A/Child"));
-    }
-
-    #[test]
-    fn rename_fixes_targets() {
-        let stage = sample();
-        NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
-            .unwrap()
-            .apply()
-            .unwrap();
-
-        assert_eq!(rel_targets(&stage, "/Other.rel"), vec!["/B", "/Keep"]);
-    }
-
-    #[test]
-    fn rename_fixes_connections() {
-        let stage = sample();
-        NamespaceEditor::new(&stage)
-            .rename_prim(&stage.prim(path("/A").unwrap()), "B")
-            .unwrap()
-            .apply()
-            .unwrap();
-
-        assert_eq!(connections(&stage, "/Other.con"), vec!["/B.out"]);
-    }
-
-    #[test]
-    fn delete_drops_targets() {
-        let stage = sample();
-        let mut editor = NamespaceEditor::new(&stage);
-        editor.delete_prim(path("/A").unwrap());
-        editor.apply().unwrap();
-
         assert_eq!(rel_targets(&stage, "/Other.rel"), vec!["/Keep"]);
         assert!(connections(&stage, "/Other.con").is_empty());
     }
@@ -826,6 +1351,23 @@ mod tests {
 
         assert!(valid(&stage, "/B"));
         assert!(!valid(&stage, "/B/Child"));
+    }
+
+    #[test]
+    fn local_child_no_relocate() {
+        let stage = sample();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A/Child").unwrap(), path("/B").unwrap())
+            .apply()
+            .unwrap();
+
+        assert!(valid(&stage, "/B"));
+        assert!(!valid(&stage, "/A/Child"));
+        assert!(
+            stage.root_layer().relocates().is_empty(),
+            "local spec move should not author relocates: {:?}",
+            stage.root_layer().relocates()
+        );
     }
 
     #[test]
@@ -997,6 +1539,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_cross_arc_descendant() {
+        let stage = referenced_stage();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Geom/Sub").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::DestinationUnderSource { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_kind_mismatch() {
         let stage = sample();
         let mut editor = NamespaceEditor::new(&stage);
@@ -1079,5 +1632,1431 @@ mod tests {
         editor.delete_prim(path("/A").unwrap());
         let layers = editor.layers_to_edit().unwrap();
         assert_eq!(layers, vec![stage.root_layer().identifier().to_string()]);
+    }
+
+    #[test]
+    fn layers_to_edit_rejects() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/B", Specifier::Def, "").unwrap();
+            e.set_relocates(vec![
+                (path("/A/X").unwrap(), path("/B/Y").unwrap()),
+                (path("/C/Y").unwrap(), path("/D/Y").unwrap()),
+            ])
+            .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/B").unwrap(), path("/D").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+        assert!(matches!(
+            editor.layers_to_edit(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A pre-existing `(/Ref/Orig, /Ref/Geom)` relocate brings referenced content
+    /// to `/Ref/Geom`; moving `/Ref/Geom -> /Ref/Final` retargets that live pair
+    /// to `(/Ref/Orig, /Ref/Final)` rather than chaining, preserving the original
+    /// source `/Ref/Orig`.
+    #[test]
+    fn relocate_fold_existing() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            // Pre-existing relocate bringing the referenced /Ref/Orig to /Ref/Geom.
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        // Moving the live target /Ref/Geom retargets the existing pair to
+        // (/Ref/Orig, /Ref/Final); the original source /Ref/Orig is preserved and
+        // no transient (/Ref/Geom, /Ref/Final) pair is authored.
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Orig").unwrap() && t == &path("/Ref/Final").unwrap()),
+            "expected (/Ref/Orig, /Ref/Final) in {relocates:?}"
+        );
+        assert!(
+            !relocates.iter().any(|(s, _)| s == &path("/Ref/Geom").unwrap()),
+            "transient /Ref/Geom source must be dropped: {relocates:?}"
+        );
+        let targets: Vec<_> = relocates
+            .iter()
+            .filter(|(_, t)| !t.is_empty())
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            targets.len(),
+            targets.iter().collect::<HashSet<_>>().len(),
+            "duplicate destinations: {relocates:?}"
+        );
+    }
+
+    /// A pre-existing relocate whose destination is a child of a deleted cross-arc
+    /// prim collapses to the delete sentinel — its target re-roots onto the empty
+    /// path rather than becoming a truncated path like `/Sub`.
+    #[test]
+    fn fold_delete_child() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            // Pre-existing relocate with a child of /Ref/Geom as its destination.
+            e.set_relocates(vec![(path("/Ref/B").unwrap(), path("/Ref/Geom/Sub").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+
+        NamespaceEditor::new(&stage)
+            .delete_prim(path("/Ref/Geom").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        // Deleting /Ref/Geom re-roots (/Ref/B, /Ref/Geom/Sub) onto the sentinel.
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/B").unwrap() && t.is_empty()),
+            "expected (/Ref/B, '') in {relocates:?}"
+        );
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t.is_empty()),
+            "expected (/Ref/Geom, '') in {relocates:?}"
+        );
+    }
+
+    /// Move a cross-arc prim then delete it in the same batch: the second edit
+    /// must also produce a relocate.
+    #[test]
+    fn chain_move_delete() {
+        let stage = referenced_stage();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .delete_prim(path("/Ref/Renamed").unwrap());
+        editor.apply().unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        // The chain collapses to a single delete on the original cross-arc
+        // source: (/Ref/Geom, '').
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t.is_empty()),
+            "expected (/Ref/Geom, '') in {relocates:?}"
+        );
+        assert!(!valid(&stage, "/Ref/Geom"));
+        assert!(!valid(&stage, "/Ref/Renamed"));
+    }
+
+    /// Move a cross-arc prim, then move the result again in the same batch:
+    /// both edits must produce relocates, and the first must be folded through
+    /// the second so the list contains no chain.
+    #[test]
+    fn chain_two_moves() {
+        let stage = referenced_stage();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .move_prim(path("/Ref/Renamed").unwrap(), path("/Ref/Final").unwrap());
+        editor.apply().unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        // The two-hop chain collapses into a single pair targeting the final
+        // destination: (/Ref/Geom, /Ref/Final).
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Ref/Final").unwrap()),
+            "expected (/Ref/Geom, /Ref/Final) in {relocates:?}"
+        );
+        // No path appears as both a source and a target (no chains).
+        let sources: HashSet<_> = relocates.iter().map(|(s, _)| s).collect();
+        let targets: HashSet<_> = relocates.iter().map(|(_, t)| t).collect();
+        assert!(
+            sources.intersection(&targets).next().is_none(),
+            "chain found in {relocates:?}"
+        );
+        assert!(valid(&stage, "/Ref/Final"));
+        assert!(!valid(&stage, "/Ref/Geom"));
+        assert!(!valid(&stage, "/Ref/Renamed"));
+    }
+
+    /// A delete that targets a path only produced by a *later* edit in the
+    /// same batch is rejected: the earlier edit must not be validated against
+    /// a path that does not yet exist when it runs.
+    #[test]
+    fn rejects_premature_delete() {
+        // edit 0: Delete(/Ref/Renamed) — /Ref/Renamed does not exist yet
+        // edit 1: Move(/Ref/Geom → /Ref/Renamed) — would have created it
+        let stage = referenced_stage();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .delete_prim(path("/Ref/Renamed").unwrap())
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap());
+        assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
+    }
+
+    /// Two separate applies form a chain across an already-authored relocate:
+    /// move `/Ref/Geom → /Ref/Renamed`, commit, then move `/Ref/Renamed →
+    /// /Ref/Final`. The second batch must fold through the committed pair onto
+    /// the genuine origin `/Ref/Geom`, not keep the transient `/Ref/Renamed`
+    /// source, so the prim ends up composed at `/Ref/Final`.
+    #[test]
+    fn relocate_fold_sequential() {
+        let stage = referenced_stage();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .apply()
+            .unwrap();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Renamed").unwrap(), path("/Ref/Final").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Ref/Final").unwrap()),
+            "expected (/Ref/Geom, /Ref/Final) in {relocates:?}"
+        );
+        assert!(
+            !relocates.iter().any(|(s, _)| s == &path("/Ref/Renamed").unwrap()),
+            "transient /Ref/Renamed source must be dropped: {relocates:?}"
+        );
+        assert!(valid(&stage, "/Ref/Final"));
+        assert!(!valid(&stage, "/Ref/Geom"));
+        assert!(!valid(&stage, "/Ref/Renamed"));
+    }
+
+    /// Move a cross-arc prim, then in the same batch move a descendant that
+    /// only exists under the relocated subtree: the descendant has no local
+    /// spec, so it must be recognized as cross-arc and earn its own relocate
+    /// authored in the relocated parent's namespace.
+    #[test]
+    fn chain_move_descendant() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .move_prim(path("/Ref/Renamed/Sub").unwrap(), path("/Ref/Renamed/Sub2").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Renamed/Sub").unwrap() && t == &path("/Ref/Renamed/Sub2").unwrap()),
+            "expected (/Ref/Renamed/Sub, /Ref/Renamed/Sub2) in {relocates:?}"
+        );
+        assert!(valid(&stage, "/Ref/Renamed/Sub2"));
+        assert!(!valid(&stage, "/Ref/Renamed/Sub"));
+        assert!(!valid(&stage, "/Ref/Geom"));
+    }
+
+    /// A later move whose source descends from a moved cross-arc root but names
+    /// no real prim (a typo under the relocated subtree) is rejected as
+    /// `SourceNotFound` rather than gaining a phantom relocate.
+    #[test]
+    fn rejects_missing_descendant() {
+        let stage = referenced_stage(); // /Ref/Geom has no children
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .move_prim(
+                path("/Ref/Renamed/Missing").unwrap(),
+                path("/Ref/Renamed/Other").unwrap(),
+            );
+        assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
+    }
+
+    /// A property under a moved cross-arc root cannot be relocated (relocates
+    /// are prim-only), so a cross-arc property move is rejected and authors no
+    /// relocate.
+    #[test]
+    fn rejects_property_descendant() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Model/Geom.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Renamed").unwrap())
+            .move_property(path("/Ref/Renamed.attr").unwrap(), path("/Ref/Renamed.attr2").unwrap());
+        assert!(matches!(editor.can_apply(), Err(NamespaceEditError::SourceNotFound(_))));
+        assert!(
+            !stage.root_layer().relocates().iter().any(|(s, _)| s.is_property_path()),
+            "no property relocate must be authored"
+        );
+    }
+
+    fn nested_ref_stage(children: &[&str]) -> Stage {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            for c in children {
+                sdf::PrimSpec::new(e.data_mut(), format!("/Model/Geom/{c}").as_str(), Specifier::Def, "").unwrap();
+            }
+        });
+        Stage::builder().make_stage(vec![root, model], 0, Vec::new())
+    }
+
+    /// Moving a descendant onto a destination occupied by a referenced sibling
+    /// inside a relocated subtree collides: `/A/Other` composes from the moved
+    /// `/Ref/Geom/Other`, so the second move must report `DestinationExists`.
+    #[test]
+    fn occupied_in_relocated() {
+        let stage = nested_ref_stage(&["Sub", "Other"]);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .move_prim(path("/A/Sub").unwrap(), path("/A/Other").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::DestinationExists(_))
+        ));
+    }
+
+    /// After a child is relocated out of a cross-arc subtree, moving the parent
+    /// root again must carry the child's relocate source with it: move
+    /// `/Ref/Geom -> /A`, `/A/Sub -> /B`, then `/A -> /C` leaves the child pair
+    /// sourced at `/C/Sub`, so `/B` is still created.
+    #[test]
+    fn child_source_follows_parent() {
+        let stage = nested_ref_stage(&["Sub"]);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .move_prim(path("/A/Sub").unwrap(), path("/B").unwrap())
+            .move_prim(path("/A").unwrap(), path("/C").unwrap());
+        editor.apply().unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/C/Sub").unwrap() && t == &path("/B").unwrap()),
+            "expected (/C/Sub, /B) in {relocates:?}"
+        );
+        assert!(valid(&stage, "/C"));
+        assert!(valid(&stage, "/B"));
+        assert!(!valid(&stage, "/A"));
+        assert!(!valid(&stage, "/C/Sub"));
+    }
+
+    /// Deleting a cross-arc parent after a descendant was relocated out of it
+    /// cannot be represented: preserving `/B` would need a child relocate source
+    /// under the deleted parent source, which Pcp rejects. The batch must fail
+    /// explicitly rather than author a dead `(/A/Sub, /B)` pair that silently
+    /// drops `/B`.
+    #[test]
+    fn delete_orphans_moved_child() {
+        let stage = nested_ref_stage(&["Sub"]);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .move_prim(path("/A/Sub").unwrap(), path("/B").unwrap())
+            .delete_prim(path("/A").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A destination vacated by earlier moves is free for a later move. With
+    /// `move /Ref/A -> /Ref/B`, `move /Ref/B -> /Ref/C`, then `move /Ref/X ->
+    /// /Ref/B`, the slot `/Ref/B` is transient (its occupant moved on to
+    /// `/Ref/C`), so the third move must succeed rather than report
+    /// `DestinationExists` just because `/Ref/B` held composed content earlier in
+    /// the batch. The relocates collapse to the chain-free `(/Ref/A, /Ref/C)` and
+    /// `(/Ref/X, /Ref/B)`.
+    #[test]
+    fn move_into_vacated_dst() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/B").unwrap())
+            .move_prim(path("/Ref/B").unwrap(), path("/Ref/C").unwrap())
+            .move_prim(path("/Ref/X").unwrap(), path("/Ref/B").unwrap());
+        editor.apply().unwrap();
+
+        assert!(valid(&stage, "/Ref/C"));
+        assert!(valid(&stage, "/Ref/B"));
+        assert!(!valid(&stage, "/Ref/A"));
+        assert!(!valid(&stage, "/Ref/X"));
+    }
+
+    /// Renaming a prim that carries its own reference moves the local spec (which
+    /// carries the arc); the reference is rooted at the prim itself, not an
+    /// ancestor, so no relocate is needed and the rename is not rejected.
+    #[test]
+    fn rename_referenced_prim() {
+        let stage = referenced_stage();
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref").unwrap(), path("/Ref2").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/Ref2/Geom"));
+        assert!(!valid(&stage, "/Ref"));
+        assert!(
+            stage.root_layer().relocates().is_empty(),
+            "rename should author no relocate"
+        );
+    }
+
+    /// Moving a property onto a destination occupied only by a referenced
+    /// composed property collides: `/Ref.attr` composes from `/Model.attr`, so
+    /// the move must report `DestinationExists` rather than overlay it.
+    #[test]
+    fn move_onto_composed_property() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Src", Specifier::Def, "").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Src.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Model.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        // /Ref.attr composes from the referenced /Model.attr (no local spec).
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_property(path("/Src.attr").unwrap(), path("/Ref.attr").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::DestinationExists(_))
+        ));
+    }
+
+    /// Moving an already-relocated prim back to its original source folds the
+    /// relocate to a no-op; the edit-target metadata must be cleared rather than
+    /// left holding the stale pair.
+    #[test]
+    fn fold_relocate_to_empty() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"));
+        // Move the relocated prim back to its original source: the relocate folds
+        // to a no-op and the metadata must be cleared.
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Orig").unwrap())
+            .apply()
+            .unwrap();
+        let relocates = stage.root_layer().relocates();
+        assert!(relocates.is_empty(), "stale relocate left authored: {relocates:?}");
+        assert!(valid(&stage, "/Ref/Orig"), "prim should be back at /Ref/Orig");
+        assert!(!valid(&stage, "/Ref/Geom"), "prim should no longer be at /Ref/Geom");
+    }
+
+    /// A purely local move of a prim that hosts a relocate target carries the
+    /// relocate with it: with `(/Ref/Geom, /Local/Geom)` authored, moving the
+    /// local `/Local` to `/Moved` retargets the relocate to `(/Ref/Geom,
+    /// /Moved/Geom)` so the relocated prim follows the namespace edit.
+    #[test]
+    fn local_retarget_relocate() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Local", Specifier::Def, "").unwrap();
+            // /Ref/Geom is relocated under the local prim /Local.
+            e.set_relocates(vec![(path("/Ref/Geom").unwrap(), path("/Local/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        assert!(valid(&stage, "/Local/Geom"));
+        // A purely local move of /Local must carry the relocate target with it.
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .apply()
+            .unwrap();
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Moved/Geom").unwrap()),
+            "relocate target should follow the local move: {relocates:?}"
+        );
+        assert!(
+            valid(&stage, "/Moved/Geom"),
+            "relocated prim should follow to /Moved/Geom"
+        );
+        assert!(!valid(&stage, "/Local/Geom"));
+    }
+
+    /// A purely local rename that neither creates nor changes a relocate must
+    /// succeed even when the layer already holds a structurally-invalid relocate
+    /// that Pcp drops as a recoverable error; the batch is not blamed for the
+    /// pre-existing pair.
+    #[test]
+    fn local_keeps_invalid() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Local", Specifier::Def, "").unwrap();
+            // A pre-existing structurally-invalid relocate (root-prim source) that
+            // Pcp drops as a recoverable error. The batch below does not touch it.
+            e.set_relocates(vec![(path("/B").unwrap(), path("/C").unwrap())])
+                .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/Moved"));
+        assert!(!valid(&stage, "/Local"));
+    }
+
+    #[test]
+    fn invalid_seed_resurrection() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/A/X", Specifier::Def, "").unwrap();
+            e.set_relocates(vec![(path("/A/X").unwrap(), path("/A").unwrap())])
+                .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/A").unwrap(), path("/C").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+        assert!(valid(&stage, "/A"));
+        assert!(!valid(&stage, "/C"));
+        assert_eq!(
+            stage.root_layer().relocates(),
+            vec![(path("/A/X").unwrap(), path("/A").unwrap())]
+        );
+    }
+
+    /// A relocate authored on a sublayer (not the edit target) folds with a move
+    /// of the relocated prim: moving `/Ref/Geom` to `/Ref/Final` lets fixup
+    /// remap the sublayer pair to `(/Ref/Orig, /Ref/Final)` and authors no
+    /// conflicting duplicate on the root, so the prim ends up at `/Ref/Final`.
+    #[test]
+    fn relocate_in_sublayer_folds() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            // The relocate lives on the sublayer, not the edit target (root).
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"), "sublayer relocate should compose");
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/Ref/Final"), "relocated prim should move to /Ref/Final");
+        assert!(!valid(&stage, "/Ref/Geom"));
+        // No conflicting duplicate authored on the root edit target.
+        assert!(
+            stage.root_layer().relocates().is_empty(),
+            "root should author no relocate: {:?}",
+            stage.root_layer().relocates()
+        );
+    }
+
+    /// The synthesized relocate must be validated against the whole local stack,
+    /// not the edit target alone: a sublayer pair `(/Ref/C, /Ref/D)` makes the
+    /// new root pair `(/Ref/X, /Ref/C)` a target-is-source chain that Pcp drops,
+    /// so the batch is rejected rather than silently failing to compose.
+    #[test]
+    fn rejects_cross_layer_conflict() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            e.set_relocates(vec![(path("/Ref/C").unwrap(), path("/Ref/D").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/X").unwrap(), path("/Ref/C").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A structurally-invalid pre-existing relocate is dropped by Pcp before
+    /// conflict detection, so it must not block a newly synthesized pair: with an
+    /// invalid `(/B, /C)` authored, moving referenced `/Ref/X` to `/B` (whose
+    /// target coincides with the invalid pair's source) still succeeds.
+    #[test]
+    fn new_ignores_invalid() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            // Invalid: a root prim cannot be a relocate source. Pcp drops it.
+            e.set_relocates(vec![(path("/B").unwrap(), path("/C").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/X").unwrap(), path("/B").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/B"));
+        assert!(!valid(&stage, "/Ref/X"));
+    }
+
+    /// A structurally-invalid seed relocate is metadata only: Pcp ignores it, so
+    /// the namespace editor must not evolve it as a live relocate even when its
+    /// target overlaps the edited path. Moving the referenced `/Ref/Geom` authors
+    /// a new valid pair and leaves the invalid old pair unchanged.
+    #[test]
+    fn invalid_seed_stays_inert() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![(path("/A").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/A").unwrap() && t == &path("/Ref/Geom").unwrap()),
+            "invalid old pair should remain unchanged: {relocates:?}"
+        );
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Final").unwrap()),
+            "valid move pair should be authored: {relocates:?}"
+        );
+        assert!(valid(&stage, "/Final"));
+        assert!(!valid(&stage, "/Ref/Geom"));
+    }
+
+    /// A pre-existing relocate dropped only by a conflict must follow namespace
+    /// moves with the conflicting pair. If it stayed at the old target while the
+    /// conflicting pair moved away, Pcp would start applying it and hide
+    /// `/Other/X`.
+    #[test]
+    fn inactive_conflict_reprojects() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/World", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Other", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Other/X", Specifier::Def, "").unwrap();
+            e.set_relocates(vec![
+                (path("/World/A").unwrap(), path("/World/C").unwrap()),
+                (path("/Other/X").unwrap(), path("/World/A/B").unwrap()),
+            ])
+            .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        assert!(valid(&stage, "/Other/X"));
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/World").unwrap(), path("/Scene").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.root_layer().relocates();
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Scene/A").unwrap() && t == &path("/Scene/C").unwrap()),
+            "conflicting pair target should follow /World -> /Scene: {relocates:?}"
+        );
+        assert!(
+            relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Other/X").unwrap() && t == &path("/Scene/A/B").unwrap()),
+            "dropped pair target should follow /World -> /Scene: {relocates:?}"
+        );
+        assert!(valid(&stage, "/Other/X"));
+    }
+
+    /// A weaker duplicate-source relocate is ignored by Pcp extraction. Its
+    /// target must not make a cross-arc move look like a continuation of a live
+    /// relocate; the move still needs its own pair.
+    #[test]
+    fn duplicate_source_inert() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Strong").unwrap())])
+                .unwrap();
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Strong"));
+        assert!(valid(&stage, "/Ref/Geom"));
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap())
+            .apply()
+            .unwrap();
+
+        let root_relocates = stage.root_layer().relocates();
+        assert!(
+            root_relocates
+                .iter()
+                .any(|(s, t)| s == &path("/Ref/Geom").unwrap() && t == &path("/Final").unwrap()),
+            "move pair should be authored: {root_relocates:?}"
+        );
+        assert!(valid(&stage, "/Final"));
+        assert!(!valid(&stage, "/Ref/Geom"));
+    }
+
+    /// Fresh relocates authored on a stronger edit target must validate at that
+    /// layer's strength, ahead of weaker sublayer pairs with the same source.
+    #[test]
+    fn edit_target_strength() {
+        let root = pcp::LayerId::from_raw(0);
+        let sub = pcp::LayerId::from_raw(1);
+        let source = path("/Ref/X").unwrap();
+        let weak_target = path("/Ref/T").unwrap();
+        let move_target = path("/Final").unwrap();
+        let mut seeds = HashMap::new();
+        seeds.insert(sub, vec![(source.clone(), weak_target.clone())]);
+
+        let mut move_plan = RelocateStackPlan::new(&[root, sub], &seeds, root);
+        move_plan.record_move(&source, &move_target, true).unwrap();
+        let combined = move_plan.combined();
+        assert_eq!(combined[0].pair, (source.clone(), move_target));
+        assert!(combined[0].fresh);
+        let pairs: sdf::RelocateList = combined.iter().map(|r| r.pair.clone()).collect();
+        let status = pcp::analyze_relocate_occurrences(&pairs);
+        assert_eq!(pcp::first_unrepresentable_relocate(&combined, &status), None);
+
+        let mut delete_plan = RelocateStackPlan::new(&[root, sub], &seeds, root);
+        delete_plan.record_delete(&source, true).unwrap();
+        let combined = delete_plan.combined();
+        assert_eq!(combined[0].pair, (source, sdf::Path::default()));
+        assert!(combined[0].fresh);
+        let pairs: sdf::RelocateList = combined.iter().map(|r| r.pair.clone()).collect();
+        let status = pcp::analyze_relocate_occurrences(&pairs);
+        assert_eq!(pcp::first_unrepresentable_relocate(&combined, &status), None);
+    }
+
+    #[test]
+    fn rejects_deleted_source() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Local", Specifier::Def, "").unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom/Sub", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/A").unwrap())
+            .delete_prim(path("/A/Sub").unwrap())
+            .move_prim(path("/Local").unwrap(), path("/A/Sub").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+        assert!(valid(&stage, "/Local"));
+        assert!(!valid(&stage, "/A"));
+    }
+
+    /// Deleting a prim relocated by a sublayer empties that sublayer pair (its
+    /// target collapses to the delete sentinel) so the prim stops composing,
+    /// rather than leaving the pair pointing at a now-deleted path.
+    #[test]
+    fn delete_sublayer_relocate_target() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"));
+        NamespaceEditor::new(&stage)
+            .delete_prim(path("/Ref/Geom").unwrap())
+            .apply()
+            .unwrap();
+        assert!(
+            !valid(&stage, "/Ref/Geom"),
+            "deleted relocated prim should no longer compose"
+        );
+    }
+
+    fn sublayer_relocate_stage(relocate: (&str, &str), model_children: &[&str]) -> Stage {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Local", Specifier::Def, "").unwrap();
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            e.set_relocates(vec![(path(relocate.0).unwrap(), path(relocate.1).unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            for c in model_children {
+                sdf::PrimSpec::new(e.data_mut(), format!("/Model/{c}").as_str(), Specifier::Def, "").unwrap();
+            }
+        });
+        Stage::builder().make_stage(vec![root, sub, model], 0, Vec::new())
+    }
+
+    /// Deleting a prim whose relocated child (described by a sublayer pair) was
+    /// moved out of the deleted subtree earlier in the batch is rejected, like
+    /// the edit-target orphan case: no valid relocate set keeps the moved child
+    /// while deleting its parent.
+    #[test]
+    fn delete_orphans_sublayer_child() {
+        let stage = sublayer_relocate_stage(("/Ref/Orig", "/Ref/Geom"), &["Orig"]);
+        assert!(valid(&stage, "/Ref/Geom"));
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Geom").unwrap(), path("/B").unwrap())
+            .delete_prim(path("/Ref").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A relocate target on a sublayer that an earlier edit moved is recognized
+    /// by a later edit: moving local `/Local -> /Moved` carries the sublayer pair
+    /// `(/Ref/Orig, /Local/Geom)` to `/Moved/Geom`, and the subsequent move of
+    /// `/Moved/Geom -> /Final` retargets that same pair instead of synthesizing a
+    /// conflicting duplicate.
+    #[test]
+    fn sublayer_target_reprojects() {
+        let stage = sublayer_relocate_stage(("/Ref/Orig", "/Local/Geom"), &["Orig"]);
+        assert!(valid(&stage, "/Local/Geom"));
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Local").unwrap(), path("/Moved").unwrap())
+            .move_prim(path("/Moved/Geom").unwrap(), path("/Final").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/Final"));
+        assert!(!valid(&stage, "/Moved/Geom"));
+    }
+
+    /// Renaming a prim that owns a subroot reference (`@model@</Model/Geom>`)
+    /// moves the local spec that carries the reference; the arc is authored at
+    /// the prim itself, so no relocate is needed and the rename is not rejected.
+    #[test]
+    fn rename_subroot_referenced_prim() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model/Geom").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "Xform").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref").unwrap(), path("/Ref2").unwrap())
+            .apply()
+            .unwrap();
+        assert!(valid(&stage, "/Ref2"));
+        assert!(!valid(&stage, "/Ref"));
+        assert!(
+            stage.root_layer().relocates().is_empty(),
+            "rename should author no relocate"
+        );
+    }
+
+    /// Spec-level `relocates` metadata is ordinary embedded-path data (it is not
+    /// owned by the relocate stack plan, which handles only layer-level
+    /// `layerRelocates`), so moving the prim that holds it reprojects its paths
+    /// like any other field.
+    #[test]
+    fn move_reprojects_spec_relocates() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/A").unwrap(),
+                FieldKey::Relocates.as_str(),
+                sdf::Value::Relocates(vec![(path("/A/X").unwrap(), path("/A/Y").unwrap())]),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .apply()
+            .unwrap();
+
+        let value = stage
+            .root_layer()
+            .data()
+            .try_field(&path("/Moved").unwrap(), FieldKey::Relocates.as_str())
+            .unwrap()
+            .expect("spec-level relocates should move with the prim")
+            .into_owned();
+        let relocates = value.try_as_relocates().expect("relocates value");
+        assert_eq!(
+            relocates,
+            vec![(path("/Moved/X").unwrap(), path("/Moved/Y").unwrap())],
+            "spec-level relocate paths should reproject onto the moved prim"
+        );
+    }
+
+    /// A pre-existing relocate the batch does not touch is left as authored, even
+    /// a structurally-invalid no-op `source == target`: an unrelated local move
+    /// must not rewrite a layer's existing relocate metadata away.
+    #[test]
+    fn untouched_noop_relocate_preserved() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+            e.set_relocates(vec![(path("/X/Keep").unwrap(), path("/X/Keep").unwrap())])
+                .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .apply()
+            .unwrap();
+        assert!(
+            stage
+                .root_layer()
+                .relocates()
+                .iter()
+                .any(|(s, t)| s == &path("/X/Keep").unwrap() && t == &path("/X/Keep").unwrap()),
+            "untouched no-op relocate must be preserved: {:?}",
+            stage.root_layer().relocates()
+        );
+    }
+
+    #[test]
+    fn moved_noop_preserved() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/A/X", Specifier::Def, "").unwrap();
+            e.set_relocates(vec![(path("/A/X").unwrap(), path("/A/X").unwrap())])
+                .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A").unwrap(), path("/B").unwrap())
+            .apply()
+            .unwrap();
+        assert_eq!(
+            stage.root_layer().relocates(),
+            vec![(path("/B/X").unwrap(), path("/B/X").unwrap())],
+            "moved no-op relocate metadata follows the namespace edit"
+        );
+    }
+
+    /// A layer included more than once in the root stack has one authored
+    /// relocate list. Seeding the relocate plan must not duplicate that layer's
+    /// entries and write doubled metadata during an unrelated edit.
+    #[test]
+    fn duplicate_sublayer_seed() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["sub.usda".into(), "sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/A", Specifier::Def, "").unwrap();
+        });
+        let mut sub = sdf::Layer::new_in_memory("sub.usda");
+        edit_layer(&mut sub, |e| {
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, sub], 0, Vec::new());
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/A").unwrap(), path("/Moved").unwrap())
+            .apply()
+            .unwrap();
+
+        let relocates = stage.layer("sub.usda").expect("sub layer").relocates();
+        assert_eq!(
+            relocates,
+            vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())],
+            "unrelated edit must not duplicate repeated sublayer relocates"
+        );
+    }
+
+    /// `layers_to_edit` reports a sublayer whose relocate the batch would rewrite:
+    /// moving a prim relocated by `sub.usda` mutates that sublayer, even though no
+    /// source spec lives there, so the preflight must name it.
+    #[test]
+    fn layers_to_edit_relocates() {
+        let stage = sublayer_relocate_stage(("/Ref/Orig", "/Ref/Geom"), &["Orig"]);
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap());
+        let layers = editor.layers_to_edit().unwrap();
+        assert!(
+            layers.iter().any(|id| id == "sub.usda"),
+            "sublayer whose relocate is rewritten should be reported: {layers:?}"
+        );
+    }
+
+    fn relocate_target_masking_stage() -> Stage {
+        // /Ref references a model with BOTH Orig and Geom; a relocate
+        // /Ref/Orig -> /Ref/Geom puts Orig's content at /Ref/Geom, masking the
+        // referenced /Ref/Geom.
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![(path("/Ref/Orig").unwrap(), path("/Ref/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Orig", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+        });
+        Stage::builder().make_stage(vec![root, model], 0, Vec::new())
+    }
+
+    /// Moving a relocate target that masks its own referenced content is
+    /// rejected: retargeting the relocate would reveal the masked `/Ref/Geom`,
+    /// so the move cannot be cleanly expressed and must not silently leave both
+    /// `/Final` and `/Ref/Geom` composed.
+    #[test]
+    fn rejects_masking_move() {
+        let stage = relocate_target_masking_stage();
+        assert!(valid(&stage, "/Ref/Geom"));
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Final").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// Deleting a relocate target that masks its own referenced content is
+    /// rejected for the same reason: emptying the relocate would reveal the
+    /// masked `/Ref/Geom` rather than removing it.
+    #[test]
+    fn rejects_masking_delete() {
+        let stage = relocate_target_masking_stage();
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_prim(path("/Ref/Geom").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// /Ref references a model with Geom, A, B; the root authors two relocates
+    /// onto the same target (/Ref/A -> /Ref/Geom, /Ref/B -> /Ref/Geom), so both
+    /// are conflict-dropped and /Ref/Geom composes directly from the reference.
+    /// Moving /Ref/Geom would author /Ref/Geom -> /Dst, whose source is the target
+    /// of those dropped relocates; Pcp would drop the fresh pair too, so the batch
+    /// is rejected.
+    #[test]
+    fn rejects_dropped_conflict() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![
+                (path("/Ref/A").unwrap(), path("/Ref/Geom").unwrap()),
+                (path("/Ref/B").unwrap(), path("/Ref/Geom").unwrap()),
+            ])
+            .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/B", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"));
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Dst").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// The root authors a target-is-source chain (/Ref/X -> /Ref/Geom, /Ref/Geom
+    /// -> /Ref/Y); both are conflict-dropped and /Ref/Geom composes directly.
+    /// Deleting /Ref/Geom cannot be represented: the deletion pair (/Ref/Geom,'')
+    /// is a duplicate source of the inert (/Ref/Geom,/Ref/Y) and source-is-target
+    /// with (/Ref/X,/Ref/Geom), so it would be dropped — the batch is rejected
+    /// rather than silently leaving /Ref/Geom composed.
+    #[test]
+    fn delete_over_dropped_chain() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![
+                (path("/Ref/X").unwrap(), path("/Ref/Geom").unwrap()),
+                (path("/Ref/Geom").unwrap(), path("/Ref/Y").unwrap()),
+            ])
+            .unwrap();
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/Geom", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/X", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"));
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.delete_prim(path("/Ref/Geom").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
     }
 }

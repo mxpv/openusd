@@ -60,6 +60,22 @@ cargo deny check
 cargo run --example dump_usdc -- path/to/file.usd
 ```
 
+## ROADMAP.md Style
+
+Keep `ROADMAP.md` rows concise. Each Notes cell should cover three things only:
+
+1. Whether it is done — the status emoji in the Status column handles this;
+   the Notes cell does not need to restate it.
+2. What to read — name the key types or traits a reader would look for
+   (e.g. `sdf::ChangeList`, `usd::NamespaceEditor`). Do not describe what
+   those types do; their own doc comments are the source of truth.
+3. What is remaining — a short `Remaining — X; Y` clause, or a `Remaining:`
+   bullet list when there are several distinct items, for anything materially
+   incomplete. Drop it once nothing is left.
+
+Avoid enumerating every method, variant, or edge case handled. If the
+implementation is complete and unremarkable, a one-line entry is fine.
+
 ## Planning New Features
 
 When implementing a new feature from the spec:

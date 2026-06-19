@@ -30,7 +30,7 @@ use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
 use super::mapping::MapFunction;
 use super::prim_index::find_layer_id;
-use super::relocates::{chain_through_relocates, validate_layer_relocates};
+use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
 use super::{effective_time_codes_per_second, Error};
 
 /// A cheap, `Copy` handle identifying a layer within a `LayerGraph`.
@@ -108,9 +108,10 @@ pub(crate) struct LayerNode {
     /// offset for that hop (the authored `subLayerOffset` with the
     /// time-codes-per-second retiming folded in, per spec 10.3.1.1 / 12.3.2).
     pub children: Vec<(LayerId, LayerOffset)>,
-    /// The validated authored `layerRelocates` pairs `(source, target)` in this
-    /// layer's own namespace (conflicting and structurally invalid pairs already
-    /// dropped). Empty when the layer authors none.
+    /// The structurally valid authored `layerRelocates` pairs `(source, target)`
+    /// in this layer's own namespace. Stack queries apply duplicate-source and
+    /// conflict rules for the ambient layer stack. Empty when the layer authors
+    /// none.
     pub relocates: RelocateList,
 }
 
@@ -174,8 +175,8 @@ pub(crate) struct LayerGraph {
     /// [`sublayer_stacks`](Self::sublayer_stacks). Every per-prim build reads it,
     /// so caching it avoids re-allocating the same Vec per prim.
     root_stack: Vec<(LayerId, LayerOffset)>,
-    /// Whether any node authors validated relocates. The indexer reads this to
-    /// gate its relocate passes without rescanning.
+    /// Whether any node keeps structurally valid authored relocates. The indexer
+    /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
     /// Sublayer-cycle diagnostics reachable from the root layer, replaced wholesale
     /// by [`build_sublayer_edges`](Self::build_sublayer_edges) on every edge
@@ -492,7 +493,7 @@ impl LayerGraph {
         self.load_payloads
     }
 
-    /// Whether any layer authors validated relocates.
+    /// Whether any layer keeps structurally valid authored relocates.
     pub(crate) fn has_relocates(&self) -> bool {
         self.has_relocates
     }
@@ -643,33 +644,34 @@ impl LayerGraph {
         self.root_layer_stack().iter().map(|&(id, _)| id).collect()
     }
 
-    /// Rebuilds the sublayer edges and the validated relocate data from the
-    /// current layer data, refreshing both [`cycle_errors`](Self::cycle_errors)
-    /// and [`relocate_errors`](Self::relocate_errors). Called after a `subLayers`
-    /// / `subLayerOffsets` edit, where the graph's edges may be stale.
+    /// Rebuilds the sublayer edges and relocate data from the current layer
+    /// data, refreshing both [`cycle_errors`](Self::cycle_errors) and
+    /// [`relocate_errors`](Self::relocate_errors). Called after a
+    /// `subLayers`/`subLayerOffsets` edit, where the graph's edges may be stale.
     pub(crate) fn recompute_sublayers(&mut self) {
         self.build_sublayer_edges();
         self.recompute_relocates();
     }
 
-    /// Re-derives every node's validated relocate pairs from its current layer
-    /// data, replacing [`relocate_errors`](Self::relocate_errors) with the
-    /// recoverable relocate diagnostics (C++ `PcpErrorInvalidAuthoredRelocates`
-    /// and conflict diagnostics). Run once at construction and again whenever a
-    /// `subLayers`/`layerRelocates` edit lands.
+    /// Re-derives every node's structurally valid relocate pairs from its
+    /// current layer data, replacing [`relocate_errors`](Self::relocate_errors)
+    /// with the recoverable relocate diagnostics (C++
+    /// `PcpErrorInvalidAuthoredRelocates` and conflict diagnostics). Run once at
+    /// construction and again whenever a `subLayers`/`layerRelocates` edit
+    /// lands.
     ///
-    /// Returns the layers whose validated relocates changed, so a mute toggle
+    /// Returns the layers whose cached relocate pairs changed, so a mute toggle
     /// can fan out to the prims reading them (see
     /// [`recompose_for_mute_with_fanout`](Self::recompose_for_mute_with_fanout))
     /// without a separate before/after snapshot. Validation reads only authored
-    /// layer data, so each layer's new pairs are moved out of `validated` rather
-    /// than cloned.
+    /// layer data, so each layer's new pairs are moved out of `relocates` into
+    /// the node cache.
     pub(crate) fn recompute_relocates(&mut self) -> HashSet<LayerId> {
-        let (mut validated, errors) = validate_layer_relocates(self);
+        let (mut relocates, errors) = validate_layer_relocates(self);
         self.has_relocates = false;
         let mut changed = HashSet::new();
         for &id in &self.order {
-            let pairs = validated.remove(&id).unwrap_or_default();
+            let pairs = relocates.remove(&id).unwrap_or_default();
             self.has_relocates |= !pairs.is_empty();
             let node = self.nodes.get_mut(&id).expect("layer node exists");
             if node.relocates != pairs {
@@ -690,16 +692,17 @@ impl LayerGraph {
         self.cycle_errors.iter().chain(&self.relocate_errors).cloned().collect()
     }
 
-    /// The set of layer-id sets, one per sublayer stack (one rooted at each
-    /// layer) plus the stage root stack. Used to scope relocate conflicts to
-    /// within a single layer stack (C++ `Pcp_ComputeRelocationsForLayerStack`).
-    pub(crate) fn relocate_conflict_scopes(&self) -> Vec<HashSet<LayerId>> {
-        let mut scopes: Vec<HashSet<LayerId>> = self
+    /// The ordered layer-id stacks, one per sublayer stack (one rooted at each
+    /// layer) plus the stage root stack. Used to scope relocate conflicts and
+    /// duplicate-source strength to a single layer stack (C++
+    /// `Pcp_ComputeRelocationsForLayerStack`).
+    pub(crate) fn relocate_conflict_scopes(&self) -> Vec<Vec<LayerId>> {
+        let mut scopes: Vec<Vec<LayerId>> = self
             .order
             .iter()
-            .map(|&id| self.sublayer_stack(id).iter().map(|&(l, _)| l).collect())
+            .map(|&id| self.sublayer_stack(id).iter().map(|&(layer, _)| layer).collect())
             .collect();
-        scopes.push(self.local_layers());
+        scopes.push(self.root_layer_stack().iter().map(|&(id, _)| id).collect());
         scopes
     }
 
@@ -707,15 +710,11 @@ impl LayerGraph {
     /// prim onto it (C++ `GetIncrementalRelocatesTargetToSource`). The strongest
     /// layer wins a collision; a deletion relocate has no target and is skipped.
     pub(crate) fn relocation_source(&self, ambient: LayerStackId, target: &Path) -> Option<Path> {
-        for &(layer, _) in self.layer_stack(ambient) {
-            let Some(node) = self.nodes.get(&layer) else {
-                continue;
-            };
-            if let Some((source, _)) = node.relocates.iter().find(|(_, t)| !t.is_empty() && t == target) {
-                return Some(source.clone());
-            }
-        }
-        None
+        self.incremental_relocate_entries(ambient)
+            .into_iter()
+            .find_map(|(source, relocate_target, _)| {
+                (!relocate_target.is_empty() && relocate_target == *target).then_some(source)
+            })
     }
 
     /// The relocation [`MapFunction`] applying at `path` in the layer stack
@@ -741,21 +740,29 @@ impl LayerGraph {
         Some(MapFunction::new(pairs))
     }
 
-    /// The as-authored relocates of `ambient`, strongest layer first, duplicate
-    /// sources dropped (C++ `GetIncrementalRelocates*`). Not chained.
-    fn incremental_relocates(&self, ambient: LayerStackId) -> RelocateList {
-        let mut pairs: RelocateList = Vec::new();
+    /// The stack-effective relocates of `ambient`, strongest layer first, after
+    /// duplicate-source and conflict dropping (C++ `GetIncrementalRelocates*`).
+    /// Not chained.
+    fn incremental_relocate_entries(&self, ambient: LayerStackId) -> Vec<(Path, Path, LayerId)> {
+        let mut entries: Vec<(Path, Path, LayerId)> = Vec::new();
         for &(layer, _) in self.layer_stack(ambient) {
             let Some(node) = self.nodes.get(&layer) else {
                 continue;
             };
             for (source, target) in &node.relocates {
-                if !pairs.iter().any(|(s, _)| s == source) {
-                    pairs.push((source.clone(), target.clone()));
-                }
+                entries.push((source.clone(), target.clone(), layer));
             }
         }
-        pairs
+        let pairs: RelocateList = entries
+            .iter()
+            .map(|(source, target, _)| (source.clone(), target.clone()))
+            .collect();
+        let status = analyze_relocate_occurrences(&pairs);
+        entries
+            .into_iter()
+            .zip(status)
+            .filter_map(|(entry, status)| status.is_active().then_some(entry))
+            .collect()
     }
 
     /// Chains the per-layer authored relocates of `ambient` into a single
@@ -765,7 +772,11 @@ impl LayerGraph {
     /// pre-relocation-source → final-target pair so a single map application
     /// reaches the final location through nested relocates.
     pub(crate) fn combined_relocates(&self, ambient: LayerStackId) -> RelocateList {
-        let mut pairs = self.incremental_relocates(ambient);
+        let mut pairs: RelocateList = self
+            .incremental_relocate_entries(ambient)
+            .into_iter()
+            .map(|(source, target, _)| (source, target))
+            .collect();
         let snapshot = pairs.clone();
         for (source, target) in pairs.iter_mut() {
             if target.is_empty() {
@@ -821,12 +832,11 @@ impl LayerGraph {
     /// Identifier of the strongest layer in `ambient` that authors a relocate
     /// whose SOURCE is `source`, or `None`.
     pub(crate) fn relocation_source_layer(&self, ambient: LayerStackId, source: &Path) -> Option<&str> {
-        self.layer_stack(ambient).iter().find_map(|&(layer, _)| {
-            self.nodes
-                .get(&layer)
-                .filter(|node| node.relocates.iter().any(|(s, _)| s == source))
-                .map(|node| node.layer.identifier())
-        })
+        self.incremental_relocate_entries(ambient)
+            .into_iter()
+            .find_map(|(relocate_source, _, layer)| {
+                (relocate_source == *source).then(|| self.layer(layer).identifier())
+            })
     }
 
     /// Ensures `layer` is present as a graph node, returning `(id, fresh)` where
@@ -883,18 +893,11 @@ impl LayerGraph {
     /// Recomposes the muting-dependent graph state for a just-changed muted set
     /// and returns the layers whose cached prim indices the toggle of
     /// `identifier` can invalidate: the structural [`mute_fanout`](Self::mute_fanout)
-    /// plus any layer whose validated relocates the recompose changed.
+    /// plus any layer whose cached relocate pairs the recompose changed.
     ///
-    /// Relocate conflicts are scoped per layer stack
-    /// ([`relocate_conflict_scopes`](Self::relocate_conflict_scopes)), so muting a
-    /// layer can re-validate the relocates of a layer *outside* the muted subtree
-    /// — two relocates that conflicted only by co-occurring in the muted layer's
-    /// stack become valid once it is pruned. A prim composing against such a layer
-    /// through a separate arc keeps no muted layer in its node stacks, so the
-    /// structural fanout alone would leave it cached with the old relocate
-    /// structure. The recompose reports exactly the layers whose validated
-    /// relocates flipped, and the prims that read them are then found by their
-    /// node stacks.
+    /// Relocate extraction omits muted layers and refreshes diagnostics in the
+    /// graph. Any layer whose cached relocate pairs change is added to the
+    /// fanout so dependent prims rebuild against the current stack state.
     fn recompose_for_mute_with_fanout(&mut self, identifier: &str) -> HashSet<LayerId> {
         let mut affected = self.mute_fanout(identifier);
         affected.extend(self.recompose_for_mute());
@@ -992,7 +995,7 @@ impl LayerGraph {
     /// changes: the sublayer stacks (rebuilding re-resolves the muted ids), the
     /// sublayer-cycle diagnostics (a cycle through a muted layer no longer
     /// composes), and the relocates, whose validation and conflict scopes both
-    /// drop muted layers. Returns the layers whose validated relocates changed
+    /// drop muted layers. Returns the layers whose cached relocate pairs changed
     /// (from [`recompute_relocates`](Self::recompute_relocates)).
     fn recompose_for_mute(&mut self) -> HashSet<LayerId> {
         self.rebuild_sublayer_stacks();
@@ -1176,13 +1179,10 @@ mod tests {
         assert!(!graph.errors().is_empty(), "unmuting restores the cycle diagnostic");
     }
 
-    /// Muting a layer whose stack scopes a relocate conflict re-validates the
-    /// relocates of layers outside its subtree, so the returned fanout must
-    /// include those layers — a prim composing against one of them through a
-    /// separate arc keeps no muted layer in its node stacks and would otherwise
-    /// stay cached with the pre-mute relocate structure.
+    /// Relocate conflicts are scoped to the stack being composed. A layer that is
+    /// weak in one stack can still contribute when referenced as its own stack.
     #[test]
-    fn mute_fanout_includes_relocate_revalidated() {
+    fn mute_keeps_relocate_scope() {
         let reloc = |id: &str, source: &str, target: &str| {
             let mut layer = sdf::Layer::new_in_memory(id);
             edit_layer(&mut layer, |e| {
@@ -1201,22 +1201,33 @@ mod tests {
         let s1 = reloc("s1.usda", "/W/A", "/W/C");
         let s2 = reloc("s2.usda", "/W/B", "/W/C");
         let mut graph = LayerGraph::from_layers(vec![root, combo, s1, s2], 0, Box::new(DefaultResolver::new()), true);
-        let (s1_id, s2_id) = (graph.id_of("s1.usda").unwrap(), graph.id_of("s2.usda").unwrap());
-        assert!(
-            graph.get(s1_id).unwrap().relocates.is_empty(),
-            "the same-target conflict drops s1's relocate up front"
+        let combo_id = graph.id_of("combo.usda").unwrap();
+        let s1_id = graph.id_of("s1.usda").unwrap();
+        let s2_id = graph.id_of("s2.usda").unwrap();
+
+        assert_eq!(
+            graph.relocation_source(graph.sublayer_stack_id(combo_id), &Path::new("/W/C").unwrap()),
+            None,
+            "combo's stack drops the same-target relocates"
+        );
+        assert_eq!(
+            graph.relocation_source(graph.sublayer_stack_id(s1_id), &Path::new("/W/C").unwrap()),
+            Some(Path::new("/W/A").unwrap()),
+            "s1's own stack keeps its authored relocate active"
         );
 
         let affected = graph
             .mute_layer("combo.usda".to_string())
             .expect("muting combo changed the set");
-        assert!(
-            affected.contains(&s1_id) && affected.contains(&s2_id),
-            "muting the conflict scope re-validates s1/s2, so both must be in the fanout"
+        assert_eq!(
+            affected,
+            HashSet::from([combo_id]),
+            "muting combo affects only stacks that include combo"
         );
-        assert!(
-            !graph.get(s1_id).unwrap().relocates.is_empty(),
-            "s1's relocate is valid again once combo's stack no longer scopes the conflict"
+        assert_eq!(
+            graph.relocation_source(graph.sublayer_stack_id(s2_id), &Path::new("/W/C").unwrap()),
+            Some(Path::new("/W/B").unwrap()),
+            "s2's own stack keeps its authored relocate active"
         );
     }
 }

@@ -55,7 +55,7 @@
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
-//! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Read the `LayerGraph`'s validated relocates directly; all data passed through parameters. |
+//! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Layer-authored pairs and stack-effective queries are read from `LayerGraph`; all data is passed through parameters. |
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //!
 //! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
@@ -285,6 +285,7 @@ pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub use prim_index::PrimIndex;
+pub(crate) use relocates::{analyze_relocate_occurrences, first_unrepresentable_relocate, BatchRelocate};
 
 /// Maps variant set names to ordered lists of fallback selections.
 ///
@@ -788,9 +789,79 @@ mod tests {
             "relocates in one sublayer stack must conflict"
         );
         assert_eq!(
-            relocate_count(&graph),
-            0,
+            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/C").unwrap()),
+            None,
             "every relocate sharing the target is dropped"
+        );
+    }
+
+    #[test]
+    fn duplicate_sublayer_relocate() {
+        let root = layer(
+            "root.usda",
+            r#"#usda 1.0
+(
+    subLayers = [@sub.usda@, @sub.usda@]
+)
+"#,
+        );
+        let sub = layer(
+            "sub.usda",
+            r#"#usda 1.0
+(
+    relocates = { </Ref/Orig>: </Ref/Geom> }
+)
+"#,
+        );
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+
+        assert!(
+            !graph
+                .errors()
+                .iter()
+                .any(|error| matches!(error, Error::SameTargetRelocations { .. })),
+            "a repeated sublayer has one authored relocate occurrence"
+        );
+        assert_eq!(
+            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/Ref/Geom").unwrap()),
+            Some(Path::new("/Ref/Orig").unwrap())
+        );
+    }
+
+    #[test]
+    fn duplicate_source_conflict() {
+        let root = layer(
+            "root.usda",
+            r#"#usda 1.0
+(
+    subLayers = [@sub.usda@]
+    relocates = {
+        </World/A>: </World/T>,
+        </World/B>: </World/T>
+    }
+)
+"#,
+        );
+        let sub = layer(
+            "sub.usda",
+            r#"#usda 1.0
+(
+    relocates = { </World/A>: </World/U> }
+)
+"#,
+        );
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+
+        assert_eq!(
+            graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/U").unwrap()),
+            None,
+            "weaker duplicate source must stay dropped even when the stronger occurrence conflicts"
+        );
+        let sub = graph.id_of("sub.usda").expect("sub layer");
+        assert_eq!(
+            graph.relocation_source(graph.sublayer_stack_id(sub), &Path::new("/World/U").unwrap()),
+            Some(Path::new("/World/A").unwrap()),
+            "duplicate-source dropping is scoped to the stack being composed"
         );
     }
 

@@ -263,8 +263,8 @@ impl Changes {
         }
         // A `subLayers`/`subLayerOffsets` edit rebuilds the graph's sublayer
         // edges (which subsumes the relocate recompute); a `layerRelocates`-only
-        // edit refreshes just the validated relocates. Each refreshes the graph's
-        // own diagnostic buckets in place; the cache holds no copy.
+        // edit refreshes the cached authored relocates. Each refreshes the
+        // graph's own diagnostic buckets in place; the cache holds no copy.
         if self
             .layer_stack
             .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)

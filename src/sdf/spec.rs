@@ -614,7 +614,9 @@ where
         self.set(sdf::FieldKey::SubLayers.as_str(), sdf::Value::StringVec(paths));
     }
 
-    /// Replace this layer's namespace relocations with `relocates`.
+    /// Replace this layer's namespace relocations with `relocates`. An empty list
+    /// authors an explicit "no relocates" opinion, distinct from clearing the
+    /// field, which removes the opinion entirely.
     pub fn set_relocates(&mut self, relocates: sdf::RelocateList) {
         self.set(sdf::FieldKey::LayerRelocates.as_str(), sdf::Value::Relocates(relocates));
     }

@@ -5,10 +5,11 @@
 //! computing effective relocates in composed namespace
 //! ([`effective_relocates`]), chaining transitive relocates
 //! ([`chain_through_relocates`]), and folding relocated child names
-//! ([`apply_child_relocates`]). Each reads the validated per-layer relocates
-//! straight off the [`LayerGraph`], so there is no owned state; all external
-//! data (layer graph, cached indices) is passed in through parameters, and
-//! nothing references [`IndexCache`](super::index_cache::IndexCache) directly.
+//! ([`apply_child_relocates`]). Layer authored pairs live on the
+//! [`LayerGraph`]; stack-effective queries apply duplicate-source and conflict
+//! rules for the layer stack being composed. All external data (layer graph,
+//! cached indices) is passed in through parameters, and nothing references
+//! [`IndexCache`](super::index_cache::IndexCache) directly.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -16,6 +17,7 @@ use crate::sdf::{self, element_cmp, Path, PathComponent, RelocateList};
 use crate::tf::Token;
 
 use super::layer_graph::LayerGraph;
+use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
@@ -23,6 +25,27 @@ use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
 /// Per-layer authored relocates, keyed by layer id.
 pub(crate) type LayerRelocates = HashMap<LayerId, RelocateList>;
+
+/// Whether an authored relocate occurrence contributes to Pcp's composed
+/// relocate map for one layer stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RelocateOccurrence {
+    /// The occurrence survives extraction and contributes to composition.
+    Active,
+    /// The source/target pair is structurally invalid before conflict checks.
+    DroppedStructural,
+    /// A stronger occurrence with the same source already contributes.
+    DroppedDuplicateSource,
+    /// The occurrence conflicts with another structurally valid occurrence.
+    DroppedConflict,
+}
+
+impl RelocateOccurrence {
+    /// Whether this occurrence survives extraction.
+    pub(crate) fn is_active(self) -> bool {
+        self == RelocateOccurrence::Active
+    }
+}
 
 /// Follows `path` to its final location through a set of relocates, applying the
 /// longest matching source prefix at each step until it reaches a fixed point.
@@ -161,9 +184,8 @@ pub(crate) fn apply_child_relocates(
 /// layer stack via [`LayerGraph::relocate_conflict_scopes`].
 pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, Vec<Error>) {
     let mut errors = Vec::new();
-    // Collect every structurally valid authored relocate across the layer stack,
-    // recording its layer; cross-relocate conflicts are checked over the whole set
-    // ("in the same layer stack"). Each structurally invalid pair is reported here.
+    // Collect every structurally valid authored relocate, recording its layer.
+    // Conflict diagnostics are computed over the layer-stack scopes below.
     let mut all: Vec<(Path, Path, LayerId, String)> = Vec::new();
     for &id in graph.all_ids() {
         // A muted layer contributes nothing, including its authored relocates and
@@ -185,102 +207,89 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
         }
     }
 
-    let scopes = graph.relocate_conflict_scopes();
-    let same_stack = |i: usize, j: usize| {
-        let left = all[i].2;
-        let right = all[j].2;
-        scopes
-            .iter()
-            .any(|scope| scope.contains(&left) && scope.contains(&right))
-    };
-    let conflicting = detect_relocate_conflicts(&all, &same_stack, &mut errors);
+    let mut by_layer: HashMap<LayerId, Vec<usize>> = HashMap::new();
+    for (idx, (_, _, layer_id, _)) in all.iter().enumerate() {
+        by_layer.entry(*layer_id).or_default().push(idx);
+    }
+    let scope_indices: Vec<Vec<usize>> = graph
+        .relocate_conflict_scopes()
+        .into_iter()
+        .map(|scope| {
+            let mut seen = HashSet::new();
+            scope
+                .into_iter()
+                .flat_map(|layer| by_layer.get(&layer).into_iter().flatten().copied())
+                .filter(|idx| seen.insert(*idx))
+                .collect()
+        })
+        .collect();
+    detect_relocate_conflicts(&all, &scope_indices, &mut errors);
+
     let mut out: LayerRelocates = HashMap::new();
-    for (idx, (source, target, layer_id, _)) in all.into_iter().enumerate() {
-        if !conflicting.contains(&idx) {
-            out.entry(layer_id).or_default().push((source, target));
-        }
+    for (source, target, layer_id, _) in all {
+        out.entry(layer_id).or_default().push((source, target));
     }
     (out, errors)
 }
 
 /// Detects cross-relocate conflicts over the layer stack's structurally valid
 /// relocates (C++ `Pcp_ComputeRelocationsForLayerStackWorkspace`'s conflict
-/// validation), returning the indices of every conflicting relocate and pushing
-/// an error for each. `same_stack(i, j)` reports whether `all[i]` and `all[j]`
-/// were authored in the same layer stack. Grouped same-target errors come first
+/// validation), pushing an error for each conflict. Each scope lists indices in
+/// authored strength order. Grouped same-target errors come first
 /// (target-sorted), then the pairwise conflicts sorted by `(source, reason,
-/// conflict source)`. A conflicting relocate is dropped from the composed map.
-fn detect_relocate_conflicts(
-    all: &[(Path, Path, LayerId, String)],
-    same_stack: &dyn Fn(usize, usize) -> bool,
-    errors: &mut Vec<Error>,
-) -> HashSet<usize> {
-    let mut conflicting = HashSet::new();
+/// conflict source)`. Conflict and duplicate-source dropping happen when
+/// composing a specific layer stack; the layer cache keeps the structurally
+/// valid authored pairs.
+fn detect_relocate_conflicts(all: &[(Path, Path, LayerId, String)], scopes: &[Vec<usize>], errors: &mut Vec<Error>) {
+    // TODO: Diagnostics currently group raw authored occurrences, so weaker
+    // duplicate-source relocates can make active stack-effective relocates look
+    // conflicting. Filter each scope through the duplicate-source
+    // classification used by `analyze_relocate_occurrences` before same-target
+    // and pairwise conflict reporting.
 
     // Multiple sources moving to the same target: all of them are invalid.
-    let mut by_target: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
-    for (idx, (_, target, _, _)) in all.iter().enumerate() {
-        if !target.is_empty() {
-            by_target.entry(target.clone()).or_default().push(idx);
-        }
-    }
-    for (target, idxs) in &by_target {
-        let mut remaining = idxs.clone();
-        while let Some(seed) = remaining.pop() {
-            let mut group = vec![seed];
-            let mut changed = true;
-            while changed {
-                changed = false;
-                let mut i = 0;
-                while i < remaining.len() {
-                    if group.iter().any(|&member| same_stack(member, remaining[i])) {
-                        group.push(remaining.swap_remove(i));
-                        changed = true;
-                    } else {
-                        i += 1;
-                    }
-                }
+    let mut same_target_errors: Vec<(Path, Vec<usize>)> = Vec::new();
+    let mut seen_same_target: HashSet<(Path, Vec<usize>)> = HashSet::new();
+    for scope in scopes {
+        let mut by_target: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
+        for &idx in scope {
+            let target = &all[idx].1;
+            if !target.is_empty() {
+                by_target.entry(target.clone()).or_default().push(idx);
             }
+        }
+        for (target, mut group) in by_target {
             if group.len() <= 1 {
                 continue;
             }
-            let mut sources: Vec<(Path, String)> =
-                group.iter().map(|&i| (all[i].0.clone(), all[i].3.clone())).collect();
-            sources.sort_by(|a, b| a.0.cmp(&b.0));
-            errors.push(Error::SameTargetRelocations {
-                target: target.clone(),
-                sources,
-            });
-            conflicting.extend(group);
+            group.sort_unstable();
+            if seen_same_target.insert((target.clone(), group.clone())) {
+                same_target_errors.push((target, group));
+            }
         }
     }
+    same_target_errors.sort_by(|a, b| a.0.cmp(&b.0));
+    for (target, group) in same_target_errors {
+        let mut sources: Vec<(Path, String)> = group.iter().map(|&i| (all[i].0.clone(), all[i].3.clone())).collect();
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        errors.push(Error::SameTargetRelocations { target, sources });
+    }
 
-    // Pairwise conflicts: a relocate's target is another's source, or its source
-    // or target is a strict descendant of another's source. Emitted sorted by
-    // (source, reason, conflict source) — `RelocateConflictReason`'s declaration
-    // order is the tie-break order.
+    // Pairwise conflicts, emitted sorted by (source, reason, conflict source) —
+    // `RelocateConflictReason`'s declaration order is the tie-break order.
     // TODO(perf): O(n^2) over the layer stack's relocates; runs once at extraction
     // (not a query hot path) and n is small, but a group-by-source/prefix index
     // would make it near-linear if a stack ever authors many relocates.
     let mut pairwise: Vec<(usize, usize, RelocateConflictReason)> = Vec::new();
-    for i in 0..all.len() {
-        for j in 0..all.len() {
-            if i == j || !same_stack(i, j) {
-                continue;
-            }
-            let (si, ti) = (&all[i].0, &all[i].1);
-            let (sj, tj) = (&all[j].0, &all[j].1);
-            if !ti.is_empty() && ti == sj {
-                pairwise.push((i, j, RelocateConflictReason::TargetIsSource));
-            }
-            if !tj.is_empty() && si == tj {
-                pairwise.push((i, j, RelocateConflictReason::SourceIsTarget));
-            }
-            if !ti.is_empty() && ti != sj && ti.has_prefix(sj) {
-                pairwise.push((i, j, RelocateConflictReason::TargetDescendant));
-            }
-            if si != sj && si.has_prefix(sj) {
-                pairwise.push((i, j, RelocateConflictReason::SourceDescendant));
+    for scope in scopes {
+        for &i in scope {
+            for &j in scope {
+                if i == j {
+                    continue;
+                }
+                for reason in relocate_pair_conflicts(&all[i].0, &all[i].1, &all[j].0, &all[j].1) {
+                    push_pairwise_conflict(&mut pairwise, i, j, reason);
+                }
             }
         }
     }
@@ -301,10 +310,155 @@ fn detect_relocate_conflicts(
             other_layer: all[j].3.clone(),
             reason,
         });
-        conflicting.insert(i);
+    }
+}
+
+fn push_pairwise_conflict(
+    pairwise: &mut Vec<(usize, usize, RelocateConflictReason)>,
+    i: usize,
+    j: usize,
+    reason: RelocateConflictReason,
+) {
+    if !pairwise.iter().any(|&(pi, pj, pr)| pi == i && pj == j && pr == reason) {
+        pairwise.push((i, j, reason));
+    }
+}
+
+/// A relocate pair presented to [`first_unrepresentable_relocate`] for
+/// validation, carrying the edit-batch provenance that decides whether a pair
+/// Pcp would drop may be blamed on the batch.
+pub(crate) struct BatchRelocate {
+    /// The relocate's `(source, target)`; an empty target is a deletion.
+    pub pair: (Path, Path),
+    /// Whether the batch created or changed this occurrence. Only a fresh pair
+    /// can be the reported offender: a pair the batch left untouched was
+    /// authored before it and Pcp already tolerates it as a recoverable error.
+    /// Freshness is per occurrence, not per value — a pair the batch changed
+    /// into the same value as another layer's pre-existing one is still fresh
+    /// and still rejected when it conflicts.
+    pub fresh: bool,
+    /// Whether Pcp had already dropped this structurally valid pair before the
+    /// batch. Its continued drop is not the batch's doing, so it is never the
+    /// reported offender; the caller checks separately whether it has become
+    /// newly active.
+    pub dropped_seed: bool,
+}
+
+/// The source path of the first relocate Pcp would reject as authored, treating
+/// `relocates` as one layer stack's pairs classified by `status` (index-aligned),
+/// or `None` if Pcp would accept them all. A pair is rejected when it is
+/// structurally invalid (see [`relocate_invalid_reason`]) or conflicts with
+/// another pair: two non-empty targets coincide, a target is another's source,
+/// a source is another's target, or a source/target is strictly nested in
+/// another pair's source. Lets a writer reject a batch up front rather than
+/// author relocates Pcp would silently drop.
+///
+/// Only a [`fresh`](BatchRelocate::fresh) pair that is not a
+/// [`dropped_seed`](BatchRelocate::dropped_seed) is blamed — the batch answers
+/// only for the occurrences it created or changed, and a fresh pair is rejected
+/// when it conflicts with any surviving pair, including a pre-existing one. The
+/// reasons mirror [`detect_relocate_conflicts`], which reports them for
+/// diagnostics.
+pub(crate) fn first_unrepresentable_relocate(
+    relocates: &[BatchRelocate],
+    status: &[RelocateOccurrence],
+) -> Option<Path> {
+    debug_assert_eq!(relocates.len(), status.len());
+    relocates
+        .iter()
+        .zip(status)
+        .find_map(|(r, status)| (r.fresh && !r.dropped_seed && !status.is_active()).then(|| r.pair.0.clone()))
+}
+
+/// The conflict reasons one structurally valid relocate pair `a = (sa, ta)`
+/// raises against another `b = (sb, tb)` in the same layer stack: `a`'s target
+/// is `b`'s source, `a`'s source is `b`'s target, or `a`'s target/source is a
+/// strict descendant of `b`'s source. The single definition of the pairwise
+/// rule, shared by [`analyze_relocate_occurrences`] and
+/// [`detect_relocate_conflicts`]. Same-target collisions are handled separately,
+/// since several sources sharing one target all drop together.
+fn relocate_pair_conflicts(sa: &Path, ta: &Path, sb: &Path, tb: &Path) -> Vec<RelocateConflictReason> {
+    let mut reasons = Vec::new();
+    if !ta.is_empty() && ta == sb {
+        reasons.push(RelocateConflictReason::TargetIsSource);
+    }
+    if !tb.is_empty() && sa == tb {
+        reasons.push(RelocateConflictReason::SourceIsTarget);
+    }
+    if !ta.is_empty() && ta != sb && ta.has_prefix(sb) {
+        reasons.push(RelocateConflictReason::TargetDescendant);
+    }
+    if sa != sb && sa.has_prefix(sb) {
+        reasons.push(RelocateConflictReason::SourceDescendant);
+    }
+    reasons
+}
+
+/// Analyze authored relocate occurrences in one layer stack, in strength order.
+///
+/// Mirrors Pcp extraction in stages: structurally invalid pairs drop first;
+/// duplicate sources keep the strongest structurally valid occurrence and drop
+/// weaker ones; several sources sharing one target all drop; then the surviving
+/// pairs are checked for pairwise conflicts. Duplicate-source occurrences are
+/// removed from conflict checks; conflict-dropped occurrences still participate
+/// so a connected conflict set drops as one unit.
+// TODO(perf): the pairwise pass is O(n^2) over a stack's relocates; n is small
+// and this runs at extraction, but a source/target index would make it linear.
+pub(crate) fn analyze_relocate_occurrences(pairs: &[(Path, Path)]) -> Vec<RelocateOccurrence> {
+    let mut status: Vec<RelocateOccurrence> = pairs
+        .iter()
+        .map(|(source, target)| {
+            if relocate_invalid_reason(source, target).is_some() {
+                RelocateOccurrence::DroppedStructural
+            } else {
+                RelocateOccurrence::Active
+            }
+        })
+        .collect();
+
+    let mut seen_sources: HashSet<&Path> = HashSet::new();
+    for (i, (source, _)) in pairs.iter().enumerate() {
+        if !status[i].is_active() {
+            continue;
+        }
+        if !seen_sources.insert(source) {
+            status[i] = RelocateOccurrence::DroppedDuplicateSource;
+        }
     }
 
-    conflicting
+    let can_conflict: Vec<bool> = status.iter().map(|s| s.is_active()).collect();
+    let mut by_target: HashMap<&Path, Vec<usize>> = HashMap::new();
+    for (i, (_, target)) in pairs.iter().enumerate() {
+        if can_conflict[i] && !target.is_empty() {
+            by_target.entry(target).or_default().push(i);
+        }
+    }
+    for group in by_target.values() {
+        if group.len() > 1 {
+            for &i in group {
+                status[i] = RelocateOccurrence::DroppedConflict;
+            }
+        }
+    }
+
+    for i in 0..pairs.len() {
+        if !can_conflict[i] {
+            continue;
+        }
+        let (si, ti) = (&pairs[i].0, &pairs[i].1);
+        for j in 0..pairs.len() {
+            if i == j || !can_conflict[j] {
+                continue;
+            }
+            let (sj, tj) = (&pairs[j].0, &pairs[j].1);
+            if !relocate_pair_conflicts(si, ti, sj, tj).is_empty() {
+                status[i] = RelocateOccurrence::DroppedConflict;
+                break;
+            }
+        }
+    }
+
+    status
 }
 
 /// The rule an authored relocate `source -> target` violates, or `None` when it
@@ -349,22 +503,18 @@ pub(crate) fn effective_relocates(
     path: &Path,
     indices: &sdf::PathTable<PrimIndex>,
 ) -> RelocateList {
-    let layer_maps = collect_layer_maps(graph, path, indices);
+    let stack_maps = collect_stack_maps(graph, path, indices);
     let mut result: RelocateList = Vec::new();
 
-    for (li, map) in &layer_maps {
-        let relocates = match graph.get(*li) {
-            Some(node) if !node.relocates.is_empty() => &node.relocates,
-            _ => continue,
-        };
-        for (src, tgt) in relocates {
-            let Some(composed_src) = map.map_source_to_target(src) else {
+    for (stack, map) in &stack_maps {
+        for (src, tgt) in graph.combined_relocates(*stack) {
+            let Some(composed_src) = map.map_source_to_target(&src) else {
                 continue;
             };
             let composed_tgt = if tgt.is_empty() {
                 tgt.clone()
             } else {
-                match map.map_source_to_target(tgt) {
+                match map.map_source_to_target(&tgt) {
                     Some(t) => t,
                     None => continue,
                 }
@@ -398,19 +548,19 @@ pub(crate) fn effective_relocates(
     result
 }
 
-/// Collects (layer_index, map_to_root) pairs from ancestor prims and from
+/// Collects (layer-stack, map_to_root) pairs from ancestor prims and from
 /// other cached prims in the same root subtree that have layers with
 /// relocates.
-fn collect_layer_maps(
+fn collect_stack_maps(
     graph: &LayerGraph,
     path: &Path,
     indices: &sdf::PathTable<PrimIndex>,
-) -> Vec<(LayerId, MapFunction)> {
-    let mut maps: Vec<(LayerId, MapFunction)> = Vec::new();
+) -> Vec<(LayerStackId, MapFunction)> {
+    let mut maps: Vec<(LayerStackId, MapFunction)> = Vec::new();
 
-    // Walk up ancestors. A per-site node fans out into every contributing
-    // sublayer so a weaker sublayer that authors `layerRelocates` is mapped
-    // through this node's namespace mapping, not just the representative.
+    // Walk up ancestors. Each node's layer stack is filtered independently, so a
+    // relocate dropped in the root stack can still contribute when that same
+    // layer is referenced as its own stack.
     for (p, cached_index) in indices.ancestors(path) {
         if p.is_abs_root() {
             continue;
@@ -419,10 +569,9 @@ fn collect_layer_maps(
             if node.arc == ArcType::Relocate {
                 continue;
             }
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
-                if !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root) {
-                    maps.push((layer, node.map_to_root.clone()));
-                }
+            let stack = node.layer_stack_id();
+            if !maps.iter().any(|(s, m)| *s == stack && *m == node.map_to_root) {
+                maps.push((stack, node.map_to_root.clone()));
             }
         }
     }
@@ -450,12 +599,13 @@ fn collect_layer_maps(
             if node.arc == ArcType::Relocate {
                 continue;
             }
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
-                if relocate_layers.contains(&layer)
-                    && !maps.iter().any(|(li, m)| *li == layer && *m == node.map_to_root)
-                {
-                    maps.push((layer, node.map_to_root.clone()));
-                }
+            let stack = node.layer_stack_id();
+            let has_relocates = graph
+                .layer_stack(stack)
+                .iter()
+                .any(|&(layer, _)| relocate_layers.contains(&layer));
+            if has_relocates && !maps.iter().any(|(s, m)| *s == stack && *m == node.map_to_root) {
+                maps.push((stack, node.map_to_root.clone()));
             }
         }
     }
@@ -466,6 +616,91 @@ fn collect_layer_maps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Freshness is per occurrence, not per value: an occurrence the batch
+    /// changed into the same pair as an untouched pre-existing one is still
+    /// blamed for the same-target conflict, while two untouched pre-existing
+    /// pairs are Pcp's own recoverable error and are not reported.
+    #[test]
+    fn fresh_value_conflict() {
+        let p = Path::from;
+        let pairs = vec![(p("/W/A"), p("/W/B")), (p("/W/A"), p("/W/B"))];
+        let status = analyze_relocate_occurrences(&pairs);
+        let batch = |fresh: [bool; 2]| -> Vec<BatchRelocate> {
+            pairs
+                .iter()
+                .zip(fresh)
+                .map(|(pair, fresh)| BatchRelocate {
+                    pair: pair.clone(),
+                    fresh,
+                    dropped_seed: false,
+                })
+                .collect()
+        };
+        // Second occurrence changed by the batch into the first's value.
+        assert_eq!(
+            first_unrepresentable_relocate(&batch([false, true]), &status),
+            Some(p("/W/A"))
+        );
+        // Neither changed by the batch: a pre-existing conflict, not reported.
+        assert_eq!(first_unrepresentable_relocate(&batch([false, false]), &status), None);
+    }
+
+    #[test]
+    fn invalid_seed_inactive() {
+        let p = Path::from;
+        let pairs = vec![(p("/A"), p("/B")), (p("/World/A"), p("/World/B"))];
+        assert_eq!(
+            analyze_relocate_occurrences(&pairs),
+            vec![RelocateOccurrence::DroppedStructural, RelocateOccurrence::Active]
+        );
+    }
+
+    #[test]
+    fn conflicting_seeds_inactive() {
+        let p = Path::from;
+        let pairs = vec![
+            (p("/World/A"), p("/World/C")),
+            (p("/World/B"), p("/World/D")),
+            (p("/World/D"), p("/World/C")),
+        ];
+        assert_eq!(
+            analyze_relocate_occurrences(&pairs),
+            vec![
+                RelocateOccurrence::DroppedConflict,
+                RelocateOccurrence::DroppedConflict,
+                RelocateOccurrence::DroppedConflict
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_source_strength() {
+        let p = Path::from;
+        let pairs = vec![(p("/World/A"), p("/World/C")), (p("/World/A"), p("/World/D"))];
+        assert_eq!(
+            analyze_relocate_occurrences(&pairs),
+            vec![RelocateOccurrence::Active, RelocateOccurrence::DroppedDuplicateSource]
+        );
+    }
+
+    #[test]
+    fn duplicate_source_skips_conflict() {
+        let p = Path::from;
+        let pairs = vec![
+            (p("/World/A"), p("/World/C")),
+            (p("/World/A"), p("/World/D")),
+            (p("/World/B"), p("/World/D")),
+        ];
+        assert_eq!(
+            analyze_relocate_occurrences(&pairs),
+            vec![
+                RelocateOccurrence::Active,
+                RelocateOccurrence::DroppedDuplicateSource,
+                RelocateOccurrence::Active,
+            ]
+        );
+    }
 
     /// A relocate is invalid when its source and target are nested within one
     /// another (C++ "the target of a relocate cannot be an ancestor of its
