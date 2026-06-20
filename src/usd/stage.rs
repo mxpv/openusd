@@ -1235,14 +1235,63 @@ impl Stage {
         self.author_on_layer(layer_id, None, f)
     }
 
-    /// Borrow the layer identified by `layer_id` mutably, run `f`, then drive
-    /// cache invalidation from the change list it records. The shared tail of
-    /// [`Self::with_root_layer`], [`Self::with_stage_metadata_layer`], and
-    /// [`Stage::apply_diff`].
+    /// Stage `f`'s edits into the single layer `layer_id` as one atomic
+    /// transaction, then drive cache invalidation from the change list it
+    /// records — or, for a dry run (`commit = false`), stage and discard without
+    /// committing or firing any sink. The shared single-layer transaction core
+    /// behind [`author_on_layer`](Self::author_on_layer) and a mapped namespace
+    /// edit (`apply` commits, `can_apply` dry-runs, both sharing `f` so an error
+    /// surfaces identically).
     ///
-    /// `mapping` is the edit target's namespace mapping, recorded with the edit
-    /// so the composed change keeps full path precision, or `None` when the edit
-    /// authored at stage-namespace paths verbatim.
+    /// `mapping` is the edit target's namespace mapping, recorded with a committed
+    /// edit so the composed change keeps full path precision; a non-identity
+    /// mapping publishes [`Provenance::EditTarget`] so the edit is attributed to
+    /// its variant or arc target. `None` (or an identity mapping) authors at
+    /// stage-namespace paths verbatim. The closure's error type is free (any
+    /// `E: From<sdf::sink::Error>`) so the caller can surface its own validation
+    /// errors through the same transaction.
+    pub(super) fn author_layer_txn<E>(
+        &self,
+        layer_id: pcp::LayerId,
+        mapping: Option<&pcp::MapFunction>,
+        commit: bool,
+        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<sdf::sink::Error>,
+    {
+        let result = {
+            let mut layers = self.layers.borrow_mut();
+            let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
+            if commit {
+                // Publish the provenance for the aggregator firing inside the
+                // commit, cleared on the way out (see [`edit_layer`]).
+                let provenance = mapping
+                    .filter(|m| !m.is_identity())
+                    .map(|m| Provenance::EditTarget(m.clone()));
+                self.edit_provenance.replace(provenance);
+                let _clear = ClearEditProvenance(&self.edit_provenance);
+                sdf::edit_layers(&mut [&mut node.layer], |edits| f(&mut edits[0])).map(|_| ())
+            } else {
+                // A dry run stages to prove the batch applies, then discards it;
+                // no sink sees it, so no provenance is published.
+                sdf::dry_run_layers(&mut [&mut node.layer], |edits| f(&mut edits[0]))
+            }
+        };
+        // A dry run records nothing, so this drains only a real commit's edit.
+        if commit {
+            self.process_pending();
+        }
+        result
+    }
+
+    /// Run `f` as one committed atomic transaction on `layer_id`. The
+    /// [`StageAuthoringError`]-typed convenience over
+    /// [`author_layer_txn`](Self::author_layer_txn) shared by
+    /// [`with_root_layer`](Self::with_root_layer),
+    /// [`with_stage_metadata_layer`](Self::with_stage_metadata_layer), and
+    /// [`apply_diff`](Stage::apply_diff). A multi-edit replay that fails midway
+    /// rolls back wholesale, leaving the layer and cache untouched.
     pub(super) fn author_on_layer<F>(
         &self,
         layer_id: pcp::LayerId,
@@ -1252,16 +1301,9 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
-        // Run `f` as one atomic transaction: a multi-edit replay (`apply_diff`)
-        // that fails midway rolls back wholesale, leaving the layer and cache
-        // untouched.
-        let edited = {
-            let mut layers = self.layers.borrow_mut();
-            let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
-            self.edit_layer(&mut node.layer, mapping, f)
-        };
-        self.process_pending();
-        edited.map(|_| ())
+        self.author_layer_txn(layer_id, mapping, true, |layer| {
+            f(layer).map_err(StageAuthoringError::from)
+        })
     }
 
     /// Run `f` as one atomic [`Layer::edit`](sdf::Layer::edit) on `layer`: commit
@@ -1911,12 +1953,11 @@ impl Stage {
     ///
     /// For property paths (e.g. `/Prim.attr`), checks whether the property
     /// exists in any layer contributing to the owning prim's composition index.
-    pub(crate) fn has_spec(&self, path: impl Into<sdf::Path>) -> Result<bool> {
-        let path = path.into();
+    pub(crate) fn has_spec(&self, path: &sdf::Path) -> Result<bool> {
         if !self.mask_includes(&path.prim_path()) {
             return Ok(false);
         }
-        self.with_cache(|g, c| c.has_spec(g, &path))
+        self.with_cache(|g, c| c.has_spec(g, path))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.

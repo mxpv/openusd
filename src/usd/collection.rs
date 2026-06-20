@@ -454,7 +454,7 @@ pub fn compute_included_paths(stage: &Stage, query: &MembershipQuery, predicate:
     let mut props: Vec<&Path> = query.rule_map.keys().filter(|p| p.is_property_path()).collect();
     props.sort();
     for path in props {
-        if query.is_path_included(path) && stage.has_spec(path.clone())? && seen.insert(path.clone()) {
+        if query.is_path_included(path) && stage.has_spec(path)? && seen.insert(path.clone()) {
             out.push(path.clone());
         }
     }
