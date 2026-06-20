@@ -280,7 +280,7 @@ use crate::sdf::{self, Path, Value};
 pub(crate) use change::Changes;
 pub use change::{CacheChanges, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::LayerGraph;
+pub(crate) use layer_graph::{LayerGraph, LayerStackId};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};

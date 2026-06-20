@@ -305,6 +305,28 @@ pub struct EditTarget {
     /// [`set_edit_target`](Stage::set_edit_target), so an arc target built
     /// against one stage's composition can't silently retarget another's.
     layer_stack: Option<pcp::LayerStackIdentifier>,
+    /// The layer stack this target authors into, captured from the target node
+    /// when known ([`edit_target_for_node`](Stage::edit_target_for_node)), or
+    /// `None` for a target whose stack the namespace editor infers from layer
+    /// membership ([`for_layer`](Self::for_layer) /
+    /// [`for_local_direct_variant`](Self::for_local_direct_variant)). An arc
+    /// target records it so a relocate synthesized for it lands in the right
+    /// stack even when the referenced asset is also a root sublayer — a case
+    /// membership alone cannot disambiguate.
+    authoring_stack: Option<AuthoringStack>,
+}
+
+/// The layer stack an [`EditTarget`] authors into, captured at construction.
+/// Distinguishes the stage root stack from a referenced asset's sublayer stack
+/// so the namespace editor seeds and authors relocates in the correct stack
+/// rather than re-inferring it from which stacks a layer happens to belong to.
+#[derive(Debug, Clone, PartialEq)]
+enum AuthoringStack {
+    /// The stage root layer stack.
+    Root,
+    /// A referenced asset's sublayer stack, rooted at the layer with this
+    /// canonical identifier.
+    Referenced(String),
 }
 
 /// Composition arc kind selecting which arc on a prim an arc-based
@@ -345,6 +367,7 @@ impl EditTarget {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::identity(),
             layer_stack: None,
+            authoring_stack: None,
         }
     }
 
@@ -361,6 +384,7 @@ impl EditTarget {
             layer_identifier: layer_identifier.into(),
             mapping: pcp::MapFunction::from_pair_identity(var_sel_path, stripped),
             layer_stack: None,
+            authoring_stack: None,
         }
     }
 
@@ -465,12 +489,16 @@ impl EditTarget {
                 layer_identifier: String::new(),
                 mapping: pcp::MapFunction::null(),
                 layer_stack: None,
+                authoring_stack: None,
             };
         }
         EditTarget {
             layer_identifier: self.layer_identifier.clone(),
             mapping: weaker.mapping.compose(&self.mapping),
             layer_stack: self.layer_stack.clone().or_else(|| weaker.layer_stack.clone()),
+            // A refinement (a variant) over an arc inherits the arc's authoring
+            // stack: the deeper target's stack when it has one, else the weaker's.
+            authoring_stack: self.authoring_stack.clone().or_else(|| weaker.authoring_stack.clone()),
         }
     }
 }
@@ -783,6 +811,7 @@ impl Stage {
             layer_identifier,
             mapping,
             layer_stack: Some(self.layer_stack_id().clone()),
+            authoring_stack: None,
         }
     }
 
@@ -838,11 +867,18 @@ impl Stage {
             let mut cache = self.cache.borrow_mut();
             cache.edit_target_node_info(&graph, prim_path, |a| arc.matches(a))?
         };
-        let (layer_identifier, mapping) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
+        let (layer_identifier, mapping, stack_root) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
             path: prim_path.clone(),
             arc,
         })?;
-        Ok(self.bound_target(layer_identifier, mapping))
+        let mut target = self.bound_target(layer_identifier, mapping);
+        // Record the node's own layer stack so the namespace editor authors into
+        // it exactly, rather than inferring it from layer membership.
+        target.authoring_stack = Some(match stack_root {
+            None => AuthoringStack::Root,
+            Some(root) => AuthoringStack::Referenced(root),
+        });
+        Ok(target)
     }
 
     /// Replace the current edit target. Subsequent authoring calls write to
@@ -1235,59 +1271,88 @@ impl Stage {
         self.author_on_layer(layer_id, None, f)
     }
 
-    /// Stage `f`'s edits into the single layer `layer_id` as one atomic
-    /// transaction, then drive cache invalidation from the change list it
-    /// records — or, for a dry run (`commit = false`), stage and discard without
-    /// committing or firing any sink. The shared single-layer transaction core
-    /// behind [`author_on_layer`](Self::author_on_layer) and a mapped namespace
-    /// edit (`apply` commits, `can_apply` dry-runs, both sharing `f` so an error
-    /// surfaces identically).
+    /// Stage a batch across `layer_ids` as one atomic transaction, then drive
+    /// cache invalidation from the change lists it records — or, for a dry run
+    /// (`commit = false`), stage and discard without committing or firing any
+    /// sink. The shared transaction core behind
+    /// [`author_on_layer`](Self::author_on_layer) (single-layer) and the
+    /// namespace editor's mapped relocate batch (which authors across the edit
+    /// target's own layer stack: the structural moves land in the target layer
+    /// while the synthesized relocates spread across that stack's layers, all
+    /// committing together). `apply` commits, `can_apply` dry-runs, both sharing
+    /// `f` so an error surfaces identically.
     ///
     /// `mapping` is the edit target's namespace mapping, recorded with a committed
     /// edit so the composed change keeps full path precision; a non-identity
     /// mapping publishes [`Provenance::EditTarget`] so the edit is attributed to
     /// its variant or arc target. `None` (or an identity mapping) authors at
-    /// stage-namespace paths verbatim. The closure's error type is free (any
+    /// stage-namespace paths verbatim. `f` receives the realized layer ids (those
+    /// `layer_ids` with a live layer, dropping any that vanished) paired in order
+    /// with their [`sdf::LayerEdit`]s. The closure's error type is free (any
     /// `E: From<sdf::sink::Error>`) so the caller can surface its own validation
     /// errors through the same transaction.
-    pub(super) fn author_layer_txn<E>(
+    pub(super) fn author_layers_txn<E>(
         &self,
-        layer_id: pcp::LayerId,
+        layer_ids: &[pcp::LayerId],
         mapping: Option<&pcp::MapFunction>,
         commit: bool,
-        f: impl FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), E>,
+        f: impl FnOnce(&[pcp::LayerId], &mut [sdf::LayerEdit<'_>]) -> Result<(), E>,
     ) -> Result<(), E>
     where
         E: From<sdf::sink::Error>,
     {
         let result = {
-            let mut layers = self.layers.borrow_mut();
-            let node = layers.get_mut(layer_id).expect("layer id refers to a live layer");
+            let mut graph = self.layers.borrow_mut();
+            let mut layers: Vec<(pcp::LayerId, &mut sdf::Layer)> = graph.layers_mut(layer_ids).into_iter().collect();
+            // The realized ids, aligned with the edits below: `layers_mut` drops any
+            // id with no live layer, so the closure keys on these rather than the
+            // requested `layer_ids` to stay paired with each `LayerEdit`.
+            let ids: Vec<pcp::LayerId> = layers.iter().map(|(id, _)| *id).collect();
+            let mut batch: Vec<&mut sdf::Layer> = layers.iter_mut().map(|(_, layer)| &mut **layer).collect();
             if commit {
-                // Publish the provenance for the aggregator firing inside the
-                // commit, cleared on the way out (see [`edit_layer`]).
                 let provenance = mapping
                     .filter(|m| !m.is_identity())
                     .map(|m| Provenance::EditTarget(m.clone()));
                 self.edit_provenance.replace(provenance);
                 let _clear = ClearEditProvenance(&self.edit_provenance);
-                sdf::edit_layers(&mut [&mut node.layer], |edits| f(&mut edits[0])).map(|_| ())
+                sdf::edit_layers(&mut batch, |edits| f(&ids, edits)).map(|_| ())
             } else {
-                // A dry run stages to prove the batch applies, then discards it;
-                // no sink sees it, so no provenance is published.
-                sdf::dry_run_layers(&mut [&mut node.layer], |edits| f(&mut edits[0]))
+                sdf::dry_run_layers(&mut batch, |edits| f(&ids, edits))
             }
         };
-        // A dry run records nothing, so this drains only a real commit's edit.
         if commit {
             self.process_pending();
         }
         result
     }
 
-    /// Run `f` as one committed atomic transaction on `layer_id`. The
-    /// [`StageAuthoringError`]-typed convenience over
-    /// [`author_layer_txn`](Self::author_layer_txn) shared by
+    /// The handle for the layer stack the mapped edit `target_layer` writes
+    /// into — the stack a relocate synthesized for that target must land in. An
+    /// arc target carries its [`AuthoringStack`] from construction, so it resolves
+    /// exactly (the referenced asset's stack even when that asset is also a root
+    /// sublayer); a target without one (a local or variant target) is inferred
+    /// from layer membership — the root stack when `target_layer` belongs to it,
+    /// else the sublayer stack rooted at it. Per spec §10.3.2.6, relocates take
+    /// effect in the stack where the bringing-in arc is authored, so this is
+    /// where the editor seeds and authors the mapped relocate plan; resolve it to
+    /// member layer ids with
+    /// [`LayerGraph::layer_stack`](crate::pcp::LayerGraph::layer_stack).
+    pub(super) fn mapped_target_stack_id(&self, target_layer: pcp::LayerId) -> pcp::LayerStackId {
+        let graph = self.layers();
+        match &self.edit_target.borrow().authoring_stack {
+            Some(AuthoringStack::Root) => graph.root_layer_stack_id(),
+            Some(AuthoringStack::Referenced(root)) => match graph.id_of(root) {
+                Some(root_id) => graph.sublayer_stack_id(root_id),
+                None => graph.sublayer_stack_id(target_layer),
+            },
+            None if graph.root_layer_stack().iter().any(|&(id, _)| id == target_layer) => graph.root_layer_stack_id(),
+            None => graph.sublayer_stack_id(target_layer),
+        }
+    }
+
+    /// Run `f` as one committed atomic transaction on the single layer
+    /// `layer_id`. The [`StageAuthoringError`]-typed, single-layer convenience
+    /// over [`author_layers_txn`](Self::author_layers_txn) shared by
     /// [`with_root_layer`](Self::with_root_layer),
     /// [`with_stage_metadata_layer`](Self::with_stage_metadata_layer), and
     /// [`apply_diff`](Stage::apply_diff). A multi-edit replay that fails midway
@@ -1301,8 +1366,8 @@ impl Stage {
     where
         F: FnOnce(&mut sdf::LayerEdit<'_>) -> Result<(), sdf::AuthoringError>,
     {
-        self.author_layer_txn(layer_id, mapping, true, |layer| {
-            f(layer).map_err(StageAuthoringError::from)
+        self.author_layers_txn(&[layer_id], mapping, true, |_ids, edits| {
+            f(&mut edits[0]).map_err(StageAuthoringError::from)
         })
     }
 
@@ -1404,12 +1469,15 @@ impl Stage {
         // A single edit carries its own provenance: a staged one verbatim, or an
         // unstaged edit (`None`) resolved to `LocalStack` or `DirectLayerEdit` by
         // whether the edited layer is in the local layer stack — a linear scan of
-        // the (small) root stack, run only for that case. A batched namespace edit
-        // records many, all authored in the local (stage) namespace, so the drain
-        // reports as `LocalStack`. Several distinct provenances are only reachable
-        // by interleaving a raw layer edit with a targeted one; there the
-        // dependency-derived composed paths stay correct and only the literal-path
-        // translation drops.
+        // the (small) root stack, run only for that case. A batch records many,
+        // all from one transaction sharing one published provenance carried by the
+        // first committed layer's record: a mapped relocate batch authors every
+        // stack layer in the target's namespace, so that `EditTarget` provenance
+        // translates the merged change's paths, while a local-stack batch stages
+        // none and reports `LocalStack` (its layers share the stage namespace).
+        // Several distinct provenances are only reachable by interleaving a raw
+        // layer edit with a targeted one; there the dependency-derived composed
+        // paths stay correct and only the literal-path translation drops.
         let provenance = if drained.len() == 1 {
             let id = drained[0].0;
             drained[0].2.take().unwrap_or_else(|| {
@@ -1426,7 +1494,10 @@ impl Stage {
                 }
             })
         } else {
-            Provenance::LocalStack
+            drained
+                .iter_mut()
+                .find_map(|(_, _, provenance)| provenance.take())
+                .unwrap_or(Provenance::LocalStack)
         };
         let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
             drained.iter().map(|(id, changes, _)| (*id, changes)).collect();

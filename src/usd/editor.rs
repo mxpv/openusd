@@ -19,14 +19,21 @@
 //! target on the local root layer stack authors across the whole stack, as C++
 //! does: it moves local specs directly and synthesizes `layerRelocates` for
 //! content that arrives across a reference or payload arc. A variant or
-//! cross-arc edit target authors into the single layer it writes to, in that
-//! target's namespace — each edit path mapped through the target — and performs
-//! only direct moves and deletes of content the target reaches: a variant move
-//! lands at the `{set=sel}` paths, a cross-arc move edits the shared source
-//! layer. A mapped target authors no relocates, so it edits only a source the
-//! target layer solely contributes: a source that also composes from another
-//! layer or a deeper arc would survive the single-layer edit and is rejected as
-//! [`RequiresRelocate`](NamespaceEditError::RequiresRelocate), and a move onto a
+//! cross-arc edit target authors into the layer stack it writes to — the
+//! referenced asset's stack for an arc target, the root stack for a variant —
+//! in that target's namespace, with each edit path mapped through the target: a
+//! variant move lands at the `{set=sel}` paths, a cross-arc move edits the
+//! shared source layer.
+//!
+//! A mapped target edits whatever its own layer stack can reach. Content with a
+//! spec in that stack moves or deletes directly across the stack's layers;
+//! content arriving across an arc nested below the target has no spec to move,
+//! so the editor synthesizes a `layerRelocates` pair into the target's stack (in
+//! the target's namespace) — the only stack where, per spec §10.3.2.6, that
+//! relocate takes effect. A source that also composes from a layer stack the
+//! target does not own — a stronger override above a reference target, or a
+//! sibling arc — cannot be expressed through the target's stack and is rejected
+//! ([`RequiresRelocate`](NamespaceEditError::RequiresRelocate)). A move onto a
 //! destination already occupied on the composed stage collides
 //! ([`DestinationExists`](NamespaceEditError::DestinationExists)) rather than
 //! silently merging.
@@ -150,12 +157,13 @@ pub enum NamespaceEditError {
     #[error("path is the wrong namespace kind for this edit (prim vs property)")]
     KindMismatch,
 
-    /// An edit against a mapped (variant or cross-arc) edit target would need a
-    /// relocate to express: the source composes on the stage but has no spec
-    /// reachable through the target, so it arrives across a deeper arc and
-    /// cannot be moved or deleted directly. A mapped target performs only direct
-    /// moves and deletes in v1; synthesizing relocates through a mapped target
-    /// is future work, and this is the seam it fills.
+    /// An edit against a mapped (variant or cross-arc) edit target cannot be
+    /// expressed through the target's own layer stack: the source composes from
+    /// a layer stack the target does not own — a stronger override above a
+    /// reference target, or a sibling arc — so a direct edit would leave it
+    /// composed and no relocate the target's stack can carry would suppress it.
+    /// Content arriving across an arc nested below the target is realized by a
+    /// synthesized relocate instead and does not raise this.
     #[error("the edit at {0} would need a relocate the current edit target cannot author")]
     RequiresRelocate(sdf::Path),
 
@@ -324,10 +332,12 @@ impl NamespaceEditor {
                 per_edit,
             } => self.execute_local_stack(commit, layer_ids, seeds, relocates, per_edit),
             BatchPlan::Mapped {
-                layer_id,
                 target,
                 per_edit,
-            } => self.execute_mapped(commit, layer_id, &target, &per_edit),
+                stack_layer_ids,
+                seeds,
+                relocates,
+            } => self.execute_mapped(commit, &target, &per_edit, stack_layer_ids, seeds, relocates),
         }
     }
 
@@ -388,31 +398,45 @@ impl NamespaceEditor {
         Ok(())
     }
 
-    /// Stage the batch into the single layer a variant or cross-arc edit target
-    /// writes to, in that target's namespace. Each edit's paths are mapped
-    /// through the target ([`MappedEdit`]); the structural moves and deletes
-    /// author directly into the one layer, and embedded paths are fixed up
-    /// through the lift-then-map chain. The mapped authoring shape behind
-    /// [`execute`](Self::execute).
+    /// Stage the batch into the layer a variant or cross-arc edit target writes
+    /// to, in that target's namespace, across the target's own layer stack. Each
+    /// edit's paths are mapped through the target ([`MappedEdit`]); a directly
+    /// reachable source moves or deletes as a spec edit in the target layer, and
+    /// a source arriving across an arc nested below the target is realized by a
+    /// relocate synthesized into the target's layer stack
+    /// ([`RelocateStackPlan`], resolved per stack layer). Embedded paths are
+    /// fixed up through the lift-then-map chain on every stack layer. The mapped
+    /// authoring shape behind [`execute`](Self::execute).
     ///
-    /// A mapped target reaches its content directly, so this performs only
-    /// direct moves and deletes — no relocate synthesis. An edit whose source
-    /// composes only across a deeper arc is rejected
-    /// ([`RequiresRelocate`](NamespaceEditError::RequiresRelocate)) rather than
-    /// authored as a relocate the target's layer stack would not carry.
+    /// The whole batch — spec moves, relocates, and fixups — commits together as
+    /// one atomic transaction over the stack (or dry-runs for
+    /// [`can_apply`](Self::can_apply)). An edit whose source composes from a
+    /// layer stack the target does not own is rejected by
+    /// [`plan_mapped`](Self::plan_mapped) before staging, since no relocate in
+    /// the target's stack can express it.
     fn execute_mapped(
         &self,
         commit: bool,
-        layer_id: pcp::LayerId,
         target: &EditTarget,
         per_edit: &[MappedEdit],
+        stack_layer_ids: Vec<pcp::LayerId>,
+        seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
+        relocates: RelocateStackPlan,
     ) -> Result<(), NamespaceEditError> {
+        let resolved = relocates.resolve(seeds)?;
         self.stage
-            .author_layer_txn(layer_id, Some(target.map_function()), commit, |layer| {
+            .author_layers_txn(&stack_layer_ids, Some(target.map_function()), commit, |ids, edits| {
                 for mapped in per_edit {
-                    apply_mapped_edit(layer, mapped)?;
+                    apply_mapped_edit(edits, mapped)?;
                 }
-                fixup_mapped_paths(layer, target, &self.edits)
+                for (id, layer) in ids.iter().zip(edits.iter_mut()) {
+                    fixup_mapped_paths(layer, target, &self.edits)?;
+                    // The plan owns relocates; the generic fixup leaves them alone.
+                    if let Some(next) = resolved.change_for(*id) {
+                        layer.set_relocates(next).map_err(StageAuthoringError::Layer)?;
+                    }
+                }
+                Ok(())
             })
     }
 
@@ -451,19 +475,7 @@ impl NamespaceEditor {
         // `seeds` (per layer) is the baseline each layer's final list is compared
         // against; the plan tracks per-occurrence freshness so validation blames
         // only the pairs this batch created or changed.
-        let seeds = {
-            let layers = self.stage.layers();
-            let mut seeds: HashMap<pcp::LayerId, sdf::RelocateList> = HashMap::new();
-            for id in &layer_ids {
-                if let Some(node) = layers.get(*id) {
-                    let pairs = node.layer.relocates();
-                    if !pairs.is_empty() {
-                        seeds.insert(*id, pairs);
-                    }
-                }
-            }
-            seeds
-        };
+        let seeds = seed_relocates(&self.stage.layers(), &layer_ids);
         let projection = NamespaceProjection::new(&self.stage);
         let mut relocates = RelocateStackPlan::new(&layer_ids, &seeds, edit_target);
         let mut per_edit: Vec<EditPlan> = Vec::with_capacity(self.edits.len());
@@ -509,42 +521,76 @@ impl NamespaceEditor {
     /// Plan the mapped authoring shape for a variant or cross-arc `target`:
     /// translate each edit's paths into the target layer's namespace, rejecting a
     /// move endpoint the target cannot express
-    /// ([`StageAuthoringError::OutsideEditTarget`]), and record whether each
-    /// source composes and whether each destination is occupied on the composed
-    /// stage. No relocate analysis runs: a mapped target edits only directly
-    /// reachable content.
+    /// ([`StageAuthoringError::OutsideEditTarget`]), classify each source against
+    /// the edit-target node's subtree, and evolve a [`RelocateStackPlan`] over the
+    /// target's own layer stack for the sources that need a relocate.
     ///
-    /// A mapped target authors a direct single-layer edit, so it can represent a
-    /// move or delete only when the target layer is the source's sole contributor.
-    /// A source that also composes from another layer or a deeper arc would
-    /// survive the edit in those other contributors, so it is rejected here as
-    /// [`RequiresRelocate`](NamespaceEditError::RequiresRelocate) rather than
-    /// authored as a partial edit that leaves the prim composed. The
-    /// multi-contributor test is conservative at node granularity (see
-    /// [`NamespaceProjection::multi_contributor`]).
+    /// The target writes into one layer stack — its own. A source's contributing
+    /// opinions are reachable through that stack when they sit at or below the
+    /// edit-target node ([`NamespaceProjection::target_facts`]): a spec in the
+    /// target's own stack moves directly, and content arriving across an arc
+    /// nested below the target is realized by a relocate synthesized into the
+    /// target's stack (in target namespace). A source that also composes from a
+    /// layer stack the target does not own — a stronger override above a
+    /// reference target, or a sibling arc — cannot be expressed through the
+    /// target's stack and is rejected
+    /// ([`RequiresRelocate`](NamespaceEditError::RequiresRelocate)). Per spec
+    /// §10.3.2.6 a relocate only takes effect in the stack where its bringing-in
+    /// arc is authored, so authoring it anywhere else would not relink
+    /// composition.
     fn plan_mapped(&self, layer_id: pcp::LayerId, target: EditTarget) -> Result<BatchPlan, NamespaceEditError> {
         let map = |path: &sdf::Path| {
             target
                 .map_to_spec_path(path)
                 .ok_or_else(|| NamespaceEditError::Stage(StageAuthoringError::OutsideEditTarget { path: path.clone() }))
         };
+        // The target authors into its own layer stack; seed the relocate plan
+        // from that stack's existing pairs, under one graph borrow.
+        let stack_id = self.stage.mapped_target_stack_id(layer_id);
+        let (stack_layer_ids, seeds) = {
+            let layers = self.stage.layers();
+            let ids: Vec<pcp::LayerId> = layers.layer_stack(stack_id).iter().map(|&(id, _)| id).collect();
+            let seeds = seed_relocates(&layers, &ids);
+            (ids, seeds)
+        };
         let projection = NamespaceProjection::new(&self.stage);
+        let mut relocates = RelocateStackPlan::new(&stack_layer_ids, &seeds, layer_id);
         let mut per_edit: Vec<MappedEdit> = Vec::with_capacity(self.edits.len());
+        // TODO(perf): like `plan_local_stack`, each edit rebuilds the composed
+        // index for its source prim (`target_facts` clones the cached index) and
+        // replays the growing `earlier` prefix, making the projection work
+        // O(edits^2); a forward cumulative path projection would make it linear.
         for (i, edit) in self.edits.iter().enumerate() {
             validate_edit_shape(edit)?;
             let earlier = &self.edits[..i];
             let stage_src = edit.source().clone();
             let src = map(&stage_src)?;
             let composed = self.stage.has_spec(&stage_src)?;
-            // A composed source the target layer does not solely own cannot be
-            // moved or deleted as a single-layer edit; expressing it needs a
-            // relocate the mapped target does not author.
-            if composed && projection.multi_contributor(&stage_src, earlier)? {
+            let facts = projection.target_facts(&stage_src, earlier, stack_id, &target)?;
+            // A contributor in a layer stack the target does not own survives a
+            // direct edit and cannot be relocated from the target's stack.
+            if facts.outside {
                 return Err(NamespaceEditError::RequiresRelocate(stage_src));
             }
+            // A masking relocate target cannot be moved or deleted as one
+            // relocate: doing so reveals the masked plain content at the old path.
+            if facts.masks {
+                return Err(NamespaceEditError::UnrepresentableRelocateBatch(stage_src));
+            }
+            // Only a prim arriving across an arc below the target needs (and can
+            // carry) a relocate; a property is moved or deleted directly.
+            let relocated = facts.below_target && !stage_src.is_property_path();
             let (dst, occupied) = match edit {
-                NamespaceEdit::Move { dst, .. } => (Some(map(dst)?), projection.occupied(dst, earlier)?),
-                NamespaceEdit::Delete { .. } => (None, false),
+                NamespaceEdit::Move { dst, .. } => {
+                    let mapped_dst = map(dst)?;
+                    let occupied = projection.occupied(dst, earlier)?;
+                    relocates.record_move(&src, &mapped_dst, relocated)?;
+                    (Some(mapped_dst), occupied)
+                }
+                NamespaceEdit::Delete { .. } => {
+                    relocates.record_delete(&src, relocated)?;
+                    (None, false)
+                }
             };
             per_edit.push(MappedEdit {
                 stage_src,
@@ -552,12 +598,15 @@ impl NamespaceEditor {
                 dst,
                 composed,
                 occupied,
+                relocated,
             });
         }
         Ok(BatchPlan::Mapped {
-            layer_id,
             target,
             per_edit,
+            stack_layer_ids,
+            seeds,
+            relocates,
         })
     }
 
@@ -583,22 +632,56 @@ impl NamespaceEditor {
                 ..
             } => {
                 let resolved = relocates.resolve(seeds)?;
-                let layers = self.stage.layers();
-                let mut result = Vec::new();
-                // TODO(perf): each layer is independent — the spec scan and the
-                // relocate comparison for the layers in `layer_ids` can run in parallel.
-                for id in &layer_ids {
-                    let Some(node) = layers.get(*id) else { continue };
-                    let touches_spec = self.edits.iter().any(|edit| node.layer.data().has_spec(edit.source()));
-                    if touches_spec || resolved.change_for(*id).is_some() {
-                        result.push(layers.identifier(*id).to_string());
-                    }
-                }
-                Ok(result)
+                let sources: Vec<&sdf::Path> = self.edits.iter().map(NamespaceEdit::source).collect();
+                self.touched_layers(&layer_ids, &resolved, &sources, |p| Ok(project_path(p, &self.edits)))
             }
-            // A mapped target authors into exactly the one layer it writes to.
-            BatchPlan::Mapped { layer_id, .. } => Ok(vec![self.stage.layers().identifier(layer_id).to_string()]),
+            // A mapped target authors into its own layer stack: the target layer
+            // (a spec move or delete), any stack layer whose relocates change, and
+            // any stack layer whose embedded paths the mapped fixup rewrites.
+            BatchPlan::Mapped {
+                target,
+                stack_layer_ids,
+                seeds,
+                relocates,
+                per_edit,
+            } => {
+                let resolved = relocates.resolve(seeds)?;
+                let sources: Vec<&sdf::Path> = per_edit.iter().map(|mapped| &mapped.src).collect();
+                self.touched_layers(&stack_layer_ids, &resolved, &sources, |p| {
+                    remap_embedded_path(p, &target, &self.edits)
+                })
+            }
         }
+    }
+
+    /// The identifiers of the layers in `layer_ids` a successful apply would
+    /// write: one holding a spec at any path in `sources` (a structural move or
+    /// delete), one whose `layerRelocates` the batch would change (`resolved`),
+    /// or one whose embedded paths the fixup `rewrite` would rewrite (a
+    /// relationship/connection/internal-reference target into a moved or deleted
+    /// object, even with no source spec of its own). The per-layer scan shared by
+    /// the local-stack and mapped [`layers_to_edit`](Self::layers_to_edit) shapes.
+    // TODO(perf): each layer is independent — the spec scan, the relocate
+    // comparison, and the embedded-path scan can run in parallel.
+    fn touched_layers(
+        &self,
+        layer_ids: &[pcp::LayerId],
+        resolved: &ResolvedRelocates,
+        sources: &[&sdf::Path],
+        rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
+    ) -> Result<Vec<String>, NamespaceEditError> {
+        let layers = self.stage.layers();
+        let mut result = Vec::new();
+        for id in layer_ids {
+            let Some(node) = layers.get(*id) else { continue };
+            let touches = sources.iter().any(|src| node.layer.data().has_spec(src))
+                || resolved.change_for(*id).is_some()
+                || layer_fixup_touches(node.layer.data(), &rewrite)?;
+            if touches {
+                result.push(layers.identifier(*id).to_string());
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -615,19 +698,27 @@ enum BatchPlan {
         relocates: RelocateStackPlan,
         per_edit: Vec<EditPlan>,
     },
-    /// A variant or cross-arc target: the single layer it writes to, that target
-    /// (carrying the namespace mapping), and the batch edits translated into the
-    /// target layer's namespace.
+    /// A variant or cross-arc target: the layer it writes to, that target
+    /// (carrying the namespace mapping), the batch edits translated into the
+    /// target layer's namespace, and — for content arriving across an arc nested
+    /// below the target — the relocate plan over the target's own layer stack
+    /// (its member layer ids and their seed relocates) that realizes those
+    /// edits. A pure direct move authors no relocates, leaving the plan a no-op.
     Mapped {
-        layer_id: pcp::LayerId,
         target: EditTarget,
         per_edit: Vec<MappedEdit>,
+        stack_layer_ids: Vec<pcp::LayerId>,
+        seeds: HashMap<pcp::LayerId, sdf::RelocateList>,
+        relocates: RelocateStackPlan,
     },
 }
 
 /// One batch edit translated into a mapped target layer's namespace. A move
 /// copies the source spec subtree to the destination and removes the source; a
-/// delete (`dst` is `None`) removes the source spec.
+/// delete (`dst` is `None`) removes the source spec. When `relocated`, the
+/// source's content arrives across an arc nested below the edit target, so a
+/// synthesized relocate (authored separately into the target's layer stack)
+/// realizes the edit and the structural op authors nothing for it.
 struct MappedEdit {
     /// The edit's source path in composed stage namespace, for error reporting.
     stage_src: sdf::Path,
@@ -644,11 +735,17 @@ struct MappedEdit {
     /// stage (a referenced or otherwise cross-arc occupant the target layer's
     /// overlay alone cannot see). Always `false` for a delete.
     occupied: bool,
+    /// Whether the edit is realized by a relocate synthesized into the target's
+    /// own layer stack — content arriving across an arc nested below the edit
+    /// target, which has no spec in the target's stack to move directly. The
+    /// structural op may author nothing yet the source still counts as present.
+    relocated: bool,
 }
 
 impl MappedEdit {
-    /// The error for a source the structural op could not author directly: a
-    /// composed source reachable only across a deeper arc would need a relocate
+    /// The error for a source the structural op could not author and that no
+    /// synthesized relocate realizes: a composed source thus reaches the stage
+    /// only from a layer stack the target cannot author into
     /// ([`RequiresRelocate`](NamespaceEditError::RequiresRelocate)); an uncomposed
     /// one is simply missing ([`SourceNotFound`](NamespaceEditError::SourceNotFound)).
     fn unreachable_source(&self) -> NamespaceEditError {
@@ -699,27 +796,8 @@ impl<'a> NamespaceProjection<'a> {
             return Ok((false, false));
         };
         let index = self.stage.prim(origin.clone()).prim_index().graph()?;
-        let mut realized = false;
-        let mut via_relocate = false;
-        let mut direct_ancestral = false;
-        for (id, node) in index.nodes_with_ids() {
-            if !node.has_specs() {
-                continue;
-            }
-            let introduced_away = node
-                .map_to_root()
-                .map_source_to_target(&node.path_at_introduction())
-                .is_some_and(|intro| intro != origin);
-            if node.arc() != pcp::ArcType::Root && introduced_away {
-                realized = true;
-            }
-            if node_under_relocate(&index, id) {
-                via_relocate = true;
-            } else if introduced_away {
-                direct_ancestral = true;
-            }
-        }
-        Ok((realized, via_relocate && direct_ancestral))
+        let facts = classify_source_nodes(&index, &origin, None);
+        Ok((facts.realized, facts.masks))
     }
 
     /// Whether a composed object (prim or property) occupies `path` after the
@@ -734,23 +812,204 @@ impl<'a> NamespaceProjection<'a> {
         Ok(self.stage.has_spec(&origin)?)
     }
 
-    /// Whether the object at `path`, after the `earlier` edits, draws spec
-    /// opinions from more than one node of its prim's composition graph — so the
-    /// single layer a mapped target writes cannot be the sole contributor, and a
-    /// direct move or delete would leave the prim composed by the others.
+    /// Classify the source at `path`, after the `earlier` edits, against the
+    /// edit-target node N — the node a mapped `target` writes into. N is the node
+    /// whose path is the source mapped into the target's namespace, found among
+    /// the nodes on the target's own layer stack `stack`. The facts decide how a
+    /// mapped edit can be authored: a contributor at or below N is reachable
+    /// through the target's stack (a direct spec move for N's own content, a
+    /// relocate for content arriving across an arc below N), while a contributor
+    /// outside N's subtree cannot be expressed through that stack.
     ///
-    /// The count is at composition-node granularity: a node bundles its whole
-    /// site layer stack, so a source whose only contributing node spans several
-    /// sublayers (only one of which the target writes) reads as single and is not
-    /// caught here. Authoring relocates to suppress such within-stack residue is
-    /// future work; a single-node source is the common variant / cross-arc case.
-    fn multi_contributor(&self, path: &sdf::Path, earlier: &[NamespaceEdit]) -> Result<bool, NamespaceEditError> {
+    /// Keying N on the mapped path, not merely the stack, separates N from a
+    /// same-stack sibling: a variant target's node sits on the root stack
+    /// alongside a direct root opinion at the same composed path, and only the
+    /// mapped path (`/Prim{set=sel}child` vs `/Prim/child`) tells them apart — so
+    /// the direct opinion is correctly flagged outside the variant N's reach.
+    ///
+    /// A spec node below N counts as cross-arc content
+    /// ([`below_target`](TargetFacts::below_target)) only when it sits in a
+    /// different layer stack than N: a local class or variant arc within N's own
+    /// stack moves with N's specs and needs no relocate.
+    fn target_facts(
+        &self,
+        path: &sdf::Path,
+        earlier: &[NamespaceEdit],
+        stack: pcp::LayerStackId,
+        target: &EditTarget,
+    ) -> Result<TargetFacts, NamespaceEditError> {
         let Some(origin) = projected_origin(path, earlier) else {
-            return Ok(false);
+            return Ok(TargetFacts::default());
         };
-        let index = self.stage.prim(origin.prim_path()).prim_index().graph()?;
-        Ok(index.nodes_with_ids().filter(|(_, node)| node.has_specs()).count() > 1)
+        let prim = origin.prim_path();
+        let index = self.stage.prim(prim.clone()).prim_index().graph()?;
+        let target_spec = target.map_to_spec_path(&prim);
+        let target_node = target_spec.as_ref().and_then(|spec| {
+            index
+                .nodes_with_ids()
+                .find(|(_, node)| node.layer_stack_id() == stack && node.path() == spec)
+                .map(|(id, _)| id)
+        });
+        let Some(target_node) = target_node else {
+            // The target does not reach this prim; the source composes (if at
+            // all) only through stacks the target cannot author, an outside
+            // contributor the direct edit path resolves into a missing-source or
+            // requires-relocate error.
+            return Ok(TargetFacts {
+                outside: index.nodes_with_ids().any(|(_, node)| node.has_specs()),
+                below_target: false,
+                masks: false,
+            });
+        };
+        let facts = classify_source_nodes(&index, &prim, Some(target_node));
+        Ok(TargetFacts {
+            below_target: facts.below_target,
+            outside: facts.outside,
+            // A property cannot itself be a relocate target, so it never masks
+            // (matching `cross_arc_facts`'s property short-circuit).
+            masks: !path.is_property_path() && facts.masks,
+        })
     }
+}
+
+/// How a mapped edit's source composes relative to the edit-target node N (see
+/// [`NamespaceProjection::target_facts`]). The default — no contributor below or
+/// outside N — is a source reached directly through the target's own stack.
+#[derive(Default)]
+struct TargetFacts {
+    /// A spec-bearing node in N's subtree is brought in by an arc rooted above
+    /// the prim (due to an ancestor): content nested below the target with no
+    /// spec at the mapped path to move, realized by a relocate synthesized into
+    /// the target's stack.
+    below_target: bool,
+    /// A spec-bearing node sits outside N's subtree — a stronger override in an
+    /// ancestor stack, or a sibling arc — so the source composes from a layer
+    /// stack the target does not own and cannot be expressed through it.
+    outside: bool,
+    /// The source is a relocate target that also masks plain ancestral content
+    /// reached through an arc. Moving or deleting it would retarget or drop the
+    /// relocate and reveal the masked content at the old path, leaving the prim
+    /// composed, so no single relocate can express the edit (mirrors the
+    /// local-stack `masks` rejection in `cross_arc_facts`).
+    masks: bool,
+}
+
+/// The non-empty `layerRelocates` of each layer in `layer_ids`, keyed by layer:
+/// the per-layer baseline a [`RelocateStackPlan`] seeds from and validation
+/// compares each layer's evolved list against.
+fn seed_relocates(layers: &pcp::LayerGraph, layer_ids: &[pcp::LayerId]) -> HashMap<pcp::LayerId, sdf::RelocateList> {
+    let mut seeds: HashMap<pcp::LayerId, sdf::RelocateList> = HashMap::new();
+    for id in layer_ids {
+        if let Some(node) = layers.get(*id) {
+            let pairs = node.layer.relocates();
+            if !pairs.is_empty() {
+                seeds.insert(*id, pairs);
+            }
+        }
+    }
+    seeds
+}
+
+/// The composed-namespace classification of a source prim's spec-bearing nodes,
+/// shared by the local-stack and mapped planners (see
+/// [`classify_source_nodes`]). Each planner reads the subset it needs:
+/// `cross_arc_facts` uses `realized` and `masks`, `target_facts` uses
+/// `below_target`, `outside`, and `masks`.
+struct SourceNodeFacts {
+    /// A non-root node's opinion arrives across an arc rooted away from the prim,
+    /// so the edit has no local spec to move and must be realized by a relocate
+    /// (the local-stack cross-arc signal).
+    realized: bool,
+    /// The prim is a relocate target that also masks plain ancestral content: a
+    /// node reached via a relocate coexists with one introduced away by a
+    /// non-relocate arc, so moving or deleting it would reveal the masked content.
+    masks: bool,
+    /// A spec node in N's subtree is brought in by an arc rooted above the prim
+    /// (due to an ancestor), so it has no spec at the mapped path to move
+    /// directly: cross-arc content the mapped target realizes with a synthesized
+    /// relocate. Covers content from another layer stack and content from an
+    /// internal reference within N's own stack alike. Always `false` when no
+    /// target node is given.
+    below_target: bool,
+    /// A spec node sits outside N's subtree — a contributor the mapped target's
+    /// own layer stack cannot reach. Always `false` when no target node is given.
+    outside: bool,
+}
+
+/// Walk the spec-bearing nodes of `origin`'s composition index once and classify
+/// them. `origin` is the composed prim path the introduced-away test keys on.
+/// When `target_node` is given (the mapped edit-target node N and its layer
+/// stack), nodes are also classified relative to N's subtree
+/// ([`below_target`](SourceNodeFacts::below_target) /
+/// [`outside`](SourceNodeFacts::outside)); without it those stay `false` and only
+/// the local-stack signals are computed. The single source of the cross-arc and
+/// masking classification both planners enforce.
+// TODO(perf): each spec node walks parent links to the root twice
+// (`node_under_relocate` and `node_in_subtree`), making this O(nodes × depth)
+// per call; a single pass precomputing each node's depth and relocate-ancestor
+// flag would make it linear.
+fn classify_source_nodes(
+    index: &pcp::PrimIndex,
+    origin: &sdf::Path,
+    target_node: Option<pcp::NodeId>,
+) -> SourceNodeFacts {
+    let mut realized = false;
+    let mut via_relocate = false;
+    let mut direct_ancestral = false;
+    let mut below_target = false;
+    let mut outside = false;
+    for (id, node) in index.nodes_with_ids() {
+        if !node.has_specs() {
+            continue;
+        }
+        let introduced_away = node
+            .map_to_root()
+            .map_source_to_target(&node.path_at_introduction())
+            .is_some_and(|intro| &intro != origin);
+        if node.arc() != pcp::ArcType::Root && introduced_away {
+            realized = true;
+        }
+        if node_under_relocate(index, id) {
+            via_relocate = true;
+        } else if introduced_away {
+            direct_ancestral = true;
+        }
+        match target_node {
+            Some(target) if id != target => {
+                if node_in_subtree(index, id, target) {
+                    // Content brought into N's subtree by an arc rooted above the
+                    // prim (due to an ancestor) has no spec at the mapped path to
+                    // move directly, so it needs a relocate — whether it arrives
+                    // from another layer stack or from an internal reference
+                    // within N's own stack. A direct arc on the prim itself (an
+                    // inherit, a same-prim reference) moves with the spec.
+                    below_target |= node.depth_below_introduction() > 0;
+                } else {
+                    outside = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    SourceNodeFacts {
+        realized,
+        masks: via_relocate && direct_ancestral,
+        below_target,
+        outside,
+    }
+}
+
+/// Whether `node` is `ancestor` or one of its descendants in the composition
+/// tree, walking parent links from `node` up to the root.
+fn node_in_subtree(index: &pcp::PrimIndex, node: pcp::NodeId, ancestor: pcp::NodeId) -> bool {
+    let mut current = Some(node);
+    while let Some(id) = current {
+        if id == ancestor {
+            return true;
+        }
+        current = index.parent(id);
+    }
+    false
 }
 
 /// Whether `node` (or any ancestor in the composed index) was introduced by a
@@ -817,17 +1076,19 @@ impl RelocatedEntry {
     }
 }
 
-/// The evolving `layerRelocates` of the whole local root stack.
+/// The evolving `layerRelocates` of one layer stack — the local root stack for
+/// an identity target, or a mapped target's own layer stack — in that stack's
+/// namespace.
 ///
-/// Pcp validates relocates over the combined layer stack, not the edit target
-/// alone, so the plan owns every local-stack layer's pairs (tagged by owning
+/// Pcp validates relocates over the combined layer stack, not the authoring
+/// layer alone, so the plan owns every stack layer's pairs (tagged by owning
 /// layer) and evolves them through each edit: a move reprojects endpoints, a
 /// delete empties a target or drops a source, and a cross-arc move or delete
-/// synthesizes a new pair — always on the edit target, the only layer the editor
-/// authors into. Authoring writes each layer's evolved list back to that layer;
-/// validation runs over the combined set. Tracking every layer (not just the
-/// edit target) lets a later edit recognize a relocate target an earlier edit
-/// moved, and lets a delete reject an orphaned cross-layer relocate.
+/// synthesizes a new pair — always on `edit_target`, the layer the editor
+/// authors new pairs into. Authoring writes each layer's evolved list back to
+/// that layer; validation runs over the combined set. Tracking every layer (not
+/// just the authoring layer) lets a later edit recognize a relocate target an
+/// earlier edit moved, and lets a delete reject an orphaned cross-layer relocate.
 struct RelocateStackPlan {
     entries: Vec<RelocatedEntry>,
     edit_target: pcp::LayerId,
@@ -1208,26 +1469,35 @@ fn stage_across_layers(
     Ok(())
 }
 
-/// Author one translated batch edit on the single mapped target layer: a move
-/// copies the source spec subtree to the destination and removes the source, a
-/// delete removes the source spec. A destination is blocked by a composed
-/// occupant settled in the plan ([`MappedEdit::occupied`]) or a spec an earlier
-/// batch edit staged into the layer overlay, and a source the structural op
-/// could not author is reported through
-/// [`unreachable_source`](MappedEdit::unreachable_source).
-fn apply_mapped_edit(layer: &mut sdf::LayerEdit<'_>, edit: &MappedEdit) -> Result<(), NamespaceEditError> {
-    let authored = match &edit.dst {
+/// Author one translated batch edit across the mapped target's layer stack: a
+/// move copies the source spec subtree to the destination and removes the
+/// source, a delete removes the source spec, in whichever stack layers hold it.
+/// A destination is blocked by a composed occupant settled in the plan
+/// ([`MappedEdit::occupied`]) or a spec an earlier batch edit staged into a
+/// layer overlay. A source the structural op could not author anywhere is
+/// reported through [`unreachable_source`](MappedEdit::unreachable_source),
+/// unless the edit is realized by a synthesized relocate
+/// ([`MappedEdit::relocated`]), which authors the destination on its own.
+fn apply_mapped_edit(layers: &mut [sdf::LayerEdit<'_>], edit: &MappedEdit) -> Result<(), NamespaceEditError> {
+    let mut authored = false;
+    match &edit.dst {
         Some(dst) => {
             // A composed cross-arc occupant (`edit.occupied`) or a spec staged by
             // an earlier edit in this batch blocks the move.
-            if edit.occupied || layer.data().has_spec(dst) {
+            if edit.occupied || layers.iter().any(|layer| layer.data().has_spec(dst)) {
                 return Err(NamespaceEditError::DestinationExists(dst.clone()));
             }
-            move_spec(layer, &edit.src, dst).map_err(StageAuthoringError::Layer)?
+            for layer in layers.iter_mut() {
+                authored |= move_spec(layer, &edit.src, dst).map_err(StageAuthoringError::Layer)?;
+            }
         }
-        None => layer.remove_spec(&edit.src).map_err(StageAuthoringError::Layer)?,
-    };
-    if !authored {
+        None => {
+            for layer in layers.iter_mut() {
+                authored |= layer.remove_spec(&edit.src).map_err(StageAuthoringError::Layer)?;
+            }
+        }
+    }
+    if !authored && !edit.relocated {
         return Err(edit.unreachable_source());
     }
     Ok(())
@@ -1263,34 +1533,41 @@ fn fixup_mapped_paths(
     rewrite_embedded_paths(layer, |p| remap_embedded_path(p, target, edits))
 }
 
-/// Rewrite every embedded namespace path in `layer` through `rewrite`,
-/// preserving list-op structure. `rewrite` maps one path to its replacement,
-/// `Ok(None)` to drop it from its list op, or an error to fail the batch.
+/// The embedded-path rewrites `rewrite` would make to `data`: for each spec
+/// field whose value changes — a relationship/connection/internal-reference
+/// target into a moved or deleted object — the spec path, field name, and
+/// rewritten value, preserving list-op structure. `rewrite` maps one path to
+/// its replacement, `Ok(None)` to drop it from its list op, or an error to fail
+/// the batch.
 ///
 /// `layerRelocates` is skipped: a layer-level relocate's source and target carry
 /// different meaning, and a deleted target becomes the empty sentinel rather than
 /// dropping out, so it is owned by [`RelocateStackPlan`] for a local-stack edit
 /// and not modeled for a mapped target. Spec-level `relocates` are ordinary
 /// embedded paths and are rewritten here.
+///
+/// The shared scan behind [`rewrite_embedded_paths`], which applies the
+/// rewrites, and [`layer_fixup_touches`], which only asks whether any exist.
 //
-// TODO(perf): scans every spec and field in the layer. A path-keyed index of
-// specs carrying target/connection/reference opinions would bound this to the
-// opinions that can actually reference a moved object.
-fn rewrite_embedded_paths(
-    layer: &mut sdf::LayerEdit<'_>,
+// TODO(perf): scans every spec and field in the layer and clones each
+// path-bearing value to compare. A path-keyed index of specs carrying
+// target/connection/reference opinions would bound this to the opinions that
+// can actually reference a moved object.
+fn embedded_path_rewrites(
+    data: &dyn sdf::AbstractData,
     rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
-) -> Result<(), NamespaceEditError> {
+) -> Result<Vec<(sdf::Path, String, sdf::Value)>, NamespaceEditError> {
     // `filter_map_paths` takes a `Fn` that cannot itself fail, so a rejected
     // path is parked here and surfaced after the rewrite.
     let failed: std::cell::Cell<Option<NamespaceEditError>> = std::cell::Cell::new(None);
-    for path in layer.data().spec_paths() {
-        let fields = layer.data().list_fields(&path).unwrap_or_default();
+    let mut changes = Vec::new();
+    for path in data.spec_paths() {
+        let fields = data.list_fields(&path).unwrap_or_default();
         for field in &fields {
             if field == sdf::FieldKey::LayerRelocates.as_str() {
                 continue;
             }
-            let Some(value) = layer
-                .data()
+            let Some(value) = data
                 .try_field(&path, field)
                 .map_err(|e| StageAuthoringError::Layer(e.into()))?
             else {
@@ -1311,11 +1588,35 @@ fn rewrite_embedded_paths(
                 return Err(error);
             }
             if rewritten != value {
-                layer.data_mut().set_field(&path, field, rewritten);
+                changes.push((path.clone(), field.clone(), rewritten));
             }
         }
     }
+    Ok(changes)
+}
+
+/// Rewrite every embedded namespace path in `layer` through `rewrite` (see
+/// [`embedded_path_rewrites`]), writing each changed field back.
+fn rewrite_embedded_paths(
+    layer: &mut sdf::LayerEdit<'_>,
+    rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
+) -> Result<(), NamespaceEditError> {
+    for (path, field, value) in embedded_path_rewrites(layer.data(), rewrite)? {
+        layer.data_mut().set_field(&path, &field, value);
+    }
     Ok(())
+}
+
+/// Whether [`rewrite_embedded_paths`] would change any embedded path in `data`:
+/// a relationship/connection/internal-reference target into a moved or deleted
+/// object. The read-only preflight twin of [`rewrite_embedded_paths`], so
+/// [`layers_to_edit`](NamespaceEditor::layers_to_edit) reports a layer the fixup
+/// rewrites even when it holds no source spec and no relocate of its own.
+fn layer_fixup_touches(
+    data: &dyn sdf::AbstractData,
+    rewrite: impl Fn(&sdf::Path) -> Result<Option<sdf::Path>, NamespaceEditError>,
+) -> Result<bool, NamespaceEditError> {
+    Ok(!embedded_path_rewrites(data, rewrite)?.is_empty())
 }
 
 /// Rewrite one embedded namespace path for a mapped edit: lift it to composed
@@ -1987,6 +2288,48 @@ mod tests {
         );
     }
 
+    /// A variant edit target cannot author a direct (local) opinion that composes
+    /// at the same path as the variant content. Moving such a prim is rejected
+    /// rather than silently moving only the variant copy and leaving the stronger
+    /// direct opinion composed: `/Prim/child` is defined both directly and inside
+    /// the selected `{set=sel}` variant, so the variant target reaches only one of
+    /// its two contributors.
+    #[test]
+    fn variant_rejects_direct_opinion() {
+        let text = r#"#usda 1.0
+            def "Prim" (
+                variants = { string set = "sel" }
+                variantSets = "set"
+            ) {
+                def "child" {}
+                variantSet "set" = {
+                    "sel" {
+                        def "child" {}
+                    }
+                }
+            }
+"#;
+        let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
+        let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
+        let stage = Stage::builder().make_stage(vec![layer], 0, Vec::new());
+        // The prim composes from both the direct opinion and the variant.
+        assert!(valid(&stage, "/Prim/child"));
+        let root = stage.root_layer().identifier().to_string();
+        stage
+            .set_edit_target(EditTarget::for_local_direct_variant(
+                root,
+                path("/Prim{set=sel}").unwrap(),
+            ))
+            .unwrap();
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Prim/child").unwrap(), path("/Prim/renamed").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::RequiresRelocate(_))
+        ));
+    }
+
     /// A stage where `/Ref` references `model.usda`'s `/Model`, bringing in two
     /// children `/Ref/A` and `/Ref/B` with no local specs. The edit target is
     /// left on the reference arc, so a namespace edit authors into `model.usda`
@@ -2058,6 +2401,57 @@ mod tests {
         assert!(!model.data().has_spec(&path("/Model/A").unwrap()));
         assert!(!valid(&stage, "/Ref/A"));
         assert!(valid(&stage, "/Ref/B"));
+    }
+
+    /// An arc edit target resolves to the referenced asset's own layer stack even
+    /// when that asset is also sublayered into the root: the authoring stack is
+    /// taken from the target node, not inferred from the layer's root-stack
+    /// membership, so a valid cross-arc move is not wrongly rejected.
+    #[test]
+    fn arc_target_referenced_and_sublayered() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["model.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/A"));
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .apply()
+            .unwrap();
+
+        let model = stage.layer("model.usda").expect("model layer");
+        assert_eq!(
+            model.data().spec_type(&path("/Model/Renamed").unwrap()),
+            Some(sdf::SpecType::Prim)
+        );
+        assert!(valid(&stage, "/Ref/Renamed"));
+        assert!(!valid(&stage, "/Ref/A"));
+        assert!(stage.root_layer().relocates().is_empty());
     }
 
     /// A cross-arc move follows an external relationship target authored in the
@@ -2142,11 +2536,11 @@ mod tests {
         ));
     }
 
-    /// An edit whose source composes only across a deeper arc into the source
-    /// layer has no spec the mapped target can move directly, so it is rejected
-    /// as needing a relocate rather than silently dropped.
-    #[test]
-    fn mapped_requires_relocate() {
+    /// A `/Ref` referencing `model.usda`'s `/Model`, which itself references
+    /// `deep.usda`'s `/Deep` so `/Ref/Inner` arrives across an arc nested below
+    /// the reference target — it has no spec in `model.usda`. The edit target is
+    /// left on the `/Ref` reference arc, writing into `model.usda`.
+    fn deep_arc_stage() -> Stage {
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
             sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
@@ -2181,17 +2575,319 @@ mod tests {
             sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
         });
         let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+        stage
+    }
+
+    /// A mapped move of a source arriving across an arc nested below the target
+    /// synthesizes a relocate in the target's own layer stack (here
+    /// `model.usda`), expressed in the target's namespace, and the prim composes
+    /// back through the outer reference.
+    #[test]
+    fn mapped_deep_arc_move() {
+        let stage = deep_arc_stage();
+        assert!(valid(&stage, "/Ref/Inner"));
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
+            .apply()
+            .unwrap();
+
+        // The relocate lands in the target's stack, in the target's namespace.
+        let model = stage.layer("model.usda").expect("model layer");
+        assert!(model
+            .relocates()
+            .iter()
+            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap()));
+        // Not in the consuming root stack — a relocate there would be dropped.
+        assert!(stage.root_layer().relocates().is_empty());
+        // The deeper-arc content composes back at the moved path.
+        assert!(valid(&stage, "/Ref/Moved"));
+        assert!(!valid(&stage, "/Ref/Inner"));
+    }
+
+    /// A mapped delete of a source arriving across an arc nested below the
+    /// target synthesizes a deletion relocate in the target's layer stack, so
+    /// the prim stops composing.
+    #[test]
+    fn mapped_deep_arc_delete() {
+        let stage = deep_arc_stage();
+        assert!(valid(&stage, "/Ref/Inner"));
+
+        NamespaceEditor::new(&stage)
+            .delete_prim(path("/Ref/Inner").unwrap())
+            .apply()
+            .unwrap();
+
+        let model = stage.layer("model.usda").expect("model layer");
+        assert!(model
+            .relocates()
+            .iter()
+            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t.is_empty()));
+        assert!(stage.root_layer().relocates().is_empty());
+        assert!(!valid(&stage, "/Ref/Inner"));
+    }
+
+    /// A mapped move of content an internal reference brings into the target —
+    /// nested in the target's own layer stack, not a deeper external asset —
+    /// still synthesizes a relocate there: the arc is rooted above the prim
+    /// (`/Model` references `/Deep` within the same layer), so the source has no
+    /// spec at the mapped path to move directly.
+    #[test]
+    fn mapped_internal_arc_relocates() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            // An internal reference (no asset path) to a sibling prim in the same
+            // layer brings /Deep/Inner in at /Model/Inner with no spec there.
+            e.data_mut().set_field(
+                &path("/Model").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    prim_path: path("/Deep").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Deep", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model], 0, Vec::new());
         assert!(valid(&stage, "/Ref/Inner"));
         let target = stage
             .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
             .unwrap();
         stage.set_edit_target(target).unwrap();
 
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
+            .apply()
+            .unwrap();
+
+        let model = stage.layer("model.usda").expect("model layer");
+        assert!(model
+            .relocates()
+            .iter()
+            .any(|(s, t)| s == &path("/Model/Inner").unwrap() && t == &path("/Model/Moved").unwrap()));
+        assert!(valid(&stage, "/Ref/Moved"));
+        assert!(!valid(&stage, "/Ref/Inner"));
+    }
+
+    /// A mapped move authors across every layer of the target's own stack, not
+    /// only the layer the target writes to. When a referenced asset's root and
+    /// its sublayer both carry the source spec, both move — leaving no residual
+    /// opinion in the sublayer and needing no relocate, since the content is all
+    /// local to the target's stack.
+    #[test]
+    fn mapped_within_stack_residue() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+        });
+        let mut model_sub = sdf::Layer::new_in_memory("model_sub.usda");
+        edit_layer(&mut model_sub, |e| {
+            // The sublayer of the referenced asset also contributes /Model/A.
+            sdf::PrimSpec::over(e.data_mut(), "/Model/A").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Model/A.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .apply()
+            .unwrap();
+
+        // Both stack layers moved their spec; no residue lingers in the sublayer.
+        let model = stage.layer("model.usda").expect("model layer");
+        let model_sub = stage.layer("model_sub.usda").expect("model_sub layer");
+        assert_eq!(
+            model.data().spec_type(&path("/Model/Renamed").unwrap()),
+            Some(sdf::SpecType::Prim)
+        );
+        assert!(!model.data().has_spec(&path("/Model/A").unwrap()));
+        assert_eq!(
+            model_sub.data().spec_type(&path("/Model/Renamed.attr").unwrap()),
+            Some(sdf::SpecType::Attribute)
+        );
+        assert!(!model_sub.data().has_spec(&path("/Model/A").unwrap()));
+        // All content is local to the target's stack, so no relocate is needed.
+        assert!(model.relocates().is_empty());
+        assert!(valid(&stage, "/Ref/Renamed"));
+        assert!(!valid(&stage, "/Ref/A"));
+    }
+
+    /// A mapped edit that writes more than one layer of the target's stack
+    /// reports its committed change with the edit-target provenance, not
+    /// `LocalStack`: every stack layer is authored in the target's namespace, so
+    /// the merged change must translate through the target's mapping for sinks
+    /// to see composed (`/Ref/...`) rather than layer (`/Model/...`) paths.
+    #[test]
+    fn mapped_multi_layer_provenance() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+        });
+        let mut model_sub = sdf::Layer::new_in_memory("model_sub.usda");
+        edit_layer(&mut model_sub, |e| {
+            sdf::PrimSpec::over(e.data_mut(), "/Model/A").unwrap();
+            sdf::AttributeSpec::new(e.data_mut(), "/Model/A.attr", "double", Variability::Varying, false).unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        let seen: std::rc::Rc<std::cell::Cell<Option<&'static str>>> = std::rc::Rc::new(std::cell::Cell::new(None));
+        {
+            let seen = seen.clone();
+            stage.add_sink(move |_: &Stage, change: &crate::usd::CommittedChange<'_>| {
+                seen.set(Some(match change.provenance {
+                    crate::usd::Provenance::LocalStack => "local",
+                    crate::usd::Provenance::EditTarget(_) => "target",
+                    crate::usd::Provenance::DirectLayerEdit => "direct",
+                }));
+            });
+        }
+
+        NamespaceEditor::new(&stage)
+            .move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap())
+            .apply()
+            .unwrap();
+
+        // Both model.usda and model_sub.usda moved their spec, so the commit drains
+        // two layer records; the merged change keeps the arc target's provenance.
+        assert_eq!(seen.get(), Some("target"));
+    }
+
+    /// A failed mapped relocate batch leaves the target's layer stack and the
+    /// cache untouched: a deep-arc move (which would synthesize a relocate)
+    /// followed by a missing source rolls the whole batch back, authoring no
+    /// relocate and leaving composition unchanged.
+    #[test]
+    fn mapped_relocate_atomic() {
+        let stage = deep_arc_stage();
         let mut editor = NamespaceEditor::new(&stage);
-        editor.move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap());
+        editor
+            .move_prim(path("/Ref/Inner").unwrap(), path("/Ref/Moved").unwrap())
+            .move_prim(path("/Ref/Missing").unwrap(), path("/Ref/X").unwrap());
+        assert!(editor.apply().is_err());
+
+        let model = stage.layer("model.usda").expect("model layer");
+        assert!(model.relocates().is_empty());
+        assert!(valid(&stage, "/Ref/Inner"));
+        assert!(!valid(&stage, "/Ref/Moved"));
+    }
+
+    /// A mapped batch that would synthesize an unrepresentable relocate set is
+    /// rejected, not authored: relocating a grandchild out of `/Ref/Inner` and
+    /// then deleting `/Ref/Inner` would orphan the moved grandchild, which no
+    /// valid relocate set in the target's stack can express.
+    #[test]
+    fn mapped_relocate_orphans_child() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            e.data_mut().set_field(
+                &path("/Model").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "deep.usda".into(),
+                    prim_path: path("/Deep").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut deep = sdf::Layer::new_in_memory("deep.usda");
+        edit_layer(&mut deep, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Deep", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Deep/Inner/Grand", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Inner/Grand"));
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor
+            .move_prim(path("/Ref/Inner/Grand").unwrap(), path("/Ref/Grand").unwrap())
+            .delete_prim(path("/Ref/Inner").unwrap());
         assert!(matches!(
             editor.can_apply(),
-            Err(NamespaceEditError::RequiresRelocate(_))
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
         ));
     }
 
@@ -2229,6 +2925,57 @@ mod tests {
         let mut editor = NamespaceEditor::new(&stage);
         editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap());
         assert_eq!(editor.layers_to_edit().unwrap(), vec!["model.usda".to_string()]);
+    }
+
+    /// `layers_to_edit` reports a target-stack layer the fixup rewrites even when
+    /// it holds no source spec: a referenced asset's sublayer carrying only a
+    /// relationship target to the moved prim is rewritten by `apply`, so the
+    /// preflight must name it alongside the layer holding the moved spec.
+    #[test]
+    fn mapped_layers_to_edit_fixup_only() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            e.data_mut().set_field(
+                &sdf::Path::abs_root(),
+                FieldKey::SubLayers.as_str(),
+                sdf::Value::StringVec(vec!["model_sub.usda".into()]),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Model/A", Specifier::Def, "").unwrap();
+        });
+        let mut model_sub = sdf::Layer::new_in_memory("model_sub.usda");
+        edit_layer(&mut model_sub, |e| {
+            sdf::RelationshipSpec::new(e.data_mut(), "/Model/B.rel", Variability::Varying, false).unwrap();
+            e.data_mut().set_field(
+                &path("/Model/B.rel").unwrap(),
+                FieldKey::TargetPaths.as_str(),
+                sdf::Value::PathListOp(sdf::PathListOp::explicit([path("/Model/A").unwrap()])),
+            );
+        });
+        let stage = Stage::builder().make_stage(vec![root, model, model_sub], 0, Vec::new());
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/A").unwrap(), path("/Ref/Renamed").unwrap());
+        let layers = editor.layers_to_edit().unwrap();
+        assert!(layers.contains(&"model.usda".to_string()), "got {layers:?}");
+        assert!(layers.contains(&"model_sub.usda".to_string()), "got {layers:?}");
     }
 
     /// A `/Ref` referencing `model.usda`'s `/Model`, with the root layer also
@@ -2288,9 +3035,10 @@ mod tests {
         ));
     }
 
-    /// A mapped move of a source that composes from both the root layer and the
-    /// arc is rejected: editing the arc source alone would leave the root-layer
-    /// opinion behind, so a relocate would be needed to express it.
+    /// A mapped move of a source that composes from both the root override and
+    /// the arc is rejected: the root opinion sits in the consuming root stack,
+    /// which the arc target does not own, so editing the arc source alone leaves
+    /// it behind and no relocate in the target's stack can suppress it.
     #[test]
     fn mapped_source_multi_layer() {
         let stage = arc_overridden_stage(&["A"]);
@@ -2302,9 +3050,10 @@ mod tests {
         ));
     }
 
-    /// A mapped delete of a source that composes from both the root layer and the
-    /// arc is rejected for the same reason: deleting the arc source spec alone
-    /// would leave the prim composed from the root override.
+    /// A mapped delete of a source that composes from both the root override and
+    /// the arc is rejected for the same reason: deleting the arc source spec
+    /// alone leaves the prim composed from the root override, in a stack the arc
+    /// target cannot author into.
     #[test]
     fn mapped_delete_multi_layer() {
         let stage = arc_overridden_stage(&["A"]);
@@ -3690,6 +4439,64 @@ mod tests {
         let stage = relocate_target_masking_stage();
         let mut editor = NamespaceEditor::new(&stage);
         editor.delete_prim(path("/Ref/Geom").unwrap());
+        assert!(matches!(
+            editor.can_apply(),
+            Err(NamespaceEditError::UnrepresentableRelocateBatch(_))
+        ));
+    }
+
+    /// A mapped (arc) target enforces the same masking rejection as the local
+    /// stack: when the target stack relocates `/Model/Orig -> /Model/Geom` over a
+    /// deeper-arc `/Model/Geom`, moving `/Ref/Geom` would retarget the relocate
+    /// and reveal the masked deeper content at the old path, so it is rejected
+    /// rather than leaving both prims composed.
+    #[test]
+    fn mapped_rejects_masking() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &path("/Ref").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "model.usda".into(),
+                    prim_path: path("/Model").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut model = sdf::Layer::new_in_memory("model.usda");
+        edit_layer(&mut model, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Model", Specifier::Def, "Xform").unwrap();
+            // /Model brings Orig and Geom across a deeper reference, then relocates
+            // Orig onto Geom, masking the deeper-arc Geom.
+            e.data_mut().set_field(
+                &path("/Model").unwrap(),
+                FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "deep.usda".into(),
+                    prim_path: path("/Deep").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            e.set_relocates(vec![(path("/Model/Orig").unwrap(), path("/Model/Geom").unwrap())])
+                .unwrap();
+        });
+        let mut deep = sdf::Layer::new_in_memory("deep.usda");
+        edit_layer(&mut deep, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Deep", Specifier::Def, "Xform").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Deep/Orig", Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/Deep/Geom", Specifier::Def, "").unwrap();
+        });
+        let stage = Stage::builder().make_stage(vec![root, model, deep], 0, Vec::new());
+        assert!(valid(&stage, "/Ref/Geom"));
+        let target = stage
+            .edit_target_for_node(&path("/Ref").unwrap(), EditTargetArc::Reference)
+            .unwrap();
+        stage.set_edit_target(target).unwrap();
+
+        let mut editor = NamespaceEditor::new(&stage);
+        editor.move_prim(path("/Ref/Geom").unwrap(), path("/Ref/Final").unwrap());
         assert!(matches!(
             editor.can_apply(),
             Err(NamespaceEditError::UnrepresentableRelocateBatch(_))

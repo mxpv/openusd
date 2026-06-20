@@ -23,7 +23,7 @@ use crate::tf::Token;
 use super::clip::{ClipSet, ResolvedClipSet};
 use super::dependencies::Dependencies;
 use super::instancing::PrototypeRegistry;
-use super::layer_graph::LayerGraph;
+use super::layer_graph::{LayerGraph, LayerStackId};
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
 use super::prim_index::{AncestorArc, CompositionContext, PrimIndex};
 use super::prim_resolve::InvalidTargetKind;
@@ -1267,7 +1267,7 @@ impl IndexCache {
         graph: &LayerGraph,
         prim_path: &Path,
         matches: impl Fn(ArcType) -> bool,
-    ) -> Result<Option<(String, MapFunction)>> {
+    ) -> Result<Option<(String, MapFunction, Option<String>)>> {
         let prim_path = self.effective_path(graph, prim_path)?.prim_path();
         self.ensure_index(graph, &prim_path)?;
         let Some(index) = self.indices.get(&prim_path) else {
@@ -1275,9 +1275,20 @@ impl IndexCache {
         };
         Ok(index.nodes().find_map(|node| {
             (matches(node.arc) && node.has_specs() && !node.is_permission_denied()).then(|| {
+                // The identifier of the layer stack the node composes in: `None`
+                // for the stage root stack, the referenced asset's root layer for
+                // a sublayer stack. The edit target carries this so its authoring
+                // stack is known exactly rather than re-inferred from layer
+                // membership (ambiguous when a referenced asset is also a root
+                // sublayer).
+                let stack_root = match node.layer_stack_id() {
+                    LayerStackId::Root => None,
+                    LayerStackId::Sublayer(root) => Some(graph.identifier(root).to_string()),
+                };
                 (
                     graph.identifier(node.layer_id()).to_string(),
                     index.map_to_root_for_targets(node),
+                    stack_root,
                 )
             })
         }))
