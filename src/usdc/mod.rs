@@ -19,45 +19,46 @@ use crate::{ar, sdf, tf};
 /// USDC binary format magic bytes (`PXR-USDC`).
 pub const MAGIC: &[u8] = b"PXR-USDC";
 
-/// A field's value, either still encoded in the file (decoded lazily on first
-/// read) or authored in memory after load. Mirrors how C++ `Usd_CrateData`
-/// keeps each field as either a `ValueRep` into the crate file or an in-memory
-/// `VtValue`, so the binary backend is both lazy and writable.
+/// A spec's type plus where its fields live. The crate stores fields
+/// deduplicated and shared across specs, so a spec read from the file keeps only
+/// the start of its fieldset; the fields are resolved on demand from the compact
+/// [`CrateFile`] arrays rather than expanded into a per-spec list. Fields
+/// authored after load are layered in a small overlay, leaving the backend both
+/// lazy and writable (C++ `Usd_CrateData` likewise keeps each field as either a
+/// `ValueRep` into the crate or an in-memory `VtValue`).
 #[derive(Debug)]
-enum FieldValue {
-    /// Encoded in the crate file; decoded on demand via [`CrateFile::value`].
-    Lazy(ValueRep),
-    /// Authored in memory (e.g. via [`sdf::AbstractData::set_field`]).
-    Authored(sdf::Value),
-}
-
-#[derive(Default, Debug)]
 struct Spec {
     /// Specifies the type of an object.
     ty: sdf::SpecType,
-    /// Spec properties, in authored order.
-    fields: Vec<(String, FieldValue)>,
+    /// Start index into the file's `fieldsets` for the fields read from the
+    /// crate, or `None` for a spec created in memory.
+    fieldset: Option<usize>,
+    /// Fields authored after load, layered over the crate fields in authored
+    /// order. `Some` sets or overrides a field; `None` tombstones one so it
+    /// reads as absent even when the crate holds it.
+    authored: Vec<(String, Option<sdf::Value>)>,
 }
 
 impl Spec {
-    fn get(&self, field: &str) -> Option<&FieldValue> {
-        self.fields.iter().find(|(k, _)| k == field).map(|(_, v)| v)
+    /// Returns the authored override for `field`: `Some(&Some(value))` when set,
+    /// `Some(&None)` when tombstoned, `None` when the crate fields alone decide.
+    fn authored(&self, field: &str) -> Option<&Option<sdf::Value>> {
+        self.authored.iter().find(|(k, _)| k == field).map(|(_, v)| v)
     }
 
-    fn contains(&self, field: &str) -> bool {
-        self.fields.iter().any(|(k, _)| k == field)
-    }
-
-    fn set(&mut self, field: &str, value: FieldValue) {
-        if let Some(slot) = self.fields.iter_mut().find(|(k, _)| k == field) {
+    /// Sets the authored override for `field`, replacing any prior one.
+    fn set_authored(&mut self, field: &str, value: Option<sdf::Value>) {
+        if let Some(slot) = self.authored.iter_mut().find(|(k, _)| k == field) {
             slot.1 = value;
         } else {
-            self.fields.push((field.to_owned(), value));
+            self.authored.push((field.to_owned(), value));
         }
     }
 
-    fn remove(&mut self, field: &str) {
-        self.fields.retain(|(k, _)| k != field);
+    /// Drops any authored override for `field`, restoring authored order so a
+    /// later set re-appends rather than reusing the old slot.
+    fn remove_authored(&mut self, field: &str) {
+        self.authored.retain(|(k, _)| k != field);
     }
 }
 
@@ -79,35 +80,22 @@ where
             file.validate()?;
         }
 
-        // Build crate data
-
-        let mut data = HashMap::default();
+        // Index each spec by its path, recording only its type and the start of
+        // its fieldset. The fields themselves stay in the file's compact,
+        // deduplicated arrays and are resolved on demand.
         let specs = mem::take(&mut file.specs);
+        let mut data = HashMap::with_capacity(specs.len());
 
-        for filespec in specs {
-            let path = file.paths[filespec.path_index].clone();
-            let ty = filespec.spec_type;
-
-            let mut fields = Vec::new();
-            let mut index = filespec.fieldset_index;
-
-            while index < file.fieldsets.len() {
-                let Some(current) = file.fieldsets[index] else { break };
-
-                index += 1;
-
-                let field = &file.fields[current];
-                let raw = &file.tokens[field.token_index];
-                let name = if raw == CRATE_PROPERTY_CHILDREN {
-                    sdf::ChildrenKey::PropertyChildren.as_str().to_owned()
-                } else {
-                    raw.clone()
-                };
-
-                fields.push((name, FieldValue::Lazy(field.value_rep)));
-            }
-
-            data.insert(path, Spec { ty, fields });
+        for spec in &specs {
+            let path = file.paths[spec.path_index].clone();
+            data.insert(
+                path,
+                Spec {
+                    ty: spec.spec_type,
+                    fieldset: Some(spec.fieldset_index),
+                    authored: Vec::new(),
+                },
+            );
         }
 
         Ok(Self {
@@ -126,9 +114,17 @@ where
         self.data.contains_key(path)
     }
 
-    #[inline]
     fn has_field(&self, path: &sdf::Path, field: &str) -> bool {
-        self.data.get(path).is_some_and(|spec| spec.contains(field))
+        let Some(spec) = self.data.get(path) else {
+            return false;
+        };
+        if let Some(authored) = spec.authored(field) {
+            return authored.is_some();
+        }
+        match spec.fieldset {
+            Some(start) => crate_fields(&self.file.borrow(), start).any(|(name, _)| name == field),
+            None => false,
+        }
     }
 
     #[inline]
@@ -137,29 +133,49 @@ where
     }
 
     fn try_field(&self, path: &sdf::Path, field: &str) -> Result<Option<Cow<'_, sdf::Value>>, sdf::DataError> {
-        let Some(field_value) = self.data.get(path).and_then(|spec| spec.get(field)) else {
+        let Some(spec) = self.data.get(path) else {
             return Ok(None);
         };
-        match field_value {
-            FieldValue::Authored(value) => Ok(Some(Cow::Borrowed(value))),
-            FieldValue::Lazy(rep) => {
-                // The crate value decoder still reports failures as `anyhow`; box
-                // it as the typed `DataError`'s source at this trait boundary.
-                let value = self.file.borrow_mut().value(*rep).map_err(|e| sdf::DataError::Decode {
-                    path: path.clone(),
-                    field: field.to_owned(),
-                    source: e.into(),
-                })?;
-                Ok(Some(Cow::Owned(value)))
-            }
+        if let Some(authored) = spec.authored(field) {
+            return Ok(authored.as_ref().map(Cow::Borrowed));
         }
+        let Some(start) = spec.fieldset else {
+            return Ok(None);
+        };
+        let rep = crate_fields(&self.file.borrow(), start)
+            .find(|(name, _)| *name == field)
+            .map(|(_, rep)| rep);
+        let Some(rep) = rep else {
+            return Ok(None);
+        };
+        // The crate value decoder still reports failures as `anyhow`; box it as
+        // the typed `DataError`'s source at this trait boundary.
+        let value = self.file.borrow_mut().value(rep).map_err(|e| sdf::DataError::Decode {
+            path: path.clone(),
+            field: field.to_owned(),
+            source: e.into(),
+        })?;
+        Ok(Some(Cow::Owned(value)))
     }
 
-    #[inline]
     fn list_fields(&self, path: &sdf::Path) -> Option<Vec<String>> {
-        self.data
-            .get(path)
-            .map(|spec| spec.fields.iter().map(|(k, _)| k.clone()).collect())
+        let spec = self.data.get(path)?;
+        let mut names = Vec::new();
+        if let Some(start) = spec.fieldset {
+            for (name, _) in crate_fields(&self.file.borrow(), start) {
+                // A tombstoned crate field is skipped; an overridden one keeps
+                // its crate position and is not duplicated by the overlay pass.
+                if !matches!(spec.authored(name), Some(None)) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        for (field, value) in &spec.authored {
+            if value.is_some() && !names.iter().any(|n| n == field) {
+                names.push(field.clone());
+            }
+        }
+        Some(names)
     }
 
     fn spec_paths(&self) -> Vec<sdf::Path> {
@@ -169,7 +185,14 @@ where
     }
 
     fn create_spec(&mut self, path: sdf::Path, ty: sdf::SpecType) {
-        self.data.insert(path, Spec { ty, fields: Vec::new() });
+        self.data.insert(
+            path,
+            Spec {
+                ty,
+                fieldset: None,
+                authored: Vec::new(),
+            },
+        );
     }
 
     fn erase_spec(&mut self, path: &sdf::Path) {
@@ -178,15 +201,53 @@ where
 
     fn set_field(&mut self, path: &sdf::Path, field: &str, value: sdf::Value) {
         match self.data.get_mut(path) {
-            Some(spec) => spec.set(field, FieldValue::Authored(value)),
+            Some(spec) => spec.set_authored(field, Some(value)),
             None => debug_assert!(false, "set_field on absent spec at {path}"),
         }
     }
 
     fn erase_field(&mut self, path: &sdf::Path, field: &str) {
-        if let Some(spec) = self.data.get_mut(path) {
-            spec.remove(field);
+        let Some(spec) = self.data.get_mut(path) else {
+            return;
+        };
+        // A tombstone is only needed to mask a field the crate holds; for an
+        // authored-only or absent field, dropping the overlay entry keeps erase
+        // idempotent and lets a later set re-append in authored order.
+        let masks_crate = spec
+            .fieldset
+            .is_some_and(|start| crate_fields(&self.file.borrow(), start).any(|(name, _)| name == field));
+        if masks_crate {
+            spec.set_authored(field, None);
+        } else {
+            spec.remove_authored(field);
         }
+    }
+}
+
+/// Walks a crate spec's fieldset from `start` to its terminator, yielding each
+/// field's resolved name and value representation. Names borrow the shared token
+/// table, so iterating makes no per-spec copy.
+fn crate_fields<R>(file: &CrateFile<R>, start: usize) -> impl Iterator<Item = (&str, ValueRep)> + '_ {
+    file.fieldsets
+        .get(start..)
+        .unwrap_or(&[])
+        .iter()
+        .map_while(|slot| *slot)
+        .map(move |index| {
+            let field = &file.fields[index];
+            (field_name(file, field.token_index), field.value_rep)
+        })
+}
+
+/// Resolves a crate token index to a field name, translating the crate's
+/// internal property-children token to the Sdf `propertyChildren` key the rest
+/// of the toolkit uses.
+fn field_name<R>(file: &CrateFile<R>, token_index: usize) -> &str {
+    let raw = file.tokens[token_index].as_str();
+    if raw == CRATE_PROPERTY_CHILDREN {
+        sdf::ChildrenKey::PropertyChildren.as_str()
+    } else {
+        raw
     }
 }
 
@@ -302,6 +363,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(copyright, "Test string");
+    }
+
+    #[test]
+    fn erase_then_reauthor_appends() {
+        let mut data = read_file("fixtures/fields.usdc").unwrap();
+        let path = sdf::path("/erase_order").unwrap();
+        data.create_spec(path.clone(), sdf::SpecType::Prim);
+
+        // Erasing an absent field is a no-op, and re-authoring a field appends
+        // it in authored order rather than reusing an earlier slot.
+        data.erase_field(&path, "alpha");
+        data.set_field(&path, "beta", sdf::Value::Token("b".into()));
+        data.set_field(&path, "alpha", sdf::Value::Token("a".into()));
+
+        assert_eq!(data.list_fields(&path).unwrap(), ["beta", "alpha"]);
+    }
+
+    #[test]
+    fn erase_masks_crate_field() {
+        let mut data = read_file("fixtures/fields.usdc").unwrap();
+        let root = sdf::Path::abs_root();
+        assert!(data.has_field(&root, "customLayerData"));
+
+        // A tombstone hides a field the crate holds.
+        data.erase_field(&root, "customLayerData");
+        assert!(!data.has_field(&root, "customLayerData"));
+        assert!(data.try_field(&root, "customLayerData").unwrap().is_none());
     }
 
     #[test]
