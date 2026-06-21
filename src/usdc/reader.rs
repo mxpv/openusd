@@ -358,7 +358,7 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         let jumps = self.read_encoded_ints::<i32>(count)?;
         debug_assert_eq!(jumps.len(), count);
 
-        self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps, 0, sdf::Path::default())?;
+        self.build_compressed_paths(&path_indexes, &element_token_indexes, &jumps)?;
 
         Ok(())
     }
@@ -368,61 +368,70 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         path_indexes: &[u32],
         element_token_indexes: &[i32],
         jumps: &[i32],
-        mut current_index: usize,
-        mut parent_path: sdf::Path,
     ) -> Result<()> {
         // See https://github.com/PixarAnimationStudios/OpenUSD/blob/0b18ad3f840c24eb25e16b795a5b0821cf05126e/pxr/usd/usd/crateFile.cpp#L3760
+        //
+        // The inner loop walks a child chain; a node that has both a child and a
+        // jump-addressed sibling pushes that sibling subtree onto an explicit
+        // stack, so stack frames stay bounded by namespace depth (the child
+        // chain) while namespace width fans out through the queue. C++
+        // `_BuildDecompressedPathsImpl` does the same, dispatching each sibling
+        // subtree to a `WorkDispatcher` task.
+        //
+        // TODO(rayon): this decoder is performance-critical — it runs for every
+        // loaded layer and dominates open time on large scenes. The deferred
+        // sibling subtrees are independent and should be decoded in parallel, as
+        // the C++ WorkDispatcher does.
+        // Nothing to decode when the PATHS section is empty.
+        if path_indexes.is_empty() {
+            return Ok(());
+        }
 
-        let mut has_child;
-        let mut has_sibling;
+        let mut pending = vec![(0usize, sdf::Path::default())];
 
-        loop {
-            let this_index = current_index;
-            current_index += 1;
+        while let Some((mut current_index, mut parent_path)) = pending.pop() {
+            loop {
+                let index = current_index;
+                current_index += 1;
 
-            if parent_path.is_empty() {
-                parent_path = sdf::Path::new("/")?;
-                self.paths[this_index] = parent_path.clone();
-            } else {
-                let token_index = element_token_indexes[this_index];
-                let is_prim_property_path = token_index < 0;
-                let token_index = token_index.unsigned_abs() as usize;
-                let element_token = self.tokens[token_index].as_str();
-
-                self.paths[path_indexes[this_index] as usize] = if is_prim_property_path {
-                    parent_path.append_property(element_token)?
-                } else if element_token.starts_with('{') {
-                    // Variant segments are appended directly without a separator
-                    // to produce canonical paths like /Prim{set=sel}.
-                    parent_path.append_variant_segment(element_token)
+                if parent_path.is_empty() {
+                    parent_path = sdf::Path::new("/")?;
+                    self.paths[index] = parent_path.clone();
                 } else {
-                    parent_path.append_path(element_token)?
-                };
-            }
+                    let token_index = element_token_indexes[index];
+                    let is_prim_property_path = token_index < 0;
+                    let token_index = token_index.unsigned_abs() as usize;
+                    let element_token = self.tokens[token_index].as_str();
 
-            has_child = jumps[this_index] > 0 || jumps[this_index] == -1;
-            has_sibling = jumps[this_index] >= 0;
-
-            if has_child {
-                if has_sibling {
-                    let sibling_index = this_index + jumps[this_index] as usize;
-
-                    self.build_compressed_paths(
-                        path_indexes,
-                        element_token_indexes,
-                        jumps,
-                        sibling_index,
-                        parent_path,
-                    )?;
+                    self.paths[path_indexes[index] as usize] = if is_prim_property_path {
+                        parent_path.append_property(element_token)?
+                    } else if element_token.starts_with('{') {
+                        // Variant segments are appended directly without a separator
+                        // to produce canonical paths like /Prim{set=sel}.
+                        parent_path.append_variant_segment(element_token)
+                    } else {
+                        parent_path.append_path(element_token)?
+                    };
                 }
 
-                // Have a child (may have also had a sibling).
-                // Reset parent path.
-                parent_path = self.paths[path_indexes[this_index] as usize].clone();
-            }
+                let has_child = jumps[index] > 0 || jumps[index] == -1;
+                let has_sibling = jumps[index] >= 0;
 
-            if !has_child && !has_sibling {
-                break;
+                if has_child {
+                    if has_sibling {
+                        let sibling_index = index + jumps[index] as usize;
+                        // Siblings share this node's parent; defer the subtree.
+                        pending.push((sibling_index, parent_path.clone()));
+                    }
+
+                    // Descend into the child (the next sequential entry) under
+                    // this node's path.
+                    parent_path = self.paths[path_indexes[index] as usize].clone();
+                }
+
+                if !has_child && !has_sibling {
+                    break;
+                }
             }
         }
 
@@ -816,6 +825,14 @@ impl<R: io::Read + io::Seek> CrateFile<R> {
         Ok(())
     }
 
+    /// Reads a crate dictionary value (`customData`, `assetInfo`, and nested
+    /// dictionaries).
+    ///
+    /// TODO: this recurses through `value`, which re-enters here for a nested
+    /// `Type::Dictionary`, so a deeply nested dictionary overflows the stack —
+    /// one Rust frame per nesting level over file-controlled data. Bound the
+    /// depth (a guard or an explicit stack), as `build_compressed_paths` does
+    /// for wide path trees.
     fn read_custom_data(&mut self) -> Result<HashMap<String, Value>> {
         let mut count = self.reader.read_count()?;
         let mut dict = HashMap::default();
