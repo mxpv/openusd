@@ -210,8 +210,6 @@
 //!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a
 //!   value-resolution surface for target validity; `NodeFlags::PERMISSION_PRIVATE`
 //!   / `RESTRICTED` are reserved for it.
-//! - Materialize empty inherit / specialize / variant targets as culled nodes
-//!   (only empty external reference/payload targets are materialized today).
 //! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.
 //!   Each build is a pure function of `&LayerGraph`, the parent context, and the
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that

@@ -3615,6 +3615,144 @@ def "Scope"
         Ok(())
     }
 
+    /// The same un-cull path works for an empty *inherit* target: authoring the
+    /// class via an inert `over` recomposes the dependent, since the spec-tier
+    /// rescan now sees the inherit as culled and rebuilds rather than flipping
+    /// `has_specs` in place.
+    #[test]
+    fn inert_add_unculls_inherit() -> Result<()> {
+        // /A inherits a class the layer does not define, so the inherit is culled
+        // until the class is authored.
+        let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root], 0, Box::new(DefaultResolver::new()), true);
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let a = sdf::path("/A")?;
+
+        // The empty class makes /A's inherit culled — no composition arc.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        // Author `over "_class_Foo"` so the class now exists.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/_class_Foo")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        assert!(changes
+            .cache
+            .did_change_specs
+            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        changes.apply(&mut cache, &mut graph);
+
+        // The inherit un-culled: /A now composes the arc.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// An empty *specialize* target un-culls the same way: the culled
+    /// copy-to-root node carries the dependency, so authoring the class
+    /// recomposes the dependent.
+    #[test]
+    fn inert_add_unculls_specialize() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root], 0, Box::new(DefaultResolver::new()), true);
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let a = sdf::path("/A")?;
+
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/_class_Foo")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        assert!(changes
+            .cache
+            .did_change_specs
+            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(cache.has_composition_arc(&graph, &a)?);
+        Ok(())
+    }
+
+    /// A descendant under an empty ancestral variant selection carries the
+    /// variant as a culled node and reports no live composition arc. The parent's
+    /// local variant arc is culled when its `{set=sel}` site authors nothing, and
+    /// the ancestral seed clones that culled node down to the descendant — so the
+    /// cull reaches descendants without a separate path. `has_composition_arc`
+    /// stays gated on `has_specs`, so the spec-less variant never counts as a
+    /// composition arc.
+    #[test]
+    fn empty_ancestral_variant_culled() -> Result<()> {
+        // /A selects a variant its set never authors; /A/Child is authored
+        // directly, so it composes under the empty ancestral selection.
+        let (graph, mut cache) = in_memory_stack(
+            "#usda 1.0\ndef \"A\" (\n    variantSets = \"v\"\n    variants = { string v = \"missing\" }\n) {\n  def \"Child\" { custom double x = 1 }\n  variantSet \"v\" = {\n    \"present\" {}\n  }\n}\n",
+        );
+        let child = sdf::path("/A/Child")?;
+
+        // The child composes from its own opinion, not the empty variant.
+        assert!(!cache.has_composition_arc(&graph, &child)?);
+        let index = cache.indices.get(&child).expect("child index");
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
+            "the empty ancestral variant target is culled"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Variant),
+            "the culled variant contributes nothing to resolution"
+        );
+        Ok(())
+    }
+
+    /// Removing the final spec at an inherit target re-culls it. The contributing
+    /// node loses its last spec, so the spec-tier rescan rebuilds and the now-empty
+    /// target composes as a culled node — the same representation as an
+    /// always-empty target, which keeps a later re-add on the un-cull rebuild path
+    /// rather than an in-place flip that would skip grafting.
+    #[test]
+    fn inert_remove_reculls_inherit() -> Result<()> {
+        // /A inherits a class that exists only as an inert `over`, so the inherit
+        // node contributes a spec.
+        let (mut graph, mut cache) =
+            in_memory_stack("#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\nover \"_class_Foo\" {}\n");
+        let root_id = graph.root_id().unwrap();
+        let a = sdf::path("/A")?;
+
+        // The class exists, so /A composes the inherit.
+        assert!(cache.has_composition_arc(&graph, &a)?);
+
+        // Erase the class's only spec — a purely inert removal.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            l.data_mut().erase_spec(&sdf::path("/_class_Foo").unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        assert!(changes
+            .cache
+            .did_change_specs
+            .contains(&(root_id, sdf::path("/_class_Foo")?)));
+        changes.apply(&mut cache, &mut graph);
+
+        // The emptied inherit composes as a culled node, just like an always-empty
+        // target — the rescan rebuilt rather than flipping `has_specs` in place.
+        assert!(!cache.has_composition_arc(&graph, &a)?);
+        let index = cache.indices.get(&a).expect("index rebuilt on query");
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
+            "the emptied inherit target re-culled"
+        );
+        Ok(())
+    }
+
     /// A reference to a *nested* missing target also recomposes when the target
     /// is authored. A sub-root target is grafted as a non-culled spec-less node
     /// (not the root case's culled node), so the spec-tier rescan refreshes its

@@ -1929,6 +1929,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let n = &mut self.output.nodes[new_node.idx()];
         n.sibling_num_at_origin = vt.vset_num;
         n.has_specs = has_specs;
+        // A selected variant whose `{vset=vsel}` site authors no spec is culled
+        // like an empty reference/payload target so a later inert spec at the site
+        // rebuilds the index.
+        if !has_specs {
+            self.cull_empty(new_node);
+        }
         self.add_tasks_for_node(new_node);
         self.retry_variant_tasks();
         Ok(())
@@ -2010,6 +2016,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 other => other,
             };
         }
+    }
+
+    /// Marks `node` as a culled empty arc target (C++ culling): it stays in the
+    /// graph for change tracking and dependency registration but contributes no
+    /// opinions to value resolution. The target authors no spec, so recording
+    /// `has_specs = false` lets a later spec at the site be detected as a
+    /// `has_specs` flip by the spec-tier rescan, which then un-culls the arc and
+    /// grafts the target's subtree.
+    fn cull_empty(&mut self, node: NodeId) {
+        let n = &mut self.output.nodes[node.idx()];
+        n.flags |= NodeFlags::CULLED;
+        n.has_specs = false;
     }
 
     /// Adds a single class-based arc under `parent` (C++ `_AddClassBasedArc`),
@@ -2164,6 +2182,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // is kept to propagate but contributes no opinions.
         if !direct_should {
             n.flags |= NodeFlags::INERT;
+        }
+        // A target authoring no spec is culled like an empty reference/payload
+        // target, so a later inert spec at the site rebuilds rather than flipping
+        // `has_specs` in place. The node still drives implied-class propagation
+        // through the tasks below, so the cull only adds the flag.
+        if !has_specs {
+            self.cull_empty(new_node);
         }
 
         self.add_tasks_for_node(new_node);
@@ -2462,6 +2487,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
             n.sibling_num_at_origin = sibling;
             n.has_specs = has_specs;
         }
+        // An empty specialize target is culled like an empty reference/payload
+        // target so a later inert spec at the site rebuilds the index.
+        if !has_specs {
+            self.cull_empty(new_node);
+        }
         self.add_tasks_for_node(new_node);
         Ok(Some(new_node))
     }
@@ -2663,12 +2693,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             .output
             .add_child(parent, target_stack, rep, source, arc, map, false);
         if empty {
-            let node = &mut self.output.nodes[new_node.idx()];
-            node.flags |= NodeFlags::CULLED;
-            // The target authors no spec, so the node contributes nothing; record
-            // that so a later spec at the site (which must un-cull and graft the
-            // target) is detected as a `has_specs` flip by the spec-tier rescan.
-            node.has_specs = false;
+            self.cull_empty(new_node);
             return Ok(());
         }
 

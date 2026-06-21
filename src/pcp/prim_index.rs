@@ -39,8 +39,10 @@ pub struct PrimIndex {
 pub(crate) struct SpecRefresh {
     /// A contributing (non-culled) node at the site was refreshed in place.
     pub contributing: bool,
-    /// A culled node at the site gained a spec; the index must be rebuilt so the
-    /// arc un-culls and grafts the target's subtree.
+    /// The index must be rebuilt rather than refreshed in place: a culled node at
+    /// the site gained a spec (un-cull and graft the target's subtree), or a
+    /// contributing arc target lost its last spec (cull it like an always-empty
+    /// target).
     pub needs_rebuild: bool,
 }
 
@@ -182,10 +184,11 @@ impl PrimIndex {
     /// contributing layers; its refreshed flag reflects whether any layer in its
     /// stack still authors a spec there.
     ///
-    /// A *culled* node that gains a spec (an empty arc target the spec fills in)
-    /// is the exception: un-culling it would graft the target's subtree, which an
-    /// in-place flip cannot do, so [`SpecRefresh::needs_rebuild`] tells the caller
-    /// to drop and rebuild the index instead.
+    /// Two transitions are the exception, both handled by rebuilding rather than
+    /// flipping in place ([`SpecRefresh::needs_rebuild`]): a *culled* node that
+    /// gains a spec (un-culling it must graft the target's subtree), and a
+    /// contributing arc target that loses its last spec (it must cull to match an
+    /// always-empty target, so a later re-add takes the un-cull path).
     //
     // TODO(perf): scans the whole node arena per call, and the caller
     // (`IndexCache::rescan_specs`) invokes it once per dependent index; a
@@ -203,9 +206,18 @@ impl PrimIndex {
             if node.path == *path && graph.layer_stack(node.layer_stack).iter().any(|&(li, _)| li == layer) {
                 let has_specs = stack_has_spec(graph, node.layer_stack, path);
                 if node.is_culled() {
+                    // An empty arc target the spec just filled in: rebuild so the
+                    // arc un-culls and grafts the target's subtree.
                     refresh.needs_rebuild |= has_specs && !node.has_specs;
                 } else {
                     refresh.contributing = true;
+                    // An arc target that just lost its last spec must re-cull to
+                    // match an always-empty target, so a later re-add takes the
+                    // un-cull rebuild path. The local root and inert placeholders
+                    // never cull.
+                    let lost_last_spec = node.has_specs && !has_specs;
+                    let cullable = node.arc != ArcType::Root && !node.is_inert();
+                    refresh.needs_rebuild |= lost_last_spec && cullable;
                 }
                 node.has_specs = has_specs;
             }
@@ -1243,6 +1255,77 @@ pub(crate) mod tests {
         assert!(
             !index.has_composition_arc(),
             "an empty reference does not compose the prim"
+        );
+        assert!(!index.is_empty(), "the prim's own opinions remain");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_inherit_target_culled() -> Result<()> {
+        // /A inherits a class the layer never defines.
+        let root = parse_usda("#usda 1.0\ndef \"A\" ( inherits = </_class_Missing> ) {\n  custom double x = 1\n}\n");
+        let index = build(&one_layer_stack(root), "/A");
+
+        // The empty class is retained as a culled node so an editor sees the arc,
+        // but value resolution skips it and the prim is not composed.
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
+            "empty inherit target kept as a culled node"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Inherit),
+            "culled inherit contributes no opinion to resolution"
+        );
+        assert!(
+            !index.has_composition_arc(),
+            "an empty inherit does not compose the prim"
+        );
+        assert!(!index.is_empty(), "the prim's own opinions remain");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_specialize_target_culled() -> Result<()> {
+        // /A specializes a class the layer never defines.
+        let root = parse_usda("#usda 1.0\ndef \"A\" ( specializes = </_class_Missing> ) {\n  custom double x = 1\n}\n");
+        let index = build(&one_layer_stack(root), "/A");
+
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Specialize && n.is_culled()),
+            "empty specialize target kept as a culled node"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Specialize),
+            "culled specialize contributes no opinion to resolution"
+        );
+        assert!(
+            !index.has_composition_arc(),
+            "an empty specialize does not compose the prim"
+        );
+        assert!(!index.is_empty(), "the prim's own opinions remain");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_variant_target_culled() -> Result<()> {
+        // /A selects a variant its set never authors, so the `{v=missing}` site
+        // has no spec.
+        let root = parse_usda(
+            "#usda 1.0\ndef \"A\" (\n    variantSets = \"v\"\n    variants = { string v = \"missing\" }\n) {\n  custom double own = 1\n  variantSet \"v\" = {\n    \"present\" { custom double x = 1 }\n  }\n}\n",
+        );
+        let index = build(&one_layer_stack(root), "/A");
+
+        assert!(
+            index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
+            "empty variant target kept as a culled node"
+        );
+        assert!(
+            index.nodes().all(|n| n.arc != ArcType::Variant),
+            "culled variant contributes no opinion to resolution"
+        );
+        assert!(
+            !index.has_composition_arc(),
+            "an empty variant does not compose the prim"
         );
         assert!(!index.is_empty(), "the prim's own opinions remain");
         Ok(())
