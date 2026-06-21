@@ -63,6 +63,31 @@ fn author_keeps_sibling_indexed() {
     );
 }
 
+/// A significant change at an ancestor invalidates a self-root-only descendant.
+///
+/// `/Foo/Bar`'s sole node is the skipped self-Root, so it registers only in the
+/// layer-agnostic `by_path` map and never appears in the per-layer subtree
+/// lookup. The literal-path subtree drop in `fanout_significant` still reaches
+/// it, because it is a namespace descendant of the changed `/Foo`.
+#[test]
+fn significant_at_ancestor_drops_descendant() {
+    let stage = open_in_memory();
+    stage.define_prim("/Foo").unwrap().set_type_name("Xform").unwrap();
+    stage.define_prim("/Foo/Bar").unwrap().set_type_name("Xform").unwrap();
+
+    let _ = stage.prim(sdf::path("/Foo").unwrap()).type_name().unwrap();
+    let _ = stage.prim(sdf::path("/Foo/Bar").unwrap()).type_name().unwrap();
+    assert!(stage.is_indexed(&sdf::path("/Foo").unwrap()));
+    assert!(stage.is_indexed(&sdf::path("/Foo/Bar").unwrap()));
+
+    stage.override_prim("/Foo").unwrap().set_instanceable(true).unwrap();
+
+    assert!(
+        !stage.is_indexed(&sdf::path("/Foo/Bar").unwrap()),
+        "a significant change at /Foo must invalidate its self-root-only descendant /Foo/Bar",
+    );
+}
+
 /// Attribute value writes never invalidate the owning prim's graph.
 #[test]
 fn attribute_value_keeps_owner_indexed() {

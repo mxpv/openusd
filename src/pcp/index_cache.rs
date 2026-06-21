@@ -1115,10 +1115,11 @@ impl IndexCache {
         // dropped subtree may hold further matches that would be revisited.
         //
         // TODO(perf): this scans every cached index (the reverse `Dependencies`
-        // map can't scope it — its synthetic self-registration ties every prim to
-        // every layer), and the per-victim `drop_index_subtree` below is itself an
-        // O(n) cache scan. The scan's per-index predicate is independent
-        // (`TODO(rayon)`); the drops could batch into one prefix-filtered pass.
+        // map can't scope it — an index that skipped a muted target keeps no node
+        // for it, so it registered no dependency site to find it by), and the
+        // per-victim `drop_index_subtree` below is itself an O(n) cache scan. The
+        // scan's per-index predicate is independent (`TODO(rayon)`); the drops
+        // could batch into one prefix-filtered pass.
         let victims: Vec<Path> = self
             .indices
             .iter()

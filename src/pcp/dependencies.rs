@@ -29,6 +29,11 @@ pub(super) struct Dependencies {
     /// Reverse map for cheap removal: prim_index_path → list of (layer, site)
     /// it registered. Avoids re-walking the index when invalidating.
     by_prim: HashMap<Path, Vec<(LayerId, Path)>>,
+    /// Layer-agnostic set of prim-index paths, each observing exactly its own
+    /// path. A prim self-registers here so an empty or cache-miss index stays
+    /// findable when a spec is first authored at its path on a layer its graph
+    /// does not yet touch; one entry per prim covers that prim on every layer.
+    by_path: HashSet<Path>,
 }
 
 impl Dependencies {
@@ -70,30 +75,23 @@ impl Dependencies {
             }
         }
 
-        // Ensure the prim's own path is findable on every layer. Without
-        // this, cached misses (empty `PrimIndex`) and self-Root-only
-        // indices have no reverse-map entry, so an authoring change that
-        // names exactly this path on a layer the graph doesn't already
-        // touch cannot reach them via `lookup_with_ancestors`. Synthetic
-        // self-registrations are cheap and let the dependency map serve as
-        // the single source of truth for "which prims observe site X on layer L".
-        for &li in graph.all_ids() {
-            let key = (li, prim_index_path.clone());
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            registered.push(key);
-            self.per_layer
-                .entry(li)
-                .or_default()
-                .get_or_insert_default(prim_index_path)
-                .push(prim_index_path.clone());
-        }
         self.by_prim.insert(prim_index_path.clone(), registered);
+
+        // Register the prim's own path once, independent of layer. Without
+        // this, cached misses (empty `PrimIndex`) and self-Root-only indices
+        // have no reverse-map entry, so an authoring change that names exactly
+        // this path on a layer the graph doesn't already touch cannot reach
+        // them. The per-layer lookups fold `by_path` in (see
+        // [`path_dependents`](Self::path_dependents)), so one layer-agnostic
+        // entry per prim keeps every layer covered.
+        self.by_path.insert(prim_index_path.clone());
     }
 
     /// Drop all registered `(layer, site)` entries for `prim_index_path`.
     pub(super) fn remove(&mut self, prim_index_path: &Path) {
+        // Drop the prim's layer-agnostic self-registration so an eviction or
+        // rebuild leaves no stale `by_path` entry.
+        self.by_path.remove(prim_index_path);
         let Some(sites) = self.by_prim.remove(prim_index_path) else {
             return;
         };
@@ -113,6 +111,7 @@ impl Dependencies {
     pub(super) fn clear(&mut self) {
         self.per_layer.clear();
         self.by_prim.clear();
+        self.by_path.clear();
     }
 
     /// Find prim indices that depend on `(layer_id, site_path)` or on any
@@ -123,10 +122,16 @@ impl Dependencies {
     /// transitively on opinions at `/Foo`, so a change at `/Foo` invalidates
     /// `/Foo/Bar` too.
     pub(super) fn lookup_with_ancestors(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        let Some(map) = self.per_layer.get(&layer_id) else {
-            return Vec::new();
-        };
-        Self::dedup_paths(map.ancestors(site_path).map(|(_, deps)| deps))
+        let per_layer = self
+            .per_layer
+            .get(&layer_id)
+            .into_iter()
+            .flat_map(|map| map.ancestors(site_path).map(|(_, deps)| deps.as_slice()));
+        // The layer-agnostic self-registrations are findable on every layer, so
+        // an ancestor that observes its own path invalidates `site_path` even on
+        // a layer its graph does not touch.
+        let by_path = site_path.ancestors().map(|anc| self.path_dependents(&anc));
+        Self::dedup_paths(per_layer.chain(by_path))
     }
 
     /// Find prim indices whose graph reads exactly `(layer_id, site_path)`,
@@ -134,34 +139,56 @@ impl Dependencies {
     /// reach the nodes sitting at that precise site whose `has_specs` flag an
     /// inert spec add or remove can flip.
     pub(super) fn exact_lookup(&self, layer_id: LayerId, site_path: &Path) -> Vec<Path> {
-        self.per_layer
+        let per_layer = self
+            .per_layer
             .get(&layer_id)
             .and_then(|map| map.get(site_path))
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice);
+        Self::dedup_paths(
+            per_layer
+                .into_iter()
+                .chain(std::iter::once(self.path_dependents(site_path))),
+        )
     }
 
-    /// Find prim indices whose dependency site is at or below `prefix` in
-    /// `layer_index`.
+    /// Find prim indices whose graph-derived dependency site is at or below
+    /// `prefix` in `layer_index`.
     ///
-    /// Used to fan out an invalidation downward (a significant change at
-    /// `/Foo` must drop every cached index whose graph touches `/Foo/*`).
-    /// Walks the `prefix` subtree of the layer's dependency [`sdf::PathTable`].
+    /// Used to fan out an invalidation downward to the cross-namespace
+    /// dependents a [`drop_index_subtree`](super::IndexCache::drop_index_subtree)
+    /// of `prefix` misses: a prim like `/World/Inst` whose own path lies outside
+    /// `prefix` but whose graph references `/Foo/Model` under it. Walks the
+    /// `prefix` subtree of the layer's dependency [`sdf::PathTable`].
+    ///
+    /// The layer-agnostic [`by_path`](Self::by_path) self-registrations are not
+    /// folded in here: a prim whose only registration is its own path under
+    /// `prefix` is a namespace descendant of `prefix`, so the caller's
+    /// literal-path subtree drop already reaches it.
     pub(super) fn subtree_lookup(&self, layer_id: LayerId, prefix: &Path) -> Vec<Path> {
         let Some(map) = self.per_layer.get(&layer_id) else {
             return Vec::new();
         };
-        Self::dedup_paths(map.subtree(prefix).map(|(_, deps)| deps))
+        Self::dedup_paths(map.subtree(prefix).map(|(_, deps)| deps.as_slice()))
+    }
+
+    /// Prim indices that observe exactly `path`, independent of layer.
+    ///
+    /// [`exact_lookup`](Self::exact_lookup) and
+    /// [`lookup_with_ancestors`](Self::lookup_with_ancestors) fold this in so a
+    /// first opinion authored at `path` reaches the prims registered there
+    /// regardless of which layer carried it.
+    fn path_dependents(&self, path: &Path) -> &[Path] {
+        self.by_path.get(path).map_or(&[], std::slice::from_ref)
     }
 
     /// Collects the deduplicated union of several dependent-path lists,
     /// preserving first-seen order.
-    fn dedup_paths<'a>(lists: impl Iterator<Item = &'a Vec<Path>>) -> Vec<Path> {
+    fn dedup_paths<'a>(lists: impl Iterator<Item = &'a [Path]>) -> Vec<Path> {
         let mut out: Vec<Path> = Vec::new();
-        let mut seen: HashSet<Path> = HashSet::new();
+        let mut seen: HashSet<&Path> = HashSet::new();
         for deps in lists {
             for d in deps {
-                if seen.insert(d.clone()) {
+                if seen.insert(d) {
                     out.push(d.clone());
                 }
             }
@@ -184,7 +211,7 @@ mod tests {
 
     /// A layer graph of `n` sublayer-free in-memory layers, so the sublayer
     /// stack rooted at the n-th layer is just that layer — the single-layer
-    /// stacks the synthetic nodes below register against.
+    /// stacks a node's site registers against.
     fn graph(n: usize) -> LayerGraph {
         let layers = (0..n)
             .map(|i| sdf::Layer::new_in_memory(format!("l{i}.usda")))
@@ -210,11 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_self_registration_covers_empty_index() {
+    fn by_path_covers_empty_index() {
         // An index with only a self-Root edge contributes no graph-derived
-        // dependencies (the Root-at-own-path is intentionally skipped to
-        // keep the map compact). The synthetic self-registration ensures
-        // the prim path is still findable on every layer.
+        // dependencies (the Root-at-own-path is intentionally skipped to keep
+        // the map compact). The layer-agnostic `by_path` entry ensures the
+        // prim path is still findable on every layer, so a first opinion
+        // authored at `/Foo` invalidates it regardless of which layer carries
+        // the change.
         let g = graph(2);
         let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
         let mut deps = Dependencies::default();
@@ -223,6 +252,7 @@ mod tests {
         deps.add(&foo, &index, &g);
         assert_eq!(deps.lookup_with_ancestors(l0, &foo), vec![foo.clone()]);
         assert_eq!(deps.lookup_with_ancestors(l1, &foo), vec![foo.clone()]);
+        assert_eq!(deps.exact_lookup(l1, &foo), vec![foo.clone()]);
     }
 
     #[test]
