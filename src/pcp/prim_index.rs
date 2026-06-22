@@ -45,6 +45,23 @@ pub(crate) struct SpecRefresh {
     pub needs_rebuild: bool,
 }
 
+/// A reference/payload arc's demand for a not-yet-loaded target layer, carried
+/// out of the indexer (in [`BuildOutput`](super::prim_indexer::BuildOutput)) to
+/// the stage's load barrier. The bare asset path alone loses the authoring
+/// context the barrier needs: the referencing layer stack's expression
+/// variables must overlay the target's own when the target's `subLayers` paths
+/// are evaluated, so the right sublayer loads (a `${VAR}` inherited across the
+/// arc resolves against the referrer's value, not only the target's local one).
+#[derive(Debug, Clone)]
+pub(crate) struct Demand {
+    /// Anchored asset path of the not-yet-loaded reference/payload target.
+    pub asset_path: String,
+    /// Expression variables composed at the authoring node, overlaid on the
+    /// target's own when its `subLayers` paths are evaluated (the referrer,
+    /// closer to the root, wins).
+    pub expr_vars: HashMap<String, Value>,
+}
+
 impl PrimIndex {
     /// Returns `true` if no layers contribute opinions for this prim.
     ///
@@ -421,16 +438,16 @@ impl PrimIndex {
     /// building from scratch, ensuring inherit/specialize targets use the
     /// fully-composed result (including ancestor-propagated specs).
     ///
-    /// The third tuple element is the anchored asset paths a reference/payload
-    /// arc demanded but that are not yet loaded; non-empty means the returned
-    /// index is incomplete and must not be cached, so the caller loads those
-    /// layers and recomposes.
+    /// The third tuple element is the [`Demand`]s a reference/payload arc raised
+    /// for a target that is not yet loaded; non-empty means the returned index
+    /// is incomplete and must not be cached, so the caller loads those layers
+    /// and recomposes.
     pub(crate) fn build_with_cache(
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<String>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack_id())
     }
 
@@ -449,7 +466,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
         ambient: LayerStackId,
-    ) -> BuildResult<(Self, Vec<Error>, Vec<String>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
         if ambient == LayerStackId::Root {
             if let Some(cached) = cached_indices.get(path) {
                 return Ok((cached.clone(), Vec::new(), Vec::new()));

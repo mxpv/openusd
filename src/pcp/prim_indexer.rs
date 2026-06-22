@@ -102,7 +102,8 @@ use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{
-    collect_payloads_in, compose_arc_list_in, compose_references_in, stack_has_spec, CompositionContext, PrimIndex,
+    collect_payloads_in, compose_arc_list_in, compose_references_in, stack_has_spec, CompositionContext, Demand,
+    PrimIndex,
 };
 use super::{CycleChain, CycleHop, Error, LayerGraph, LayerId};
 
@@ -371,10 +372,10 @@ enum TaskKind {
 pub(crate) struct BuildOutput {
     pub(crate) graph: Option<PrimIndexGraph>,
     pub(crate) errors: Vec<Error>,
-    /// Anchored asset paths demanded by a reference/payload arc whose target
-    /// layer is not yet loaded. Non-empty means the build is incomplete and its
-    /// `graph` must not be cached; the cache loads these and recomposes.
-    pub(crate) pending_loads: Vec<String>,
+    /// [`Demand`]s raised by a reference/payload arc whose target layer is not
+    /// yet loaded. Non-empty means the build is incomplete and its `graph` must
+    /// not be cached; the cache loads these and recomposes.
+    pub(crate) pending_loads: Vec<Demand>,
 }
 
 /// The shared, read-only inputs to a prim build — the same across every nested
@@ -449,12 +450,12 @@ pub(crate) struct Indexer<'a, 'f> {
     /// still composes; the cache retains these as stage composition diagnostics.
     /// Errors from nested sub-builds are merged in at their call sites.
     errors: Vec<Error>,
-    /// Anchored asset paths a reference/payload arc demanded but whose target
-    /// layer is not yet loaded. Returned in [`BuildOutput`] (like
-    /// [`errors`](Self::errors)) — a non-empty list means the build is incomplete
-    /// and its graph must not be cached; the cache loads these and recomposes.
-    /// Nested sub-builds merge theirs up at their call sites.
-    pending_loads: Vec<String>,
+    /// [`Demand`]s a reference/payload arc raised for a target layer that is not
+    /// yet loaded. Returned in [`BuildOutput`] (like [`errors`](Self::errors)) —
+    /// a non-empty list means the build is incomplete and its graph must not be
+    /// cached; the cache loads these and recomposes. Nested sub-builds merge
+    /// theirs up at their call sites.
+    pending_loads: Vec<Demand>,
     /// Invalid-opinion-at-relocation-source errors deferred until the build
     /// finishes, paired with the relocate node they were detected on. A relocate
     /// composed under a culled branch (an empty ancestral reference at the
@@ -1524,7 +1525,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
         self.errors.append(&mut arc_errors);
         for (asset_path, prim_path, offset) in &arcs {
-            self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset)?;
+            self.add_ref_or_payload_arc(node, asset_path, prim_path, arc, *offset, &expr_vars)?;
         }
         Ok(())
     }
@@ -2552,6 +2553,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         prim_path: &Path,
         arc: ArcType,
         arc_offset: LayerOffset,
+        expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<()> {
         let is_internal = asset_path.is_empty();
         let parent_path = self.node(parent).path.clone();
@@ -2566,44 +2568,75 @@ impl<'a, 'f> Indexer<'a, 'f> {
         } else {
             let layer_index = match self.inputs.stack.find(asset_path) {
                 Some(layer_index) => layer_index,
-                // A muted target contributes nothing and is never opened: skip
-                // the arc, which then composes as if absent. Checked before the
-                // load demand below so a muted reference target's file is not read.
-                None if self.inputs.stack.is_asset_muted(asset_path) => return Ok(()),
-                // A resolvable-but-not-yet-loaded target is demanded, not an
-                // error: record it in `pending_loads` and leave the arc uncomposed
-                // this pass. The stage's query loop opens the layer and recomposes,
-                // so composition drives layer loading and an un-visited subtree
-                // never loads. A target a prior load attempt failed to read is not
-                // re-demanded — it falls through to the malformed-layer error below
-                // so the prim's index can finally cache.
-                None if self.inputs.stack.layer_registry().resolve(asset_path).is_some()
-                    && !self.inputs.stack.load_failed(asset_path) =>
-                {
-                    self.pending_loads.push(asset_path.to_string());
-                    return Ok(());
-                }
-                // A target the load barrier resolved but could not read or parse:
-                // report it with the underlying reason and skip the arc.
-                None if self.inputs.stack.load_failed(asset_path) => {
-                    self.errors.push(Error::MalformedLayer {
-                        asset_path: asset_path.to_string(),
-                        arc,
-                        introduced_by: self.introducing_layer(parent),
-                        site_path: parent_path,
-                        reason: self
-                            .inputs
-                            .stack
-                            .load_failure_reason(asset_path)
-                            .unwrap_or_default()
-                            .to_string(),
-                    });
-                    return Ok(());
-                }
-                // An unresolvable asset is a recoverable error (C++ "Could not
-                // open asset … for {arc}"): record it and skip the arc so the rest
-                // of the prim — including its own local opinions — still composes.
+                // The target is not loaded. The authoring layer's location gates
+                // both the `.usdz` guard and the relative-mute anchor, so resolve
+                // it once here — only on a `find` miss, leaving an already-loaded
+                // arc (the steady state) doing no filesystem work.
                 None => {
+                    // TODO(perf): this resolves the authoring layer's location
+                    // only to read its extension for the usdz guard; the layer's
+                    // in-memory identifier already carries the extension, so the
+                    // guard could test that and skip the filesystem resolve.
+                    let anchor = self.inputs.stack.anchor_location(Some(self.node(parent).layer_id()));
+                    // A reference/payload authored inside a `.usdz` package would
+                    // need to open a sibling layer within the archive, which is not
+                    // yet supported (the eager collector bailed the same way for a
+                    // usdz inner layer's sublayers). Report it explicitly rather
+                    // than letting the package-relative target fail as a generic
+                    // unresolved layer.
+                    if anchor.as_ref().is_some_and(|resolved| resolved.extension() == "usdz") {
+                        self.errors.push(Error::UnsupportedUsdzReference {
+                            asset_path: asset_path.to_string(),
+                            arc,
+                            introduced_by: self.introducing_layer(parent),
+                            site_path: parent_path,
+                        });
+                        return Ok(());
+                    }
+                    // A muted target contributes nothing and is never opened: skip
+                    // the arc, which then composes as if absent. Checked before the
+                    // load demand so a muted target's file is not read.
+                    if self.arc_target_muted(parent, asset_path) {
+                        return Ok(());
+                    }
+                    // A resolvable-but-not-yet-loaded target is demanded, not an
+                    // error: record it in `pending_loads` and leave the arc
+                    // uncomposed this pass. The stage's query loop opens the layer
+                    // and recomposes, so composition drives layer loading and an
+                    // un-visited subtree never loads. A target a prior load attempt
+                    // failed to read is not re-demanded — it falls through to the
+                    // malformed-layer error below so the prim's index can finally
+                    // cache.
+                    if self.inputs.stack.layer_registry().resolve(asset_path).is_some()
+                        && !self.inputs.stack.load_failed(asset_path)
+                    {
+                        self.pending_loads.push(Demand {
+                            asset_path: asset_path.to_string(),
+                            expr_vars: expr_vars.clone(),
+                        });
+                        return Ok(());
+                    }
+                    // A target the load barrier resolved but could not read or
+                    // parse: report it with the underlying reason and skip the arc.
+                    if self.inputs.stack.load_failed(asset_path) {
+                        self.errors.push(Error::MalformedLayer {
+                            asset_path: asset_path.to_string(),
+                            arc,
+                            introduced_by: self.introducing_layer(parent),
+                            site_path: parent_path,
+                            reason: self
+                                .inputs
+                                .stack
+                                .load_failure_reason(asset_path)
+                                .unwrap_or_default()
+                                .to_string(),
+                        });
+                        return Ok(());
+                    }
+                    // An unresolvable asset is a recoverable error (C++ "Could not
+                    // open asset … for {arc}"): record it and skip the arc so the
+                    // rest of the prim — including its own local opinions — still
+                    // composes.
                     self.errors.push(Error::UnresolvedLayer {
                         asset_path: asset_path.to_string(),
                         arc,
@@ -2788,6 +2821,23 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// recoverable arc errors.
     fn introducing_layer(&self, node: NodeId) -> String {
         self.inputs.stack.layer(self.node(node).layer_id()).identifier.clone()
+    }
+
+    /// Whether the reference/payload target `asset_path` (already anchored) names
+    /// a muted layer, as resolved by the layer that authored the arc. A relative
+    /// muted identifier is anchored against its containing layer; the arc may be
+    /// authored on any member of `node`'s layer stack — a sublayer in a different
+    /// directory than the node's representative — so the target is matched against
+    /// each member's location. An exact-identifier mute matches under any anchor.
+    /// Guarded by [`has_muted_layers`](LayerGraph::has_muted_layers) so the common
+    /// unmuted stage does no anchoring work.
+    fn arc_target_muted(&self, node: NodeId, asset_path: &str) -> bool {
+        let graph = self.inputs.stack;
+        graph.has_muted_layers()
+            && graph
+                .layer_stack(self.node(node).layer_stack_id())
+                .iter()
+                .any(|&(layer, _)| graph.is_asset_muted(asset_path, graph.anchor_location(Some(layer)).as_ref()))
     }
 
     /// Builds the cycle chain for an [`Error::ArcCycle`]: the arcs from the

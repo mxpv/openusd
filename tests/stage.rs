@@ -12,6 +12,7 @@ use openusd::usd::{
     CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StagePopulationMask, StageSink,
 };
+use openusd::usdz::ArchiveWriter;
 use openusd::{ar, gf, pcp, sdf, tf, usd};
 
 /// A [`StageSink`] for tests: holds optional closures for the composed-change and
@@ -253,6 +254,243 @@ fn instance_proxy_cold_query() -> Result<()> {
             .attribute("/World/Inst/Child.x")
             .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
         Some(sdf::Value::Double(3.0))
+    );
+    Ok(())
+}
+
+/// A reference target's `subLayers` expression resolves against the *referencing*
+/// layer stack's variables: the root sets `${V}` but the target only authors the
+/// expression, so the on-demand load must carry the referrer's composed
+/// expression variables into the target's sublayer evaluation (the closer-to-root
+/// referrer wins). Without them `${V}` is unresolved and the sublayer never loads.
+#[test]
+fn lazy_ref_inherited_expr_var() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("prod"))?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    let over = dir.path().join("prod").join("over.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"prod\" }\n)\ndef \"P\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}/over.usda\"`@]\n)\ndef \"P\" {}\n",
+    )?;
+    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(9.0)),
+        "the target's `${{V}}` sublayer resolves against the referrer's variable"
+    );
+    Ok(())
+}
+
+/// A root-layer `subLayers` expression composes the layer it names: the
+/// expression resolves against the root layer's own `expressionVariables`, so the
+/// sublayer edge forms and its prims contribute (the demand path is exercised by
+/// [`lazy_ref_inherited_expr_var`]; this covers the root-stack build).
+#[test]
+fn expr_sublayer_composes() -> Result<()> {
+    let stage = Stage::open(&fixture_path("expr_sublayer.usda"))?;
+    assert_eq!(stage.layer_count(), 2, "root + the expression-resolved sublayer");
+    assert_eq!(
+        stage.root_prims()?.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
+        ["World"],
+        "the expression sublayer's prim composes onto the stage"
+    );
+    Ok(())
+}
+
+/// A reference authored inside a `.usdz` package targets a sibling layer in the
+/// archive, which is unsupported: composition reports the explicit
+/// [`UnsupportedUsdzReference`](pcp::Error::UnsupportedUsdzReference) error and
+/// drops the arc rather than failing the package layer as a generic unresolved
+/// target.
+#[test]
+fn lazy_ref_inside_usdz_unsupported() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let package = dir.path().join("package.usdz");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    // The usdz's inner layer authors a reference to another layer.
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "scene.usda",
+            b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @other.usda@\n) {}\n",
+        )?;
+        writer.finish()?;
+    }
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/P").is_valid()?, "/P still composes from the package layer");
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::UnsupportedUsdzReference { asset_path, introduced_by, .. }
+                if asset_path.ends_with("other.usda") && introduced_by.ends_with("package.usdz")
+        )),
+        "expected UnsupportedUsdzReference, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A reference target's present-but-corrupt sublayer is dropped on its own —
+/// reported [`MalformedSublayer`](pcp::Error::MalformedSublayer) — while the
+/// target itself still composes (its own opinion resolves). The bad sublayer
+/// must not fail the whole reference target.
+#[test]
+fn lazy_ref_corrupt_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    let broken = dir.path().join("broken.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    subLayers = [@broken.usda@]\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+    // Resolves (the file exists) but the parser rejects the body.
+    std::fs::write(&broken, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0)),
+        "the target composes despite its corrupt sublayer"
+    );
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::MalformedSublayer { asset_path, introduced_by, reason }
+                if asset_path == "broken.usda" && introduced_by.ends_with("target.usda") && !reason.is_empty()
+        )),
+        "expected MalformedSublayer carrying the parse error, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A reference/payload target named by a *relative* path on a nested (non-root)
+/// referrer is recognized as muted when that relative identifier is muted: the
+/// mute is anchored against the arc's authoring layer, not only the root. The
+/// muted target is never opened.
+#[test]
+fn lazy_relative_mute_on_nested_referrer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("sub"))?;
+    let root = dir.path().join("root.usda");
+    let mid = dir.path().join("sub").join("mid.usda");
+    let model = dir.path().join("sub").join("model.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @sub/mid.usda@\n) {}\n")?;
+    std::fs::write(
+        &mid,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @model.usda@\n) {}\n",
+    )?;
+    std::fs::write(
+        &model,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    // Mute the model target by its relative spelling, as authored on the nested
+    // referrer `sub/mid.usda` (it resolves under `sub/`, not the root directory).
+    let stage = Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .mute(["model.usda"])
+        .open(root.to_str().unwrap())?;
+
+    // Compose /P, following the nested reference to mid.usda and reaching the
+    // muted model reference.
+    assert!(stage.prim("/P").is_valid()?);
+    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+    assert!(opened_has("mid.usda"), "the nested referrer must load");
+    assert!(
+        !opened_has("model.usda"),
+        "the relatively-muted nested target must never be opened, got {:?}",
+        opened.borrow()
+    );
+    Ok(())
+}
+
+/// A relative mute is anchored against the layer that *authored* the arc, which
+/// may be a sublayer in a different directory than its layer stack's root: a
+/// reference authored in `detail/extra.usda` resolves `@model.usda@` under
+/// `detail/`, and muting the relative `"model.usda"` is recognized there.
+#[test]
+fn relative_mute_nested_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("detail"))?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    let extra = dir.path().join("detail").join("extra.usda");
+    let model = dir.path().join("detail").join("model.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    // target.usda sublayers a layer in detail/, which authors the relative model
+    // reference — so the arc's authoring layer is not the stack's root layer.
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@detail/extra.usda@]\n)\ndef \"P\" {}\n",
+    )?;
+    std::fs::write(&extra, "#usda 1.0\ndef \"P\" (\n    references = @model.usda@\n) {}\n")?;
+    std::fs::write(
+        &model,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let stage = Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .mute(["model.usda"])
+        .open(root.to_str().unwrap())?;
+
+    assert!(stage.prim("/P").is_valid()?);
+    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+    assert!(opened_has("extra.usda"), "the authoring sublayer must load");
+    assert!(
+        !opened_has("model.usda"),
+        "the target muted relative to its authoring sublayer must not be opened, got {:?}",
+        opened.borrow()
+    );
+    Ok(())
+}
+
+/// An unevaluable expression `subLayers` entry drops only that sublayer: the
+/// reference target still composes its own opinions and its valid sublayer,
+/// rather than the bad expression failing the whole target load.
+#[test]
+fn bad_expr_sublayer_dropped() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    let over = dir.path().join("over.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    // The second sublayer uses an undefined expression variable; the first is valid.
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@over.usda@, @`\"${UNDEFINED}.usda\"`@]\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double y = 2\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0)),
+        "the target's own opinion composes despite the bad expression sublayer"
+    );
+    assert_eq!(
+        stage.attribute("/P.y").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(2.0)),
+        "the valid sublayer still composes"
+    );
+    assert!(
+        !stage.composition_errors().is_empty(),
+        "the dropped expression sublayer is reported"
     );
     Ok(())
 }

@@ -54,6 +54,18 @@ impl ResolvedPath {
     pub fn is_empty(&self) -> bool {
         self.0.as_os_str().is_empty()
     }
+
+    /// The file extension (without the leading dot), lowercased, or `""` when
+    /// there is none or it is not valid UTF-8. Lowercased so a caller can match a
+    /// format case-insensitively — `resolved.extension() == "usdz"` — the way the
+    /// format registry's `find_by_extension` does, without juggling `OsStr`.
+    pub(crate) fn extension(&self) -> String {
+        self.0
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default()
+    }
 }
 
 impl Deref for ResolvedPath {
@@ -506,9 +518,12 @@ mod tests {
     #[test]
     fn resolved_path_deref() {
         let p = ResolvedPath::new("some/path/model.usda");
-        // Deref to Path allows calling Path methods directly.
-        assert_eq!(p.extension().unwrap(), "usda");
+        // The string-typed `extension` accessor, then a Path method via Deref.
+        assert_eq!(p.extension(), "usda");
         assert_eq!(p.file_name().unwrap(), "model.usda");
+        // The extension is lowercased for case-insensitive format matching.
+        assert_eq!(ResolvedPath::new("x/Model.USDZ").extension(), "usdz");
+        assert_eq!(ResolvedPath::new("x/noext").extension(), "");
     }
 
     #[test]

@@ -38,7 +38,7 @@
 //! [LIVERPS]: https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use anyhow::Result;
@@ -2389,7 +2389,7 @@ impl Stage {
         self.process_pending();
         // Reused across passes: swapped with the cache's queue so neither
         // reallocates once warmed up.
-        let mut pending: Vec<String> = Vec::new();
+        let mut pending: Vec<pcp::Demand> = Vec::new();
         loop {
             let result = {
                 let graph = self.layers.borrow();
@@ -2427,11 +2427,12 @@ impl Stage {
     /// Returns whether the pass made progress — a layer joined or a target was
     /// newly marked failed — so the caller recomposes once more; a demanded path
     /// already loaded or already known failed is skipped.
-    fn load_demanded(&self, pending: &[String]) -> bool {
+    fn load_demanded(&self, pending: &[pcp::Demand]) -> bool {
         let before = self.layers.borrow().len();
         let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
         let mut newly_failed = false;
-        for asset_path in pending {
+        for demand in pending {
+            let asset_path = demand.asset_path.as_str();
             // The shared graph borrow is dropped before `add_layer` /
             // `mark_load_failed` take a mutable one.
             let opened = {
@@ -2439,9 +2440,15 @@ impl Stage {
                 if graph.id_of(asset_path).is_some() || graph.load_failed(asset_path) {
                     continue;
                 }
+                // The arc anchored `asset_path` to an absolute identifier, so no
+                // anchor is needed here. The referencing stack's composed
+                // expression variables overlay the target's own when its
+                // `subLayers` paths resolve, so a `${VAR}` inherited across the
+                // arc picks the right sublayer.
                 graph.layer_registry().open_stack(
                     asset_path,
                     None,
+                    &demand.expr_vars,
                     &|error| {
                         sublayer_errors.borrow_mut().push(error.into());
                         Ok(())
@@ -2722,9 +2729,11 @@ impl StageBuilder {
     /// rather than aborting the open.
     fn collect_layers(&self, path: &str) -> Result<CollectedLayers> {
         let errors = RefCell::new(Vec::new());
+        // The root stack has no referrer, so no inherited expression variables.
         let layers = self.registry.open_stack(
             path,
             None,
+            &HashMap::new(),
             &|error| {
                 errors.borrow_mut().push(error.into());
                 Ok(())

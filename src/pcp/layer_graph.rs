@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ar::ResolvedPath;
+use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
@@ -312,8 +313,29 @@ impl LayerGraph {
                 })
                 .unwrap_or_default();
 
+            // Expression-valued `subLayers` paths resolve against the expression
+            // variables visible at this layer (its own, overlaid by the root
+            // layer's — the strongest opinion, and the referencing stack's
+            // variables for a target reached across a reference). Computed once
+            // per layer, only when a path is actually an expression.
+            let expr_vars = if sub_paths.iter().any(|p| expr::is_expression(p)) {
+                self.sublayer_expr_vars(id)
+            } else {
+                HashMap::new()
+            };
+
             let mut edges = Vec::new();
             for (i, sub_path) in sub_paths.into_iter().enumerate() {
+                let sub_path = if expr::is_expression(&sub_path) {
+                    match expr::evaluate_asset_path(&sub_path, &expr_vars) {
+                        Ok(resolved) => resolved,
+                        // An unevaluable expression resolves to no edge; the layer
+                        // it would name is left out of the stack.
+                        Err(_) => continue,
+                    }
+                } else {
+                    sub_path
+                };
                 let Some(sub_id) = self.find(&sub_path) else {
                     continue;
                 };
@@ -335,6 +357,32 @@ impl LayerGraph {
 
         self.rebuild_sublayer_stacks();
         self.recompute_cycle_errors();
+    }
+
+    /// The expression variables visible when resolving `layer`'s `subLayers`
+    /// paths: the layer's own `expressionVariables` overlaid by the root layer's,
+    /// so the closer-to-root opinion wins (C++ `PcpExpressionVariables`). The
+    /// root layer's set is the strongest stage-wide opinion and stands in for the
+    /// referencing stack's variables when `layer` was reached across a reference
+    /// or payload (the on-demand load anchored its `${VAR}` sublayers with the
+    /// same inherited values).
+    //
+    // TODO: this skips every scope between `layer` and the root — a variable
+    // defined only on an intermediate sublayer ancestor, or on a referencing
+    // stack a nested reference inherits from, is missed, so an expression
+    // sublayer that uses it loads but drops its edge. The fix is a top-down
+    // composition down the sublayer structure (as `open_sublayers` does), seeding
+    // a demand-loaded subtree from the variables the `Demand` carries. See the
+    // pcp module's "Remaining work".
+    fn sublayer_expr_vars(&self, layer: LayerId) -> HashMap<String, Value> {
+        let read = |id: LayerId| expr::read_expression_variables(self.nodes[&id].layer.data()).unwrap_or_default();
+        let mut vars = read(layer);
+        if let Some(root) = self.root {
+            if root != layer {
+                vars.extend(read(root));
+            }
+        }
+        vars
     }
 
     /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer cycles
@@ -1014,12 +1062,23 @@ impl LayerGraph {
         self.muted_identifiers.contains(identifier)
     }
 
+    /// Whether any layer identifier is muted at all. A cheap gate so the per-arc
+    /// mute check skips its anchoring work on the common unmuted stage.
+    pub(crate) fn has_muted_layers(&self) -> bool {
+        !self.muted_identifiers.is_empty()
+    }
+
     /// Whether `asset_path` (an anchored, resolved asset identifier) names a
-    /// muted layer, by the same exact-then-root-anchored matching the muted set
-    /// uses. Unlike [`is_muted`](Self::is_muted), this matches before the layer
-    /// is interned, so the on-demand loader can recognize a muted reference or
-    /// payload target and skip opening it.
-    pub(crate) fn is_asset_muted(&self, asset_path: &str) -> bool {
+    /// muted layer, matching against `anchor`. An exact identifier match wins;
+    /// otherwise each relative muted entry is canonicalized against `anchor` and
+    /// compared, so a target named by a relative path is recognized when `anchor`
+    /// is the location it was resolved against. The caller supplies the relevant
+    /// anchor (the layer that authored the arc); see
+    /// [`Indexer::arc_target_muted`](super::prim_indexer). Unlike
+    /// [`is_muted`](Self::is_muted), this matches before the layer is interned, so
+    /// the on-demand loader can recognize a muted reference or payload target and
+    /// skip opening it.
+    pub(crate) fn is_asset_muted(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> bool {
         if self.muted_identifiers.is_empty() {
             return false;
         }
@@ -1028,12 +1087,11 @@ impl LayerGraph {
         }
         // TODO(perf): with muting active, this runs once per not-yet-loaded
         // reference/payload arc per composition pass, canonicalizing every muted
-        // entry (a filesystem syscall each) against the root anchor. Cache the
-        // anchored muted set, rebuilding it only when the muted set changes.
-        let root_anchor = self.anchor_location(self.root);
+        // entry (a filesystem syscall each) against the authoring anchor. Cache
+        // the anchored muted set, rebuilding it only when the muted set changes.
         self.muted_identifiers
             .iter()
-            .any(|m| self.registry.create_identifier(m, root_anchor.as_ref()) == asset_path)
+            .any(|m| self.registry.create_identifier(m, anchor) == asset_path)
     }
 
     /// The muted layer identifiers, sorted for a deterministic result.

@@ -11,6 +11,7 @@
 //! sources and exposing targets in place.
 
 use std::collections::{HashMap, HashSet};
+use std::mem;
 
 use anyhow::Result;
 
@@ -25,7 +26,7 @@ use super::dependencies::Dependencies;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackId};
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
-use super::prim_index::{AncestorArc, CompositionContext, PrimIndex};
+use super::prim_index::{AncestorArc, CompositionContext, Demand, PrimIndex};
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, MapFunction, VariantFallbackMap};
@@ -122,14 +123,14 @@ pub struct IndexCache {
     /// reading it gets empty results, which the stage's query loop discards
     /// before recomposing with the demanded layer loaded.
     empty_index: PrimIndex,
-    /// Anchored asset paths a build demanded but whose target layer is not yet
-    /// loaded, returned up from the indexer (via `BuildOutput`) and accumulated
-    /// here across the builds run in a pass. [`Stage::with_cache`](crate::usd::Stage)
+    /// [`Demand`]s a build raised for a target layer that is not yet loaded,
+    /// returned up from the indexer (via `BuildOutput`) and accumulated here
+    /// across the builds run in a pass. [`Stage::with_cache`](crate::usd::Stage)
     /// drains it, opens the layers, and recomposes. A plain `Vec` mutated through
     /// `&mut self` — pcp keeps no interior mutability. `pub(super)` so the
     /// instancing pass can detect a demand fired mid-redirect (see
     /// [`effective_path`](Self::effective_path)).
-    pub(super) pending_loads: Vec<String>,
+    pub(super) pending_loads: Vec<Demand>,
     /// Monotonic counter bumped once per applied change batch
     /// ([`Changes::apply`](super::Changes::apply)), the single funnel every
     /// authoring and layer-stack edit passes through. Cached views that resolve
@@ -228,13 +229,13 @@ impl IndexCache {
         }
     }
 
-    /// Hands the asset paths the builds run so far demanded (but whose target
-    /// layers are not yet loaded) to `buf`, taking `buf`'s storage in exchange.
-    /// The stage's query loop passes a buffer it reuses across passes, so the two
-    /// queues ping-pong without reallocating: it opens the returned layers and
+    /// Hands the [`Demand`]s the builds run so far raised (for target layers not
+    /// yet loaded) to `buf`, taking `buf`'s storage in exchange. The stage's
+    /// query loop passes a buffer it reuses across passes, so the two queues
+    /// ping-pong without reallocating: it opens the returned layers and
     /// recomposes until a pass demands nothing.
-    pub(crate) fn swap_pending_loads(&mut self, buf: &mut Vec<String>) {
-        std::mem::swap(&mut self.pending_loads, buf);
+    pub(crate) fn swap_pending_loads(&mut self, buf: &mut Vec<Demand>) {
+        mem::swap(&mut self.pending_loads, buf);
     }
 
     /// The current composition revision (see the [`revision`](Self::revision)

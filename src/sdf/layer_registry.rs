@@ -51,6 +51,20 @@ pub(crate) enum Error {
         /// The layer that declared the sublayer.
         referencing_layer: String,
     },
+
+    /// A sublayer resolved to a physical location but could not be read or
+    /// parsed. Only the bad sublayer is dropped; the layer that declared it (and
+    /// the rest of the stack) still loads, matching C++ `SdfLayer`, which opens
+    /// the parent and reports the unreadable sublayer.
+    #[error("failed to read sublayer asset: {asset_path} (referenced by {referencing_layer}): {reason}")]
+    UnreadableAsset {
+        /// The sublayer asset path that resolved but could not be read.
+        asset_path: String,
+        /// The layer that declared the sublayer.
+        referencing_layer: String,
+        /// The underlying read or parse error.
+        reason: String,
+    },
 }
 
 /// Owns layer loading for a stage: the [`ar::Resolver`] that finds and opens
@@ -135,21 +149,47 @@ impl LayerRegistry {
     /// stack contributes opinions to its own namespace and so must be present
     /// whenever the layer is (spec 10.3.1.1). `already_present` reports whether a
     /// layer (by canonical identifier) is already loaded, so a sublayer shared
-    /// with the graph is neither re-read nor re-emitted; a sublayer that fails to
-    /// resolve is routed to `on_error`, while the root must resolve.
+    /// with the graph is neither re-read nor re-emitted.
+    ///
+    /// The root must resolve and read — its failure propagates as `Err`. A
+    /// sublayer that fails to resolve, or that resolves but cannot be read, is
+    /// routed to `on_error` and skipped, so one bad sublayer never fails the
+    /// whole stack (C++ `SdfLayer` opens the root and reports the bad sublayer).
+    ///
+    /// `ancestor_expr_vars` are the expression variables composed by the stack
+    /// that brought `asset_path` in (empty for the stage root stack, the
+    /// referencing stack's composed set for a reference/payload target). They
+    /// overlay the root's own `expressionVariables` — the ancestor, closer to the
+    /// composed root, wins — and thread down the sublayer stack to evaluate its
+    /// expression-valued `subLayers` paths.
     pub(crate) fn open_stack(
         &self,
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
+        ancestor_expr_vars: &HashMap<String, sdf::Value>,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<sdf::Layer>> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
+
+        let identifier = self.resolver.create_identifier(asset_path, anchor);
+        if identifier.is_empty() || already_present(&identifier) {
+            return Ok(layers);
+        }
+        // The root must resolve and read; both failures propagate.
+        let resolved = self
+            .resolver
+            .resolve(&identifier)
+            .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
+        let data = self.read(&resolved)?;
+        visited.insert(identifier.clone());
+
         self.open_sublayers(
-            asset_path,
-            anchor,
-            &HashMap::new(),
+            identifier,
+            resolved,
+            data,
+            ancestor_expr_vars,
             on_error,
             already_present,
             &mut visited,
@@ -164,7 +204,7 @@ impl LayerRegistry {
     /// [`matches_content`](sdf::FileFormat::matches_content) (the crate magic),
     /// falling back to text. C++ `SdfFileFormat::FindByExtension` + `CanRead`.
     fn read(&self, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
-        let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let ext = resolved.extension();
         let format = if ext.eq_ignore_ascii_case("usd") {
             // TODO(perf): the chosen format re-opens the asset in `read`; only
             // `.usd` peeks, so fold the peek into one read once `FileFormat::read`
@@ -176,7 +216,7 @@ impl LayerRegistry {
                 .find(|f| f.matches_content(&prefix))
                 .or_else(|| Self::find_by_id("usda"))
         } else {
-            Self::find_by_extension(ext)
+            Self::find_by_extension(&ext)
         };
         format
             .ok_or_else(|| anyhow::anyhow!("no file format registered for {resolved}"))?
@@ -192,7 +232,13 @@ impl LayerRegistry {
         Ok(prefix)
     }
 
-    /// Recursively opens a layer and its sublayers.
+    /// Emits an already-read layer and recursively opens its sublayers.
+    ///
+    /// `identifier`, `resolved`, and `data` are this layer's canonical
+    /// identifier, resolved location, and parsed contents — read by the caller
+    /// (the root in [`open_stack`](Self::open_stack), each sublayer in the loop
+    /// below) so a sublayer's read failure is routed to `on_error` while the
+    /// root's propagates.
     ///
     /// `ancestor_expr_vars` are the expression variables composed from the layers
     /// that sublayer this one (empty at the root). They are applied over this
@@ -202,42 +248,22 @@ impl LayerRegistry {
     #[allow(clippy::too_many_arguments)]
     fn open_sublayers(
         &self,
-        asset_path: &str,
-        anchor: Option<&ar::ResolvedPath>,
+        identifier: String,
+        resolved: ar::ResolvedPath,
+        data: sdf::LayerData,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
         layers: &mut Vec<sdf::Layer>,
     ) -> Result<()> {
-        // Create an anchored identifier so relative paths resolve correctly.
-        let identifier = self.resolver.create_identifier(asset_path, anchor);
-
-        // Skip cycles, layers already opened in this pass, and layers already loaded.
-        if identifier.is_empty() || visited.contains(&identifier) || already_present(&identifier) {
-            return Ok(());
-        }
-
-        // Resolve using the anchored (absolute) identifier. A missing root is a
-        // hard error; a missing sublayer is pre-checked below and routed to
-        // `on_error`.
-        let resolved = self
-            .resolver
-            .resolve(&identifier)
-            .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
-
-        visited.insert(identifier.clone());
-
-        // Load and parse the layer.
-        let data = self.read(&resolved)?;
-
         // Compose this layer's authored expression variables with those inherited
         // from the layers that sublayer it; the inherited (closer-to-root) set is
         // applied last so it overrides this layer's own (C++ `PcpExpressionVariables`).
         let mut expr_vars = expr::read_expression_variables(data.as_ref())?;
         expr_vars.extend(ancestor_expr_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-        let is_usdz = resolved.extension().and_then(|e| e.to_str()) == Some("usdz");
+        let is_usdz = resolved.extension() == "usdz";
         let sub_paths = Self::sublayer_paths(data.as_ref());
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -245,31 +271,68 @@ impl LayerRegistry {
         // entries in a `subLayers` list override later ones (spec 10.3.1.1).
         layers.push(sdf::Layer::new(identifier.clone(), data));
 
+        // A layer inside a `.usdz` package cannot reach a sibling layer within the
+        // archive (not yet supported), so a usdz layer declaring any sublayers
+        // fails the open.
+        if is_usdz && !sub_paths.is_empty() {
+            bail!(
+                "cross-file references within USDZ archives are not yet supported: {}",
+                resolved
+            );
+        }
+
         for sub_path in sub_paths {
-            // Evaluate expression-valued sublayer paths.
-            let sub_asset = expr::evaluate_asset_path(&sub_path, &expr_vars)?;
+            // Evaluate the (possibly expression-valued) sublayer path. An
+            // unevaluable expression drops only this sublayer — like an unresolved
+            // or unreadable one — rather than failing the whole stack open.
+            let sub_asset = match expr::evaluate_asset_path(&sub_path, &expr_vars) {
+                Ok(evaluated) => evaluated,
+                Err(reason) => {
+                    on_error(Error::UnreadableAsset {
+                        asset_path: sub_path,
+                        referencing_layer: identifier.clone(),
+                        reason: format!("{reason:#}"),
+                    })?;
+                    continue;
+                }
+            };
 
-            if is_usdz {
-                bail!(
-                    "cross-file references within USDZ archives are not yet supported: {}",
-                    resolved
-                );
-            }
-
-            // Check that the sublayer resolves before recursing.
             let sub_id = self.resolver.create_identifier(&sub_asset, Some(&resolved));
-            if !visited.contains(&sub_id) && !already_present(&sub_id) && self.resolver.resolve(&sub_id).is_none() {
+            // A sublayer already opened (this pass or in the graph) is skipped; an
+            // empty/degenerate identifier falls through to the resolve below and is
+            // reported `UnresolvedAsset`.
+            if visited.contains(&sub_id) || already_present(&sub_id) {
+                continue;
+            }
+            // Resolve the sublayer; a missing one is routed to `on_error`.
+            let Some(sub_resolved) = self.resolver.resolve(&sub_id) else {
                 on_error(Error::UnresolvedAsset {
                     asset_path: sub_asset,
                     referencing_layer: identifier.clone(),
                 })?;
                 visited.insert(sub_id);
                 continue;
-            }
+            };
+            visited.insert(sub_id.clone());
+            // Read the sublayer; a resolved-but-unreadable one is routed to
+            // `on_error` and skipped, dropping only it (the root's read failure
+            // propagated from `open_stack`).
+            let sub_data = match self.read(&sub_resolved) {
+                Ok(data) => data,
+                Err(reason) => {
+                    on_error(Error::UnreadableAsset {
+                        asset_path: sub_asset,
+                        referencing_layer: identifier.clone(),
+                        reason: format!("{reason:#}"),
+                    })?;
+                    continue;
+                }
+            };
 
             self.open_sublayers(
-                &sub_asset,
-                Some(&resolved),
+                sub_id,
+                sub_resolved,
+                sub_data,
                 &expr_vars,
                 on_error,
                 already_present,
@@ -418,7 +481,7 @@ mod tests {
 
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer.
     fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
-        registry().open_stack(path, None, &|e| Err(e.into()), &|_| false)
+        registry().open_stack(path, None, &HashMap::new(), &|e| Err(e.into()), &|_| false)
     }
 
     #[test]
@@ -534,6 +597,7 @@ mod tests {
         let layers = registry().open_stack(
             &composition_path("subLayer/sublayer_invalid.usda"),
             None,
+            &HashMap::new(),
             &|e| {
                 errors.borrow_mut().push(e);
                 Ok(())
@@ -547,7 +611,9 @@ mod tests {
 
         let errors = errors.into_inner();
         assert_eq!(errors.len(), 1);
-        let Error::UnresolvedAsset { referencing_layer, .. } = &errors[0];
+        let Error::UnresolvedAsset { referencing_layer, .. } = &errors[0] else {
+            panic!("expected UnresolvedAsset, got {:?}", errors[0]);
+        };
         assert!(referencing_layer.contains("sublayer_invalid.usda"));
         Ok(())
     }

@@ -241,12 +241,38 @@
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
 //! - Muted-identifier canonicalization: `LayerGraph::resolve_muted_ids` matches
-//!   a muted identifier exactly, then anchored against the root layer only. C++
+//!   a muted identifier exactly, then anchored against the root layer only (the
+//!   on-demand `is_asset_muted` check at the reference/payload demand point does
+//!   anchor a relative mute against the arc's authoring layer). C++
 //!   `Pcp_MutedLayers::_GetCanonicalLayerId` anchors a relative path per
 //!   containing layer and strips file-format target args before matching. The
 //!   muted set is keyed by the raw spelling, so two spellings of one loaded
 //!   layer mute it twice and unmuting one spelling leaves it muted via the
 //!   other; canonicalizing (or keying on the resolved id) fixes both.
+//! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
+//!   non-default population mask resolves to empty until an instance sharing
+//!   that prototype has been composed (which registers the prototype). The
+//!   registry is populated lazily as instances compose, and `Stage::mask_includes`
+//!   cannot map a synthetic prototype path back to an instance to compose before
+//!   the registry knows it, so a query that addresses the prototype namespace
+//!   before any instance is touched reads the default. Reaching the prototype
+//!   through an instance (`Prim::prototype`, or any instance-proxy query) first
+//!   registers it, after which masked prototype-content queries (including those
+//!   behind a lazily-loaded payload) resolve correctly.
+//! - Expression `subLayers` intermediate scopes: `LayerGraph::sublayer_expr_vars`
+//!   resolves an expression-valued sublayer path against the layer's own and the
+//!   root layer's `expressionVariables` only, skipping every scope in between. A
+//!   variable defined on neither the authoring layer nor the root — only on an
+//!   intermediate sublayer ancestor between them, or on a referencing layer stack
+//!   a nested reference inherits from — is therefore unresolved when the edge is
+//!   rebuilt, so the sublayer the on-demand load did open never composes (its
+//!   edge is dropped or misdirected). Root-authored variables — the common,
+//!   stage-wide pattern, and what every test covers — resolve correctly, since
+//!   the root is always the strongest scope and is always included. The fix is a
+//!   top-down composition that threads each layer stack's accumulated variable
+//!   context down the sublayer structure (mirroring
+//!   `LayerRegistry::open_sublayers`), seeding a demand-loaded target's context
+//!   from the variables the `Demand` already carries.
 //! - Open-time and unresolved muting diagnostics:
 //!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection,
 //!   so a missing sublayer under a muted layer still surfaces as an
@@ -282,6 +308,7 @@ pub(crate) use layer_graph::{LayerGraph, LayerStackId};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
+pub(crate) use prim_index::Demand;
 pub use prim_index::PrimIndex;
 pub(crate) use relocates::{analyze_relocate_occurrences, first_unrepresentable_relocate, BatchRelocate};
 
@@ -411,6 +438,22 @@ pub enum Error {
         site_path: Path,
         /// The underlying read or parse error.
         reason: String,
+    },
+
+    /// A reference or payload authored inside a `.usdz` package names another
+    /// layer, which would require opening a sibling layer within the archive —
+    /// not yet supported (the eager collector bailed the same way). The arc is
+    /// dropped while the rest of the prim composes.
+    #[error("unsupported {arc:?} @{asset_path}@ inside usdz package @{introduced_by}@ at {site_path}")]
+    UnsupportedUsdzReference {
+        /// The reference/payload asset path authored inside the package.
+        asset_path: String,
+        /// The composition arc type.
+        arc: ArcType,
+        /// Identifier of the usdz package layer that authored the arc.
+        introduced_by: String,
+        /// The prim path where the arc was authored.
+        site_path: Path,
     },
 
     /// A reference/payload resolved its target layer, but the named prim path
@@ -602,6 +645,20 @@ pub enum Error {
         introduced_by: String,
     },
 
+    /// A sublayer resolved but its layer could not be read or parsed. Only the
+    /// bad sublayer is dropped; the layer that declared it (and the rest of the
+    /// stack) still composes, matching C++ `SdfLayer`, which opens the parent and
+    /// reports the unreadable sublayer.
+    #[error("malformed sublayer @{asset_path}@ introduced by @{introduced_by}@: {reason}")]
+    MalformedSublayer {
+        /// The authored asset path whose layer could not be read.
+        asset_path: String,
+        /// Identifier of the layer that authored the sublayer.
+        introduced_by: String,
+        /// The underlying read or parse error.
+        reason: String,
+    },
+
     /// A layer's `subLayers` form a cycle — a layer includes itself, directly or
     /// transitively (C++ `PcpErrorSublayerCycle`). Detected while building the
     /// stage root layer stack; the cyclic sublayer is skipped and the rest of the
@@ -669,15 +726,26 @@ impl From<sdf::layer_registry::Error> for Error {
     /// Lifts a layer-registry load error into a composition error: a sublayer
     /// that failed to resolve while opening a layer stack (the root stack or a
     /// reference/payload target reached on demand) is an
-    /// [`UnresolvedSublayer`](Error::UnresolvedSublayer).
+    /// [`UnresolvedSublayer`](Error::UnresolvedSublayer); a sublayer that
+    /// resolved but could not be read is a [`MalformedSublayer`](Error::MalformedSublayer).
     fn from(error: sdf::layer_registry::Error) -> Self {
-        let sdf::layer_registry::Error::UnresolvedAsset {
-            asset_path,
-            referencing_layer,
-        } = error;
-        Error::UnresolvedSublayer {
-            asset_path,
-            introduced_by: referencing_layer,
+        match error {
+            sdf::layer_registry::Error::UnresolvedAsset {
+                asset_path,
+                referencing_layer,
+            } => Error::UnresolvedSublayer {
+                asset_path,
+                introduced_by: referencing_layer,
+            },
+            sdf::layer_registry::Error::UnreadableAsset {
+                asset_path,
+                referencing_layer,
+                reason,
+            } => Error::MalformedSublayer {
+                asset_path,
+                introduced_by: referencing_layer,
+                reason,
+            },
         }
     }
 }
