@@ -573,8 +573,17 @@ impl IndexCache {
         let redirected = match self.redirected_prims.get(&prim) {
             Some(hit) => hit.clone(),
             None => {
+                let pending_before = self.pending_loads.len();
                 let redirected = self.redirect_prim(graph, &prim)?;
-                self.redirected_prims.insert(prim.clone(), redirected.clone());
+                // Only memoize a redirect resolved against fully-loaded indices.
+                // If finding the enclosing instance demanded a not-yet-loaded
+                // layer, that ancestor read as a non-instance (its index is the
+                // empty-on-miss one), so this identity result is provisional;
+                // leave it unmemoized for the stage's load loop to recompute once
+                // the layer loads and the instance composes.
+                if self.pending_loads.len() == pending_before {
+                    self.redirected_prims.insert(prim.clone(), redirected.clone());
+                }
                 redirected
             }
         };

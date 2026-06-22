@@ -200,7 +200,6 @@ impl Dependencies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
     use crate::pcp::layer_graph::LayerStackId;
     use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::Node;
@@ -216,7 +215,7 @@ mod tests {
         let layers = (0..n)
             .map(|i| sdf::Layer::new_in_memory(format!("l{i}.usda")))
             .collect();
-        LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
     fn make_index(prim_path: &Path, nodes: Vec<(ArcType, LayerId, Path)>) -> PrimIndex {

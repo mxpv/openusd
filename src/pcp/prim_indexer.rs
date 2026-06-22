@@ -371,6 +371,10 @@ enum TaskKind {
 pub(crate) struct BuildOutput {
     pub(crate) graph: Option<PrimIndexGraph>,
     pub(crate) errors: Vec<Error>,
+    /// Anchored asset paths demanded by a reference/payload arc whose target
+    /// layer is not yet loaded. Non-empty means the build is incomplete and its
+    /// `graph` must not be cached; the cache loads these and recomposes.
+    pub(crate) pending_loads: Vec<String>,
 }
 
 /// The shared, read-only inputs to a prim build — the same across every nested
@@ -445,6 +449,12 @@ pub(crate) struct Indexer<'a, 'f> {
     /// still composes; the cache retains these as stage composition diagnostics.
     /// Errors from nested sub-builds are merged in at their call sites.
     errors: Vec<Error>,
+    /// Anchored asset paths a reference/payload arc demanded but whose target
+    /// layer is not yet loaded. Returned in [`BuildOutput`] (like
+    /// [`errors`](Self::errors)) — a non-empty list means the build is incomplete
+    /// and its graph must not be cached; the cache loads these and recomposes.
+    /// Nested sub-builds merge theirs up at their call sites.
+    pending_loads: Vec<String>,
     /// Invalid-opinion-at-relocation-source errors deferred until the build
     /// finishes, paired with the relocate node they were detected on. A relocate
     /// composed under a culled branch (an empty ancestral reference at the
@@ -477,6 +487,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             implied_seen: HashSet::new(),
             root_contributes: true,
             errors: Vec::new(),
+            pending_loads: Vec::new(),
             pending_relocation_errors: Vec::new(),
         }
     }
@@ -497,6 +508,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(BuildOutput {
                 graph: None,
                 errors: self.errors,
+                pending_loads: self.pending_loads,
             });
         }
         self.site.path = path.clone();
@@ -507,6 +519,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(BuildOutput {
                 graph: None,
                 errors: self.errors,
+                pending_loads: self.pending_loads,
             });
         }
 
@@ -542,6 +555,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             return Ok(BuildOutput {
                 graph: Some(self.output),
                 errors: self.errors,
+                pending_loads: self.pending_loads,
             });
         }
 
@@ -606,6 +620,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(BuildOutput {
             graph: Some(self.output),
             errors: self.errors,
+            pending_loads: self.pending_loads,
         })
     }
 
@@ -772,6 +787,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// returns its graph, so each call site handles only the `Option<graph>`.
     fn merge_subindex(&mut self, out: BuildOutput) -> Option<PrimIndexGraph> {
         self.errors.extend(out.errors);
+        // A layer demanded only inside the sub-build is still needed to compose
+        // this prim, so carry the demand up even when the sub-build's graph is
+        // `None` (the sub-build was itself left incomplete by the missing layer).
+        self.pending_loads.extend(out.pending_loads);
         // A muted target reached only inside the sub-build is still a dependency
         // of this prim, so carry its trace up before the graph is grafted.
         if let Some(graph) = &out.graph {
@@ -966,7 +985,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// [`add_tasks_for_node`](Self::add_tasks_for_node) when an arc is composed.
     fn add_expressed_arc_tasks(&mut self, node: NodeId) {
         self.tasks.push(Task::new(TaskKind::EvalNodeReferences, node));
-        if self.inputs.stack.load_payloads() {
+        if self.inputs.ctx.load_payloads {
             self.tasks.push(Task::new(TaskKind::EvalNodePayloads, node));
         }
         self.tasks.push(Task::new(TaskKind::EvalNodeInherits, node));
@@ -1470,7 +1489,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 let refs = compose_references_in(
                     self.node_slice(node),
                     self.inputs.stack,
-                    self.inputs.stack.resolver(),
                     &expr_vars,
                     &site_path,
                     &mut arc_errors,
@@ -1485,7 +1503,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 let payloads = collect_payloads_in(
                     self.node_slice(node),
                     self.inputs.stack,
-                    self.inputs.stack.resolver(),
                     &expr_vars,
                     &site_path,
                     &mut arc_errors,
@@ -2547,21 +2564,54 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let target_stack = if is_internal {
             self.node(parent).layer_stack_id()
         } else {
-            let Some(layer_index) = self.inputs.stack.find(asset_path) else {
+            let layer_index = match self.inputs.stack.find(asset_path) {
+                Some(layer_index) => layer_index,
+                // A muted target contributes nothing and is never opened: skip
+                // the arc, which then composes as if absent. Checked before the
+                // load demand below so a muted reference target's file is not read.
+                None if self.inputs.stack.is_asset_muted(asset_path) => return Ok(()),
+                // A resolvable-but-not-yet-loaded target is demanded, not an
+                // error: record it in `pending_loads` and leave the arc uncomposed
+                // this pass. The stage's query loop opens the layer and recomposes,
+                // so composition drives layer loading and an un-visited subtree
+                // never loads. A target a prior load attempt failed to read is not
+                // re-demanded — it falls through to the malformed-layer error below
+                // so the prim's index can finally cache.
+                None if self.inputs.stack.layer_registry().resolve(asset_path).is_some()
+                    && !self.inputs.stack.load_failed(asset_path) =>
+                {
+                    self.pending_loads.push(asset_path.to_string());
+                    return Ok(());
+                }
+                // A target the load barrier resolved but could not read or parse:
+                // report it with the underlying reason and skip the arc.
+                None if self.inputs.stack.load_failed(asset_path) => {
+                    self.errors.push(Error::MalformedLayer {
+                        asset_path: asset_path.to_string(),
+                        arc,
+                        introduced_by: self.introducing_layer(parent),
+                        site_path: parent_path,
+                        reason: self
+                            .inputs
+                            .stack
+                            .load_failure_reason(asset_path)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                    return Ok(());
+                }
                 // An unresolvable asset is a recoverable error (C++ "Could not
                 // open asset … for {arc}"): record it and skip the arc so the rest
                 // of the prim — including its own local opinions — still composes.
-                // TODO: an asset path muted before it was ever loaded reaches here
-                // (it has no interned id to drop from a stack) and is reported
-                // unresolved rather than recognized as muted; check the muted
-                // identifiers before recording this error.
-                self.errors.push(Error::UnresolvedLayer {
-                    asset_path: asset_path.to_string(),
-                    arc,
-                    introduced_by: self.introducing_layer(parent),
-                    site_path: parent_path,
-                });
-                return Ok(());
+                None => {
+                    self.errors.push(Error::UnresolvedLayer {
+                        asset_path: asset_path.to_string(),
+                        arc,
+                        introduced_by: self.introducing_layer(parent),
+                        site_path: parent_path,
+                    });
+                    return Ok(());
+                }
             };
             external_target = Some(layer_index);
             self.inputs.stack.sublayer_stack_id(layer_index)
@@ -3012,12 +3062,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
 
     fn stack(text: &str) -> LayerGraph {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usd", Box::new(sdf::Data::from_specs(data)));
-        LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default())
     }
 
     fn multi_stack(layers: &[(&str, &str)]) -> LayerGraph {
@@ -3042,7 +3091,7 @@ mod tests {
                 sdf::Layer::new(*id, Box::new(sdf::Data::from_specs(data)))
             })
             .collect();
-        LayerGraph::from_layers(layers, session, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, session, sdf::LayerRegistry::default())
     }
 
     /// An internal default reference (`references = <>`) resolves `defaultPrim`

@@ -58,7 +58,8 @@
 //! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Layer-authored pairs and stack-effective queries are read from `LayerGraph`; all data is passed through parameters. |
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //!
-//! Layer collection lives in [`crate::layer`] (analogous to `PcpLayerStack`).
+//! Layer loading lives in [`sdf::LayerRegistry`](crate::sdf::LayerRegistry); the
+//! loaded layers and their sublayer DAG are held in [`layer_graph::LayerGraph`].
 //!
 //! # Architecture
 //!
@@ -275,8 +276,7 @@ mod relocates;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, Path, Value};
 
-pub(crate) use change::Changes;
-pub use change::{CacheChanges, LayerStackChanges};
+pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{LayerGraph, LayerStackId};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
@@ -392,6 +392,25 @@ pub enum Error {
         introduced_by: String,
         /// The prim path where the arc was authored.
         site_path: Path,
+    },
+
+    /// A reference/payload target resolved but its layer could not be read or
+    /// parsed (C++ "could not open asset … for {arc}"). The arc is dropped while
+    /// the rest of the prim still composes; `reason` carries the underlying
+    /// read/parse failure, surfaced once the stage's load barrier records the
+    /// target failed.
+    #[error("malformed {arc:?} layer @{asset_path}@ at {site_path}: {reason}")]
+    MalformedLayer {
+        /// The asset path whose target layer could not be read.
+        asset_path: String,
+        /// The composition arc type that introduced this dependency.
+        arc: ArcType,
+        /// Identifier of the layer that authored the arc.
+        introduced_by: String,
+        /// The prim path where the arc was authored.
+        site_path: Path,
+        /// The underlying read or parse error.
+        reason: String,
     },
 
     /// A reference/payload resolved its target layer, but the named prim path
@@ -646,6 +665,23 @@ pub enum Error {
     },
 }
 
+impl From<sdf::layer_registry::Error> for Error {
+    /// Lifts a layer-registry load error into a composition error: a sublayer
+    /// that failed to resolve while opening a layer stack (the root stack or a
+    /// reference/payload target reached on demand) is an
+    /// [`UnresolvedSublayer`](Error::UnresolvedSublayer).
+    fn from(error: sdf::layer_registry::Error) -> Self {
+        let sdf::layer_registry::Error::UnresolvedAsset {
+            asset_path,
+            referencing_layer,
+        } = error;
+        Error::UnresolvedSublayer {
+            asset_path,
+            introduced_by: referencing_layer,
+        }
+    }
+}
+
 /// Structural rule violated by an authored relocate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InvalidRelocateReason {
@@ -709,7 +745,6 @@ pub struct CycleHop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
 
     fn layer(id: &str, text: &str) -> sdf::Layer {
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
@@ -731,7 +766,7 @@ mod tests {
     #[test]
     fn recompute_relocate_data_syncs() {
         let plain = layer("root.usd", "#usda 1.0\ndef \"A\" {}\n");
-        let mut graph = LayerGraph::from_layers(vec![plain], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![plain], 0, sdf::LayerRegistry::default());
         let id = graph.root_id().expect("root layer");
         assert!(!graph.has_relocates(), "a graph with no layerRelocates starts clear");
         assert!(
@@ -777,7 +812,7 @@ mod tests {
 )
 "#,
         );
-        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
 
         assert!(
             graph
@@ -811,7 +846,7 @@ mod tests {
 )
 "#,
         );
-        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
 
         assert!(
             !graph
@@ -848,7 +883,7 @@ mod tests {
 )
 "#,
         );
-        let graph = LayerGraph::from_layers(vec![root, sub], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
 
         assert_eq!(
             graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/U").unwrap()),
@@ -881,7 +916,7 @@ mod tests {
 )
 "#,
         );
-        let graph = LayerGraph::from_layers(vec![first, second], 0, Box::new(DefaultResolver::new()), true);
+        let graph = LayerGraph::from_layers(vec![first, second], 0, sdf::LayerRegistry::default());
 
         assert!(
             !graph

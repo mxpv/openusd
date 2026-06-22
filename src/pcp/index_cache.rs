@@ -57,6 +57,10 @@ pub struct IndexCache {
     deps: Dependencies,
     /// Variant fallback selections tried when no authored selection exists.
     variant_fallbacks: VariantFallbackMap,
+    /// Whether payload arcs are expanded during composition, from the stage's
+    /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Seeds every root build's
+    /// [`CompositionContext`] (see [`root_parent_context`](Self::root_parent_context)).
+    load_payloads: bool,
     /// Lazily-loaded value-clip and manifest layers, keyed by resolved
     /// identifier. Clip layers do not participate in composition (spec
     /// 12.3.4), so they are held here rather than in the [`LayerGraph`](super::layer_graph::LayerGraph).
@@ -113,6 +117,19 @@ pub struct IndexCache {
     /// returns early, so the cycle-closing arc simply finds no cached target and
     /// drops out of composition.
     in_progress: HashSet<Path>,
+    /// An empty index returned by [`cached`](Self::cached) for a path left
+    /// uncached because its build demanded a not-yet-loaded layer. A query
+    /// reading it gets empty results, which the stage's query loop discards
+    /// before recomposing with the demanded layer loaded.
+    empty_index: PrimIndex,
+    /// Anchored asset paths a build demanded but whose target layer is not yet
+    /// loaded, returned up from the indexer (via `BuildOutput`) and accumulated
+    /// here across the builds run in a pass. [`Stage::with_cache`](crate::usd::Stage)
+    /// drains it, opens the layers, and recomposes. A plain `Vec` mutated through
+    /// `&mut self` — pcp keeps no interior mutability. `pub(super)` so the
+    /// instancing pass can detect a demand fired mid-redirect (see
+    /// [`effective_path`](Self::effective_path)).
+    pub(super) pending_loads: Vec<String>,
     /// Monotonic counter bumped once per applied change batch
     /// ([`Changes::apply`](super::Changes::apply)), the single funnel every
     /// authoring and layer-stack edit passes through. Cached views that resolve
@@ -187,12 +204,17 @@ impl IndexCache {
     /// errors join them as indices are composed. The regenerable layer-graph
     /// diagnostics (sublayer cycles, invalid relocates) live on the
     /// [`LayerGraph`] and are read through [`LayerGraph::errors`].
-    pub(crate) fn new(variant_fallbacks: VariantFallbackMap, collection_errors: Vec<Error>) -> Self {
+    pub(crate) fn new(
+        variant_fallbacks: VariantFallbackMap,
+        load_payloads: bool,
+        collection_errors: Vec<Error>,
+    ) -> Self {
         Self {
             indices: sdf::PathTable::new(),
             contexts: HashMap::new(),
             deps: Dependencies::default(),
             variant_fallbacks,
+            load_payloads,
             clip_layers: HashMap::new(),
             prototypes: PrototypeRegistry::default(),
             redirected_prims: HashMap::new(),
@@ -200,8 +222,19 @@ impl IndexCache {
             prim_errors: HashMap::new(),
             query_errors: Vec::new(),
             in_progress: HashSet::new(),
+            empty_index: PrimIndex::default(),
+            pending_loads: Vec::new(),
             revision: 0,
         }
+    }
+
+    /// Hands the asset paths the builds run so far demanded (but whose target
+    /// layers are not yet loaded) to `buf`, taking `buf`'s storage in exchange.
+    /// The stage's query loop passes a buffer it reuses across passes, so the two
+    /// queues ping-pong without reallocating: it opens the returned layers and
+    /// recomposes until a pass demands nothing.
+    pub(crate) fn swap_pending_loads(&mut self, buf: &mut Vec<String>) {
+        std::mem::swap(&mut self.pending_loads, buf);
     }
 
     /// The current composition revision (see the [`revision`](Self::revision)
@@ -226,6 +259,16 @@ impl IndexCache {
             .chain(&self.query_errors)
             .cloned()
             .collect()
+    }
+
+    /// Records one-shot collection errors raised while opening a layer on demand
+    /// — a missing sublayer of a reference/payload target the stage's load
+    /// barrier reached. Joins the errors from root-stack collection so
+    /// [`composition_errors`](Self::composition_errors) reports a lazily-loaded
+    /// stack's diagnostics too. Each demanded target opens once, so a given error
+    /// is recorded once.
+    pub(crate) fn record_collection_errors(&mut self, errors: impl IntoIterator<Item = Error>) {
+        self.collection_errors.extend(errors);
     }
 
     #[cfg(test)]
@@ -253,14 +296,12 @@ impl IndexCache {
         // Anchor the clip asset path to the authoring layer's location so
         // relative paths resolve like any other dependency.
         let anchor = graph.anchor_location(Some(anchor_layer));
-        let clip_id = graph.resolver().create_identifier(asset_path, anchor.as_ref());
+        let clip_id = graph.layer_registry().create_identifier(asset_path, anchor.as_ref());
 
         if !self.clip_layers.contains_key(&clip_id) {
-            let resolver = graph.resolver();
-            let Some(resolved) = resolver.resolve(&clip_id) else {
+            let Some(data) = graph.layer_registry().open(&clip_id)? else {
                 return Ok(None);
             };
-            let data = crate::layer::open_layer(resolver, &resolved)?;
             self.clip_layers
                 .insert(clip_id.clone(), sdf::Layer::new(clip_id.clone(), data));
         }
@@ -951,16 +992,18 @@ impl IndexCache {
         self.indices.contains_key(path)
     }
 
-    /// Borrows the cached index at `path`, panicking if it is absent.
+    /// Borrows the cached index at `path`.
     ///
-    /// Callers use this only where composition has already guaranteed the index
-    /// is present (a prim's index is built before any query that reads it, and
-    /// children build after their parents); a miss is a logic error, not a
-    /// recoverable condition.
+    /// Callers use this where composition has already guaranteed the index is
+    /// present (a prim's index is built before any query that reads it, and
+    /// children build after their parents). When the build was left uncached
+    /// because it demanded a not-yet-loaded layer, an empty index is returned:
+    /// the query reads empty results and the stage's query loop discards them,
+    /// recomposing once the demanded layer is loaded. Absence is therefore always
+    /// the transient demanded-layer case — never a logic error — under the
+    /// loop's guarantee that a demanded build is retried.
     pub(super) fn cached(&self, path: &Path) -> &PrimIndex {
-        self.indices
-            .get(path)
-            .unwrap_or_else(|| panic!("no composed index cached at {path}"))
+        self.indices.get(path).unwrap_or(&self.empty_index)
     }
 
     /// Number of cached prim indices.
@@ -990,6 +1033,7 @@ impl IndexCache {
     pub(super) fn root_parent_context(&self) -> CompositionContext {
         CompositionContext {
             variant_fallbacks: self.variant_fallbacks.clone(),
+            load_payloads: self.load_payloads,
             ..Default::default()
         }
     }
@@ -1003,6 +1047,28 @@ impl IndexCache {
         self.deps.remove(path);
         self.prim_errors.remove(path);
         self.query_errors.clear();
+    }
+
+    /// Drops every cached index that recorded a
+    /// [`MalformedLayer`](Error::MalformedLayer) error so it recomposes and
+    /// re-demands the target. The arc to an unreadable target was dropped, so
+    /// these indices carry no dependency on it and an ordinary layer-stack
+    /// invalidation misses them; the stage calls this when an edit clears the
+    /// graph's recorded load failures, since the target may now be readable.
+    pub(crate) fn drop_load_failed_indices(&mut self) {
+        let failed: Vec<Path> = self
+            .prim_errors
+            .iter()
+            .filter(|(_, errors)| errors.iter().any(|e| matches!(e, Error::MalformedLayer { .. })))
+            .map(|(path, _)| path.clone())
+            .collect();
+        if failed.is_empty() {
+            return;
+        }
+        for path in failed {
+            self.drop_index(&path);
+        }
+        self.bump_revision();
     }
 
     /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`): refresh, in place,
@@ -1078,14 +1144,16 @@ impl IndexCache {
         self.redirected_prims.clear();
     }
 
-    /// Applies a layer-muting change incrementally: advances the composition
-    /// revision (so cached value views rebuild) and drops only the cached indices
-    /// the toggle can have restructured, via
-    /// [`drop_indices_touching_layers`](Self::drop_indices_touching_layers). The
-    /// graph's layer-stack precomputed state is rebuilt by the muting mutation
-    /// itself, so the cache is all that remains. Matches the final composed result
-    /// of a [`clear_all_indices`](Self::clear_all_indices) with less recomposition.
-    pub(crate) fn recompose_muted(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
+    /// Invalidates the cache after a layer-set change restructures only some
+    /// prims: advances the composition revision (so cached value views rebuild)
+    /// and drops just the cached indices that read one of the `affected` layers,
+    /// via [`drop_indices_touching_layers`](Self::drop_indices_touching_layers).
+    /// Used for a layer-muting toggle and for a demanded layer that introduces
+    /// relocates; in both cases the graph's precomputed layer-stack state is
+    /// rebuilt by the mutation itself, so the cache is all that remains. Matches
+    /// the final composed result of a
+    /// [`clear_all_indices`](Self::clear_all_indices) with less recomposition.
+    pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         self.bump_revision();
         self.drop_indices_touching_layers(graph, affected);
     }
@@ -1420,13 +1488,13 @@ impl IndexCache {
             let Ok(evaluated) = sdf::expr::evaluate_asset_path(asset.as_str(), expr_vars) else {
                 return asset;
             };
-            let identifier = graph.resolver().create_identifier(&evaluated, anchor);
+            let identifier = graph.layer_registry().create_identifier(&evaluated, anchor);
             asset.set_evaluated_path(evaluated);
             identifier
         } else {
-            graph.resolver().create_identifier(asset.as_str(), anchor)
+            graph.layer_registry().create_identifier(asset.as_str(), anchor)
         };
-        if let Some(resolved) = graph.resolver().resolve(&identifier) {
+        if let Some(resolved) = graph.layer_registry().resolve(&identifier) {
             asset.set_resolved_path(resolved.to_string_lossy().into_owned());
         }
         asset
@@ -2239,6 +2307,10 @@ impl IndexCache {
     /// Builds and caches the index for `path`, assuming `path` is already
     /// recorded in [`in_progress`](Self::in_progress) (see [`ensure_index`](Self::ensure_index)).
     fn build_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
+        // Snapshot the demand queue so a reference/payload arc to a not-yet-loaded
+        // layer — demanded by this build or by a pre-cached ancestor below — is
+        // detected after the build and keeps the incomplete index out of the cache.
+        let pending_before = self.pending_loads.len();
         // Compose ancestors first so the parent's `CompositionContext` (and
         // its `within_instance` flag, spec 11.3.3) is available. Composition
         // is a pure function of the layer stack, path, and parent context, so
@@ -2267,10 +2339,21 @@ impl IndexCache {
         // The blocker is the shared `self.indices` map that inherit/specialize
         // targets read mid-build — parallelizing the driver needs a concurrent
         // map or a topological (targets-first) build order.
-        let (mut index, mut build_errors) = match PrimIndex::build_with_cache(path, graph, &parent_ctx, &self.indices) {
-            Ok(result) => result,
-            Err(e) => return Err(e.into()),
-        };
+        let (mut index, mut build_errors, pending_loads) =
+            match PrimIndex::build_with_cache(path, graph, &parent_ctx, &self.indices) {
+                Ok(result) => result,
+                Err(e) => return Err(e.into()),
+            };
+        self.pending_loads.extend(pending_loads);
+        // A reference/payload arc demanded a layer that is not yet loaded — here,
+        // or in a pre-cached ancestor that then seeded this build incompletely —
+        // so this index is incomplete: leave `path` uncached for the stage's query
+        // loop to load and recompose. Returning before `cache_index` keeps a
+        // partial index — and the transient errors composed without the missing
+        // layer — out of the cache entirely.
+        if self.pending_loads.len() > pending_before {
+            return Ok(());
+        }
         // Retain recoverable composition errors recorded during the build (e.g.
         // an unresolvable arc). An invalid opinion at a
         // relocation source is reported "while composing" this prim, so stamp its
@@ -2483,22 +2566,20 @@ fn target_prim_inherits_class(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::{DefaultResolver, Resolver};
 
     fn manifest_dir() -> String {
         std::env::var("CARGO_MANIFEST_DIR").unwrap()
     }
 
-    /// Builds a stack with the root and every layer reachable through
-    /// references/sublayers collected in, so composition can resolve them
-    /// (clip layers are still opened lazily by the cache).
+    /// Builds a stack with the root and the full transitive closure of its
+    /// sublayers, references, and payloads collected in, so composition can
+    /// resolve them directly without the stage's on-demand load loop (clip
+    /// layers are still opened lazily by the cache).
     fn collected_stack(path: &str) -> (LayerGraph, IndexCache) {
-        let resolver = DefaultResolver::new();
-        let layers = crate::layer::Collector::new(&resolver)
-            .collect(path)
-            .expect("collect layers");
-        let graph = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
-        (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
+        let registry = sdf::LayerRegistry::default();
+        let layers = registry.collect_with_arcs(path).expect("collect layers");
+        let graph = LayerGraph::from_layers(layers, 0, registry);
+        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
     }
 
     /// Parses in-memory USDA text into a single `root.usda` layer.
@@ -2516,8 +2597,8 @@ mod tests {
     /// Builds a one-layer graph + cache from in-memory USDA text, for
     /// composition cases that need no on-disk asset.
     fn in_memory_stack(text: &str) -> (LayerGraph, IndexCache) {
-        let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, Box::new(DefaultResolver::new()), true);
-        (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
+        let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, sdf::LayerRegistry::default());
+        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
     }
 
     /// Run `f` as one atomic transaction on `layer` and return the recorded change
@@ -2545,17 +2626,11 @@ mod tests {
     /// Builds a one-layer graph + cache whose root is loaded from a real path,
     /// so the resolver can anchor clip asset paths relative to it.
     fn single_layer_stack(path: &str) -> (LayerGraph, IndexCache) {
-        let resolver = DefaultResolver::new();
-        let resolved = resolver.resolve(path).expect("root resolves");
-        let id = resolver.create_identifier(path, None);
-        let data = crate::layer::open_layer(&resolver, &resolved).expect("open root");
-        let graph = LayerGraph::from_layers(
-            vec![sdf::Layer::new(id, data)],
-            0,
-            Box::new(DefaultResolver::new()),
-            true,
-        );
-        (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
+        let registry = sdf::LayerRegistry::default();
+        let id = registry.create_identifier(path, None);
+        let data = registry.open(path).expect("open root").expect("root resolves");
+        let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
+        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
     }
 
     /// `clip_layer` loads a clip layer relative to the authoring layer, caches
@@ -2914,8 +2989,8 @@ def "A" (
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
-        let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
 
         let child = sdf::path("/A/B")?;
         cache.ensure_index(&graph, &child)?;
@@ -2988,8 +3063,8 @@ def "A" (
 "#;
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
-        let graph = LayerGraph::from_layers(vec![layer], 0, Box::new(DefaultResolver::new()), true);
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
 
         let a = sdf::path("/A")?;
         cache.ensure_index(&graph, &a)?;
@@ -3581,9 +3656,9 @@ def "Scope"
             "#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {}\n",
         );
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
-        let mut graph = LayerGraph::from_layers(vec![root, base], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
         let a = sdf::path("/A")?;
 
         // The empty target makes /A's reference culled — no composition arc.
@@ -3625,9 +3700,9 @@ def "Scope"
         // /A inherits a class the layer does not define, so the inherit is culled
         // until the class is authored.
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
-        let mut graph = LayerGraph::from_layers(vec![root], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
         let a = sdf::path("/A")?;
 
         // The empty class makes /A's inherit culled — no composition arc.
@@ -3658,9 +3733,9 @@ def "Scope"
     #[test]
     fn inert_add_unculls_specialize() -> Result<()> {
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
-        let mut graph = LayerGraph::from_layers(vec![root], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
         let a = sdf::path("/A")?;
 
         assert!(!cache.has_composition_arc(&graph, &a)?);
@@ -3765,9 +3840,9 @@ def "Scope"
             "#usda 1.0\ndef \"A\" ( references = @base.usd@</Parent/Empty> ) {}\n",
         );
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
-        let mut graph = LayerGraph::from_layers(vec![root, base], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
         let a = sdf::path("/A")?;
 
         // The missing nested target makes /A's reference contribute nothing.
@@ -3803,9 +3878,9 @@ def "Scope"
             "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\nover \"World\" ( active = false ) {}\n",
         );
         let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
-        let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, sdf::LayerRegistry::default());
         let strong_id = graph.root_id().unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
 
         let world = sdf::path("/World")?;
         let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {

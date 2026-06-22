@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::ar::Resolver;
 use crate::sdf::expr;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, ListOp, Path, Payload, PayloadListOp, Reference, Value};
@@ -414,19 +413,24 @@ impl PrimIndex {
     /// the indexer seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
-        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new()).map(|(index, _errors)| index)
+        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new()).map(|(index, _errors, _pending)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
     /// previously-composed prim indices. Cached indices are checked before
     /// building from scratch, ensuring inherit/specialize targets use the
     /// fully-composed result (including ancestor-propagated specs).
+    ///
+    /// The third tuple element is the anchored asset paths a reference/payload
+    /// arc demanded but that are not yet loaded; non-empty means the returned
+    /// index is incomplete and must not be cached, so the caller loads those
+    /// layers and recomposes.
     pub(crate) fn build_with_cache(
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
-    ) -> BuildResult<(Self, Vec<Error>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<String>)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack_id())
     }
 
@@ -445,10 +449,10 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimIndex>,
         ambient: LayerStackId,
-    ) -> BuildResult<(Self, Vec<Error>)> {
+    ) -> BuildResult<(Self, Vec<Error>, Vec<String>)> {
         if ambient == LayerStackId::Root {
             if let Some(cached) = cached_indices.get(path) {
-                return Ok((cached.clone(), Vec::new()));
+                return Ok((cached.clone(), Vec::new(), Vec::new()));
             }
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
@@ -456,12 +460,17 @@ impl PrimIndex {
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
         let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient);
-        let super::prim_indexer::BuildOutput { graph, errors } = indexer.build(path)?;
+        let super::prim_indexer::BuildOutput {
+            graph,
+            errors,
+            pending_loads,
+        } = indexer.build(path)?;
         Ok((
             PrimIndex {
                 graph: graph.unwrap_or_default(),
             },
             errors,
+            pending_loads,
         ))
     }
 
@@ -518,6 +527,8 @@ impl PrimIndex {
             instance_depth: parent_ctx.instance_depth,
             // Carried forward; the cache appends this prim's own denied targets.
             denied_prefixes: parent_ctx.denied_prefixes.clone(),
+            // A stage-wide policy, propagated unchanged to every descendant.
+            load_payloads: parent_ctx.load_payloads,
         }
     }
 
@@ -557,7 +568,7 @@ impl PrimIndex {
 /// Contains accumulated variant selections, arc mappings, and variant
 /// fallbacks that enable single-pass composition without cross-prim
 /// post-processing.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompositionContext {
     /// Variant selections accumulated from all ancestor compositions.
     /// First-opinion-wins: strongest ancestor's selection takes priority.
@@ -583,6 +594,26 @@ pub(crate) struct CompositionContext {
     /// it `PERMISSION_DENIED` even in descendant prims composed separately
     /// (where the arc is extended, not authored here).
     pub denied_prefixes: Vec<Path>,
+    /// Whether payload arcs are expanded during composition, from the stage's
+    /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Propagated unchanged from
+    /// the root context to every descendant, a sibling of `variant_fallbacks`.
+    /// Defaults to `true` (C++ `UsdStage::LoadAll`); the stage sets `false` for
+    /// `LoadNone`.
+    pub load_payloads: bool,
+}
+
+impl Default for CompositionContext {
+    fn default() -> Self {
+        Self {
+            selections: HashMap::new(),
+            ancestor_arcs: Vec::new(),
+            variant_fallbacks: VariantFallbackMap::new(),
+            instance_depth: None,
+            denied_prefixes: Vec::new(),
+            // Compose payloads unless the stage opts out (C++ `UsdStage::LoadAll`).
+            load_payloads: true,
+        }
+    }
 }
 
 impl CompositionContext {
@@ -850,9 +881,9 @@ where
 /// runs a `canonicalize` per reference/payload per authoring layer per prim.
 /// Cache resolved identifiers per (layer, asset_path) once the resolver exposes
 /// a pure-string anchoring path.
-fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, resolver: &dyn Resolver) -> String {
+fn resolve_against_layer(asset_path: &str, layer: &sdf::Layer, registry: &sdf::LayerRegistry) -> String {
     let anchor = crate::ar::ResolvedPath::new(PathBuf::from(&layer.identifier));
-    resolver.create_identifier(asset_path, Some(&anchor))
+    registry.create_identifier(asset_path, Some(&anchor))
 }
 
 /// The retiming scale a reference or payload arc folds into its layer offset
@@ -881,11 +912,11 @@ fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, graph: &LayerGraph
 /// so the same relative path in different layers resolves to distinct targets
 /// (C++ resolves a reference's asset path against its authoring layer when the
 /// layer stack is composed). An empty path (internal reference) is left as-is.
-fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, resolver: &dyn Resolver) {
+fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, registry: &sdf::LayerRegistry) {
     if asset_path.is_empty() {
         return;
     }
-    *asset_path = resolve_against_layer(asset_path, authoring_layer, resolver);
+    *asset_path = resolve_against_layer(asset_path, authoring_layer, registry);
 }
 
 /// Resolves a reference/payload arc's asset path in place: evaluates a backtick
@@ -903,7 +934,6 @@ fn resolve_arc_asset_path(
     asset_path: &mut String,
     authoring_layer: LayerId,
     graph: &LayerGraph,
-    resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     arc: ArcType,
     site: &Path,
@@ -921,7 +951,7 @@ fn resolve_arc_asset_path(
             return None;
         }
     }
-    anchor_asset_path(asset_path, graph.layer(authoring_layer), resolver);
+    anchor_asset_path(asset_path, graph.layer(authoring_layer), graph.layer_registry());
     Some(arc_tcps_scale(graph.layer(authoring_layer), asset_path, graph))
 }
 
@@ -934,7 +964,6 @@ fn resolve_arc_asset_path(
 pub(super) fn compose_references_in(
     nodes: &[Node],
     graph: &LayerGraph,
-    resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Vec<Error>,
@@ -957,7 +986,6 @@ pub(super) fn compose_references_in(
                 &mut r.asset_path,
                 layer,
                 graph,
-                resolver,
                 expr_vars,
                 ArcType::Reference,
                 site,
@@ -980,7 +1008,6 @@ pub(super) fn compose_references_in(
 pub(super) fn collect_payloads_in(
     nodes: &[Node],
     graph: &LayerGraph,
-    resolver: &dyn Resolver,
     expr_vars: &HashMap<String, Value>,
     site: &Path,
     errors: &mut Vec<Error>,
@@ -1017,7 +1044,6 @@ pub(super) fn collect_payloads_in(
                 &mut p.asset_path,
                 layer,
                 graph,
-                resolver,
                 expr_vars,
                 ArcType::Payload,
                 site,
@@ -1033,31 +1059,47 @@ pub(super) fn collect_payloads_in(
     Ok(payloads)
 }
 
-/// Finds the [`LayerId`] of a layer whose identifier matches
-/// `asset_path`, iterating `order` (the [`LayerGraph`](super::layer_graph::LayerGraph)
-/// collection order) so the first match is deterministic: an exact or
-/// path-separator-boundary suffix match against canonical identifiers, then
-/// resolver anchoring for parent-relative paths (`../foo`), which custom asset
-/// resolution backends handle without filesystem access here.
+/// Finds the [`LayerId`] of a layer matching `asset_path` among `order` (the
+/// [`LayerGraph`](super::layer_graph::LayerGraph) collection order).
+///
+/// An exact identifier match wins. Failing that, a path-separator-boundary
+/// suffix match (a relative authored path against a canonical absolute
+/// identifier), but only when a single layer matches: two layers sharing a
+/// trailing component (`a/model.usda` and `b/model.usda`) stay ambiguous rather
+/// than resolving to whichever comes first in `order`. Failing that, resolver
+/// anchoring for parent-relative paths (`../foo`), which custom asset resolution
+/// backends handle without filesystem access here.
 pub(super) fn find_layer_id<'a>(
     asset_path: &str,
     order: &[LayerId],
     layer: impl Fn(LayerId) -> &'a sdf::Layer,
-    resolver: &dyn Resolver,
+    registry: &sdf::LayerRegistry,
 ) -> Option<LayerId> {
     let asset_path_ref = std::path::Path::new(asset_path);
     let needle = asset_path_ref.strip_prefix(".").unwrap_or(asset_path_ref);
 
-    for &id in order {
-        let identifier = std::path::Path::new(layer(id).identifier());
-        if identifier == needle || identifier.ends_with(needle) {
+    // An exact identifier match is unambiguous and outranks any suffix match,
+    // including one on an earlier layer in `order`.
+    if let Some(&id) = order
+        .iter()
+        .find(|&&id| std::path::Path::new(layer(id).identifier()) == needle)
+    {
+        return Some(id);
+    }
+
+    // A boundary suffix match, accepted only when exactly one layer matches.
+    let mut suffix = order
+        .iter()
+        .filter(|&&id| std::path::Path::new(layer(id).identifier()).ends_with(needle));
+    if let Some(&id) = suffix.next() {
+        if suffix.next().is_none() {
             return Some(id);
         }
     }
 
     if needle.starts_with("..") {
         for &anchor_id in order {
-            let resolved = resolve_against_layer(asset_path, layer(anchor_id), resolver);
+            let resolved = resolve_against_layer(asset_path, layer(anchor_id), registry);
             if let Some(&id) = order.iter().find(|&&id| layer(id).identifier() == resolved) {
                 return Some(id);
             }
@@ -1076,8 +1118,6 @@ pub(crate) mod tests {
     use std::cmp::Ordering;
 
     use super::*;
-    use crate::ar::DefaultResolver;
-    use crate::layer::Collector;
 
     use anyhow::Result;
 
@@ -1095,20 +1135,22 @@ pub(crate) mod tests {
         format!("{}/fixtures/{relative}", manifest_dir())
     }
 
-    /// Loads layers into a `Vec<sdf::Layer>` for PrimIndex::build.
+    /// Loads a root layer and the full transitive closure of its sublayers,
+    /// references, and payloads into a `Vec<sdf::Layer>` for PrimIndex::build —
+    /// the layer set composition would have loaded on demand had it been driven
+    /// through a stage.
     fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
-        let resolver = DefaultResolver::new();
-        Collector::new(&resolver).collect(path)
+        sdf::LayerRegistry::default().collect_with_arcs(path)
     }
 
     /// Resolves `asset_path` against a layer slice to its index, adapting the
     /// production [`find_layer_id`] (which keys on [`LayerId`]) so the
     /// matching-logic tests can assert by position.
-    fn find(asset_path: &str, layers: &[sdf::Layer], resolver: &dyn Resolver) -> Option<usize> {
+    fn find(asset_path: &str, layers: &[sdf::Layer], registry: &sdf::LayerRegistry) -> Option<usize> {
         // Synthesize one id per position so the result maps straight back to it.
         let ids: Vec<LayerId> = (0..layers.len() as u32).map(LayerId::from_raw).collect();
         let position = |id: LayerId| ids.iter().position(|&x| x == id).unwrap();
-        find_layer_id(asset_path, &ids, |id| &layers[position(id)], resolver).map(position)
+        find_layer_id(asset_path, &ids, |id| &layers[position(id)], registry).map(position)
     }
 
     /// Builds a prim index for a given path string.
@@ -1144,7 +1186,7 @@ pub(crate) mod tests {
         };
         let mut last = None;
         for ancestor in &chain {
-            let (index, _errors) =
+            let (index, _errors, _pending) =
                 PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
             parent_ctx = index.context_for_children(stack, &parent_ctx);
             cache.insert(ancestor.clone(), index.clone());
@@ -1156,24 +1198,19 @@ pub(crate) mod tests {
     /// Helper: loads layers and builds a [`LayerGraph`].
     fn load_stack(path: &str) -> anyhow::Result<LayerGraph> {
         let layers = load_layers(path)?;
-        Ok(LayerGraph::from_layers(
-            layers,
-            0,
-            Box::new(DefaultResolver::new()),
-            true,
-        ))
+        Ok(LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default()))
     }
 
     /// Builds a single-layer stack from in-memory `root.usd` data.
     fn one_layer_stack(root: Box<dyn sdf::AbstractData>) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root)];
-        LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
     /// Builds a two-layer stack from in-memory `root.usd` + `ref.usd` data.
     fn two_layer_stack(root: Box<dyn sdf::AbstractData>, refl: Box<dyn sdf::AbstractData>) -> LayerGraph {
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
-        LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
     #[test]
@@ -1239,7 +1276,7 @@ pub(crate) mod tests {
         let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {\n  custom double x = 1\n}\n");
         let base = parse_usda("#usda 1.0\ndef \"Other\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/A");
 
         // The empty target is retained as a culled node so an editor sees the
@@ -1343,7 +1380,7 @@ pub(crate) mod tests {
             "#usda 1.0\ndef \"Ref\" {\n  def \"Sub\" ( inherits = </Ref/Class> ) {}\n  class \"Class\" { custom string x = \"ref\" }\n}\n",
         );
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let index = build(&stack, "/Model/Sub");
         let implied = index
@@ -1486,7 +1523,7 @@ pub(crate) mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
         let index = build(&stack, "/Model");
         let find = |p: &str| {
@@ -1521,7 +1558,7 @@ pub(crate) mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/Model");
 
         let dump = index.dump_to_string();
@@ -1593,17 +1630,17 @@ pub(crate) mod tests {
 
     #[test]
     fn find_layer_exact_match() -> Result<()> {
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find(&layers[0].identifier, &layers, &resolver).is_some());
+        assert!(find(&layers[0].identifier, &layers, &registry).is_some());
         Ok(())
     }
 
     #[test]
     fn find_layer_suffix_match() -> Result<()> {
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("ref_target.usda", &layers, &resolver).is_some());
+        assert!(find("ref_target.usda", &layers, &registry).is_some());
         Ok(())
     }
 
@@ -1615,29 +1652,44 @@ pub(crate) mod tests {
         let model = asset_dir.join("model.usda");
         std::fs::write(&model, b"placeholder")?;
 
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         let layers = vec![sdf::Layer::new(
             model.canonicalize()?.to_string_lossy(),
             Box::new(sdf::Data::new()),
         )];
-        assert_eq!(find("./asset/model.usda", &layers, &resolver), Some(0));
+        assert_eq!(find("./asset/model.usda", &layers, &registry), Some(0));
         Ok(())
     }
 
     #[test]
     fn find_layer_no_partial_name_match() -> Result<()> {
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("target.usda", &layers, &resolver).is_none());
+        assert!(find("target.usda", &layers, &registry).is_none());
         Ok(())
     }
 
     #[test]
     fn find_layer_not_found() -> Result<()> {
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("nonexistent.usda", &layers, &resolver).is_none());
+        assert!(find("nonexistent.usda", &layers, &registry).is_none());
         Ok(())
+    }
+
+    /// Two layers sharing a trailing component are ambiguous for a bare suffix,
+    /// so it resolves to neither rather than guessing the first; an exact match
+    /// or a directory-distinguishing suffix still resolves.
+    #[test]
+    fn find_layer_ambiguous_basename() {
+        let registry = sdf::LayerRegistry::default();
+        let layers = vec![
+            sdf::Layer::new("/proj/a/model.usda", Box::new(sdf::Data::new())),
+            sdf::Layer::new("/proj/b/model.usda", Box::new(sdf::Data::new())),
+        ];
+        assert_eq!(find("model.usda", &layers, &registry), None, "ambiguous bare basename");
+        assert_eq!(find("/proj/b/model.usda", &layers, &registry), Some(1), "exact wins");
+        assert_eq!(find("a/model.usda", &layers, &registry), Some(0), "unique suffix");
     }
 
     /// Relative `../` paths must be anchored against each candidate
@@ -1659,10 +1711,10 @@ pub(crate) mod tests {
             sdf::Layer::new(a.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
             sdf::Layer::new(b.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
         ];
-        let resolver = DefaultResolver::new();
+        let registry = sdf::LayerRegistry::default();
         // `../Materials/Materials.usd` written inside `Props/link.usd`
         // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(find("../Materials/Materials.usd", &layers, &resolver), Some(1));
+        assert_eq!(find("../Materials/Materials.usd", &layers, &registry), Some(1));
         Ok(())
     }
 
@@ -1812,9 +1864,9 @@ def "Root" (
 "#,
         );
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
@@ -1859,9 +1911,9 @@ def "Outer"
 "#,
         );
         let layers = vec![sdf::Layer::new("a.usd", a), sdf::Layer::new("b.usd", b)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (_index, errors) = PrimIndex::build_with_cache(
+        let (_index, errors, _pending) = PrimIndex::build_with_cache(
             &Path::from("/Root"),
             &stack,
             &CompositionContext::default(),
@@ -1890,9 +1942,9 @@ def "Prim" (
 "#,
         );
         let layers = vec![sdf::Layer::new("test.usda", layer)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (index, errors) = PrimIndex::build_with_cache(
+        let (index, errors, _pending) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),
@@ -1928,9 +1980,9 @@ def "Prim" (
             sdf::Layer::new("root.usda", root),
             sdf::Layer::new("target.usda", target),
         ];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let (index, errors) = PrimIndex::build_with_cache(
+        let (index, errors, _pending) = PrimIndex::build_with_cache(
             &Path::from("/Prim"),
             &stack,
             &CompositionContext::default(),
@@ -2384,7 +2436,7 @@ def "Model"
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
 
         let samples = index
@@ -2416,7 +2468,7 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2443,7 +2495,7 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2471,7 +2523,7 @@ def "Root" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
@@ -2513,7 +2565,7 @@ over "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/P");
 
         // Strongest-only resolution would drop the weaker "b"; folding keeps it.
@@ -2534,7 +2586,7 @@ def "P" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, None);
@@ -2557,7 +2609,7 @@ def "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));
@@ -2594,7 +2646,7 @@ over "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, Box::new(DefaultResolver::new()), true);
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
         let index = build(&stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(vec!["a".to_string()]));

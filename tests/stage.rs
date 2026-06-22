@@ -7,11 +7,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::Result;
+use openusd::ar::Resolver as _;
 use openusd::usd::{
     CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
     StagePopulationMask, StageSink,
 };
-use openusd::{gf, pcp, sdf, tf, usd};
+use openusd::{ar, gf, pcp, sdf, tf, usd};
 
 /// A [`StageSink`] for tests: holds optional closures for the composed-change and
 /// lifecycle hooks a test cares about, recording into shared state it inspects
@@ -126,6 +127,133 @@ fn missing_sublayer_retained() -> Result<()> {
         } if asset_path == "missing.usda" && introduced_by.ends_with("root.usda")
     )));
     assert!(stage.prim("/Root").is_valid()?);
+    Ok(())
+}
+
+/// A missing sublayer of a reference target opened on demand surfaces the same
+/// `UnresolvedSublayer` diagnostic as a missing root sublayer: composition reaches
+/// the target lazily, so the load barrier records it. The target still loads, so
+/// the reference composes (`/P.x` resolves).
+#[test]
+fn lazy_ref_missing_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(1.0)),
+        "the reference target loads despite its missing sublayer"
+    );
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::UnresolvedSublayer { asset_path, introduced_by }
+                if asset_path == "missing.usda" && introduced_by.ends_with("target.usda")
+        )),
+        "expected UnresolvedSublayer, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A reference target that resolves but cannot be parsed is reported
+/// `MalformedLayer` (carrying the parse error) rather than silently dropped, and
+/// composition still completes — the demanding prim composes without the arc
+/// instead of looping on the unreadable target.
+#[test]
+fn lazy_ref_unreadable_target() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("broken.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @broken.usda@\n) {}\n")?;
+    // Resolves (the file exists) but the parser rejects the body.
+    std::fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/P").is_valid()?, "/P still composes without the arc");
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::MalformedLayer { asset_path, reason, .. }
+                if asset_path.contains("broken.usda") && !reason.is_empty()
+        )),
+        "expected MalformedLayer carrying the parse error, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A reference target that failed to read on first demand is retried after an
+/// edit clears the recorded failure, so a repaired asset composes.
+#[test]
+fn failed_load_retried_after_edit() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let target = dir.path().join("target.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @target.usda@\n) {}\n")?;
+    std::fs::write(&target, "#usda 1.0\ndef Broken {{{ not valid\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/P").is_valid()?);
+    assert!(
+        stage.composition_errors().iter().any(|e| matches!(
+            e,
+            pcp::Error::MalformedLayer { asset_path, .. } if asset_path.contains("target.usda")
+        )),
+        "the unreadable target is reported malformed"
+    );
+
+    // Repair the file, then author an unrelated prim: the edit clears the recorded
+    // failure so the next query re-demands the now-readable target.
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom double x = 7\n}\n",
+    )?;
+    stage.define_prim("/Trigger")?;
+
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0)),
+        "the repaired reference composes once the failure is cleared"
+    );
+    Ok(())
+}
+
+/// A cold direct query into a descendant of an instanceable reference (no prior
+/// traversal) composes through the prototype, not an empty namespace: the
+/// instance-proxy redirect is not memoized while the reference layer is still
+/// being demanded.
+#[test]
+fn instance_proxy_cold_query() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let proto = dir.path().join("proto.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &proto,
+        "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Child\" {\n        custom double x = 3\n    }\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    // The first query is the descendant read; it must demand proto.usda, compose
+    // the instance, and resolve through the prototype rather than memoizing an
+    // identity redirect against the not-yet-loaded reference.
+    assert_eq!(
+        stage
+            .attribute("/World/Inst/Child.x")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(3.0))
+    );
     Ok(())
 }
 
@@ -842,14 +970,105 @@ fn active_loaded() -> Result<()> {
     Ok(())
 }
 
+/// Records every layer the wrapped resolver opens, to verify lazy loading: a
+/// reference/payload target is read from disk only when composition reaches its
+/// arc, never at stage-open time.
+struct RecordingResolver {
+    inner: ar::DefaultResolver,
+    opened: Rc<RefCell<Vec<String>>>,
+}
+
+impl RecordingResolver {
+    fn new(opened: Rc<RefCell<Vec<String>>>) -> Self {
+        Self {
+            inner: ar::DefaultResolver::new(),
+            opened,
+        }
+    }
+}
+
+impl ar::Resolver for RecordingResolver {
+    fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+        self.inner.create_identifier(asset_path, anchor)
+    }
+    fn resolve(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        self.inner.resolve(asset_path)
+    }
+    fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ar::ResolvedPath> {
+        self.inner.resolve_for_new_asset(asset_path)
+    }
+    fn open_asset(&self, resolved_path: &ar::ResolvedPath) -> std::io::Result<Box<dyn ar::Asset>> {
+        self.opened.borrow_mut().push(resolved_path.to_string());
+        self.inner.open_asset(resolved_path)
+    }
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+}
+
+/// A reference target is opened only when composition reaches its arc, not at
+/// stage-open time, and then exactly once.
+#[test]
+fn lazy_reference_loads_on_demand() -> Result<()> {
+    let path = composition_path("references/reference_same_folder.usda");
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let stage = Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .open(&path)?;
+
+    let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
+
+    // Opening the stage reads only the root layer; the reference target stays
+    // closed until composition reaches the arc on `/World`.
+    assert!(opened_has("reference_same_folder"));
+    assert!(!opened_has("_stage.usda"), "reference target must not load at open");
+    assert_eq!(stage.layer_count(), 1);
+
+    // Composing `/World` follows its reference, opening the target exactly once.
+    let _ = child_names(&stage, "/World")?;
+    assert!(opened_has("_stage.usda"), "composing the prim must load its reference");
+    assert_eq!(stage.layer_count(), 2);
+    let target_opens = opened.borrow().iter().filter(|p| p.contains("_stage.usda")).count();
+    assert_eq!(target_opens, 1, "the reference target loads exactly once");
+    Ok(())
+}
+
+/// A muted reference target contributes nothing and is never read from disk,
+/// even once composition reaches its arc.
+#[test]
+fn muted_reference_target_not_opened() -> Result<()> {
+    let path = composition_path("references/reference_same_folder.usda");
+    let target = composition_path("references/_stage.usda");
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    // Mute the reference target by its canonical identifier.
+    let muted_id = ar::DefaultResolver::new().create_identifier(&target, None);
+    let stage = Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .mute([muted_id])
+        .open(&path)?;
+
+    // Composing `/World` reaches the muted reference; it is recognized as muted
+    // before the loader would open it.
+    let _ = child_names(&stage, "/World")?;
+    assert!(
+        !opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        "a muted reference target must never be opened"
+    );
+    Ok(())
+}
+
 #[test]
 fn load_none() -> Result<()> {
     let path = composition_path("payload/payload_same_folder.usda");
 
     let loaded = Stage::open(&path)?;
-    assert_eq!(loaded.layer_count(), 2);
+    // Lazy loading: only the root layer is loaded until composition reaches the
+    // payload arc on `/World`.
+    assert_eq!(loaded.layer_count(), 1);
     assert!(loaded.prim("/World").is_loaded()?);
     assert_eq!(child_names(&loaded, "/World")?, vec!["Cube"]);
+    // Composing `/World` pulled its payload target in, so it is now loaded.
+    assert_eq!(loaded.layer_count(), 2);
 
     let unloaded = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
     assert_eq!(unloaded.load(), InitialLoadSet::LoadNone);

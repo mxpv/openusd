@@ -302,7 +302,6 @@ impl Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
     use crate::pcp::VariantFallbackMap;
     use crate::sdf::{ChangeFlags, ChangeList};
 
@@ -316,8 +315,8 @@ mod tests {
     }
 
     fn empty_cache() -> (LayerGraph, IndexCache) {
-        let graph = LayerGraph::from_layers(Vec::new(), 0, Box::new(DefaultResolver::new()), true);
-        (graph, IndexCache::new(VariantFallbackMap::new(), Vec::new()))
+        let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
+        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
     }
 
     #[test]

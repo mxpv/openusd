@@ -1,15 +1,12 @@
 //! Pluggable per-format read/write seam (C++ `SdfFileFormat`).
 //!
 //! A [`FileFormat`] maps a concrete on-disk encoding (`usda` text, `usdc`
-//! binary crate, `usdz` archive) to the shared [`AbstractData`] interface,
-//! so [`Layer`](super::Layer) and the loader stay decoupled from any single
-//! format. Formats are discovered by file extension via [`find_by_extension`]
-//! / [`find_by_id`], mirroring C++ `SdfFileFormat::FindByExtension` /
-//! `FindById` — lookup never sniffs content.
-//!
-//! The built-in formats are compiled in and held in a static registry. A
-//! future `LayerRegistry` will own this registry alongside layer-instance
-//! dedup; for now the lookup functions are free-standing.
+//! binary crate, `usdz` archive) to the shared [`AbstractData`] interface, so
+//! [`Layer`](super::Layer) and the loader stay decoupled from any single
+//! format. This module is the format abstraction (the trait); the registry that
+//! holds the built-in formats and looks them up by extension/content lives with
+//! [`LayerRegistry`](super::LayerRegistry) (`find_by_extension` / `find_by_id`),
+//! mirroring C++ `SdfFileFormat::FindByExtension` / `FindById`.
 
 use std::io::{Seek, Write};
 
@@ -17,9 +14,6 @@ use anyhow::Result;
 use bitflags::bitflags;
 
 use super::{AbstractData, LayerData};
-use crate::usda::UsdaFileFormat;
-use crate::usdc::UsdcFileFormat;
-use crate::usdz::UsdzFileFormat;
 use crate::{ar, tf};
 
 bitflags! {
@@ -93,32 +87,16 @@ pub trait FileFormat: Sync {
     /// sibling assets) through `resolver`.
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData>;
 
+    /// Whether this format can read an asset whose leading bytes are `prefix`
+    /// (C++ `SdfFileFormat::CanRead`). Used to disambiguate an extension claimed
+    /// by more than one format — binary vs text `.usd` — by content. The default
+    /// has no content signature; a binary format overrides it to match its magic.
+    fn matches_content(&self, _prefix: &[u8]) -> bool {
+        false
+    }
+
     /// Serialize `data` to `sink` in this format.
     fn write(&self, data: &dyn AbstractData, sink: &mut dyn WriteSeek) -> Result<()>;
-}
-
-static USDA: UsdaFileFormat = UsdaFileFormat;
-static USDC: UsdcFileFormat = UsdcFileFormat;
-static USDZ: UsdzFileFormat = UsdzFileFormat;
-
-// Poor man's sdf::LayerRegistry implementation :)
-
-/// All built-in formats, in lookup order.
-static FORMATS: &[&dyn FileFormat] = &[&USDA, &USDC, &USDZ];
-
-/// Find the format claiming `ext` (without the leading dot, case-insensitive),
-/// e.g. `"usda"` or `"usd"`. C++ `SdfFileFormat::FindByExtension`.
-pub fn find_by_extension(ext: &str) -> Option<&'static dyn FileFormat> {
-    FORMATS
-        .iter()
-        .copied()
-        .find(|f| f.extensions().iter().any(|e| e.eq_ignore_ascii_case(ext)))
-}
-
-/// Find the format with the given [`format_id`](FileFormat::format_id), e.g.
-/// `"usdc"`. C++ `SdfFileFormat::FindById`.
-pub fn find_by_id(id: &str) -> Option<&'static dyn FileFormat> {
-    FORMATS.iter().copied().find(|f| f.format_id() == id)
 }
 
 #[cfg(test)]
@@ -126,6 +104,9 @@ mod tests {
     use super::*;
     use crate::ar::{DefaultResolver, Resolver};
     use crate::sdf::{self, SpecType};
+    use crate::usda::UsdaFileFormat;
+    use crate::usdc::UsdcFileFormat;
+    use crate::usdz::UsdzFileFormat;
 
     /// Build a one-prim layer's data for write/read round-tripping.
     fn sample_data() -> sdf::Data {
@@ -173,35 +154,5 @@ mod tests {
     #[test]
     fn roundtrip_usdz() {
         roundtrip(&UsdzFileFormat, "usdz");
-    }
-
-    #[test]
-    fn lookup_by_extension() {
-        assert_eq!(find_by_extension("usda").unwrap().format_id(), "usda");
-        assert_eq!(find_by_extension("usdc").unwrap().format_id(), "usdc");
-        assert_eq!(find_by_extension("usd").unwrap().format_id(), "usdc");
-        assert_eq!(find_by_extension("USDA").unwrap().format_id(), "usda");
-        assert_eq!(find_by_extension("usdz").unwrap().format_id(), "usdz");
-        assert!(find_by_extension("xyz").is_none());
-        assert!(find_by_extension("").is_none());
-    }
-
-    #[test]
-    fn lookup_by_id() {
-        assert_eq!(find_by_id("usdc").unwrap().extensions(), &["usdc", "usd"]);
-        assert!(find_by_id("usd").is_none());
-    }
-
-    #[test]
-    fn builtin_capabilities() {
-        for id in ["usda", "usdc"] {
-            let caps = find_by_id(id).unwrap().caps();
-            assert_eq!(caps, FileFormatCaps::all(), "{id} should read, write, and edit");
-        }
-        // usdz is a package format: writable as a new archive, but not editable
-        // (savable) in place.
-        let usdz = find_by_id("usdz").unwrap().caps();
-        assert!(usdz.can_read() && usdz.can_write());
-        assert!(!usdz.can_edit(), "usdz should not be editable in place");
     }
 }

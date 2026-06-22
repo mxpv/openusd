@@ -17,7 +17,6 @@
 //! | [`usdc`] | Binary format. [`CrateData`](usdc::CrateData) parses and [`CrateWriter`](usdc::CrateWriter) emits `.usdc` files. |
 //! | [`usdz`] | Archive format. [`Archive`](usdz::Archive) reads and [`ArchiveWriter`](usdz::ArchiveWriter) emits `.usdz` packages. |
 //! | [`ar`] | Asset resolution. [`Resolver`](ar::Resolver) trait maps asset paths (`@...@`) to physical locations; [`DefaultResolver`](ar::DefaultResolver) searches the filesystem. |
-//! | [`layer`] | Layer collection. [`Collector`](layer::Collector) recursively loads all layers from a root file. |
 //! | [`pcp`] | Prim Cache Population — the composition engine. Implements LIVRPS strength ordering, per-prim index caching, and namespace mapping via [`MapFunction`](pcp::MapFunction). |
 //! | [`usd`] | Composed stage API. [`Stage`](usd::Stage) merges opinions across layers using [LIVERPS](https://docs.nvidia.com/learn-openusd/latest/creating-composition-arcs/strength-ordering/what-is-liverps.html) strength ordering. |
 //! | [`gf`] | Graphics foundations — linear algebra types (`Vec3f`, `Matrix4d`, …). |
@@ -87,6 +86,8 @@
 //!     .load(usd::InitialLoadSet::LoadNone)
 //!     .open("scene.usda")?;
 //!
+//! // Recoverable composition errors discovered so far: the root layer stack at
+//! // open, plus reference/payload diagnostics that accrue as prims are traversed.
 //! for err in stage.composition_errors() {
 //!     eprintln!("warning: {err}");
 //! }
@@ -95,7 +96,6 @@
 
 pub mod ar;
 pub mod gf;
-pub mod layer;
 pub mod pcp;
 pub mod schemas;
 pub mod sdf;
@@ -104,5 +104,3 @@ pub mod usd;
 pub mod usda;
 pub mod usdc;
 pub mod usdz;
-
-pub use layer::{Collector, DependencyKind};

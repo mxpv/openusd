@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ar::{ResolvedPath, Resolver};
+use crate::ar::ResolvedPath;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
@@ -188,12 +188,20 @@ pub(crate) struct LayerGraph {
     /// rebuild. Independent of [`cycle_errors`](Self::cycle_errors): a
     /// relocate-only edit refreshes these alone.
     relocate_errors: Vec<Error>,
-    /// Resolver used to locate and anchor relative asset paths. Its
+    /// Loads layers: the resolver that anchors relative asset paths (its
     /// [`identity`](Resolver::identity) is the resolver component of the stack's
-    /// [`layer_stack_id`](Self::layer_stack_id).
-    resolver: Box<dyn Resolver>,
-    /// Whether payload arcs should be expanded during composition.
-    load_payloads: bool,
+    /// [`layer_stack_id`](Self::layer_stack_id)) and the format registry.
+    /// Composition opens a reference/payload target on demand through it.
+    registry: sdf::LayerRegistry,
+    /// Anchored asset paths whose target layer resolved but failed to read or
+    /// parse, each mapped to the underlying error. Consulted at the
+    /// reference/payload demand point so a target that cannot be opened is
+    /// reported [`MalformedLayer`](Error::MalformedLayer) once (with the arc's
+    /// site context and this reason) rather than re-demanded every pass — without
+    /// it the demanding prim's index would never cache. Written only at the
+    /// stage's load barrier through `&mut self`; read during composition, and
+    /// cleared when an edit changes the layers so a now-readable asset is retried.
+    failed_loads: HashMap<String, String>,
 }
 
 impl LayerGraph {
@@ -201,12 +209,12 @@ impl LayerGraph {
     /// first, then the root layer and the rest). The recoverable layer-stack
     /// errors it detects (sublayer cycles, invalid relocates) are stored on the
     /// graph and read back through [`errors`](Self::errors).
-    /// An empty graph that resolves asset paths through `resolver`. Layers join
-    /// via [`ensure_layer`](Self::ensure_layer); [`finalize`](Self::finalize)
-    /// wires the sublayer DAG once they are all added. The stage builds a graph
-    /// this way so it can attach a change sink to each layer as it joins;
+    /// An empty graph that opens layers through `registry`. Layers join via
+    /// [`ensure_layer`](Self::ensure_layer); [`finalize`](Self::finalize) wires
+    /// the sublayer DAG once they are all added. The stage builds a graph this way
+    /// so it can attach a change sink to each layer as it joins;
     /// [`from_layers`](Self::from_layers) is the all-at-once convenience.
-    pub(crate) fn new(resolver: Box<dyn Resolver>, load_payloads: bool) -> Self {
+    pub(crate) fn new(registry: sdf::LayerRegistry) -> Self {
         Self {
             nodes: HashMap::new(),
             by_identifier: HashMap::new(),
@@ -221,8 +229,8 @@ impl LayerGraph {
             has_relocates: false,
             cycle_errors: Vec::new(),
             relocate_errors: Vec::new(),
-            resolver,
-            load_payloads,
+            registry,
+            failed_loads: HashMap::new(),
         }
     }
 
@@ -474,23 +482,48 @@ impl LayerGraph {
         self.nodes.contains_key(&id)
     }
 
-    /// The resolver used to anchor relative asset paths.
-    pub(crate) fn resolver(&self) -> &dyn Resolver {
-        self.resolver.as_ref()
+    /// The registry that opens reference/payload targets on demand.
+    pub(crate) fn layer_registry(&self) -> &sdf::LayerRegistry {
+        &self.registry
     }
 
     /// Resolves the location of the layer `anchor`, used to anchor the relative
     /// asset paths authored there. Returns `None` when there is no anchor layer
     /// or it cannot itself be resolved. Resolve a layer once and reuse the
-    /// result to anchor every asset path it authors (see
-    /// [`Resolver::create_identifier`]).
+    /// result to anchor every asset path it authors.
     pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
-        anchor.and_then(|layer| self.resolver().resolve(self.identifier(layer)))
+        anchor.and_then(|layer| self.registry.resolve(self.identifier(layer)))
     }
 
-    /// Whether payload arcs should be expanded during composition.
-    pub(crate) fn load_payloads(&self) -> bool {
-        self.load_payloads
+    /// Records that the layer at `asset_path` resolved but could not be read or
+    /// parsed (`reason`), so composition stops demanding it and reports it
+    /// [`MalformedLayer`](Error::MalformedLayer). Called from the stage's load
+    /// barrier when an on-demand open fails.
+    pub(crate) fn mark_load_failed(&mut self, asset_path: &str, reason: String) {
+        self.failed_loads.insert(asset_path.to_string(), reason);
+    }
+
+    /// Whether a prior on-demand open of `asset_path` failed to read or parse the
+    /// target layer.
+    pub(crate) fn load_failed(&self, asset_path: &str) -> bool {
+        self.failed_loads.contains_key(asset_path)
+    }
+
+    /// The read/parse error from a prior failed on-demand open of `asset_path`,
+    /// or `None` if it never failed.
+    pub(crate) fn load_failure_reason(&self, asset_path: &str) -> Option<&str> {
+        self.failed_loads.get(asset_path).map(String::as_str)
+    }
+
+    /// Forgets every recorded load failure so a now-readable asset is demanded
+    /// again, returning whether any were recorded. Called when an edit changes
+    /// the layers.
+    pub(crate) fn clear_failed_loads(&mut self) -> bool {
+        if self.failed_loads.is_empty() {
+            return false;
+        }
+        self.failed_loads.clear();
+        true
     }
 
     /// Whether any layer keeps structurally valid authored relocates.
@@ -556,7 +589,7 @@ impl LayerGraph {
     /// or suffix match, then by resolver anchoring for parent-relative paths.
     /// Iterates in collection order so the result is deterministic.
     pub(crate) fn find(&self, asset_path: &str) -> Option<LayerId> {
-        find_layer_id(asset_path, &self.order, |id| self.layer(id), self.resolver.as_ref())
+        find_layer_id(asset_path, &self.order, |id| self.layer(id), &self.registry)
     }
 
     /// The layer ids + effective offsets of the sublayer stack rooted at
@@ -648,9 +681,13 @@ impl LayerGraph {
     /// data, refreshing both [`cycle_errors`](Self::cycle_errors) and
     /// [`relocate_errors`](Self::relocate_errors). Called after a
     /// `subLayers`/`subLayerOffsets` edit, where the graph's edges may be stale.
-    pub(crate) fn recompute_sublayers(&mut self) {
+    ///
+    /// Returns the layers whose relocate pairs changed, so the caller can drop
+    /// the cached indices that read them (a demanded layer can introduce
+    /// relocates that restructure prims composed against its stack).
+    pub(crate) fn recompute_sublayers(&mut self) -> HashSet<LayerId> {
         self.build_sublayer_edges();
-        self.recompute_relocates();
+        self.recompute_relocates()
     }
 
     /// Re-derives every node's structurally valid relocate pairs from its
@@ -977,6 +1014,28 @@ impl LayerGraph {
         self.muted_identifiers.contains(identifier)
     }
 
+    /// Whether `asset_path` (an anchored, resolved asset identifier) names a
+    /// muted layer, by the same exact-then-root-anchored matching the muted set
+    /// uses. Unlike [`is_muted`](Self::is_muted), this matches before the layer
+    /// is interned, so the on-demand loader can recognize a muted reference or
+    /// payload target and skip opening it.
+    pub(crate) fn is_asset_muted(&self, asset_path: &str) -> bool {
+        if self.muted_identifiers.is_empty() {
+            return false;
+        }
+        if self.muted_identifiers.contains(asset_path) {
+            return true;
+        }
+        // TODO(perf): with muting active, this runs once per not-yet-loaded
+        // reference/payload arc per composition pass, canonicalizing every muted
+        // entry (a filesystem syscall each) against the root anchor. Cache the
+        // anchored muted set, rebuilding it only when the muted set changes.
+        let root_anchor = self.anchor_location(self.root);
+        self.muted_identifiers
+            .iter()
+            .any(|m| self.registry.create_identifier(m, root_anchor.as_ref()) == asset_path)
+    }
+
     /// The muted layer identifiers, sorted for a deterministic result.
     pub(crate) fn muted_layers(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.muted_identifiers.iter().cloned().collect();
@@ -1047,7 +1106,7 @@ impl LayerGraph {
         if let Some(id) = self.id_of(identifier) {
             return Some(id);
         }
-        let anchored = self.resolver.create_identifier(identifier, root_anchor);
+        let anchored = self.registry.create_identifier(identifier, root_anchor);
         self.id_of(&anchored)
     }
 }
@@ -1055,7 +1114,6 @@ impl LayerGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ar::DefaultResolver;
 
     /// Author through a layer's `edit` API and commit, for building test fixtures.
     fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
@@ -1077,10 +1135,9 @@ mod tests {
         pub(crate) fn from_layers(
             layers: Vec<sdf::Layer>,
             session_layer_count: usize,
-            resolver: Box<dyn Resolver>,
-            load_payloads: bool,
+            registry: sdf::LayerRegistry,
         ) -> Self {
-            let mut graph = Self::new(resolver, load_payloads);
+            let mut graph = Self::new(registry);
             let mut root = None;
             let mut session_count = 0;
             for (i, layer) in layers.into_iter().enumerate() {
@@ -1109,7 +1166,7 @@ mod tests {
             e.pseudo_root_mut().unwrap().set_sublayers(["leaf.usda"]);
         });
         let leaf = sdf::Layer::new_in_memory("leaf.usda");
-        LayerGraph::from_layers(vec![root, sub, leaf], 0, Box::new(DefaultResolver::new()), true)
+        LayerGraph::from_layers(vec![root, sub, leaf], 0, sdf::LayerRegistry::default())
     }
 
     /// Muting a sublayer drops it and its whole subtree from `sublayer_stack`,
@@ -1166,7 +1223,7 @@ mod tests {
         edit_layer(&mut b, |e| {
             e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
         });
-        let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
         assert!(!graph.errors().is_empty(), "the a → b → a sublayer cycle is reported");
 
         assert!(graph.mute_layer("b.usda".to_string()).is_some());
@@ -1200,7 +1257,7 @@ mod tests {
         // within combo's stack so both are dropped while combo is present.
         let s1 = reloc("s1.usda", "/W/A", "/W/C");
         let s2 = reloc("s2.usda", "/W/B", "/W/C");
-        let mut graph = LayerGraph::from_layers(vec![root, combo, s1, s2], 0, Box::new(DefaultResolver::new()), true);
+        let mut graph = LayerGraph::from_layers(vec![root, combo, s1, s2], 0, sdf::LayerRegistry::default());
         let combo_id = graph.id_of("combo.usda").unwrap();
         let s1_id = graph.id_of("s1.usda").unwrap();
         let s2_id = graph.id_of("s2.usda").unwrap();

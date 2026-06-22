@@ -12,7 +12,7 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`tf/`** - Tools Foundation (C++ `Tf`): low-level utilities, chiefly `tf::Token`, the interned-identifier string behind every `TfToken`-equivalent API. Start at `tf/mod.rs`.
 
-- **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model. `AbstractData` is the unified read/write backend interface the text, binary, and archive readers all implement; `Value`, `Path`, and `Layer` (C++ `SdfLayer`) are the everyday types. A `Layer`'s edits run through `Layer::edit` (a closure over a `LayerEdit` view) as atomic copy-on-write transactions that derive a `ChangeList` for composition invalidation and fire per-layer `LayerSink`s at the commit seam (`sdf/layer.rs`, `sdf/change.rs`, `sdf/sink.rs`); spec authoring lives on the typed views (`PrimSpec::new` and friends). Also here: the pluggable `FileFormat` read/write seam, the variable-expression engine (`sdf/expr.rs`), and the namespace-aware spec-copy primitive (`sdf/copy.rs`). Start at `sdf/mod.rs`.
+- **`sdf/`** - Scene Description Foundations (C++ `Sdf`): the core data model. `AbstractData` is the unified read/write backend interface the text, binary, and archive readers all implement; `Value`, `Path`, and `Layer` (C++ `SdfLayer`) are the everyday types. A `Layer`'s edits run through `Layer::edit` (a closure over a `LayerEdit` view) as atomic copy-on-write transactions that derive a `ChangeList` for composition invalidation and fire per-layer `LayerSink`s at the commit seam (`sdf/layer.rs`, `sdf/change.rs`, `sdf/sink.rs`); spec authoring lives on the typed views (`PrimSpec::new` and friends). Also here: the pluggable `FileFormat` read/write seam, the `LayerRegistry` that owns asset loading and format dispatch (composition opens reference/payload targets on demand through it, so an un-visited subtree never loads), the variable-expression engine (`sdf/expr.rs`), and the namespace-aware spec-copy primitive (`sdf/copy.rs`). Start at `sdf/mod.rs`.
 
 - **`usda/`** - Text format `.usda`: logos lexer + recursive-descent parser. `TextReader` / `TextWriter`.
 
@@ -22,9 +22,7 @@ The codebase mirrors the C++ OpenUSD SDK's module layout. The bullets below are 
 
 - **`ar/`** - Asset Resolution (C++ `Ar`): the `Resolver` trait maps `@...@` asset paths to physical locations; `DefaultResolver` searches the filesystem.
 
-- **`layer`** - Layer collection (C++ `PcpLayerStack`, loading half): `Collector::collect` recursively resolves and loads all layers from a root file, following sublayers, references, and payloads.
-
-- **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`): LIVERPS strength ordering across layers, kept a pure function of `(graph, context, cached indices)` so it stays parallelizable. Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure table.
+- **`pcp/`** - Prim Cache Population, the composition engine (C++ `Pcp`): LIVERPS strength ordering across layers, kept a pure function of `(graph, context, cached indices)` so it stays parallelizable. Composition drives layer loading: a reference/payload target opens on first use and the demand travels out through `BuildOutput` to the stage's load barrier. Start at `pcp/mod.rs` — it has the LIVERPS overview and a per-file structure table.
 
 - **`usd/`** - Composed stage API (C++ `Usd`): `usd::Stage` is the handle that delegates composition to `pcp::IndexCache`; `Prim`, `Attribute`, `Relationship`, and the schema views are `Clone` value types over it, and stage-tier authoring routes through the current `EditTarget`, with `Stage::batch_edit` for atomic multi-layer edits. Notable sub-surfaces: `usd/sink.rs` (`StageSink` composed-change observers, `Provenance`), `usd/diff.rs` (edit replication), `usd/editor.rs` (namespace editing). Start at `usd/stage.rs`. Public users import modules (`use openusd::{sdf, usd};`), not root-level re-exports.
 
@@ -97,6 +95,8 @@ When implementing a new feature from the spec:
 
 - Write clean and idiomatic Rust code
 - Less is better - prefer functionality offered by stdlib
+- Don't write a function or method whose body is just a call to another free-standing function (a thin delegating wrapper, e.g. `fn open_stack(&self, p) { open_layer_stack(self.resolver(), p) }`). Call the free function directly at the call site. A method earns its place only when it adds something — encapsulating private state, a non-trivial default, or an invariant
+- Keep `pcp` composition free of interior mutability: no `Cell`/`RefCell` (and no `Mutex`) on `LayerGraph`, `IndexCache`, the indexer, or anything a per-prim build reads. A build is a pure function of its `&`-inputs, so anything it discovers (errors, demanded-but-unloaded layers) travels out through its return value (`BuildOutput`), not a shared mutable cell. Accumulate such results in an owned field and merge them up; the cache holds the deferred list as a plain `Vec` it mutates through `&mut self`
 - Order a file top-down by importance so the first thing a reader sees is the main type, not a helper: the primary type definition (and the structs it depends on) first, then its `impl` blocks, then free-standing helper functions, then the `#[cfg(test)] mod tests`. Don't open a file with a small private helper.
 - Code requires documentation
 - Proof read and reword docs and/or comments as needed
@@ -124,6 +124,8 @@ The test suite includes extensive binary format tests using fixture files in `fi
 - Scene hierarchy traversal
 
 Prefer using USD assets from `vendor/usd-wg-assets/` for test fixtures when a suitable file exists. Only add new files to `fixtures/` when vendor assets don't cover the specific case needed.
+
+Never put a test-only function in a module's main body — not even gated with `#[cfg(test)]`. Every test helper lives inside a `#[cfg(test)] mod tests { … }` block. A helper that is intrinsically about a production type and is shared across modules' tests goes as a `#[cfg(test)]` method in a `#[cfg(test)] impl` block on that type (e.g. `LayerRegistry::collect_with_arcs`), reached as `Type::helper(...)`. Don't add a separate `test_support` module for it.
 
 Test function names MUST be terse — 2–4 underscore-separated words, no more. Match the existing naming convention of the file. Prefer `add_api_schema_dup_delete` over `add_api_schema_clears_duplicate_delete_opinions`, `light_api_skips_non_light` over `read_light_api_returns_none_on_non_light_prim`. Drop redundant prefixes like `read_`/`reads_` when the test file already targets a reader; favour the subject + outcome (`light_api_via_applied_schema`) over verbose sentences.
 

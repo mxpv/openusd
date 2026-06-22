@@ -279,6 +279,10 @@ impl sdf::FileFormat for UsdcFileFormat {
         Ok(Box::new(data))
     }
 
+    fn matches_content(&self, prefix: &[u8]) -> bool {
+        prefix.starts_with(MAGIC)
+    }
+
     fn write(&self, data: &dyn sdf::AbstractData, mut sink: &mut dyn sdf::WriteSeek) -> Result<()> {
         CrateWriter::write(data, &mut sink)
     }

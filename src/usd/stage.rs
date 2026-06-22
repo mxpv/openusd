@@ -45,7 +45,7 @@ use anyhow::Result;
 use bitflags::bitflags;
 
 use crate::tf::Token;
-use crate::{ar, layer, pcp, sdf};
+use crate::{ar, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
 use super::sink::{Payload, Provenance, StageSink, StageSinkId};
@@ -767,7 +767,7 @@ impl Stage {
     ///
     /// let stage = usd::Stage::builder().open("scene.usda").unwrap();
     /// ```
-    pub fn builder() -> StageBuilder<ar::DefaultResolver> {
+    pub fn builder() -> StageBuilder {
         StageBuilder::new()
     }
 
@@ -860,13 +860,9 @@ impl Stage {
         prim_path: &sdf::Path,
         arc: EditTargetArc,
     ) -> Result<EditTarget, StageAuthoringError> {
-        let info = {
-            // Drain pending edits so the arc lookup reads current composition.
-            self.process_pending();
-            let graph = self.layers.borrow();
-            let mut cache = self.cache.borrow_mut();
-            cache.edit_target_node_info(&graph, prim_path, |a| arc.matches(a))?
-        };
+        // Composes the prim (loading any reference/payload target on demand) so
+        // the arc lookup reads the current, fully-resolved composition.
+        let info = self.with_cache(|graph, cache| cache.edit_target_node_info(graph, prim_path, |a| arc.matches(a)))?;
         let (layer_identifier, mapping, stack_root) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
             path: prim_path.clone(),
             arc,
@@ -1466,6 +1462,12 @@ impl Stage {
             }
             std::mem::take(&mut *queue)
         };
+        // An edit changes the layers, so a target that previously failed to read
+        // may now be readable: forget recorded load failures and drop the indices
+        // that recorded one, so the next query re-demands and recomposes them.
+        if self.layers.borrow_mut().clear_failed_loads() {
+            self.cache.borrow_mut().drop_load_failed_indices();
+        }
         // A single edit carries its own provenance: a staged one verbatim, or an
         // unstaged edit (`None`) resolved to `LocalStack` or `DirectLayerEdit` by
         // whether the edited layer is in the local layer stack — a linear scan of
@@ -1557,7 +1559,12 @@ impl Stage {
         }
     }
 
-    /// Returns the number of layers in the stage (including session layers).
+    /// Returns the number of layers loaded so far (including session layers).
+    ///
+    /// Layers behind references and payloads load on demand as composition
+    /// reaches their arcs, so this is the count loaded by the queries performed
+    /// so far — it grows as more of the stage is visited, mirroring C++
+    /// `UsdStage::GetUsedLayers`. The root layer stack is always fully loaded.
     pub fn layer_count(&self) -> usize {
         self.layers().len()
     }
@@ -1574,8 +1581,14 @@ impl Stage {
         self.cache().indexed_count()
     }
 
-    /// Returns the layer identifiers in strength order (session layers first,
-    /// then root layer and its sublayers).
+    /// Returns the identifiers of the layers loaded so far, in collection order
+    /// (session and root layer stack first, then arc-target layers in the order
+    /// composition opened them).
+    ///
+    /// Reference and payload target layers load on demand, so this lists the
+    /// layers reached by the queries performed so far rather than the full
+    /// transitive closure (C++ `UsdStage::GetUsedLayers`). Traverse the stage
+    /// to force every reachable layer to load.
     pub fn layer_identifiers(&self) -> Vec<String> {
         self.layers().identifiers()
     }
@@ -1584,8 +1597,8 @@ impl Stage {
     /// layers, the root layer, and its sublayers, in strength order. Mirrors
     /// C++ `UsdStage::GetLayerStack` (with `includeSessionLayers = true`).
     ///
-    /// Unlike [`layer_identifiers`](Self::layer_identifiers), which lists every
-    /// loaded layer including those reached across reference/payload arcs, this
+    /// Unlike [`layer_identifiers`](Self::layer_identifiers), which lists the
+    /// loaded layers including those reached across reference/payload arcs, this
     /// is only the local layer stack a top-level prim scans for direct opinions.
     pub fn layer_stack(&self) -> Vec<String> {
         self.layers().root_layer_stack_identifiers()
@@ -1772,7 +1785,7 @@ impl Stage {
             Some(affected) => {
                 // The mutation already rebuilt the graph's sublayer stacks,
                 // relocates, and cycle diagnostics; only the cache needs work.
-                cache.recompose_muted(&graph, &affected);
+                cache.invalidate_layers(&graph, &affected);
                 true
             }
             None => false,
@@ -2087,7 +2100,7 @@ impl Stage {
     pub(crate) fn masked<T: Default>(
         &self,
         path: &sdf::Path,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
+        query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
         if !self.mask_includes(&path.prim_path()) {
             return Ok(T::default());
@@ -2242,14 +2255,13 @@ impl Stage {
     ///
     /// Only `layer` itself is added. If `layer` authors its own `subLayers`
     /// naming layers not already loaded in the stage, those nested sublayers are
-    /// not auto-collected from disk — their edges resolve to nothing and
-    /// contribute no opinions. Insert an already-collected layer (e.g. from a
-    /// [`layer::Collector`](crate::layer::Collector)) when nested sublayers must
-    /// load.
+    /// not auto-opened from disk — their edges resolve to nothing and contribute
+    /// no opinions. Insert an already-opened sublayer stack when nested sublayers
+    /// must load.
     //
-    // TODO: run the collector on `layer` so its sublayer/reference/payload
-    // dependencies load (and unresolved ones surface as `UnresolvedSublayer`),
-    // matching what `StageBuilder::open` does for the root layer.
+    // TODO: open `layer`'s sublayer stack so its nested sublayers load (and
+    // unresolved ones surface as `UnresolvedSublayer`), matching what
+    // `StageBuilder::open` does for the root layer.
     pub fn insert_layer(
         &self,
         parent: &str,
@@ -2360,17 +2372,113 @@ impl Stage {
     }
 
     /// Runs a composed query that needs both the layer graph and the
-    /// composition cache, borrowing each for the call. The layer graph is
-    /// borrowed shared and the cache mutably, mirroring how composition reads
-    /// layer data through a `&LayerGraph` while lazily building the index.
+    /// composition cache, driving on-demand layer loading to a fixpoint.
+    ///
+    /// Each pass borrows the layer graph shared and the cache mutably, mirroring
+    /// how composition reads layer data through a `&LayerGraph` while lazily
+    /// building the index. A reference or payload arc to a not-yet-loaded layer
+    /// records a demand instead of composing (the index is left uncached); after
+    /// the pass the borrows are released, the demanded layers are opened into the
+    /// graph, and the query re-runs. The loop ends when a pass demands nothing,
+    /// or when a demanded target cannot be opened (so loading makes no progress).
+    /// Composition thus drives layer loading: an un-visited subtree never loads.
     pub(crate) fn with_cache<T>(
         &self,
-        query: impl FnOnce(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
+        mut query: impl FnMut(&pcp::LayerGraph, &mut pcp::IndexCache) -> Result<T>,
     ) -> Result<T> {
         self.process_pending();
-        let graph = self.layers.borrow();
-        let mut cache = self.cache.borrow_mut();
-        query(&graph, &mut cache)
+        // Reused across passes: swapped with the cache's queue so neither
+        // reallocates once warmed up.
+        let mut pending: Vec<String> = Vec::new();
+        loop {
+            let result = {
+                let graph = self.layers.borrow();
+                let mut cache = self.cache.borrow_mut();
+                let result = query(&graph, &mut cache);
+                cache.swap_pending_loads(&mut pending);
+                result
+            };
+            // The pass left a reference/payload arc uncomposed pending these
+            // layers; open them and recompose. `load_demanded` reports false once a
+            // pass neither loads a layer nor newly marks one failed, so the loop
+            // ends after an unopenable target is marked failed and the following
+            // pass recomposes its prim — recording the arc unresolved — without it.
+            if pending.is_empty() || !self.load_demanded(&pending) {
+                return result;
+            }
+            pending.clear();
+        }
+    }
+
+    /// Opens the layers a composition pass demanded but that were not yet loaded.
+    ///
+    /// Each demanded asset path is opened together with its sublayer stack and
+    /// interned through [`add_layer`](Self::add_layer), so the new layers join
+    /// the graph with a change sink; the sublayer DAG is then rewired. A missing
+    /// sublayer of an on-demand target is recorded as an
+    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error,
+    /// matching root-stack collection so a lazily-reached stack reports the same
+    /// diagnostics. A target that resolves but cannot be read or parsed is marked
+    /// failed on the graph, so the next composition pass reports it
+    /// [`UnresolvedLayer`](pcp::Error::UnresolvedLayer) (with the arc's site
+    /// context) rather than demanding it again — otherwise the demanding prim's
+    /// index would never cache.
+    ///
+    /// Returns whether the pass made progress — a layer joined or a target was
+    /// newly marked failed — so the caller recomposes once more; a demanded path
+    /// already loaded or already known failed is skipped.
+    fn load_demanded(&self, pending: &[String]) -> bool {
+        let before = self.layers.borrow().len();
+        let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
+        let mut newly_failed = false;
+        for asset_path in pending {
+            // The shared graph borrow is dropped before `add_layer` /
+            // `mark_load_failed` take a mutable one.
+            let opened = {
+                let graph = self.layers.borrow();
+                if graph.id_of(asset_path).is_some() || graph.load_failed(asset_path) {
+                    continue;
+                }
+                graph.layer_registry().open_stack(
+                    asset_path,
+                    None,
+                    &|error| {
+                        sublayer_errors.borrow_mut().push(error.into());
+                        Ok(())
+                    },
+                    &|id| graph.id_of(id).is_some(),
+                )
+            };
+            match opened {
+                Ok(layers) => {
+                    for layer in layers {
+                        self.add_layer(layer);
+                    }
+                }
+                Err(err) => {
+                    self.layers.borrow_mut().mark_load_failed(asset_path, err.to_string());
+                    newly_failed = true;
+                }
+            }
+        }
+        let errors = sublayer_errors.into_inner();
+        if !errors.is_empty() {
+            self.cache.borrow_mut().record_collection_errors(errors);
+        }
+        let grew = self.layers.borrow().len() != before;
+        if grew {
+            // Wire the sublayer edges (and relocates) for the newly interned layers.
+            // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
+            let relocated = self.layers.borrow_mut().recompute_sublayers();
+            // A demanded layer that introduces relocates restructures prims
+            // composed against its stack; drop their cached indices so they
+            // recompose with the relocates applied.
+            if !relocated.is_empty() {
+                let graph = self.layers.borrow();
+                self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
+            }
+        }
+        grew || newly_failed
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -2423,10 +2531,10 @@ impl Stage {
 
 /// Builder for configuring and opening a [`Stage`].
 ///
-/// Created via [`Stage::builder`]. Allows setting a custom asset resolver and
-/// composition options.
-pub struct StageBuilder<R: ar::Resolver = ar::DefaultResolver> {
-    resolver: R,
+/// Created via [`Stage::builder`]. Configures the [`LayerRegistry`] layers load
+/// through (resolver + file formats) and composition options.
+pub struct StageBuilder {
+    registry: sdf::LayerRegistry,
     variant_fallbacks: pcp::VariantFallbackMap,
     session_layer: Option<String>,
     initial_load_set: InitialLoadSet,
@@ -2444,7 +2552,7 @@ struct CollectedLayers {
 impl StageBuilder {
     fn new() -> Self {
         Self {
-            resolver: ar::DefaultResolver::new(),
+            registry: sdf::LayerRegistry::default(),
             variant_fallbacks: pcp::VariantFallbackMap::new(),
             session_layer: None,
             initial_load_set: InitialLoadSet::LoadAll,
@@ -2453,20 +2561,19 @@ impl StageBuilder {
             muted: HashSet::new(),
         }
     }
-}
 
-impl<R: ar::Resolver> StageBuilder<R> {
-    /// Sets a custom asset resolver.
-    pub fn resolver<R2: ar::Resolver>(self, resolver: R2) -> StageBuilder<R2> {
-        StageBuilder {
-            resolver,
-            variant_fallbacks: self.variant_fallbacks,
-            session_layer: self.session_layer,
-            initial_load_set: self.initial_load_set,
-            population_mask: self.population_mask,
-            interpolation_type: self.interpolation_type,
-            muted: self.muted,
-        }
+    /// Sets the [`LayerRegistry`](sdf::LayerRegistry) the stage loads layers
+    /// through — its resolver and (in the future) registered file formats.
+    pub fn registry(mut self, registry: sdf::LayerRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// Sets a custom asset resolver, wrapping it in a [`LayerRegistry`] over the
+    /// built-in formats. A convenience over [`registry`](Self::registry).
+    pub fn resolver<R: ar::Resolver + 'static>(mut self, resolver: R) -> Self {
+        self.registry = sdf::LayerRegistry::new(Box::new(resolver));
+        self
     }
 
     /// Sets the stage-level interpolation mode for time-sampled
@@ -2568,10 +2675,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
     ///
     /// Session layers (if any) are prepended at the front of the layer stack
     /// so they hold the strongest opinions.
-    pub fn open(self, root_path: &str) -> Result<Stage>
-    where
-        R: 'static,
-    {
+    pub fn open(self, root_path: &str) -> Result<Stage> {
         let session = self.collect_optional_session_layers()?;
         let root = self.collect_layers(root_path)?;
         let session_layer_count = session.layers.len();
@@ -2596,10 +2700,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
     ///     .unwrap();
     /// stage.define_prim("/World").unwrap().set_type_name("Xform").unwrap();
     /// ```
-    pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage>
-    where
-        R: 'static,
-    {
+    pub fn in_memory(self, identifier: impl Into<String>) -> Result<Stage> {
         let identifier = identifier.into();
         let session = self.collect_optional_session_layers()?;
         let session_layer_count = session.layers.len();
@@ -2611,35 +2712,25 @@ impl<R: ar::Resolver> StageBuilder<R> {
         Ok(self.make_stage(layers, session_layer_count, session.errors))
     }
 
-    /// Collect layers reachable from `path`, honoring the builder's resolver,
-    /// payload-loading flag, and population mask.
+    /// Open the root layer named by `path` and its sublayer stack.
+    ///
+    /// References and payloads are not followed here — composition opens those
+    /// target layers on demand (see [`Stage::with_cache`]), so the population
+    /// mask prunes them naturally: a culled prim is never composed, so its arc
+    /// targets are never demanded. A missing sublayer is recorded as an
+    /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error
+    /// rather than aborting the open.
     fn collect_layers(&self, path: &str) -> Result<CollectedLayers> {
-        let include_prim_dependency = |p: &sdf::Path| self.population_mask.includes(p);
         let errors = RefCell::new(Vec::new());
-        let layers = {
-            let collector = layer::Collector::new(&self.resolver)
-                .load_payloads(self.initial_load_set.load_payloads())
-                .on_error(|error| {
-                    if let layer::Error::UnresolvedAsset {
-                        asset_path,
-                        referencing_layer,
-                        kind: layer::DependencyKind::SubLayer,
-                        ..
-                    } = error
-                    {
-                        errors.borrow_mut().push(pcp::Error::UnresolvedSublayer {
-                            asset_path,
-                            introduced_by: referencing_layer,
-                        });
-                    }
-                    Ok(())
-                });
-            if self.population_mask.is_all() {
-                collector.collect(path)
-            } else {
-                collector.prim_dependency_filter(&include_prim_dependency).collect(path)
-            }
-        }?;
+        let layers = self.registry.open_stack(
+            path,
+            None,
+            &|error| {
+                errors.borrow_mut().push(error.into());
+                Ok(())
+            },
+            &|_| false,
+        )?;
         Ok(CollectedLayers {
             layers,
             errors: errors.into_inner(),
@@ -2664,10 +2755,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
         layers: Vec<sdf::Layer>,
         session_layer_count: usize,
         collection_errors: Vec<pcp::Error>,
-    ) -> Stage
-    where
-        R: 'static,
-    {
+    ) -> Stage {
         let load_payloads = self.initial_load_set.load_payloads();
         // The root layer stack's identity, from the collected inputs: the root is
         // the first non-session layer, the session layer the first of any. The
@@ -2679,7 +2767,7 @@ impl<R: ar::Resolver> StageBuilder<R> {
                 .map(|l| l.identifier().to_string())
                 .unwrap_or_default(),
             session_layer: (session_layer_count > 0).then(|| layers[0].identifier().to_string()),
-            resolver: self.resolver.identity(),
+            resolver: self.registry.identity(),
         };
         // The root layer is the strongest authoring target by default; an empty
         // stack names no layer, so the target resolves to nothing at author time.
@@ -2691,8 +2779,12 @@ impl<R: ar::Resolver> StageBuilder<R> {
         // invalid relocates); the cache holds only the one-shot collection errors.
         // `Stage::composition_errors` concatenates the two.
         let stage = Stage(Rc::new(StageInner {
-            layers: RefCell::new(pcp::LayerGraph::new(Box::new(self.resolver), load_payloads)),
-            cache: RefCell::new(pcp::IndexCache::new(self.variant_fallbacks, collection_errors)),
+            layers: RefCell::new(pcp::LayerGraph::new(self.registry)),
+            cache: RefCell::new(pcp::IndexCache::new(
+                self.variant_fallbacks,
+                load_payloads,
+                collection_errors,
+            )),
             initial_load_set: self.initial_load_set,
             population_mask: self.population_mask,
             interpolation_type: Cell::new(self.interpolation_type),

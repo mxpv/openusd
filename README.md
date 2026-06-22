@@ -105,7 +105,8 @@ let stage = usd::Stage::builder()
     .mask(usd::StagePopulationMask::new(["/World/Hero"]))
     .open("scene.usda")?;
 
-// Inspect any recoverable composition errors collected while loading.
+// Recoverable composition errors discovered so far: the root layer stack at
+// open, plus reference/payload diagnostics that accrue as prims are traversed.
 for err in stage.composition_errors() {
     eprintln!("warning: {err}");
 }
