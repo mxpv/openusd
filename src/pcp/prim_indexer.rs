@@ -103,7 +103,7 @@ use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{
     collect_payloads_in, compose_arc_list_in, compose_references_in, stack_has_spec, CompositionContext, Demand,
-    PrimIndex,
+    PrimEntry,
 };
 use super::{CycleChain, CycleHop, Error, LayerGraph, LayerId};
 
@@ -391,7 +391,7 @@ struct Inputs<'a> {
     /// Cached prim indices from the composition cache. The parent prim's index
     /// is read from here to seed this child's graph (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
-    cached_indices: &'a sdf::PathTable<PrimIndex>,
+    cached_indices: &'a sdf::PathTable<PrimEntry>,
 }
 
 /// The site this build composes (C++ `PcpLayerStackSite`): the layer stack the
@@ -468,7 +468,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     pub(crate) fn new(
         stack: &'a LayerGraph,
         ctx: &'a CompositionContext,
-        cached_indices: &'a sdf::PathTable<PrimIndex>,
+        cached_indices: &'a sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
     ) -> Self {
         Self {
@@ -659,7 +659,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `_BuildInitialPrimIndexFromAncestor`'s else-branch
         // `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`) applies.
         let graph = if self.frame.is_none() && self.site.ambient == LayerStackId::Root {
-            let Some(parent_index) = self.inputs.cached_indices.get(&parent) else {
+            let Some(parent_index) = self.inputs.cached_indices.get(&parent).map(|e| &e.index) else {
                 return Ok(false);
             };
             parent_index.graph().clone()
@@ -3111,6 +3111,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::prim_index::PrimIndex;
     use super::*;
 
     fn stack(text: &str) -> LayerGraph {
@@ -3346,7 +3347,14 @@ mod tests {
         // Seed the child build with the parent's composed index, as the cache does.
         let root_index = PrimIndex::build_with_context(&Path::from("/Root"), &s, &ctx).expect("root index build");
         let mut cached = sdf::PathTable::new();
-        cached.insert(Path::from("/Root"), root_index);
+        cached.insert(
+            Path::from("/Root"),
+            PrimEntry {
+                index: root_index,
+                context: CompositionContext::default(),
+                errors: Vec::new(),
+            },
+        );
         let child = Indexer::new(&s, &ctx, &cached, ambient)
             .build(&Path::from("/Root/Child"))
             .expect("indexer build")

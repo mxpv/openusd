@@ -408,7 +408,7 @@ impl IndexCache {
             ),
             "materialized prototype root's instanceable must be inert",
         );
-        self.cache_index(graph, prototype, index, context);
+        self.cache_index(graph, prototype, index, context, Vec::new());
     }
 
     /// Returns the synthetic prototype path (`/__Prototype_N`) shared by

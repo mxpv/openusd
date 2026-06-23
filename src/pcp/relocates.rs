@@ -20,7 +20,7 @@ use super::layer_graph::LayerGraph;
 use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
-use super::prim_index::PrimIndex;
+use super::prim_index::PrimEntry;
 use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 
 /// Per-layer authored relocates, keyed by layer id.
@@ -501,7 +501,7 @@ fn relocate_invalid_reason(source: &Path, target: &Path) -> Option<InvalidReloca
 pub(crate) fn effective_relocates(
     graph: &LayerGraph,
     path: &Path,
-    indices: &sdf::PathTable<PrimIndex>,
+    indices: &sdf::PathTable<PrimEntry>,
 ) -> RelocateList {
     let stack_maps = collect_stack_maps(graph, path, indices);
     let mut result: RelocateList = Vec::new();
@@ -554,7 +554,7 @@ pub(crate) fn effective_relocates(
 fn collect_stack_maps(
     graph: &LayerGraph,
     path: &Path,
-    indices: &sdf::PathTable<PrimIndex>,
+    indices: &sdf::PathTable<PrimEntry>,
 ) -> Vec<(LayerStackId, MapFunction)> {
     let mut maps: Vec<(LayerStackId, MapFunction)> = Vec::new();
 
@@ -565,7 +565,7 @@ fn collect_stack_maps(
         if p.is_abs_root() {
             continue;
         }
-        for node in cached_index.nodes() {
+        for node in cached_index.index.nodes() {
             if node.arc == ArcType::Relocate {
                 continue;
             }
@@ -589,13 +589,13 @@ fn collect_stack_maps(
 
     // Sort for deterministic iteration: the collected layer-map order feeds
     // downstream relocate composition, so it must not depend on hash order.
-    let mut entries: Vec<(&Path, &PrimIndex)> = indices.iter().collect();
+    let mut entries: Vec<(&Path, &PrimEntry)> = indices.iter().collect();
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (cached_path, cached_index) in entries {
         if root_prim_name(cached_path) != root_name {
             continue;
         }
-        for node in cached_index.all_nodes() {
+        for node in cached_index.index.all_nodes() {
             if node.arc == ArcType::Relocate {
                 continue;
             }

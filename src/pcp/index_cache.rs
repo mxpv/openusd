@@ -1,9 +1,9 @@
 //! Lazily-built cache of per-prim composition indices.
 //!
 //! The [`IndexCache`] is the primary interface between [`Stage`](crate::usd::Stage)
-//! and the composition engine. It caches [`PrimIndex`] results alongside the
-//! [`CompositionContext`] that flows from parent prims to children, so ancestor
-//! composition is never recomputed.
+//! and the composition engine. It caches one [`PrimEntry`] per composed prim —
+//! the [`PrimIndex`] plus the [`CompositionContext`] its children inherit — so
+//! ancestor composition is never recomputed.
 //!
 //! Relocates (`layerRelocates`) are composed by the indexer as `ArcType::Relocate`
 //! nodes; the cache applies each node's layer-stack relocates while folding the
@@ -26,17 +26,17 @@ use super::dependencies::Dependencies;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackId};
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
-use super::prim_index::{AncestorArc, CompositionContext, Demand, PrimIndex};
+use super::prim_index::{AncestorArc, CompositionContext, Demand, PrimEntry, PrimIndex};
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, MapFunction, VariantFallbackMap};
 
 /// Lazily-built composition graph.
 ///
-/// Caches per-prim composition indices and contexts. When a prim is queried
-/// for the first time, its index is built using the parent's cached context
-/// (if available). During depth-first traversal, parents are always composed
-/// before children, so the context chain is always populated.
+/// Caches a [`PrimEntry`] per composed prim. When a prim is queried for the
+/// first time, its index is built using the parent's cached context (if
+/// available). During depth-first traversal, parents are always composed before
+/// children, so the context chain is always populated.
 ///
 /// An optional [`VariantFallbackMap`] provides fallback selections for variant
 /// sets that have no authored opinion. Authored selections always take priority;
@@ -47,13 +47,12 @@ use super::{Error, LayerId, MapFunction, VariantFallbackMap};
 /// [`Self::composition_errors`], while operational failures are returned to the
 /// caller.
 pub struct IndexCache {
-    /// Per-prim composition indices, keyed by composed path. A
+    /// Per-prim composition records ([`PrimEntry`]), keyed by composed path. A
     /// [`sdf::PathTable`] so [`Self::drop_index_subtree`] erases an invalidated
     /// subtree by namespace walk rather than a full scan. `pub(super)` so the
-    /// instancing pass ([`super::instancing`]) can read composed indices.
-    pub(super) indices: sdf::PathTable<PrimIndex>,
-    /// Per-prim composition contexts for child propagation.
-    contexts: HashMap<Path, CompositionContext>,
+    /// instancing pass ([`super::instancing`]) can reach composed indices through
+    /// [`Self::cached`].
+    pub(super) entries: sdf::PathTable<PrimEntry>,
     /// Reverse `(layer, site) → prim_index_paths` map for surgical invalidation.
     deps: Dependencies,
     /// Variant fallback selections tried when no authored selection exists.
@@ -96,11 +95,6 @@ pub struct IndexCache {
     /// cannot regenerate (e.g. `UnresolvedSublayer`). Set once at construction;
     /// never cleared, since nothing recomputes them.
     collection_errors: Vec<Error>,
-    /// Recoverable per-prim build errors, keyed by composed prim path. Replaced
-    /// wholesale each time the prim's index is (re)built and dropped when the
-    /// index is invalidated, so they always reflect the current composition —
-    /// no duplicates across rebuilds, no stale error after a prim is fixed.
-    prim_errors: HashMap<Path, Vec<Error>>,
     /// Transient errors produced by on-demand target / property-stack queries
     /// (invalid external targets, inconsistent property types). Cleared on any
     /// index invalidation so they never go stale across an edit; they are
@@ -114,7 +108,7 @@ pub struct IndexCache {
     /// stack. Pre-caching an inherit/specialize target (and that target's own
     /// targets) re-enters `ensure_index`; a cyclic class hierarchy (e.g. two
     /// prims that inherit each other) would otherwise recurse forever before any
-    /// of them is inserted into `indices`. Re-entry for an in-progress path
+    /// of them is inserted into `entries`. Re-entry for an in-progress path
     /// returns early, so the cycle-closing arc simply finds no cached target and
     /// drops out of composition.
     in_progress: HashSet<Path>,
@@ -211,8 +205,7 @@ impl IndexCache {
         collection_errors: Vec<Error>,
     ) -> Self {
         Self {
-            indices: sdf::PathTable::new(),
-            contexts: HashMap::new(),
+            entries: sdf::PathTable::new(),
             deps: Dependencies::default(),
             variant_fallbacks,
             load_payloads,
@@ -220,7 +213,6 @@ impl IndexCache {
             prototypes: PrototypeRegistry::default(),
             redirected_prims: HashMap::new(),
             collection_errors,
-            prim_errors: HashMap::new(),
             query_errors: Vec::new(),
             in_progress: HashSet::new(),
             empty_index: PrimIndex::default(),
@@ -256,7 +248,7 @@ impl IndexCache {
     pub(crate) fn composition_errors(&self) -> Vec<Error> {
         self.collection_errors
             .iter()
-            .chain(self.prim_errors.values().flatten())
+            .chain(self.entries.iter().flat_map(|(_, entry)| entry.errors.iter()))
             .chain(&self.query_errors)
             .cloned()
             .collect()
@@ -276,8 +268,10 @@ impl IndexCache {
     fn take_composition_errors(&mut self) -> Vec<Error> {
         let errors = self.composition_errors();
         self.collection_errors.clear();
-        self.prim_errors.clear();
         self.query_errors.clear();
+        for (_, entry) in self.entries.iter_mut() {
+            entry.errors.clear();
+        }
         errors
     }
 
@@ -726,7 +720,7 @@ impl IndexCache {
         field: &str,
         local_layers: &HashSet<LayerId>,
     ) -> Result<FieldValue> {
-        let Some(index) = self.indices.get(prim) else {
+        let Some(index) = self.index_at(prim) else {
             return Ok(FieldValue::NotAuthored);
         };
 
@@ -990,7 +984,16 @@ impl IndexCache {
 
     /// Returns `true` if a composed prim index is currently cached at `path`.
     pub fn is_indexed(&self, path: &Path) -> bool {
-        self.indices.contains_key(path)
+        self.entries.contains_key(path)
+    }
+
+    /// Borrows the composed index at `path`, or `None` when no entry is cached.
+    ///
+    /// The projection out of the per-prim [`PrimEntry`] store, used where an
+    /// absent entry must be distinguished from a present one. Callers that want
+    /// the empty-index fallback for an uncached path use [`cached`](Self::cached).
+    fn index_at(&self, path: &Path) -> Option<&PrimIndex> {
+        self.entries.get(path).map(|entry| &entry.index)
     }
 
     /// Borrows the cached index at `path`.
@@ -1004,28 +1007,30 @@ impl IndexCache {
     /// the transient demanded-layer case — never a logic error — under the
     /// loop's guarantee that a demanded build is retried.
     pub(super) fn cached(&self, path: &Path) -> &PrimIndex {
-        self.indices.get(path).unwrap_or(&self.empty_index)
+        self.index_at(path).unwrap_or(&self.empty_index)
     }
 
     /// Number of cached prim indices.
     pub fn indexed_count(&self) -> usize {
-        self.indices.len()
+        self.entries.len()
     }
 
-    /// Caches a fully composed `index` at `path` with its child `context` and
-    /// registers its dependencies. The single insertion point for the cache's
-    /// three per-prim maps, shared by the ordinary [`build_index`](Self::build_index)
-    /// path and the materialized-prototype path (which has no spec to build from).
+    /// Caches a fully composed `index` at `path` with the `context` its children
+    /// inherit and its recoverable build `errors`, and registers its
+    /// dependencies. The single insertion point for the per-prim [`PrimEntry`]
+    /// store, shared by the ordinary [`build_index`](Self::build_index) path and
+    /// the materialized-prototype path (which has no spec to build from, so it
+    /// passes no errors).
     pub(super) fn cache_index(
         &mut self,
         graph: &LayerGraph,
         path: &Path,
         index: PrimIndex,
         context: CompositionContext,
+        errors: Vec<Error>,
     ) {
         self.deps.add(path, &index, graph);
-        self.indices.insert(path.clone(), index);
-        self.contexts.insert(path.clone(), context);
+        self.entries.insert(path.clone(), PrimEntry { index, context, errors });
     }
 
     /// The composition context for a namespace-root prim: empty except for the
@@ -1039,14 +1044,13 @@ impl IndexCache {
         }
     }
 
-    /// Drop a single prim's cached index, context, dependency, and error
-    /// entries. The transient query errors are cleared too — they may reference
-    /// the dropped prim and are recomputed on the next query.
+    /// Drop a single prim's cached entry (its index, child context, and build
+    /// errors) along with its dependency registrations. The transient query
+    /// errors are cleared too — they may reference the dropped prim and are
+    /// recomputed on the next query.
     pub(super) fn drop_index(&mut self, path: &Path) {
-        self.indices.remove(path);
-        self.contexts.remove(path);
+        self.entries.remove(path);
         self.deps.remove(path);
-        self.prim_errors.remove(path);
         self.query_errors.clear();
     }
 
@@ -1058,9 +1062,9 @@ impl IndexCache {
     /// graph's recorded load failures, since the target may now be readable.
     pub(crate) fn drop_load_failed_indices(&mut self) {
         let failed: Vec<Path> = self
-            .prim_errors
+            .entries
             .iter()
-            .filter(|(_, errors)| errors.iter().any(|e| matches!(e, Error::MalformedLayer { .. })))
+            .filter(|(_, entry)| entry.errors.iter().any(|e| matches!(e, Error::MalformedLayer { .. })))
             .map(|(path, _)| path.clone())
             .collect();
         if failed.is_empty() {
@@ -1087,7 +1091,7 @@ impl IndexCache {
     /// must un-cull and graft the target's subtree.
     pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) {
         for prim in self.deps.exact_lookup(layer, path) {
-            let rebuild = if let Some(index) = self.indices.get_mut(&prim) {
+            let rebuild = if let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) {
                 let refresh = index.refresh_has_specs_at(layer, path, graph);
                 // The local prim is one of its own dependents (it reads its own
                 // site). Drop it when it carries no contributing node there; drop
@@ -1109,8 +1113,8 @@ impl IndexCache {
     /// subtree, so every dependent index is invalidated.
     ///
     /// Walking the `prefix` subtree of the [`sdf::PathTable`] yields the removed
-    /// entries, whose paths forward the cleanup to the parallel `contexts`,
-    /// `deps`, and `prim_errors` maps.
+    /// entries, whose paths forward the cleanup to the parallel `deps` map; each
+    /// removed [`PrimEntry`] already carries its own index, context, and errors.
     pub(super) fn drop_index_subtree(&mut self, prefix: &Path) {
         // `Path::has_prefix("")` returns `true` for every absolute path, so
         // a default-constructed `Path` would silently wipe the entire
@@ -1121,10 +1125,8 @@ impl IndexCache {
             !prefix.is_empty(),
             "drop_index_subtree called with empty prefix — use Path::abs_root() to drop everything",
         );
-        for (victim, _) in self.indices.remove_subtree(prefix) {
-            self.contexts.remove(&victim);
+        for (victim, _) in self.entries.remove_subtree(prefix) {
             self.deps.remove(&victim);
-            self.prim_errors.remove(&victim);
         }
         self.query_errors.clear();
     }
@@ -1136,10 +1138,8 @@ impl IndexCache {
     /// than dropping each `/__Prototype_N` subtree first) avoids re-scanning the
     /// cache per prototype only to wipe it wholesale.
     pub(super) fn clear_all_indices(&mut self) {
-        self.indices.clear();
-        self.contexts.clear();
+        self.entries.clear();
         self.deps.clear();
-        self.prim_errors.clear();
         self.query_errors.clear();
         self.prototypes.clear();
         self.redirected_prims.clear();
@@ -1180,7 +1180,7 @@ impl IndexCache {
         if affected.is_empty() {
             return;
         }
-        // Collect the roots first: `drop_index_subtree` mutates `indices`, and a
+        // Collect the roots first: `drop_index_subtree` mutates `entries`, and a
         // dropped subtree may hold further matches that would be revisited.
         //
         // TODO(perf): this scans every cached index (the reverse `Dependencies`
@@ -1190,9 +1190,9 @@ impl IndexCache {
         // scan's per-index predicate is independent (`TODO(rayon)`); the drops
         // could batch into one prefix-filtered pass.
         let victims: Vec<Path> = self
-            .indices
+            .entries
             .iter()
-            .filter(|(_, index)| {
+            .filter(|(_, entry)| {
                 // A cached node resolves its `LayerStackId` against the
                 // already-mutated graph here, so the two prongs are both needed and
                 // complementary; correctness rests on the invariant that whenever a
@@ -1212,13 +1212,17 @@ impl IndexCache {
                 // in it), and the root anchor covers session-layer mutes. Pinned by
                 // `mute_sublayer_drops_root_stack_index` / `mute_keeps_independent_index`;
                 // do not narrow to a representative-only check.
-                index.dependency_nodes().any(|node| {
+                entry.index.dependency_nodes().any(|node| {
                     affected.contains(&node.layer_id())
                         || graph
                             .layer_stack(node.layer_stack_id())
                             .iter()
                             .any(|&(li, _)| affected.contains(&li))
-                }) || index.muted_external_targets().iter().any(|li| affected.contains(li))
+                }) || entry
+                    .index
+                    .muted_external_targets()
+                    .iter()
+                    .any(|li| affected.contains(li))
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -1257,7 +1261,7 @@ impl IndexCache {
     ) -> Result<Option<T>> {
         let prim_path = path.prim_path();
         self.ensure_index(graph, &prim_path)?;
-        let Some(index) = self.indices.get(&prim_path) else {
+        let Some(index) = self.index_at(&prim_path) else {
             return Ok(None);
         };
         for node in index.nodes() {
@@ -1283,7 +1287,7 @@ impl IndexCache {
                 .is_some());
         }
         self.ensure_index(graph, path)?;
-        Ok(self.indices.get(path).is_some_and(|idx| !idx.is_empty()))
+        Ok(self.index_at(path).is_some_and(|idx| !idx.is_empty()))
     }
 
     /// Returns the spec type at a composed path from the strongest contributing layer.
@@ -1298,7 +1302,7 @@ impl IndexCache {
             return self.find_property_node(graph, path, |layer, p| layer.data().spec_type(p));
         }
         self.ensure_index(graph, path)?;
-        let Some(index) = self.indices.get(path) else {
+        let Some(index) = self.index_at(path) else {
             return Ok(None);
         };
         for node in index.nodes() {
@@ -1314,7 +1318,7 @@ impl IndexCache {
     /// Returns `true` if the composed prim index contains any non-local arc.
     pub(crate) fn has_composition_arc(&mut self, graph: &LayerGraph, path: &Path) -> Result<bool> {
         self.ensure_index(graph, path)?;
-        Ok(self.indices.get(path).is_some_and(|index| index.has_composition_arc()))
+        Ok(self.index_at(path).is_some_and(|index| index.has_composition_arc()))
     }
 
     /// Captures the target layer identifier and namespace mapping of the
@@ -1340,7 +1344,7 @@ impl IndexCache {
     ) -> Result<Option<(String, MapFunction, Option<String>)>> {
         let prim_path = self.effective_path(graph, prim_path)?.prim_path();
         self.ensure_index(graph, &prim_path)?;
-        let Some(index) = self.indices.get(&prim_path) else {
+        let Some(index) = self.index_at(&prim_path) else {
             return Ok(None);
         };
         Ok(index.nodes().find_map(|node| {
@@ -1443,7 +1447,7 @@ impl IndexCache {
         prop_suffix: Option<&str>,
         needs_expr: bool,
     ) -> (Option<ResolvedPath>, HashMap<String, Value>) {
-        let Some(index) = self.indices.get(prim_path) else {
+        let Some(index) = self.index_at(prim_path) else {
             return (None, HashMap::new());
         };
         let Some((layer, node)) = index.strongest_opinion(field, graph, prop_suffix) else {
@@ -1649,7 +1653,7 @@ impl IndexCache {
             index.resolve_path_list_op_validated(field, graph, Some(&prop_suffix), &instance_targets)?
         };
         if deleted && graph.has_relocates() {
-            let relocates = effective_relocates(graph, &resolved_prim, &self.indices);
+            let relocates = effective_relocates(graph, &resolved_prim, &self.entries);
             for target in &mut targets {
                 *target = chain_through_relocates(target, &relocates, None);
             }
@@ -1994,7 +1998,7 @@ impl IndexCache {
     /// property-stack pass ([`property_stack`](Self::property_stack)) each compose
     /// it, so the error surfaces once per pass.
     fn report_property_type_conflicts(&mut self, graph: &LayerGraph, prim_path: &Path, names: &[Token]) {
-        let Some(index) = self.indices.get(prim_path) else {
+        let Some(index) = self.index_at(prim_path) else {
             return;
         };
         let mut conflicts = Vec::new();
@@ -2097,7 +2101,7 @@ impl IndexCache {
         }
         let prim_path = path.prim_path();
         self.ensure_index(graph, &prim_path)?;
-        let Some(index) = self.indices.get(&prim_path) else {
+        let Some(index) = self.index_at(&prim_path) else {
             return Ok(Vec::new());
         };
         let (stack, mut conflicts) = self.compose_property_specs(graph, index, &prim_path, &path);
@@ -2143,7 +2147,7 @@ impl IndexCache {
         let mut arcs = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
-            if let Some(ctx) = self.contexts.get(&pp) {
+            if let Some(ctx) = self.entries.get(&pp).map(|entry| &entry.context) {
                 arcs.extend(&ctx.ancestor_arcs);
             }
             p = pp.parent();
@@ -2158,7 +2162,7 @@ impl IndexCache {
         let Some(parent) = path.parent() else {
             return;
         };
-        let Some(parent_index) = self.indices.get(&parent) else {
+        let Some(parent_index) = self.index_at(&parent) else {
             return;
         };
 
@@ -2215,7 +2219,7 @@ impl IndexCache {
         for target in targets_to_cache {
             self.precache_path(graph, &target);
             // Recursively precache the target's own inherit targets.
-            if self.indices.contains_key(&target) {
+            if self.entries.contains_key(&target) {
                 self.precache_inherit_targets(graph, &target);
             }
         }
@@ -2280,7 +2284,7 @@ impl IndexCache {
     /// child specs at their respective paths. This handles prims that only
     /// exist through ancestor inherit, specialize, or reference arcs.
     pub(super) fn ensure_index(&mut self, graph: &LayerGraph, path: &Path) -> Result<()> {
-        if self.indices.contains_key(path) {
+        if self.entries.contains_key(path) {
             return Ok(());
         }
         // Composing a prim whose ancestor is still mid-build cannot seed from that
@@ -2318,7 +2322,7 @@ impl IndexCache {
         // building ancestors eagerly only fixes the parent context — it does
         // not change any prim's resolved opinions.
         if let Some(parent) = path.parent() {
-            if !parent.is_abs_root() && !self.indices.contains_key(&parent) {
+            if !parent.is_abs_root() && !self.entries.contains_key(&parent) {
                 self.precache_path(graph, &parent);
             }
         }
@@ -2330,18 +2334,18 @@ impl IndexCache {
 
         let parent_ctx = path
             .parent()
-            .and_then(|p| self.contexts.get(&p))
-            .cloned()
+            .and_then(|p| self.entries.get(&p))
+            .map(|entry| entry.context.clone())
             .unwrap_or_else(|| self.root_parent_context());
 
         // TODO(rayon): `build_with_cache` is a pure function of `graph`,
-        // `&parent_ctx`, and `&self.indices`, so sibling prims compose
+        // `&parent_ctx`, and `&self.entries`, so sibling prims compose
         // independently and this is the natural per-prim `par_iter` boundary.
-        // The blocker is the shared `self.indices` map that inherit/specialize
+        // The blocker is the shared `self.entries` map that inherit/specialize
         // targets read mid-build — parallelizing the driver needs a concurrent
         // map or a topological (targets-first) build order.
         let (mut index, mut build_errors, pending_loads) =
-            match PrimIndex::build_with_cache(path, graph, &parent_ctx, &self.indices) {
+            match PrimIndex::build_with_cache(path, graph, &parent_ctx, &self.entries) {
                 Ok(result) => result,
                 Err(e) => return Err(e.into()),
             };
@@ -2369,9 +2373,9 @@ impl IndexCache {
             }
         }
         // `build_errors` accumulates every error for this prim (the build errors
-        // above plus the permission denials below) and is stored keyed by `path`
-        // at the end, replacing any prior set, so a rebuild never duplicates and
-        // a fixed prim drops its stale errors.
+        // above plus the permission denials below) and is carried into the prim's
+        // cache entry at the end, replacing any prior entry, so a rebuild never
+        // duplicates and a fixed prim drops its stale errors.
 
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
@@ -2397,14 +2401,6 @@ impl IndexCache {
             build_errors.push(error);
         }
         index.mark_permission_denied_under(&denied_prefixes);
-
-        // Store (replace) this prim's recoverable errors; drop the entry when
-        // there are none so a now-clean rebuild leaves nothing stale.
-        if build_errors.is_empty() {
-            self.prim_errors.remove(path);
-        } else {
-            self.prim_errors.insert(path.clone(), build_errors);
-        }
 
         // Inside an instance, the ancestral references the instance prim is
         // nested under contribute opinions at the instance's own namespace that
@@ -2440,7 +2436,7 @@ impl IndexCache {
             parent_ctx.instance_depth
         };
         child_context.denied_prefixes = denied_prefixes;
-        self.cache_index(graph, path, index, child_context);
+        self.cache_index(graph, path, index, child_context, build_errors);
         // Report inconsistent property types once per prim composition (C++
         // `PcpErrorInconsistentPropertyType`); a later property-stack query
         // reports the conflict again, matching C++'s per-pass reporting.
@@ -2457,7 +2453,7 @@ impl IndexCache {
         let mut to_build = Vec::new();
         let mut p = Some(path.clone());
         while let Some(pp) = p {
-            if pp == Path::abs_root() || self.indices.contains_key(&pp) {
+            if pp == Path::abs_root() || self.entries.contains_key(&pp) {
                 break;
             }
             to_build.push(pp.clone());
@@ -3776,7 +3772,7 @@ def "Scope"
 
         // The child composes from its own opinion, not the empty variant.
         assert!(!cache.has_composition_arc(&graph, &child)?);
-        let index = cache.indices.get(&child).expect("child index");
+        let index = cache.index_at(&child).expect("child index");
         assert!(
             index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
             "the empty ancestral variant target is culled"
@@ -3822,7 +3818,7 @@ def "Scope"
         // The emptied inherit composes as a culled node, just like an always-empty
         // target — the rescan rebuilt rather than flipping `has_specs` in place.
         assert!(!cache.has_composition_arc(&graph, &a)?);
-        let index = cache.indices.get(&a).expect("index rebuilt on query");
+        let index = cache.index_at(&a).expect("index rebuilt on query");
         assert!(
             index.all_nodes().any(|n| n.arc == ArcType::Inherit && n.is_culled()),
             "the emptied inherit target re-culled"

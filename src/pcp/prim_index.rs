@@ -32,6 +32,26 @@ pub struct PrimIndex {
     graph: PrimIndexGraph,
 }
 
+/// The cache's per-prim composition record: the composed [`PrimIndex`], the
+/// [`CompositionContext`] its children inherit, and the recoverable errors
+/// recorded while building it.
+///
+/// [`IndexCache`](super::index_cache::IndexCache) stores one of these per
+/// composed prim in a single [`sdf::PathTable`], so a prim's index, its child
+/// context, and its errors are inserted and dropped together as one unit. The
+/// builder and relocate evaluation receive the table to read already-composed
+/// indices; they touch only [`index`](Self::index).
+pub(crate) struct PrimEntry {
+    /// The composed prim index.
+    pub index: PrimIndex,
+    /// The context propagated from this prim to its children.
+    pub context: CompositionContext,
+    /// Recoverable composition errors recorded while building [`index`](Self::index),
+    /// replaced wholesale on each rebuild so they always reflect the current
+    /// composition.
+    pub errors: Vec<Error>,
+}
+
 /// Outcome of [`PrimIndex::refresh_has_specs_at`]: what the spec-tier rescan
 /// must do with the index after refreshing the affected nodes' `has_specs`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -446,7 +466,7 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
-        cached_indices: &sdf::PathTable<PrimIndex>,
+        cached_indices: &sdf::PathTable<PrimEntry>,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
         Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack_id())
     }
@@ -464,12 +484,12 @@ impl PrimIndex {
         path: &Path,
         stack: &LayerGraph,
         ctx: &CompositionContext,
-        cached_indices: &sdf::PathTable<PrimIndex>,
+        cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
         if ambient == LayerStackId::Root {
             if let Some(cached) = cached_indices.get(path) {
-                return Ok((cached.clone(), Vec::new(), Vec::new()));
+                return Ok((cached.index.clone(), Vec::new(), Vec::new()));
             }
         }
         // The task-queue indexer is the sole composition path. A genuine cycle
@@ -1196,7 +1216,7 @@ pub(crate) mod tests {
         }
         chain.reverse();
 
-        let mut cache: sdf::PathTable<PrimIndex> = sdf::PathTable::new();
+        let mut cache: sdf::PathTable<PrimEntry> = sdf::PathTable::new();
         let mut parent_ctx = CompositionContext {
             variant_fallbacks: fallbacks,
             ..CompositionContext::default()
@@ -1206,7 +1226,14 @@ pub(crate) mod tests {
             let (index, _errors, _pending) =
                 PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
             parent_ctx = index.context_for_children(stack, &parent_ctx);
-            cache.insert(ancestor.clone(), index.clone());
+            cache.insert(
+                ancestor.clone(),
+                PrimEntry {
+                    index: index.clone(),
+                    context: CompositionContext::default(),
+                    errors: Vec::new(),
+                },
+            );
             last = Some(index);
         }
         last.expect("a non-empty namespace chain")

@@ -145,6 +145,14 @@ impl<V> PathTable<V> {
         self.nodes.iter().filter_map(|(p, n)| n.value.as_ref().map(|v| (p, v)))
     }
 
+    /// Iterates `(path, &mut value)` for every value-bearing entry, in
+    /// unspecified order.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Path, &mut V)> {
+        self.nodes
+            .iter_mut()
+            .filter_map(|(p, n)| n.value.as_mut().map(|v| (p, v)))
+    }
+
     /// Iterates `(path, &value)` for every value-bearing entry that is `path`
     /// or an ancestor of it, walking from `path` upward toward the root.
     ///
