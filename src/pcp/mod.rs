@@ -292,6 +292,7 @@ pub(crate) mod clip;
 mod compose_site;
 pub(crate) mod dependencies;
 pub(crate) mod index_cache;
+mod index_store;
 pub(crate) mod instancing;
 pub(crate) mod layer_graph;
 mod mapping;
