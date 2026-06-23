@@ -17,6 +17,7 @@
 //! (spec 10.3.1.1).
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
@@ -101,6 +102,22 @@ impl LayerRegistry {
     /// [`ar::Resolver`] stays private so callers reach it only through here.
     pub(crate) fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
         self.resolver.create_identifier(asset_path, anchor)
+    }
+
+    /// Resolves `asset_path` against `anchor_identifier` — the identifier of the
+    /// layer it is authored in — yielding the canonical identifier of the
+    /// targeted layer. The convenience over [`create_identifier`](Self::create_identifier)
+    /// for the common case of anchoring against another layer's identifier
+    /// string rather than a pre-resolved [`ar::ResolvedPath`].
+    ///
+    /// TODO(perf): the resolver canonicalizes via the filesystem, so each call
+    /// runs a `canonicalize`. Cache resolved identifiers per
+    /// `(anchor_identifier, asset_path)`.
+    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor_identifier: &str) -> String {
+        self.create_identifier(
+            asset_path,
+            Some(&ar::ResolvedPath::new(PathBuf::from(anchor_identifier))),
+        )
     }
 
     /// Resolves an asset identifier to a physical location, or `None` if it does

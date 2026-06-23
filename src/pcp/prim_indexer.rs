@@ -98,13 +98,11 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
+use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in};
 use super::layer_graph::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
-use super::prim_index::{
-    collect_payloads_in, compose_arc_list_in, compose_references_in, stack_has_spec, CompositionContext, Demand,
-    PrimEntry,
-};
+use super::prim_index::{stack_has_spec, CompositionContext, Demand, PrimEntry};
 use super::{CycleChain, CycleHop, Error, LayerGraph, LayerId};
 
 /// Maximum composition-arc nesting before the prim is abandoned as a cycle,

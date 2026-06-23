@@ -21,7 +21,7 @@ use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{LayerOffset, Path, SpecType, Value};
 use crate::tf::Token;
 
-use super::clip::{ClipSet, ResolvedClipSet};
+use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::dependencies::Dependencies;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::{LayerGraph, LayerStackId};
@@ -61,10 +61,11 @@ pub struct IndexCache {
     /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Seeds every root build's
     /// [`CompositionContext`] (see [`root_parent_context`](Self::root_parent_context)).
     load_payloads: bool,
-    /// Lazily-loaded value-clip and manifest layers, keyed by resolved
-    /// identifier. Clip layers do not participate in composition (spec
-    /// 12.3.4), so they are held here rather than in the [`LayerGraph`](super::layer_graph::LayerGraph).
-    clip_layers: HashMap<String, sdf::Layer>,
+    /// Value-clip resolution and its layer cache ([`ClipCache`], spec 12.3.4) —
+    /// an independently-owned entity that the clip orchestration methods
+    /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
+    /// per-anchor clip work to once they have ensured the relevant indices.
+    clip_cache: ClipCache,
     /// Shared-prototype registry for scene-graph instancing (spec 11.3.3),
     /// internal machinery driven by the instancing glue in
     /// [`super::instancing`] (a second `impl IndexCache`). Callers go through
@@ -174,21 +175,11 @@ pub(crate) enum AttributeValueSource {
 /// Collapses the spec sentinels for "no value" ([`Value::ValueBlock`] and
 /// [`Value::None`]) to `None`, passing any real value through as `Some`. An
 /// authored block stops fall-through to weaker sources yet presents as absent.
-fn block_to_none(value: Value) -> Option<Value> {
+pub(super) fn block_to_none(value: Value) -> Option<Value> {
     match value {
         Value::ValueBlock | Value::None => None,
         other => Some(other),
     }
-}
-
-/// The attribute's path inside a clip set's namespace: the `attr_prim + suffix`
-/// path with the clip anchor prim replaced by the set's `base` prim (spec
-/// 12.3.4.1.1.1). `anchor` is an ancestor of `attr_prim`, so the replacement
-/// lands on a path boundary; the fallback keeps the path unchanged if it ever
-/// is not a prefix.
-fn clip_attr_path(anchor: &Path, base: &Path, attr_prim: &Path, suffix: &str) -> Result<Path> {
-    let attr = Path::new(&format!("{attr_prim}{suffix}"))?;
-    Ok(attr.replace_prefix(anchor, base).unwrap_or(attr))
 }
 
 impl IndexCache {
@@ -209,7 +200,7 @@ impl IndexCache {
             deps: Dependencies::default(),
             variant_fallbacks,
             load_payloads,
-            clip_layers: HashMap::new(),
+            clip_cache: ClipCache::default(),
             prototypes: PrototypeRegistry::default(),
             redirected_prims: HashMap::new(),
             collection_errors,
@@ -273,35 +264,6 @@ impl IndexCache {
             entry.errors.clear();
         }
         errors
-    }
-
-    /// Loads a value-clip or manifest layer referenced by `asset_path`,
-    /// anchored to the layer `anchor_layer` (the layer that authored the
-    /// clip metadata). Layers are loaded on demand through the graph's
-    /// resolver and cached by resolved identifier; clip layers never enter the
-    /// composition [`LayerGraph`] (spec 12.3.4).
-    ///
-    /// Returns `Ok(None)` when the asset path cannot be resolved.
-    pub(crate) fn clip_layer(
-        &mut self,
-        graph: &LayerGraph,
-        asset_path: &str,
-        anchor_layer: LayerId,
-    ) -> Result<Option<&sdf::Layer>> {
-        // Anchor the clip asset path to the authoring layer's location so
-        // relative paths resolve like any other dependency.
-        let anchor = graph.anchor_location(Some(anchor_layer));
-        let clip_id = graph.layer_registry().create_identifier(asset_path, anchor.as_ref());
-
-        if !self.clip_layers.contains_key(&clip_id) {
-            let Some(data) = graph.layer_registry().open(&clip_id)? else {
-                return Ok(None);
-            };
-            self.clip_layers
-                .insert(clip_id.clone(), sdf::Layer::new(clip_id.clone(), data));
-        }
-
-        Ok(self.clip_layers.get(&clip_id))
     }
 
     /// Resolves an attribute's value at `time`, honoring value clips
@@ -559,94 +521,74 @@ impl IndexCache {
         ))
     }
 
-    /// Whether `resolved` declares the attribute at `clip_path` through its
-    /// manifest. A manifest that lists the attribute makes the set own it
-    /// authoritatively (spec 12.3.4.6), gap-filling rather than falling through
-    /// to weaker sources. A manifest-less set returns `false` here: its
-    /// ownership is per-time, resolved by each caller's own sample handling.
-    /// This is the shared manifest-declaration predicate behind
-    /// [`Self::clip_value_at`] and [`Self::clip_set_participates`].
-    fn clip_set_declares(&mut self, graph: &LayerGraph, resolved: &ResolvedClipSet, clip_path: &Path) -> Result<bool> {
-        match resolved.set.manifest_asset.as_deref() {
-            Some(asset) => {
-                let layer = resolved.manifest_layer.unwrap_or(resolved.asset_layer);
-                Ok(matches!(self.clip_layer(graph, asset, layer)?,
-                            Some(opened) if opened.data().has_spec(clip_path)))
-            }
-            None => Ok(false),
-        }
-    }
-
-    /// Whether the resolved clip `set` participates in sourcing the attribute at
-    /// `clip_path`, returning each clip's in-clip authored sample times when it
-    /// does and `None` when it does not. A set participates when its manifest
-    /// declares the attribute ([`Self::clip_set_declares`]), or — manifest-less —
-    /// when a clip the `active` schedule selects authors a sample for it. The
-    /// single participation predicate behind [`Self::first_participating_clip_set`].
-    ///
-    /// Participation tracks what [`Self::clip_value_at`] can reach: it selects a
-    /// clip only through [`ClipSet::active_clip`], so a set with no `active`
-    /// schedule sources nothing, and a manifest-less set is sourced only by the
-    /// clips its schedule names — an authored-but-unscheduled clip is never read.
-    fn clip_set_participates(
-        &mut self,
-        graph: &LayerGraph,
-        resolved: &ResolvedClipSet,
-        clip_path: &Path,
-    ) -> Result<Option<Vec<Vec<f64>>>> {
-        let set = &resolved.set;
-        let declared = self.clip_set_declares(graph, resolved, clip_path)?;
-        // A manifest that does not declare the attribute does not source it.
-        if set.manifest_asset.is_some() && !declared {
-            return Ok(None);
-        }
-        // With no active schedule no clip is ever selected, so the set sources
-        // nothing regardless of what its clips author.
-        if set.active.is_empty() {
-            return Ok(None);
-        }
-        let mut per_clip: Vec<Vec<f64>> = Vec::with_capacity(set.asset_paths.len());
-        for asset in &set.asset_paths {
-            per_clip.push(self.clip_in_clip_times(graph, asset.as_str(), resolved.asset_layer, clip_path)?);
-        }
-        // A manifest-less set sources the attribute only where a *scheduled* clip
-        // authors a sample; if no `active` entry names a sampled clip, value_at
-        // falls through to weaker sources, so the set does not participate.
-        let scheduled_sample = set
-            .active
-            .iter()
-            .any(|&(_, index)| per_clip.get(index).is_some_and(|s| !s.is_empty()));
-        if !declared && !scheduled_sample {
-            return Ok(None);
-        }
-        Ok(Some(per_clip))
-    }
-
-    /// Searches `attr_prim` and its ancestors nearest-first for the first
-    /// value-clip set that participates in sourcing `attr_prim + suffix`,
-    /// applying `f` to it (and its per-clip sample times) and returning the
-    /// result; `None` when no set participates. Centralizes the ancestor walk
-    /// and per-set participation check so every clip introspection shares one
-    /// notion of ownership.
-    fn first_participating_clip_set<T>(
+    /// Resolves a clip value for `attr_path` at `time` by searching the
+    /// attribute's prim and then its ancestors, nearest first — a nearer clip
+    /// set overrides one on an ancestor (spec 12.3.4.5).
+    fn resolve_clip_value(
         &mut self,
         graph: &LayerGraph,
         attr_prim: &Path,
         suffix: &str,
-        f: impl Fn(&ClipSet, Vec<Vec<f64>>) -> T,
-    ) -> Result<Option<T>> {
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let mut anchor_prim = attr_prim.clone();
+        loop {
+            if let Some(value) = self.clip_value_at(graph, &anchor_prim, attr_prim, suffix, time, interp)? {
+                return Ok(Some(value));
+            }
+            match anchor_prim.parent() {
+                Some(parent) if !parent.is_abs_root() => anchor_prim = parent,
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Looks for a clip set anchored on `anchor_prim` that provides a value for
+    /// `attr_prim + suffix` at `time`, delegating the per-set resolution to the
+    /// [`ClipCache`].
+    fn clip_value_at(
+        &mut self,
+        graph: &LayerGraph,
+        anchor_prim: &Path,
+        attr_prim: &Path,
+        suffix: &str,
+        time: f64,
+        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
+    ) -> Result<Option<Value>> {
+        let sets = self.clip_sets_for(graph, anchor_prim)?;
+        let query = ClipQuery {
+            anchor: anchor_prim,
+            attr_prim,
+            suffix,
+        };
+        self.clip_cache.value_in_sets(graph, &sets, &query, time, interp)
+    }
+
+    /// The value-clip introspection for `attr_prim + suffix` from the first
+    /// participating set, searching the attribute's prim and its ancestors
+    /// nearest-first: its stage sample times (spec 12.3.4) and whether its
+    /// schedule alone can vary the value ([`ClipSet::may_be_time_varying`]).
+    /// `None` when no clip set sources the attribute; `Some` exactly when a set
+    /// participates. The sample-time vector may be empty for a participating set
+    /// that contributes no discrete times. Delegates the per-set participation
+    /// check to the [`ClipCache`].
+    fn clip_introspection(
+        &mut self,
+        graph: &LayerGraph,
+        attr_prim: &Path,
+        suffix: &str,
+    ) -> Result<Option<(Vec<f64>, bool)>> {
         let mut anchor = attr_prim.clone();
         loop {
-            let sets = {
-                self.ensure_index(graph, &anchor)?;
-                self.cached(&anchor).resolve_clip_sets(graph)?
+            let sets = self.clip_sets_for(graph, &anchor)?;
+            let query = ClipQuery {
+                anchor: &anchor,
+                attr_prim,
+                suffix,
             };
-            for resolved in &sets {
-                let base = resolved.set.prim_path.clone().unwrap_or_else(|| anchor.clone());
-                let clip_path = clip_attr_path(&anchor, &base, attr_prim, suffix)?;
-                if let Some(per_clip) = self.clip_set_participates(graph, resolved, &clip_path)? {
-                    return Ok(Some(f(&resolved.set, per_clip)));
-                }
+            if let Some(introspection) = self.clip_cache.clip_introspection_in_sets(graph, &sets, &query)? {
+                return Ok(Some(introspection));
             }
             match anchor.parent() {
                 Some(parent) if !parent.is_abs_root() => anchor = parent,
@@ -655,46 +597,24 @@ impl IndexCache {
         }
     }
 
-    /// The value-clip introspection for `attr_prim + suffix` from the first
-    /// participating set: its stage sample times (spec 12.3.4) and whether its
-    /// schedule alone can vary the value ([`ClipSet::may_be_time_varying`]).
-    /// `None` when no clip set sources the attribute; `Some` exactly when a set
-    /// participates, so [`Self::clip_sample_times`] doubles as the clip gate for
-    /// [`Self::resolve_value_source`]. The sample-time vector may be empty for a
-    /// participating set that contributes no discrete times.
-    fn clip_introspection(
-        &mut self,
-        graph: &LayerGraph,
-        attr_prim: &Path,
-        suffix: &str,
-    ) -> Result<Option<(Vec<f64>, bool)>> {
-        self.first_participating_clip_set(graph, attr_prim, suffix, |set, per_clip| {
-            (set.stage_sample_times(&per_clip), set.may_be_time_varying())
-        })
-    }
-
     /// The stage times a value-clip set contributes for `attr_prim + suffix`, or
     /// `None` when no clip set sources the attribute. Drops the time-varying flag
     /// from [`Self::clip_introspection`] for callers that need only the times.
+    /// `Some` exactly when a clip set participates, so this doubles as the clip
+    /// gate for [`Self::resolve_value_source`] (and `value_at`'s clip tier).
     fn clip_sample_times(&mut self, graph: &LayerGraph, attr_prim: &Path, suffix: &str) -> Result<Option<Vec<f64>>> {
         Ok(self
             .clip_introspection(graph, attr_prim, suffix)?
             .map(|(times, _)| times))
     }
 
-    /// The in-clip authored sample times for `clip_path` in a single clip layer,
-    /// or empty when the layer is unresolved or authors no samples there.
-    fn clip_in_clip_times(
-        &mut self,
-        graph: &LayerGraph,
-        asset: &str,
-        anchor_layer: LayerId,
-        clip_path: &Path,
-    ) -> Result<Vec<f64>> {
-        Ok(self
-            .clip_time_samples(graph, asset, anchor_layer, clip_path)?
-            .map(|samples| samples.iter().map(|(t, _)| *t).collect())
-            .unwrap_or_default())
+    /// Ensures `anchor`'s index is composed and resolves its value-clip sets —
+    /// the shared preamble for the clip orchestration walks. Returns an owned
+    /// list so the cached-index borrow is released before the per-anchor
+    /// [`ClipCache`] query takes `&mut self.clip_cache`.
+    fn clip_sets_for(&mut self, graph: &LayerGraph, anchor: &Path) -> Result<Vec<ResolvedClipSet>> {
+        self.ensure_index(graph, anchor)?;
+        self.cached(anchor).resolve_clip_sets(graph)
     }
 
     /// Redirects `attr_path` through [`Self::effective_path`] and ensures the
@@ -738,243 +658,6 @@ impl IndexCache {
         }
 
         Ok(FieldValue::NotAuthored)
-    }
-
-    /// Resolves a clip value for `attr_path` at `time` by searching the
-    /// attribute's prim and then its ancestors, nearest first — a nearer clip
-    /// set overrides one on an ancestor (spec 12.3.4.5).
-    fn resolve_clip_value(
-        &mut self,
-        graph: &LayerGraph,
-        attr_prim: &Path,
-        suffix: &str,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
-        let mut anchor_prim = attr_prim.clone();
-        loop {
-            if let Some(value) = self.clip_value_at(graph, &anchor_prim, attr_prim, suffix, time, interp)? {
-                return Ok(Some(value));
-            }
-            match anchor_prim.parent() {
-                Some(parent) if !parent.is_abs_root() => anchor_prim = parent,
-                _ => return Ok(None),
-            }
-        }
-    }
-
-    /// Looks for a clip set anchored on `anchor_prim` that provides a value for
-    /// the attribute `attr_prim + suffix` at `time`. Returns the interpolated
-    /// clip value, or `None` when no applicable clip set is found.
-    fn clip_value_at(
-        &mut self,
-        graph: &LayerGraph,
-        anchor_prim: &Path,
-        attr_prim: &Path,
-        suffix: &str,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
-        // Gather the clip sets, then drop the index borrow so
-        // clip layers can be loaded through `&mut self`.
-        let sets = {
-            self.ensure_index(graph, anchor_prim)?;
-            let index = self.cached(anchor_prim);
-            let sets = index.resolve_clip_sets(graph)?;
-            if sets.is_empty() {
-                return Ok(None);
-            }
-            sets
-        };
-
-        for resolved in &sets {
-            let set = &resolved.set;
-            let base = set.prim_path.clone().unwrap_or_else(|| anchor_prim.clone());
-            let clip_path = clip_attr_path(anchor_prim, &base, attr_prim, suffix)?;
-
-            // Resolve the manifest once: its declaration gates the set and its
-            // default later fills a gap (spec 12.3.4.6).
-            let manifest = set
-                .manifest_asset
-                .as_deref()
-                .map(|asset| (asset, resolved.manifest_layer.unwrap_or(resolved.asset_layer)));
-
-            // A manifest, when authored, declares which attributes the clips
-            // provide. A set whose manifest does not declare this attribute is
-            // skipped. A set that *does* declare it owns the attribute's
-            // time-varying value (spec 12.3.4.6): a gap in the active clip
-            // resolves to a manifest default or a value block, never to a
-            // weaker value source.
-            let manifest_declared = self.clip_set_declares(graph, resolved, &clip_path)?;
-            if manifest.is_some() && !manifest_declared {
-                continue;
-            }
-
-            let Some(active) = set.active_clip(time) else {
-                continue;
-            };
-            let Some(asset) = set.asset_paths.get(active) else {
-                continue;
-            };
-            let clip_time = set.map_stage_to_clip(time);
-
-            if let Some(value) = self.clip_sample_at(
-                graph,
-                asset.as_str(),
-                resolved.asset_layer,
-                &clip_path,
-                clip_time,
-                interp,
-            )? {
-                return Ok(Some(value));
-            }
-
-            // The active clip has no sample at `clip_time`. Only a
-            // manifest-declared attribute gets the gap-filling treatment;
-            // without a manifest there is no assurance this set owns the
-            // attribute, so fall through to weaker value sources.
-            if !manifest_declared {
-                continue;
-            }
-
-            // (a) Manifest default: synthesize a sample at the clip's active
-            //     time (spec 12.3.4.6). Reached only when the manifest declared
-            //     the attribute, so the manifest asset is authored.
-            if let Some((asset, layer)) = manifest {
-                if let Some(value) = self.manifest_default(graph, asset, layer, &clip_path)? {
-                    return Ok(Some(value));
-                }
-            }
-
-            // (b) interpolateMissingClipValues: interpolate the gap across the
-            //     nearest surrounding clips (spec 12.3.4.7).
-            if set.interpolate_missing {
-                if let Some(value) = self.interpolate_missing_value(graph, resolved, &clip_path, time, interp)? {
-                    return Ok(Some(value));
-                }
-            }
-
-            // (c) No default and nothing to interpolate: the manifest-declared
-            //     attribute is authoritatively absent — a value block — which
-            //     must not fall through to weaker sources (spec 12.3.4.6).
-            return Ok(Some(Value::ValueBlock));
-        }
-
-        Ok(None)
-    }
-
-    /// Reads the `timeSamples` map authored for `clip_path` in a single clip
-    /// layer, or `None` when the layer is unresolved or authors no samples
-    /// there. The shared read behind [`Self::clip_sample_at`] (which
-    /// interpolates) and [`Self::clip_in_clip_times`] (which lists the times).
-    fn clip_time_samples(
-        &mut self,
-        graph: &LayerGraph,
-        asset: &str,
-        anchor_layer: LayerId,
-        clip_path: &Path,
-    ) -> Result<Option<sdf::TimeSampleMap>> {
-        Ok(match self.clip_layer(graph, asset, anchor_layer)? {
-            Some(layer) => match layer.data().try_field(clip_path, FieldKey::TimeSamples.as_str())? {
-                Some(value) => match value.into_owned() {
-                    Value::TimeSamples(samples) => Some(samples),
-                    _ => None,
-                },
-                None => None,
-            },
-            None => None,
-        })
-    }
-
-    /// Reads the time samples for `clip_path` from a single clip layer and
-    /// interpolates at `clip_time`. Returns `None` when the layer is
-    /// unresolved or the attribute has no time samples there.
-    fn clip_sample_at(
-        &mut self,
-        graph: &LayerGraph,
-        asset: &str,
-        anchor_layer: LayerId,
-        clip_path: &Path,
-        clip_time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
-        Ok(self
-            .clip_time_samples(graph, asset, anchor_layer, clip_path)?
-            .and_then(|samples| interp(&samples, clip_time)))
-    }
-
-    /// Reads the manifest's authored `default` for `clip_path` (spec 12.3.4.6):
-    /// when the active clip has a gap, the manifest default stands in as the
-    /// sample value. Returns `None` when the manifest is unresolved or holds no
-    /// usable default for the attribute.
-    fn manifest_default(
-        &mut self,
-        graph: &LayerGraph,
-        manifest: &str,
-        manifest_layer: LayerId,
-        clip_path: &Path,
-    ) -> Result<Option<Value>> {
-        let value = match self.clip_layer(graph, manifest, manifest_layer)? {
-            Some(layer) => layer
-                .data()
-                .try_field(clip_path, FieldKey::Default.as_str())?
-                .map(|value| value.into_owned()),
-            None => None,
-        };
-        Ok(value.and_then(block_to_none))
-    }
-
-    /// Fills a gap in the active clip by interpolating across the nearest
-    /// surrounding clips that contribute a value (spec 12.3.4.7). Each
-    /// contributing clip is anchored on the stage timeline at the active stage
-    /// time it owns and valued by its sample there; `interp` then brackets
-    /// `time` between the nearest such anchors, exactly as if the clips' samples
-    /// formed one virtual sample map. The forward bracket is the next
-    /// contributing clip's start time and the backward bracket the previous
-    /// one's, matching the C++ resolver. When only one side contributes, its
-    /// value is held across the gap.
-    fn interpolate_missing_value(
-        &mut self,
-        graph: &LayerGraph,
-        resolved: &ResolvedClipSet,
-        clip_path: &Path,
-        time: f64,
-        interp: &dyn Fn(&sdf::TimeSampleMap, f64) -> Option<Value>,
-    ) -> Result<Option<Value>> {
-        let set = &resolved.set;
-        let anchor = resolved.asset_layer;
-        // Position of the active clip among the `active` entries at `time`.
-        let active_pos = set.active.iter().rposition(|&(stage, _)| stage <= time).unwrap_or(0);
-
-        // Forward: nearest later clip that contributes, anchored at its start.
-        let mut upper = None;
-        for &(stage, idx) in set.active.iter().skip(active_pos + 1) {
-            if let Some(asset) = set.asset_paths.get(idx) {
-                let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
-                    upper = Some((stage, value));
-                    break;
-                }
-            }
-        }
-
-        // Backward: nearest earlier clip that contributes, anchored at its start.
-        let mut lower = None;
-        for &(stage, idx) in set.active[..active_pos].iter().rev() {
-            if let Some(asset) = set.asset_paths.get(idx) {
-                let clip_time = set.map_stage_to_clip(stage);
-                if let Some(value) = self.clip_sample_at(graph, asset.as_str(), anchor, clip_path, clip_time, interp)? {
-                    lower = Some((stage, value));
-                    break;
-                }
-            }
-        }
-
-        Ok(match (lower, upper) {
-            (Some((lt, lv)), Some((ut, uv))) => interp(&vec![(lt, lv), (ut, uv)], time),
-            (Some((_, value)), None) | (None, Some((_, value))) => Some(value),
-            (None, None) => None,
-        })
     }
 
     /// Read-only access to the dependency map for change-driven invalidation.
@@ -1473,7 +1156,7 @@ impl IndexCache {
     ///
     /// TODO: a failed expression is dropped silently, unlike a reference/payload
     /// arc asset-path expression which records `Error::InvalidExpression`
-    /// (`prim_index::resolve_arc_asset_path`). Surfacing it needs an error
+    /// (`compose_site::resolve_arc_asset_path`). Surfacing it needs an error
     /// channel through value resolution (`value_at` returns `Result<Option>` but
     /// this runs after the value is produced).
     fn resolve_asset_path(
@@ -2628,32 +2311,6 @@ mod tests {
         let data = registry.open(path).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
         (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
-    }
-
-    /// `clip_layer` loads a clip layer relative to the authoring layer, caches
-    /// it (clip layers never enter the composition stack), and reports an
-    /// unresolvable path as `None`.
-    #[test]
-    fn loads_and_caches_clip_layer() -> Result<()> {
-        let root = format!(
-            "{}/vendor/core-spec-supplemental-release_dec2025/value_resolution/tests/assets/clip_basic/usda/root.usda",
-            manifest_dir()
-        );
-        let (graph, mut cache) = single_layer_stack(&root);
-        let root_id = graph.root_id().expect("root layer");
-
-        {
-            let clip = cache
-                .clip_layer(&graph, "./clip.usda", root_id)?
-                .expect("clip resolves");
-            assert!(clip.identifier.contains("clip.usda"));
-            assert!(clip.data().has_spec(&sdf::path("/Model.size")?));
-        }
-
-        // Second lookup is a cache hit; a bogus path resolves to None.
-        assert!(cache.clip_layer(&graph, "./clip.usda", root_id)?.is_some());
-        assert!(cache.clip_layer(&graph, "./does_not_exist.usda", root_id)?.is_none());
-        Ok(())
     }
 
     /// A prim inheriting its own grand-descendant (`/A` inherits `/A/B/C`) is a

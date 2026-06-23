@@ -49,7 +49,8 @@
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
-//! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`), the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child, and the arc-composition helpers (`compose_references_in`, `collect_payloads_in`, etc.) the `prim_indexer` drives. |
+//! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child. |
+//! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
 //! | `prim_graph` | `PcpPrimIndex` / `PcpNodeRef` | Arena-backed `PrimIndexGraph` of [`Node`]s with parent/child and origin links, plus the strength-order projection. |
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
@@ -288,6 +289,7 @@ use std::collections::HashMap;
 
 pub(crate) mod change;
 pub(crate) mod clip;
+mod compose_site;
 pub(crate) mod dependencies;
 pub(crate) mod index_cache;
 pub(crate) mod instancing;
