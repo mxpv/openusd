@@ -1272,7 +1272,8 @@ fn lazy_reference_loads_on_demand() -> Result<()> {
 }
 
 /// A muted reference target contributes nothing and is never read from disk,
-/// even once composition reaches its arc.
+/// even once composition reaches its arc, and surfaces a `MutedAssetPath`
+/// diagnostic.
 #[test]
 fn muted_reference_target_not_opened() -> Result<()> {
     let path = composition_path("references/reference_same_folder.usda");
@@ -1291,6 +1292,21 @@ fn muted_reference_target_not_opened() -> Result<()> {
     assert!(
         !opened.borrow().iter().any(|p| p.contains("_stage.usda")),
         "a muted reference target must never be opened"
+    );
+    let errors = stage.composition_errors();
+    let muted = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                pcp::Error::MutedAssetPath { arc: pcp::ArcType::Reference, asset_path, .. }
+                    if asset_path.contains("_stage.usda")
+            )
+        })
+        .count();
+    assert_eq!(
+        muted, 1,
+        "a muted reference target must surface exactly one MutedAssetPath diagnostic, got {errors:?}"
     );
     Ok(())
 }

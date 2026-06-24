@@ -396,9 +396,8 @@ pub(crate) struct PrimIndexGraph {
     /// keeps no trace of the dependency and unmuting the target could not find it
     /// to recompose; the change machinery reads it to fan a mute toggle out to
     /// such an index (see [`IndexCache`](super::index_cache::IndexCache)'s
-    /// layer-muting drop). This serves only that recomposition fanout, not error
-    /// reporting — surfacing a skipped muted arc as a diagnostic is the separate
-    /// `PcpErrorMutedAssetPath` work the `prim_indexer` still defers.
+    /// layer-muting drop). This serves the recomposition fanout; the skipped arc is
+    /// separately surfaced as an [`Error::MutedAssetPath`](super::Error::MutedAssetPath).
     pub(crate) muted_external_targets: Vec<LayerId>,
 }
 

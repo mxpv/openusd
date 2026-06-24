@@ -233,11 +233,6 @@
 //!   already composed during indexing. Storing the composed set on the index
 //!   (or each node) would remove the duplicate walk and the risk of the two
 //!   diverging.
-//! - Muted reference/payload targets: a muted layer that is the root of a
-//!   referenced/payloaded layer stack yields an empty target stack, so the arc
-//!   is skipped silently. C++ records a `PcpErrorMutedAssetPath`
-//!   (`prim_indexer.rs`, the external-arc add); value resolution needs an error
-//!   channel to surface it.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -250,6 +245,16 @@
 //!   muted set is keyed by the raw spelling, so two spellings of one loaded
 //!   layer mute it twice and unmuting one spelling leaves it muted via the
 //!   other; canonicalizing (or keying on the resolved id) fixes both.
+//! - Unmuting a never-loaded target: a reference/payload to a layer muted before
+//!   it ever loaded is skipped at the demand point ([`Error::MutedAssetPath`])
+//!   without interning the target or recording a recomposition trace, so
+//!   `LayerGraph::mute_fanout` — which resolves the unmuted identifier through the
+//!   interned layers only — yields an empty fanout, and the referrer's cached
+//!   index keeps its now-stale `MutedAssetPath` and unresolved arc. A loaded
+//!   target (whose muted root empties the sublayer stack) instead records
+//!   `muted_external_targets` and recomposes correctly. Fanning the unmute out by
+//!   canonical identifier to indices that recorded a `MutedAssetPath` (building on
+//!   the canonicalization above) would close it.
 //! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
 //!   non-default population mask resolves to empty until an instance sharing
 //!   that prototype has been composed (which registers the prototype). The
@@ -274,14 +279,14 @@
 //!   context down the sublayer structure (mirroring
 //!   `LayerRegistry::open_sublayers`), seeding a demand-loaded target's context
 //!   from the variables the `Demand` already carries.
-//! - Open-time and unresolved muting diagnostics:
-//!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection,
-//!   so a missing sublayer under a muted layer still surfaces as an
-//!   `UnresolvedSublayer` collection error; likewise a reference/payload whose
-//!   target asset was muted before loading is reported `UnresolvedLayer`
-//!   (`prim_indexer.rs`) rather than recognized as muted. Applying the muted set
-//!   during collection and checking it before the unresolved-arc error would
-//!   suppress both.
+//! - Open-time muted-sublayer collection diagnostics:
+//!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection, so
+//!   a missing sublayer under a muted layer still surfaces as an
+//!   `UnresolvedSublayer` collection error. Applying the muted set during
+//!   collection and checking it before the unresolved-sublayer error would
+//!   suppress it. A reference/payload target is reached only at query time, after
+//!   the muted set is seeded, so a muted one is recognized at the demand point and
+//!   reported [`Error::MutedAssetPath`].
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
@@ -441,6 +446,22 @@ pub enum Error {
         site_path: Path,
         /// The underlying read or parse error.
         reason: String,
+    },
+
+    /// A reference or payload targets a muted layer (C++ `PcpErrorMutedAssetPath`).
+    /// A muted target contributes no opinions, so the arc is dropped while the rest
+    /// of the prim still composes. Recorded whether or not the target was ever
+    /// loaded.
+    #[error("muted {arc:?} layer @{asset_path}@ at {site_path}")]
+    MutedAssetPath {
+        /// The asset path naming the muted target, anchored to its authoring layer.
+        asset_path: String,
+        /// The composition arc type that introduced this dependency.
+        arc: ArcType,
+        /// Identifier of the layer that authored the arc.
+        introduced_by: String,
+        /// The prim path where the arc was authored.
+        site_path: Path,
     },
 
     /// A reference or payload authored inside a `.usdz` package names another

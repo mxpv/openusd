@@ -2591,10 +2591,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
                         });
                         return Ok(());
                     }
-                    // A muted target contributes nothing and is never opened: skip
-                    // the arc, which then composes as if absent. Checked before the
-                    // load demand so a muted target's file is not read.
+                    // A muted target contributes nothing and is never opened: drop
+                    // the arc (it then composes as if absent) and record the muted
+                    // reference as a diagnostic. Checked before the load demand so a
+                    // muted target's file is not read.
                     if self.arc_target_muted(parent, asset_path) {
+                        self.errors.push(Error::MutedAssetPath {
+                            asset_path: asset_path.to_string(),
+                            arc,
+                            introduced_by: self.introducing_layer(parent),
+                            site_path: parent_path,
+                        });
                         return Ok(());
                     }
                     // A resolvable-but-not-yet-loaded target is demanded, not an
@@ -2649,16 +2656,19 @@ impl<'a, 'f> Indexer<'a, 'f> {
         };
 
         // A muted target root drops out of its own `sublayer_stack`, leaving the
-        // stack empty. Skip the arc rather than indexing the empty stack, but
-        // record the muted target so unmuting it can find this index to recompose
-        // — a skipped arc grafts no node, so the recorded id is the only other
-        // trace of the dependency.
-        // TODO: record a `PcpErrorMutedAssetPath` analog here (C++
-        // `primIndex.cpp`) so a muted reference/payload target surfaces a
-        // composition error instead of silently contributing nothing.
+        // stack empty. Skip the arc rather than indexing the empty stack, recording
+        // both the muted target (so unmuting it can find this index to recompose —
+        // a skipped arc grafts no node, so the recorded id is the only other trace
+        // of the dependency) and the diagnostic.
         let Some(rep) = self.inputs.stack.layer_stack(target_stack).first().map(|&(li, _)| li) else {
             if let Some(layer_index) = external_target {
                 self.output.muted_external_targets.push(layer_index);
+                self.errors.push(Error::MutedAssetPath {
+                    asset_path: asset_path.to_string(),
+                    arc,
+                    introduced_by: self.introducing_layer(parent),
+                    site_path: parent_path,
+                });
             }
             return Ok(());
         };
