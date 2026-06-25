@@ -478,8 +478,8 @@ impl PrimIndex {
             if matches!(n.arc, ArcType::Root | ArcType::Reference | ArcType::Payload) {
                 // Members are strongest-first; apply weakest-first so the strongest wins.
                 for &(layer, _) in stack.layer_stack(n.layer_stack_id()).iter().rev() {
-                    if let Ok(dict) = crate::sdf::expr::read_expression_variables(stack.layer(layer).data()) {
-                        composed.extend(dict);
+                    if let Ok(dict) = sdf::expr::read_expression_variables(stack.layer(layer).data()) {
+                        sdf::expr::compose_over(&mut composed, &dict);
                     }
                 }
             }

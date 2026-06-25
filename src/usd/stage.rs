@@ -2462,6 +2462,19 @@ impl Stage {
                     for layer in layers {
                         self.add_layer(layer);
                     }
+                    // Record the variables inherited across the arc against the
+                    // now-interned target root (resolved by the same `id_of` the
+                    // demand guard above uses), so the sublayer-edge rebuild
+                    // resolves the target's `${VAR}` sublayers against the context
+                    // the load just opened them with. An empty inherited context
+                    // needs no entry — the rebuild reaches such a root with the
+                    // empty context anyway.
+                    if !demand.expr_vars.is_empty() {
+                        let root = self.layers.borrow().id_of(asset_path);
+                        if let Some(root) = root {
+                            self.layers.borrow_mut().seed_subtree(root, demand.expr_vars.clone());
+                        }
+                    }
                 }
                 Err(err) => {
                     self.layers.borrow_mut().mark_load_failed(asset_path, err.to_string());

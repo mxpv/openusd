@@ -1570,7 +1570,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // Members are strongest-first; apply weakest-first so the strongest wins.
         for &(layer, _) in self.inputs.stack.layer_stack(ambient).iter().rev() {
             if let Ok(dict) = expr::read_expression_variables(self.inputs.stack.layer(layer).data()) {
-                vars.extend(dict);
+                expr::compose_over(&mut vars, &dict);
             }
         }
         vars

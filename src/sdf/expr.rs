@@ -20,6 +20,7 @@
 use crate::sdf;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use logos::{Logos, SpannedIter};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
@@ -30,19 +31,30 @@ pub fn is_expression(s: &str) -> bool {
     s.starts_with('`') && s.ends_with('`') && s.len() >= 2
 }
 
-/// Reads a layer's pseudo-root `expressionVariables` dictionary, returning an
-/// empty map when the field is absent or is not a dictionary. Composing these
-/// variables across reference/payload arcs is a `pcp`-level concern (C++
-/// `PcpExpressionVariables`); this is the single per-layer read both layer
-/// collection and arc composition share.
-pub fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<HashMap<String, sdf::Value>> {
+/// Reads a layer's pseudo-root `expressionVariables` dictionary, borrowing it
+/// from `data` when the backing store holds it directly (the common in-memory
+/// case) and only owning an empty map when the field is absent or not a
+/// dictionary. Composing these variables across reference/payload arcs is a
+/// `pcp`-level concern (C++ `PcpExpressionVariables`); this is the single
+/// per-layer read both layer collection and arc composition share, overlaid
+/// with [`compose_over`].
+pub fn read_expression_variables(data: &dyn sdf::AbstractData) -> Result<Cow<'_, HashMap<String, sdf::Value>>> {
     let root = sdf::Path::abs_root();
-    if let Some(value) = data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
-        if let sdf::Value::Dictionary(dict) = value.into_owned() {
-            return Ok(dict);
-        }
-    }
-    Ok(HashMap::new())
+    Ok(
+        match data.try_field(&root, sdf::FieldKey::ExpressionVariables.as_str())? {
+            Some(Cow::Borrowed(sdf::Value::Dictionary(dict))) => Cow::Borrowed(dict),
+            Some(Cow::Owned(sdf::Value::Dictionary(dict))) => Cow::Owned(dict),
+            _ => Cow::Owned(HashMap::new()),
+        },
+    )
+}
+
+/// Overlays `overlay`'s expression variables onto `base`, the overlay winning on
+/// a key collision — the precedence both layer collection and arc composition
+/// need, where the closer-to-root (or stronger) opinion is applied last (C++
+/// `PcpExpressionVariables`). Each entry is cloned, since `overlay` is borrowed.
+pub fn compose_over(base: &mut HashMap<String, sdf::Value>, overlay: &HashMap<String, sdf::Value>) {
+    base.extend(overlay.iter().map(|(k, v)| (k.clone(), v.clone())));
 }
 
 /// Evaluates an expression-valued asset path against `vars`, or returns the path

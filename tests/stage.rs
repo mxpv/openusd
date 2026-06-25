@@ -305,6 +305,67 @@ fn expr_sublayer_composes() -> Result<()> {
     Ok(())
 }
 
+/// A `${VAR}` sublayer resolves against a variable authored on an *intermediate*
+/// sublayer ancestor — neither the layer that authors the expression nor the
+/// root. The root sublayers `a`; `a` defines `V` and sublayers `b`; `b`'s `${V}`
+/// sublayer must compose against `a`'s value, threaded down from the intermediate
+/// layer.
+#[test]
+fn intermediate_expr_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let a = dir.path().join("a.usda");
+    let b = dir.path().join("b.usda");
+    let leaf = dir.path().join("leaf.usda");
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@a.usda@]\n)\n")?;
+    std::fs::write(
+        &a,
+        "#usda 1.0\n(\n    expressionVariables = { string V = \"leaf\" }\n    subLayers = [@b.usda@]\n)\n",
+    )?;
+    std::fs::write(&b, "#usda 1.0\n(\n    subLayers = [@`\"${V}.usda\"`@]\n)\n")?;
+    std::fs::write(&leaf, "#usda 1.0\ndef \"P\" {\n    custom double x = 7\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(7.0)),
+        "the intermediate layer's variable resolves the deeper expression sublayer"
+    );
+    Ok(())
+}
+
+/// A reference target's `${VAR}` sublayer resolves against a variable authored on
+/// a *non-root* referencing layer. The root references `mid`; `mid` defines `V`
+/// and references `target`; `target`'s `${V}` sublayer must resolve against
+/// `mid`'s value — the variable is on neither `target` nor the root, so the
+/// referrer's composed variables carried across the arc are what resolve it.
+#[test]
+fn cross_ref_expr_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let mid = dir.path().join("mid.usda");
+    let target = dir.path().join("target.usda");
+    let over = dir.path().join("over.usda");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @mid.usda@\n) {}\n")?;
+    std::fs::write(
+        &mid,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    expressionVariables = { string V = \"over\" }\n)\ndef \"P\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    std::fs::write(
+        &target,
+        "#usda 1.0\n(\n    defaultPrim = \"P\"\n    subLayers = [@`\"${V}.usda\"`@]\n)\ndef \"P\" {}\n",
+    )?;
+    std::fs::write(&over, "#usda 1.0\ndef \"P\" {\n    custom double x = 9\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(9.0)),
+        "the referrer's variable resolves the target's `${{V}}` sublayer"
+    );
+    Ok(())
+}
+
 /// A reference authored inside a `.usdz` package targets a sibling layer in the
 /// archive, which is unsupported: composition reports the explicit
 /// [`UnsupportedUsdzReference`](pcp::Error::UnsupportedUsdzReference) error and

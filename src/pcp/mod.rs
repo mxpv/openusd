@@ -256,20 +256,6 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Expression `subLayers` intermediate scopes: `LayerGraph::sublayer_expr_vars`
-//!   resolves an expression-valued sublayer path against the layer's own and the
-//!   root layer's `expressionVariables` only, skipping every scope in between. A
-//!   variable defined on neither the authoring layer nor the root — only on an
-//!   intermediate sublayer ancestor between them, or on a referencing layer stack
-//!   a nested reference inherits from — is therefore unresolved when the edge is
-//!   rebuilt, so the sublayer the on-demand load did open never composes (its
-//!   edge is dropped or misdirected). Root-authored variables — the common,
-//!   stage-wide pattern, and what every test covers — resolve correctly, since
-//!   the root is always the strongest scope and is always included. The fix is a
-//!   top-down composition that threads each layer stack's accumulated variable
-//!   context down the sublayer structure (mirroring
-//!   `LayerRegistry::open_sublayers`), seeding a demand-loaded target's context
-//!   from the variables the `Demand` already carries.
 //! - Open-time muted-sublayer collection diagnostics:
 //!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection, so
 //!   a missing sublayer under a muted layer still surfaces as an

@@ -277,8 +277,8 @@ impl LayerRegistry {
         // Compose this layer's authored expression variables with those inherited
         // from the layers that sublayer it; the inherited (closer-to-root) set is
         // applied last so it overrides this layer's own (C++ `PcpExpressionVariables`).
-        let mut expr_vars = expr::read_expression_variables(data.as_ref())?;
-        expr_vars.extend(ancestor_expr_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut expr_vars = expr::read_expression_variables(data.as_ref())?.into_owned();
+        expr::compose_over(&mut expr_vars, ancestor_expr_vars);
 
         let is_usdz = resolved.extension() == "usdz";
         let sub_paths = Self::sublayer_paths(data.as_ref());
@@ -402,8 +402,8 @@ impl LayerRegistry {
         };
         visited.insert(identifier.clone());
         let data = self.read(&resolved)?;
-        let mut expr_vars = expr::read_expression_variables(data.as_ref())?;
-        expr_vars.extend(ancestor_expr_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut expr_vars = expr::read_expression_variables(data.as_ref())?.into_owned();
+        expr::compose_over(&mut expr_vars, ancestor_expr_vars);
         for dep in Self::arc_dependencies(data.as_ref())? {
             let dep_asset = expr::evaluate_asset_path(&dep, &expr_vars)?;
             self.collect_with_arcs_in(&dep_asset, Some(&resolved), &expr_vars, layers, visited)?;

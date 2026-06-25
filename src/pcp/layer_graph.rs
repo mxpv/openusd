@@ -207,6 +207,27 @@ pub(crate) struct LayerGraph {
     /// stage's load barrier through `&mut self`; read during composition, and
     /// cleared when an edit changes the layers so a now-readable asset is retried.
     failed_loads: HashMap<String, String>,
+    /// Expression-variable context inherited across the arc that first reached
+    /// each external (reference/payload) subtree root, captured from its
+    /// [`Demand`](super::Demand). [`build_sublayer_edges`](Self::build_sublayer_edges)
+    /// starts that root's top-down walk from this set, so a `${VAR}` sublayer
+    /// inheriting a variable across the arc resolves the same way the load path
+    /// opened it (`LayerRegistry::open_sublayers`). Only a root that actually
+    /// inherited variables is recorded; a reference/payload target with no
+    /// inherited context is reached by the rebuild's order-fallback pass with the
+    /// empty context instead, so this map stays empty in the common case.
+    ///
+    /// Edges are stored per layer node, so a single [`LayerId`] carries one
+    /// inherited context, captured at the load that first reaches the target. A
+    /// target reachable through several ancestries — distinct arcs, or a sublayer
+    /// shared by parents (including shared root/session sublayers) that carry
+    /// different expression variables — resolves its expression `subLayers` against
+    /// only that first context; re-authoring a referrer's `expressionVariables`
+    /// does not switch it (and is not a layer-stack recomposition trigger
+    /// regardless, so the recorded context never diverges from what the rest of
+    /// composition reads). The faithful fix is the per-`(layer stack, path)` node
+    /// model; this single-node graph approximates it.
+    subtree_seed: HashMap<LayerId, HashMap<String, Value>>,
 }
 
 /// What a [`mute_layer`](LayerGraph::mute_layer) or
@@ -250,6 +271,7 @@ impl LayerGraph {
             relocate_errors: Vec::new(),
             registry,
             failed_loads: HashMap::new(),
+            subtree_seed: HashMap::new(),
         }
     }
 
@@ -299,74 +321,50 @@ impl LayerGraph {
     /// folding the per-hop time-codes-per-second retiming into each edge offset.
     /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer-cycle
     /// errors reachable from the root layer (C++ `PcpErrorSublayerCycle`).
+    ///
+    /// The walk is top-down over the sublayer forest, threading each scope's
+    /// composed expression variables into its descendants so an expression-valued
+    /// `${VAR}` sublayer resolves against the same context the load path
+    /// (`LayerRegistry::open_sublayers`) opened it with — a layer's own
+    /// `expressionVariables`, overlaid by everything inherited from the layers
+    /// that sublayer it and, across a reference/payload arc, by the
+    /// [`subtree_seed`](Self::subtree_seed) the demand carried. The forest roots
+    /// are walked strongest-first so a layer shared by several ancestries keeps
+    /// the strongest context (its edges are built once, on first reach).
     fn build_sublayer_edges(&mut self) {
         // Start from a clean slate so a rebuild after a `subLayers` edit does not
         // accumulate stale edges.
         for node in self.nodes.values_mut() {
             node.children.clear();
         }
-        let root_path = Path::abs_root();
-        // Edges are resolved into a side buffer so the immutable `find` borrow
-        // does not clash with the per-node mutation.
-        let mut all_edges: Vec<(LayerId, Vec<(LayerId, LayerOffset)>)> = Vec::new();
+        // Edges are resolved into a side buffer so the immutable `compose_edges`
+        // borrow does not clash with the per-node mutation that applies them.
+        let mut all_edges: Vec<(LayerId, Vec<(LayerId, LayerOffset)>)> = Vec::with_capacity(self.nodes.len());
+        let mut visited: HashSet<LayerId> = HashSet::with_capacity(self.nodes.len());
+
+        // Forest roots in strength order: session layers, the root layer (each
+        // with no inherited context), then the external reference/payload roots
+        // that inherited variables across their arc. A final pass over any layer
+        // not yet reached builds the edges of an interned subtree hanging off no
+        // known root: a reference/payload target whose arc carried no variables is
+        // not in `subtree_seed`, so this pass is what reaches it (with the empty
+        // context the load opened it under). It also covers eagerly-loaded test
+        // graphs whose reference targets are interned without the demand path.
+        // `subtree_seed` is consulted through `self.order` rather than its own
+        // iteration order, keeping the walk deterministic.
+        for &id in self.session_layers() {
+            self.compose_edges(id, None, &mut visited, &mut all_edges);
+        }
+        if let Some(root) = self.root {
+            self.compose_edges(root, None, &mut visited, &mut all_edges);
+        }
         for &id in &self.order {
-            let node = &self.nodes[&id];
-            let parent_tcps = effective_time_codes_per_second(&node.layer);
-            let Ok(Value::StringVec(sub_paths)) = node
-                .layer
-                .data()
-                .get_field(&root_path, FieldKey::SubLayers.as_str())
-                .map(|v| v.into_owned())
-            else {
-                continue;
-            };
-            let offsets: Vec<LayerOffset> = node
-                .layer
-                .data()
-                .get_field(&root_path, FieldKey::SubLayerOffsets.as_str())
-                .ok()
-                .and_then(|v| match v.into_owned() {
-                    Value::LayerOffsetVec(v) => Some(v),
-                    _ => None,
-                })
-                .unwrap_or_default();
-
-            // Expression-valued `subLayers` paths resolve against the expression
-            // variables visible at this layer (its own, overlaid by the root
-            // layer's — the strongest opinion, and the referencing stack's
-            // variables for a target reached across a reference). Computed once
-            // per layer, only when a path is actually an expression.
-            let expr_vars = if sub_paths.iter().any(|p| expr::is_expression(p)) {
-                self.sublayer_expr_vars(id)
-            } else {
-                HashMap::new()
-            };
-
-            let mut edges = Vec::new();
-            for (i, sub_path) in sub_paths.into_iter().enumerate() {
-                let sub_path = if expr::is_expression(&sub_path) {
-                    match expr::evaluate_asset_path(&sub_path, &expr_vars) {
-                        Ok(resolved) => resolved,
-                        // An unevaluable expression resolves to no edge; the layer
-                        // it would name is left out of the stack.
-                        Err(_) => continue,
-                    }
-                } else {
-                    sub_path
-                };
-                let Some(sub_id) = self.find(&sub_path) else {
-                    continue;
-                };
-                let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
-                let effective = offsets
-                    .get(i)
-                    .copied()
-                    .unwrap_or_default()
-                    .sanitized()
-                    .concatenate(&LayerOffset::scale_only(ratio));
-                edges.push((sub_id, effective));
+            if let Some(seed) = self.subtree_seed.get(&id) {
+                self.compose_edges(id, Some(seed), &mut visited, &mut all_edges);
             }
-            all_edges.push((id, edges));
+        }
+        for &id in &self.order {
+            self.compose_edges(id, None, &mut visited, &mut all_edges);
         }
 
         for (id, edges) in all_edges {
@@ -377,30 +375,93 @@ impl LayerGraph {
         self.recompute_cycle_errors();
     }
 
-    /// The expression variables visible when resolving `layer`'s `subLayers`
-    /// paths: the layer's own `expressionVariables` overlaid by the root layer's,
-    /// so the closer-to-root opinion wins (C++ `PcpExpressionVariables`). The
-    /// root layer's set is the strongest stage-wide opinion and stands in for the
-    /// referencing stack's variables when `layer` was reached across a reference
-    /// or payload (the on-demand load anchored its `${VAR}` sublayers with the
-    /// same inherited values).
-    //
-    // TODO: this skips every scope between `layer` and the root — a variable
-    // defined only on an intermediate sublayer ancestor, or on a referencing
-    // stack a nested reference inherits from, is missed, so an expression
-    // sublayer that uses it loads but drops its edge. The fix is a top-down
-    // composition down the sublayer structure (as `open_sublayers` does), seeding
-    // a demand-loaded subtree from the variables the `Demand` carries. See the
-    // pcp module's "Remaining work".
-    fn sublayer_expr_vars(&self, layer: LayerId) -> HashMap<String, Value> {
-        let read = |id: LayerId| expr::read_expression_variables(self.nodes[&id].layer.data()).unwrap_or_default();
-        let mut vars = read(layer);
-        if let Some(root) = self.root {
-            if root != layer {
-                vars.extend(read(root));
-            }
+    /// Resolves `id`'s `subLayers` into edges against `ancestor` (the expression
+    /// variables inherited from the layers that sublayer it, or the demand seed at
+    /// an external root; `None` is the empty context), then descends into each
+    /// child threading `id`'s own variables overlaid on `ancestor`. Each layer's
+    /// edges are built once — `visited` gates re-entry, so a shared sublayer keeps
+    /// the strongest ancestry's context and a sublayer cycle terminates (the edge
+    /// is still recorded for [`detect_cycles`](Self::detect_cycles)). Resolved
+    /// edges are pushed to `all_edges`; the caller applies them to the nodes.
+    fn compose_edges(
+        &self,
+        id: LayerId,
+        ancestor: Option<&HashMap<String, Value>>,
+        visited: &mut HashSet<LayerId>,
+        all_edges: &mut Vec<(LayerId, Vec<(LayerId, LayerOffset)>)>,
+    ) {
+        if !visited.insert(id) {
+            return;
         }
-        vars
+        let root_path = Path::abs_root();
+        let node = &self.nodes[&id];
+        let Ok(Value::StringVec(sub_paths)) = node
+            .layer
+            .data()
+            .get_field(&root_path, FieldKey::SubLayers.as_str())
+            .map(|v| v.into_owned())
+        else {
+            return;
+        };
+        let offsets: Vec<LayerOffset> = node
+            .layer
+            .data()
+            .get_field(&root_path, FieldKey::SubLayerOffsets.as_str())
+            .ok()
+            .and_then(|v| match v.into_owned() {
+                Value::LayerOffsetVec(v) => Some(v),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        // This layer's own `expressionVariables` overlaid by the inherited set
+        // (the ancestor, closer to the root, wins — C++ `PcpExpressionVariables`),
+        // threaded down to descendants. A layer that authors none threads
+        // `ancestor` straight through with no allocation; the read still happens so
+        // a literal-only sublayer that defines variables passes them to a deeper
+        // expression sublayer.
+        let own = expr::read_expression_variables(node.layer.data()).unwrap_or_default();
+        let combined = if own.is_empty() {
+            None
+        } else {
+            let mut combined = own.into_owned();
+            if let Some(ancestor) = ancestor {
+                expr::compose_over(&mut combined, ancestor);
+            }
+            Some(combined)
+        };
+        let context = combined.as_ref().or(ancestor);
+
+        let parent_tcps = effective_time_codes_per_second(&node.layer);
+        let empty = HashMap::new();
+        let mut edges = Vec::with_capacity(sub_paths.len());
+        for (i, sub_path) in sub_paths.into_iter().enumerate() {
+            let sub_path = if expr::is_expression(&sub_path) {
+                match expr::evaluate_asset_path(&sub_path, context.unwrap_or(&empty)) {
+                    Ok(resolved) => resolved,
+                    // An unevaluable expression resolves to no edge; the layer it
+                    // would name is left out of the stack.
+                    Err(_) => continue,
+                }
+            } else {
+                sub_path
+            };
+            let Some(sub_id) = self.find(&sub_path) else {
+                continue;
+            };
+            let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
+            let effective = offsets
+                .get(i)
+                .copied()
+                .unwrap_or_default()
+                .sanitized()
+                .concatenate(&LayerOffset::scale_only(ratio));
+            edges.push((sub_id, effective));
+        }
+        for &(child, _) in &edges {
+            self.compose_edges(child, context, visited, all_edges);
+        }
+        all_edges.push((id, edges));
     }
 
     /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer cycles
@@ -567,6 +628,16 @@ impl LayerGraph {
     /// barrier when an on-demand open fails.
     pub(crate) fn mark_load_failed(&mut self, asset_path: &str, reason: String) {
         self.failed_loads.insert(asset_path.to_string(), reason);
+    }
+
+    /// Records the expression-variable context that reached `root` across the
+    /// reference/payload arc that first demanded it, registering `root` as an
+    /// external forest root for [`build_sublayer_edges`](Self::build_sublayer_edges)
+    /// (see [`subtree_seed`](Self::subtree_seed)). The first context recorded for
+    /// a root wins, so a target reached by several arcs keeps the one that opened
+    /// it. Called from the stage's load barrier when a demanded target is interned.
+    pub(crate) fn seed_subtree(&mut self, root: LayerId, vars: HashMap<String, Value>) {
+        self.subtree_seed.entry(root).or_insert(vars);
     }
 
     /// Whether a prior on-demand open of `asset_path` failed to read or parse the
@@ -1318,6 +1389,77 @@ mod tests {
 
         assert!(graph.unmute_layer("b.usda").is_some());
         assert!(!graph.errors().is_empty(), "unmuting restores the cycle diagnostic");
+    }
+
+    /// Authors an `expressionVariables` dictionary on a layer's pseudo-root.
+    fn set_expr_var(layer: &mut sdf::Layer, name: &str, value: &str) {
+        edit_layer(layer, |e| {
+            let dict = HashMap::from([(name.to_string(), Value::String(value.to_string()))]);
+            e.pseudo_root_mut()
+                .unwrap()
+                .set(FieldKey::ExpressionVariables.as_str(), Value::Dictionary(dict));
+        });
+    }
+
+    /// A `${VAR}` sublayer resolves against a variable authored on an intermediate
+    /// sublayer ancestor — neither the authoring layer nor the root. The top-down
+    /// rebuild threads `a`'s `V` down into `b`, so `b`'s expression sublayer edge
+    /// to `leaf` forms.
+    #[test]
+    fn intermediate_var_sublayer() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        });
+        let mut a = sdf::Layer::new_in_memory("a.usda");
+        set_expr_var(&mut a, "V", "leaf");
+        edit_layer(&mut a, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        });
+        let mut b = sdf::Layer::new_in_memory("b.usda");
+        edit_layer(&mut b, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let leaf = sdf::Layer::new_in_memory("leaf.usda");
+
+        let graph = LayerGraph::from_layers(vec![root, a, b, leaf], 0, sdf::LayerRegistry::default());
+        let root = graph.root_id().unwrap();
+        let leaf = graph.id_of("leaf.usda").unwrap();
+        let ids: Vec<LayerId> = graph.sublayer_stack(root).iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&leaf),
+            "`b`'s ${{V}} sublayer resolves against `a`'s variable and composes",
+        );
+    }
+
+    /// A `${VAR}` sublayer on an external (reference/payload) subtree root
+    /// resolves against the context the arc carried. Before the root is seeded
+    /// the edge drops (the variable is unknown); after
+    /// [`seed_subtree`](LayerGraph::seed_subtree) records it, the rebuild forms
+    /// the edge.
+    #[test]
+    fn seeded_var_sublayer() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let over = sdf::Layer::new_in_memory("over.usda");
+
+        let mut graph = LayerGraph::from_layers(vec![root, target, over], 0, sdf::LayerRegistry::default());
+        let target = graph.id_of("target.usda").unwrap();
+        let over = graph.id_of("over.usda").unwrap();
+
+        let ids: Vec<LayerId> = graph.sublayer_stack(target).iter().map(|&(id, _)| id).collect();
+        assert!(!ids.contains(&over), "the unseeded `${{V}}` sublayer cannot resolve");
+
+        graph.seed_subtree(
+            target,
+            HashMap::from([("V".to_string(), Value::String("over".to_string()))]),
+        );
+        graph.recompute_sublayers();
+        let ids: Vec<LayerId> = graph.sublayer_stack(target).iter().map(|&(id, _)| id).collect();
+        assert!(ids.contains(&over), "the seeded variable resolves the sublayer edge");
     }
 
     /// Relocate conflicts are scoped to the stack being composed. A layer that is
