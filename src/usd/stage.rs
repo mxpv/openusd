@@ -1750,45 +1750,46 @@ impl Stage {
     /// (`SdfLayer::SetMuted`, a process-global data swap) is a separate feature
     /// and is not implemented.
     pub fn mute_layer(&self, identifier: impl Into<String>) {
-        let identifier = identifier.into();
-        if self.apply_mute(|graph| graph.mute_layer(identifier.clone())) {
-            for sink in self.sinks.borrow().iter() {
-                sink.layer_muting_changed(self, &identifier, true);
-            }
+        if let Some(changed) = self.apply_mute(|graph| graph.mute_layer(identifier.into())) {
+            self.notify_muting_changed(&changed, true);
         }
     }
 
     /// Unmutes the layer with the given identifier, restoring its opinions to
     /// composition (C++ `UsdStage::UnmuteLayer`).
     pub fn unmute_layer(&self, identifier: &str) {
-        if self.apply_mute(|graph| graph.unmute_layer(identifier)) {
-            for sink in self.sinks.borrow().iter() {
-                sink.layer_muting_changed(self, identifier, false);
-            }
+        if let Some(changed) = self.apply_mute(|graph| graph.unmute_layer(identifier)) {
+            self.notify_muting_changed(&changed, false);
         }
     }
 
     /// Applies a muted-set mutation to the layer graph and recomposes when it
-    /// reports a change, returning whether the set changed. The mutation returns
-    /// the layers whose cached indices the change can invalidate (`None` when the
-    /// set was unchanged), so only those indices are dropped rather than the whole
-    /// cache. The graph owns the muted set and rejects the root layer; the borrows
-    /// are released before the caller notifies, so the listener may read the set
-    /// or re-author.
-    fn apply_mute(&self, mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<HashSet<pcp::LayerId>>) -> bool {
+    /// reports a change, returning the canonical identifier whose muted state
+    /// toggled (`None` when the set was unchanged). Unmuting through an alternate
+    /// spelling reports the canonical identifier the layer was muted under, not the
+    /// one passed, so a listener mirroring the set stays in sync. The mutation also
+    /// reports the layers whose cached indices the change can invalidate, so only
+    /// those are dropped rather than the whole cache. The graph owns the muted set
+    /// and rejects the root layer; the borrows are released before the caller
+    /// notifies, so the listener may read the set or re-author.
+    fn apply_mute(&self, mutate: impl FnOnce(&mut pcp::LayerGraph) -> Option<pcp::MuteChange>) -> Option<String> {
         // Drain pending edits first so the mute recomposes against a current
         // graph and cache rather than stranding queued changes.
         self.process_pending();
         let mut graph = self.layers.borrow_mut();
         let mut cache = self.cache.borrow_mut();
-        match mutate(&mut graph) {
-            Some(affected) => {
-                // The mutation already rebuilt the graph's sublayer stacks,
-                // relocates, and cycle diagnostics; only the cache needs work.
-                cache.invalidate_layers(&graph, &affected);
-                true
-            }
-            None => false,
+        let change = mutate(&mut graph)?;
+        // The mutation already rebuilt the graph's sublayer stacks, relocates, and
+        // cycle diagnostics; only the cache needs work.
+        cache.invalidate_layers(&graph, &change.affected);
+        Some(change.changed)
+    }
+
+    /// Fires [`StageSink::layer_muting_changed`] for the toggled identifier, after
+    /// the graph and cache borrows are released.
+    fn notify_muting_changed(&self, changed: &str, muted: bool) {
+        for sink in self.sinks.borrow().iter() {
+            sink.layer_muting_changed(self, changed, muted);
         }
     }
 
@@ -3414,6 +3415,44 @@ mod tests {
 
         stage.unmute_layer("late.usda");
         assert_eq!(read_ax(&stage)?, Some(5.0), "unmuting restores the now-loaded layer");
+        Ok(())
+    }
+
+    /// An anonymous layer is muted by its `anon:` identifier even in a filesystem
+    /// stage: it has no asset-resolvable location, so canonicalization passes the
+    /// identifier through (C++ `_GetCanonicalLayerId`) rather than anchoring it
+    /// against the root.
+    #[test]
+    fn mute_anonymous_sublayer() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root_path = dir.path().join("root.usda");
+        std::fs::write(&root_path, "#usda 1.0\n")?;
+        let stage = Stage::open(root_path.to_str().unwrap())?;
+        let root_id = stage.root_layer().identifier().to_string();
+
+        let mut anon = sdf::Layer::new_anonymous("opinion.usda");
+        edit_layer(&mut anon, |e| {
+            sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true)
+                .unwrap()
+                .set_default(sdf::Value::Double(5.0));
+        });
+        let anon_id = anon.identifier().to_string();
+        stage.insert_layer(&root_id, 0, anon, sdf::LayerOffset::IDENTITY)?;
+        assert_eq!(read_ax(&stage)?, Some(5.0), "the anonymous sublayer contributes");
+
+        stage.mute_layer(anon_id.clone());
+        assert!(
+            stage.is_layer_muted(&anon_id),
+            "the anonymous layer reads as muted by its id"
+        );
+        assert_eq!(
+            read_ax(&stage)?,
+            None,
+            "muting the anonymous sublayer drops its opinion"
+        );
+
+        stage.unmute_layer(&anon_id);
+        assert_eq!(read_ax(&stage)?, Some(5.0), "unmuting restores it");
         Ok(())
     }
 

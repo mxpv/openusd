@@ -236,25 +236,16 @@
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
-//! - Muted-identifier canonicalization: `LayerGraph::resolve_muted_ids` matches
-//!   a muted identifier exactly, then anchored against the root layer only (the
-//!   on-demand `is_asset_muted` check at the reference/payload demand point does
-//!   anchor a relative mute against the arc's authoring layer). C++
-//!   `Pcp_MutedLayers::_GetCanonicalLayerId` anchors a relative path per
-//!   containing layer and strips file-format target args before matching. The
-//!   muted set is keyed by the raw spelling, so two spellings of one loaded
-//!   layer mute it twice and unmuting one spelling leaves it muted via the
-//!   other; canonicalizing (or keying on the resolved id) fixes both.
 //! - Unmuting a never-loaded target: a reference/payload to a layer muted before
 //!   it ever loaded is skipped at the demand point ([`Error::MutedAssetPath`])
 //!   without interning the target or recording a recomposition trace, so
-//!   `LayerGraph::mute_fanout` — which resolves the unmuted identifier through the
+//!   `LayerGraph::mute_fanout` — which looks the canonical identifier up among the
 //!   interned layers only — yields an empty fanout, and the referrer's cached
 //!   index keeps its now-stale `MutedAssetPath` and unresolved arc. A loaded
 //!   target (whose muted root empties the sublayer stack) instead records
 //!   `muted_external_targets` and recomposes correctly. Fanning the unmute out by
-//!   canonical identifier to indices that recorded a `MutedAssetPath` (building on
-//!   the canonicalization above) would close it.
+//!   canonical identifier to the indices that recorded a `MutedAssetPath` for it
+//!   would close it.
 //! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
 //!   non-default population mask resolves to empty until an instance sharing
 //!   that prototype has been composed (which registers the prototype). The
@@ -312,7 +303,7 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::{LayerGraph, LayerStackId};
+pub(crate) use layer_graph::{LayerGraph, LayerStackId, MuteChange};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};

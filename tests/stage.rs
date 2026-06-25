@@ -376,12 +376,12 @@ fn lazy_ref_corrupt_sublayer() -> Result<()> {
     Ok(())
 }
 
-/// A reference/payload target named by a *relative* path on a nested (non-root)
-/// referrer is recognized as muted when that relative identifier is muted: the
-/// mute is anchored against the arc's authoring layer, not only the root. The
-/// muted target is never opened.
+/// A not-yet-loaded reference target under a nested referrer is muted by the
+/// path that resolves, from the stage root, to its canonical identifier (C++
+/// `Pcp_MutedLayers`): the model under `sub/` is muted as `"sub/model.usda"` and
+/// never opened.
 #[test]
-fn lazy_relative_mute_on_nested_referrer() -> Result<()> {
+fn mute_nested_reference_target() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::fs::create_dir(dir.path().join("sub"))?;
     let root = dir.path().join("root.usda");
@@ -398,32 +398,31 @@ fn lazy_relative_mute_on_nested_referrer() -> Result<()> {
     )?;
 
     let opened = Rc::new(RefCell::new(Vec::new()));
-    // Mute the model target by its relative spelling, as authored on the nested
-    // referrer `sub/mid.usda` (it resolves under `sub/`, not the root directory).
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
-        .mute(["model.usda"])
+        .mute(["sub/model.usda"])
         .open(root.to_str().unwrap())?;
 
     // Compose /P, following the nested reference to mid.usda and reaching the
-    // muted model reference.
+    // muted model reference; its identifier matches the muted one, so it is
+    // recognized at the demand point and never read.
     assert!(stage.prim("/P").is_valid()?);
     let opened_has = |needle: &str| opened.borrow().iter().any(|p| p.contains(needle));
     assert!(opened_has("mid.usda"), "the nested referrer must load");
     assert!(
         !opened_has("model.usda"),
-        "the relatively-muted nested target must never be opened, got {:?}",
+        "the muted nested target must never be opened, got {:?}",
         opened.borrow()
     );
     Ok(())
 }
 
-/// A relative mute is anchored against the layer that *authored* the arc, which
-/// may be a sublayer in a different directory than its layer stack's root: a
-/// reference authored in `detail/extra.usda` resolves `@model.usda@` under
-/// `detail/`, and muting the relative `"model.usda"` is recognized there.
+/// The arc's authoring layer is consulted, not only the root: a reference
+/// authored in `detail/extra.usda` (a sublayer of the referenced `target.usda`)
+/// resolves `@model.usda@` under `detail/`, so muting `"detail/model.usda"` — the
+/// path resolving from the root to that target's canonical identifier — mutes it.
 #[test]
-fn relative_mute_nested_sublayer() -> Result<()> {
+fn mute_target_under_nested_sublayer() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::fs::create_dir(dir.path().join("detail"))?;
     let root = dir.path().join("root.usda");
@@ -446,7 +445,7 @@ fn relative_mute_nested_sublayer() -> Result<()> {
     let opened = Rc::new(RefCell::new(Vec::new()));
     let stage = Stage::builder()
         .resolver(RecordingResolver::new(opened.clone()))
-        .mute(["model.usda"])
+        .mute(["detail/model.usda"])
         .open(root.to_str().unwrap())?;
 
     assert!(stage.prim("/P").is_valid()?);
@@ -454,8 +453,159 @@ fn relative_mute_nested_sublayer() -> Result<()> {
     assert!(opened_has("extra.usda"), "the authoring sublayer must load");
     assert!(
         !opened_has("model.usda"),
-        "the target muted relative to its authoring sublayer must not be opened, got {:?}",
+        "the muted target under the nested sublayer must not be opened, got {:?}",
         opened.borrow()
+    );
+    Ok(())
+}
+
+/// Muting keys on the canonical identifier: a layer muted by a relative spelling
+/// is the same entry as its absolute spelling, so re-muting the absolute is a
+/// no-op, both spellings read as muted, and unmuting through either fully restores
+/// it — and every notice carries the canonical identifier, whatever spelling was
+/// passed, so a listener mirroring the muted set by identifier stays in sync.
+#[test]
+fn mute_alternate_spelling() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let weak = dir.path().join("weak.usda");
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
+    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let abs = weak.to_str().unwrap();
+    // The identifier both spellings resolve to (what muting stores and notifies).
+    let canonical = ar::DefaultResolver::new().create_identifier(abs, None);
+    let read_x = || stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+
+    let muted = Rc::new(RefCell::new(Vec::<String>::new()));
+    let unmuted = Rc::new(RefCell::new(Vec::<String>::new()));
+    let _token = {
+        let (muted, unmuted) = (muted.clone(), unmuted.clone());
+        stage.add_sink(RecordingSink {
+            muting: Some(Box::new(move |_stage, layer, is_muted| {
+                if is_muted {
+                    muted.borrow_mut().push(layer.to_string());
+                } else {
+                    unmuted.borrow_mut().push(layer.to_string());
+                }
+            })),
+            ..Default::default()
+        })
+    };
+
+    assert_eq!(
+        read_x()?,
+        Some(sdf::Value::Double(1.0)),
+        "weak contributes x until muted"
+    );
+
+    // Mute by the relative spelling, then the absolute spelling names the same
+    // canonical identifier, so re-muting it is a no-op.
+    stage.mute_layer("weak.usda");
+    assert!(
+        stage.is_layer_muted(abs),
+        "the absolute spelling reads the same muted layer"
+    );
+    stage.mute_layer(abs);
+    assert_eq!(
+        stage.muted_layers(),
+        vec![canonical.clone()],
+        "both spellings are one canonical entry"
+    );
+    assert_eq!(read_x()?, None, "the muted weak layer contributes nothing");
+
+    // Unmute through the other spelling; the layer is fully restored.
+    stage.unmute_layer(abs);
+    assert!(
+        !stage.is_layer_muted("weak.usda"),
+        "unmuting any spelling unmutes the layer"
+    );
+    assert!(stage.muted_layers().is_empty());
+    assert_eq!(
+        read_x()?,
+        Some(sdf::Value::Double(1.0)),
+        "the unmuted weak layer contributes again"
+    );
+
+    // One notice each, both carrying the canonical identifier (not the spelling
+    // passed): the redundant mute fired nothing.
+    assert_eq!(*muted.borrow(), vec![canonical.clone()]);
+    assert_eq!(*unmuted.borrow(), vec![canonical]);
+    Ok(())
+}
+
+/// Open-time muting dedups co-resolving spellings the same way the runtime path
+/// does: seeding one loaded layer under both a relative and an absolute spelling
+/// lists it once and mutes it.
+#[test]
+fn mute_open_dedup() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let weak = dir.path().join("weak.usda");
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\ndef \"P\" {}\n")?;
+    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+    let abs = weak.to_str().unwrap();
+
+    let stage = Stage::builder().mute(["weak.usda", abs]).open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.muted_layers().len(),
+        1,
+        "two spellings of one loaded layer seed a single mute, got {:?}",
+        stage.muted_layers()
+    );
+    assert!(stage.is_layer_muted("weak.usda") && stage.is_layer_muted(abs));
+    assert_eq!(
+        stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        None,
+        "the muted weak layer contributes nothing"
+    );
+    Ok(())
+}
+
+/// A nested sublayer is muted by the path that resolves, from the stage root, to
+/// its canonical identifier: `sub/weak.usda` drops from the stack and unmutes
+/// through its absolute spelling (the same identifier).
+#[test]
+fn mute_nested_sublayer() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::create_dir(dir.path().join("sub"))?;
+    let root = dir.path().join("root.usda");
+    let mid = dir.path().join("sub").join("mid.usda");
+    let weak = dir.path().join("sub").join("weak.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\n(\n    subLayers = [@sub/mid.usda@]\n)\ndef \"P\" {}\n",
+    )?;
+    std::fs::write(&mid, "#usda 1.0\n(\n    subLayers = [@weak.usda@]\n)\n")?;
+    std::fs::write(&weak, "#usda 1.0\ndef \"P\" {\n    custom double x = 1\n}\n")?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let abs = weak.to_str().unwrap();
+    let read_x = || stage.attribute("/P.x").get_at::<sdf::Value>(usd::TimeCode::new(0.0));
+    assert_eq!(
+        read_x()?,
+        Some(sdf::Value::Double(1.0)),
+        "the nested sublayer contributes x"
+    );
+
+    // Mute by the root-relative path; `weak.usda` lives under `sub/`.
+    stage.mute_layer("sub/weak.usda");
+    assert!(
+        stage.is_layer_muted(abs),
+        "the muted nested layer reads as muted by absolute path"
+    );
+    assert_eq!(read_x()?, None, "the muted nested sublayer drops from the stack");
+
+    stage.unmute_layer(abs);
+    assert!(
+        !stage.is_layer_muted("sub/weak.usda"),
+        "unmuting by an alternate spelling unmutes it"
+    );
+    assert_eq!(
+        read_x()?,
+        Some(sdf::Value::Double(1.0)),
+        "the unmuted nested sublayer contributes again"
     );
     Ok(())
 }

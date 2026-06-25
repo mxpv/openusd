@@ -2831,14 +2831,22 @@ impl<'a, 'f> Indexer<'a, 'f> {
         self.inputs.stack.layer(self.node(node).layer_id()).identifier.clone()
     }
 
-    /// Whether the reference/payload target `asset_path` (already anchored) names
-    /// a muted layer, as resolved by the layer that authored the arc. A relative
-    /// muted identifier is anchored against its containing layer; the arc may be
-    /// authored on any member of `node`'s layer stack — a sublayer in a different
-    /// directory than the node's representative — so the target is matched against
-    /// each member's location. An exact-identifier mute matches under any anchor.
-    /// Guarded by [`has_muted_layers`](LayerGraph::has_muted_layers) so the common
-    /// unmuted stage does no anchoring work.
+    /// Whether the reference/payload target `asset_path` names a muted layer,
+    /// matched by the canonical identifier it would be interned under. A reference
+    /// may be authored on any member of `node`'s layer stack — a sublayer in a
+    /// different directory than the node's representative — so the target is
+    /// canonicalized against each member's location and looked up in the muted set
+    /// (C++ `_EvalRefOrPayloadArcs` checks the specific authoring `srcLayer`). The
+    /// muted set is keyed by identifiers anchored against the stage root, so a
+    /// nested target is muted by the path that resolves from the root to its
+    /// identifier. Guarded by [`has_muted_layers`](LayerGraph::has_muted_layers) so
+    /// the common unmuted stage does no anchoring work.
+    ///
+    /// TODO(perf): on a muted stage this resolves each member's anchor and
+    /// canonicalizes `asset_path` against it (a filesystem syscall apiece) for
+    /// every not-yet-loaded reference/payload arc. Cache the per-member anchors, or
+    /// track the specific authoring layer per arc entry so only one canonicalize
+    /// runs (the `srcLayer` C++ uses).
     fn arc_target_muted(&self, node: NodeId, asset_path: &str) -> bool {
         let graph = self.inputs.stack;
         graph.has_muted_layers()

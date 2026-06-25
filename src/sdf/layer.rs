@@ -455,7 +455,15 @@ impl Layer {
     /// `SdfLayer::IsAnonymous`; an anonymous layer has no asset-resolvable
     /// location.
     pub fn is_anonymous(&self) -> bool {
-        self.identifier.starts_with(ANONYMOUS_PREFIX)
+        Self::is_anonymous_identifier(&self.identifier)
+    }
+
+    /// Whether `identifier` is an anonymous-layer identifier (the `anon:` prefix),
+    /// without needing the layer itself. Mirrors C++
+    /// `SdfLayer::IsAnonymousLayerIdentifier`; the prefix is the single source of
+    /// truth for anonymity.
+    pub fn is_anonymous_identifier(identifier: &str) -> bool {
+        identifier.starts_with(ANONYMOUS_PREFIX)
     }
 
     /// Look up a prim spec at `path`. Returns `None` if no spec exists or the
