@@ -241,13 +241,6 @@
 //!   expression-variable context. Per-context fidelity holds *across* arcs (each
 //!   gets its own instance) but not for a sublayer diamond *within* a single
 //!   instance; a per-`(layer, context)` edge walk would close it.
-//! - Instance-scoped layer-stack invalidation: a `subLayers`/offset/relocate edit
-//!   clears every cached prim index ([`IndexCache::clear_all_indices`]) and
-//!   re-resolves every context-keyed stack instance, not just the indices and
-//!   instances whose members the edited layer contributes to. Keying
-//!   invalidation by the affected layer-stack instances would scope both to what
-//!   changed; the per-member dependency map already tracks which layers a stack
-//!   reads.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.

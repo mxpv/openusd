@@ -75,8 +75,8 @@ pub struct IndexCache {
     /// [`super::instancing`] (a second `impl IndexCache`). Callers go through
     /// the cache's facade methods (`is_instance` / `prototype_of` /
     /// `is_prototype` / …), never this field. Affected entries are dropped by
-    /// [`Self::invalidate_prototypes`] on a prim-level change, or the whole
-    /// registry by [`Self::clear_all_indices`] on a layer-stack rebuild.
+    /// [`Self::invalidate_prototypes`] on a prim-level change, or through
+    /// [`Self::invalidate_layers`] on a layer-stack edit.
     pub(super) prototypes: PrototypeRegistry,
     /// Memoized instance-proxy / prototype-descendant redirections (spec
     /// 11.3.3): a prim path mapped to the path that actually composes it
@@ -85,8 +85,8 @@ pub struct IndexCache {
     /// query). A non-redirected prim caches an identity entry, so the common
     /// non-instanced case skips the walk too. An entry holds only while the
     /// prototype registry that produced it is unchanged: it is cleared wholesale
-    /// when prototypes are invalidated ([`Self::invalidate_prototypes`] /
-    /// [`Self::clear_all_indices`]), and the subtree under a freshly
+    /// when prototypes are invalidated ([`Self::invalidate_prototypes`]), and the
+    /// subtree under a freshly
     /// minted `/__Prototype_N` is dropped at registration (a synthetic
     /// descendant queried before the mint cached an identity that must now
     /// redirect into the prototype namespace).
@@ -770,28 +770,16 @@ impl IndexCache {
         self.query_errors.clear();
     }
 
-    /// Drop every cached index, context, and dependency entry — plus the
-    /// shared-prototype registry and its redirection memo — without touching the
-    /// layer stack's precomputed state. Use this for a layer-stack rebuild, where
-    /// every cached prim must be re-evaluated; clearing the registry here (rather
-    /// than dropping each `/__Prototype_N` subtree first) avoids re-scanning the
-    /// cache per prototype only to wipe it wholesale.
-    pub(super) fn clear_all_indices(&mut self) {
-        self.store.clear();
-        self.query_errors.clear();
-        self.prototypes.clear();
-        self.redirected_prims.clear();
-    }
-
     /// Invalidates the cache after a layer-set change restructures only some
     /// prims: advances the composition revision (so cached value views rebuild)
     /// and drops just the cached indices that read one of the `affected` layers,
     /// via [`drop_indices_touching_layers`](Self::drop_indices_touching_layers).
-    /// Used for a layer-muting toggle and for a demanded layer that introduces
-    /// relocates; in both cases the graph's precomputed layer-stack state is
-    /// rebuilt by the mutation itself, so the cache is all that remains. Matches
-    /// the final composed result of a
-    /// [`clear_all_indices`](Self::clear_all_indices) with less recomposition.
+    /// Used for a layer-muting toggle, a `subLayers`/offset/relocate/`timeCodesPerSecond`
+    /// edit (see [`Changes::apply`](super::change::Changes::apply)), and a demanded
+    /// layer that introduces relocates; in each case the graph's precomputed
+    /// layer-stack state is rebuilt by the mutation first, so the cache is all that
+    /// remains. Drops exactly the cached indices whose composition reads an
+    /// `affected` layer, leaving the rest warm.
     pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         self.bump_revision();
         self.drop_indices_touching_layers(graph, affected);
@@ -800,11 +788,9 @@ impl IndexCache {
     /// Drop every cached prim index whose composition reads one of the `affected`
     /// layers (per [`IndexStore::indices_touching_layers`]) — together with its
     /// namespace descendants and any prototype the drops touch — leaving indices
-    /// that read none of them cached. The incremental counterpart of
-    /// [`clear_all_indices`](Self::clear_all_indices) for a layer-muting change:
-    /// muting or unmuting a layer can only restructure prims that compose against
-    /// a layer stack containing it (C++ `PcpChanges` layer-stack fanout), so the
-    /// rest of the cache stays warm.
+    /// that read none of them cached. Muting/unmuting or editing a layer can only
+    /// restructure prims that compose against a layer stack containing it (C++
+    /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
     fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
         if affected.is_empty() {
             return;
@@ -2572,8 +2558,8 @@ def "A" (
 
     /// A prim's recoverable build error is keyed by its path and replaced on
     /// rebuild, so dropping and recomposing the index (as a layer-stack edit
-    /// does via `clear_all_indices` + re-query) does not duplicate it, and a
-    /// prim that composes cleanly leaves no stale error behind.
+    /// does via a scoped drop + re-query) does not duplicate it, and a prim that
+    /// composes cleanly leaves no stale error behind.
     #[test]
     fn prim_errors_replace_on_rebuild() -> Result<()> {
         let (graph, mut cache) =
@@ -2590,7 +2576,7 @@ def "A" (
         assert_eq!(unresolved(&cache), 1, "the unresolved reference is recorded once");
 
         // Drop and rebuild — the bookkeeping a SIGNIFICANT layer-stack edit
-        // performs (clear_all_indices then a re-query). The error must not double.
+        // performs (a scoped drop then a re-query). The error must not double.
         cache.drop_index(&a);
         cache.ensure_index(&graph, &a)?;
         assert_eq!(

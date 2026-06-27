@@ -256,15 +256,27 @@ impl LayerStackRegistry {
         }
     }
 
-    /// The `(id, root, seed-vars)` of every non-root target stack, for re-resolving
-    /// members on a stack rebuild.
-    pub(crate) fn target_rebuild_specs(&self) -> Vec<(LayerStackId, LayerId, HashMap<String, Value>)> {
+    /// The `(id, root, seed-vars)` of every non-root target stack a rebuild must
+    /// re-resolve. With `affected` set, a stack whose members are disjoint from
+    /// those layers is skipped: the edit changed neither its sublayer edges nor an
+    /// authored `${VAR}` expression it resolves, so its members are unchanged.
+    /// `None` returns every target, for a full rebuild (a load can extend a stack
+    /// with a newly opened member the changed-edge set cannot name).
+    pub(crate) fn target_rebuild_specs(
+        &self,
+        affected: Option<&HashSet<LayerId>>,
+    ) -> Vec<(LayerStackId, LayerId, HashMap<String, Value>)> {
         self.instances
             .iter()
             .enumerate()
             .filter_map(|(i, inst)| match inst.key {
                 LayerStackKey::Root => None,
-                LayerStackKey::Target { root, seed } => Some((LayerStackId(i as u32), root, self.seed_vars(seed))),
+                LayerStackKey::Target { root, seed } => {
+                    if affected.is_some_and(|affected| inst.member_set.is_disjoint(affected)) {
+                        return None;
+                    }
+                    Some((LayerStackId(i as u32), root, self.seed_vars(seed)))
+                }
             })
             .collect()
     }

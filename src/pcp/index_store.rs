@@ -128,12 +128,6 @@ impl IndexStore {
         }
     }
 
-    /// Drops every entry and dependency.
-    pub(super) fn clear(&mut self) {
-        self.entries.clear();
-        self.deps.clear();
-    }
-
     /// The paths whose entry recorded a [`MalformedLayer`](Error::MalformedLayer)
     /// build error — an arc to an unreadable target that may now be readable, so
     /// the index should be dropped and re-demanded. Such an index carries no
@@ -177,15 +171,20 @@ impl IndexStore {
     }
 
     /// Every cached prim index whose composition reads one of the `affected`
-    /// layers — the victim set for a layer-muting invalidation.
+    /// layers — the victim set for a layer-set invalidation (`invalidate_layers`),
+    /// shared by a mute toggle and a `subLayers`/offset/relocate/`timeCodesPerSecond`
+    /// edit.
     ///
-    /// `affected` is [`LayerGraph::mute_fanout`](super::layer_graph::LayerGraph)'s
-    /// result: the toggled layer and every layer whose subtree contains it. A
-    /// node's layer stack lists the members it resolved against, so an index whose
-    /// dependency nodes touch an `affected` layer is exactly one the toggle can
-    /// restructure. An index that skipped a reference/payload arc because the
-    /// target root was muted keeps no node for it, so its recorded muted targets
-    /// (see [`PrimIndex::muted_external_targets`]) are checked too — without that,
+    /// A mute passes [`mute_fanout`](super::layer_graph::LayerGraph)'s result (the
+    /// toggled layer and every layer whose subtree contains it), so a sublayer
+    /// stack's root stays present even when the toggle empties the stack. An edit
+    /// passes the layers whose composed edges or relocates moved plus the authored
+    /// layers, which stay resolvable members of their stacks. A node's layer stack
+    /// lists the members it resolved against, so an index whose nodes touch an
+    /// `affected` layer is exactly one the change can restructure. An index that
+    /// skipped a reference/payload arc because the target root was muted keeps no
+    /// node for it, so its recorded muted targets (see
+    /// [`PrimIndex::muted_external_targets`]) are checked too — without that,
     /// unmuting the target could not find the index to recompose.
     ///
     /// TODO(perf): this scans every cached index (the reverse [`Dependencies`] map

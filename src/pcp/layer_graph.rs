@@ -303,7 +303,8 @@ impl LayerGraph {
     pub(crate) fn finalize(&mut self, session_layer_count: usize, root: Option<LayerId>) {
         self.session_layer_count = session_layer_count;
         self.root = root;
-        self.build_sublayer_edges();
+        // A full pass returns no scoped set; finalize re-resolves every stack.
+        let _ = self.build_sublayer_edges(None);
         self.mint_eager_target_stacks();
         self.recompute_relocates();
     }
@@ -344,12 +345,10 @@ impl LayerGraph {
     /// several arcs resolves each independently. The forest roots are walked
     /// strongest-first so a layer shared by several ancestries keeps the strongest
     /// context (its edges are built once, on first reach).
-    fn build_sublayer_edges(&mut self) {
-        // Start from a clean slate so a rebuild after a `subLayers` edit does not
-        // accumulate stale edges.
-        for node in self.nodes.values_mut() {
-            node.children.clear();
-        }
+    /// Returns the affected layer set for a scoped edit (the layers whose composed
+    /// edges changed, unioned with `edited`) so the caller can scope cache eviction
+    /// to the same stacks the re-resolution touched; `None` for a full pass.
+    fn build_sublayer_edges(&mut self, edited: Option<&HashSet<LayerId>>) -> Option<HashSet<LayerId>> {
         // Edges are resolved into a side buffer so the immutable `compose_edges`
         // borrow does not clash with the per-node mutation that applies them.
         let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::with_capacity(self.nodes.len());
@@ -385,12 +384,38 @@ impl LayerGraph {
         }
         self.sublayer_resolution = resolution;
 
-        for (id, edges) in all_edges {
-            self.nodes.get_mut(&id).expect("edge source exists").children = edges;
-        }
+        // Apply the composed edges. A full pass (`None`, at finalize or after a load
+        // that can extend a stack with a newly opened member) re-resolves every
+        // stack, so the edges are assigned outright. For an edit, the layers whose
+        // composed edges actually changed — folded together with the authored layers
+        // (`edited`) — scope the stack re-resolution to the affected instances: the
+        // edge diff catches a descendant whose inherited expression-variable context
+        // shifted, while `edited` catches an authored `${VAR}` sublayer expression
+        // that shifts a contextual stack's members without changing its plain edges.
+        let affected = match edited {
+            None => {
+                for (id, edges) in all_edges {
+                    self.nodes.get_mut(&id).expect("edge source exists").children = edges;
+                }
+                None
+            }
+            Some(edited) => {
+                let mut changed: HashSet<LayerId> = HashSet::new();
+                for (id, edges) in all_edges {
+                    let node = self.nodes.get_mut(&id).expect("edge source exists");
+                    if node.children != edges {
+                        node.children = edges;
+                        changed.insert(id);
+                    }
+                }
+                changed.extend(edited);
+                Some(changed)
+            }
+        };
 
-        self.rebuild_sublayer_stacks();
+        self.rebuild_sublayer_stacks(affected.as_ref());
         self.recompute_cycle_errors();
+        affected
     }
 
     /// Resolves the subtree rooted at `id` into edges against `ancestor` (the
@@ -597,29 +622,43 @@ impl LayerGraph {
     /// composed stacks rather than the sum over every layer (O(n²) for a deep
     /// chain): a sublayer-only layer participates through its root's stack, never its
     /// own.
-    fn rebuild_sublayer_stacks(&mut self) {
+    fn rebuild_sublayer_stacks(&mut self, affected: Option<&HashSet<LayerId>>) {
         // Re-resolve the muted identifiers to ids first, so a layer muted before
         // it was loaded takes effect the moment a later edit interns it and
         // rebuilds the stacks.
         self.resolve_muted_ids();
 
-        // The stage root stack: session layers at identity offset (minus a muted
-        // session subtree), then the root layer and its sublayers.
-        let pruned = self.muted_session_subtree();
-        let mut root_members: Vec<(LayerId, LayerOffset)> = self
-            .session_layers()
-            .iter()
-            .filter(|id| !pruned.contains(id))
-            .map(|&id| (id, LayerOffset::IDENTITY))
-            .collect();
-        if let Some(root) = self.root {
-            // The root layer is never muted (the Stage API rejects it).
-            root_members.extend(self.build_stack_members(root, &HashMap::new()));
+        // The stage root stack (session layers at identity offset minus a muted
+        // session subtree, then the root layer and its sublayers) is rebuilt on a
+        // full pass, or when an edited layer is one of its members — an edit
+        // elsewhere leaves it unchanged. A not-yet-built root (finalize) always
+        // rebuilds.
+        let rebuild_root = match affected {
+            None => true,
+            Some(affected) => self
+                .stacks
+                .member_set(LayerStackId::ROOT)
+                .is_none_or(|members| !members.is_disjoint(affected)),
+        };
+        if rebuild_root {
+            let pruned = self.muted_session_subtree();
+            let mut root_members: Vec<(LayerId, LayerOffset)> = self
+                .session_layers()
+                .iter()
+                .filter(|id| !pruned.contains(id))
+                .map(|&id| (id, LayerOffset::IDENTITY))
+                .collect();
+            if let Some(root) = self.root {
+                // The root layer is never muted (the Stage API rejects it).
+                root_members.extend(self.build_stack_members(root, &HashMap::new()));
+            }
+            self.stacks.set_root(root_members);
         }
-        self.stacks.set_root(root_members);
 
-        // Re-resolve each already-interned target stack (plain and contextual).
-        for (id, root, vars) in self.stacks.target_rebuild_specs() {
+        // Re-resolve each already-interned target stack (plain and contextual)
+        // whose members an edited layer contributes to; a full pass (`None`)
+        // re-resolves them all.
+        for (id, root, vars) in self.stacks.target_rebuild_specs(affected) {
             let members = self.build_stack_members(root, &vars);
             self.stacks.set_members(id, members);
         }
@@ -1134,12 +1173,21 @@ impl LayerGraph {
     /// [`relocate_errors`](Self::relocate_errors). Called after a
     /// `subLayers`/`subLayerOffsets` edit, where the graph's edges may be stale.
     ///
-    /// Returns the layers whose relocate pairs changed, so the caller can drop
-    /// the cached indices that read them (a demanded layer can introduce
-    /// relocates that restructure prims composed against its stack).
-    pub(crate) fn recompute_sublayers(&mut self) -> HashSet<LayerId> {
-        self.build_sublayer_edges();
-        self.recompute_relocates()
+    /// `edited` names the layers whose root metadata the edit authored; together
+    /// with the edges the rebuild finds changed, it scopes the stack re-resolution
+    /// to the instances the change can affect. Pass `None` for a load, where a
+    /// newly opened layer can join a stack the changed-edge set cannot name, so
+    /// every stack is re-resolved.
+    ///
+    /// Returns the affected layer set the caller drops cached indices against: the
+    /// layers whose composed edges shifted (unioned with `edited`) plus those whose
+    /// relocate pairs changed, so eviction covers exactly the stacks the rebuild
+    /// re-resolved. Empty when `edited` is `None` apart from the relocate set (a
+    /// full pass scopes nothing).
+    pub(crate) fn recompute_sublayers(&mut self, edited: Option<&HashSet<LayerId>>) -> HashSet<LayerId> {
+        let mut affected = self.build_sublayer_edges(edited).unwrap_or_default();
+        affected.extend(self.recompute_relocates());
+        affected
     }
 
     /// Re-derives every node's structurally valid relocate pairs from its
@@ -1563,7 +1611,11 @@ impl LayerGraph {
     /// drop muted layers. Returns the layers whose cached relocate pairs changed
     /// (from [`recompute_relocates`](Self::recompute_relocates)).
     fn recompose_for_mute(&mut self) -> HashSet<LayerId> {
-        self.rebuild_sublayer_stacks();
+        // A mute toggles the muted set rather than the sublayer edges, so the
+        // edge-diff scoping `build_sublayer_edges` uses does not apply; re-resolve
+        // every instance (an unmuted layer rejoins stacks whose members no longer
+        // list it, which a member-set scope would miss).
+        self.rebuild_sublayer_stacks(None);
         self.recompute_cycle_errors();
         self.recompute_relocates()
     }
@@ -2054,7 +2106,7 @@ mod tests {
         );
 
         graph.ensure_layer(sdf::Layer::new_in_memory("leaf.usda"));
-        graph.recompute_sublayers();
+        graph.recompute_sublayers(None);
         let leaf = graph.id_of("leaf.usda").unwrap();
         let ids: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
         assert_eq!(

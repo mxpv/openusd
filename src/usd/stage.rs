@@ -2521,7 +2521,7 @@ impl Stage {
         // before any stack is composed against them.
         if grew {
             // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
-            let relocated = self.layers.borrow_mut().recompute_sublayers();
+            let relocated = self.layers.borrow_mut().recompute_sublayers(None);
             // A demanded layer that introduces relocates restructures prims
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
@@ -3894,6 +3894,203 @@ def "T" {
         assert!(
             !stage.is_indexed(&p),
             "muting the root sublayer holding /P's opinion drops the cached index via the members prong"
+        );
+        Ok(())
+    }
+
+    /// A `subLayers` edit scopes its invalidation to the stacks the edited layer
+    /// belongs to: editing a reference target's sublayer stack drops the
+    /// referencing prim's index (its composition reads that target) while a prim
+    /// composed only from the root stack keeps its cached index. A blanket cache
+    /// clear would drop both.
+    #[test]
+    fn edit_keeps_independent_index() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", sdf::Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/Ref").unwrap(),
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "target.usda".into(),
+                    prim_path: sdf::path("/Target").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+            sdf::PrimSpec::new(e.data_mut(), "/Indep", sdf::Specifier::Def, "").unwrap();
+        });
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Target", sdf::Specifier::Def, "").unwrap();
+        });
+
+        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let (refp, indep) = (sdf::path("/Ref")?, sdf::path("/Indep")?);
+        // Force both prim indices into the cache (querying /Ref loads the target).
+        assert!(stage.prim(refp.clone()).is_valid()?);
+        assert!(stage.prim(indep.clone()).is_valid()?);
+        assert!(stage.is_indexed(&refp) && stage.is_indexed(&indep));
+
+        // Edit the reference target's sublayer stack — only /Ref reads it.
+        let extra = sdf::Layer::new_in_memory("extra.usda");
+        stage.insert_layer("target.usda", 0, extra, sdf::LayerOffset::IDENTITY)?;
+        assert!(
+            !stage.is_indexed(&refp),
+            "the referencing prim recomposes against the edited target stack"
+        );
+        assert!(stage.is_indexed(&indep), "the independent prim keeps its cached index");
+        Ok(())
+    }
+
+    /// Editing a reference target's sublayer stack re-resolves that target's stack
+    /// instance, so the referencing prim recomposes against the inserted sublayer's
+    /// stronger opinion.
+    #[test]
+    fn target_edit_recomposes_ref() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", sdf::Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/Ref").unwrap(),
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "target.usda".into(),
+                    prim_path: sdf::path("/A").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/A", sdf::Specifier::Def, "").unwrap();
+            e.pseudo_root_mut().unwrap().set_sublayers(["base.usda"]);
+        });
+
+        let stage = Stage::builder().make_stage(vec![root, target, opinion_layer("base.usda", 1.0)?], 0, Vec::new());
+        let ref_x = || stage.attribute("/Ref.x").get::<f64>();
+        assert_eq!(ref_x()?, Some(1.0), "the reference target's sublayer opinion composes");
+
+        // Insert a stronger sublayer into the target's stack; the referencing prim
+        // must recompose against the re-resolved target stack.
+        stage.insert_layer(
+            "target.usda",
+            0,
+            opinion_layer("over.usda", 2.0)?,
+            sdf::LayerOffset::IDENTITY,
+        )?;
+        assert_eq!(
+            ref_x()?,
+            Some(2.0),
+            "editing the target's subLayers re-resolves its stack and recomposes the referencing prim"
+        );
+        Ok(())
+    }
+
+    /// A `subLayers` edit that introduces a previously-absent prim invalidates its
+    /// cached negative result, so the prim becomes visible: the cached miss composed
+    /// against the edited layer's stack, so the scoped layer-set drop reaches it.
+    #[test]
+    fn edit_revives_missing_prim() -> Result<()> {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let stage = Stage::builder().make_stage(vec![root], 0, Vec::new());
+        let newp = sdf::path("/New")?;
+        // Query the absent prim, caching a negative (empty) index.
+        assert!(!stage.prim(newp.clone()).is_valid()?, "the prim is absent");
+        assert!(stage.is_indexed(&newp), "the miss is cached");
+
+        // Add a root sublayer that defines the prim.
+        let mut over = sdf::Layer::new_in_memory("over.usda");
+        edit_layer(&mut over, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/New", sdf::Specifier::Def, "").unwrap();
+        });
+        stage.insert_layer("root.usda", 0, over, sdf::LayerOffset::IDENTITY)?;
+        assert!(
+            stage.prim(newp.clone()).is_valid()?,
+            "the subLayers edit invalidates the cached miss and the prim becomes visible"
+        );
+        Ok(())
+    }
+
+    /// A cached miss for a reference descendant is invalidated when the reference
+    /// target's sublayer stack gains a spec for it — the decisive case, since the
+    /// miss's only tie to the edited layer is its arc node, not its root-stack
+    /// local node.
+    #[test]
+    fn target_edit_revives_descendant() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/Ref", sdf::Specifier::Def, "").unwrap();
+            e.data_mut().set_field(
+                &sdf::path("/Ref").unwrap(),
+                sdf::FieldKey::References.as_str(),
+                sdf::Value::ReferenceListOp(sdf::ReferenceListOp::prepended([sdf::Reference {
+                    asset_path: "target.usda".into(),
+                    prim_path: sdf::path("/T").unwrap(),
+                    ..Default::default()
+                }])),
+            );
+        });
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/T", sdf::Specifier::Def, "").unwrap();
+        });
+
+        let stage = Stage::builder().make_stage(vec![root, target], 0, Vec::new());
+        let missing = sdf::path("/Ref/Missing")?;
+        assert!(
+            !stage.prim(missing.clone()).is_valid()?,
+            "the reference descendant is absent"
+        );
+        assert!(stage.is_indexed(&missing), "the miss is cached");
+
+        // Add a sublayer to the target that defines the missing prim.
+        let mut over = sdf::Layer::new_in_memory("over.usda");
+        edit_layer(&mut over, |e| {
+            sdf::PrimSpec::new(e.data_mut(), "/T", sdf::Specifier::Def, "").unwrap();
+            sdf::PrimSpec::new(e.data_mut(), "/T/Missing", sdf::Specifier::Def, "").unwrap();
+        });
+        stage.insert_layer("target.usda", 0, over, sdf::LayerOffset::IDENTITY)?;
+        assert!(
+            stage.prim(missing.clone()).is_valid()?,
+            "editing the target's subLayers invalidates the cached reference-descendant miss"
+        );
+        Ok(())
+    }
+
+    /// Editing the root layer's `timeCodesPerSecond` re-scales the sublayer edge
+    /// offsets, so a time-sampled value from a sublayer at a different rate
+    /// recomposes to the value a fresh open at the new rate produces.
+    #[test]
+    fn tcps_edit_rescales_samples() -> Result<()> {
+        let build = |root_tcps: f64| -> Stage {
+            let mut root = sdf::Layer::new_in_memory("root.usda");
+            edit_layer(&mut root, |e| {
+                let mut pr = e.pseudo_root_mut().unwrap();
+                pr.set_sublayers(["sub.usda"]);
+                pr.set_time_codes_per_second(root_tcps);
+            });
+            let mut sub = sdf::Layer::new_in_memory("sub.usda");
+            edit_layer(&mut sub, |e| {
+                e.pseudo_root_mut().unwrap().set_time_codes_per_second(2.0);
+                let mut x =
+                    sdf::AttributeSpec::new(e.data_mut(), "/A.x", "double", sdf::Variability::Varying, true).unwrap();
+                x.set_time_sample(0.0, sdf::Value::Double(0.0));
+                x.set_time_sample(20.0, sdf::Value::Double(200.0));
+            });
+            Stage::builder().make_stage(vec![root, sub], 0, Vec::new())
+        };
+        let read = |s: &Stage| s.attribute("/A.x").get_at::<f64>(crate::usd::TimeCode::new(8.0));
+
+        let stage = build(1.0);
+        let before = read(&stage)?;
+        stage.set_time_codes_per_second(2.0)?;
+        let after = read(&stage)?;
+        let fresh = read(&build(2.0))?;
+
+        assert_ne!(before, fresh, "the root rate changes the retimed sample value");
+        assert_eq!(
+            after, fresh,
+            "editing timeCodesPerSecond recomposes the sublayer offset to the fresh-open value"
         );
         Ok(())
     }

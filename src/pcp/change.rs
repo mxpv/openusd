@@ -18,7 +18,7 @@
 //!   flag in place instead of rebuilding, dropping the local index only when
 //!   it holds no node at the site (a brand-new spec needs a fresh build).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use bitflags::bitflags;
 
@@ -40,6 +40,12 @@ pub(crate) struct Changes {
     pub cache: CacheChanges,
     /// Per-layer-stack flags.
     pub layer_stack: LayerStackChanges,
+    /// The layers whose root metadata edit set a [`LayerStackChanges`] flag. A
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond` edit keeps its layer a
+    /// member of every stack the layer participates in, so dropping the indices
+    /// whose composition reads one of these layers ([`IndexCache::invalidate_layers`])
+    /// scopes the layer-stack invalidation to exactly the affected stacks.
+    layer_stack_layers: HashSet<LayerId>,
 }
 
 /// Path-sets identifying which cached prim indices to invalidate.
@@ -84,13 +90,17 @@ bitflags! {
         const OFFSETS = 1 << 1;
         /// `layerRelocates` was edited.
         const RELOCATES = 1 << 2;
-        /// The whole stack should be treated as significantly changed
-        /// (every index dropped).
+        /// The stack changed significantly: every index whose composition reads
+        /// one of its layers is dropped and recomposed.
         const SIGNIFICANT = 1 << 3;
+        /// `timeCodesPerSecond` / `framesPerSecond` was edited. The effective rate
+        /// retimes each sublayer edge offset (spec 12.3.2), so the composed edges
+        /// must rebuild even though no sublayer was added or reordered.
+        const TIME_CODES = 1 << 4;
 
-        /// Any change that requires recomputing the sublayer ordering /
-        /// layer offsets map.
-        const NEEDS_LAYER_STACK_REBUILD = Self::LAYERS.bits() | Self::OFFSETS.bits();
+        /// Any change that requires recomputing the sublayer ordering, layer
+        /// offsets, or the time-codes retiming folded into the edge offsets.
+        const NEEDS_LAYER_STACK_REBUILD = Self::LAYERS.bits() | Self::OFFSETS.bits() | Self::TIME_CODES.bits();
         /// Any change that requires recomputing the per-layer relocates
         /// table.
         const NEEDS_RELOCATES_REBUILD = Self::LAYERS.bits() | Self::RELOCATES.bits();
@@ -160,24 +170,37 @@ impl Changes {
         }
     }
 
-    fn classify_root_entry(&mut self, _cache: &IndexCache, _layer: LayerId, entry: &ChangeEntry) {
+    fn classify_root_entry(&mut self, _cache: &IndexCache, layer: LayerId, entry: &ChangeEntry) {
+        let mut touches_stack = false;
         for key in &entry.info_changed {
             if *key == FieldKey::SubLayers.as_str() {
                 self.layer_stack |= LayerStackChanges::LAYERS | LayerStackChanges::SIGNIFICANT;
+                touches_stack = true;
             } else if *key == FieldKey::SubLayerOffsets.as_str() {
                 self.layer_stack |= LayerStackChanges::OFFSETS | LayerStackChanges::SIGNIFICANT;
+                touches_stack = true;
             } else if *key == FieldKey::LayerRelocates.as_str() {
                 self.layer_stack |= LayerStackChanges::RELOCATES | LayerStackChanges::SIGNIFICANT;
+                touches_stack = true;
             } else if *key == FieldKey::TimeCodesPerSecond.as_str() || *key == FieldKey::FramesPerSecond.as_str() {
                 // The effective timeCodesPerSecond (authored rate, else
-                // framesPerSecond) retimes reference/payload arcs whose target
-                // resolves at a different rate (spec 12.3.2, see
-                // `arc_tcps_scale`). Every cached index that folded the old
-                // ratio into an arc offset is now stale, so drop the stack.
-                self.layer_stack |= LayerStackChanges::SIGNIFICANT;
+                // framesPerSecond) retimes each sublayer edge offset by the
+                // per-hop ratio (spec 12.3.2, folded into `LayerNode::children` by
+                // `build_sublayer_edges`). `TIME_CODES` rebuilds those edges so the
+                // stale ratio is refreshed; `SIGNIFICANT` then drops the indices
+                // that read the re-offset stack.
+                self.layer_stack |= LayerStackChanges::TIME_CODES | LayerStackChanges::SIGNIFICANT;
+                touches_stack = true;
             } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
+        }
+        // Record the layer behind any layer-stack-tier flag so `apply` can scope the
+        // invalidation to the stacks this layer is a member of. Each edited layer in
+        // a round is attributed independently, so a multi-layer edit invalidates
+        // every affected stack.
+        if touches_stack {
+            self.layer_stack_layers.insert(layer);
         }
     }
 
@@ -227,17 +250,47 @@ impl Changes {
         // is the single funnel for every authoring and layer-stack edit, so a
         // value-only change that drops no index still invalidates them.
         cache.bump_revision();
-        // Any index invalidation can change which prims are instances or how
-        // they compose, so affected entries in the shared-prototype registry
-        // (spec 11.3.3) must be dropped rather than left stale; they are lazily
-        // recomposed on the next instancing query. A prim-level change drops only
-        // the prototypes whose instances or shared content it touches; a
-        // layer-stack rebuild clears the whole registry as part of the
-        // `clear_all_indices` below, so it needs no per-prototype work here.
-        if !self.layer_stack.contains(LayerStackChanges::SIGNIFICANT)
-            && (!self.cache.did_change_significantly.is_empty()
-                || !self.cache.did_change_prims.is_empty()
-                || !self.cache.did_change_specs.is_empty())
+
+        // Rebuild the graph's layer-stack precomputed state before the scoped drop
+        // below reads it, and collect the affected layer set the drop evicts
+        // against. A `subLayers`/`subLayerOffsets`/`timeCodesPerSecond` edit rebuilds
+        // the sublayer edges (which subsumes the relocate recompute) and returns the
+        // layers whose composed edges shifted, the authored layers, and any whose
+        // relocates moved; a `layerRelocates`-only edit refreshes the cached
+        // relocates, with the edited layer added to its relocate set. Each refreshes
+        // the graph's own diagnostic buckets in place; the cache holds no copy.
+        let affected = if self
+            .layer_stack
+            .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
+        {
+            graph.recompute_sublayers(Some(&self.layer_stack_layers))
+        } else if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
+            let mut relocated = graph.recompute_relocates();
+            relocated.extend(self.layer_stack_layers.iter().copied());
+            relocated
+        } else {
+            HashSet::new()
+        };
+
+        // Layer-stack-tier change: drop only the indices whose composition reads a
+        // stack the rebuild re-resolved. `affected` names every such stack's layers
+        // — the edited layers stay members of the stacks they belong to, the edge
+        // diff adds a descendant whose inherited context shifted, and the relocate
+        // set adds any whose effective relocates moved — so `invalidate_layers`
+        // evicts those indices and the prototypes they touch and leaves the rest
+        // warm.
+        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
+            cache.invalidate_layers(graph, &affected);
+        }
+
+        // A prim-tier index invalidation can change which prims are instances or
+        // how they compose, so affected entries in the shared-prototype registry
+        // (spec 11.3.3) are dropped rather than left stale and lazily recomposed
+        // on the next instancing query. The layer-stack path evicted its
+        // prototypes through `invalidate_layers` above.
+        if !self.cache.did_change_significantly.is_empty()
+            || !self.cache.did_change_prims.is_empty()
+            || !self.cache.did_change_specs.is_empty()
         {
             let changed: Vec<Path> = self
                 .cache
@@ -250,35 +303,6 @@ impl Changes {
             cache.invalidate_prototypes(&changed);
         }
 
-        // Order matters: clear the index cache BEFORE rebuilding the
-        // layer stack's precomputed state. Cached prim graphs were
-        // composed against the old composed stacks and relocates; if a
-        // future `recompute_*` ever inspects `indices` (e.g. to scope an
-        // incremental rebuild) it must not see graphs pinned to the
-        // pre-update state. The order is also panic-safe — if a
-        // `recompute_*` panics, `indices` is already empty rather than
-        // populated with stale entries pointing at the new stack.
-        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            cache.clear_all_indices();
-        }
-        // A `subLayers`/`subLayerOffsets` edit rebuilds the graph's sublayer
-        // edges (which subsumes the relocate recompute); a `layerRelocates`-only
-        // edit refreshes the cached authored relocates. Each refreshes the
-        // graph's own diagnostic buckets in place; the cache holds no copy.
-        if self
-            .layer_stack
-            .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
-        {
-            graph.recompute_sublayers();
-        } else if self.layer_stack.intersects(LayerStackChanges::NEEDS_RELOCATES_REBUILD) {
-            graph.recompute_relocates();
-        }
-        if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            // Cache already cleared above; layer-stack precomputed state
-            // is now in sync. Skip the per-path drops below since they'd
-            // be no-ops against an empty cache.
-            return;
-        }
         for path in &self.cache.did_change_significantly {
             cache.drop_index_subtree(path);
         }

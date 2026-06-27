@@ -190,15 +190,6 @@ impl PrototypeRegistry {
         self.by_root.nearest_ancestor(&start?).map(|(root, _)| root.clone())
     }
 
-    /// Drops every prototype so stale instance-to-prototype mappings do not
-    /// survive a composition change; the registry is rebuilt lazily on the next
-    /// instancing query. `count` stays monotonic (see its doc).
-    pub(super) fn clear(&mut self) {
-        self.by_root.clear();
-        self.by_instance.clear();
-        self.by_key.clear();
-    }
-
     /// Removes every prototype the change set could have invalidated, returning
     /// the dropped `/__Prototype_N` roots so the cache can evict their indices.
     /// A prototype is affected when a changed prim path lies on the ancestor
@@ -285,8 +276,8 @@ impl IndexCache {
     ///
     /// Pure analysis over the change list (no composition), so it stays
     /// rayon-friendly: see [`PrototypeRegistry::remove_affected`]. A layer-stack
-    /// rebuild instead clears the whole registry through
-    /// [`Self::clear_all_indices`].
+    /// edit instead drops the affected prototypes through
+    /// [`Self::invalidate_layers`].
     pub(crate) fn invalidate_prototypes(&mut self, changed: &[Path]) {
         // A prototype's whole namespace composes in place now (the root from its
         // materialized index, descendants by deepening it; see

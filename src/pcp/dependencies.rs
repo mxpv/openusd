@@ -107,13 +107,6 @@ impl Dependencies {
         }
     }
 
-    /// Drop all entries.
-    pub(super) fn clear(&mut self) {
-        self.per_layer.clear();
-        self.by_prim.clear();
-        self.by_path.clear();
-    }
-
     /// Find prim indices that depend on `(layer_id, site_path)` or on any
     /// ancestor of `site_path`.
     ///
