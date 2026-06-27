@@ -324,9 +324,20 @@ pub struct EditTarget {
 enum AuthoringStack {
     /// The stage root layer stack.
     Root,
-    /// A referenced asset's sublayer stack, rooted at the layer with this
-    /// canonical identifier.
-    Referenced(String),
+    /// A referenced asset's sublayer stack (boxed to keep the enum small). The
+    /// context is kept so the namespace editor reconstructs the same
+    /// context-resolved stack rather than the plain one, whose members can differ.
+    Referenced(Box<ReferencedStack>),
+}
+
+/// A referenced asset's sublayer stack an [`EditTarget`] authors into, rooted at
+/// the layer with `root`'s canonical identifier and resolved under `expr_vars` —
+/// the expression variables inherited across the arc (empty for a plain stack, the
+/// `${VAR}` context for a contextual one).
+#[derive(Debug, Clone, PartialEq)]
+struct ReferencedStack {
+    root: String,
+    expr_vars: HashMap<String, sdf::Value>,
 }
 
 /// Composition arc kind selecting which arc on a prim an arc-based
@@ -863,16 +874,16 @@ impl Stage {
         // Composes the prim (loading any reference/payload target on demand) so
         // the arc lookup reads the current, fully-resolved composition.
         let info = self.with_cache(|graph, cache| cache.edit_target_node_info(graph, prim_path, |a| arc.matches(a)))?;
-        let (layer_identifier, mapping, stack_root) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
+        let (layer_identifier, mapping, stack_info) = info.ok_or_else(|| StageAuthoringError::NoArcNode {
             path: prim_path.clone(),
             arc,
         })?;
         let mut target = self.bound_target(layer_identifier, mapping);
         // Record the node's own layer stack so the namespace editor authors into
         // it exactly, rather than inferring it from layer membership.
-        target.authoring_stack = Some(match stack_root {
+        target.authoring_stack = Some(match stack_info {
             None => AuthoringStack::Root,
-            Some(root) => AuthoringStack::Referenced(root),
+            Some((root, expr_vars)) => AuthoringStack::Referenced(Box::new(ReferencedStack { root, expr_vars })),
         });
         Ok(target)
     }
@@ -1334,16 +1345,31 @@ impl Stage {
     /// member layer ids with
     /// [`LayerGraph::layer_stack`](crate::pcp::LayerGraph::layer_stack).
     pub(super) fn mapped_target_stack_id(&self, target_layer: pcp::LayerId) -> pcp::LayerStackId {
-        let graph = self.layers();
-        match &self.edit_target.borrow().authoring_stack {
-            Some(AuthoringStack::Root) => graph.root_layer_stack_id(),
-            Some(AuthoringStack::Referenced(root)) => match graph.id_of(root) {
-                Some(root_id) => graph.sublayer_stack_id(root_id),
-                None => graph.sublayer_stack_id(target_layer),
-            },
-            None if graph.root_layer_stack().iter().any(|&(id, _)| id == target_layer) => graph.root_layer_stack_id(),
-            None => graph.sublayer_stack_id(target_layer),
-        }
+        // Determine the `(root, inherited context)` the target authors into: the
+        // captured stack for an arc target (its context preserved so a contextual
+        // stack reconstructs faithfully), or, for a target inferred from layer
+        // membership, the root stack when the layer belongs to it, else the plain
+        // stack rooted at the layer itself.
+        let (root, expr_vars) = match &self.edit_target.borrow().authoring_stack {
+            Some(AuthoringStack::Root) => return self.layers().root_layer_stack_id(),
+            Some(AuthoringStack::Referenced(stack)) => (
+                self.layers().id_of(&stack.root).unwrap_or(target_layer),
+                stack.expr_vars.clone(),
+            ),
+            None if self
+                .layers()
+                .root_layer_stack()
+                .iter()
+                .any(|&(id, _)| id == target_layer) =>
+            {
+                return self.layers().root_layer_stack_id()
+            }
+            None => (target_layer, HashMap::new()),
+        };
+        // Resolve to the exact stack, minting it when the target was never composed
+        // in this session rather than falling back to an unrelated stack (which would
+        // seed the relocate plan from the wrong layers).
+        self.layers.borrow_mut().ensure_external_stack(root, &expr_vars)
     }
 
     /// Run `f` as one committed atomic transaction on the single layer
@@ -2433,15 +2459,15 @@ impl Stage {
         let before = self.layers.borrow().len();
         let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
         let mut newly_failed = false;
-        let mut newly_seeded = false;
+        let mut newly_interned = false;
         for demand in pending {
             let asset_path = demand.asset_path.as_str();
             // Whether the target needs opening, and `reload` whether it is a re-open
-            // of an already-interned target: interned by an earlier variable-free arc
-            // but not yet seeded with this arc's variables. A re-open (re)loads the
+            // of an already-interned target reached by a new expression-variable
+            // context with no contextual instance yet. A re-open (re)loads the
             // `${VAR}` sublayers the new context resolves — including ones nested
-            // below a literal sublayer — that the first open left unloaded. A target
-            // a prior open failed is not retried.
+            // below a literal sublayer — that an earlier context's open left
+            // unloaded. A target a prior open failed is not retried.
             let open = {
                 let graph = self.layers.borrow();
                 if graph.load_failed(asset_path) {
@@ -2449,7 +2475,7 @@ impl Stage {
                 } else {
                     match graph.id_of(asset_path) {
                         None => Some(false),
-                        Some(target) if !demand.expr_vars.is_empty() && !graph.is_seeded(target) => Some(true),
+                        Some(target) if graph.needs_contextual_open(target, &demand.expr_vars) => Some(true),
                         Some(_) => None,
                     }
                 }
@@ -2485,30 +2511,15 @@ impl Stage {
                     }
                 }
             }
-            // Record the variables inherited across the arc against the interned
-            // target root, so the sublayer-edge rebuild resolves the target's
-            // `${VAR}` sublayers against the context the arc carried. This runs for
-            // an already-interned target too: when several arcs share a target, the
-            // first to reach it may carry no variables (so it records nothing), and
-            // a later variable-carrying arc must still seed it. `seed_subtree` keeps
-            // the first context recorded, and an empty context needs no entry — the
-            // rebuild reaches such a root with the empty context anyway.
-            if !demand.expr_vars.is_empty() {
-                let root = self.layers.borrow().id_of(asset_path);
-                if let Some(root) = root {
-                    newly_seeded |= self.layers.borrow_mut().seed_subtree(root, demand.expr_vars.clone());
-                }
-            }
         }
         let errors = sublayer_errors.into_inner();
         if !errors.is_empty() {
             self.cache.borrow_mut().record_collection_errors(errors);
         }
         let grew = self.layers.borrow().len() != before;
-        // A new seed changes how an already-interned target's `${VAR}` sublayers
-        // resolve, so rebuild the edges for it as well as for newly joined layers.
-        if grew || newly_seeded {
-            // Wire the sublayer edges (and relocates) for the newly interned layers.
+        // Newly joined layers need their plain sublayer edges (and relocates) wired
+        // before any stack is composed against them.
+        if grew {
             // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
             let relocated = self.layers.borrow_mut().recompute_sublayers();
             // A demanded layer that introduces relocates restructures prims
@@ -2519,7 +2530,17 @@ impl Stage {
                 self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
             }
         }
-        grew || newly_failed || newly_seeded
+        // Mint each demand's layer stack now that the edges are wired. The layer
+        // graph applies the plain-vs-contextual policy; `intern_external` is
+        // idempotent, so a plain stack the rebuild above already minted, or a
+        // context reached before, is left unchanged.
+        for demand in pending {
+            let root = self.layers.borrow().id_of(demand.asset_path.as_str());
+            if let Some(root) = root {
+                newly_interned |= self.layers.borrow_mut().intern_external(root, &demand.expr_vars).1;
+            }
+        }
+        grew || newly_failed || newly_interned
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -3372,6 +3393,85 @@ def "T" {
             ),
         ])
         .map(|_| ())
+    }
+
+    /// A variable-free arc to a shared `${VAR}`-sublayer target stays isolated from
+    /// another arc that reached the same target carrying a variable, even when the
+    /// variable-carrying arc composed first. Each arc resolves the `${V}` sublayer
+    /// against its own inherited context, so `/P` (no variable) does not pick up
+    /// `/Q`'s `V=chosen` sublayer and `/P.x` stays absent.
+    #[test]
+    fn shared_target_contexts_isolated() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let write = |name: &str, body: &str| std::fs::write(tmp.path().join(name), body);
+        write(
+            "root.usda",
+            r#"#usda 1.0
+def "P" (
+    references = @./target.usda@</T>
+) {
+}
+def "Q" (
+    references = @./middle.usda@</Q>
+) {
+}
+"#,
+        )?;
+        write(
+            "middle.usda",
+            r#"#usda 1.0
+(
+    expressionVariables = {
+        string V = "chosen"
+    }
+)
+def "Q" (
+    references = @./target.usda@</T>
+) {
+}
+"#,
+        )?;
+        write(
+            "target.usda",
+            r#"#usda 1.0
+(
+    subLayers = [
+        @`"./${V}.usda"`@
+    ]
+)
+def "T" {
+}
+"#,
+        )?;
+        write(
+            "chosen.usda",
+            r#"#usda 1.0
+over "T" {
+    custom double x = 42
+}
+"#,
+        )?;
+
+        let stage = Stage::open(&tmp.path().join("root.usda").to_string_lossy())?;
+        // Compose `/Q` first: it reaches the target carrying `V=chosen`, so the
+        // target's `${V}` sublayer resolves to `chosen.usda`.
+        assert_eq!(
+            stage
+                .attribute("/Q.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(42.0)),
+            "the variable-carrying arc resolves the `${{V}}` sublayer",
+        );
+        // `/P` reaches the same target with no variable. Its `${V}` sublayer cannot
+        // resolve, so `/P.x` stays absent — not polluted by `/Q`'s context.
+        assert_eq!(
+            stage
+                .attribute("/P.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            None,
+            "the variable-free arc is isolated from the other arc's context",
+        );
+        Ok(())
     }
 
     /// A target shared by a variable-free arc and a later variable-carrying arc

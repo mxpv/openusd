@@ -252,7 +252,7 @@ impl Changes {
 
         // Order matters: clear the index cache BEFORE rebuilding the
         // layer stack's precomputed state. Cached prim graphs were
-        // composed against the old `sublayer_stacks`/`Relocates`; if a
+        // composed against the old composed stacks and relocates; if a
         // future `recompute_*` ever inspects `indices` (e.g. to scope an
         // incremental rebuild) it must not see graphs pinned to the
         // pre-update state. The order is also panic-safe — if a

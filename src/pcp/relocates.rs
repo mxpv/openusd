@@ -17,7 +17,7 @@ use crate::sdf::{self, element_cmp, Path, PathComponent, RelocateList};
 use crate::tf::Token;
 
 use super::layer_graph::LayerGraph;
-use super::layer_graph::LayerStackId;
+use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimEntry;

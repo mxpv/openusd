@@ -11,7 +11,7 @@ use bitflags::bitflags;
 
 use crate::sdf::Path;
 
-use super::layer_graph::LayerStackId;
+use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::LayerId;
 
@@ -132,11 +132,13 @@ pub struct Node {
     /// sublayer offset onto this node's arc offset (`map_to_root.time_offset()`).
     pub(crate) layer_stack: LayerStackId,
     /// The strongest (representative) layer of [`layer_stack`](Self::layer_stack)
-    /// (C++ `PcpNode::GetLayerStack()->GetLayers().front()`). Cached so structural
-    /// identity ([`same_site`](PrimIndexGraph::same_site),
-    /// [`node_using_site`](PrimIndexGraph::node_using_site)) and
-    /// [`layer_id`](Self::layer_id) resolve without the layer graph; equals the
-    /// first member of the resolved `layer_stack`.
+    /// (C++ `PcpNode::GetLayerStack()->GetLayers().front()`). Cached so
+    /// [`layer_id`](Self::layer_id) — the member handle dependencies and dumps
+    /// key on — resolves without the layer graph; equals the first member of the
+    /// resolved `layer_stack`. Structural identity
+    /// ([`same_site`](PrimIndexGraph::same_site),
+    /// [`node_using_site`](PrimIndexGraph::node_using_site)) keys on
+    /// [`layer_stack`](Self::layer_stack) instead.
     pub(crate) representative: LayerId,
     /// The path within that layer (may differ from composed path due to remapping).
     pub(crate) path: Path,
@@ -516,20 +518,18 @@ impl PrimIndexGraph {
     }
 
     /// Finds a non-inert, non-culled node already on this graph whose site
-    /// matches `(root_layer, path)` (C++ `PcpPrimIndex_Graph::GetNodeUsingSite`).
+    /// matches `(layer_stack, path)` (C++ `PcpPrimIndex_Graph::GetNodeUsingSite`).
     ///
-    /// The representative layer index is the root sublayer of a node's layer
-    /// stack, which uniquely identifies that stack, so matching it together with
-    /// the path is equivalent to C++'s `layerStack == site.layerStack` test. The
-    /// task-queue indexer uses this for opt-in duplicate-node skipping by the
-    /// class-based arcs (inherits/specializes); reference/payload arcs keep
-    /// diamonds.
-    pub(crate) fn node_using_site(&self, root_layer: LayerId, path: &Path) -> Option<NodeId> {
+    /// Matches on the node's layer-stack handle directly (C++'s `layerStack ==
+    /// site.layerStack` test). The task-queue indexer uses this for opt-in
+    /// duplicate-node skipping by the class-based arcs (inherits/specializes);
+    /// reference/payload arcs keep diamonds.
+    pub(crate) fn node_using_site(&self, layer_stack: LayerStackId, path: &Path) -> Option<NodeId> {
         self.nodes
             .iter()
             .position(|node| {
                 !node.flags.intersects(NodeFlags::INERT | NodeFlags::CULLED)
-                    && node.layer_id() == root_layer
+                    && node.layer_stack == layer_stack
                     && &node.path == path
             })
             .map(|i| NodeId(i as u32))
@@ -764,12 +764,12 @@ impl PrimIndexGraph {
         self.nodes[id.idx()].origin.unwrap_or(NodeId::INVALID)
     }
 
-    /// Whether two nodes carry the same site: same representative layer and path
+    /// Whether two nodes carry the same site: same layer stack and path
     /// (C++ `GetSite() ==`).
     pub(crate) fn same_site(&self, a: NodeId, b: NodeId) -> bool {
         a.is_valid()
             && b.is_valid()
-            && self.nodes[a.idx()].layer_id() == self.nodes[b.idx()].layer_id()
+            && self.nodes[a.idx()].layer_stack == self.nodes[b.idx()].layer_stack
             && self.nodes[a.idx()].path == self.nodes[b.idx()].path
     }
 
@@ -988,7 +988,7 @@ mod tests {
 
     fn node(path: &str, namespace_depth: u16) -> Node {
         let mut n = Node::new(
-            LayerStackId::Sublayer(LayerId::from_raw(0)),
+            LayerStackId::from_raw(1),
             LayerId::from_raw(0),
             Path::from(path),
             ArcType::Inherit,

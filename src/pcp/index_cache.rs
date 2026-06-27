@@ -25,12 +25,19 @@ use super::clip::{ClipCache, ClipQuery, ResolvedClipSet};
 use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
-use super::layer_graph::{LayerGraph, LayerStackId};
+use super::layer_graph::LayerGraph;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
 use super::prim_index::{AncestorArc, CompositionContext, Demand, PrimIndex};
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, MapFunction, VariantFallbackMap};
+
+/// What [`IndexCache::edit_target_node_info`] reports for an arc node: the target
+/// layer's identifier, the node's spec-to-scene mapping, and the layer stack it
+/// composes in — `None` for the stage root stack, else `(target root identifier,
+/// inherited expression-variable context)` so an edit target reconstructs the same
+/// (possibly contextual) stack.
+type EditTargetNodeInfo = (String, MapFunction, Option<(String, HashMap<String, Value>)>);
 
 /// Lazily-built composition graph.
 ///
@@ -921,7 +928,7 @@ impl IndexCache {
         graph: &LayerGraph,
         prim_path: &Path,
         matches: impl Fn(ArcType) -> bool,
-    ) -> Result<Option<(String, MapFunction, Option<String>)>> {
+    ) -> Result<Option<EditTargetNodeInfo>> {
         let prim_path = self.effective_path(graph, prim_path)?.prim_path();
         self.ensure_index(graph, &prim_path)?;
         let Some(index) = self.store.index_at(&prim_path) else {
@@ -929,20 +936,24 @@ impl IndexCache {
         };
         Ok(index.nodes().find_map(|node| {
             (matches(node.arc) && node.has_specs() && !node.is_permission_denied()).then(|| {
-                // The identifier of the layer stack the node composes in: `None`
-                // for the stage root stack, the referenced asset's root layer for
-                // a sublayer stack. The edit target carries this so its authoring
-                // stack is known exactly rather than re-inferred from layer
-                // membership (ambiguous when a referenced asset is also a root
-                // sublayer).
-                let stack_root = match node.layer_stack_id() {
-                    LayerStackId::Root => None,
-                    LayerStackId::Sublayer(root) => Some(graph.identifier(root).to_string()),
-                };
+                // The layer stack the node composes in, captured so the edit target
+                // authors into it exactly rather than re-inferring it from layer
+                // membership: `None` for the stage root stack, else the target root
+                // layer's identifier paired with the expression-variable context the
+                // stack resolved against (empty for a plain stack, the inherited
+                // `${VAR}` context for a contextual one — needed so a relocate plan
+                // seeds from the same context-resolved members).
+                let stack = node.layer_stack_id();
+                let stack_info = (!graph.is_root_stack(stack)).then(|| {
+                    (
+                        graph.identifier(graph.stack_target_root(stack)).to_string(),
+                        graph.stack_seed_vars(stack),
+                    )
+                });
                 (
                     graph.identifier(node.layer_id()).to_string(),
                     index.map_to_root_for_targets(node),
-                    stack_root,
+                    stack_info,
                 )
             })
         }))
@@ -1518,9 +1529,9 @@ impl IndexCache {
             // name. TODO(perf): `combined_relocates` rescans and re-allocates the
             // node's layer-stack relocates on every contributing node (here and in
             // the indexer's arc-map fold), gated on `has_relocates`. Precompute it
-            // once per distinct ambient (keyed by the layer-id sequence) in
-            // `LayerGraph::recompute_relocates`, alongside `sublayer_stacks`, so
-            // this becomes a lookup (C++ caches these on `PcpLayerStack`).
+            // once per distinct ambient, keyed by `LayerStackId` on the composed
+            // stack instance, so this becomes a lookup (C++ caches these on
+            // `PcpLayerStack`).
             if has_relocates {
                 let pairs = graph.combined_relocates(node.layer_stack_id());
                 apply_child_relocates(&node.path, &pairs, &mut name_order, &mut name_set, &mut prohibited);

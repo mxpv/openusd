@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::sdf::schema::{ChildrenKey, FieldKey};
 use crate::sdf::{self, LayerOffset, Path, Value};
 
-use super::layer_graph::LayerStackId;
+use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_indexer::BuildResult;
@@ -473,7 +473,7 @@ impl PrimIndex {
     /// `ambient` is the layer stack the prim is composed in: the root layer
     /// stack for a stage prim, or a referenced asset's sublayer stack for an
     /// arc target reached within that reference. When `ambient` is the stage
-    /// root layer stack ([`LayerStackId::Root`]) the shared `cached_indices`
+    /// root layer stack ([`LayerStackId::ROOT`]) the shared `cached_indices`
     /// (keyed by stage path) apply; an arc-target sublayer stack is composed
     /// fresh.
     pub(crate) fn build_with_cache_in(
@@ -483,7 +483,7 @@ impl PrimIndex {
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
-        if ambient == LayerStackId::Root {
+        if ambient == LayerStackId::ROOT {
             if let Some(cached) = cached_indices.get(path) {
                 return Ok((cached.index.clone(), Vec::new(), Vec::new()));
             }
@@ -845,7 +845,7 @@ pub(crate) mod tests {
     }
 
     /// Builds a prim index for a given path string.
-    fn build(stack: &LayerGraph, prim: &str) -> PrimIndex {
+    fn build(stack: &mut LayerGraph, prim: &str) -> PrimIndex {
         build_with_fallbacks(stack, prim, VariantFallbackMap::new())
     }
 
@@ -855,7 +855,13 @@ pub(crate) mod tests {
     /// ancestors are composed first (mirroring the cache's `ensure_index`),
     /// threading each prim's child context to the next. Shared with the
     /// `prim_indexer` test suite.
-    pub(crate) fn build_with_fallbacks(stack: &LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
+    ///
+    /// Takes `&mut LayerGraph` to mirror the stage's load barrier: a build that
+    /// reaches an external arc whose layer stack is not yet interned records a
+    /// [`Demand`], which this mints through [`LayerGraph::intern_external`] before
+    /// re-running (the test fixtures load every layer up front, so a demand only
+    /// ever needs interning, never loading).
+    pub(crate) fn build_with_fallbacks(stack: &mut LayerGraph, prim: &str, fallbacks: VariantFallbackMap) -> PrimIndex {
         let path = Path::from(prim);
 
         // Namespace chain from the topmost prim down to `path`.
@@ -870,27 +876,42 @@ pub(crate) mod tests {
         }
         chain.reverse();
 
-        let mut cache: sdf::PathTable<PrimEntry> = sdf::PathTable::new();
-        let mut parent_ctx = CompositionContext {
-            variant_fallbacks: fallbacks,
-            ..CompositionContext::default()
-        };
-        let mut last = None;
-        for ancestor in &chain {
-            let (index, _errors, _pending) =
-                PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
-            parent_ctx = index.context_for_children(stack, &parent_ctx);
-            cache.insert(
-                ancestor.clone(),
-                PrimEntry {
-                    index: index.clone(),
-                    context: CompositionContext::default(),
-                    errors: Vec::new(),
-                },
-            );
-            last = Some(index);
+        loop {
+            let mut cache: sdf::PathTable<PrimEntry> = sdf::PathTable::new();
+            let mut parent_ctx = CompositionContext {
+                variant_fallbacks: fallbacks.clone(),
+                ..CompositionContext::default()
+            };
+            let mut last = None;
+            let mut pending: Vec<Demand> = Vec::new();
+            for ancestor in &chain {
+                let (index, _errors, demands) =
+                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
+                pending.extend(demands);
+                parent_ctx = index.context_for_children(stack, &parent_ctx);
+                cache.insert(
+                    ancestor.clone(),
+                    PrimEntry {
+                        index: index.clone(),
+                        context: CompositionContext::default(),
+                        errors: Vec::new(),
+                    },
+                );
+                last = Some(index);
+            }
+            // Mint the layer stacks the demands resolved against and re-run, the way
+            // the stage's load barrier does. The `progress` guard terminates if a
+            // demand cannot be satisfied (e.g. an unresolvable target).
+            let mut progress = false;
+            for demand in &pending {
+                if let Some(root) = stack.id_of(demand.asset_path.as_str()) {
+                    progress |= stack.intern_external(root, &demand.expr_vars).1;
+                }
+            }
+            if !progress {
+                return last.expect("a non-empty namespace chain");
+            }
         }
-        last.expect("a non-empty namespace chain")
     }
 
     /// Helper: loads layers and builds a [`LayerGraph`].
@@ -913,8 +934,8 @@ pub(crate) mod tests {
 
     #[test]
     fn single_layer_root_node() -> Result<()> {
-        let stack = load_stack(&composition_path("active.usda"))?;
-        let index = build(&stack, "/World");
+        let mut stack = load_stack(&composition_path("active.usda"))?;
+        let index = build(&mut stack, "/World");
 
         assert_eq!(index.nodes().count(), 1);
         assert_eq!(index.nodes().next().unwrap().layer_id(), stack.all_ids()[0]);
@@ -924,8 +945,8 @@ pub(crate) mod tests {
 
     #[test]
     fn sublayer_site_layer_order() -> Result<()> {
-        let stack = load_stack(&fixture_path("sublayer_override.usda"))?;
-        let index = build(&stack, "/World");
+        let mut stack = load_stack(&fixture_path("sublayer_override.usda"))?;
+        let index = build(&mut stack, "/World");
 
         let ns: Vec<_> = index.nodes().collect();
         assert_eq!(ns.len(), 1, "one per-site node spans both sublayers");
@@ -942,8 +963,8 @@ pub(crate) mod tests {
 
     #[test]
     fn prim_only_in_stronger_layer() -> Result<()> {
-        let stack = load_stack(&fixture_path("sublayer_override.usda"))?;
-        let index = build(&stack, "/World/Sphere");
+        let mut stack = load_stack(&fixture_path("sublayer_override.usda"))?;
+        let index = build(&mut stack, "/World/Sphere");
 
         assert_eq!(index.nodes().count(), 1);
         assert_eq!(index.nodes().next().unwrap().layer_id(), stack.all_ids()[0]);
@@ -952,8 +973,8 @@ pub(crate) mod tests {
 
     #[test]
     fn nonexistent_prim_empty_index() -> Result<()> {
-        let stack = load_stack(&composition_path("active.usda"))?;
-        let index = build(&stack, "/DoesNotExist");
+        let mut stack = load_stack(&composition_path("active.usda"))?;
+        let index = build(&mut stack, "/DoesNotExist");
 
         assert!(index.is_empty());
         Ok(())
@@ -961,8 +982,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reference_arc_present() -> Result<()> {
-        let stack = load_stack(&fixture_path("ref_external.usda"))?;
-        let index = build(&stack, "/World/MyPrim");
+        let mut stack = load_stack(&fixture_path("ref_external.usda"))?;
+        let index = build(&mut stack, "/World/MyPrim");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Reference));
         Ok(())
@@ -974,8 +995,8 @@ pub(crate) mod tests {
         let root = parse_usda("#usda 1.0\ndef \"A\" ( references = @base.usd@</Empty> ) {\n  custom double x = 1\n}\n");
         let base = parse_usda("#usda 1.0\ndef \"Other\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/A");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/A");
 
         // The empty target is retained as a culled node so an editor sees the
         // arc, but value resolution skips it and the prim is not composed.
@@ -999,7 +1020,7 @@ pub(crate) mod tests {
     fn empty_inherit_target_culled() -> Result<()> {
         // /A inherits a class the layer never defines.
         let root = parse_usda("#usda 1.0\ndef \"A\" ( inherits = </_class_Missing> ) {\n  custom double x = 1\n}\n");
-        let index = build(&one_layer_stack(root), "/A");
+        let index = build(&mut one_layer_stack(root), "/A");
 
         // The empty class is retained as a culled node so an editor sees the arc,
         // but value resolution skips it and the prim is not composed.
@@ -1023,7 +1044,7 @@ pub(crate) mod tests {
     fn empty_specialize_target_culled() -> Result<()> {
         // /A specializes a class the layer never defines.
         let root = parse_usda("#usda 1.0\ndef \"A\" ( specializes = </_class_Missing> ) {\n  custom double x = 1\n}\n");
-        let index = build(&one_layer_stack(root), "/A");
+        let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
             index.all_nodes().any(|n| n.arc == ArcType::Specialize && n.is_culled()),
@@ -1048,7 +1069,7 @@ pub(crate) mod tests {
         let root = parse_usda(
             "#usda 1.0\ndef \"A\" (\n    variantSets = \"v\"\n    variants = { string v = \"missing\" }\n) {\n  custom double own = 1\n  variantSet \"v\" = {\n    \"present\" { custom double x = 1 }\n  }\n}\n",
         );
-        let index = build(&one_layer_stack(root), "/A");
+        let index = build(&mut one_layer_stack(root), "/A");
 
         assert!(
             index.all_nodes().any(|n| n.arc == ArcType::Variant && n.is_culled()),
@@ -1078,9 +1099,9 @@ pub(crate) mod tests {
             "#usda 1.0\ndef \"Ref\" {\n  def \"Sub\" ( inherits = </Ref/Class> ) {}\n  class \"Class\" { custom string x = \"ref\" }\n}\n",
         );
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("ref.usd", refl)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let index = build(&stack, "/Model/Sub");
+        let index = build(&mut stack, "/Model/Sub");
         let implied = index
             .arena()
             .iter()
@@ -1117,8 +1138,8 @@ pub(crate) mod tests {
         let refl = parse_usda(
             "#usda 1.0\ndef \"Ref\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom string x = \"a\" }\n    \"b\" { custom string x = \"b\" }\n  }\n}\n",
         );
-        let stack = two_layer_stack(root, refl);
-        let index = build(&stack, "/Model");
+        let mut stack = two_layer_stack(root, refl);
+        let index = build(&mut stack, "/Model");
         assert!(
             index
                 .nodes()
@@ -1135,8 +1156,8 @@ pub(crate) mod tests {
         let root = parse_usda(
             "#usda 1.0\ndef \"Base\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" { custom string x = \"a\" }\n    \"b\" { custom string x = \"b\" }\n  }\n}\ndef \"Model\" (\n  references = </Base>\n  variants = { string v = \"b\" }\n) {}\n",
         );
-        let stack = one_layer_stack(root);
-        let index = build(&stack, "/Model");
+        let mut stack = one_layer_stack(root);
+        let index = build(&mut stack, "/Model");
         // The variant arrives grafted through the reference, so its node carries
         // the Reference arc; what matters is that the selected variant (v=b),
         // not the fallback (v=a), was composed.
@@ -1161,8 +1182,8 @@ pub(crate) mod tests {
         let refl = parse_usda(
             "#usda 1.0\ndef \"Inner\" { custom string y = \"inner\" }\ndef \"Ref\" (\n  add variantSets = \"v\"\n) {\n  variantSet \"v\" = {\n    \"a\" {}\n    \"b\" ( references = </Inner> ) {}\n  }\n}\n",
         );
-        let stack = two_layer_stack(root, refl);
-        let index = build(&stack, "/Model");
+        let mut stack = two_layer_stack(root, refl);
+        let index = build(&mut stack, "/Model");
         assert!(
             index
                 .nodes()
@@ -1180,8 +1201,8 @@ pub(crate) mod tests {
     /// under a root node, and every stored parent agrees with its child list.
     #[test]
     fn structural_links_consistent() -> Result<()> {
-        let stack = load_stack(&fixture_path("ref_external.usda"))?;
-        let index = build(&stack, "/World/MyPrim");
+        let mut stack = load_stack(&fixture_path("ref_external.usda"))?;
+        let index = build(&mut stack, "/World/MyPrim");
 
         let root = index.root().expect("non-empty index has a root");
         assert_eq!(index.node(root).arc, ArcType::Root);
@@ -1221,9 +1242,9 @@ pub(crate) mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
 
-        let index = build(&stack, "/Model");
+        let index = build(&mut stack, "/Model");
         let find = |p: &str| {
             index
                 .arena()
@@ -1256,8 +1277,8 @@ pub(crate) mod tests {
         );
         let base = parse_usda("#usda 1.0\ndef \"Base\" {}\n");
         let layers = vec![sdf::Layer::new("root.usd", root), sdf::Layer::new("base.usd", base)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/Model");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/Model");
 
         let dump = index.dump_to_string();
         let line = |needle: &str| {
@@ -1283,8 +1304,8 @@ pub(crate) mod tests {
 
     #[test]
     fn inherit_arc_present() -> Result<()> {
-        let stack = load_stack(&composition_path("class_inherit.usda"))?;
-        let index = build(&stack, "/World/cubeWithoutSetColor");
+        let mut stack = load_stack(&composition_path("class_inherit.usda"))?;
+        let index = build(&mut stack, "/World/cubeWithoutSetColor");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Inherit));
         Ok(())
@@ -1292,8 +1313,8 @@ pub(crate) mod tests {
 
     #[test]
     fn inherit_root_is_strongest() -> Result<()> {
-        let stack = load_stack(&composition_path("class_inherit.usda"))?;
-        let index = build(&stack, "/World/cubeWithSetColor");
+        let mut stack = load_stack(&composition_path("class_inherit.usda"))?;
+        let index = build(&mut stack, "/World/cubeWithSetColor");
         let arcs: Vec<_> = index.nodes().map(|n| n.arc).collect();
 
         assert_eq!(arcs[0], ArcType::Root);
@@ -1307,8 +1328,8 @@ pub(crate) mod tests {
             "{}/vendor/usd-wg-assets/docs/CompositionPuzzles/VariantSetAndLocal1/puzzle_1.usda",
             manifest_dir()
         );
-        let stack = load_stack(&path)?;
-        let index = build(&stack, "/World/Sphere");
+        let mut stack = load_stack(&path)?;
+        let index = build(&mut stack, "/World/Sphere");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Variant));
 
@@ -1319,8 +1340,8 @@ pub(crate) mod tests {
 
     #[test]
     fn specialize_arc_present() -> Result<()> {
-        let stack = load_stack(&composition_path("inherit_and_specialize.usda"))?;
-        let index = build(&stack, "/World/cubeScene/specializes");
+        let mut stack = load_stack(&composition_path("inherit_and_specialize.usda"))?;
+        let index = build(&mut stack, "/World/cubeScene/specializes");
 
         assert!(index.nodes().any(|n| n.arc == ArcType::Specialize));
         Ok(())
@@ -1334,8 +1355,8 @@ pub(crate) mod tests {
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/BasicReferenceDiamond_root/usda/root.usd",
             manifest_dir()
         );
-        let stack = load_stack(&path)?;
-        let index = build(&stack, "/Root");
+        let mut stack = load_stack(&path)?;
+        let index = build(&mut stack, "/Root");
 
         assert!(
             index
@@ -1375,8 +1396,8 @@ pub(crate) mod tests {
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/SpecializesAndVariants_root/usda/root.usd",
             manifest_dir()
         );
-        let stack = load_stack(&path)?;
-        let index = build(&stack, "/B");
+        let mut stack = load_stack(&path)?;
+        let index = build(&mut stack, "/B");
 
         assert!(
             index.nodes().any(|n| n.arc == ArcType::Specialize),
@@ -1400,14 +1421,14 @@ pub(crate) mod tests {
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/BasicVariantWithConnections_root/usda/root.usd",
             manifest_dir()
         );
-        let stack = load_stack(&path)?;
+        let mut stack = load_stack(&path)?;
 
         assert!(
             stack.find_by_leaf("camera_perspective.usd").is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
-        let index = build(&stack, "/main_cam/Lens");
+        let index = build(&mut stack, "/main_cam/Lens");
         assert!(
             index.nodes().any(|n| n.path.as_str() == "/camera/_localclass_Lens"),
             "should have inherit node for _localclass_Lens"
@@ -1424,8 +1445,8 @@ pub(crate) mod tests {
             "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/TrickyVariantWeakerSelection2_root/usda/root.usd",
             manifest_dir()
         );
-        let stack = load_stack(&path)?;
-        let index = build(&stack, "/bob");
+        let mut stack = load_stack(&path)?;
+        let index = build(&mut stack, "/bob");
 
         assert!(
             index.nodes().any(|n| n.path.as_str().contains("{geotype=cube}")),
@@ -1623,8 +1644,8 @@ def "Prim" (
     /// first-variant default).
     #[test]
     fn variant_no_selection_unselected() -> Result<()> {
-        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
-        let index = build(&stack, "/NoSelection");
+        let mut stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let index = build(&mut stack, "/NoSelection");
         let paths = variant_paths(&index);
         assert!(
             paths.is_empty(),
@@ -1637,9 +1658,9 @@ def "Prim" (
     /// authored selection exists, the composition should select "simple".
     #[test]
     fn variant_fallback_overrides_default() -> Result<()> {
-        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let mut stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let fb = VariantFallbackMap::new().add("shadingComplexity", ["simple"]);
-        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let index = build_with_fallbacks(&mut stack, "/NoSelection", fb);
         let paths = variant_paths(&index);
         assert!(
             paths.iter().any(|p| p.contains("{shadingComplexity=simple}")),
@@ -1655,9 +1676,9 @@ def "Prim" (
     /// An authored selection should take priority over a variant fallback.
     #[test]
     fn variant_authored_selection_beats_fallback() -> Result<()> {
-        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let mut stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let fb = VariantFallbackMap::new().add("shadingComplexity", ["none"]);
-        let index = build_with_fallbacks(&stack, "/Root", fb);
+        let index = build_with_fallbacks(&mut stack, "/Root", fb);
         let paths = variant_paths(&index);
         assert!(
             paths.iter().any(|p| p.contains("{shadingComplexity=full}")),
@@ -1670,9 +1691,9 @@ def "Prim" (
     /// it should be skipped and the next fallback (or default) should be used.
     #[test]
     fn variant_fallback_skips_nonexistent() -> Result<()> {
-        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let mut stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let fb = VariantFallbackMap::new().add("shadingComplexity", ["ultra", "simple"]);
-        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let index = build_with_fallbacks(&mut stack, "/NoSelection", fb);
         let paths = variant_paths(&index);
         assert!(
             paths.iter().any(|p| p.contains("{shadingComplexity=simple}")),
@@ -1685,9 +1706,9 @@ def "Prim" (
     /// set, the set stays unselected — no variant arc is added.
     #[test]
     fn variant_fallback_all_invalid_unselected() -> Result<()> {
-        let stack = load_stack(&fixture_path("variant_fallback.usda"))?;
+        let mut stack = load_stack(&fixture_path("variant_fallback.usda"))?;
         let fb = VariantFallbackMap::new().add("shadingComplexity", ["ultra", "mega"]);
-        let index = build_with_fallbacks(&stack, "/NoSelection", fb);
+        let index = build_with_fallbacks(&mut stack, "/NoSelection", fb);
         let paths = variant_paths(&index);
         assert!(
             paths.is_empty(),
@@ -1704,7 +1725,7 @@ def "Prim" (
         let p = |s: &str| Path::from(s.to_string());
         let id = MapFunction::identity();
         let lid = LayerId::from_raw(0);
-        let lsid = LayerStackId::Sublayer(lid);
+        let lsid = LayerStackId::from_raw(1);
         let mut g = PrimIndexGraph::default();
         let root = g.add_child(NodeId::INVALID, lsid, lid, p("/A"), ArcType::Root, id.clone(), false);
         let inh = g.add_child(root, lsid, lid, p("/Class"), ArcType::Inherit, id.clone(), false);
@@ -1774,8 +1795,8 @@ def "Prim" (
     /// (spec 10.4.1 — specializes global weakness).
     #[test]
     fn specialize_global_weakness_basic() -> Result<()> {
-        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
-        let index = build(&stack, "/Root");
+        let mut stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&mut stack, "/Root");
 
         // Expected from pcp.txt:
         //   root.usd  /Root          (Root)
@@ -1828,8 +1849,8 @@ def "Prim" (
     /// opinions from both targets appear after all reference opinions.
     #[test]
     fn specialize_global_weakness_multiple() -> Result<()> {
-        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
-        let index = build(&stack, "/MultipleSpecializes");
+        let mut stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&mut stack, "/MultipleSpecializes");
 
         // Non-specialize opinions must come before all specialize opinions.
         let first_spec = index
@@ -1853,8 +1874,8 @@ def "Prim" (
     /// the correct chain order.
     #[test]
     fn specialize_chain_ordering() -> Result<()> {
-        let stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
-        let index = build(&stack, "/Basic");
+        let mut stack = load_stack(&spec_composition_path("BasicSpecializes_root/usda/root.usd"))?;
+        let index = build(&mut stack, "/Basic");
 
         // Expected from pcp.txt:
         //   root.usd  /Basic               (Root)
@@ -1926,8 +1947,8 @@ def "Prim" (
         //   root.usd /Root  (0, 1)
         //   A.usd    /Model (10, 1)    [reference arc]
         //   B.usd    /Model (30, 1)    [sublayer of A]  = (10,1) ∘ (20,1)
-        let stack = basic_time_offset_stack()?;
-        let index = build(&stack, "/Root");
+        let mut stack = basic_time_offset_stack()?;
+        let index = build(&mut stack, "/Root");
         assert_eq!(
             offset_stack(&index, &stack),
             vec![
@@ -1949,8 +1970,8 @@ def "Prim" (
         //   ref.usd     /Ref                (10, 2)    [payload arc; ref.usd has no /Ref spec → L empty]
         //   ref_sub.usd /Ref                (50, 2)    [sublayer of ref.usd: (10,2) ∘ (20,1) = (50, 2)]
         //   B.usd       /Model              (50, 2)    [payload from ref_sub.usd, default offset]
-        let stack = basic_time_offset_stack()?;
-        let index = build(&stack, "/PayloadRefPayload");
+        let mut stack = basic_time_offset_stack()?;
+        let index = build(&mut stack, "/PayloadRefPayload");
         let got = offset_stack(&index, &stack);
 
         // ref.usd has no /Ref spec (only ref_sub.usd does), so the
@@ -1980,8 +2001,8 @@ def "Prim" (
         //   root.usd    /PayloadMultiRef (0, 1)
         //   ref_sub.usd /Ref2             (50, 2)
         //   B.usd       /Model            (50, 2)    [reference; scale carries through]
-        let stack = basic_time_offset_stack()?;
-        let index = build(&stack, "/PayloadMultiRef");
+        let mut stack = basic_time_offset_stack()?;
+        let index = build(&mut stack, "/PayloadMultiRef");
         let got = offset_stack(&index, &stack);
 
         assert!(
@@ -2006,8 +2027,8 @@ def "Prim" (
         // in B.usd only.
         // Per pcp.txt, /Root/Anim should have:
         //   B.usd /Model/Anim (30, 1)    [effective: ref 10 ∘ sublayer 20]
-        let stack = basic_time_offset_stack()?;
-        let index = build(&stack, "/Root/Anim");
+        let mut stack = basic_time_offset_stack()?;
+        let index = build(&mut stack, "/Root/Anim");
         let got = offset_stack(&index, &stack);
 
         assert!(
@@ -2076,8 +2097,8 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/Root");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
             got.contains(&("model.usd".into(), "/Model".into(), ArcType::Reference, 0.0, 1.0)),
@@ -2103,8 +2124,8 @@ def "Model" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/Root");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
             got.contains(&("model.usd".into(), "/Model".into(), ArcType::Payload, 0.0, 1.0)),
@@ -2131,8 +2152,8 @@ def "Root" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/Root");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/Root");
         let got = offset_stack(&index, &stack);
         assert!(
             got.iter().any(|(name, path, _, off, scale)| name == "sub.usda"
@@ -2173,8 +2194,8 @@ over "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/P");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/P");
 
         // Strongest-only resolution would drop the weaker "b"; folding keeps it.
         assert_eq!(
@@ -2194,8 +2215,8 @@ def "P" {}
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/P");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, None);
         Ok(())
@@ -2217,8 +2238,8 @@ def "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/P");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(Vec::new()));
         Ok(())
@@ -2254,8 +2275,8 @@ over "P" (
 "#,
         );
         let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("sub.usda", sub)];
-        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
-        let index = build(&stack, "/P");
+        let mut stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = build(&mut stack, "/P");
 
         assert_eq!(index.clip_sets_order(&stack)?, Some(vec!["a".to_string()]));
         // The list-op form (behind `ClipsAPI::clip_sets`) stays canonical, so

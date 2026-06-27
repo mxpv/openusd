@@ -99,7 +99,8 @@ use crate::sdf::{self, LayerOffset, Path, Value};
 use crate::tf::Token;
 
 use super::compose_site::{collect_payloads_in, compose_arc_list_in, compose_references_in};
-use super::layer_graph::LayerStackId;
+use super::layer_graph::ExternalStack;
+use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
 use super::prim_graph::{is_class_based_arc, ArcType, NodeFlags, NodeId, PrimIndexGraph};
 use super::prim_index::{stack_has_spec, CompositionContext, Demand, PrimEntry};
@@ -398,7 +399,7 @@ struct Site {
     /// Handle to the layer stack the root `L` site scans (the stage root layer
     /// stack for a stage prim, or a referenced asset's sublayer stack for an arc
     /// target). Resolve to members through [`Inputs::stack`]. When this is
-    /// [`LayerStackId::Root`] the build composes against the stage root layer
+    /// [`LayerStackId::ROOT`] the build composes against the stage root layer
     /// stack — the only case where the stage-keyed `cached_indices` apply.
     ambient: LayerStackId,
     /// The path this build composes — the graph's local-root site path. Set at
@@ -656,7 +657,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // reusing the frame chain so duplicate-node skipping (C++
         // `_BuildInitialPrimIndexFromAncestor`'s else-branch
         // `Pcp_BuildPrimIndex(parentSite, …, previousFrame)`) applies.
-        let graph = if self.frame.is_none() && self.site.ambient == LayerStackId::Root {
+        let graph = if self.frame.is_none() && self.site.ambient == LayerStackId::ROOT {
             let Some(parent_index) = self.inputs.cached_indices.get(&parent).map(|e| &e.index) else {
                 return Ok(false);
             };
@@ -830,7 +831,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         Ok(Some(grafted))
     }
 
-    /// Whether a node at the arc target site `(rep_layer, site_path)` already
+    /// Whether a node at the arc target site `(layer_stack, site_path)` already
     /// exists in this graph or a parent frame's graph (C++ `_AddArc`'s
     /// `skipDuplicateNodes` search). Adding a duplicate would introduce the same
     /// site twice; class arcs and arcs composed inside a skip sub-build skip it.
@@ -838,12 +839,12 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// The current graph is searched at the target path; each parent frame is
     /// searched at the path the site takes once deepened by the suffix that
     /// frame's request adds (C++'s `ReplacePrefix` across the stack frame).
-    fn find_duplicate(&self, rep_layer: LayerId, site_path: &Path) -> bool {
-        if self.output.node_using_site(rep_layer, site_path).is_some() {
+    fn find_duplicate(&self, layer_stack: LayerStackId, site_path: &Path) -> bool {
+        if self.output.node_using_site(layer_stack, site_path).is_some() {
             return true;
         }
         self.frame_sites(site_path)
-            .any(|(f, search)| f.graph.node_using_site(rep_layer, &search).is_some())
+            .any(|(f, search)| f.graph.node_using_site(layer_stack, &search).is_some())
     }
 
     /// Iterates the parent frame chain, deepening `target` into each frame's
@@ -1963,7 +1964,6 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let n = self.node(node);
         let node_path = n.path.clone();
         let stack_id = n.layer_stack_id();
-        let rep = n.layer_id();
         let selected = vt.vset_path.append_variant_selection(&vt.vset_name, vsel);
         let Some(var_path) = node_path.replace_prefix(&vt.vset_path, &selected) else {
             return Ok(());
@@ -1980,7 +1980,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // same `{set=sel}` target the direct class already grafted, and grafting
         // it again would duplicate that site (C++ `_AddArc`'s `skipDuplicateNodes`
         // covering the arc's own target node).
-        if skip && self.find_duplicate(rep, &var_path) {
+        if skip && self.find_duplicate(stack_id, &var_path) {
             return Ok(());
         }
         let grafted = self.compose_and_graft(
@@ -2087,7 +2087,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // lands it at nested namespace sites (the spooky / symmetric-rig inherits),
         // which the cycle test would otherwise reject (C++ excludes implied
         // class-based arcs under relocates from the check).
-        if !implied && self.class_arc_is_cycle(parent, rep, &inherit_path) {
+        if !implied && self.class_arc_is_cycle(parent, parent_stack, &inherit_path) {
             self.errors
                 .push(Error::ArcCycle(self.cycle_error(parent, arc, rep, inherit_path)));
             return Ok(None);
@@ -2152,7 +2152,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // (mapping unchanged) is kept to keep propagating. The skip also carries
         // in from a parent frame (C++ `_AddArc`'s `|= previousFrame->skip`).
         let skip = direct_should || self.frame_skip();
-        if skip && self.find_duplicate(rep, &inherit_path) {
+        if skip && self.find_duplicate(parent_stack, &inherit_path) {
             return Ok(None);
         }
 
@@ -2483,7 +2483,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // C++ `_AddArc` with `skipDuplicateNodes`: a site already reached by
         // another path is not copied again (the inert placeholder at `src` is
         // skipped by `node_using_site`, so it is not its own duplicate).
-        if self.find_duplicate(rep, &src_path) {
+        if self.find_duplicate(src_stack, &src_path) {
             return Ok(None);
         }
 
@@ -2565,26 +2565,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             self.node(parent).layer_stack_id()
         } else {
             let layer_index = match self.inputs.stack.id_of(asset_path) {
-                Some(layer_index) => {
-                    // The target is loaded, but if this arc carries expression
-                    // variables and reaches a target that has a `${VAR}` sublayer yet
-                    // was interned unseeded (by an earlier variable-free arc to the
-                    // same target), demand a re-seed so that sublayer resolves against
-                    // this context. The load barrier seeds the already-loaded target,
-                    // reloads the sublayers the new context resolves, and recomposes;
-                    // once seeded the target is not demanded again, so this converges.
-                    if !expr_vars.is_empty()
-                        && !self.inputs.stack.is_seeded(layer_index)
-                        && self.inputs.stack.has_expr_sublayer(layer_index)
-                    {
-                        self.pending_loads.push(Demand {
-                            asset_path: asset_path.to_string(),
-                            expr_vars: expr_vars.clone(),
-                        });
-                        return Ok(());
-                    }
-                    layer_index
-                }
+                Some(layer_index) => layer_index,
                 // The target is not loaded. The authoring layer's location gates
                 // both the `.usdz` guard and the relative-mute anchor, so resolve
                 // it once here — only on a lookup miss, leaving an already-loaded
@@ -2671,7 +2652,23 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 }
             };
             external_target = Some(layer_index);
-            self.inputs.stack.sublayer_stack_id(layer_index)
+            // The layer graph decides which stack this arc composes against — the
+            // plain stack, or a context-keyed one when the inherited expression
+            // variables can change the target's `${VAR}` sublayers. A stack not yet
+            // built is demanded: the load barrier mints it (opening any `${VAR}`
+            // sublayers the context resolves) and the query re-runs to find it (this
+            // build is discarded while a load is pending, so abandoning the arc here
+            // is harmless).
+            match self.inputs.stack.external_stack_id(layer_index, expr_vars) {
+                ExternalStack::Ready(id) => id,
+                ExternalStack::Demand => {
+                    self.pending_loads.push(Demand {
+                        asset_path: asset_path.to_string(),
+                        expr_vars: expr_vars.clone(),
+                    });
+                    return Ok(());
+                }
+            }
         };
 
         // A muted target root drops out of its own `sublayer_stack`, leaving the
@@ -2712,7 +2709,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
 
         // A duplicate site reached inside a skip sub-build is skipped, keeping a
         // class reached both directly and through this arc from grafting twice.
-        if self.frame_skip() && self.find_duplicate(rep, &source) {
+        if self.frame_skip() && self.find_duplicate(target_stack, &source) {
             return Ok(());
         }
         // A reference/payload that lands back on an active ancestor site closes a
@@ -2720,7 +2717,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // arc, leaving the chain composed so far intact, rather than abandoning the
         // whole prim. The reference diamond `GroupRoot → A → B → A` keeps its
         // `[GroupRoot, GroupA, GroupB]` stack and drops only the closing `B → A`.
-        if !self.arc_target_in_bounds(parent, rep, &source) {
+        if !self.arc_target_in_bounds(parent, target_stack, &source) {
             self.errors
                 .push(Error::ArcCycle(self.cycle_error(parent, arc, rep, source)));
             return Ok(());
@@ -2976,11 +2973,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// or prefixed by, `path` — means the arc would re-introduce a prim that
     /// contains or is contained by the inheriting one. Variant arcs are not
     /// class-based and never reach here.
-    fn class_arc_is_cycle(&self, parent: NodeId, rep: LayerId, path: &Path) -> bool {
+    fn class_arc_is_cycle(&self, parent: NodeId, layer_stack: LayerStackId, path: &Path) -> bool {
         let mut cur = parent;
         while cur.is_valid() {
             let n = self.node(cur);
-            if n.layer_id() == rep && n.path.is_nested_with(path) {
+            if n.layer_stack_id() == layer_stack && n.path.is_nested_with(path) {
                 return true;
             }
             cur = n.parent().unwrap_or(NodeId::INVALID);
@@ -2990,7 +2987,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // cross-frame mutual-inherit cycle (e.g. `Child1` inherits `Child2`, which
         // inherits `Child1`, each composed as the other's sub-build).
         for (f, search) in self.frame_sites(path) {
-            if search == f.root_path && f.graph.node_using_site(rep, &search).is_some() {
+            if search == f.root_path && f.graph.node_using_site(layer_stack, &search).is_some() {
                 return true;
             }
         }
@@ -3006,13 +3003,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// path a prefix of, or prefixed by, the target) closes the cycle — covering
     /// the ancestral reference cycle `AnotherChild → Model → AnotherParent`, where
     /// the target is a namespace ancestor of the composing prim.
-    fn arc_target_in_bounds(&self, parent: NodeId, root_layer: LayerId, path: &Path) -> bool {
+    fn arc_target_in_bounds(&self, parent: NodeId, layer_stack: LayerStackId, path: &Path) -> bool {
         // Count the arc target node itself, then each ancestor up to the root.
         let mut depth = 1;
         let mut cur = parent;
         while cur.is_valid() {
             let n = self.node(cur);
-            if n.layer_id() == root_layer && n.path.is_nested_with(path) {
+            if n.layer_stack_id() == layer_stack && n.path.is_nested_with(path) {
                 return false;
             }
             depth += 1;
@@ -3027,10 +3024,10 @@ impl<'a, 'f> Indexer<'a, 'f> {
             // composition in a parent frame. The ancestor case closes the
             // sub-root-reference cycle where the target's own ancestral chain
             // re-introduces a prim above the referrer.
-            let at_root = search == f.root_path && f.graph.node_using_site(root_layer, &search).is_some();
+            let at_root = search == f.root_path && f.graph.node_using_site(layer_stack, &search).is_some();
             let above_root = search != f.root_path
                 && f.root_path.has_prefix(&search)
-                && f.graph.node_using_site(root_layer, &f.root_path).is_some();
+                && f.graph.node_using_site(layer_stack, &f.root_path).is_some();
             if at_root || above_root {
                 return false;
             }
@@ -3406,7 +3403,7 @@ mod tests {
     /// Composes `path` and every namespace ancestor as the cache does, returning
     /// the target prim's composition graph — a graph-returning wrapper over the
     /// shared [`build_with_fallbacks`](crate::pcp::prim_index::tests::build_with_fallbacks).
-    fn compose_chain(s: &LayerGraph, path: &str) -> PrimIndexGraph {
+    fn compose_chain(s: &mut LayerGraph, path: &str) -> PrimIndexGraph {
         crate::pcp::prim_index::tests::build_with_fallbacks(s, path, crate::pcp::VariantFallbackMap::new())
             .graph()
             .clone()
@@ -3431,7 +3428,7 @@ mod tests {
     /// relocation (C++ `_EvalImpliedRelocations`).
     #[test]
     fn implied_relocation_grafts_placeholder() {
-        let s = multi_stack(&[
+        let mut s = multi_stack(&[
             (
                 "root.usd",
                 "#usda 1.0\ndef \"Ref\" (\n    references = @model.usd@</Model>\n) {}\n",
@@ -3441,7 +3438,7 @@ mod tests {
                 "#usda 1.0\n(\n    relocates = { </Model/Rig>: </Model/Scope> }\n)\ndef \"Model\" {\n  def \"Rig\" { custom double x = 1 }\n}\n",
             ),
         ]);
-        let graph = compose_chain(&s, "/Ref/Scope");
+        let graph = compose_chain(&mut s, "/Ref/Scope");
         let id = implied_placeholder(&graph).expect("an implied relocate placeholder is grafted onto the grandparent");
         let placeholder = &graph[id.idx()];
         assert_eq!(
@@ -3462,7 +3459,7 @@ mod tests {
     /// case).
     #[test]
     fn implied_relocation_skips_outside_domain() {
-        let s = multi_stack(&[
+        let mut s = multi_stack(&[
             (
                 "root.usd",
                 "#usda 1.0\ndef \"P\" (\n    references = @groups.usd@</Group/Dst>\n) {}\n",
@@ -3472,7 +3469,7 @@ mod tests {
                 "#usda 1.0\n(\n    relocates = { </Group/Src/Child>: </Group/Dst/Child> }\n)\ndef \"Group\" {\n  def \"Src\" {\n    def \"Child\" { custom double x = 1 }\n  }\n  def \"Dst\" {}\n}\n",
             ),
         ]);
-        let graph = compose_chain(&s, "/P/Child");
+        let graph = compose_chain(&mut s, "/P/Child");
         assert!(
             implied_placeholder(&graph).is_none(),
             "no implied relocate is grafted when the source is outside the reference domain"
@@ -3484,10 +3481,10 @@ mod tests {
     /// grafted onto the synthetic tree root.
     #[test]
     fn implied_relocation_skips_root_prim() {
-        let s = stack(
+        let mut s = stack(
             "#usda 1.0\n(\n    relocates = { </Group/Rig>: </Group/Scope> }\n)\ndef \"Group\" {\n  def \"Rig\" { custom double x = 1 }\n}\n",
         );
-        let graph = compose_chain(&s, "/Group/Scope");
+        let graph = compose_chain(&mut s, "/Group/Scope");
         assert!(
             implied_placeholder(&graph).is_none(),
             "a relocate whose target sits directly under the local root grafts no implied relocate"

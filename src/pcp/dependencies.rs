@@ -200,7 +200,7 @@ impl Dependencies {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcp::layer_graph::LayerStackId;
+    use crate::pcp::layer_graph::ExternalStack;
     use crate::pcp::mapping::MapFunction;
     use crate::pcp::prim_graph::Node;
 
@@ -218,19 +218,17 @@ mod tests {
         LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default())
     }
 
-    fn make_index(prim_path: &Path, nodes: Vec<(ArcType, LayerId, Path)>) -> PrimIndex {
+    fn make_index(g: &LayerGraph, prim_path: &Path, nodes: Vec<(ArcType, LayerId, Path)>) -> PrimIndex {
         let mut idx = PrimIndex::default();
         for (arc, layer_id, node_path) in nodes {
+            // The stack rooted at `layer_id` — `external_stack_id` resolves it to the
+            // root or a plain instance the graph minted for each sublayer-free layer.
+            let stack = match g.external_stack_id(layer_id, &HashMap::new()) {
+                ExternalStack::Ready(id) => id,
+                ExternalStack::Demand => panic!("no minted stack for test layer {layer_id:?}"),
+            };
             let map = MapFunction::from_pair_identity(node_path.clone(), prim_path.clone());
-            idx.push_node(Node::new(
-                LayerStackId::Sublayer(layer_id),
-                layer_id,
-                node_path,
-                arc,
-                map.clone(),
-                map,
-                false,
-            ));
+            idx.push_node(Node::new(stack, layer_id, node_path, arc, map.clone(), map, false));
         }
         idx
     }
@@ -247,7 +245,7 @@ mod tests {
         let (l0, l1) = (g.all_ids()[0], g.all_ids()[1]);
         let mut deps = Dependencies::default();
         let foo = p("/Foo");
-        let index = make_index(&foo, vec![(ArcType::Root, l0, foo.clone())]);
+        let index = make_index(&g, &foo, vec![(ArcType::Root, l0, foo.clone())]);
         deps.add(&foo, &index, &g);
         assert_eq!(deps.lookup_with_ancestors(l0, &foo), vec![foo.clone()]);
         assert_eq!(deps.lookup_with_ancestors(l1, &foo), vec![foo.clone()]);
@@ -262,6 +260,7 @@ mod tests {
         let here = p("/World/Inst");
         let there = p("/Model");
         let index = make_index(
+            &g,
             &here,
             vec![
                 (ArcType::Root, l0, here.clone()),
@@ -280,6 +279,7 @@ mod tests {
         let here = p("/A/B");
         let arc_site = p("/X/Y");
         let index = make_index(
+            &g,
             &here,
             vec![
                 (ArcType::Root, l0, here.clone()),
@@ -301,10 +301,10 @@ mod tests {
         let b = p("/B");
         let xy = p("/X/Y");
         let xy_child = p("/X/Y/Child");
-        deps.add(&a, &make_index(&a, vec![(ArcType::Reference, l0, xy.clone())]), &g);
+        deps.add(&a, &make_index(&g, &a, vec![(ArcType::Reference, l0, xy.clone())]), &g);
         deps.add(
             &b,
-            &make_index(&b, vec![(ArcType::Reference, l0, xy_child.clone())]),
+            &make_index(&g, &b, vec![(ArcType::Reference, l0, xy_child.clone())]),
             &g,
         );
         // Subtree at /X/Y catches both sites.
@@ -322,7 +322,7 @@ mod tests {
         let there = p("/X");
         deps.add(
             &here,
-            &make_index(&here, vec![(ArcType::Reference, l0, there.clone())]),
+            &make_index(&g, &here, vec![(ArcType::Reference, l0, there.clone())]),
             &g,
         );
         assert!(!deps.lookup_with_ancestors(l0, &there).is_empty());

@@ -45,7 +45,8 @@
 //!
 //! | Item | C++ equivalent | Description |
 //! |------|---------------|-------------|
-//! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle, with a precomputed sublayer stack per layer. Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
+//! | `layer_graph` | `PcpLayerStack` | The loaded layers and their sublayer DAG, keyed by the graph-minted [`LayerId`] handle (physical layer storage). Owns the composed-stack registry (`layer_stack`). Owned by [`Stage`](crate::usd::Stage), passed to each build by shared reference. Sublayer edges are always derived from `subLayers` metadata, the single source of truth. |
+//! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of context-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under a context, so a `${VAR}` sublayer reached through two contexts resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
 //! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
@@ -233,6 +234,20 @@
 //!   already composed during indexing. Storing the composed set on the index
 //!   (or each node) would remove the duplicate walk and the risk of the two
 //!   diverging.
+//! - Intra-instance shared-sublayer context: building a contextual stack's
+//!   members (`LayerGraph::build_stack_members` → `compose_edges`) gates its walk
+//!   on a per-`LayerId` `visited` set, so within one instance a sublayer reached
+//!   through two different sublayer ancestries keeps the first ancestry's
+//!   expression-variable context. Per-context fidelity holds *across* arcs (each
+//!   gets its own instance) but not for a sublayer diamond *within* a single
+//!   instance; a per-`(layer, context)` edge walk would close it.
+//! - Instance-scoped layer-stack invalidation: a `subLayers`/offset/relocate edit
+//!   clears every cached prim index ([`IndexCache::clear_all_indices`]) and
+//!   re-resolves every context-keyed stack instance, not just the indices and
+//!   instances whose members the edited layer contributes to. Keying
+//!   invalidation by the affected layer-stack instances would scope both to what
+//!   changed; the per-member dependency map already tracks which layers a stack
+//!   reads.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -277,6 +292,7 @@ pub(crate) mod index_cache;
 mod index_store;
 pub(crate) mod instancing;
 pub(crate) mod layer_graph;
+pub(crate) mod layer_stack;
 mod mapping;
 pub(crate) mod prim_graph;
 pub(crate) mod prim_index;
@@ -289,8 +305,9 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::{LayerGraph, LayerStackId, MuteChange};
+pub(crate) use layer_graph::{LayerGraph, MuteChange};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
+pub(crate) use layer_stack::LayerStackId;
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;
@@ -952,7 +969,7 @@ mod tests {
 )
 "#,
         );
-        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
+        let mut graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
 
         assert_eq!(
             graph.relocation_source(graph.root_layer_stack_id(), &Path::new("/World/U").unwrap()),
@@ -960,8 +977,12 @@ mod tests {
             "weaker duplicate source must stay dropped even when the stronger occurrence conflicts"
         );
         let sub = graph.id_of("sub.usda").expect("sub layer");
+        // The sub-stack handle is minted on demand at the load barrier in
+        // production; this direct relocate query composes nothing, so mint it via
+        // `ensure_external_stack`.
+        let sub_stack = graph.ensure_external_stack(sub, &HashMap::new());
         assert_eq!(
-            graph.relocation_source(graph.sublayer_stack_id(sub), &Path::new("/World/U").unwrap()),
+            graph.relocation_source(sub_stack, &Path::new("/World/U").unwrap()),
             Some(Path::new("/World/A").unwrap()),
             "duplicate-source dropping is scoped to the stack being composed"
         );
