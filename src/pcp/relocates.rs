@@ -207,6 +207,13 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
         }
     }
 
+    // With no valid relocates there is nothing to scope or conflict-check, so
+    // skip computing the per-layer-stack scopes (O(n²) for a deep sublayer chain).
+    // Any invalid-relocate diagnostics gathered above are still returned.
+    if all.is_empty() {
+        return (HashMap::new(), errors);
+    }
+
     let mut by_layer: HashMap<LayerId, Vec<usize>> = HashMap::new();
     for (idx, (_, _, layer_id, _)) in all.iter().enumerate() {
         by_layer.entry(*layer_id).or_default().push(idx);

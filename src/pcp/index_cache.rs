@@ -239,10 +239,20 @@ impl IndexCache {
     /// — a missing sublayer of a reference/payload target the stage's load
     /// barrier reached. Joins the errors from root-stack collection so
     /// [`composition_errors`](Self::composition_errors) reports a lazily-loaded
-    /// stack's diagnostics too. Each demanded target opens once, so a given error
-    /// is recorded once.
+    /// stack's diagnostics too.
+    ///
+    /// A target shared by several arcs can open more than once — a later
+    /// variable-carrying arc re-opens an already-interned target under its
+    /// expression-variable context to reach the `${VAR}` sublayers the first,
+    /// variable-free open left unresolved — and that re-walk re-surfaces the
+    /// target's genuinely-missing sublayers. An error already recorded is dropped
+    /// so each diagnostic appears once.
     pub(crate) fn record_collection_errors(&mut self, errors: impl IntoIterator<Item = Error>) {
-        self.collection_errors.extend(errors);
+        for error in errors {
+            if !self.collection_errors.contains(&error) {
+                self.collection_errors.push(error);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -634,7 +644,7 @@ impl IndexCache {
 
         for node in index.nodes() {
             let query_path = Path::new(&format!("{}{suffix}", node.path))?;
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 if !local_layers.contains(&layer) {
                     continue;
                 }
@@ -835,7 +845,7 @@ impl IndexCache {
             let Some(prop_path) = path.replace_prefix(&prim_path, &node.path) else {
                 continue;
             };
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 if let Some(found) = probe(graph.layer(layer), &prop_path) {
                     return Ok(Some(found));
                 }
@@ -873,7 +883,7 @@ impl IndexCache {
             return Ok(None);
         };
         for node in index.nodes() {
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 if let Some(ty) = graph.layer(layer).data().spec_type(&node.path) {
                     return Ok(Some(ty));
                 }
@@ -1298,7 +1308,7 @@ impl IndexCache {
                 let class_layers: Vec<LayerId> = members.iter().map(|(l, _)| *l).collect();
                 let map = index.map_to_root_for_targets(node);
                 let property = Path::new(&format!("{}{prop_suffix}", node.path))?;
-                for &(layer, _) in members {
+                for &(layer, _) in members.iter() {
                     let Some(value) = graph.layer(layer).data().try_field(&property, field.as_str())? else {
                         continue;
                     };
@@ -1601,7 +1611,7 @@ impl IndexCache {
             let Some(p) = prop_path.replace_prefix(prim_path, &node.path) else {
                 continue;
             };
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 let Some(spec_type) = graph.layer(layer).data().spec_type(&p) else {
                     continue;
                 };
@@ -1651,7 +1661,7 @@ impl IndexCache {
         for node in index.nodes() {
             // A node may carry its full site layer stack; only the layers that
             // author a spec at its path belong in the prim stack.
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 if graph.layer(layer).data().has_spec(&node.path) {
                     stack.push((graph.identifier(layer).to_string(), node.path.clone()));
                 }
@@ -1746,7 +1756,7 @@ impl IndexCache {
         // needed.
         let mut nodes_to_scan: Vec<(Path, LayerId)> = Vec::new();
         for node in parent_index.nodes() {
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 nodes_to_scan.push((node.path.clone(), layer));
                 if let Some(name) = path.name() {
                     if let Ok(child_in_node) = node.path.append_path(name) {
@@ -1831,7 +1841,7 @@ impl IndexCache {
     /// Returns `true` when the strongest `permission` opinion at a direct arc's
     /// target site (read across the node's contributing layers) is `private`.
     fn target_is_private(&self, graph: &LayerGraph, node: &Node) -> bool {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             if let Ok(Some(value)) = graph
                 .layer(layer)
                 .data()

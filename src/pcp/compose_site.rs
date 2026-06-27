@@ -185,7 +185,7 @@ where
         // once, at its strongest occurrence (C++ `GetLayerOffsetForLayer` is
         // single-valued per layer).
         let mut seen_layers: HashSet<LayerId> = HashSet::new();
-        for &(layer, sub) in graph.layer_stack(node.layer_stack_id()) {
+        for &(layer, sub) in graph.layer_stack(node.layer_stack_id()).iter() {
             if !seen_layers.insert(layer) {
                 continue;
             }
@@ -276,17 +276,16 @@ fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, regi
 /// An internal arc (empty asset path) or an unresolved target retimes by 1.0.
 /// `asset_path` must already be anchored to its authoring layer.
 //
-// TODO(perf): this `graph.find` re-resolves the target that
-// `indexer::add_ref_or_payload_arc` resolves again moments later for the same
-// anchored path. The duplicate can't be hoisted trivially — the ratio's
-// numerator is the per-member authoring rate, knowable only here inside the
-// in-place list-op fold, while the target stack is needed there — so it waits on
-// an asset-path resolution cache at the resolver level.
+// `graph.id_of` is an exact O(1) lookup of the already-anchored target.
+// `indexer::add_ref_or_payload_arc` looks the same path up again moments later;
+// the duplicate can't be hoisted trivially — the ratio's numerator is the
+// per-member authoring rate, knowable only here inside the in-place list-op fold,
+// while the target stack is needed there — but both are cheap hash hits.
 fn arc_tcps_scale(introducing: &sdf::Layer, asset_path: &str, graph: &LayerGraph) -> f64 {
     if asset_path.is_empty() {
         return 1.0;
     }
-    graph.find(asset_path).map_or(1.0, |target| {
+    graph.id_of(asset_path).map_or(1.0, |target| {
         super::effective_time_codes_per_second(introducing)
             / super::effective_time_codes_per_second(graph.layer(target))
     })

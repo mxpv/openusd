@@ -382,7 +382,7 @@ pub(crate) fn effective_time_codes_per_second(layer: &sdf::Layer) -> f64 {
 ///
 /// These errors represent composition diagnostics. Recoverable failures skip
 /// the broken opinion and are retained by [`Stage`](crate::usd::Stage).
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// A composition arc cycle was detected (C++ `PcpErrorArcCycle`). The arc
@@ -788,7 +788,7 @@ pub enum RelocateConflictReason {
 /// A composition arc cycle ([`Error::ArcCycle`]). The chain reads from the
 /// composing prim (`composing`, in the `root_layer`) through each `hops` site;
 /// the last hop is the arc that closes the cycle and is dropped.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CycleChain {
     /// The prim being composed when the cycle was detected (the chain root).
     pub composing: Path,
@@ -801,7 +801,7 @@ pub struct CycleChain {
 
 /// One arc in a composition cycle chain ([`CycleChain::hops`]): the arc type and
 /// the `(layer, path)` site it reaches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CycleHop {
     /// The arc reaching this site (selects "references" / "inherits from" / …).
     pub arc: ArcType,

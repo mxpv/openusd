@@ -98,9 +98,20 @@ impl LayerRegistry {
     }
 
     /// Canonicalizes `asset_path` into a stable identifier, anchoring a relative
-    /// path against `anchor`. The registry's resolution surface — the underlying
-    /// [`ar::Resolver`] stays private so callers reach it only through here.
+    /// path against `anchor`. Every canonical-identifier computation — interning a
+    /// layer as it loads, anchoring an authored sublayer/arc path for lookup,
+    /// keying the muted set — flows through here, so the underlying
+    /// [`ar::Resolver`] stays private and the rules below apply uniformly.
+    ///
+    /// An anonymous layer identifier is its own canonical id: it names no
+    /// asset-resolvable location, so it passes through unchanged (C++
+    /// `SdfLayer::_GetCanonicalLayerId` / `ArResolver::CreateIdentifier`).
+    /// Anchoring it against a layer would corrupt it into a bogus path that no
+    /// interned layer matches.
     pub(crate) fn create_identifier(&self, asset_path: &str, anchor: Option<&ar::ResolvedPath>) -> String {
+        if sdf::Layer::is_anonymous_identifier(asset_path) {
+            return asset_path.to_string();
+        }
         self.resolver.create_identifier(asset_path, anchor)
     }
 
@@ -184,16 +195,23 @@ impl LayerRegistry {
         asset_path: &str,
         anchor: Option<&ar::ResolvedPath>,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
     ) -> Result<Vec<sdf::Layer>> {
         let mut layers = Vec::new();
         let mut visited = HashSet::new();
 
-        let identifier = self.resolver.create_identifier(asset_path, anchor);
-        if identifier.is_empty() || already_present(&identifier) {
+        let identifier = self.create_identifier(asset_path, anchor);
+        if identifier.is_empty() {
             return Ok(layers);
         }
+        // With `reload`, an already-interned root and its already-present sublayers
+        // are re-read and re-walked (but not re-emitted) so a re-open under a new
+        // expression-variable context loads the `${VAR}` sublayers the context now
+        // resolves — including ones nested below a literal sublayer — that a first,
+        // variable-free open left unresolved. The caller only reloads for that case.
+        //
         // The root must resolve and read; both failures propagate.
         let resolved = self
             .resolver
@@ -207,6 +225,7 @@ impl LayerRegistry {
             resolved,
             data,
             ancestor_expr_vars,
+            reload,
             on_error,
             already_present,
             &mut visited,
@@ -269,6 +288,7 @@ impl LayerRegistry {
         resolved: ar::ResolvedPath,
         data: sdf::LayerData,
         ancestor_expr_vars: &HashMap<String, sdf::Value>,
+        reload: bool,
         on_error: &dyn Fn(Error) -> Result<()>,
         already_present: &dyn Fn(&str) -> bool,
         visited: &mut HashSet<String>,
@@ -285,8 +305,12 @@ impl LayerRegistry {
 
         // Emit this layer ahead of its sublayers so the collected stack is
         // strongest-first: a layer overrides the layers it sublayers, and earlier
-        // entries in a `subLayers` list override later ones (spec 10.3.1.1).
-        layers.push(sdf::Layer::new(identifier.clone(), data));
+        // entries in a `subLayers` list override later ones (spec 10.3.1.1). In a
+        // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
+        // sublayer the new context now resolves) but not re-emitted.
+        if !already_present(&identifier) {
+            layers.push(sdf::Layer::new(identifier.clone(), data));
+        }
 
         // A layer inside a `.usdz` package cannot reach a sibling layer within the
         // archive (not yet supported), so a usdz layer declaring any sublayers
@@ -314,11 +338,13 @@ impl LayerRegistry {
                 }
             };
 
-            let sub_id = self.resolver.create_identifier(&sub_asset, Some(&resolved));
-            // A sublayer already opened (this pass or in the graph) is skipped; an
-            // empty/degenerate identifier falls through to the resolve below and is
-            // reported `UnresolvedAsset`.
-            if visited.contains(&sub_id) || already_present(&sub_id) {
+            let sub_id = self.create_identifier(&sub_asset, Some(&resolved));
+            // A sublayer already opened this pass is skipped. One already in the
+            // graph is skipped too — except in a reload pass, where it is re-walked
+            // to reach the `${VAR}` sublayers the new context now resolves below it
+            // (it is not re-emitted; see the push above). An empty/degenerate
+            // identifier falls through to the resolve below as `UnresolvedAsset`.
+            if visited.contains(&sub_id) || (already_present(&sub_id) && !reload) {
                 continue;
             }
             // Resolve the sublayer; a missing one is routed to `on_error`.
@@ -351,6 +377,7 @@ impl LayerRegistry {
                 sub_resolved,
                 sub_data,
                 &expr_vars,
+                reload,
                 on_error,
                 already_present,
                 visited,
@@ -393,7 +420,7 @@ impl LayerRegistry {
         layers: &mut Vec<sdf::Layer>,
         visited: &mut HashSet<String>,
     ) -> Result<()> {
-        let identifier = self.resolver.create_identifier(asset_path, anchor);
+        let identifier = self.create_identifier(asset_path, anchor);
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
         }
@@ -498,7 +525,7 @@ mod tests {
 
     /// Opens a root layer and its sublayer stack, erroring on a missing sublayer.
     fn open_stack(path: &str) -> Result<Vec<sdf::Layer>> {
-        registry().open_stack(path, None, &HashMap::new(), &|e| Err(e.into()), &|_| false)
+        registry().open_stack(path, None, &HashMap::new(), false, &|e| Err(e.into()), &|_| false)
     }
 
     #[test]
@@ -615,6 +642,7 @@ mod tests {
             &composition_path("subLayer/sublayer_invalid.usda"),
             None,
             &HashMap::new(),
+            false,
             &|e| {
                 errors.borrow_mut().push(e);
                 Ok(())

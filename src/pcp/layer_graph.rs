@@ -22,7 +22,12 @@
 //! source of truth — no DFS on every query, and no edge that fails to persist on
 //! save.
 
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::mem;
+use std::path;
+use std::rc::Rc;
 
 use crate::ar::ResolvedPath;
 use crate::sdf::expr;
@@ -30,7 +35,6 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
 use super::mapping::MapFunction;
-use super::prim_index::find_layer_id;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
 use super::{effective_time_codes_per_second, Error};
 
@@ -101,14 +105,22 @@ pub struct LayerStackIdentifier {
     pub resolver: String,
 }
 
+/// A layer's resolved sublayer edges in declared order: each child paired with
+/// the effective layer offset for that hop (the authored `subLayerOffset` with
+/// the time-codes-per-second retiming folded in, per spec 10.3.1.1 / 12.3.2).
+type SublayerEdges = Vec<(LayerId, LayerOffset)>;
+
+/// A composed expression-variable context, shared (cheaply cloned) down the
+/// sublayer walk in [`compose_edges`](LayerGraph::compose_edges) so that
+/// threading it to a layer's children does not copy the dictionary.
+type SharedExprVars = Rc<HashMap<String, Value>>;
+
 /// A single layer in the [`LayerGraph`].
 pub(crate) struct LayerNode {
     /// The loaded layer (identifier + backing data + authoring surface).
     pub layer: sdf::Layer,
-    /// Sublayer edges in declared order, each paired with the effective layer
-    /// offset for that hop (the authored `subLayerOffset` with the
-    /// time-codes-per-second retiming folded in, per spec 10.3.1.1 / 12.3.2).
-    pub children: Vec<(LayerId, LayerOffset)>,
+    /// This layer's [`SublayerEdges`].
+    pub children: SublayerEdges,
     /// The structurally valid authored `layerRelocates` pairs `(source, target)`
     /// in this layer's own namespace. Stack queries apply duplicate-source and
     /// conflict rules for the ambient layer stack. Empty when the layer authors
@@ -145,7 +157,7 @@ pub(crate) struct LayerGraph {
     /// never reused for a different layer within a session.
     next_id: u32,
     /// All layer ids in collection order. Iteration order is deterministic, so
-    /// asset-path resolution (`find`) and identifier listing are stable. The
+    /// identifier listing and sublayer-stack composition are stable. The
     /// first [`session_layer_count`](Self::session_layer_count) entries are the
     /// session layers, in strength order.
     order: Vec<LayerId>,
@@ -228,6 +240,17 @@ pub(crate) struct LayerGraph {
     /// composition reads). The faithful fix is the per-`(layer stack, path)` node
     /// model; this single-node graph approximates it.
     subtree_seed: HashMap<LayerId, HashMap<String, Value>>,
+    /// Memoized sublayer-path resolution, `parent layer → (authored sub-path →
+    /// resolved identifier)`. [`compose_edges`](Self::compose_edges) anchors each
+    /// relative `subLayers` entry against its parent through the resolver — a
+    /// filesystem canonicalize — and re-runs the whole walk on every
+    /// [`build_sublayer_edges`](Self::build_sublayer_edges), i.e. every `subLayers`
+    /// edit. The `(parent, sub-path) → identifier` mapping is a pure function of
+    /// the asset paths, so it is computed once and reused; the identifier is then
+    /// looked up live with [`id_of`](Self::id_of), so the cache survives a layer
+    /// being removed and re-added, and a target that interns on a later rebuild is
+    /// picked up without re-resolving the path.
+    sublayer_resolution: HashMap<LayerId, HashMap<String, String>>,
 }
 
 /// What a [`mute_layer`](LayerGraph::mute_layer) or
@@ -272,6 +295,7 @@ impl LayerGraph {
             registry,
             failed_loads: HashMap::new(),
             subtree_seed: HashMap::new(),
+            sublayer_resolution: HashMap::new(),
         }
     }
 
@@ -339,33 +363,48 @@ impl LayerGraph {
         }
         // Edges are resolved into a side buffer so the immutable `compose_edges`
         // borrow does not clash with the per-node mutation that applies them.
-        let mut all_edges: Vec<(LayerId, Vec<(LayerId, LayerOffset)>)> = Vec::with_capacity(self.nodes.len());
+        let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::with_capacity(self.nodes.len());
         let mut visited: HashSet<LayerId> = HashSet::with_capacity(self.nodes.len());
+        // Take the resolution cache out so `compose_edges` (which borrows `self`
+        // immutably) can fill it; it carries forward across rebuilds, so a
+        // `subLayers` edit only resolves paths it has not seen before.
+        let mut resolution = mem::take(&mut self.sublayer_resolution);
 
         // Forest roots in strength order: session layers, the root layer (each
         // with no inherited context), then the external reference/payload roots
-        // that inherited variables across their arc. A final pass over any layer
-        // not yet reached builds the edges of an interned subtree hanging off no
-        // known root: a reference/payload target whose arc carried no variables is
-        // not in `subtree_seed`, so this pass is what reaches it (with the empty
-        // context the load opened it under). It also covers eagerly-loaded test
-        // graphs whose reference targets are interned without the demand path.
-        // `subtree_seed` is consulted through `self.order` rather than its own
-        // iteration order, keeping the walk deterministic.
+        // that inherited variables across their arc. What remains is the orphan
+        // forest — a reference/payload target whose arc carried no variables is
+        // not in `subtree_seed`, so it (and the sublayer subtree the load opened
+        // under it) is reached only after the seeded passes; it is walked from its
+        // own roots below so context still threads top-down. This also covers
+        // eagerly-loaded test graphs whose reference targets are interned without
+        // the demand path. `subtree_seed` is consulted through `self.order` rather
+        // than its own iteration order, keeping the walk deterministic.
         for &id in self.session_layers() {
-            self.compose_edges(id, None, &mut visited, &mut all_edges);
+            self.compose_edges(id, None, &mut visited, &mut all_edges, &mut resolution);
         }
         if let Some(root) = self.root {
-            self.compose_edges(root, None, &mut visited, &mut all_edges);
+            self.compose_edges(root, None, &mut visited, &mut all_edges, &mut resolution);
         }
         for &id in &self.order {
             if let Some(seed) = self.subtree_seed.get(&id) {
-                self.compose_edges(id, Some(seed), &mut visited, &mut all_edges);
+                self.compose_edges(id, Some(seed), &mut visited, &mut all_edges, &mut resolution);
             }
         }
-        for &id in &self.order {
-            self.compose_edges(id, None, &mut visited, &mut all_edges);
+        // Walk the orphan forest from its roots — a layer no other still-unvisited
+        // layer sublayers — so an intermediate layer's `expressionVariables` reach
+        // a descendant's `${VAR}` sublayer before that descendant could be composed
+        // standalone with the empty context (which collection order alone does not
+        // guarantee). The final order pass is a backstop for an orphan cycle, which
+        // has no root and so is reached nowhere above.
+        let unvisited: Vec<LayerId> = self.order.iter().copied().filter(|id| !visited.contains(id)).collect();
+        for id in self.orphan_roots(&unvisited, &mut resolution) {
+            self.compose_edges(id, None, &mut visited, &mut all_edges, &mut resolution);
         }
+        for &id in &self.order {
+            self.compose_edges(id, None, &mut visited, &mut all_edges, &mut resolution);
+        }
+        self.sublayer_resolution = resolution;
 
         for (id, edges) in all_edges {
             self.nodes.get_mut(&id).expect("edge source exists").children = edges;
@@ -375,24 +414,59 @@ impl LayerGraph {
         self.recompute_cycle_errors();
     }
 
-    /// Resolves `id`'s `subLayers` into edges against `ancestor` (the expression
-    /// variables inherited from the layers that sublayer it, or the demand seed at
-    /// an external root; `None` is the empty context), then descends into each
-    /// child threading `id`'s own variables overlaid on `ancestor`. Each layer's
-    /// edges are built once — `visited` gates re-entry, so a shared sublayer keeps
-    /// the strongest ancestry's context and a sublayer cycle terminates (the edge
-    /// is still recorded for [`detect_cycles`](Self::detect_cycles)). Resolved
-    /// edges are pushed to `all_edges`; the caller applies them to the nodes.
+    /// Resolves the subtree rooted at `id` into edges against `ancestor` (the
+    /// expression variables inherited from the layers that sublayer it, or the
+    /// demand seed at an external root; `None` is the empty context), threading
+    /// each layer's own variables overlaid on its ancestor down into its children.
+    /// Each layer's edges are built once — `visited` gates re-entry, so a shared
+    /// sublayer keeps the strongest ancestry's context and a sublayer cycle
+    /// terminates (the edge is still recorded for [`detect_cycles`](Self::detect_cycles)).
+    /// Resolved edges are pushed to `all_edges`; the caller applies them.
+    ///
+    /// The depth-first walk runs on an explicit stack rather than the native call
+    /// stack, so a deep single-sublayer chain composes without overflowing it
+    /// (mirroring [`detect_cycles`](Self::detect_cycles) and the indexer). Each
+    /// entry carries its inherited context as a cheaply cloned [`Rc`]; children are
+    /// pushed in reverse so they pop in declared (strength) order.
     fn compose_edges(
         &self,
         id: LayerId,
         ancestor: Option<&HashMap<String, Value>>,
         visited: &mut HashSet<LayerId>,
-        all_edges: &mut Vec<(LayerId, Vec<(LayerId, LayerOffset)>)>,
+        all_edges: &mut Vec<(LayerId, SublayerEdges)>,
+        resolution: &mut HashMap<LayerId, HashMap<String, String>>,
     ) {
-        if !visited.insert(id) {
-            return;
+        let mut stack: Vec<(LayerId, Option<SharedExprVars>)> = vec![(id, ancestor.map(|a| Rc::new(a.clone())))];
+        while let Some((id, ancestor)) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let (edges, combined) = self.resolve_edges(id, ancestor.as_deref(), resolution);
+            // The context threaded into the children: this layer's own variables
+            // overlaid (`combined`), or the inherited `ancestor` when it authors none.
+            let child_context = match combined {
+                Some(combined) => Some(Rc::new(combined)),
+                None => ancestor,
+            };
+            for &(child, _) in edges.iter().rev() {
+                stack.push((child, child_context.clone()));
+            }
+            all_edges.push((id, edges));
         }
+    }
+
+    /// Resolves `id`'s `subLayers` into `(child, effective offset)` edges against
+    /// `ancestor`, also returning the context to thread into those children —
+    /// `id`'s own `expressionVariables` overlaid on `ancestor`, or `None` when it
+    /// authors none (the caller falls back to `ancestor`). Reads only `id`'s own
+    /// data, so it is reused both to build an edge (in [`compose_edges`](Self::compose_edges))
+    /// and to discover a layer's children (in [`orphan_roots`](Self::orphan_roots)).
+    fn resolve_edges(
+        &self,
+        id: LayerId,
+        ancestor: Option<&HashMap<String, Value>>,
+        resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+    ) -> (SublayerEdges, Option<HashMap<String, Value>>) {
         let root_path = Path::abs_root();
         let node = &self.nodes[&id];
         let Ok(Value::StringVec(sub_paths)) = node
@@ -401,7 +475,7 @@ impl LayerGraph {
             .get_field(&root_path, FieldKey::SubLayers.as_str())
             .map(|v| v.into_owned())
         else {
-            return;
+            return (Vec::new(), None);
         };
         let offsets: Vec<LayerOffset> = node
             .layer
@@ -446,7 +520,7 @@ impl LayerGraph {
             } else {
                 sub_path
             };
-            let Some(sub_id) = self.find(&sub_path) else {
+            let Some(sub_id) = self.resolve_sublayer(id, &sub_path, resolution) else {
                 continue;
             };
             let ratio = parent_tcps / effective_time_codes_per_second(&self.nodes[&sub_id].layer);
@@ -458,10 +532,65 @@ impl LayerGraph {
                 .concatenate(&LayerOffset::scale_only(ratio));
             edges.push((sub_id, effective));
         }
-        for &(child, _) in &edges {
-            self.compose_edges(child, context, visited, all_edges);
+        (edges, combined)
+    }
+
+    /// The roots of the orphan sublayer forest: the still-`unvisited` layers that
+    /// no other unvisited layer sublayers. The fallback in
+    /// [`build_sublayer_edges`](Self::build_sublayer_edges) walks from these rather
+    /// than from every layer in collection order, so an intermediate layer's
+    /// `expressionVariables` thread to its descendants before a descendant is
+    /// composed standalone with the empty context.
+    //
+    // TODO(perf): this resolves every unvisited layer's edges just to collect the
+    // child ids, then `compose_edges` resolves them again for the surviving roots.
+    // The sublayer-resolution cache spares the canonicalize, but the field decode
+    // and offset build repeat; the discovered edges could be reused.
+    fn orphan_roots(
+        &self,
+        unvisited: &[LayerId],
+        resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+    ) -> Vec<LayerId> {
+        let mut is_child: HashSet<LayerId> = HashSet::new();
+        for &id in unvisited {
+            let (edges, _) = self.resolve_edges(id, None, resolution);
+            is_child.extend(edges.into_iter().map(|(child, _)| child));
         }
-        all_edges.push((id, edges));
+        unvisited.iter().copied().filter(|id| !is_child.contains(id)).collect()
+    }
+
+    /// Resolves an authored `subLayers` entry `sub_path` against its parent layer
+    /// `parent` to the interned sublayer (the memoizing form of
+    /// [`find_relative`](Self::find_relative) for the per-rebuild
+    /// [`compose_edges`](Self::compose_edges) walk). The anchored identifier — the
+    /// asset USD resolves the relative entry to — is tried first; only when no
+    /// layer is interned there does it fall back to the bare authored string, so a
+    /// filesystem-backed parent never resolves to an unrelated layer interned
+    /// under the bare string, while an in-memory layer keyed under that literal
+    /// name (no filesystem anchor) still resolves.
+    ///
+    /// The anchored identifier is a pure function of the asset paths, so it is
+    /// memoized in `cache` whether or not it currently names an interned layer:
+    /// the resolver's filesystem canonicalize then runs once per `(parent,
+    /// sub_path)`, while the live [`id_of`](Self::id_of) below still tracks
+    /// interning, so a target that interns on a later rebuild is picked up without
+    /// re-resolving the path (see [`sublayer_resolution`](Self::sublayer_resolution)).
+    fn resolve_sublayer(
+        &self,
+        parent: LayerId,
+        sub_path: &str,
+        cache: &mut HashMap<LayerId, HashMap<String, String>>,
+    ) -> Option<LayerId> {
+        let sub_path = without_dot_segments(sub_path);
+        if let Some(anchored) = cache.get(&parent).and_then(|paths| paths.get(sub_path.as_ref())) {
+            return self.anchored_or_bare(anchored, &sub_path);
+        }
+        let anchored = self
+            .registry
+            .create_identifier_anchored(&sub_path, self.identifier(parent));
+        let sub_id = self.anchored_or_bare(&anchored, &sub_path);
+        cache.entry(parent).or_default().insert(sub_path.into_owned(), anchored);
+        sub_id
     }
 
     /// Replaces [`cycle_errors`](Self::cycle_errors) with the sublayer cycles
@@ -477,19 +606,36 @@ impl LayerGraph {
         self.cycle_errors = errors;
     }
 
-    /// Recomputes the cached sublayer stack for every layer from the current
-    /// edges. Run after any edge mutation so [`sublayer_stack`](Self::sublayer_stack)
-    /// and its callers read up-to-date stacks.
+    /// Recomputes the cached sublayer stacks from the current edges. Run after any
+    /// edge mutation so [`sublayer_stack`](Self::sublayer_stack) and its callers
+    /// read up-to-date stacks.
+    ///
+    /// Only the sublayer-DAG roots — layers no other layer sublayers — are
+    /// precomputed: a `Sublayer` layer stack is only ever rooted at the stage root
+    /// or a reference/payload target, and those are the roots of the DAG (a
+    /// sublayer child participates through its root's stack, not its own). This
+    /// keeps the total work proportional to the roots' stack sizes rather than the
+    /// sum over every layer (which is O(n²) for a deep chain, where every layer
+    /// would re-walk the tail below it). A layer that is both sublayered and
+    /// referenced is not a root; [`sublayer_stack`](Self::sublayer_stack) composes
+    /// its stack on demand.
     fn rebuild_sublayer_stacks(&mut self) {
         // Re-resolve the muted identifiers to ids first, so a layer muted before
         // it was loaded takes effect the moment a later edit interns it and
         // rebuilds the stacks.
         self.resolve_muted_ids();
+        // A layer is a sublayer-DAG root unless it is some layer's sublayer child.
+        let sublayered: HashSet<LayerId> = self
+            .order
+            .iter()
+            .flat_map(|&id| self.nodes[&id].children.iter().map(|&(child, _)| child))
+            .collect();
         // Collect into a local map under the immutable `collect_sublayers` borrow,
         // then swap it in.
         let stacks: HashMap<LayerId, Vec<(LayerId, LayerOffset)>> = self
             .order
             .iter()
+            .filter(|id| !sublayered.contains(id))
             .map(|&id| {
                 let mut stack = Vec::new();
                 let mut ancestors = HashSet::new();
@@ -513,7 +659,7 @@ impl LayerGraph {
         if let Some(root) = self.root {
             // The root layer is never muted (the Stage API rejects it), and
             // `collect_sublayers` would prune it defensively if it ever were.
-            root_stack.extend_from_slice(self.sublayer_stack(root));
+            root_stack.extend_from_slice(&self.sublayer_stack(root));
         }
         self.root_stack = root_stack;
     }
@@ -547,25 +693,49 @@ impl LayerGraph {
     }
 
     /// Depth-first cycle scan recording [`Error::SublayerCycle`] for any edge
-    /// that re-enters a layer already on the path from the root.
+    /// that re-enters a layer already on the path from the root. Runs on an
+    /// explicit work stack so a deep chain does not overflow the native stack; an
+    /// `Exit` frame pops the layer back out of the `ancestors` path after its
+    /// subtree.
     fn detect_cycles(&self, id: LayerId, ancestors: &mut HashSet<LayerId>, errors: &mut Vec<Error>) {
-        ancestors.insert(id);
-        for &(child, _) in &self.nodes[&id].children {
-            // A muted child is pruned from every stack, so a cycle through it
-            // never composes and is not reported.
-            if self.is_muted(child) {
-                continue;
-            }
-            if ancestors.contains(&child) {
-                errors.push(Error::SublayerCycle {
-                    root_layer: self.nodes[&id].layer.identifier().to_string(),
-                    seen_layer: self.nodes[&child].layer.identifier().to_string(),
-                });
-                continue;
-            }
-            self.detect_cycles(child, ancestors, errors);
+        enum Step {
+            Enter(LayerId),
+            Exit(LayerId),
         }
-        ancestors.remove(&id);
+        let mut work = vec![Step::Enter(id)];
+        while let Some(step) = work.pop() {
+            let id = match step {
+                Step::Exit(id) => {
+                    ancestors.remove(&id);
+                    continue;
+                }
+                Step::Enter(id) => id,
+            };
+            ancestors.insert(id);
+            work.push(Step::Exit(id));
+            // Iterate forward to record cycle errors in declared order, gathering
+            // the non-cycle children; they are pushed reversed so they pop in
+            // declared order.
+            let mut to_visit = Vec::new();
+            for &(child, _) in &self.nodes[&id].children {
+                // A muted child is pruned from every stack, so a cycle through it
+                // never composes and is not reported.
+                if self.is_muted(child) {
+                    continue;
+                }
+                if ancestors.contains(&child) {
+                    errors.push(Error::SublayerCycle {
+                        root_layer: self.nodes[&id].layer.identifier().to_string(),
+                        seen_layer: self.nodes[&child].layer.identifier().to_string(),
+                    });
+                    continue;
+                }
+                to_visit.push(child);
+            }
+            for &child in to_visit.iter().rev() {
+                work.push(Step::Enter(child));
+            }
+        }
     }
 
     /// Read-only access to a layer node.
@@ -635,9 +805,47 @@ impl LayerGraph {
     /// external forest root for [`build_sublayer_edges`](Self::build_sublayer_edges)
     /// (see [`subtree_seed`](Self::subtree_seed)). The first context recorded for
     /// a root wins, so a target reached by several arcs keeps the one that opened
-    /// it. Called from the stage's load barrier when a demanded target is interned.
-    pub(crate) fn seed_subtree(&mut self, root: LayerId, vars: HashMap<String, Value>) {
-        self.subtree_seed.entry(root).or_insert(vars);
+    /// it. Returns whether this call recorded the context (the root was not already
+    /// seeded), so the caller can rebuild the edges for a newly seeded root. Called
+    /// from the stage's load barrier when a demanded target is interned.
+    pub(crate) fn seed_subtree(&mut self, root: LayerId, vars: HashMap<String, Value>) -> bool {
+        match self.subtree_seed.entry(root) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(slot) => {
+                slot.insert(vars);
+                true
+            }
+        }
+    }
+
+    /// Whether `root` already carries a recorded expression-variable context (see
+    /// [`seed_subtree`](Self::seed_subtree)). The indexer reads this to decide
+    /// whether an arc reaching an already-loaded target must demand a (re-)seed,
+    /// so a variable-carrying arc still seeds a target an earlier variable-free
+    /// arc interned unseeded.
+    pub(crate) fn is_seeded(&self, root: LayerId) -> bool {
+        self.subtree_seed.contains_key(&root)
+    }
+
+    /// Whether any layer in `id`'s loaded sublayer stack authors an
+    /// expression-valued `${VAR}` `subLayers` entry — the only kind of sublayer
+    /// whose resolution depends on the inherited expression-variable context. The
+    /// indexer reads this to demand a re-seed only for a target whose stack a
+    /// re-seed could change (so a variable-carrying arc to a plain target is left
+    /// alone), and the whole stack is scanned so an expression sublayer nested
+    /// below the target root — under a literal sublayer — is still caught.
+    pub(crate) fn has_expr_sublayer(&self, id: LayerId) -> bool {
+        let root_path = Path::abs_root();
+        self.sublayer_stack(id).iter().any(|&(layer, _)| {
+            let Ok(subs) = self.nodes[&layer]
+                .layer
+                .data()
+                .get_field(&root_path, FieldKey::SubLayers.as_str())
+            else {
+                return false;
+            };
+            matches!(&*subs, Value::StringVec(subs) if subs.iter().any(|p| expr::is_expression(p)))
+        })
     }
 
     /// Whether a prior on-demand open of `asset_path` failed to read or parse the
@@ -722,24 +930,34 @@ impl LayerGraph {
         self.identifiers_of(self.root_layer_stack().iter().map(|&(id, _)| id))
     }
 
-    /// Finds the id of a layer whose identifier matches `asset_path`, by exact
-    /// or suffix match, then by resolver anchoring for parent-relative paths.
-    /// Iterates in collection order so the result is deterministic.
-    pub(crate) fn find(&self, asset_path: &str) -> Option<LayerId> {
-        find_layer_id(asset_path, &self.order, |id| self.layer(id), &self.registry)
-    }
-
     /// The layer ids + effective offsets of the sublayer stack rooted at
     /// `root_layer` (spec 10.3.1.1): the depth-first pre-order walk of its
-    /// sublayer edges with offsets composed through nested sublayers, read from
-    /// the precomputed cache. A layer that sublayers itself transitively is a
-    /// cycle and is skipped; an off-path duplicate is expanded again. Empty for
-    /// an unknown layer. Callers needing an owned copy call `.to_vec()`.
-    pub(crate) fn sublayer_stack(&self, root_layer: LayerId) -> &[(LayerId, LayerOffset)] {
-        self.sublayer_stacks
-            .get(&root_layer)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+    /// sublayer edges with offsets composed through nested sublayers. A layer that
+    /// sublayers itself transitively is a cycle and is skipped; an off-path
+    /// duplicate is expanded again. Empty for an unknown layer.
+    ///
+    /// [`rebuild_sublayer_stacks`](Self::rebuild_sublayer_stacks) precomputes the
+    /// stack only for the sublayer-DAG roots — the stage root and the
+    /// reference/payload targets a `Sublayer` layer stack is ever rooted at — so a
+    /// hit returns a borrow of the cache. A layer that is both sublayered and used
+    /// as a reference target (so not a DAG root, yet queried here) composes its
+    /// stack on demand. Callers needing an owned copy call `.into_owned()`.
+    //
+    // TODO(perf): the on-demand `Cow::Owned` branch re-walks the whole subtree on
+    // every call for a target that is both sublayered and referenced (not a
+    // precomputed DAG root), and that id lands on the per-field value-resolution
+    // path. Memoize these on demand if the case shows up at scale.
+    pub(crate) fn sublayer_stack(&self, root_layer: LayerId) -> Cow<'_, [(LayerId, LayerOffset)]> {
+        if let Some(stack) = self.sublayer_stacks.get(&root_layer) {
+            return Cow::Borrowed(stack.as_slice());
+        }
+        if !self.nodes.contains_key(&root_layer) {
+            return Cow::Borrowed(&[]);
+        }
+        let mut stack = Vec::new();
+        let mut ancestors = HashSet::new();
+        self.collect_sublayers(root_layer, LayerOffset::IDENTITY, &mut stack, &mut ancestors);
+        Cow::Owned(stack)
     }
 
     fn collect_sublayers(
@@ -749,21 +967,41 @@ impl LayerGraph {
         stack: &mut Vec<(LayerId, LayerOffset)>,
         ancestors: &mut HashSet<LayerId>,
     ) {
-        // A muted layer contributes nothing: skip it and its whole subtree, so a
-        // muted sublayer (or a muted root handed to `sublayer_stack`) prunes the
-        // entire branch rather than just the one node.
-        if self.is_muted(id) {
-            return;
+        // Depth-first pre-order on an explicit work stack so a deep sublayer chain
+        // does not overflow the native stack. An `Exit` frame pops the layer back
+        // out of the `ancestors` path after its subtree (matching the recursive
+        // `ancestors.remove` on return); children are pushed in reverse so they pop
+        // in declared order.
+        enum Step {
+            Enter(LayerId, LayerOffset),
+            Exit(LayerId),
         }
-        stack.push((id, effective));
-        ancestors.insert(id);
-        for &(child, edge_offset) in &self.nodes[&id].children {
-            if ancestors.contains(&child) {
+        let mut work = vec![Step::Enter(id, effective)];
+        while let Some(step) = work.pop() {
+            let (id, effective) = match step {
+                Step::Exit(id) => {
+                    ancestors.remove(&id);
+                    continue;
+                }
+                Step::Enter(id, effective) => (id, effective),
+            };
+            // A muted layer contributes nothing: skip it and its whole subtree, so
+            // a muted sublayer (or a muted root handed to `sublayer_stack`) prunes
+            // the entire branch rather than just the one node.
+            if self.is_muted(id) {
                 continue;
             }
-            self.collect_sublayers(child, effective.concatenate(&edge_offset), stack, ancestors);
+            stack.push((id, effective));
+            ancestors.insert(id);
+            work.push(Step::Exit(id));
+            for &(child, edge_offset) in self.nodes[&id].children.iter().rev() {
+                // A layer that sublayers itself transitively is a cycle and is
+                // skipped; an off-path duplicate is expanded again.
+                if !ancestors.contains(&child) {
+                    work.push(Step::Enter(child, effective.concatenate(&edge_offset)));
+                }
+            }
         }
-        ancestors.remove(&id);
     }
 
     /// The stage's root layer stack: session layers (identity offset) followed by
@@ -791,9 +1029,9 @@ impl LayerGraph {
     /// offset)` pairs in strength order), reading the precomputed
     /// [`root_stack`](Self::root_stack) or [`sublayer_stacks`](Self::sublayer_stacks).
     /// Empty for the sublayer stack of an unknown or muted root layer.
-    pub(crate) fn layer_stack(&self, id: LayerStackId) -> &[(LayerId, LayerOffset)] {
+    pub(crate) fn layer_stack(&self, id: LayerStackId) -> Cow<'_, [(LayerId, LayerOffset)]> {
         match id {
-            LayerStackId::Root => &self.root_stack,
+            LayerStackId::Root => Cow::Borrowed(self.root_stack.as_slice()),
             LayerStackId::Sublayer(root) => self.sublayer_stack(root),
         }
     }
@@ -919,7 +1157,7 @@ impl LayerGraph {
     /// Not chained.
     fn incremental_relocate_entries(&self, ambient: LayerStackId) -> Vec<(Path, Path, LayerId)> {
         let mut entries: Vec<(Path, Path, LayerId)> = Vec::new();
-        for &(layer, _) in self.layer_stack(ambient) {
+        for &(layer, _) in self.layer_stack(ambient).iter() {
             let Some(node) = self.nodes.get(&layer) else {
                 continue;
             };
@@ -1023,16 +1261,53 @@ impl LayerGraph {
     ///
     /// The node must exist before a `subLayers` edit naming its asset path is
     /// rebuilt, so that [`build_sublayer_edges`](Self::build_sublayer_edges)'s
-    /// `find()` resolves the path to it.
+    /// [`find_relative`](Self::find_relative) resolves the path to it.
     pub(crate) fn ensure_layer(&mut self, layer: sdf::Layer) -> (LayerId, bool) {
         self.intern(layer)
     }
 
-    /// The id of the layer whose canonical identifier is exactly `identifier`,
-    /// or `None`. The exact-match counterpart to the asset-path
-    /// [`find`](Self::find); the authoring surface resolves a layer this way.
+    /// The id of the layer interned under exactly `identifier` (the canonical,
+    /// resolver-produced form), or `None`. An authored relative path must be
+    /// anchored to its canonical identifier first (see
+    /// [`find_relative`](Self::find_relative)); this is the exact registry lookup
+    /// the anchored path then resolves through, and the authoring surface keys a
+    /// layer this way.
     pub(crate) fn id_of(&self, identifier: &str) -> Option<LayerId> {
         self.by_identifier.get(identifier).copied()
+    }
+
+    /// The layer interned under the resolver-anchored identifier `anchored`, or —
+    /// when nothing is interned there — under the bare authored `normalized` path.
+    /// Anchoring wins so a relative path against a filesystem-backed layer never
+    /// resolves to an unrelated layer interned under the bare string, while an
+    /// in-memory layer keyed under that literal name (no filesystem anchor) still
+    /// resolves. The shared lookup behind [`find_relative`](Self::find_relative)
+    /// and [`resolve_sublayer`](Self::resolve_sublayer).
+    fn anchored_or_bare(&self, anchored: &str, normalized: &str) -> Option<LayerId> {
+        self.id_of(anchored).or_else(|| self.id_of(normalized))
+    }
+
+    /// Resolves `asset_path` as authored in `anchor`, anchoring it through the
+    /// resolver to a canonical identifier, then looking that up exactly (C++
+    /// `SdfLayer::FindRelativeToLayer`). The resolver owns anchoring and
+    /// canonicalization, so a `..` path or a symlinked leaf resolves to the same
+    /// canonical identifier the load path (`LayerRegistry::open_sublayers`)
+    /// interned the layer under — the lookup is an exact registry hit that agrees
+    /// with the load path by construction.
+    ///
+    /// The anchored identifier — the asset USD resolves a relative path to — is
+    /// tried first. Only when no layer is interned there does it fall back to the
+    /// bare authored string, which lets an in-memory layer keyed under that
+    /// literal name (with no filesystem location to anchor against) resolve.
+    /// Anchoring first means a relative path against a filesystem-backed layer
+    /// never resolves to an unrelated layer that merely happens to be interned
+    /// under the bare string.
+    pub(crate) fn find_relative(&self, asset_path: &str, anchor: LayerId) -> Option<LayerId> {
+        let asset_path = without_dot_segments(asset_path);
+        let anchored = self
+            .registry
+            .create_identifier_anchored(&asset_path, self.identifier(anchor));
+        self.anchored_or_bare(&anchored, &asset_path)
     }
 
     /// Mutes the layer with the given identifier so it contributes no opinions to
@@ -1243,13 +1518,13 @@ impl LayerGraph {
 
     /// The canonical identifier a muted-layer path resolves to (C++
     /// `Pcp_MutedLayers::_GetCanonicalLayerId`). A path is reduced to the
-    /// identifier its layer is interned under (see [`intern`](Self::intern)): an
-    /// anonymous identifier keeps its `anon:` form (it has no asset-resolvable
-    /// location), and so does any path when there is no filesystem `anchor` — an
-    /// in-memory or anonymous root, where a relative path has nothing to resolve
-    /// against and an added layer keeps its bare identifier. Every other path is
-    /// canonicalized through the resolver against `anchor`, the form a filesystem
-    /// asset is interned under.
+    /// identifier its layer is interned under (see [`intern`](Self::intern)): with
+    /// no filesystem `anchor` — an in-memory or anonymous root — a relative path
+    /// has nothing to resolve against and an added layer keeps its bare
+    /// identifier, so the path passes through. Every other path is canonicalized
+    /// through the registry against `anchor`, the form a filesystem asset is
+    /// interned under; an anonymous identifier passes through there too (the
+    /// registry keeps an `anon:` id as its own canonical form).
     ///
     /// `anchor` is the layer the path is anchored against: the root layer for the
     /// mute/unmute/query API, the arc's authoring layer for a reference/payload
@@ -1259,16 +1534,41 @@ impl LayerGraph {
     /// `(path, anchor)`, independent of which layers are currently loaded — so the
     /// same physical layer never keys under different strings by load order.
     fn canonical_muted_id(&self, path: &str, anchor: Option<&ResolvedPath>) -> String {
-        if anchor.is_none() || sdf::Layer::is_anonymous_identifier(path) {
+        if anchor.is_none() {
             return path.to_string();
         }
         self.registry.create_identifier(path, anchor)
     }
 }
 
+/// `asset_path` with its `.` (current-directory) segments dropped, rendered with
+/// `/` separators: `./a` and `a/./b` become `a` and `a/b`. Segments are split on
+/// any separator the platform accepts — `/` everywhere, and `\` on Windows — so
+/// this matches the `std::path::Components` normalization the resolver applies
+/// when it anchors a relative path (`LayerRegistry::create_identifier` via
+/// `TfNormPath`). A dot-relative spelling therefore reduces to the same bare key
+/// the anchored identifier drops its `.` to — `./sub.usda` on any platform, or
+/// `.\sub.usda` on Windows — and the bare fallback in `anchored_or_bare` finds an
+/// in-memory layer interned under `sub.usda`. A path with no `.` segment is
+/// returned unchanged.
+fn without_dot_segments(asset_path: &str) -> Cow<'_, str> {
+    if !asset_path.split(path::is_separator).any(|segment| segment == ".") {
+        return Cow::Borrowed(asset_path);
+    }
+    let kept: Vec<&str> = asset_path
+        .split(path::is_separator)
+        .filter(|segment| *segment != ".")
+        .collect();
+    Cow::Owned(kept.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::path::Path as FsPath;
+
     use super::*;
+    use crate::ar;
 
     /// Author through a layer's `edit` API and commit, for building test fixtures.
     fn edit_layer(layer: &mut sdf::Layer, f: impl FnOnce(&mut sdf::LayerEdit<'_>)) {
@@ -1306,6 +1606,19 @@ mod tests {
             }
             graph.finalize(session_count, root);
             graph
+        }
+
+        /// The id of a loaded layer whose identifier ends with the path component
+        /// `leaf` (its file name), or `None`. A test convenience for locating a
+        /// layer in a stack built from on-disk assets, where the identifier is the
+        /// full resolved path rather than the authored leaf; production code keys
+        /// layers by canonical identifier ([`id_of`](Self::id_of)) or anchors an
+        /// authored path first ([`find_relative`](Self::find_relative)).
+        pub(crate) fn find_by_leaf(&self, leaf: &str) -> Option<LayerId> {
+            self.order
+                .iter()
+                .copied()
+                .find(|&id| FsPath::new(self.identifier(id)).ends_with(leaf))
         }
     }
 
@@ -1432,6 +1745,87 @@ mod tests {
         );
     }
 
+    /// The same intermediate-variable threading holds in an orphan subtree (one
+    /// the root does not sublayer, reached only by the final fallback pass) even
+    /// when the child `b` is interned before its parent `a`. Walking the orphan
+    /// forest from its root `a` — rather than from each layer in collection order —
+    /// composes `b` with `a`'s `V` in scope, so `b`'s `${V}` edge to `leaf` forms;
+    /// composing `b` standalone first (collection order alone) would drop it.
+    #[test]
+    fn orphan_subtree_threads_intermediate_vars() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut a = sdf::Layer::new_in_memory("a.usda");
+        set_expr_var(&mut a, "V", "leaf");
+        edit_layer(&mut a, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        });
+        let mut b = sdf::Layer::new_in_memory("b.usda");
+        edit_layer(&mut b, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let leaf = sdf::Layer::new_in_memory("leaf.usda");
+
+        // `root` sublayers none of them, so `a`/`b`/`leaf` are an orphan subtree;
+        // `b` precedes `a` in collection order.
+        let graph = LayerGraph::from_layers(vec![root, b, a, leaf], 0, sdf::LayerRegistry::default());
+        let b_id = graph.id_of("b.usda").unwrap();
+        let leaf_id = graph.id_of("leaf.usda").unwrap();
+        let ids: Vec<LayerId> = graph.sublayer_stack(b_id).iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&leaf_id),
+            "`b`'s ${{V}} sublayer resolves against `a`'s variable even as an orphan interned before `a`",
+        );
+    }
+
+    /// A deep single-sublayer chain composes without overflowing the native
+    /// stack: the edge walk, the cycle scan, and the stack collection all run on
+    /// explicit stacks. Each layer sublayers the next; the root's composed
+    /// sublayer stack contains the whole chain. Only the root's stack is
+    /// precomputed (the chain has one sublayer-DAG root), so this is O(n).
+    #[test]
+    fn deep_sublayer_chain_no_overflow() {
+        const DEPTH: usize = 50_000;
+        let mut layers = Vec::with_capacity(DEPTH);
+        for i in 0..DEPTH {
+            let mut layer = sdf::Layer::new_in_memory(format!("layer{i}.usda"));
+            if i + 1 < DEPTH {
+                edit_layer(&mut layer, |e| {
+                    e.pseudo_root_mut()
+                        .unwrap()
+                        .set_sublayers([format!("layer{}.usda", i + 1)]);
+                });
+            }
+            layers.push(layer);
+        }
+        let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        assert_eq!(graph.sublayer_stack(root_id).len(), DEPTH, "the whole chain composes");
+    }
+
+    /// `sublayer_stack` composes a non-precomputed layer's stack on demand: a
+    /// layer that is sublayered (so not a sublayer-DAG root, not precomputed)
+    /// still reports its own stack when queried — the case of a layer that is both
+    /// sublayered and used as a reference/payload target.
+    #[test]
+    fn sublayer_stack_computed_on_demand() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        });
+        let mut a = sdf::Layer::new_in_memory("a.usda");
+        edit_layer(&mut a, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        });
+        let b = sdf::Layer::new_in_memory("b.usda");
+
+        let graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
+        let a_id = graph.id_of("a.usda").unwrap();
+        let b_id = graph.id_of("b.usda").unwrap();
+        // `a` is sublayered by root, so it is not a precomputed DAG root.
+        let ids: Vec<LayerId> = graph.sublayer_stack(a_id).iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids, vec![a_id, b_id], "a's stack composes on demand");
+    }
+
     /// A `${VAR}` sublayer on an external (reference/payload) subtree root
     /// resolves against the context the arc carried. Before the root is seeded
     /// the edge drops (the variable is unknown); after
@@ -1460,6 +1854,36 @@ mod tests {
         graph.recompute_sublayers();
         let ids: Vec<LayerId> = graph.sublayer_stack(target).iter().map(|&(id, _)| id).collect();
         assert!(ids.contains(&over), "the seeded variable resolves the sublayer edge");
+    }
+
+    /// A sublayer interned after the first edge build is picked up on the next
+    /// rebuild. `compose_edges` resolves the authored `./leaf.usda` through the
+    /// memoizing [`resolve_sublayer`](LayerGraph::resolve_sublayer) and looks the
+    /// resolved identifier up live, so a target missing at first resolves once it
+    /// is interned — the cache never pins the earlier miss.
+    #[test]
+    fn rebuild_resolves_newly_interned_sublayer() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["./leaf.usda"]);
+        });
+        let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        assert_eq!(
+            graph.sublayer_stack(root_id).len(),
+            1,
+            "the not-yet-interned sublayer contributes no edge"
+        );
+
+        graph.ensure_layer(sdf::Layer::new_in_memory("leaf.usda"));
+        graph.recompute_sublayers();
+        let leaf = graph.id_of("leaf.usda").unwrap();
+        let ids: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
+        assert_eq!(
+            ids,
+            vec![root_id, leaf],
+            "the newly interned sublayer resolves on rebuild"
+        );
     }
 
     /// Relocate conflicts are scoped to the stack being composed. A layer that is
@@ -1512,5 +1936,212 @@ mod tests {
             Some(Path::new("/W/B").unwrap()),
             "s2's own stack keeps its authored relocate active"
         );
+    }
+
+    /// An authored relative path anchors against its parent's identifier and
+    /// resolves to the layer interned under the canonical (absolute) identifier
+    /// the load path would have produced; an unrelated leaf resolves to `None`.
+    /// On-disk files are used so the resolver canonicalizes the `./` and bare
+    /// spellings to the same absolute identifier the sublayer is interned under.
+    #[test]
+    fn find_relative_resolves_authored() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("root.usda"), b"#usda 1.0\n").unwrap();
+        std::fs::write(tmp.path().join("sub.usda"), b"#usda 1.0\n").unwrap();
+        let canonical = |leaf: &str| {
+            tmp.path()
+                .join(leaf)
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        let graph = LayerGraph::from_layers(
+            vec![
+                sdf::Layer::new(canonical("root.usda"), Box::new(sdf::Data::new())),
+                sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let root_id = graph.root_id().unwrap();
+        let sub_id = graph.id_of(&canonical("sub.usda")).unwrap();
+
+        assert_eq!(graph.find_relative("sub.usda", root_id), Some(sub_id));
+        assert_eq!(graph.find_relative("./sub.usda", root_id), Some(sub_id));
+        assert_eq!(graph.find_relative("missing.usda", root_id), None);
+    }
+
+    /// When anchoring finds no interned layer, resolution falls back to the bare
+    /// authored string, so an in-memory graph keyed by literal identifiers still
+    /// composes. A directory-bearing parent (`/proj/root.usda`) anchors the bare
+    /// `sub.usda` to `/proj/sub.usda`; with nothing interned there, the fallback
+    /// matches the child interned under the literal `sub.usda`.
+    #[test]
+    fn find_relative_falls_back_to_bare_interned() {
+        let mut root = sdf::Layer::new_in_memory("/proj/root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+        });
+        let sub = sdf::Layer::new_in_memory("sub.usda");
+
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        let sub_id = graph.id_of("sub.usda").unwrap();
+
+        assert_eq!(graph.find_relative("sub.usda", root_id), Some(sub_id));
+        let ids: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
+        assert_eq!(
+            ids,
+            vec![root_id, sub_id],
+            "the bare-named sublayer edge forms via the bare-id fallback"
+        );
+    }
+
+    /// When both the anchored target and an unrelated layer interned under the
+    /// bare authored string are present, the anchored identifier wins: a relative
+    /// sublayer resolves to the asset USD anchors it to, not to the colliding
+    /// bare-named layer. On-disk files give the parent a real location so its
+    /// relative `sub.usda` canonicalizes to the interned anchored layer.
+    #[test]
+    fn find_relative_prefers_anchored_over_bare_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("root.usda"), b"#usda 1.0\n").unwrap();
+        std::fs::write(tmp.path().join("sub.usda"), b"#usda 1.0\n").unwrap();
+        let canonical = |leaf: &str| {
+            tmp.path()
+                .join(leaf)
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+
+        let graph = LayerGraph::from_layers(
+            vec![
+                sdf::Layer::new(canonical("root.usda"), Box::new(sdf::Data::new())),
+                sdf::Layer::new(canonical("sub.usda"), Box::new(sdf::Data::new())),
+                // An unrelated layer interned under the bare authored string.
+                sdf::Layer::new("sub.usda", Box::new(sdf::Data::new())),
+            ],
+            0,
+            sdf::LayerRegistry::default(),
+        );
+        let root_id = graph.root_id().unwrap();
+        let anchored_id = graph.id_of(&canonical("sub.usda")).unwrap();
+
+        assert_eq!(
+            graph.find_relative("sub.usda", root_id),
+            Some(anchored_id),
+            "the relative entry resolves to the anchored on-disk asset, not the colliding bare layer",
+        );
+    }
+
+    /// A leading `./` is normalized before resolution, so a dot-relative entry
+    /// resolves to a bare-interned child. Anchoring `./sub.usda` against
+    /// `/proj/root.usda` yields `/proj/sub.usda`; with nothing interned there, the
+    /// normalized bare `sub.usda` matches via the fallback.
+    #[test]
+    fn find_relative_strips_dot() {
+        let mut root = sdf::Layer::new_in_memory("/proj/root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["./sub.usda"]);
+        });
+        let sub = sdf::Layer::new_in_memory("sub.usda");
+
+        let graph = LayerGraph::from_layers(vec![root, sub], 0, sdf::LayerRegistry::default());
+        let root_id = graph.root_id().unwrap();
+        let sub_id = graph.id_of("sub.usda").unwrap();
+
+        assert_eq!(graph.find_relative("./sub.usda", root_id), Some(sub_id));
+        assert_eq!(
+            graph.find_relative("././sub.usda", root_id),
+            Some(sub_id),
+            "repeated leading `./` is normalized too"
+        );
+        let ids: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
+        assert_eq!(
+            ids,
+            vec![root_id, sub_id],
+            "the dot-relative entry resolves to the bare-interned child"
+        );
+    }
+
+    /// `.` path segments are dropped, anywhere in an asset path, rendered with
+    /// `/` separators — matching the resolver's anchored normalization so the
+    /// exact and anchored lookups agree. On Windows a `\`-spelled `.` segment is
+    /// recognized too, since `std::path` (and thus the resolver) treats `\` as a
+    /// separator there.
+    #[test]
+    fn dot_segments_normalized() {
+        assert_eq!(&*without_dot_segments("./sub.usda"), "sub.usda");
+        assert_eq!(&*without_dot_segments("././sub.usda"), "sub.usda");
+        assert_eq!(&*without_dot_segments("dir/./sub.usda"), "dir/sub.usda");
+        assert_eq!(&*without_dot_segments("/abs/./path"), "/abs/path");
+        assert_eq!(
+            &*without_dot_segments("sub.usda"),
+            "sub.usda",
+            "no `.` segment is unchanged"
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(&*without_dot_segments(".\\sub.usda"), "sub.usda");
+            assert_eq!(&*without_dot_segments("dir\\.\\sub.usda"), "dir/sub.usda");
+        }
+    }
+
+    /// `find_relative` follows the resolver's canonicalization rather than raw
+    /// path matching: a resolver that aliases an authored `link.usda` to a fixed
+    /// canonical leaf resolves the authored name to the layer interned under that
+    /// different leaf — what a symlinked or repository-aliased sublayer needs.
+    #[test]
+    fn find_relative_follows_resolver_canonicalization() {
+        let registry = sdf::LayerRegistry::new(Box::new(LinkResolver {
+            inner: ar::DefaultResolver::new(),
+        }));
+        let graph = LayerGraph::from_layers(
+            vec![
+                sdf::Layer::new("/canonical/root.usda", Box::new(sdf::Data::new())),
+                sdf::Layer::new("/canonical/real.usda", Box::new(sdf::Data::new())),
+            ],
+            0,
+            registry,
+        );
+        let root_id = graph.root_id().unwrap();
+        let real_id = graph.id_of("/canonical/real.usda").unwrap();
+
+        assert_eq!(
+            graph.find_relative("link.usda", root_id),
+            Some(real_id),
+            "the authored leaf resolves through the resolver to the canonical layer"
+        );
+    }
+
+    /// A resolver whose `create_identifier` aliases an authored `link.usda` to a
+    /// fixed canonical leaf, modeling a symlinked or repository-aliased asset the
+    /// resolver canonicalizes away. Every other path falls through to the default
+    /// filesystem behavior.
+    struct LinkResolver {
+        inner: ar::DefaultResolver,
+    }
+
+    impl ar::Resolver for LinkResolver {
+        fn create_identifier(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> String {
+            if asset_path.ends_with("link.usda") {
+                "/canonical/real.usda".to_string()
+            } else {
+                self.inner.create_identifier(asset_path, anchor)
+            }
+        }
+        fn resolve(&self, asset_path: &str) -> Option<ResolvedPath> {
+            self.inner.resolve(asset_path)
+        }
+        fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {
+            self.inner.resolve_for_new_asset(asset_path)
+        }
+        fn open_asset(&self, resolved_path: &ResolvedPath) -> io::Result<Box<dyn ar::Asset>> {
+            self.inner.open_asset(resolved_path)
+        }
     }
 }

@@ -61,7 +61,7 @@ impl Dependencies {
             if node.arc == ArcType::Root && node.path == *prim_index_path {
                 continue;
             }
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
                 let key = (layer, node.path.clone());
                 if !seen.insert(key.clone()) {
                     continue;

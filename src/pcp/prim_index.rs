@@ -691,15 +691,20 @@ pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Pat
 /// `PcpNodeRef`'s per-layer offset). The value-resolution view of a node's
 /// layer stack, resolved through `graph`; the single home for this offset
 /// composition so value resolution and introspection never drift.
-pub(super) fn node_layer_offsets<'g>(
-    node: &Node,
-    graph: &'g LayerGraph,
-) -> impl Iterator<Item = (LayerId, LayerOffset)> + 'g {
+//
+// TODO(perf): this collects a `Vec` per node per field read on the value-
+// resolution hot path (callers consume it by value). It returns owned rather
+// than a borrowing iterator because `layer_stack` yields a `Cow` — for the
+// precomputed-DAG-root case that `Cow` borrows `graph`, so the lazy form could
+// be kept by having the caller hold the `Cow` and iterate it, or by threading
+// the resolved layer-stack slice through.
+pub(super) fn node_layer_offsets(node: &Node, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
     let arc_offset = node.map_to_root().time_offset();
     graph
         .layer_stack(node.layer_stack_id())
         .iter()
-        .map(move |&(li, sub)| (li, arc_offset.concatenate(&sub)))
+        .map(|&(li, sub)| (li, arc_offset.concatenate(&sub)))
+        .collect()
 }
 
 /// Resolves variant selections across a prim's composition nodes.
@@ -754,7 +759,7 @@ fn resolve_variant_selections_in<'a>(
     // Gather explicit selections for sets the seed did not already fix. Each
     // node fans out into its layer stack, strongest sublayer first.
     for node in &ordered {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             if let Ok(value) = graph
                 .layer(layer)
                 .data()
@@ -774,7 +779,7 @@ fn resolve_variant_selections_in<'a>(
     // set stays unselected (C++ `_EvalNodeFallbackVariant`); there is no implicit
     // first-variant default, matching the indexer.
     for node in &ordered {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()) {
+        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
             let data = graph.layer(layer).data();
             let Ok(value) = data.get_field(&node.path, ChildrenKey::VariantSetChildren.as_str()) else {
                 continue;
@@ -803,56 +808,6 @@ fn resolve_variant_selections_in<'a>(
     }
 
     selections
-}
-
-/// Finds the [`LayerId`] of a layer matching `asset_path` among `order` (the
-/// [`LayerGraph`](super::layer_graph::LayerGraph) collection order).
-///
-/// An exact identifier match wins. Failing that, a path-separator-boundary
-/// suffix match (a relative authored path against a canonical absolute
-/// identifier), but only when a single layer matches: two layers sharing a
-/// trailing component (`a/model.usda` and `b/model.usda`) stay ambiguous rather
-/// than resolving to whichever comes first in `order`. Failing that, resolver
-/// anchoring for parent-relative paths (`../foo`), which custom asset resolution
-/// backends handle without filesystem access here.
-pub(super) fn find_layer_id<'a>(
-    asset_path: &str,
-    order: &[LayerId],
-    layer: impl Fn(LayerId) -> &'a sdf::Layer,
-    registry: &sdf::LayerRegistry,
-) -> Option<LayerId> {
-    let asset_path_ref = std::path::Path::new(asset_path);
-    let needle = asset_path_ref.strip_prefix(".").unwrap_or(asset_path_ref);
-
-    // An exact identifier match is unambiguous and outranks any suffix match,
-    // including one on an earlier layer in `order`.
-    if let Some(&id) = order
-        .iter()
-        .find(|&&id| std::path::Path::new(layer(id).identifier()) == needle)
-    {
-        return Some(id);
-    }
-
-    // A boundary suffix match, accepted only when exactly one layer matches.
-    let mut suffix = order
-        .iter()
-        .filter(|&&id| std::path::Path::new(layer(id).identifier()).ends_with(needle));
-    if let Some(&id) = suffix.next() {
-        if suffix.next().is_none() {
-            return Some(id);
-        }
-    }
-
-    if needle.starts_with("..") {
-        for &anchor_id in order {
-            let resolved = registry.create_identifier_anchored(asset_path, layer(anchor_id).identifier());
-            if let Some(&id) = order.iter().find(|&&id| layer(id).identifier() == resolved) {
-                return Some(id);
-            }
-        }
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -887,16 +842,6 @@ pub(crate) mod tests {
     /// through a stage.
     fn load_layers(path: &str) -> Result<Vec<sdf::Layer>> {
         sdf::LayerRegistry::default().collect_with_arcs(path)
-    }
-
-    /// Resolves `asset_path` against a layer slice to its index, adapting the
-    /// production [`find_layer_id`] (which keys on [`LayerId`]) so the
-    /// matching-logic tests can assert by position.
-    fn find(asset_path: &str, layers: &[sdf::Layer], registry: &sdf::LayerRegistry) -> Option<usize> {
-        // Synthesize one id per position so the result maps straight back to it.
-        let ids: Vec<LayerId> = (0..layers.len() as u32).map(LayerId::from_raw).collect();
-        let position = |id: LayerId| ids.iter().position(|&x| x == id).unwrap();
-        find_layer_id(asset_path, &ids, |id| &layers[position(id)], registry).map(position)
     }
 
     /// Builds a prim index for a given path string.
@@ -1381,96 +1326,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    fn find_layer_exact_match() -> Result<()> {
-        let registry = sdf::LayerRegistry::default();
-        let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find(&layers[0].identifier, &layers, &registry).is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn find_layer_suffix_match() -> Result<()> {
-        let registry = sdf::LayerRegistry::default();
-        let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("ref_target.usda", &layers, &registry).is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn find_layer_relative_child() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let asset_dir = tmp.path().join("asset");
-        std::fs::create_dir_all(&asset_dir)?;
-        let model = asset_dir.join("model.usda");
-        std::fs::write(&model, b"placeholder")?;
-
-        let registry = sdf::LayerRegistry::default();
-        let layers = vec![sdf::Layer::new(
-            model.canonicalize()?.to_string_lossy(),
-            Box::new(sdf::Data::new()),
-        )];
-        assert_eq!(find("./asset/model.usda", &layers, &registry), Some(0));
-        Ok(())
-    }
-
-    #[test]
-    fn find_layer_no_partial_name_match() -> Result<()> {
-        let registry = sdf::LayerRegistry::default();
-        let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("target.usda", &layers, &registry).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn find_layer_not_found() -> Result<()> {
-        let registry = sdf::LayerRegistry::default();
-        let layers = load_layers(&fixture_path("ref_external.usda"))?;
-        assert!(find("nonexistent.usda", &layers, &registry).is_none());
-        Ok(())
-    }
-
-    /// Two layers sharing a trailing component are ambiguous for a bare suffix,
-    /// so it resolves to neither rather than guessing the first; an exact match
-    /// or a directory-distinguishing suffix still resolves.
-    #[test]
-    fn find_layer_ambiguous_basename() {
-        let registry = sdf::LayerRegistry::default();
-        let layers = vec![
-            sdf::Layer::new("/proj/a/model.usda", Box::new(sdf::Data::new())),
-            sdf::Layer::new("/proj/b/model.usda", Box::new(sdf::Data::new())),
-        ];
-        assert_eq!(find("model.usda", &layers, &registry), None, "ambiguous bare basename");
-        assert_eq!(find("/proj/b/model.usda", &layers, &registry), Some(1), "exact wins");
-        assert_eq!(find("a/model.usda", &layers, &registry), Some(0), "unique suffix");
-    }
-
-    /// Relative `../` paths must be anchored against each candidate
-    /// identifier's location via the resolver. Without this, a reference
-    /// like `../Materials/Materials.usd` authored inside a prop USD silently
-    /// fails every composition lookup with `UnresolvedLayer`.
-    #[test]
-    fn find_layer_relative_parent_anchored() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let a_dir = tmp.path().join("Props");
-        let b_dir = tmp.path().join("Materials");
-        std::fs::create_dir_all(&a_dir)?;
-        std::fs::create_dir_all(&b_dir)?;
-        let a = a_dir.join("link.usd");
-        let b = b_dir.join("Materials.usd");
-        std::fs::write(&a, b"placeholder")?;
-        std::fs::write(&b, b"placeholder")?;
-        let layers = vec![
-            sdf::Layer::new(a.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
-            sdf::Layer::new(b.canonicalize()?.to_string_lossy(), Box::new(sdf::Data::new())),
-        ];
-        let registry = sdf::LayerRegistry::default();
-        // `../Materials/Materials.usd` written inside `Props/link.usd`
-        // should resolve to identifier index 1 (the Materials.usd).
-        assert_eq!(find("../Materials/Materials.usd", &layers, &registry), Some(1));
-        Ok(())
-    }
-
     /// External references with `./` relative paths and nested references
     /// should be followed recursively (diamond pattern: Root -> A,B -> C).
     #[test]
@@ -1501,7 +1356,7 @@ pub(crate) mod tests {
             "should have node from C.usd via nested reference"
         );
 
-        let a_idx = stack.find("A.usd").unwrap();
+        let a_idx = stack.find_by_leaf("A.usd").unwrap();
         let a_attr_path = Path::new("/A.A_attr").unwrap();
         assert!(
             stack.layer(a_idx).data().has_spec(&a_attr_path),
@@ -1548,7 +1403,7 @@ pub(crate) mod tests {
         let stack = load_stack(&path)?;
 
         assert!(
-            stack.find("camera_perspective.usd").is_some(),
+            stack.find_by_leaf("camera_perspective.usd").is_some(),
             "camera_perspective.usd should be collected from variant reference"
         );
 
@@ -2046,7 +1901,7 @@ def "Prim" (
                 let arc = n.arc;
                 // One row per contributing sublayer, carrying that layer's
                 // effective offset.
-                node_layer_offsets(n, stack).map(move |(li, off)| {
+                node_layer_offsets(n, stack).into_iter().map(move |(li, off)| {
                     (
                         layer_name(stack.identifier(li)).to_owned(),
                         path.clone(),

@@ -453,7 +453,7 @@ impl PrimIndex {
             let Ok(query_path) = Self::query_path(node, prop_suffix) else {
                 continue;
             };
-            for &(layer, _) in stack.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in stack.layer_stack(node.layer_stack_id()).iter() {
                 if matches!(stack.layer(layer).data().try_field(&query_path, field), Ok(Some(_))) {
                     return Some((layer, node));
                 }

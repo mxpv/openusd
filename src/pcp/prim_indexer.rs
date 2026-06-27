@@ -1814,7 +1814,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             } else {
                 path_in_node
             };
-            for &(layer, _) in self.inputs.stack.layer_stack(node.layer_stack_id()) {
+            for &(layer, _) in self.inputs.stack.layer_stack(node.layer_stack_id()).iter() {
                 let Some(value) = self
                     .inputs
                     .stack
@@ -2564,11 +2564,30 @@ impl<'a, 'f> Indexer<'a, 'f> {
         let target_stack = if is_internal {
             self.node(parent).layer_stack_id()
         } else {
-            let layer_index = match self.inputs.stack.find(asset_path) {
-                Some(layer_index) => layer_index,
+            let layer_index = match self.inputs.stack.id_of(asset_path) {
+                Some(layer_index) => {
+                    // The target is loaded, but if this arc carries expression
+                    // variables and reaches a target that has a `${VAR}` sublayer yet
+                    // was interned unseeded (by an earlier variable-free arc to the
+                    // same target), demand a re-seed so that sublayer resolves against
+                    // this context. The load barrier seeds the already-loaded target,
+                    // reloads the sublayers the new context resolves, and recomposes;
+                    // once seeded the target is not demanded again, so this converges.
+                    if !expr_vars.is_empty()
+                        && !self.inputs.stack.is_seeded(layer_index)
+                        && self.inputs.stack.has_expr_sublayer(layer_index)
+                    {
+                        self.pending_loads.push(Demand {
+                            asset_path: asset_path.to_string(),
+                            expr_vars: expr_vars.clone(),
+                        });
+                        return Ok(());
+                    }
+                    layer_index
+                }
                 // The target is not loaded. The authoring layer's location gates
                 // both the `.usdz` guard and the relative-mute anchor, so resolve
-                // it once here — only on a `find` miss, leaving an already-loaded
+                // it once here — only on a lookup miss, leaving an already-loaded
                 // arc (the steady state) doing no filesystem work.
                 None => {
                     // TODO(perf): this resolves the authoring layer's location
@@ -3091,7 +3110,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// gather a site's variant set names and a set's variant options.
     fn compose_token_children(&self, node: NodeId, path: &Path, key: ChildrenKey) -> BuildResult<Vec<Token>> {
         let mut out: Vec<Token> = Vec::new();
-        for &(layer, _) in self.inputs.stack.layer_stack(self.node(node).layer_stack_id()) {
+        for &(layer, _) in self.inputs.stack.layer_stack(self.node(node).layer_stack_id()).iter() {
             let Some(value) = self.inputs.stack.layer(layer).data().try_field(path, key.as_str())? else {
                 continue;
             };
@@ -3301,8 +3320,8 @@ mod tests {
             .filter(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/Class")
             .map(|n| n.layer_id())
             .collect();
-        let root_id = s.find("root.usd").expect("root.usd present");
-        let ref_id = s.find("ref.usd").expect("ref.usd present");
+        let root_id = s.id_of("root.usd").expect("root.usd present");
+        let ref_id = s.id_of("ref.usd").expect("ref.usd present");
         assert!(
             class_layers.contains(&root_id) && class_layers.contains(&ref_id),
             "the class is composed in both the referenced and referencing layers, got {class_layers:?}"

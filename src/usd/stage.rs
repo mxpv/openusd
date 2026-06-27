@@ -2273,7 +2273,7 @@ impl Stage {
         let identifier = layer.identifier().to_string();
         // Author the parent's metadata first; the child node is added only after
         // this succeeds (the authored asset path is a plain string, so the node
-        // need not exist yet — only the later rebuild's `find()` needs it).
+        // need not exist yet — only the later rebuild's edge resolution needs it).
         let edited = {
             let mut layers = self.layers.borrow_mut();
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
@@ -2315,18 +2315,19 @@ impl Stage {
             let parent_id = layers.id_of(parent).ok_or_else(|| StageAuthoringError::LayerNotFound {
                 layer: parent.to_string(),
             })?;
-            // Resolve `child` to a layer id (exact canonical identifier, or an
-            // authored asset path), then find the authored `subLayers` entry
-            // that resolves to it. The entry string can differ from the
-            // canonical id (e.g. a relative path), so an exact string match
-            // against the caller's `child` would miss it.
-            let authored = layers.id_of(child).or_else(|| layers.find(child)).and_then(|child_id| {
+            // Resolve `child` to a layer id (an exact canonical identifier, or an
+            // asset path authored relative to `parent`), then find the authored
+            // `subLayers` entry that resolves to the same layer. An entry is
+            // authored relative to `parent`, so anchoring it the way the load path
+            // interned the sublayer makes the entry's canonical id comparable to
+            // `child_id` even when the entry string differs from the canonical id.
+            let authored = layers.find_relative(child, parent_id).and_then(|child_id| {
                 let subs = layers.get(parent_id)?.layer.pseudo_root()?.sublayers()?.to_vec();
                 subs.into_iter()
-                    .find(|entry| layers.id_of(entry).or_else(|| layers.find(entry)) == Some(child_id))
+                    .find(|entry| layers.find_relative(entry, parent_id) == Some(child_id))
             });
             authored.map(|entry| {
-                let node = layers.get_mut(parent_id).expect("id_of returned a live id");
+                let node = layers.get_mut(parent_id).expect("parent_id is a live id");
                 self.edit_layer(&mut node.layer, None, move |l| {
                     l.pseudo_root_mut()
                         .map(|mut root| root.remove_sublayer(&entry))
@@ -2432,53 +2433,70 @@ impl Stage {
         let before = self.layers.borrow().len();
         let sublayer_errors: RefCell<Vec<pcp::Error>> = RefCell::new(Vec::new());
         let mut newly_failed = false;
+        let mut newly_seeded = false;
         for demand in pending {
             let asset_path = demand.asset_path.as_str();
-            // The shared graph borrow is dropped before `add_layer` /
-            // `mark_load_failed` take a mutable one.
-            let opened = {
+            // Whether the target needs opening, and `reload` whether it is a re-open
+            // of an already-interned target: interned by an earlier variable-free arc
+            // but not yet seeded with this arc's variables. A re-open (re)loads the
+            // `${VAR}` sublayers the new context resolves — including ones nested
+            // below a literal sublayer — that the first open left unloaded. A target
+            // a prior open failed is not retried.
+            let open = {
                 let graph = self.layers.borrow();
-                if graph.id_of(asset_path).is_some() || graph.load_failed(asset_path) {
-                    continue;
-                }
-                // The arc anchored `asset_path` to an absolute identifier, so no
-                // anchor is needed here. The referencing stack's composed
-                // expression variables overlay the target's own when its
-                // `subLayers` paths resolve, so a `${VAR}` inherited across the
-                // arc picks the right sublayer.
-                graph.layer_registry().open_stack(
-                    asset_path,
-                    None,
-                    &demand.expr_vars,
-                    &|error| {
-                        sublayer_errors.borrow_mut().push(error.into());
-                        Ok(())
-                    },
-                    &|id| graph.id_of(id).is_some(),
-                )
-            };
-            match opened {
-                Ok(layers) => {
-                    for layer in layers {
-                        self.add_layer(layer);
+                if graph.load_failed(asset_path) {
+                    None
+                } else {
+                    match graph.id_of(asset_path) {
+                        None => Some(false),
+                        Some(target) if !demand.expr_vars.is_empty() && !graph.is_seeded(target) => Some(true),
+                        Some(_) => None,
                     }
-                    // Record the variables inherited across the arc against the
-                    // now-interned target root (resolved by the same `id_of` the
-                    // demand guard above uses), so the sublayer-edge rebuild
-                    // resolves the target's `${VAR}` sublayers against the context
-                    // the load just opened them with. An empty inherited context
-                    // needs no entry — the rebuild reaches such a root with the
-                    // empty context anyway.
-                    if !demand.expr_vars.is_empty() {
-                        let root = self.layers.borrow().id_of(asset_path);
-                        if let Some(root) = root {
-                            self.layers.borrow_mut().seed_subtree(root, demand.expr_vars.clone());
+                }
+            };
+            if let Some(reload) = open {
+                // The shared graph borrow is dropped before `add_layer` /
+                // `mark_load_failed` take a mutable one. The arc anchored `asset_path`
+                // to an absolute identifier, so no anchor is needed.
+                let opened = {
+                    let graph = self.layers.borrow();
+                    graph.layer_registry().open_stack(
+                        asset_path,
+                        None,
+                        &demand.expr_vars,
+                        reload,
+                        &|error| {
+                            sublayer_errors.borrow_mut().push(error.into());
+                            Ok(())
+                        },
+                        &|id| graph.id_of(id).is_some(),
+                    )
+                };
+                match opened {
+                    Ok(layers) => {
+                        for layer in layers {
+                            self.add_layer(layer);
                         }
                     }
+                    Err(err) => {
+                        self.layers.borrow_mut().mark_load_failed(asset_path, err.to_string());
+                        newly_failed = true;
+                        continue;
+                    }
                 }
-                Err(err) => {
-                    self.layers.borrow_mut().mark_load_failed(asset_path, err.to_string());
-                    newly_failed = true;
+            }
+            // Record the variables inherited across the arc against the interned
+            // target root, so the sublayer-edge rebuild resolves the target's
+            // `${VAR}` sublayers against the context the arc carried. This runs for
+            // an already-interned target too: when several arcs share a target, the
+            // first to reach it may carry no variables (so it records nothing), and
+            // a later variable-carrying arc must still seed it. `seed_subtree` keeps
+            // the first context recorded, and an empty context needs no entry — the
+            // rebuild reaches such a root with the empty context anyway.
+            if !demand.expr_vars.is_empty() {
+                let root = self.layers.borrow().id_of(asset_path);
+                if let Some(root) = root {
+                    newly_seeded |= self.layers.borrow_mut().seed_subtree(root, demand.expr_vars.clone());
                 }
             }
         }
@@ -2487,7 +2505,9 @@ impl Stage {
             self.cache.borrow_mut().record_collection_errors(errors);
         }
         let grew = self.layers.borrow().len() != before;
-        if grew {
+        // A new seed changes how an already-interned target's `${VAR}` sublayers
+        // resolve, so rebuild the edges for it as well as for newly joined layers.
+        if grew || newly_seeded {
             // Wire the sublayer edges (and relocates) for the newly interned layers.
             // TODO(perf): rebuild only the new subtrees rather than the whole DAG.
             let relocated = self.layers.borrow_mut().recompute_sublayers();
@@ -2499,7 +2519,7 @@ impl Stage {
                 self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
             }
         }
-        grew || newly_failed
+        grew || newly_failed || newly_seeded
     }
 
     /// Traverses composed prims depth-first, visiting prims that match `predicate`.
@@ -2748,6 +2768,7 @@ impl StageBuilder {
             path,
             None,
             &HashMap::new(),
+            false,
             &|error| {
                 errors.borrow_mut().push(error.into());
                 Ok(())
@@ -3170,35 +3191,52 @@ mod tests {
     }
 
     /// `remove_layer` resolves `child` to a layer before matching, so a
-    /// sublayer authored with a relative path (whose canonical identifier
-    /// differs from the authored entry) is still removed when named by the
-    /// canonical identifier `sub_layers` returns.
+    /// sublayer authored with a relative path (whose canonical identifier — the
+    /// resolved absolute path — differs from the authored entry) is still removed
+    /// when named by the canonical identifier `sub_layers` returns.
     #[test]
     fn remove_layer_resolves_relative() -> Result<()> {
-        // root authors `subLayers = ["sub.usda"]`, but the child layer's
-        // canonical identifier is `dir/sub.usda` (find() resolves the relative
-        // entry to it by suffix).
+        // root.usda authors `subLayers = [@./sub.usda@]`; sub.usda sits beside it
+        // on disk. The sublayer is interned under its absolute identifier, which
+        // differs from the authored `./sub.usda`, and `remove_layer` anchors the
+        // authored entry against root to match it.
+        let tmp = tempfile::tempdir()?;
+        let root_path = tmp.path().join("root.usda");
+        let sub_path = tmp.path().join("sub.usda");
+
         let mut root = sdf::Layer::new_in_memory("root.usda");
         edit_layer(&mut root, |e| {
-            e.pseudo_root_mut().unwrap().set_sublayers(["sub.usda"]);
+            e.pseudo_root_mut().unwrap().set_sublayers(["./sub.usda"]);
         });
-        let child = opinion_layer("dir/sub.usda", 5.0)?;
-        let stage = Stage::builder().make_stage(vec![root, child], 0, Vec::new());
+        root.export(root_path.to_string_lossy())?;
+        opinion_layer("sub.usda", 5.0)?.export(sub_path.to_string_lossy())?;
+
+        let stage = Stage::open(&root_path.to_string_lossy())?;
         assert_eq!(
             stage
                 .attribute("/A.x")
                 .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
-            Some(sdf::Value::Double(5.0))
+            Some(sdf::Value::Double(5.0)),
+            "the relative sublayer composes its opinion"
         );
 
-        // sub_layers reports the canonical identifier, not the authored string.
-        let canonical = stage.sub_layers("root.usda");
-        assert!(canonical.iter().any(|id| id == "dir/sub.usda"));
+        // sub_layers reports the canonical absolute identifier, not the authored
+        // `./sub.usda` string.
+        let root_id = stage.root_layer().identifier().to_string();
+        let sub_canonical = stage
+            .sub_layers(&root_id)
+            .into_iter()
+            .find(|id| id != &root_id)
+            .expect("the sublayer is in the stack");
+        assert_ne!(
+            sub_canonical, "./sub.usda",
+            "the canonical id differs from the authored entry"
+        );
 
         // Removing by that canonical identifier must still drop the relative
-        // `sub.usda` entry (exact-string matching would have missed it).
+        // `./sub.usda` entry (exact-string matching would have missed it).
         assert!(
-            stage.remove_layer("root.usda", "dir/sub.usda")?,
+            stage.remove_layer(&root_id, &sub_canonical)?,
             "the relative sublayer is removed when named by canonical identifier"
         );
         assert_eq!(
@@ -3211,6 +3249,177 @@ mod tests {
         assert!(
             authored_sublayers(&stage).is_empty(),
             "the authored subLayers entry is gone"
+        );
+        Ok(())
+    }
+
+    /// Builds a stage where `/P` references a shared target with no expression
+    /// variables and `/Q` reaches the same target through `middle.usda` (which
+    /// defines `V = "chosen"`), composes `/P` first so the target loads unseeded,
+    /// and asserts the target's `${V}` sublayer (resolving to `chosen.usda`, which
+    /// overrides `/T.x` to 42) still contributes to `/Q`. `target_layers` supplies
+    /// `target.usda` and any layer it sublayers. Returns the composed stage so a
+    /// caller can make further assertions over it.
+    fn assert_shared_target_seeds_later_arc(target_layers: &[(&str, &str)]) -> Result<Stage> {
+        let tmp = tempfile::tempdir()?;
+        let write = |name: &str, body: &str| std::fs::write(tmp.path().join(name), body);
+        write(
+            "root.usda",
+            r#"#usda 1.0
+def "P" (
+    references = @./target.usda@</T>
+) {
+}
+def "Q" (
+    references = @./middle.usda@</Q>
+) {
+}
+"#,
+        )?;
+        write(
+            "middle.usda",
+            r#"#usda 1.0
+(
+    expressionVariables = {
+        string V = "chosen"
+    }
+)
+def "Q" (
+    references = @./target.usda@</T>
+) {
+}
+"#,
+        )?;
+        write(
+            "chosen.usda",
+            r#"#usda 1.0
+over "T" {
+    custom double x = 42
+}
+"#,
+        )?;
+        for &(name, body) in target_layers {
+            write(name, body)?;
+        }
+
+        let stage = Stage::open(&tmp.path().join("root.usda").to_string_lossy())?;
+        // Compose `/P` first, loading the shared target under the empty (no
+        // variable) context.
+        let _ = stage
+            .attribute("/P.x")
+            .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?;
+        // `/Q` reaches the same target carrying `V=chosen`; the target's `${V}`
+        // sublayer must resolve and contribute `chosen.usda`'s opinion.
+        assert_eq!(
+            stage
+                .attribute("/Q.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(42.0)),
+            "the later variable-carrying arc seeds the shared target's ${{V}} sublayer",
+        );
+        Ok(stage)
+    }
+
+    /// A reference target shared by two arcs resolves its `${VAR}` sublayer
+    /// against a later variable-carrying arc even when an earlier variable-free
+    /// arc interned it first (the `${V}` sublayer is authored on the target root).
+    #[test]
+    fn shared_target_seeds_later_var_arc() -> Result<()> {
+        assert_shared_target_seeds_later_arc(&[(
+            "target.usda",
+            r#"#usda 1.0
+(
+    subLayers = [
+        @`"./${V}.usda"`@
+    ]
+)
+def "T" {
+}
+"#,
+        )])
+        .map(|_| ())
+    }
+
+    /// As [`shared_target_seeds_later_var_arc`], but the `${VAR}` sublayer is
+    /// nested below the target root, under a literal sublayer (`mid.usda`). The
+    /// re-seed must scan the whole subtree to demand a re-open, and the re-open
+    /// must re-walk the already-present `mid.usda` to load the now-resolvable
+    /// `chosen.usda`.
+    #[test]
+    fn shared_target_seeds_nested_var_sublayer() -> Result<()> {
+        assert_shared_target_seeds_later_arc(&[
+            (
+                "target.usda",
+                r#"#usda 1.0
+(
+    subLayers = [
+        @./mid.usda@
+    ]
+)
+def "T" {
+}
+"#,
+            ),
+            (
+                "mid.usda",
+                r#"#usda 1.0
+(
+    subLayers = [
+        @`"./${V}.usda"`@
+    ]
+)
+"#,
+            ),
+        ])
+        .map(|_| ())
+    }
+
+    /// A target shared by a variable-free arc and a later variable-carrying arc
+    /// re-opens under the second arc's context to reach its `${V}` sublayer. That
+    /// re-walk re-visits the target's genuinely-missing `missing.usda` sublayer,
+    /// but the diagnostic is recorded once, not once per open.
+    #[test]
+    fn shared_target_error_once() -> Result<()> {
+        let stage = assert_shared_target_seeds_later_arc(&[(
+            "target.usda",
+            r#"#usda 1.0
+(
+    subLayers = [
+        @./missing.usda@,
+        @`"./${V}.usda"`@
+    ]
+)
+def "T" {
+}
+"#,
+        )])?;
+        let reported = stage
+            .composition_errors()
+            .into_iter()
+            .filter(|e| e.to_string().contains("missing.usda"))
+            .count();
+        assert_eq!(reported, 1, "the missing sublayer is reported once across both opens");
+        Ok(())
+    }
+
+    /// An in-memory stage whose root authors a `./`-relative sublayer composes
+    /// it: the dot-relative entry normalizes to the child's interned identifier
+    /// (C++ `ArResolver::CreateIdentifier` drops `.` via `TfNormPath`), so the
+    /// edge forms even though the child is an in-memory layer with no file to
+    /// canonicalize against.
+    #[test]
+    fn dot_relative_sublayer_in_memory() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["./sub.usda"]);
+        });
+        let stage = Stage::builder().make_stage(vec![root, opinion_layer("sub.usda", 5.0)?], 0, Vec::new());
+        assert_eq!(
+            stage
+                .attribute("/A.x")
+                .get_at::<sdf::Value>(crate::usd::TimeCode::new(0.0))?,
+            Some(sdf::Value::Double(5.0)),
+            "the dot-relative sublayer composes its opinion"
         );
         Ok(())
     }

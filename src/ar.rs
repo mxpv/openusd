@@ -31,7 +31,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Seek};
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 /// A resolved asset path representing the physical location of an asset.
@@ -287,30 +287,20 @@ impl Resolver for DefaultResolver {
 
         // Absolute paths are their own identifier.
         if path.is_absolute() {
-            return path
-                .canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy()
-                .into_owned();
+            return canonical_identifier(path.to_path_buf());
         }
 
         // Anchor relative paths to the anchor's directory.
         if let Some(anchor) = anchor {
             if let Some(dir) = anchor.parent() {
-                let anchored = dir.join(path);
-                return anchored
-                    .canonicalize()
-                    .unwrap_or(anchored)
-                    .to_string_lossy()
-                    .into_owned();
+                return canonical_identifier(dir.join(path));
             }
         }
 
         // Without an anchor, resolve relative to the current working directory so
         // every identifier is stable and absolute (matching canonicalized dependencies).
         if let Ok(cwd) = std::env::current_dir() {
-            let joined = cwd.join(path);
-            return joined.canonicalize().unwrap_or(joined).to_string_lossy().into_owned();
+            return canonical_identifier(cwd.join(path));
         }
 
         asset_path.to_string()
@@ -389,20 +379,45 @@ impl Resolver for DefaultResolver {
     }
 }
 
+/// Lexically normalizes `path`: drops `.` components (including a leading one)
+/// and collapses redundant separators, with no filesystem access. `..` is
+/// preserved, since collapsing it lexically could change meaning across
+/// symlinks. Matches the normalization C++ `TfNormPath` performs.
+fn lexically_normalize(path: &Path) -> PathBuf {
+    path.components().filter(|c| !matches!(c, Component::CurDir)).collect()
+}
+
+/// Renders `path` as a stable layer identifier: its filesystem-canonical
+/// spelling when it resolves (collapsing equivalent spellings and following
+/// symlinks), else the [`lexically_normalize`]d path.
+///
+/// `.` components are dropped either way, matching C++
+/// [`ArResolver::CreateIdentifier`], which normalizes via `TfNormPath` without
+/// touching the filesystem. So a target authored `./foo.usda` produces the same
+/// identifier as `foo.usda` even when it is an in-memory layer that cannot be
+/// canonicalized, and the registry's exact-identifier lookup still finds it.
+///
+/// [`ArResolver::CreateIdentifier`]: https://openusd.org/release/api/class_ar_resolver.html
+fn canonical_identifier(path: PathBuf) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(&path))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Canonicalizes a search-path spelling for [`DefaultResolver`].
 ///
-/// Relative paths are anchored to the current working directory; lexical noise
-/// (`.` components, redundant and trailing separators) is collapsed. The result
-/// resolves candidates identically to the input while giving equivalent
-/// directories one canonical rendering. `..` is preserved, since collapsing it
-/// lexically would change meaning across symlinks.
+/// Relative paths are anchored to the current working directory, then lexical
+/// noise is collapsed (see [`lexically_normalize`]). The result resolves
+/// candidates identically to the input while giving equivalent directories one
+/// canonical rendering.
 fn normalize_search_path(path: PathBuf) -> PathBuf {
     let path = if path.is_relative() {
         std::env::current_dir().unwrap_or_default().join(path)
     } else {
         path
     };
-    path.components().collect()
+    lexically_normalize(&path)
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +700,22 @@ mod tests {
         let id = resolver.create_identifier("ar.rs", Some(&anchor));
         // The identifier should resolve relative to the anchor's directory.
         assert!(id.contains("ar.rs"));
+    }
+
+    /// A `.`-relative asset path that cannot be canonicalized (the target does
+    /// not exist on disk, as for an in-memory layer) still has its `.` components
+    /// dropped lexically, matching C++ `ArResolver::CreateIdentifier`'s
+    /// `TfNormPath`. So `./sub.usda` and `sub.usda` yield the same identifier and
+    /// the registry's exact-identifier lookup resolves an in-memory sublayer.
+    #[test]
+    fn resolver_create_identifier_dot_relative() {
+        let resolver = DefaultResolver::new();
+        let anchor = ResolvedPath::new(PathBuf::from("root.usda"));
+        assert_eq!(
+            resolver.create_identifier("./sub.usda", Some(&anchor)),
+            resolver.create_identifier("sub.usda", Some(&anchor)),
+            "a leading `./` normalizes away when the target cannot be canonicalized"
+        );
     }
 
     #[test]
