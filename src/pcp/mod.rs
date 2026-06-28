@@ -451,22 +451,6 @@ pub enum Error {
         site_path: Path,
     },
 
-    /// A reference or payload authored inside a `.usdz` package names another
-    /// layer, which would require opening a sibling layer within the archive —
-    /// not yet supported (the eager collector bailed the same way). The arc is
-    /// dropped while the rest of the prim composes.
-    #[error("unsupported {arc:?} @{asset_path}@ inside usdz package @{introduced_by}@ at {site_path}")]
-    UnsupportedUsdzReference {
-        /// The reference/payload asset path authored inside the package.
-        asset_path: String,
-        /// The composition arc type.
-        arc: ArcType,
-        /// Identifier of the usdz package layer that authored the arc.
-        introduced_by: String,
-        /// The prim path where the arc was authored.
-        site_path: Path,
-    },
-
     /// A reference/payload resolved its target layer, but the named prim path
     /// authors no spec there (C++ `PcpErrorUnresolvedPrimPath`). The arc is
     /// dropped while the rest of the prim still composes.

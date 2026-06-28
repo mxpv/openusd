@@ -60,6 +60,19 @@ impl ResolvedPath {
     /// format case-insensitively — `resolved.extension() == "usdz"` — the way the
     /// format registry's `find_by_extension` does, without juggling `OsStr`.
     pub(crate) fn extension(&self) -> String {
+        // Package-relative path (`pkg.usdz[inner/layer.usd]`): the format is the
+        // innermost packaged layer's extension, not the literal trailing chars
+        // (`.usd]`). Match the format on the inner path instead.
+        let s = self.0.to_string_lossy();
+        if is_package_relative_path(&s) {
+            if let Some((_, inner)) = split_package_relative_path_inner(&s) {
+                return Path::new(&inner)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+            }
+        }
         self.0
             .extension()
             .and_then(|ext| ext.to_str())
@@ -283,6 +296,11 @@ impl Resolver for DefaultResolver {
             return String::new();
         }
 
+        // An already package-relative asset path is its own identifier.
+        if is_package_relative_path(asset_path) {
+            return asset_path.to_string();
+        }
+
         let path = Path::new(asset_path);
 
         // Absolute paths are their own identifier.
@@ -290,8 +308,25 @@ impl Resolver for DefaultResolver {
             return canonical_identifier(path.to_path_buf());
         }
 
-        // Anchor relative paths to the anchor's directory.
+        // Anchor relative paths.
         if let Some(anchor) = anchor {
+            let anchor_str = anchor.to_string_lossy();
+            // Anchor lives inside a package (`pkg.usdz[inner/layer.usd]`): keep
+            // the reference inside the package, relative to the inner layer's
+            // directory → `pkg.usdz[inner/asset.usd]`.
+            if is_package_relative_path(&anchor_str) {
+                if let Some((package, inner)) = split_package_relative_path_inner(&anchor_str) {
+                    let inner_dir = Path::new(&inner).parent().unwrap_or_else(|| Path::new(""));
+                    let joined = lexically_normalize(&inner_dir.join(path));
+                    return join_package_relative_path(&package, &joined.to_string_lossy());
+                }
+            }
+            // Anchor IS a package file (`foo.usdz`): a relative reference from
+            // the package's root layer is package-relative → `foo.usdz[asset]`.
+            if anchor_str.to_ascii_lowercase().ends_with(".usdz") {
+                let joined = lexically_normalize(path);
+                return join_package_relative_path(&anchor_str, &joined.to_string_lossy());
+            }
             if let Some(dir) = anchor.parent() {
                 return canonical_identifier(dir.join(path));
             }
@@ -311,16 +346,41 @@ impl Resolver for DefaultResolver {
             return None;
         }
 
-        // Handle package-relative paths.
+        // Handle package-relative paths. The package itself is resolved as a
+        // plain file (not re-anchored to its default layer — that would nest),
+        // then the inner packaged path is reattached.
         if is_package_relative_path(asset_path) {
             let (package, inner) = split_package_relative_path_outer(asset_path)?;
-            let resolved_package = self.resolve(&package)?;
-            // Return the resolved package with the inner path reattached.
+            let resolved_package = self.resolve_with_search_paths(&package)?;
             let package_str = resolved_package.to_str().unwrap_or_default();
             return Some(ResolvedPath::new(join_package_relative_path(package_str, &inner)));
         }
 
-        self.resolve_with_search_paths(asset_path)
+        let resolved = self.resolve_with_search_paths(asset_path)?;
+
+        // A bare package (`.usdz`) resolves to its default — first — packaged
+        // layer (`pkg.usdz[first.usd]`), so the package participates in normal
+        // composition and references inside it resolve in-package. Mirrors C++
+        // Ar package resolution; applies uniformly to a root, sublayer, or
+        // referenced `.usdz`.
+        if resolved.extension() == "usdz" {
+            // Read the package directory through the resolver's own asset seam
+            // (`open_asset`) rather than direct filesystem access, so a future
+            // host-provided byte source (issue #105's "get me the bytes for
+            // this layer") flows through unchanged — no async introduced here.
+            if let Some(first) = self
+                .open_asset(&resolved)
+                .ok()
+                .and_then(|mut asset| asset.read_all().ok())
+                .and_then(|bytes| crate::usdz::Archive::from_reader(std::io::Cursor::new(bytes)).ok())
+                .and_then(|archive| archive.first_layer_name())
+            {
+                let package_str = resolved.to_str().unwrap_or_default();
+                return Some(ResolvedPath::new(join_package_relative_path(package_str, &first)));
+            }
+        }
+
+        Some(resolved)
     }
 
     fn resolve_for_new_asset(&self, asset_path: &str) -> Option<ResolvedPath> {

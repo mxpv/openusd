@@ -367,36 +367,43 @@ fn cross_ref_expr_sublayer() -> Result<()> {
 }
 
 /// A reference authored inside a `.usdz` package targets a sibling layer in the
-/// archive, which is unsupported: composition reports the explicit
-/// [`UnsupportedUsdzReference`](pcp::Error::UnsupportedUsdzReference) error and
-/// drops the arc rather than failing the package layer as a generic unresolved
-/// target.
+/// same archive: it resolves package-relative (not against the host
+/// filesystem), so the sibling's opinion composes onto the prim and no
+/// composition error is reported.
 #[test]
-fn lazy_ref_inside_usdz_unsupported() -> Result<()> {
+fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     let package = dir.path().join("package.usdz");
     std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
-    // The usdz's inner layer authors a reference to another layer.
+    // The package's first (root) layer references a sibling layer inside the
+    // same archive, which authors an opinion on the prim.
     {
         let mut writer = ArchiveWriter::create(&package)?;
         writer.add_layer(
             "scene.usda",
             b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @other.usda@\n) {}\n",
         )?;
+        writer.add_layer(
+            "other.usda",
+            b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom int probe = 7\n}\n",
+        )?;
         writer.finish()?;
     }
 
     let stage = Stage::open(root.to_str().unwrap())?;
-    assert!(stage.prim("/P").is_valid()?, "/P still composes from the package layer");
+    assert!(stage.prim("/P").is_valid()?, "/P composes from the package");
     assert!(
-        stage.composition_errors().iter().any(|error| matches!(
-            error,
-            pcp::Error::UnsupportedUsdzReference { asset_path, introduced_by, .. }
-                if asset_path.ends_with("other.usda") && introduced_by.ends_with("package.usdz")
-        )),
-        "expected UnsupportedUsdzReference, got {:?}",
+        stage.composition_errors().is_empty(),
+        "the in-package reference should resolve cleanly, got {:?}",
         stage.composition_errors()
+    );
+    assert_eq!(
+        stage
+            .attribute("/P.probe")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Int(7)),
+        "the sibling layer's opinion composes through the in-package reference"
     );
     Ok(())
 }
