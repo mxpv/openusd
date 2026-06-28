@@ -296,8 +296,14 @@ impl Resolver for DefaultResolver {
             return String::new();
         }
 
-        // An already package-relative asset path is its own identifier.
+        // An already package-relative asset path (`pkg.usdz[inner]`): anchor its
+        // outer package path like any other path (so a relative `pkg.usdz` is
+        // resolved against the anchor), then reattach the inner packaged path.
         if is_package_relative_path(asset_path) {
+            if let Some((package, inner)) = split_package_relative_path_outer(asset_path) {
+                let anchored = self.create_identifier(&package, anchor);
+                return join_package_relative_path(&anchored, &inner);
+            }
             return asset_path.to_string();
         }
 
@@ -352,8 +358,8 @@ impl Resolver for DefaultResolver {
         if is_package_relative_path(asset_path) {
             let (package, inner) = split_package_relative_path_outer(asset_path)?;
             let resolved_package = self.resolve_with_search_paths(&package)?;
-            let package_str = resolved_package.to_str().unwrap_or_default();
-            return Some(ResolvedPath::new(join_package_relative_path(package_str, &inner)));
+            let package_str = resolved_package.to_string_lossy();
+            return Some(ResolvedPath::new(join_package_relative_path(&package_str, &inner)));
         }
 
         let resolved = self.resolve_with_search_paths(asset_path)?;
@@ -375,8 +381,8 @@ impl Resolver for DefaultResolver {
                 .and_then(|bytes| crate::usdz::Archive::from_reader(std::io::Cursor::new(bytes)).ok())
                 .and_then(|archive| archive.first_layer_name())
             {
-                let package_str = resolved.to_str().unwrap_or_default();
-                return Some(ResolvedPath::new(join_package_relative_path(package_str, &first)));
+                let package_str = resolved.to_string_lossy();
+                return Some(ResolvedPath::new(join_package_relative_path(&package_str, &first)));
             }
         }
 
@@ -775,6 +781,19 @@ mod tests {
             resolver.create_identifier("./sub.usda", Some(&anchor)),
             resolver.create_identifier("sub.usda", Some(&anchor)),
             "a leading `./` normalizes away when the target cannot be canonicalized"
+        );
+    }
+
+    #[test]
+    fn resolver_create_identifier_package_relative_anchored() {
+        let resolver = DefaultResolver::new();
+        let anchor = ResolvedPath::new(PathBuf::from("/scene/root.usda"));
+        // A package-relative target anchors its outer package path to the
+        // anchor's directory (not returned verbatim), then reattaches the inner
+        // packaged path — the same identifier as anchoring the bare package.
+        assert_eq!(
+            resolver.create_identifier("model.usdz[geom.usd]", Some(&anchor)),
+            join_package_relative_path(&resolver.create_identifier("model.usdz", Some(&anchor)), "geom.usd"),
         );
     }
 
