@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::ar;
 use crate::sdf::{self, expr};
@@ -300,7 +300,6 @@ impl LayerRegistry {
         let mut expr_vars = expr::read_expression_variables(data.as_ref())?.into_owned();
         expr::compose_over(&mut expr_vars, ancestor_expr_vars);
 
-        let is_usdz = resolved.extension() == "usdz";
         let sub_paths = Self::sublayer_paths(data.as_ref());
 
         // Emit this layer ahead of its sublayers so the collected stack is
@@ -312,16 +311,10 @@ impl LayerRegistry {
             layers.push(sdf::Layer::new(identifier.clone(), data));
         }
 
-        // A layer inside a `.usdz` package cannot reach a sibling layer within the
-        // archive (not yet supported), so a usdz layer declaring any sublayers
-        // fails the open.
-        if is_usdz && !sub_paths.is_empty() {
-            bail!(
-                "cross-file references within USDZ archives are not yet supported: {}",
-                resolved
-            );
-        }
-
+        // Sublayers (and references) reached from inside a `.usdz` resolve
+        // in-package: a package root is anchored to its first layer, so this
+        // layer's `resolved` is already package-relative and its sublayer paths
+        // anchor against it the same way any other layer's do.
         for sub_path in sub_paths {
             // Evaluate the (possibly expression-valued) sublayer path. An
             // unevaluable expression drops only this sublayer — like an unresolved

@@ -2566,31 +2566,8 @@ impl<'a, 'f> Indexer<'a, 'f> {
         } else {
             let layer_index = match self.inputs.stack.id_of(asset_path) {
                 Some(layer_index) => layer_index,
-                // The target is not loaded. The authoring layer's location gates
-                // both the `.usdz` guard and the relative-mute anchor, so resolve
-                // it once here — only on a lookup miss, leaving an already-loaded
-                // arc (the steady state) doing no filesystem work.
+                // The target is not loaded.
                 None => {
-                    // TODO(perf): this resolves the authoring layer's location
-                    // only to read its extension for the usdz guard; the layer's
-                    // in-memory identifier already carries the extension, so the
-                    // guard could test that and skip the filesystem resolve.
-                    let anchor = self.inputs.stack.anchor_location(Some(self.node(parent).layer_id()));
-                    // A reference/payload authored inside a `.usdz` package would
-                    // need to open a sibling layer within the archive, which is not
-                    // yet supported (the eager collector bailed the same way for a
-                    // usdz inner layer's sublayers). Report it explicitly rather
-                    // than letting the package-relative target fail as a generic
-                    // unresolved layer.
-                    if anchor.as_ref().is_some_and(|resolved| resolved.extension() == "usdz") {
-                        self.errors.push(Error::UnsupportedUsdzReference {
-                            asset_path: asset_path.to_string(),
-                            arc,
-                            introduced_by: self.introducing_layer(parent),
-                            site_path: parent_path,
-                        });
-                        return Ok(());
-                    }
                     // A muted target contributes nothing and is never opened: drop
                     // the arc (it then composes as if absent) and record the muted
                     // reference as a diagnostic. Checked before the load demand so a

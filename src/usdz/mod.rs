@@ -46,7 +46,20 @@ impl sdf::FileFormat for UsdzFileFormat {
     }
 
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
-        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        // `resolved` may be the package file (`pkg.usdz`) or a package-relative
+        // path (`pkg.usdz[inner]`) once a package root has been anchored. This
+        // format always reads the archive's first layer, so open the package
+        // itself, not an inner entry.
+        let s = resolved.to_string();
+        let package = if ar::is_package_relative_path(&s) {
+            match ar::split_package_relative_path_outer(&s) {
+                Some((pkg, _)) => ar::ResolvedPath::new(pkg),
+                None => resolved.clone(),
+            }
+        } else {
+            resolved.clone()
+        };
+        let bytes = resolver.open_asset(&package)?.read_all()?;
         let mut archive = Archive::from_reader(Cursor::new(bytes)).context("failed to open USDZ archive")?;
         archive
             .read_first_layer()
@@ -59,6 +72,41 @@ impl sdf::FileFormat for UsdzFileFormat {
         let mut archive = ArchiveWriter::new(sink);
         archive.add_layer(USDZ_LAYER_NAME, &buf)?;
         archive.finish()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usd::{Stage, TimeCode};
+
+    /// A `.usdz` whose root layer references another layer *inside the same
+    /// archive*. The reference (`@./inner.usda@`) must resolve in-package —
+    /// not against the host filesystem — for the inner opinion to compose onto
+    /// the root prim. Exercises the full package-relative resolution path
+    /// (bare-package anchoring + `create_identifier` + inner-layer read).
+    #[test]
+    fn resolves_packaged_reference() -> Result<()> {
+        let root =
+            b"#usda 1.0\n(defaultPrim = \"World\")\ndef \"World\" (prepend references = @./inner.usda@</Inner>) {}\n";
+        let inner = b"#usda 1.0\ndef \"Inner\" { custom int probe = 42 }\n";
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("pkg.usdz");
+        let mut writer = ArchiveWriter::create(&path)?;
+        writer.add_layer("root.usda", root)?; // first entry is the root layer
+        writer.add_layer("inner.usda", inner)?;
+        writer.finish()?;
+
+        let stage = Stage::open(path.to_str().unwrap())?;
+        assert_eq!(
+            stage
+                .attribute("/World.probe")
+                .get_at::<sdf::Value>(TimeCode::new(0.0))?,
+            Some(sdf::Value::Int(42)),
+            "reference to a layer inside the package should compose"
+        );
         Ok(())
     }
 }
