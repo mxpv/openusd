@@ -91,10 +91,23 @@ impl<R: Read + Seek> Archive<R> {
             // TODO: Implement nested USDZ files support.
             bail!("Nested USDZ files are not yet supported: '{}'", file_path)
         } else {
-            bail!(
-                "Unsupported file format for '{}'. Expected .usda or .usdc extension",
-                file_path
-            )
+            // Format-agnostic `.usd` (or any other extension): resolve by
+            // content, mirroring USD's content-based format detection. A USDC
+            // crate file begins with the magic `PXR-USDC`; otherwise parse as
+            // USDA text. Per the USDZ spec the root layer may be `.usd`, and
+            // Pixar's reference assets (e.g. Kitchen_set.usdz) ship it that way.
+            if buffer.starts_with(usdc::MAGIC) {
+                let cursor = Cursor::new(buffer);
+                let data = usdc::CrateData::open(cursor, true)
+                    .with_context(|| format!("Failed to parse USDC data from '{}'", file_path))?;
+                Ok(Box::new(data))
+            } else {
+                let content =
+                    String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
+                let data =
+                    usda::parse(&content).with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
+                Ok(Box::new(data))
+            }
         }
     }
 }
