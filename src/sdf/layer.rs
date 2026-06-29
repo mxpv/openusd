@@ -46,6 +46,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 
+use crate::ar;
+
 use super::schema::FieldKey;
 use super::{
     sink, AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch,
@@ -69,6 +71,16 @@ static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.
     pub identifier: String,
+    /// The layer's resolved physical location when it differs from
+    /// [`identifier`](Self::identifier) — the anchor for the relative asset
+    /// paths it authors (C++ `SdfLayer::GetRealPath`). `None` (the common case)
+    /// means it equals the identifier; a package (`.usdz`) opens under the bare
+    /// package identifier while its real path is the package-relative default
+    /// layer (`pkg.usdz[root.usd]`), so paths authored inside it anchor
+    /// in-package against the real path rather than the identifier. Read
+    /// through [`real_path`](Self::real_path), which falls back to the
+    /// identifier.
+    real_path: Option<String>,
     /// The parsed scene description data, under a copy-on-write [`CowData`]
     /// staging overlay. Every authoring write stages in the overlay; committing an
     /// edit derives the composition record and drains the overlay into the backend.
@@ -93,8 +105,30 @@ impl Layer {
     /// for blank in-memory layers, or open a stage (which loads layers from
     /// disk on demand) for loaded layers.
     pub(crate) fn new(identifier: impl Into<String>, data: LayerData) -> Self {
+        Self::build(identifier.into(), None, data)
+    }
+
+    /// Construct a loaded layer recording its resolved physical location.
+    ///
+    /// The loader passes the [`real_path`](Self::real_path) it resolved the
+    /// layer to: it equals `identifier` for an ordinary layer, but a package
+    /// opens under its bare identifier while its real path is the
+    /// package-relative default layer, so the paths it authors anchor
+    /// in-package. Only a real path that differs from the identifier is stored;
+    /// otherwise this is [`new`](Self::new).
+    pub(crate) fn new_resolved(identifier: impl Into<String>, real_path: &ar::ResolvedPath, data: LayerData) -> Self {
+        let identifier = identifier.into();
+        let real_path = real_path.to_string();
+        let real_path = (real_path != identifier).then_some(real_path);
+        Self::build(identifier, real_path, data)
+    }
+
+    /// Shared constructor backing [`new`](Self::new) and
+    /// [`new_resolved`](Self::new_resolved).
+    fn build(identifier: String, real_path: Option<String>, data: LayerData) -> Self {
         Self {
-            identifier: identifier.into(),
+            identifier,
+            real_path,
             data: CowData::new(data),
             changes: ChangeList::new(),
             sinks: sink::Set::default(),
@@ -236,6 +270,14 @@ impl Layer {
     /// The layer's resolved, canonical identifier.
     pub fn identifier(&self) -> &str {
         &self.identifier
+    }
+
+    /// The layer's resolved physical location, the anchor for the relative
+    /// asset paths it authors (C++ `SdfLayer::GetRealPath`). Equals the
+    /// identifier except for a package, whose real path is its package-relative
+    /// default layer.
+    pub(crate) fn real_path(&self) -> &str {
+        self.real_path.as_deref().unwrap_or(&self.identifier)
     }
 }
 

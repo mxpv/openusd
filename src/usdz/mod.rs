@@ -13,7 +13,7 @@ pub use writer::ArchiveWriter;
 
 use std::io::Cursor;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::{ar, sdf, tf, usdc};
 
@@ -45,23 +45,44 @@ impl sdf::FileFormat for UsdzFileFormat {
         sdf::FileFormatCaps::READ | sdf::FileFormatCaps::WRITE
     }
 
+    fn resolve_layer(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
+        // An already package-relative path (`pkg.usdz[inner]`, including a nested
+        // `pkg.usdz[inner.usdz]`) already names its entry; only a bare package is
+        // anchored to its default — first — packaged layer.
+        let package = resolved.to_string_lossy();
+        if ar::is_package_relative_path(&package) {
+            return Some(resolved.clone());
+        }
+        // A package that cannot be opened, or that lists no default layer, falls
+        // back to the bare package path so `read` surfaces the precise zip/parse
+        // error, rather than being demoted to an unresolved (missing) asset.
+        //
+        // TODO(perf): `from_asset` slurps the whole package into memory only to
+        // list its central directory (`first_layer_name`), and `read` then reads
+        // it again to extract the anchored layer. The resolver's asset is `Seek`,
+        // so a `ZipArchive` could read just the central directory here (as
+        // `ar::open_package_archive` does off a `File`); carry that opened archive
+        // through so a bare-package open touches the file once.
+        match Archive::from_asset(resolver, resolved)
+            .ok()
+            .and_then(|a| a.first_layer_name())
+        {
+            Some(first) => Some(ar::ResolvedPath::new(ar::join_package_relative_path(&package, &first))),
+            None => Some(resolved.clone()),
+        }
+    }
+
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<sdf::LayerData> {
-        // `resolved` may be the package file (`pkg.usdz`) or a package-relative
-        // path (`pkg.usdz[inner]`) once a package root has been anchored. This
-        // format always reads the archive's first layer, so open the package
-        // itself, not an inner entry.
+        // A package-relative path reaches this format only when its named entry is
+        // itself a package (an ordinary inner layer dispatches to its own format),
+        // so it is a nested package — unsupported. Reported before opening the
+        // outer archive, since the whole-package read would only be discarded.
         let s = resolved.to_string();
-        let package = if ar::is_package_relative_path(&s) {
-            match ar::split_package_relative_path_outer(&s) {
-                Some((pkg, _)) => ar::ResolvedPath::new(pkg),
-                None => resolved.clone(),
-            }
-        } else {
-            resolved.clone()
-        };
-        let bytes = resolver.open_asset(&package)?.read_all()?;
-        let mut archive = Archive::from_reader(Cursor::new(bytes)).context("failed to open USDZ archive")?;
-        archive
+        if let Some((_, inner)) = ar::split_package_relative_path_outer(&s) {
+            bail!("Nested USDZ files are not yet supported: '{inner}'");
+        }
+        // A bare package has no named entry, so read its first (default) layer.
+        Archive::from_asset(resolver, resolved)?
             .read_first_layer()
             .context("failed to read first layer from USDZ archive")
     }

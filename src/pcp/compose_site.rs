@@ -267,7 +267,7 @@ fn anchor_asset_path(asset_path: &mut String, authoring_layer: &sdf::Layer, regi
     if asset_path.is_empty() {
         return;
     }
-    *asset_path = registry.create_identifier_anchored(asset_path, &authoring_layer.identifier);
+    *asset_path = registry.create_identifier_anchored(asset_path, authoring_layer.real_path());
 }
 
 /// The retiming scale a reference or payload arc folds into its layer offset

@@ -90,6 +90,15 @@ When implementing a new feature from the spec:
 - Comprehensive test coverage (50% minimum) with grcov
 - Security auditing with cargo-deny
 - Pre-1.0: backward compatibility is not a constraint. Prefer the cleanest design and change or remove public APIs freely; don't keep deprecated shims, compatibility shims, or worse-but-compatible behavior. Update all call sites in the same change.
+- Prefer an architecturally correct design over a quick, dirty, or bandaid fix.
+  Fix the root cause at the layer that owns the concept, not the symptom at the
+  call site. A special case layered onto shared infrastructure (an `if this one
+  format` branch, or a value re-derived from a string because the right field
+  was not carried) signals the fix is at the wrong altitude — generalize the
+  mechanism or carry the missing state instead. When a module mirrors C++
+  OpenUSD, factor the concern the way the C++ model does (e.g. a layer's lexical
+  identifier vs. its resolved real path). Note genuinely deferred depth as a
+  `TODO` naming the missing generalization.
 
 ## Code Quality
 

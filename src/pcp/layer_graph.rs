@@ -591,7 +591,7 @@ impl LayerGraph {
         }
         let anchored = self
             .registry
-            .create_identifier_anchored(&sub_path, self.identifier(parent));
+            .create_identifier_anchored(&sub_path, self.real_path(parent));
         let sub_id = self.anchored_or_bare(&anchored, &sub_path);
         cache.entry(parent).or_default().insert(sub_path.into_owned(), anchored);
         sub_id
@@ -801,6 +801,15 @@ impl LayerGraph {
         self.nodes[&id].layer.identifier()
     }
 
+    /// The resolved physical location of the layer with the given id — the
+    /// anchor for the relative asset paths it authors (C++
+    /// `SdfLayer::GetRealPath`). Equals the identifier except for a package,
+    /// whose real path is its package-relative default layer. Panics if
+    /// unknown.
+    pub(crate) fn real_path(&self, id: LayerId) -> &str {
+        self.nodes[&id].layer.real_path()
+    }
+
     /// Whether a layer with this id is present.
     pub(crate) fn contains(&self, id: LayerId) -> bool {
         self.nodes.contains_key(&id)
@@ -811,12 +820,14 @@ impl LayerGraph {
         &self.registry
     }
 
-    /// Resolves the location of the layer `anchor`, used to anchor the relative
-    /// asset paths authored there. Returns `None` when there is no anchor layer
-    /// or it cannot itself be resolved. Resolve a layer once and reuse the
-    /// result to anchor every asset path it authors.
+    /// The location that anchors the relative asset paths authored in the layer
+    /// `anchor`: its resolved [`real_path`](Self::real_path), recorded when the
+    /// loader opened it. Returns `None` when there is no anchor layer or it is
+    /// anonymous (no resolvable location, C++ `SdfLayer::GetRealPath` is
+    /// empty).
     pub(crate) fn anchor_location(&self, anchor: Option<LayerId>) -> Option<ResolvedPath> {
-        anchor.and_then(|layer| self.registry.resolve(self.identifier(layer)))
+        let layer = &self.nodes[&anchor?].layer;
+        (!layer.is_anonymous()).then(|| ResolvedPath::new(layer.real_path()))
     }
 
     /// Records that the layer at `asset_path` resolved but could not be read or
@@ -1431,7 +1442,7 @@ impl LayerGraph {
         let asset_path = without_dot_segments(asset_path);
         let anchored = self
             .registry
-            .create_identifier_anchored(&asset_path, self.identifier(anchor));
+            .create_identifier_anchored(&asset_path, self.real_path(anchor));
         self.anchored_or_bare(&anchored, &asset_path)
     }
 
