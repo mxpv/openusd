@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 
 use bitflags::bitflags;
 
-use crate::sdf::Path;
+use crate::sdf::{LayerOffset, Path};
 
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
@@ -370,6 +370,29 @@ impl Node {
     pub(crate) fn is_permission_denied(&self) -> bool {
         self.flags.contains(NodeFlags::PERMISSION_DENIED)
     }
+}
+
+/// One contributing prim spec in a [`PrimIndex`](crate::pcp::PrimIndex)'s
+/// memoized spec stack (C++ `PcpPrimIndex`'s spec stack): the node it came from,
+/// the layer that authored it, and that layer's time offset folded to the root
+/// namespace.
+///
+/// An entry exists for each `(node, layer)` where the layer authors a spec at
+/// the node's path; the stack collects them in strength order. [`node`](Self::node)
+/// indexes the arena; resolve it through
+/// [`PrimIndex::node`](crate::pcp::PrimIndex::node). [`offset`](Self::offset) is
+/// the member's sublayer offset composed onto the node's arc offset
+/// (`map_to_root().time_offset()`), the value-resolution view of the member's
+/// retiming to root. See [`PrimIndex::finalize_spec_stack`](crate::pcp::PrimIndex)
+/// for how the stack is built and read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpecSite {
+    /// The contributing node, by arena handle.
+    pub(crate) node: NodeId,
+    /// The layer that authored the spec at the node's path.
+    pub(crate) layer: LayerId,
+    /// The contributing layer's time offset folded to the root namespace.
+    pub(crate) offset: LayerOffset,
 }
 
 /// Arena-based composition graph.

@@ -19,7 +19,7 @@ use crate::tf::Token;
 use super::clip;
 use super::mapping::MapFunction;
 use super::prim_graph::{ArcType, Node};
-use super::prim_index::{node_layer_offsets, PrimIndex};
+use super::prim_index::PrimIndex;
 use super::{LayerGraph, LayerId};
 
 /// A single authored opinion surfaced by [`PrimIndex::opinions`].
@@ -44,6 +44,26 @@ struct Opinion<'a> {
     /// (the node's arc offset with the layer's sublayer offset composed on
     /// top). Used to retime time samples and clip schedules.
     offset: LayerOffset,
+}
+
+/// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
+/// whose node still contributes opinions (inert, culled, and permission-denied
+/// nodes filtered out), paired with the path to query in the contributing layer.
+/// The shared output of [`PrimIndex::contributing_sites`], so
+/// [`opinions`](PrimIndex::opinions) and
+/// [`strongest_opinion`](PrimIndex::strongest_opinion) apply the same node
+/// filter and query-path resolution and cannot drift.
+struct ContributingSite<'a> {
+    /// The contributing node, strongest-to-weakest in the walk.
+    node: &'a Node,
+    /// Id of the contributing layer (see [`Opinion::layer`]).
+    layer: LayerId,
+    /// Effective time offset of the contributing layer to the root namespace,
+    /// taken precomputed from the spec stack (see [`Opinion::offset`]).
+    offset: LayerOffset,
+    /// The path queried in the contributing layer (the node path with the
+    /// property suffix applied).
+    query_path: Cow<'a, Path>,
 }
 
 /// Why a relationship/connection target was dropped during target composition.
@@ -383,52 +403,63 @@ impl PrimIndex {
         }
     }
 
+    /// Iterates the live contributing spec sites in strength order, strongest
+    /// first — each [`live_spec_sites`](Self::live_spec_sites) entry that also
+    /// passes value resolution's permission filter, paired with its query path.
+    /// The shared filter and query-path resolution behind both
+    /// [`opinions`](Self::opinions) and [`strongest_opinion`](Self::strongest_opinion),
+    /// so the two cannot drift. Beyond the structural skip `live_spec_sites`
+    /// already applies, this also drops a permission-denied node (a direct arc to
+    /// a private site, spec 10.3.3), which stays visible to introspection.
+    fn contributing_sites<'a>(
+        &'a self,
+        prop_suffix: Option<&'a str>,
+    ) -> impl Iterator<Item = Result<ContributingSite<'a>>> + 'a {
+        self.live_spec_sites().filter_map(move |(site, node)| {
+            if node.is_permission_denied() {
+                return None;
+            }
+            let query_path = match Self::query_path(node, prop_suffix) {
+                Ok(path) => path,
+                Err(err) => return Some(Err(err)),
+            };
+            Some(Ok(ContributingSite {
+                node,
+                layer: site.layer,
+                offset: site.offset,
+                query_path,
+            }))
+        })
+    }
+
     /// Iterates the authored opinions for `field` across the composition graph,
-    /// strongest to weakest, skipping nodes with no opinion. Centralizes the
-    /// query-path / layer / `try_field` walk shared by every `resolve_*` field
-    /// resolver.
+    /// strongest to weakest, skipping sites with no opinion for `field`. Reads
+    /// the memoized spec stack through [`contributing_sites`](Self::contributing_sites),
+    /// so each site's contributing layer and root-namespace offset are already
+    /// resolved; only the `try_field` for this `field` happens per query.
     fn opinions<'a>(
         &'a self,
         field: &'a str,
         stack: &'a LayerGraph,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<Opinion<'a>>> + 'a {
-        // Each node fans out into one opinion per contributing layer in its
-        // layer stack, strongest sublayer first, so a per-site node surfaces
-        // every sublayer that authored the field. Two kinds of node stay in
-        // `nodes` for structural queries but contribute no opinions here: a
-        // permission-denied node (a direct arc to a private site, spec 10.3.3),
-        // and a node authoring no spec at its path (`has_specs == false`, a
-        // full-stack ancestral site deepened to a child with no local opinion).
-        // Skipping the spec-less node avoids a `try_field` per field on a site
-        // that cannot author one, and guards against a backend that would return
-        // a field where no spec exists.
-        //
-        // TODO(perf): collecting per node allocates a small Vec; a custom
-        // iterator over (node, layer) pairs would avoid it on the hot path.
-        self.nodes()
-            .filter(|node| node.has_specs() && !node.is_permission_denied())
-            .flat_map(move |node| {
-                let query_path = match Self::query_path(node, prop_suffix) {
-                    Ok(path) => path,
-                    Err(err) => return vec![Err(err)],
-                };
-                let mut out: Vec<Result<Opinion<'a>>> = Vec::new();
-                for (layer, offset) in node_layer_offsets(node, stack) {
-                    match stack.layer(layer).data().try_field(&query_path, field) {
-                        Ok(Some(value)) => out.push(Ok(Opinion {
-                            node,
-                            layer,
-                            query_path: query_path.clone(),
-                            value,
-                            offset,
-                        })),
-                        Ok(None) => {}
-                        Err(err) => out.push(Err(err.into())),
-                    }
-                }
-                out
-            })
+        self.contributing_sites(prop_suffix).filter_map(move |site| {
+            let site = match site {
+                Ok(site) => site,
+                Err(err) => return Some(Err(err)),
+            };
+            match stack.layer(site.layer).data().try_field(&site.query_path, field) {
+                Ok(Some(value)) => Some(Ok(Opinion {
+                    node: site.node,
+                    layer: site.layer,
+                    query_path: site.query_path,
+                    value,
+                    offset: site.offset,
+                })),
+                Ok(None) => None,
+                Err(err) => Some(Err(err.into())),
+            }
+        })
     }
 
     /// The strongest authored opinion for `field`: the contributing layer (the
@@ -436,27 +467,23 @@ impl PrimIndex {
     /// `UsdStage::_MakeResolvedAssetPaths`) and the node it came from (the scope
     /// for composing the `expressionVariables` an asset-path expression is
     /// evaluated against). Returns `None` if nothing authors the field.
-    pub(crate) fn strongest_opinion(
-        &self,
+    pub(crate) fn strongest_opinion<'a>(
+        &'a self,
         field: &str,
         stack: &LayerGraph,
-        prop_suffix: Option<&str>,
-    ) -> Option<(LayerId, &Node)> {
-        // A direct walk rather than `opinions()` so the returned node borrows
-        // from `self` alone, not from the `field` / `stack` parameters. The
-        // node/layer filter must match `opinions()`'s first-yield: keep the
-        // `has_specs` / permission / `query_path` / `try_field` checks in sync.
-        for node in self.nodes() {
-            if !node.has_specs() || node.is_permission_denied() {
-                continue;
-            }
-            let Ok(query_path) = Self::query_path(node, prop_suffix) else {
-                continue;
-            };
-            for &(layer, _) in stack.layer_stack(node.layer_stack_id()).iter() {
-                if matches!(stack.layer(layer).data().try_field(&query_path, field), Ok(Some(_))) {
-                    return Some((layer, node));
-                }
+        prop_suffix: Option<&'a str>,
+    ) -> Option<(LayerId, &'a Node)> {
+        // Shares `contributing_sites` with `opinions`, so the node filter never
+        // drifts. The returned node borrows `self` (the spec stack and arena),
+        // not `stack`: `prop_suffix` is tied to `self` only to build the query
+        // path, leaving the node free to outlive the iteration.
+        for site in self.contributing_sites(prop_suffix) {
+            let Ok(site) = site else { continue };
+            if matches!(
+                stack.layer(site.layer).data().try_field(&site.query_path, field),
+                Ok(Some(_))
+            ) {
+                return Some((site.layer, site.node));
             }
         }
         None

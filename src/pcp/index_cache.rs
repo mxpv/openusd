@@ -1594,6 +1594,11 @@ impl IndexCache {
     /// relationship) is the defining type; weaker specs of the other kind are
     /// inconsistent (C++ `PcpErrorInconsistentPropertyType`) — dropped from the
     /// stack and reported. `prop_path` is the property in `prim_path`'s namespace.
+    ///
+    /// Reads the memoized prim spec stack as the candidate set: a property spec
+    /// requires its owning prim spec, so every layer that authors the property
+    /// also authors the prim spec the stack records. Inert and culled nodes are
+    /// skipped (matching the structural node walk); permission-denied sites stay.
     fn compose_property_specs(
         &self,
         graph: &LayerGraph,
@@ -1604,33 +1609,32 @@ impl IndexCache {
         let mut stack = Vec::new();
         let mut conflicts = Vec::new();
         let mut defining: Option<(SpecType, String, Path)> = None;
-        for node in index.nodes() {
-            let Some(p) = prop_path.replace_prefix(prim_path, &node.path) else {
+        for (site, node) in index.live_spec_sites() {
+            let Some(p) = prop_path.replace_prefix(prim_path, node.path()) else {
                 continue;
             };
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                let Some(spec_type) = graph.layer(layer).data().spec_type(&p) else {
+            let Some(spec_type) = graph.layer(site.layer).data().spec_type(&p) else {
+                continue;
+            };
+            let layer_id = graph.identifier(site.layer).to_string();
+            match &defining {
+                None => defining = Some((spec_type, layer_id.clone(), p.clone())),
+                Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
+                    conflicts.push(Error::InconsistentPropertyType {
+                        property: prop_path.clone(),
+                        defining_layer: def_layer.clone(),
+                        defining_path: def_path.clone(),
+                        defining_is_attribute: *def_type == SpecType::Attribute,
+                        conflicting_layer: layer_id,
+                        conflicting_path: p.clone(),
+                        conflicting_is_attribute: spec_type == SpecType::Attribute,
+                        composing: prim_path.clone(),
+                    });
                     continue;
-                };
-                match &defining {
-                    None => defining = Some((spec_type, graph.identifier(layer).to_string(), p.clone())),
-                    Some((def_type, def_layer, def_path)) if *def_type != spec_type => {
-                        conflicts.push(Error::InconsistentPropertyType {
-                            property: prop_path.clone(),
-                            defining_layer: def_layer.clone(),
-                            defining_path: def_path.clone(),
-                            defining_is_attribute: *def_type == SpecType::Attribute,
-                            conflicting_layer: graph.identifier(layer).to_string(),
-                            conflicting_path: p.clone(),
-                            conflicting_is_attribute: spec_type == SpecType::Attribute,
-                            composing: prim_path.clone(),
-                        });
-                        continue;
-                    }
-                    Some(_) => {}
                 }
-                stack.push((graph.identifier(layer).to_string(), p.clone()));
+                Some(_) => {}
             }
+            stack.push((layer_id, p));
         }
         (stack, conflicts)
     }
@@ -1646,24 +1650,19 @@ impl IndexCache {
     }
 
     /// Returns the prim stack: each `(layer identifier, spec path)` site that
-    /// contributes a prim spec, strongest first. Backs C++
-    /// `UsdPrim::GetPrimStack` (each per-site node fans out into one entry per
-    /// contributing layer in its layer stack, since every member authored a
-    /// prim spec).
+    /// contributes a prim spec, strongest first (C++ `UsdPrim::GetPrimStack`).
+    ///
+    /// Projects the live spec sites; permission-denied sites are kept — they still
+    /// author a spec, so the structural introspection lists them, unlike value
+    /// resolution.
     pub fn prim_stack(&mut self, graph: &LayerGraph, path: &Path) -> Result<Vec<(String, Path)>> {
         let path = self.effective_path(graph, &path.prim_path())?;
         self.ensure_index(graph, &path)?;
         let index = self.cached(&path);
-        let mut stack = Vec::new();
-        for node in index.nodes() {
-            // A node may carry its full site layer stack; only the layers that
-            // author a spec at its path belong in the prim stack.
-            for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-                if graph.layer(layer).data().has_spec(&node.path) {
-                    stack.push((graph.identifier(layer).to_string(), node.path.clone()));
-                }
-            }
-        }
+        let stack = index
+            .live_spec_sites()
+            .map(|(site, node)| (graph.identifier(site.layer).to_string(), node.path().clone()))
+            .collect();
         Ok(stack)
     }
 
@@ -3189,6 +3188,53 @@ def "Scope"
 
         // The arc is gone, not left dangling by an in-place spec refresh.
         assert!(!cache.has_composition_arc(&graph, &inst)?);
+        Ok(())
+    }
+
+    /// An inert `over` add into a stronger sublayer is a spec-tier change that
+    /// refreshes the memoized spec stack in place: the new site joins the prim
+    /// stack ahead of the weaker one, and the refreshed stack matches a
+    /// from-scratch composition of the edited layers.
+    #[test]
+    fn spec_tier_refresh_updates_prim_stack() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\n(\n    subLayers = [@weak.usd@]\n)\n");
+        let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, weak], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let a = sdf::path("/A")?;
+
+        // Before the edit only the weak sublayer authors /A.
+        assert_eq!(cache.prim_stack(&graph, &a)?, vec![("weak.usd".into(), a.clone())]);
+
+        // Author an inert `over "A"` into the strong root layer.
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        assert!(
+            changes.cache.did_change_specs.contains(&(root_id, a.clone())),
+            "an inert over add routes through the spec tier"
+        );
+        changes.apply(&mut cache, &mut graph);
+
+        // The refreshed spec stack lists the strong site first and equals a fresh
+        // composition of the same layers.
+        let refreshed = cache.prim_stack(&graph, &a)?;
+        assert_eq!(
+            refreshed,
+            vec![("root.usd".into(), a.clone()), ("weak.usd".into(), a.clone())],
+            "the spec-tier refresh adds the new strong site to the prim stack"
+        );
+        let mut fresh = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        assert_eq!(
+            refreshed,
+            fresh.prim_stack(&graph, &a)?,
+            "in-place refresh matches a fresh build"
+        );
         Ok(())
     }
 

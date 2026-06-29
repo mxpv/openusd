@@ -8,11 +8,11 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::sdf::schema::{ChildrenKey, FieldKey};
-use crate::sdf::{self, LayerOffset, Path, Value};
+use crate::sdf::{self, Path, Value};
 
 use super::layer_stack::LayerStackId;
 use super::mapping::MapFunction;
-use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph};
+use super::prim_graph::{ArcType, Node, NodeFlags, NodeId, PrimIndexGraph, SpecSite};
 use super::prim_indexer::BuildResult;
 use super::{Error, LayerGraph, LayerId, VariantFallbackMap};
 
@@ -26,6 +26,15 @@ use super::{Error, LayerGraph, LayerId, VariantFallbackMap};
 pub struct PrimIndex {
     /// Composition graph: node arena plus strength-order projection.
     graph: PrimIndexGraph,
+    /// Strength-ordered prim spec stack: one [`SpecSite`] per `(node, layer)`
+    /// that authors a spec at its node's path, strongest first, so value
+    /// resolution and the `prim_stack` / `property_stack` introspection read this
+    /// precomputed list. Built by [`finalize_spec_stack`](Self::finalize_spec_stack)
+    /// and rebuilt by the spec-tier change refresh; read through the filtered
+    /// [`live_spec_sites`](Self::live_spec_sites) view. It is a resolution-time
+    /// artifact, kept off [`PrimIndexGraph`] so the indexer's structural seed
+    /// clone does not carry it.
+    spec_stack: Vec<SpecSite>,
 }
 
 /// The cache's per-prim composition record: the composed [`PrimIndex`], the
@@ -146,6 +155,19 @@ impl PrimIndex {
         &self.graph.muted_external_targets
     }
 
+    /// Iterates the spec stack's live contributing sites — those whose node is
+    /// neither inert nor culled, the same structural filter
+    /// [`nodes`](Self::nodes) applies — each paired with its resolved node. The
+    /// single home for that filter, shared by every spec-stack consumer (value
+    /// resolution adds `!is_permission_denied()`; the `prim_stack` /
+    /// `property_stack` introspection keeps denied sites).
+    pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, &Node)> + '_ {
+        self.spec_stack.iter().filter_map(|site| {
+            let node = self.node(site.node);
+            (!node.is_inert() && !node.is_culled()).then_some((site, node))
+        })
+    }
+
     /// Iterates every node in strength order, unfiltered — the shared projection
     /// the filtered public node iterators build on.
     fn ordered_nodes(&self) -> impl DoubleEndedIterator<Item = &Node> + Clone + '_ {
@@ -255,6 +277,60 @@ impl PrimIndex {
             }
         }
         refresh
+    }
+
+    /// Rebuilds the memoized [`spec stack`](SpecSite): the strength-ordered
+    /// list of `(node, layer)` sites that author a spec at their node's path,
+    /// each with the layer's time offset folded to root (the C++ `PcpPrimIndex`
+    /// spec stack). Value resolution ([`opinions`](Self::opinions)) and the
+    /// `prim_stack` / `property_stack` introspection read it as their precomputed
+    /// candidate sites.
+    ///
+    /// A site is recorded where the layer authors the prim spec at the node's
+    /// path (`has_spec`). A property spec requires its owning prim spec, so this
+    /// is also the candidate set for property reads; an orphan property spec (one
+    /// whose owning prim spec is absent, reachable only through malformed backend
+    /// data) is not represented.
+    ///
+    /// Run by the index builder (the single composition seam) and by the
+    /// spec-tier change refresh. It walks every strength-ordered node, gated on
+    /// [`has_specs`](super::prim_graph::Node::has_specs) — a node with no spec on
+    /// any member contributes nothing — and leaves the stack *unfiltered* by the
+    /// inert / culled / permission-denied flags: those are flipped after the
+    /// graph is finalized (an instance-local or permission inerting, often on a
+    /// clone), so a pre-filtered stack would go stale. Consumers apply the live
+    /// flag filter through [`live_spec_sites`](Self::live_spec_sites).
+    ///
+    /// The folded offset is stable across the refresh and across
+    /// [`rebase_root`](Self::rebase_root): the spec tier never edits
+    /// subLayers/offsets (those drop the index), and a rebase re-anchors only the
+    /// path side of each map, leaving `map_to_root().time_offset()` intact.
+    ///
+    /// TODO(perf): re-reads `has_spec` per member, duplicating the indexer's own
+    /// `has_specs` pass — the build could emit the spec-authoring layers it
+    /// already scans. The spec-tier refresh also re-runs this once per changed
+    /// site, so an index reached by several sites in one edit rebuilds
+    /// repeatedly; a `(layer, path) → NodeId` index would splice the affected
+    /// entries once instead.
+    pub(crate) fn finalize_spec_stack(&mut self, graph: &LayerGraph) {
+        let mut stack = Vec::new();
+        for &id in &self.graph.strength_order {
+            let node = &self.graph.nodes[id.idx()];
+            if !node.has_specs {
+                continue;
+            }
+            let arc_offset = node.map_to_root.time_offset();
+            for &(layer, sub) in graph.layer_stack(node.layer_stack).iter() {
+                if graph.layer(layer).data().has_spec(&node.path) {
+                    stack.push(SpecSite {
+                        node: id,
+                        layer,
+                        offset: arc_offset.concatenate(&sub),
+                    });
+                }
+            }
+        }
+        self.spec_stack = stack;
     }
 
     /// Classifies each node as instance-local (`true`) or shared (`false`) for an
@@ -498,13 +574,18 @@ impl PrimIndex {
             errors,
             pending_loads,
         } = indexer.build(path)?;
-        Ok((
-            PrimIndex {
-                graph: graph.unwrap_or_default(),
-            },
-            errors,
-            pending_loads,
-        ))
+        let mut index = PrimIndex {
+            graph: graph.unwrap_or_default(),
+            spec_stack: Vec::new(),
+        };
+        // Build the memoized spec stack here, the single seam every freshly
+        // composed index passes through, so value resolution reads it without a
+        // separate finalize step. The later permission / instance-local inerting
+        // only flips flags (which consumers filter live), leaving the data-derived
+        // stack valid; a materialized prototype clones an index that already
+        // carries it.
+        index.finalize_spec_stack(stack);
+        Ok((index, errors, pending_loads))
     }
 
     /// Returns the composition context derived from this prim's index.
@@ -685,28 +766,6 @@ pub(super) fn stack_has_spec(graph: &LayerGraph, stack: LayerStackId, path: &Pat
         .any(|&(li, _)| graph.layer(li).data().has_spec(path))
 }
 
-/// Iterates `node`'s contributing layers strongest first, each paired with its
-/// effective time offset to the root namespace: the node's arc offset
-/// (`map_to_root`) folded onto the member's sublayer offset (C++
-/// `PcpNodeRef`'s per-layer offset). The value-resolution view of a node's
-/// layer stack, resolved through `graph`; the single home for this offset
-/// composition so value resolution and introspection never drift.
-//
-// TODO(perf): this collects a `Vec` per node per field read on the value-
-// resolution hot path (callers consume it by value). It returns owned rather
-// than a borrowing iterator because `layer_stack` yields a `Cow` — for the
-// precomputed-DAG-root case that `Cow` borrows `graph`, so the lazy form could
-// be kept by having the caller hold the `Cow` and iterate it, or by threading
-// the resolved layer-stack slice through.
-pub(super) fn node_layer_offsets(node: &Node, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
-    let arc_offset = node.map_to_root().time_offset();
-    graph
-        .layer_stack(node.layer_stack_id())
-        .iter()
-        .map(|&(li, sub)| (li, arc_offset.concatenate(&sub)))
-        .collect()
-}
-
 /// Resolves variant selections across a prim's composition nodes.
 ///
 /// Precedence: `seed` selections inherited from the composition context win
@@ -821,6 +880,8 @@ pub(crate) mod tests {
     use super::*;
 
     use anyhow::Result;
+
+    use crate::sdf::LayerOffset;
 
     const VENDOR_COMPOSITION: &str = "vendor/usd-wg-assets/test_assets/foundation/stage_composition";
 
@@ -1909,6 +1970,21 @@ def "Prim" (
     //                          /Ref2 has a reference to B.usd/Model.
     // -------------------------------------------------------------------
 
+    /// Iterates `node`'s layer-stack members strongest first, each paired with
+    /// its effective time offset to the root namespace: the node's arc offset
+    /// (`map_to_root`) folded onto the member's sublayer offset. Unlike the
+    /// memoized spec stack — which keeps only spec-authoring members — this lists
+    /// every member, so [`offset_stack`] can assert the offset folding on layers
+    /// that author no spec at the node's path.
+    fn node_layer_offsets(node: &Node, graph: &LayerGraph) -> Vec<(LayerId, LayerOffset)> {
+        let arc_offset = node.map_to_root().time_offset();
+        graph
+            .layer_stack(node.layer_stack_id())
+            .iter()
+            .map(|&(li, sub)| (li, arc_offset.concatenate(&sub)))
+            .collect()
+    }
+
     /// Returns `(layer_name, node_path, arc_type, offset, scale)` tuples for
     /// every node in the prim stack. The offset/scale values are the effective
     /// [`sdf::LayerOffset`] carried by the node — i.e., the composition of
@@ -2073,6 +2149,48 @@ def "Model"
             .expect("retimed samples");
         let times: Vec<f64> = samples.iter().map(|(t, _)| *t).collect();
         assert_eq!(times, vec![12.0, 20.0]);
+        Ok(())
+    }
+
+    /// `rebase_root` re-anchors only the path side of each map, so the spec
+    /// stack's node ids and folded time offsets survive a prototype
+    /// materialization. Value resolution over a materialized prototype reads
+    /// those offsets, so this locks the invariant the instancing clone relies on.
+    #[test]
+    fn spec_stack_offsets_survive_rebase() -> Result<()> {
+        let root = parse_usda(
+            r#"#usda 1.0
+def "Root" (
+    references = @model.usd@</Model> (offset = 10; scale = 2)
+)
+{
+}
+"#,
+        );
+        let model = parse_usda("#usda 1.0\ndef \"Model\" { custom double radius = 1.0 }\n");
+        let layers = vec![sdf::Layer::new("root.usda", root), sdf::Layer::new("model.usd", model)];
+        let stack = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let index = PrimIndex::build_with_context(&Path::from("/Root"), &stack, &CompositionContext::default())?;
+
+        let sites = |index: &PrimIndex| -> Vec<(NodeId, f64, f64)> {
+            index
+                .live_spec_sites()
+                .map(|(s, _)| (s.node, s.offset.offset, s.offset.scale))
+                .collect()
+        };
+        let before = sites(&index);
+        assert!(
+            before.iter().any(|&(_, off, scale)| off == 10.0 && scale == 2.0),
+            "the referenced Model site carries the arc's (offset=10, scale=2): {before:?}"
+        );
+
+        let mut rebased = index.clone();
+        rebased.rebase_root(&Path::from("/Root"), &Path::from("/__Prototype_1"));
+        assert_eq!(
+            before,
+            sites(&rebased),
+            "rebase_root must preserve spec-stack node ids and folded offsets"
+        );
         Ok(())
     }
 

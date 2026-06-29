@@ -154,17 +154,21 @@ impl IndexStore {
     pub(super) fn refresh_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) -> Vec<Path> {
         let mut rebuild = Vec::new();
         for prim in self.deps.exact_lookup(layer, path) {
-            let needs_rebuild = if let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) {
-                let refresh = index.refresh_has_specs_at(layer, path, graph);
-                // The local prim is one of its own dependents (it reads its own
-                // site). Drop it when it carries no contributing node there; drop
-                // any index whose culled site the spec just filled in.
-                refresh.needs_rebuild || (prim == *path && !refresh.contributing)
-            } else {
-                false
+            let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) else {
+                continue;
             };
-            if needs_rebuild {
+            let refresh = index.refresh_has_specs_at(layer, path, graph);
+            // The local prim is one of its own dependents (it reads its own
+            // site). Drop it when it carries no contributing node there; drop any
+            // index whose culled site the spec just filled in.
+            if refresh.needs_rebuild || (prim == *path && !refresh.contributing) {
                 rebuild.push(prim);
+            } else {
+                // The `has_specs` flags changed in place, so rebuild the memoized
+                // spec stack the same edit shifted — a site that gained or lost
+                // its spec — keeping value resolution and introspection current.
+                // A dropped index recomposes from scratch, so it needs none here.
+                index.finalize_spec_stack(graph);
             }
         }
         rebuild
