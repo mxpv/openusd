@@ -115,26 +115,53 @@ impl LayerRegistry {
         self.resolver.create_identifier(asset_path, anchor)
     }
 
-    /// Resolves `asset_path` against `anchor_identifier` — the identifier of the
-    /// layer it is authored in — yielding the canonical identifier of the
-    /// targeted layer. The convenience over [`create_identifier`](Self::create_identifier)
-    /// for the common case of anchoring against another layer's identifier
-    /// string rather than a pre-resolved [`ar::ResolvedPath`].
+    /// Resolves `asset_path` against `anchor_location` — the resolved real path
+    /// of the layer it is authored in (its
+    /// [`real_path`](sdf::Layer::real_path), which for a package is the
+    /// package-relative default layer, not the bare package identifier) —
+    /// yielding the canonical identifier of the targeted layer. The convenience
+    /// over [`create_identifier`](Self::create_identifier) for the common case
+    /// of anchoring against another layer's location string rather than a
+    /// pre-resolved [`ar::ResolvedPath`].
     ///
     /// TODO(perf): the resolver canonicalizes via the filesystem, so each call
     /// runs a `canonicalize`. Cache resolved identifiers per
-    /// `(anchor_identifier, asset_path)`.
-    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor_identifier: &str) -> String {
-        self.create_identifier(
-            asset_path,
-            Some(&ar::ResolvedPath::new(PathBuf::from(anchor_identifier))),
-        )
+    /// `(anchor_location, asset_path)`.
+    pub(crate) fn create_identifier_anchored(&self, asset_path: &str, anchor_location: &str) -> String {
+        self.create_identifier(asset_path, Some(&ar::ResolvedPath::new(PathBuf::from(anchor_location))))
     }
 
     /// Resolves an asset identifier to a physical location, or `None` if it does
     /// not exist.
     pub(crate) fn resolve(&self, identifier: &str) -> Option<ar::ResolvedPath> {
         self.resolver.resolve(identifier)
+    }
+
+    /// Resolves the layer the composition graph should open at `identifier`.
+    ///
+    /// This is [`resolve`](Self::resolve) deferred to the selected format's
+    /// [`resolve_layer`](sdf::FileFormat::resolve_layer): a package
+    /// (`pkg.usdz`) resolves to its default — first — packaged layer
+    /// (`pkg.usdz[root.usd]`), so it composes as an ordinary layer stack and
+    /// the sublayers and references authored inside it anchor in-package, while
+    /// an ordinary format keeps the resolved location. Generic
+    /// [`resolve`](Self::resolve) stays package-agnostic for asset-value
+    /// resolution and the resolvability probe, which want the package path
+    /// itself rather than a layer inside it. A resolved location no registered
+    /// format claims passes through unchanged, so [`read`](Self::read) reports
+    /// the missing format.
+    ///
+    /// The format is chosen by extension alone — unlike [`read`](Self::read),
+    /// which content-sniffs the ambiguous `.usd`. That is sound because every
+    /// `.usd` claimant keeps the identity default, so which one is picked does
+    /// not change the real path; a future `.usd` format with a non-identity
+    /// `resolve_layer` would need the content sniff here too.
+    fn resolve_layer(&self, identifier: &str) -> Option<ar::ResolvedPath> {
+        let resolved = self.resolver.resolve(identifier)?;
+        match Self::find_by_extension(&resolved.extension()) {
+            Some(format) => format.resolve_layer(self.resolver.as_ref(), &resolved),
+            None => Some(resolved),
+        }
     }
 
     /// The resolver's [`identity`](ar::Resolver::identity) token — the
@@ -162,7 +189,7 @@ impl LayerRegistry {
     /// `None` when it does not resolve. Used for value-clip and manifest layers,
     /// which compose outside the layer graph (spec 12.3.4).
     pub(crate) fn open(&self, identifier: &str) -> Result<Option<sdf::LayerData>> {
-        match self.resolver.resolve(identifier) {
+        match self.resolve_layer(identifier) {
             Some(resolved) => self.read(&resolved).map(Some),
             None => Ok(None),
         }
@@ -214,8 +241,7 @@ impl LayerRegistry {
         //
         // The root must resolve and read; both failures propagate.
         let resolved = self
-            .resolver
-            .resolve(&identifier)
+            .resolve_layer(&identifier)
             .with_context(|| format!("failed to resolve asset path: {asset_path}"))?;
         let data = self.read(&resolved)?;
         visited.insert(identifier.clone());
@@ -308,7 +334,7 @@ impl LayerRegistry {
         // reload pass an already-interned layer is re-walked (to reach a `${VAR}`
         // sublayer the new context now resolves) but not re-emitted.
         if !already_present(&identifier) {
-            layers.push(sdf::Layer::new(identifier.clone(), data));
+            layers.push(sdf::Layer::new_resolved(identifier.clone(), &resolved, data));
         }
 
         // Sublayers (and references) reached from inside a `.usdz` resolve
@@ -341,7 +367,7 @@ impl LayerRegistry {
                 continue;
             }
             // Resolve the sublayer; a missing one is routed to `on_error`.
-            let Some(sub_resolved) = self.resolver.resolve(&sub_id) else {
+            let Some(sub_resolved) = self.resolve_layer(&sub_id) else {
                 on_error(Error::UnresolvedAsset {
                     asset_path: sub_asset,
                     referencing_layer: identifier.clone(),
@@ -417,7 +443,7 @@ impl LayerRegistry {
         if identifier.is_empty() || visited.contains(&identifier) {
             return Ok(());
         }
-        let Some(resolved) = self.resolver.resolve(&identifier) else {
+        let Some(resolved) = self.resolve_layer(&identifier) else {
             return Ok(());
         };
         visited.insert(identifier.clone());
@@ -428,7 +454,7 @@ impl LayerRegistry {
             let dep_asset = expr::evaluate_asset_path(&dep, &expr_vars)?;
             self.collect_with_arcs_in(&dep_asset, Some(&resolved), &expr_vars, layers, visited)?;
         }
-        layers.push(sdf::Layer::new(identifier, data));
+        layers.push(sdf::Layer::new_resolved(identifier, &resolved, data));
         Ok(())
     }
 

@@ -408,6 +408,142 @@ fn lazy_ref_inside_usdz_resolves() -> Result<()> {
     Ok(())
 }
 
+/// A reference authored inside a `.usdz` package targets a sibling layer that
+/// is not present in the archive: the missing entry is unresolved (not merely
+/// unreadable), so composition reports
+/// [`UnresolvedLayer`](pcp::Error::UnresolvedLayer) and the rest of the prim
+/// still composes.
+#[test]
+fn lazy_ref_inside_usdz_missing() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let package = dir.path().join("package.usdz");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    // The package's first layer references a sibling that is never added.
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "scene.usda",
+            b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @other.usda@\n) {}\n",
+        )?;
+        writer.finish()?;
+    }
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/P").is_valid()?, "/P still composes from the package layer");
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::UnresolvedLayer { asset_path, .. } if asset_path.ends_with("other.usda]")
+        )),
+        "expected UnresolvedLayer for the missing in-package target, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A reference to a present-but-empty `.usdz` (no packaged USD layer) reports a
+/// [`MalformedLayer`](pcp::Error::MalformedLayer) carrying the real reason —
+/// the package resolved but could not be read — rather than being silently
+/// dropped as a missing asset or surfacing a "failed to resolve" diagnostic.
+#[test]
+fn lazy_ref_empty_usdz_malformed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let package = dir.path().join("empty.usdz");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @empty.usdz@\n) {}\n")?;
+    // A valid ZIP archive with no packaged USD layer.
+    ArchiveWriter::create(&package)?.finish()?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(stage.prim("/P").is_valid()?, "/P still composes from its own opinion");
+    assert!(
+        stage.composition_errors().iter().any(|error| matches!(
+            error,
+            pcp::Error::MalformedLayer { asset_path, reason, .. }
+                if asset_path.ends_with("empty.usdz") && reason.contains("USDZ archive")
+        )),
+        "expected MalformedLayer with the package read reason, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A `.usdz` whose default (first) layer sits in a sub-directory references a
+/// sibling by a relative path. The reference must anchor against the package's
+/// real path (the package-relative default layer,
+/// `pkg.usdz[Scenes/root.usda]`),
+/// not the bare package identifier, so the sibling resolves at
+/// `pkg.usdz[Scenes/other.usda]` and its opinion composes.
+#[test]
+fn usdz_subdir_first_layer_anchors() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let package = dir.path().join("package.usdz");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" (\n    references = @package.usdz@\n) {}\n")?;
+    // Both packaged layers live under `Scenes/`; the first is the default layer.
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "Scenes/root.usda",
+            b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" (\n    references = @other.usda@\n) {}\n",
+        )?;
+        writer.add_layer(
+            "Scenes/other.usda",
+            b"#usda 1.0\n(\n    defaultPrim = \"P\"\n)\ndef \"P\" {\n    custom int probe = 9\n}\n",
+        )?;
+        writer.finish()?;
+    }
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert!(
+        stage.composition_errors().is_empty(),
+        "the sub-directory in-package reference should resolve cleanly, got {:?}",
+        stage.composition_errors()
+    );
+    assert_eq!(
+        stage
+            .attribute("/P.probe")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Int(9)),
+        "the sibling under Scenes/ composes through the in-package reference"
+    );
+    Ok(())
+}
+
+/// An `asset`-valued attribute pointing at a `.usdz` package resolves to the
+/// package path itself, not a path anchored into the package's first layer:
+/// the asset is the package, and consumers key on the package path.
+#[test]
+fn asset_value_usdz_is_package_path() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let package = dir.path().join("model.usdz");
+    std::fs::write(&root, "#usda 1.0\ndef \"P\" {\n    custom asset a = @model.usdz@\n}\n")?;
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer("root.usda", b"#usda 1.0\ndef \"M\" {}\n")?;
+        writer.finish()?;
+    }
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let value = stage
+        .attribute("/P.a")
+        .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?
+        .expect("asset value resolves");
+    let asset = value.try_as_asset_path().expect("attribute is asset-typed");
+    let resolved = asset.resolved_path().expect("asset path is resolved");
+    assert!(
+        resolved.ends_with("model.usdz"),
+        "asset value should resolve to the bare package path, got {resolved:?}",
+    );
+    assert!(
+        !resolved.contains('['),
+        "asset value must not be anchored into the package, got {resolved:?}",
+    );
+    Ok(())
+}
+
 /// A reference target's present-but-corrupt sublayer is dropped on its own —
 /// reported [`MalformedSublayer`](pcp::Error::MalformedSublayer) — while the
 /// target itself still composes (its own opinion resolves). The bad sublayer

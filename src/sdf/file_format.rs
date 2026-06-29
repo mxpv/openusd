@@ -87,6 +87,21 @@ pub trait FileFormat: Sync {
     /// sibling assets) through `resolver`.
     fn read(&self, resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<LayerData>;
 
+    /// Resolves the real path of the layer to open at `resolved` — the location
+    /// it physically loads from and anchors its relative asset paths against
+    /// (C++ `SdfLayer::GetRealPath`) — or `None` if this format cannot read it
+    /// there.
+    ///
+    /// The default is the identity: an ordinary layer loads from the location
+    /// it resolved to. A package format overrides this to select the package's
+    /// default layer (`pkg.usdz` → `pkg.usdz[root.usd]`), so the package
+    /// composes as an ordinary layer stack and the paths authored inside it
+    /// anchor in-package; a package it cannot open returns `None`. Opening the
+    /// asset goes through `resolver` so a host-provided byte source is honored.
+    fn resolve_layer(&self, _resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Option<ar::ResolvedPath> {
+        Some(resolved.clone())
+    }
+
     /// Whether this format can read an asset whose leading bytes are `prefix`
     /// (C++ `SdfFileFormat::CanRead`). Used to disambiguate an extension claimed
     /// by more than one format — binary vs text `.usd` — by content. The default

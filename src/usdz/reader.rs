@@ -9,7 +9,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use zip::ZipArchive;
 
-use crate::{sdf, usda, usdc};
+use crate::{ar, sdf, usda, usdc};
 
 /// USDZ archive reader.
 ///
@@ -30,6 +30,15 @@ impl Archive<File> {
         let archive =
             ZipArchive::new(file).with_context(|| format!("Failed to read ZIP archive: {}", path.display()))?;
         Ok(Self { archive })
+    }
+}
+
+impl Archive<Cursor<Vec<u8>>> {
+    /// Reads the entire package at `resolved` through the resolver's asset seam
+    /// and opens it as an archive, so a host-provided byte source is honored.
+    pub fn from_asset(resolver: &dyn ar::Resolver, resolved: &ar::ResolvedPath) -> Result<Self> {
+        let bytes = resolver.open_asset(resolved)?.read_all()?;
+        Archive::from_reader(Cursor::new(bytes)).context("failed to open USDZ archive")
     }
 }
 
@@ -74,40 +83,34 @@ impl<R: Read + Seek> Archive<R> {
         file.read_to_end(&mut buffer)
             .with_context(|| format!("Failed to read file '{}' from archive", file_path))?;
 
-        if file_path.ends_with(".usdc") {
-            let cursor = Cursor::new(buffer);
-            let data = usdc::CrateData::open(cursor, true)
+        if file_path.ends_with(".usdz") {
+            // TODO: Implement nested USDZ files support.
+            bail!("Nested USDZ files are not yet supported: '{}'", file_path);
+        }
+
+        // The named extension decides crate vs text; a format-agnostic `.usd`
+        // (or any other name) falls back to the crate magic, mirroring USD's
+        // content-based format detection. Per the USDZ spec the root layer may be
+        // `.usd`, and Pixar's reference assets (e.g. Kitchen_set.usdz) ship it
+        // that way.
+        let is_crate = if file_path.ends_with(".usdc") {
+            true
+        } else if file_path.ends_with(".usda") {
+            false
+        } else {
+            buffer.starts_with(usdc::MAGIC)
+        };
+
+        if is_crate {
+            let data = usdc::CrateData::open(Cursor::new(buffer), true)
                 .with_context(|| format!("Failed to parse USDC data from '{}'", file_path))?;
             Ok(Box::new(data))
-        } else if file_path.ends_with(".usda") {
+        } else {
             let content =
                 String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
-
             let data =
                 usda::parse(&content).with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
-
             Ok(Box::new(data))
-        } else if file_path.ends_with(".usdz") {
-            // TODO: Implement nested USDZ files support.
-            bail!("Nested USDZ files are not yet supported: '{}'", file_path)
-        } else {
-            // Format-agnostic `.usd` (or any other extension): resolve by
-            // content, mirroring USD's content-based format detection. A USDC
-            // crate file begins with the magic `PXR-USDC`; otherwise parse as
-            // USDA text. Per the USDZ spec the root layer may be `.usd`, and
-            // Pixar's reference assets (e.g. Kitchen_set.usdz) ship it that way.
-            if buffer.starts_with(usdc::MAGIC) {
-                let cursor = Cursor::new(buffer);
-                let data = usdc::CrateData::open(cursor, true)
-                    .with_context(|| format!("Failed to parse USDC data from '{}'", file_path))?;
-                Ok(Box::new(data))
-            } else {
-                let content =
-                    String::from_utf8(buffer).with_context(|| format!("File '{}' is not valid UTF-8", file_path))?;
-                let data =
-                    usda::parse(&content).with_context(|| format!("Failed to parse USDA data from '{}'", file_path))?;
-                Ok(Box::new(data))
-            }
         }
     }
 }
