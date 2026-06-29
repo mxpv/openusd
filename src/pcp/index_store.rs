@@ -144,34 +144,52 @@ impl IndexStore {
     /// Spec-tier refresh (C++ `Pcp_RescanForSpecs`): for every cached index that
     /// reads `(layer, path)` — the local prim and each dependent, found through
     /// the reverse dependency map — recompute its `has_specs` flags in place from
-    /// live layer data, and return the paths that cannot be refreshed in place and
-    /// must be rebuilt.
+    /// live layer data, then partition it into `refreshed` (the flags were flipped
+    /// in place) or `rebuild` (the in-place refresh cannot make it current).
     ///
-    /// An index needs a rebuild only when the in-place refresh cannot make it
-    /// current: the local prim holds no node at the site (a prior "no spec here"
-    /// result), or a dependent had *culled* the site as an empty arc target that
-    /// the spec now fills in, which must un-cull and graft the target's subtree.
-    pub(super) fn refresh_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) -> Vec<Path> {
-        let mut rebuild = Vec::new();
+    /// An index needs a rebuild when the local prim holds no contributing node at
+    /// the site (a prior "no spec here" result), or a dependent had *culled* the
+    /// site as an empty arc target that the spec now fills in, which must un-cull
+    /// and graft the target's subtree.
+    ///
+    /// The memoized spec stack is left stale: the caller finalizes the deduped
+    /// `refreshed` set once via [`finalize_spec_stacks`](Self::finalize_spec_stacks),
+    /// so an index reached by several of one change round's sites rebuilds its
+    /// stack a single time.
+    pub(super) fn refresh_specs(
+        &mut self,
+        graph: &LayerGraph,
+        layer: LayerId,
+        path: &Path,
+        refreshed: &mut HashSet<Path>,
+        rebuild: &mut HashSet<Path>,
+    ) {
         for prim in self.deps.exact_lookup(layer, path) {
             let Some(index) = self.entries.get_mut(&prim).map(|entry| &mut entry.index) else {
                 continue;
             };
             let refresh = index.refresh_has_specs_at(layer, path, graph);
             // The local prim is one of its own dependents (it reads its own
-            // site). Drop it when it carries no contributing node there; drop any
-            // index whose culled site the spec just filled in.
+            // site). Rebuild it when it carries no contributing node there; rebuild
+            // any index whose culled site the spec just filled in.
             if refresh.needs_rebuild || (prim == *path && !refresh.contributing) {
-                rebuild.push(prim);
+                rebuild.insert(prim);
             } else {
-                // The `has_specs` flags changed in place, so rebuild the memoized
-                // spec stack the same edit shifted — a site that gained or lost
-                // its spec — keeping value resolution and introspection current.
-                // A dropped index recomposes from scratch, so it needs none here.
-                index.finalize_spec_stack(graph);
+                refreshed.insert(prim);
             }
         }
-        rebuild
+    }
+
+    /// Rebuilds the memoized spec stack of each index at `paths`, the deduped set
+    /// of indices [`refresh_specs`](Self::refresh_specs) flipped `has_specs` on in
+    /// place this change round. Skips a path with no cached entry (one dropped for
+    /// rebuild, which recomposes its stack from scratch).
+    pub(super) fn finalize_spec_stacks<'p>(&mut self, graph: &LayerGraph, paths: impl IntoIterator<Item = &'p Path>) {
+        for path in paths {
+            if let Some(entry) = self.entries.get_mut(path) {
+                entry.index.finalize_spec_stack(graph);
+            }
+        }
     }
 
     /// Every cached prim index whose composition reads one of the `affected`

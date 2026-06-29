@@ -10,7 +10,8 @@
 //! - Significant: graph topology may be wrong — drop the index AND every
 //!   namespace descendant.
 //! - Prim: this index's graph is wrong but descendants survive — drop only
-//!   this index.
+//!   this index. Currently dormant: the spec tier subsumes the one case C++
+//!   populates it for (see [`CacheChanges::did_change_prims`]).
 //! - Spec: the graph is fine; only whether a site contributes an opinion
 //!   changed. An inert spec add or remove authors no arc and no significant
 //!   field, so [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)
@@ -19,6 +20,7 @@
 //!   it holds no node at the site (a brand-new spec needs a fresh build).
 
 use std::collections::{BTreeSet, HashSet};
+use std::mem;
 
 use bitflags::bitflags;
 
@@ -55,6 +57,24 @@ pub struct CacheChanges {
     pub(crate) did_change_significantly: BTreeSet<Path>,
     /// Drop only this index; descendants survive — for a change that reshapes
     /// this prim's own graph but cannot restructure its namespace children.
+    ///
+    /// Deliberately never populated, kept (with its [`Changes::apply`] consumer)
+    /// as the named third tier so the model stays aligned with C++ `PcpChanges`.
+    /// The C++ tier this mirrors (`didChangePrims`) holds one case: an inert prim
+    /// spec add that may un-cull a node, where C++ unconditionally rebuilds that
+    /// single prim index. The memoized spec stack handles that case here, and more
+    /// precisely — [`did_change_specs`](Self::did_change_specs) refreshes
+    /// `has_specs` in place and rebuilds the single index (no subtree) only when a
+    /// node actually un-culls or loses its last spec (see
+    /// [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs)). Every other
+    /// prim-index-affecting field — C++ `Pcp_EntryRequiresPrimIndexChange`:
+    /// references / payload / inherits / specializes / variants / instanceable /
+    /// permission, plus the `active` / `specifier` / `apiSchemas` this cache adds
+    /// conservatively — is significant: it can add or drop a subtree, and a
+    /// descendant index seeds from its parent's composed graph, so it must
+    /// recompose with the parent. A safe population would need a change that
+    /// invalidates this prim's graph yet provably leaves untouched the seed and
+    /// child context its descendants inherit; no field meets that bar today.
     pub(crate) did_change_prims: BTreeSet<Path>,
     /// Refresh `has_specs` at site `(layer, path)` rather than rebuild — for an
     /// inert spec add or remove, which flips only whether a site contributes an
@@ -245,7 +265,7 @@ impl Changes {
     }
 
     /// Apply phase: commit the planned invalidations to `cache`.
-    pub fn apply(self, cache: &mut IndexCache, graph: &mut LayerGraph) {
+    pub fn apply(mut self, cache: &mut IndexCache, graph: &mut LayerGraph) {
         // Advance the composition revision so cached value views rebuild. This
         // is the single funnel for every authoring and layer-stack edit, so a
         // value-only change that drops no index still invalidates them.
@@ -313,12 +333,17 @@ impl Changes {
             }
             cache.drop_index(path);
         }
-        for (layer, path) in &self.cache.did_change_specs {
-            // Subsumed by an ancestor whose subtree was already dropped.
-            if self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)) {
-                continue;
-            }
-            cache.rescan_specs(graph, *layer, path);
+        // Batch the spec-tier rescan: an index reached by several of this round's
+        // changed sites refreshes its `has_specs` flags per site but finalizes its
+        // spec stack once. Sites subsumed by an ancestor whose subtree was already
+        // dropped are skipped. The owned `did_change_specs` is the last read of
+        // `self`, so move its sites out rather than cloning each `Path`.
+        let sites: Vec<(LayerId, Path)> = mem::take(&mut self.cache.did_change_specs)
+            .into_iter()
+            .filter(|(_, path)| !self.cache.did_change_significantly.iter().any(|p| path.has_prefix(p)))
+            .collect();
+        if !sites.is_empty() {
+            cache.rescan_specs(graph, &sites);
         }
     }
 }

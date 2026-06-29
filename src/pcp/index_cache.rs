@@ -748,15 +748,28 @@ impl IndexCache {
         self.bump_revision();
     }
 
-    /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) after an inert spec
-    /// add or remove at `(layer, path)`. The store refreshes each affected index's
-    /// `has_specs` flags in place and reports the ones it could not refresh; those
-    /// are dropped for rebuild. The transient query errors are cleared too — they
-    /// may reference a dropped prim.
-    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, layer: LayerId, path: &Path) {
-        for prim in self.store.refresh_specs(graph, layer, path) {
-            self.store.remove(&prim);
+    /// Spec-tier change consumer (C++ `Pcp_RescanForSpecs`) for one change round's
+    /// inert spec adds and removes, each a `(layer, path)` site. The store
+    /// refreshes every affected index's `has_specs` flags in place per site,
+    /// partitioning the indices into those refreshed in place and those it cannot
+    /// refresh; the latter are dropped for rebuild. Each in-place-refreshed index
+    /// then finalizes its memoized spec stack once, however many of this round's
+    /// sites reached it. The transient query errors are cleared too — they may
+    /// reference a dropped prim.
+    pub(super) fn rescan_specs(&mut self, graph: &LayerGraph, sites: &[(LayerId, Path)]) {
+        let mut refreshed: HashSet<Path> = HashSet::new();
+        let mut rebuild: HashSet<Path> = HashSet::new();
+        for (layer, path) in sites {
+            self.store
+                .refresh_specs(graph, *layer, path, &mut refreshed, &mut rebuild);
         }
+        for prim in &rebuild {
+            self.store.remove(prim);
+        }
+        // The rebuild set was just dropped from the store and `finalize_spec_stacks`
+        // skips a path with no cached entry, so an index that ended up in both sets
+        // is already excluded — the refreshed set needs no further filtering.
+        self.store.finalize_spec_stacks(graph, &refreshed);
         self.query_errors.clear();
     }
 
@@ -3228,6 +3241,66 @@ def "Scope"
             refreshed,
             vec![("root.usd".into(), a.clone()), ("weak.usd".into(), a.clone())],
             "the spec-tier refresh adds the new strong site to the prim stack"
+        );
+        let mut fresh = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        assert_eq!(
+            refreshed,
+            fresh.prim_stack(&graph, &a)?,
+            "in-place refresh matches a fresh build"
+        );
+        Ok(())
+    }
+
+    /// A single change round whose inert spec adds reach the same index through
+    /// several sites stays correct. `/A` composes across three sublayers; adding an
+    /// `over "A"` into two of them in one round produces two `(layer, /A)` sites
+    /// that both reach index `/A`, and the batched rescan must compose the prim
+    /// stack a fresh build would. (The batch also finalizes each index's stack once
+    /// per round, but the idempotent finalize makes that performance property
+    /// invisible to the result; this guards the correctness it must preserve.)
+    #[test]
+    fn spec_refresh_multi_site() -> Result<()> {
+        let root = parse_named_layer("root.usd", "#usda 1.0\n(\n    subLayers = [@mid.usd@, @weak.usd@]\n)\n");
+        let mid = parse_named_layer("mid.usd", "#usda 1.0\n");
+        let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, mid, weak], 0, sdf::LayerRegistry::default());
+        let root_id = graph.id_of("root.usd").unwrap();
+        let mid_id = graph.id_of("mid.usd").unwrap();
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let a = sdf::path("/A")?;
+
+        // Only the weakest sublayer authors /A before the edit.
+        assert_eq!(cache.prim_stack(&graph, &a)?, vec![("weak.usd".into(), a.clone())]);
+
+        // In one change round author an inert `over "A"` into both the root and
+        // the middle sublayer — two spec-tier sites that both reach index /A.
+        let cl_root = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let cl_mid = edit_layer(&mut graph.get_mut(mid_id).unwrap().layer, |l| {
+            sdf::PrimSpecMut::over(l.data_mut(), "/A")?;
+            Ok(())
+        })
+        .unwrap();
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl_root), (mid_id, &cl_mid)]);
+        assert!(changes.cache.did_change_specs.contains(&(root_id, a.clone())));
+        assert!(changes.cache.did_change_specs.contains(&(mid_id, a.clone())));
+        changes.apply(&mut cache, &mut graph);
+
+        // Both new sites joined the stack in strength order, matching a fresh
+        // composition of the edited layers.
+        let refreshed = cache.prim_stack(&graph, &a)?;
+        assert_eq!(
+            refreshed,
+            vec![
+                ("root.usd".into(), a.clone()),
+                ("mid.usd".into(), a.clone()),
+                ("weak.usd".into(), a.clone()),
+            ],
+            "the batched spec-tier refresh adds both new strong sites"
         );
         let mut fresh = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
         assert_eq!(
