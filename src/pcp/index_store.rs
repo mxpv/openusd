@@ -214,12 +214,14 @@ impl IndexStore {
         }
     }
 
-    /// Drops `prim`'s whole resolved-target memo, for a `targetPaths` /
-    /// `connectionPaths` edit that leaves the prim's graph intact but restales its
-    /// composed targets. No-op when `prim` has no cached entry.
-    pub(super) fn clear_target_memo(&mut self, prim: &Path) {
+    /// Drops the single memoized property `key` from `prim`'s resolved-target map,
+    /// for a `targetPaths` / `connectionPaths` edit that leaves the prim's graph
+    /// intact but restales that one property's composed targets — the prim's other
+    /// relationships and connections keep their memos. No-op when `prim` has no
+    /// cached entry.
+    pub(super) fn clear_target_memo(&mut self, prim: &Path, key: &TargetMemoKey) {
         if let Some(entry) = self.entries.get_mut(prim) {
-            entry.resolved_targets.clear();
+            entry.resolved_targets.remove(key);
         }
     }
 }

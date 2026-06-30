@@ -87,7 +87,7 @@ pub(crate) struct PrimEntry {
 /// Which path-list-op field a [`TargetMemo`] resolved. Narrower than
 /// [`FieldKey`] so the memo map admits only the two fields that carry targets,
 /// not arbitrary fields like `timeSamples`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum PropertyTargetKind {
     /// A relationship's `targetPaths`.
     Relationship,
@@ -98,7 +98,7 @@ pub(crate) enum PropertyTargetKind {
 /// Key into a prim's [`resolved_targets`](PrimEntry::resolved_targets) memo: the
 /// property kind plus its suffix within the prim (e.g. `.binding`), so a
 /// relationship and a same-named connection never share an entry.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct TargetMemoKey {
     pub kind: PropertyTargetKind,
     pub property_suffix: String,

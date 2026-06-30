@@ -117,12 +117,15 @@ pub struct IndexCache {
     //
     // TODO: the `property_stack` inconsistent-property-type conflicts are still
     // recomputed and re-appended on each call, so repeated stacks on the same
-    // conflicting property duplicate within a session. Memoizing them on
-    // `PrimEntry` like the targets would fix it, but the conflict set depends on
-    // the prim's property specs, so it would need a property-add/remove
-    // invalidation branch in `classify_property_entry`; computing them eagerly at
-    // index build instead would add per-property work to every prim's build (a
-    // cost on Caldera-class stages). Deferred until a profile justifies one.
+    // conflicting property duplicate within a session. The per-pass double-report
+    // (one at prim build, one per `property_stack` query) is C++-faithful — the
+    // composition golden expects it — so a fix must preserve the per-pass count and
+    // collapse only the repeat `property_stack` calls. A `PrimEntry` memo (like the
+    // targets) would do that, but the conflict set depends on the prim's property
+    // specs, so it would need a property-add/remove invalidation branch in
+    // `classify_property_entry`; computing it eagerly at index build instead would
+    // add per-property work to every prim's build (a cost on Caldera-class stages).
+    // Deferred until a profile justifies one.
     query_errors: Vec<Error>,
     /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
     /// stack. Pre-caching an inherit/specialize target (and that target's own
@@ -806,13 +809,15 @@ impl IndexCache {
         self.query_errors.clear();
     }
 
-    /// Drops the resolved-target memo of each prim in `prims`, for a
+    /// Drops one memoized `(prim, property)` resolved-target entry per item, for a
     /// `targetPaths` / `connectionPaths` edit that leaves the graph intact (so the
-    /// index survives) but restales the composed targets the memo cached. See
+    /// index survives) but restales that property's composed targets. Keyed by the
+    /// edited property's [`TargetMemoKey`], so a prim's other relationships and
+    /// connections keep their memos. See
     /// [`CacheChanges::did_change_targets`](super::change::CacheChanges).
-    pub(super) fn clear_target_memos<'p>(&mut self, prims: impl IntoIterator<Item = &'p Path>) {
-        for prim in prims {
-            self.store.clear_target_memo(prim);
+    pub(super) fn clear_target_memos<'p>(&mut self, memos: impl IntoIterator<Item = &'p (Path, TargetMemoKey)>) {
+        for (prim, key) in memos {
+            self.store.clear_target_memo(prim, key);
         }
     }
 
@@ -2905,6 +2910,48 @@ def "Scope"
         assert!(
             cache.store.index_at(&refp).is_none(),
             "the referencing prim reads base.usda, so the expr-var edit drops its index"
+        );
+        Ok(())
+    }
+
+    /// A `targetPaths` edit clears only the edited relationship's memo; a sibling
+    /// relationship on the same prim keeps its cached resolved-target list — the
+    /// suffix-precise target-memo clear.
+    #[test]
+    fn target_edit_clears_one_memo() -> Result<()> {
+        let (mut graph, mut cache) = in_memory_stack(
+            "#usda 1.0\ndef \"P\" {\n    rel relA = [</X>]\n    rel relB = [</Y>]\n}\ndef \"X\" {}\ndef \"Y\" {}\n",
+        );
+        let root_id = graph.root_id().unwrap();
+        let p_prim = sdf::path("/P")?;
+        let key = |suffix: &str| TargetMemoKey {
+            kind: PropertyTargetKind::Relationship,
+            property_suffix: suffix.to_owned(),
+        };
+
+        // The first query of each relationship populates its memo on /P's entry.
+        cache.relationship_targets(&graph, &sdf::path("/P.relA")?)?;
+        cache.relationship_targets(&graph, &sdf::path("/P.relB")?)?;
+        assert!(cache.store.target_memo(&p_prim, &key(".relA")).is_some());
+        assert!(cache.store.target_memo(&p_prim, &key(".relB")).is_some());
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
+            e.relationship_mut("/P.relA")
+                .expect("relationship spec")
+                .set_target_paths([sdf::path("/Z").unwrap()]);
+            Ok(())
+        })?;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.store.target_memo(&p_prim, &key(".relA")).is_none(),
+            "the edited relationship's memo is cleared"
+        );
+        assert!(
+            cache.store.target_memo(&p_prim, &key(".relB")).is_some(),
+            "the sibling relationship's memo survives the suffix-precise clear"
         );
         Ok(())
     }

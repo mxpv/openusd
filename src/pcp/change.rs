@@ -48,6 +48,7 @@ use crate::sdf::schema::FieldKey;
 use crate::sdf::{ChangeEntry, ChangeList, Path};
 
 use super::layer_graph::LayerGraph;
+use super::prim_index::{PropertyTargetKind, TargetMemoKey};
 use super::{IndexCache, LayerId};
 
 /// Plan + apply object for one author round.
@@ -101,14 +102,16 @@ pub struct CacheChanges {
     /// opinion. [`Changes::apply`] feeds each entry to
     /// [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs).
     pub(crate) did_change_specs: BTreeSet<(LayerId, Path)>,
-    /// Prims whose memoized resolved targets are stale — a `targetPaths` /
-    /// `connectionPaths` edit changed a relationship/connection the prim composes
-    /// in place, or one it reads through an arc (so a referenced site's edit fans
-    /// out to its dependents). The graph is intact, so the index survives;
-    /// [`Changes::apply`] drops only the memo
-    /// ([`IndexCache::clear_target_memos`](super::IndexCache::clear_target_memos)),
-    /// and the next query recomposes the targets live.
-    pub(crate) did_change_targets: BTreeSet<Path>,
+    /// Memoized resolved targets that are stale — a `targetPaths` /
+    /// `connectionPaths` edit changed a relationship/connection a prim composes in
+    /// place, or one it reads through an arc (so a referenced site's edit fans out
+    /// to its dependents). Each entry pairs the dependent prim with the edited
+    /// property's [`TargetMemoKey`], so [`Changes::apply`] drops only that one
+    /// property's memo
+    /// ([`IndexCache::clear_target_memos`](super::IndexCache::clear_target_memos))
+    /// and the prim's other relationships and connections keep theirs. The graph is
+    /// intact, so the index survives; the next query recomposes the targets live.
+    pub(crate) did_change_targets: BTreeSet<(Path, TargetMemoKey)>,
 }
 
 impl CacheChanges {
@@ -240,39 +243,70 @@ impl Changes {
     /// a translated copy of those targets, so a referenced site's edit restales
     /// them too.
     fn classify_property_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
-        let is_target_edit = entry
-            .flags
-            .intersects(sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION)
+        let is_connection = entry.flags.contains(sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION)
             || entry
                 .info_changed
                 .iter()
-                .any(|k| *k == FieldKey::TargetPaths.as_str() || *k == FieldKey::ConnectionPaths.as_str());
-        if !is_target_edit {
+                .any(|k| *k == FieldKey::ConnectionPaths.as_str());
+        let is_relationship = entry.flags.contains(sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS)
+            || entry.info_changed.iter().any(|k| *k == FieldKey::TargetPaths.as_str());
+        if !is_connection && !is_relationship {
             return;
         }
         let prim = path.prim_path();
-        self.fanout_targets(cache, layer, &prim);
         // A target opinion authored inside a variant (`/P{v=x}child.r`) composes
         // into the variant-stripped prim (`/P/child`), whose memo key is not on the
-        // authored path's ancestor chain, so the fanout above misses it; restale it
-        // too, as the significant tier does for the same reason.
+        // authored path's ancestor chain, so the fanout from the variant path alone
+        // misses it; restale it too, as the significant tier does for the same reason.
         let stripped = prim.strip_all_variant_selections();
+        let suffix = path.property_suffix();
+        // The memo is keyed by the edited property within its prim, matching the key
+        // `IndexCache::compose_property_paths` files results under. One edit can
+        // replace a relationship with a same-named attribute (or the reverse),
+        // surfacing both target fields on a single entry, so restale each signalled
+        // kind — clearing only one would leave the prior kind's memo stale.
+        let keys: Vec<TargetMemoKey> = [
+            is_relationship.then_some(PropertyTargetKind::Relationship),
+            is_connection.then_some(PropertyTargetKind::Connection),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|kind| TargetMemoKey {
+            kind,
+            property_suffix: suffix.to_owned(),
+        })
+        .collect();
+        self.fanout_targets(cache, layer, &prim, &keys);
         if stripped != prim {
-            self.fanout_targets(cache, layer, &stripped);
+            self.fanout_targets(cache, layer, &stripped, &keys);
         }
     }
 
-    /// Marks the resolved-target memo of `prim` and every prim that composes its
-    /// targets — anything reading its site, or an ancestor of it, through an arc —
-    /// as stale. A prim reading a *descendant* of `prim` does not compose this
-    /// property, so the fanout stays on the ancestor + self direction. The literal
-    /// prim is included via the dependency self-edge, and explicitly for a prim not
-    /// yet cached.
-    fn fanout_targets(&mut self, cache: &IndexCache, layer: LayerId, prim: &Path) {
+    /// Marks every key in `keys` stale on `prim`'s resolved-target memo and on every
+    /// prim that composes its targets — anything reading its site, or an ancestor of
+    /// it, through an arc. A prim reading a *descendant* of `prim` does not compose
+    /// this property, so the fanout stays on the ancestor + self direction. The
+    /// literal prim is included via the dependency self-edge, and explicitly for a
+    /// prim not yet cached. The dependent set is the same for every key — an arc maps
+    /// prim namespaces, not property names — so the ancestor walk runs once and each
+    /// dependent is restaled under every key.
+    fn fanout_targets(&mut self, cache: &IndexCache, layer: LayerId, prim: &Path, keys: &[TargetMemoKey]) {
         for dep in cache.dependencies().lookup_with_ancestors(layer, prim) {
-            self.cache.did_change_targets.insert(dep);
+            self.restale_targets(dep, keys);
         }
-        self.cache.did_change_targets.insert(prim.clone());
+        self.restale_targets(prim.clone(), keys);
+    }
+
+    /// Records `prim`'s memo as stale under each of `keys`, consuming `prim` on the
+    /// final key so the common single-key edit clones it not at all.
+    fn restale_targets(&mut self, prim: Path, keys: &[TargetMemoKey]) {
+        let Some((last, rest)) = keys.split_last() else {
+            return;
+        };
+        for key in rest {
+            self.cache.did_change_targets.insert((prim.clone(), key.clone()));
+        }
+        self.cache.did_change_targets.insert((prim, last.clone()));
     }
 
     fn classify_root_entry(&mut self, _cache: &IndexCache, layer: LayerId, entry: &ChangeEntry) {
@@ -450,15 +484,15 @@ impl Changes {
         }
 
         // Property tier: a `targetPaths` / `connectionPaths` edit leaves the graph
-        // intact, so drop only the affected prims' resolved-target memo. A prim
-        // whose whole subtree was already dropped above lost its memo with the
-        // entry, so it is skipped.
+        // intact, so drop only the edited property's resolved-target memo on each
+        // affected prim. A prim whose whole subtree was already dropped above lost
+        // its memo with the entry, so it is skipped.
         if !self.cache.did_change_targets.is_empty() {
             let stale = self
                 .cache
                 .did_change_targets
                 .iter()
-                .filter(|p| !self.cache.did_change_significantly.iter().any(|s| p.has_prefix(s)));
+                .filter(|(prim, _)| !self.cache.did_change_significantly.iter().any(|s| prim.has_prefix(s)));
             cache.clear_target_memos(stale);
         }
     }
@@ -676,7 +710,38 @@ mod tests {
         entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_targets.contains(&p("/P/Child")));
-        assert!(changes.cache.did_change_targets.contains(&p("/P{v=x}Child")));
+        let key = TargetMemoKey {
+            kind: PropertyTargetKind::Relationship,
+            property_suffix: ".r".to_owned(),
+        };
+        assert!(changes.cache.did_change_targets.contains(&(p("/P/Child"), key.clone())));
+        assert!(changes.cache.did_change_targets.contains(&(p("/P{v=x}Child"), key)));
+    }
+
+    /// Replacing a relationship with a same-named attribute in one edit surfaces
+    /// both `targetPaths` and `connectionPaths` on the entry; the classifier must
+    /// restale both memo kinds, or the prior kind's memo would linger and a later
+    /// query could return the stale pre-replacement targets.
+    #[test]
+    fn property_replace_restales_both_kinds() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        let entry = cl.entry_mut(&p("/P.x"));
+        entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
+        entry.info_changed.insert(FieldKey::ConnectionPaths.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        let key = |kind| TargetMemoKey {
+            kind,
+            property_suffix: ".x".to_owned(),
+        };
+        assert!(changes
+            .cache
+            .did_change_targets
+            .contains(&(p("/P"), key(PropertyTargetKind::Relationship))));
+        assert!(changes
+            .cache
+            .did_change_targets
+            .contains(&(p("/P"), key(PropertyTargetKind::Connection))));
     }
 }
