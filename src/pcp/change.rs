@@ -30,15 +30,13 @@
 //!   and does not yet compose `apiSchemas` from a schema registry).
 //! - an inert `over` add or remove carrying no significant field → spec tier.
 //! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
-//!   `framesPerSecond` on the root → layer-stack tier; `defaultPrim` on the
-//!   root → significant at the root.
+//!   `framesPerSecond`, `expressionVariables` on the root → layer-stack tier;
+//!   `defaultPrim` on the root → significant at the root.
 //! - `clips` / `clipSets`, and non-composition metadata (`kind`,
 //!   `colorConfiguration`, `customData`, …) → no index drop. Clips resolve
 //!   live through the cached index's spec sites, and every value view rebuilds
 //!   against the composition-revision bump [`apply`](Changes::apply) always
 //!   makes, so the new opinion is visible without invalidating the graph.
-//! - `expressionVariables` on the root → not yet handled (see the `TODO` in
-//!   [`classify_root_entry`](Changes::classify_root_entry)).
 
 use std::collections::{BTreeSet, HashSet};
 use std::mem;
@@ -64,10 +62,11 @@ pub(crate) struct Changes {
     /// Per-layer-stack flags.
     pub layer_stack: LayerStackChanges,
     /// The layers whose root metadata edit set a [`LayerStackChanges`] flag. A
-    /// `subLayers`/offset/relocate/`timeCodesPerSecond` edit keeps its layer a
-    /// member of every stack the layer participates in, so dropping the indices
-    /// whose composition reads one of these layers ([`IndexCache::invalidate_layers`])
-    /// scopes the layer-stack invalidation to exactly the affected stacks.
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
+    /// keeps its layer a member of every stack the layer participates in, so
+    /// dropping the indices whose composition reads one of these layers
+    /// ([`IndexCache::invalidate_layers`]) scopes the layer-stack invalidation to
+    /// exactly the affected stacks.
     layer_stack_layers: HashSet<LayerId>,
 }
 
@@ -152,10 +151,17 @@ bitflags! {
         /// retimes each sublayer edge offset (spec 12.3.2), so the composed edges
         /// must rebuild even though no sublayer was added or reordered.
         const TIME_CODES = 1 << 4;
+        /// `expressionVariables` was edited. A `${VAR}` expression in any of the
+        /// stack's layers — a sublayer asset path or a reference/payload target —
+        /// may read the changed values, so the expanded sublayer edges rebuild and
+        /// every index touching the stack recomposes.
+        const EXPRESSION_VARS = 1 << 5;
 
         /// Any change that requires recomputing the sublayer ordering, layer
-        /// offsets, or the time-codes retiming folded into the edge offsets.
-        const NEEDS_LAYER_STACK_REBUILD = Self::LAYERS.bits() | Self::OFFSETS.bits() | Self::TIME_CODES.bits();
+        /// offsets, the time-codes retiming folded into the edge offsets, or the
+        /// `${VAR}` sublayer-edge expansions.
+        const NEEDS_LAYER_STACK_REBUILD =
+            Self::LAYERS.bits() | Self::OFFSETS.bits() | Self::TIME_CODES.bits() | Self::EXPRESSION_VARS.bits();
         /// Any change that requires recomputing the per-layer relocates
         /// table.
         const NEEDS_RELOCATES_REBUILD = Self::LAYERS.bits() | Self::RELOCATES.bits();
@@ -290,17 +296,23 @@ impl Changes {
                 // that read the re-offset stack.
                 self.layer_stack |= LayerStackChanges::TIME_CODES | LayerStackChanges::SIGNIFICANT;
                 touches_stack = true;
+            } else if *key == FieldKey::ExpressionVariables.as_str() {
+                // An `expressionVariables` edit restales the graph's
+                // `${VAR}`-expanded sublayer edges and any reference/payload
+                // `${VAR}` expression a layer in the stack resolves against (C++
+                // `PcpChanges::_DidChangeLayerStackExpressionVariables`).
+                // `EXPRESSION_VARS` rebuilds the expanded edges; `SIGNIFICANT` then
+                // drops every index touching the stack. The edited layer joins
+                // `layer_stack_layers`, so `recompute_sublayers` returns it in the
+                // affected set and `invalidate_layers` reaches every dependent
+                // through the `layer → [index]` reverse map, which registers an
+                // index under every layer it reads — so a `${VAR}` reference edge is
+                // caught even when no sublayer edge shifted.
+                self.layer_stack |= LayerStackChanges::EXPRESSION_VARS | LayerStackChanges::SIGNIFICANT;
+                touches_stack = true;
             } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
-            // TODO(expressionVariables): an `expressionVariables` edit restales the
-            // graph's `${VAR}`-expanded sublayer edges and any arc / variant
-            // expression that reads the vars (C++
-            // `PcpChanges::_DidChangeLayerStackExpressionVariables`). The correct
-            // tier drops every index touching the affected stack, not just the
-            // edge-shifted layers a `LAYERS` rebuild reports, so it folds in with
-            // item E's `layer → [index]` reverse map. No Stage producer authors the
-            // field yet, so the gap is latent.
         }
         // Record the layer behind any layer-stack-tier flag so `apply` can scope the
         // invalidation to the stacks this layer is a member of. Each edited layer in
@@ -363,12 +375,13 @@ impl Changes {
 
         // Rebuild the graph's layer-stack precomputed state before the scoped drop
         // below reads it, and collect the affected layer set the drop evicts
-        // against. A `subLayers`/`subLayerOffsets`/`timeCodesPerSecond` edit rebuilds
-        // the sublayer edges (which subsumes the relocate recompute) and returns the
-        // layers whose composed edges shifted, the authored layers, and any whose
-        // relocates moved; a `layerRelocates`-only edit refreshes the cached
-        // relocates, with the edited layer added to its relocate set. Each refreshes
-        // the graph's own diagnostic buckets in place; the cache holds no copy.
+        // against. A `subLayers`/`subLayerOffsets`/`timeCodesPerSecond`/`expressionVariables`
+        // edit rebuilds the sublayer edges (which subsumes the relocate recompute and
+        // re-expands `${VAR}` edges) and returns the layers whose composed edges
+        // shifted, the authored layers, and any whose relocates moved; a
+        // `layerRelocates`-only edit refreshes the cached relocates, with the edited
+        // layer added to its relocate set. Each refreshes the graph's own diagnostic
+        // buckets in place; the cache holds no copy.
         let affected = if self
             .layer_stack
             .intersects(LayerStackChanges::NEEDS_LAYER_STACK_REBUILD)
@@ -608,6 +621,22 @@ mod tests {
             changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
             assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
         }
+    }
+
+    /// Editing the root layer's `expressionVariables` restales every `${VAR}`
+    /// expansion in the stack, so it flags the layer stack for an edge rebuild
+    /// (`EXPRESSION_VARS`) and a significant drop of the indices that read it.
+    #[test]
+    fn expression_variables_change_is_significant() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&Path::abs_root())
+            .info_changed
+            .insert(FieldKey::ExpressionVariables.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        assert!(changes.layer_stack.contains(LayerStackChanges::EXPRESSION_VARS));
+        assert!(changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
     }
 
     #[test]

@@ -1176,6 +1176,15 @@ impl Stage {
         self.with_stage_metadata_layer(|layer| layer.set_frames_per_second(rate))
     }
 
+    /// Authors `expressionVariables` on the current edit target's layer when it
+    /// is the root or session layer (see [`Self::with_stage_metadata_layer`]).
+    /// The dictionary supplies the values `${VAR}` expressions in sublayer asset
+    /// paths and reference/payload targets resolve against; replacing it
+    /// recomposes every prim whose composition reads the edited layer stack.
+    pub fn set_expression_variables(&self, vars: HashMap<String, sdf::Value>) -> Result<(), StageAuthoringError> {
+        self.with_stage_metadata_layer(|layer| layer.set_expression_variables(vars))
+    }
+
     /// Map `scene_path` through the current edit target, borrow the target's
     /// layer, and hand both the layer and the mapped spec path to `f`, then
     /// drive cache invalidation from the [`sdf::ChangeList`] the closure
@@ -4089,6 +4098,38 @@ def "T" {
         assert_eq!(
             after, fresh,
             "editing timeCodesPerSecond recomposes the sublayer offset to the fresh-open value"
+        );
+        Ok(())
+    }
+
+    /// Editing the root layer's `expressionVariables` re-expands a `${VAR}`
+    /// sublayer asset path, so the cached prim index recomposes against the newly
+    /// named sublayer — the correctness gap the expression-variable invalidation
+    /// closes (a stale read before the fix).
+    #[test]
+    fn expr_var_edit_recomposes_sublayer() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            let mut pr = e.pseudo_root_mut().unwrap();
+            pr.set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("a".into()))]));
+            pr.set_sublayers([r#"`"${WHICH}.usda"`"#]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![root, opinion_layer("a.usda", 1.0)?, opinion_layer("b.usda", 2.0)?],
+            0,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            stage.attribute("/A.x").get::<f64>()?,
+            Some(1.0),
+            "the WHICH-valued sublayer resolves to a.usda"
+        );
+        stage.set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("b".into()))]))?;
+        assert_eq!(
+            stage.attribute("/A.x").get::<f64>()?,
+            Some(2.0),
+            "editing WHICH re-expands the sublayer to b.usda and recomposes the cached index"
         );
         Ok(())
     }

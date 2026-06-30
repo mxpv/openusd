@@ -228,10 +228,11 @@ impl Payload {
                 None => p.clone(),
             })
             .collect();
-        // A layer-stack-significant edit (sublayers, layer offsets, relocates, or
-        // the effective timeCodesPerSecond) drops the cached indices reading the
-        // edited layers, which the per-path tiers don't capture. Report it as a
-        // stage-wide resync at the pseudo-root, matching C++ `ResyncedPaths`.
+        // A layer-stack-significant edit (sublayers, layer offsets, relocates, the
+        // effective timeCodesPerSecond, or expressionVariables) drops the cached
+        // indices reading the edited layers, which the per-path tiers don't capture.
+        // Report it as a stage-wide resync at the pseudo-root, matching C++
+        // `ResyncedPaths`.
         if changes.layer_stack.intersects(pcp::LayerStackChanges::SIGNIFICANT) {
             resynced.push(sdf::Path::abs_root());
         }

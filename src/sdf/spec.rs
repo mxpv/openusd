@@ -33,6 +33,7 @@
 //! through [`Layer::prim`](crate::sdf::Layer::prim) and friends.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -619,6 +620,19 @@ where
     /// field, which removes the opinion entirely.
     pub fn set_relocates(&mut self, relocates: sdf::RelocateList) {
         self.set(sdf::FieldKey::LayerRelocates.as_str(), sdf::Value::Relocates(relocates));
+    }
+
+    /// Replace this layer's `expressionVariables` dictionary — the named values an
+    /// `${VAR}` expression resolves against in a sublayer asset path or a
+    /// reference/payload target (C++ layer expression variables, composed across
+    /// the layer stack and arcs by `pcp`). An empty map authors an explicit empty
+    /// dictionary, distinct from clearing the field, which removes the opinion
+    /// entirely.
+    pub fn set_expression_variables(&mut self, vars: HashMap<String, sdf::Value>) {
+        self.set(
+            sdf::FieldKey::ExpressionVariables.as_str(),
+            sdf::Value::Dictionary(vars),
+        );
     }
 
     /// Append a sublayer asset path. Duplicate entries are preserved because

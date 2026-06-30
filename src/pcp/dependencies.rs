@@ -41,8 +41,9 @@ pub(super) struct Dependencies {
     /// index registers under every layer its composition touched — any
     /// dependency node's own layer or a member of that node's resolved layer
     /// stack — plus each layer it skipped as a muted external reference/payload
-    /// target. A mute/unmute or a `subLayers`/offset/relocate/`timeCodesPerSecond`
-    /// edit collects its victims as a union of lookups over the changed layers
+    /// target. A mute/unmute or a
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
+    /// collects its victims as a union of lookups over the changed layers
     /// ([`indices_for_layers`](Self::indices_for_layers)). Unlike `per_layer`,
     /// this registers the self-Root edge too, since the local prim reads its own
     /// root layer stack and a layer-set change must reach it.
@@ -210,8 +211,8 @@ impl Dependencies {
 
     /// Prim indices to invalidate for a change to any layer in `affected` — the
     /// deduplicated union of the `by_layer` registrations. The victim set for a
-    /// mute/unmute or a `subLayers`/offset/relocate/`timeCodesPerSecond` edit
-    /// (C++ `PcpChanges` layer-stack fanout). Each registered index reads a layer
+    /// mute/unmute or a `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables`
+    /// edit (C++ `PcpChanges` layer-stack fanout). Each registered index reads a layer
     /// stack containing one of `affected` (or skipped one as a muted target), so
     /// it is exactly one the change can restructure.
     pub(super) fn indices_for_layers(&self, affected: &HashSet<LayerId>) -> Vec<Path> {

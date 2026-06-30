@@ -820,8 +820,9 @@ impl IndexCache {
     /// prims: advances the composition revision (so cached value views rebuild)
     /// and drops just the cached indices that read one of the `affected` layers,
     /// via [`drop_indices_touching_layers`](Self::drop_indices_touching_layers).
-    /// Used for a layer-muting toggle, a `subLayers`/offset/relocate/`timeCodesPerSecond`
-    /// edit (see [`Changes::apply`](super::change::Changes::apply)), and a demanded
+    /// Used for a layer-muting toggle, a
+    /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
+    /// (see [`Changes::apply`](super::change::Changes::apply)), and a demanded
     /// layer that introduces relocates; in each case the graph's precomputed
     /// layer-stack state is rebuilt by the mutation first, so the cache is all that
     /// remains. Drops exactly the cached indices whose composition reads an
@@ -2824,6 +2825,86 @@ def "Scope"
             cache.value_at(&graph, &sdf::path("/Model.source")?, 0.0, &interp)?,
             Some(Value::String("right".to_string())),
             "the referencing layer's TARGET override resolves the nested reference to right.usda"
+        );
+        Ok(())
+    }
+
+    /// Editing a layer stack's `expressionVariables` re-resolves a `${VAR}`
+    /// reference asset path and recomposes the cached index: with `PICK = "a"`
+    /// the reference draws a.usda's opinion, and editing it to "b" yields
+    /// b.usda's — the under-invalidation (stale-read) guard.
+    #[test]
+    fn expr_var_edit_recomposes_reference() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\n(\n    expressionVariables = {\n        string PICK = \"a\"\n    }\n)\n\
+             def \"R\" (\n    references = @`\"${PICK}.usda\"`@</X>\n) {}\n",
+        );
+        let a = parse_named_layer("a.usda", "#usda 1.0\ndef \"X\" { custom double y = 1 }\n");
+        let b = parse_named_layer("b.usda", "#usda 1.0\ndef \"X\" { custom double y = 2 }\n");
+        let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let root_id = graph.root_id().unwrap();
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        let y = sdf::path("/R.y")?;
+
+        assert_eq!(
+            cache.value_at(&graph, &y, 0.0, &interp)?,
+            Some(Value::Double(1.0)),
+            "the PICK-valued reference resolves to a.usda"
+        );
+
+        let cl = edit_layer(&mut graph.get_mut(root_id).unwrap().layer, |e| {
+            e.set_expression_variables(HashMap::from([("PICK".to_string(), Value::String("b".into()))]))
+        })?;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(root_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert_eq!(
+            cache.value_at(&graph, &y, 0.0, &interp)?,
+            Some(Value::Double(2.0)),
+            "editing PICK re-resolves the reference to b.usda and recomposes the cached index"
+        );
+        Ok(())
+    }
+
+    /// An `expressionVariables` edit on a referenced layer drops only the indices
+    /// that read it: the referencing prim's index is evicted, while a sibling
+    /// composed solely from the root keeps its cached index — the
+    /// over-invalidation (dropped-sibling) guard.
+    #[test]
+    fn expr_var_edit_scoped_drop() -> Result<()> {
+        let root = parse_named_layer(
+            "root.usda",
+            "#usda 1.0\ndef \"Local\" {}\ndef \"Ref\" (\n    references = @base.usda@</Base>\n) {}\n",
+        );
+        let base = parse_named_layer("base.usda", "#usda 1.0\ndef \"Base\" {}\n");
+        let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let base_id = graph.id_of("base.usda").unwrap();
+        let local = sdf::path("/Local")?;
+        let refp = sdf::path("/Ref")?;
+
+        cache.ensure_index(&graph, &local)?;
+        cache.ensure_index(&graph, &refp)?;
+        assert!(cache.store.index_at(&local).is_some());
+        assert!(cache.store.index_at(&refp).is_some());
+
+        let cl = edit_layer(&mut graph.get_mut(base_id).unwrap().layer, |e| {
+            e.set_expression_variables(HashMap::from([("V".to_string(), Value::String("x".into()))]))
+        })?;
+        let mut changes = crate::pcp::Changes::new();
+        changes.did_change(&cache, &[(base_id, &cl)]);
+        changes.apply(&mut cache, &mut graph);
+
+        assert!(
+            cache.store.index_at(&local).is_some(),
+            "the root-only sibling does not read base.usda, so its index stays warm"
+        );
+        assert!(
+            cache.store.index_at(&refp).is_none(),
+            "the referencing prim reads base.usda, so the expr-var edit drops its index"
         );
         Ok(())
     }

@@ -52,7 +52,7 @@ use super::schema::FieldKey;
 use super::{
     sink, AbstractData, AttributeSpecMut, AttributeSpecRef, ChangeList, CowData, Data, DataError, LayerData, Patch,
     Path, PrimSpecMut, PrimSpecRef, PseudoRootSpecMut, PseudoRootSpecRef, RelationshipSpecMut, RelationshipSpecRef,
-    RelocateList, SpecError, SpecType,
+    RelocateList, SpecError, SpecType, Value,
 };
 
 /// A [`sink::Id`] for a [`LayerSink`] installed on a [`Layer`].
@@ -723,6 +723,19 @@ impl LayerEdit<'_> {
     /// Clear the layer's `relocates` opinion. No-op when no pseudo-root spec exists.
     pub fn clear_relocates(&mut self) -> Result<(), AuthoringError> {
         self.clear_root_field(FieldKey::LayerRelocates)
+    }
+
+    /// Replace the layer's `expressionVariables` dictionary, the values an
+    /// `${VAR}` expression resolves against (see
+    /// [`PseudoRootSpec::set_expression_variables`](crate::sdf::PseudoRootSpec::set_expression_variables)).
+    pub fn set_expression_variables(&mut self, vars: HashMap<String, Value>) -> Result<(), AuthoringError> {
+        self.pseudo_root_mut()?.set_expression_variables(vars);
+        Ok(())
+    }
+
+    /// Clear the layer's `expressionVariables` opinion. No-op when no pseudo-root spec exists.
+    pub fn clear_expression_variables(&mut self) -> Result<(), AuthoringError> {
+        self.clear_root_field(FieldKey::ExpressionVariables)
     }
 
     /// Set the layer's `startTimeCode`.
