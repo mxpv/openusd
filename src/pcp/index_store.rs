@@ -11,13 +11,13 @@
 //! cross-cutting concerns (transient query errors, the prototype registry, the
 //! composition revision) around the store's index and dependency queries.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::sdf::{self, Path};
 
 use super::dependencies::Dependencies;
 use super::layer_graph::LayerGraph;
-use super::prim_index::{CompositionContext, PrimEntry, PrimIndex};
+use super::prim_index::{CompositionContext, PrimEntry, PrimIndex, TargetMemo, TargetMemoKey};
 use super::{Error, LayerId};
 
 /// Per-prim composition index storage with dependency tracking. See the
@@ -102,7 +102,15 @@ impl IndexStore {
         errors: Vec<Error>,
     ) {
         self.deps.add(path, &index, graph);
-        self.entries.insert(path.clone(), PrimEntry { index, context, errors });
+        self.entries.insert(
+            path.clone(),
+            PrimEntry {
+                index,
+                context,
+                errors,
+                resolved_targets: HashMap::new(),
+            },
+        );
     }
 
     /// Drops the entry at `path` and retracts its dependency registrations.
@@ -192,63 +200,26 @@ impl IndexStore {
         }
     }
 
-    /// Every cached prim index whose composition reads one of the `affected`
-    /// layers — the victim set for a layer-set invalidation (`invalidate_layers`),
-    /// shared by a mute toggle and a `subLayers`/offset/relocate/`timeCodesPerSecond`
-    /// edit.
-    ///
-    /// A mute passes [`mute_fanout`](super::layer_graph::LayerGraph)'s result (the
-    /// toggled layer and every layer whose subtree contains it), so a sublayer
-    /// stack's root stays present even when the toggle empties the stack. An edit
-    /// passes the layers whose composed edges or relocates moved plus the authored
-    /// layers, which stay resolvable members of their stacks. A node's layer stack
-    /// lists the members it resolved against, so an index whose nodes touch an
-    /// `affected` layer is exactly one the change can restructure. An index that
-    /// skipped a reference/payload arc because the target root was muted keeps no
-    /// node for it, so its recorded muted targets (see
-    /// [`PrimIndex::muted_external_targets`]) are checked too — without that,
-    /// unmuting the target could not find the index to recompose.
-    ///
-    /// TODO(perf): this scans every cached index (the reverse [`Dependencies`] map
-    /// can't scope it — an index that skipped a muted target registered no
-    /// dependency site to find it by). The per-index predicate is independent
-    /// (`TODO(rayon)`).
-    pub(super) fn indices_touching_layers(&self, graph: &LayerGraph, affected: &HashSet<LayerId>) -> Vec<Path> {
-        self.entries
-            .iter()
-            .filter(|(_, entry)| {
-                // A cached node resolves its `LayerStackId` against the
-                // already-mutated graph here, so the two prongs are both needed and
-                // complementary; correctness rests on the invariant that whenever a
-                // node's stack contained a toggled layer, one of these holds:
-                //   * the frozen `representative` (the stack's strongest member,
-                //     recorded at composition) is in `affected` — this catches a
-                //     toggle of a `Sublayer(L)` stack's own root `L`, whose live
-                //     stack now resolves empty so the member scan would miss it;
-                //   * a surviving resolved member is in `affected` — this catches a
-                //     toggle deeper in the stack (e.g. a root sublayer on a stage
-                //     with session layers, where the representative is a session
-                //     layer outside the fanout but the root layer remains and is in
-                //     `affected`).
-                // The invariant holds because [`mute_fanout`](super::layer_graph::LayerGraph)'s
-                // `ancestors_including` puts every layer whose subtree contains the
-                // toggled one into `affected` (so a sublayer stack's root is always
-                // in it), and the root anchor covers session-layer mutes. Pinned by
-                // `mute_sublayer_drops_root_stack_index` / `mute_keeps_independent_index`;
-                // do not narrow to a representative-only check.
-                entry.index.dependency_nodes().any(|node| {
-                    affected.contains(&node.layer_id())
-                        || graph
-                            .layer_stack(node.layer_stack_id())
-                            .iter()
-                            .any(|&(li, _)| affected.contains(&li))
-                }) || entry
-                    .index
-                    .muted_external_targets()
-                    .iter()
-                    .any(|li| affected.contains(li))
-            })
-            .map(|(path, _)| path.clone())
-            .collect()
+    /// The [`TargetMemo`] resolved for `prim`'s property at `key`, or `None` on a
+    /// miss. See [`PrimEntry::resolved_targets`].
+    pub(super) fn target_memo(&self, prim: &Path, key: &TargetMemoKey) -> Option<&TargetMemo> {
+        self.entries.get(prim).and_then(|entry| entry.resolved_targets.get(key))
+    }
+
+    /// Memoizes a [`TargetMemo`] for `prim`'s property at `key`. No-op when `prim`
+    /// has no cached entry (its index was dropped mid-resolution).
+    pub(super) fn set_target_memo(&mut self, prim: &Path, key: TargetMemoKey, memo: TargetMemo) {
+        if let Some(entry) = self.entries.get_mut(prim) {
+            entry.resolved_targets.insert(key, memo);
+        }
+    }
+
+    /// Drops `prim`'s whole resolved-target memo, for a `targetPaths` /
+    /// `connectionPaths` edit that leaves the prim's graph intact but restales its
+    /// composed targets. No-op when `prim` has no cached entry.
+    pub(super) fn clear_target_memo(&mut self, prim: &Path) {
+        if let Some(entry) = self.entries.get_mut(prim) {
+            entry.resolved_targets.clear();
+        }
     }
 }

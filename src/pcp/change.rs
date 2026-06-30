@@ -18,6 +18,27 @@
 //!   (C++ `Pcp_RescanForSpecs`) refreshes the affected nodes' `has_specs`
 //!   flag in place instead of rebuilding, dropping the local index only when
 //!   it holds no node at the site (a brand-new spec needs a fresh build).
+//!
+//! Edit-type → tier, the audit behind the classifier:
+//!
+//! - `references`, `payload`, `inheritPaths`, `specializes`, `variantSetNames`,
+//!   `variantSelection`, `instanceable`, `permission` → significant: each is a
+//!   composition-arc, instancing, or permission opinion that can add or drop a
+//!   subtree (C++ `Pcp_EntryRequiresPrimIndexChange`). `specifier`, `active`,
+//!   `apiSchemas`, and `relocates` are significant here too, slightly broader
+//!   than C++ (which routes `active` / `specifier` through separate mechanisms
+//!   and does not yet compose `apiSchemas` from a schema registry).
+//! - an inert `over` add or remove carrying no significant field → spec tier.
+//! - `subLayers`, `subLayerOffsets`, `layerRelocates`, `timeCodesPerSecond` /
+//!   `framesPerSecond` on the root → layer-stack tier; `defaultPrim` on the
+//!   root → significant at the root.
+//! - `clips` / `clipSets`, and non-composition metadata (`kind`,
+//!   `colorConfiguration`, `customData`, …) → no index drop. Clips resolve
+//!   live through the cached index's spec sites, and every value view rebuilds
+//!   against the composition-revision bump [`apply`](Changes::apply) always
+//!   makes, so the new opinion is visible without invalidating the graph.
+//! - `expressionVariables` on the root → not yet handled (see the `TODO` in
+//!   [`classify_root_entry`](Changes::classify_root_entry)).
 
 use std::collections::{BTreeSet, HashSet};
 use std::mem;
@@ -81,15 +102,29 @@ pub struct CacheChanges {
     /// opinion. [`Changes::apply`] feeds each entry to
     /// [`IndexCache::rescan_specs`](super::IndexCache::rescan_specs).
     pub(crate) did_change_specs: BTreeSet<(LayerId, Path)>,
+    /// Prims whose memoized resolved targets are stale — a `targetPaths` /
+    /// `connectionPaths` edit changed a relationship/connection the prim composes
+    /// in place, or one it reads through an arc (so a referenced site's edit fans
+    /// out to its dependents). The graph is intact, so the index survives;
+    /// [`Changes::apply`] drops only the memo
+    /// ([`IndexCache::clear_target_memos`](super::IndexCache::clear_target_memos)),
+    /// and the next query recomposes the targets live.
+    pub(crate) did_change_targets: BTreeSet<Path>,
 }
 
 impl CacheChanges {
-    /// The composed paths whose cached composition changed — the union of the
-    /// significant, prim, and spec tiers. These are the paths a consumer must
-    /// re-resolve (C++ `PcpCacheChanges` resync set). The spec tier is included
-    /// so an inert spec add/remove (e.g. an `over`) is surfaced, not silently
-    /// dropped, even though it refreshes `has_specs` in place rather than
+    /// The composed prim paths whose cached composition was resynced — the union
+    /// of the significant, prim, and spec tiers. These are the paths a consumer
+    /// must re-resolve (C++ `PcpCacheChanges` resync set). The spec tier is
+    /// included so an inert spec add/remove (e.g. an `over`) is surfaced, not
+    /// silently dropped, even though it refreshes `has_specs` in place rather than
     /// rebuilding the index.
+    ///
+    /// The target tier is deliberately absent: a `targetPaths` / `connectionPaths`
+    /// edit drops only a memo, leaving the prim graph intact, so it is a
+    /// changed-info edit on the property, not a prim resync. The composed change
+    /// notice reports it through the property entry's relationship/connection-
+    /// target flag instead.
     pub(crate) fn resynced_paths(&self) -> impl Iterator<Item = &Path> {
         self.did_change_significantly
             .iter()
@@ -136,19 +171,20 @@ impl Changes {
     /// Diff phase: classify each [`ChangeEntry`] into the appropriate
     /// invalidation tier. Pure analysis — does not mutate `cache`.
     ///
-    /// Property-path entries (attribute values, time samples, relationship
-    /// targets) are intentionally ignored: those queries read live layer
-    /// data on every call, so a newly authored value is visible without
-    /// any cache mutation. When the cache memoizes resolved property or
-    /// target stacks, a property-tier branch (keyed by property path) will
-    /// land here.
+    /// Most property-path entries (attribute values, time samples) are ignored:
+    /// those queries read live layer data on every call, so a newly authored
+    /// value is visible without any cache mutation. A `targetPaths` /
+    /// `connectionPaths` edit is the exception — the cache memoizes resolved
+    /// relationship/connection targets, so it routes through
+    /// [`classify_property_entry`](Self::classify_property_entry) to the
+    /// [`did_change_targets`](CacheChanges::did_change_targets) set.
     pub fn did_change(&mut self, cache: &IndexCache, changes: &[(LayerId, &ChangeList)]) {
         for (layer_index, cl) in changes {
             for (path, entry) in cl.entries() {
                 if path.is_abs_root() {
                     self.classify_root_entry(cache, *layer_index, entry);
                 } else if path.is_property_path() {
-                    continue;
+                    self.classify_property_entry(cache, *layer_index, path, entry);
                 } else {
                     self.classify_prim_entry(cache, *layer_index, path, entry);
                 }
@@ -190,6 +226,49 @@ impl Changes {
         }
     }
 
+    /// Routes a property-path edit. Only a `targetPaths` / `connectionPaths`
+    /// change matters to the cache — it memoizes resolved relationship/connection
+    /// targets; every other property edit (attribute value, time samples) reads
+    /// live and is ignored. The owning prim's memo is marked stale, as is each
+    /// dependent's: a prim that reads the property's site through an arc composes
+    /// a translated copy of those targets, so a referenced site's edit restales
+    /// them too.
+    fn classify_property_entry(&mut self, cache: &IndexCache, layer: LayerId, path: &Path, entry: &ChangeEntry) {
+        let is_target_edit = entry
+            .flags
+            .intersects(sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION)
+            || entry
+                .info_changed
+                .iter()
+                .any(|k| *k == FieldKey::TargetPaths.as_str() || *k == FieldKey::ConnectionPaths.as_str());
+        if !is_target_edit {
+            return;
+        }
+        let prim = path.prim_path();
+        self.fanout_targets(cache, layer, &prim);
+        // A target opinion authored inside a variant (`/P{v=x}child.r`) composes
+        // into the variant-stripped prim (`/P/child`), whose memo key is not on the
+        // authored path's ancestor chain, so the fanout above misses it; restale it
+        // too, as the significant tier does for the same reason.
+        let stripped = prim.strip_all_variant_selections();
+        if stripped != prim {
+            self.fanout_targets(cache, layer, &stripped);
+        }
+    }
+
+    /// Marks the resolved-target memo of `prim` and every prim that composes its
+    /// targets — anything reading its site, or an ancestor of it, through an arc —
+    /// as stale. A prim reading a *descendant* of `prim` does not compose this
+    /// property, so the fanout stays on the ancestor + self direction. The literal
+    /// prim is included via the dependency self-edge, and explicitly for a prim not
+    /// yet cached.
+    fn fanout_targets(&mut self, cache: &IndexCache, layer: LayerId, prim: &Path) {
+        for dep in cache.dependencies().lookup_with_ancestors(layer, prim) {
+            self.cache.did_change_targets.insert(dep);
+        }
+        self.cache.did_change_targets.insert(prim.clone());
+    }
+
     fn classify_root_entry(&mut self, _cache: &IndexCache, layer: LayerId, entry: &ChangeEntry) {
         let mut touches_stack = false;
         for key in &entry.info_changed {
@@ -214,6 +293,14 @@ impl Changes {
             } else if *key == FieldKey::DefaultPrim.as_str() {
                 self.cache.did_change_significantly.insert(Path::abs_root());
             }
+            // TODO(expressionVariables): an `expressionVariables` edit restales the
+            // graph's `${VAR}`-expanded sublayer edges and any arc / variant
+            // expression that reads the vars (C++
+            // `PcpChanges::_DidChangeLayerStackExpressionVariables`). The correct
+            // tier drops every index touching the affected stack, not just the
+            // edge-shifted layers a `LAYERS` rebuild reports, so it folds in with
+            // item E's `layer → [index]` reverse map. No Stage producer authors the
+            // field yet, so the gap is latent.
         }
         // Record the layer behind any layer-stack-tier flag so `apply` can scope the
         // invalidation to the stacks this layer is a member of. Each edited layer in
@@ -240,9 +327,11 @@ impl Changes {
     /// Authoring this field on a prim path forces a graph rebuild.
     ///
     /// Mirrors C++ `Pcp_EntryRequiresPrimIndexChange` (changes.cpp:264-298): the
-    /// composition-arc, instancing, and activation opinions plus `specifier`,
-    /// whose def↔over↔class transitions change whether the prim and its subtree
-    /// compose.
+    /// composition-arc and instancing opinions, `permission` (a direct arc to a
+    /// `private` site is denied, inerting its subtree — spec 10.3.3), and
+    /// `specifier`, whose def↔over↔class transitions change whether the prim and
+    /// its subtree compose. `active`, `apiSchemas`, and `relocates` are added
+    /// conservatively (see the module-level edit-type → tier table).
     fn field_promotes_to_significant(field: &str) -> bool {
         field == FieldKey::References.as_str()
             || field == FieldKey::Payload.as_str()
@@ -251,6 +340,7 @@ impl Changes {
             || field == FieldKey::VariantSetNames.as_str()
             || field == FieldKey::VariantSelection.as_str()
             || field == FieldKey::Instanceable.as_str()
+            || field == FieldKey::Permission.as_str()
             || field == FieldKey::Specifier.as_str()
             || field == FieldKey::Active.as_str()
             // `apiSchemas` is composed off the cached prim index
@@ -300,7 +390,7 @@ impl Changes {
         // evicts those indices and the prototypes they touch and leaves the rest
         // warm.
         if self.layer_stack.contains(LayerStackChanges::SIGNIFICANT) {
-            cache.invalidate_layers(graph, &affected);
+            cache.invalidate_layers(&affected);
         }
 
         // A prim-tier index invalidation can change which prims are instances or
@@ -344,6 +434,19 @@ impl Changes {
             .collect();
         if !sites.is_empty() {
             cache.rescan_specs(graph, &sites);
+        }
+
+        // Property tier: a `targetPaths` / `connectionPaths` edit leaves the graph
+        // intact, so drop only the affected prims' resolved-target memo. A prim
+        // whose whole subtree was already dropped above lost its memo with the
+        // entry, so it is skipped.
+        if !self.cache.did_change_targets.is_empty() {
+            let stale = self
+                .cache
+                .did_change_targets
+                .iter()
+                .filter(|p| !self.cache.did_change_significantly.iter().any(|s| p.has_prefix(s)));
+            cache.clear_target_memos(stale);
         }
     }
 }
@@ -390,6 +493,37 @@ mod tests {
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+    }
+
+    /// A `permission` edit denies (or re-opens) a direct arc to the prim, which
+    /// reshapes every dependent's graph (spec 10.3.3), so it must promote to
+    /// significant — the under-invalidation backstop the C++ classifier shares.
+    #[test]
+    fn permission_promotes_to_significant() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/Foo"))
+            .info_changed
+            .insert(FieldKey::Permission.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+    }
+
+    /// A non-composition metadata edit (`kind`) on an existing prim resolves
+    /// live against the bumped revision, so the classifier drops no index in
+    /// either the significant or the spec tier — the over-invalidation guard.
+    #[test]
+    fn kind_metadata_drops_nothing() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        cl.entry_mut(&p("/Foo"))
+            .info_changed
+            .insert(FieldKey::Kind.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.did_change_specs.is_empty());
     }
 
     /// An inert prim add whose spec authors `instanceable` flips the prim's
@@ -499,5 +633,21 @@ mod tests {
         assert!(changes.cache.did_change_significantly.is_empty());
         assert!(changes.cache.did_change_specs.is_empty());
         assert!(!changes.layer_stack.contains(LayerStackChanges::SIGNIFICANT));
+    }
+
+    /// A `targetPaths` edit authored inside a variant composes into the
+    /// variant-stripped prim, so the target tier must restale that stripped prim's
+    /// memo (`/P/Child`), not only the variant path's (`/P{v=x}Child`).
+    #[test]
+    fn variant_target_edit_restales_stripped_prim() {
+        let (graph, cache) = empty_cache();
+        let mut cl = ChangeList::new();
+        let entry = cl.entry_mut(&p("/P{v=x}Child.r"));
+        entry.flags = ChangeFlags::CHANGE_RELATIONSHIP_TARGETS;
+        entry.info_changed.insert(FieldKey::TargetPaths.as_str().into());
+        let mut changes = Changes::new();
+        changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
+        assert!(changes.cache.did_change_targets.contains(&p("/P/Child")));
+        assert!(changes.cache.did_change_targets.contains(&p("/P{v=x}Child")));
     }
 }

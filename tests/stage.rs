@@ -3842,6 +3842,313 @@ fn override_prim() -> Result<()> {
     Ok(())
 }
 
+// --- Incremental invalidation: per-field change classification ---
+
+/// Authoring `permission = private` on an inherited class denies the direct arc
+/// (spec 10.3.3), so the dependent prim must recompose and its inherited opinion
+/// stop contributing. Regression guard for the classifier gap that omitted
+/// `permission` from the significant tier, leaving a stale, under-invalidated read.
+#[test]
+fn permission_edit_inerts_opinion() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\n\ndef \"Class\"\n{\n    custom double attr = 5\n}\n\ndef \"Inst\" (\n    inherits = </Class>\n)\n{\n}\n",
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        stage.attribute("/Inst.attr").get::<sdf::Value>()?,
+        Some(sdf::Value::Double(5.0)),
+        "the inherited opinion contributes before the permission edit",
+    );
+
+    stage.prim("/Class").set_metadata(
+        sdf::FieldKey::Permission.as_str(),
+        sdf::Value::Permission(sdf::Permission::Private),
+    )?;
+
+    assert_eq!(
+        stage.attribute("/Inst.attr").get::<sdf::Value>()?,
+        None,
+        "the private arc is inerted, so the inherited opinion no longer resolves",
+    );
+    Ok(())
+}
+
+/// Authoring `clips` on a prim that had none is read live through the cached
+/// index's spec sites — clips need no classifier entry, since every value view
+/// rebuilds against the revision bump. The authored clip set overrides the
+/// reference's time samples once present (spec 12.3.4.5).
+#[test]
+fn clips_edit_resolves_live() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let clip = dir.path().join("clip.usda");
+    let manifest = dir.path().join("manifest.usda");
+    let referenced = dir.path().join("ref.usda");
+    std::fs::write(
+        &clip,
+        "#usda 1.0\n\ndef \"Model\"\n{\n    double size.timeSamples = {\n        0: 0,\n        10: 10,\n    }\n}\n",
+    )?;
+    std::fs::write(&manifest, "#usda 1.0\n\ndef \"Model\"\n{\n    double size\n}\n")?;
+    std::fs::write(
+        &referenced,
+        "#usda 1.0\n\ndef \"Model\"\n{\n    double size.timeSamples = {\n        0: -1,\n        10: -10,\n    }\n}\n",
+    )?;
+    std::fs::write(
+        &root,
+        format!(
+            "#usda 1.0\n\ndef \"Model\" (\n    references = @{}@</Model>\n)\n{{\n}}\n",
+            referenced.display()
+        ),
+    )?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+    assert_eq!(
+        value_f64(&stage, "/Model.size", 10.0),
+        Some(-10.0),
+        "the reference time sample resolves before any clips are authored",
+    );
+
+    let prim = stage.prim("/Model");
+    let api = usd::ClipsAPI::new(&prim);
+    api.set_clip_asset_paths("default", vec![clip.display().to_string()])?;
+    api.set_clip_prim_path("default", "/Model")?;
+    api.set_clip_manifest_asset_path("default", manifest.display().to_string())?;
+    api.set_clip_active("default", vec![gf::vec2d(0.0, 0.0)])?;
+
+    assert_eq!(
+        value_f64(&stage, "/Model.size", 10.0),
+        Some(10.0),
+        "the authored clip set overrides the reference time sample",
+    );
+    Ok(())
+}
+
+/// The cache memoizes a relationship's resolved targets on first query; editing
+/// its `targetPaths` must drop that memo so the next query recomposes them.
+/// Regression guard for the property-tier (`did_change_targets`) consumer.
+#[test]
+fn target_edit_drops_memo() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.define_prim("/B")?;
+    stage.define_prim("/C")?;
+    stage
+        .prim("/A")
+        .create_relationship("r")?
+        .set_targets([sdf::path("/B")?])?;
+
+    // First query populates the memo.
+    assert_eq!(stage.relationship("/A.r").targets()?, vec![sdf::path("/B")?]);
+
+    stage.relationship("/A.r").set_targets([sdf::path("/C")?])?;
+    assert_eq!(
+        stage.relationship("/A.r").targets()?,
+        vec![sdf::path("/C")?],
+        "the re-authored targets must be visible, not the memoized list",
+    );
+    Ok(())
+}
+
+/// A relationship inherited from a class translates the class's targets into the
+/// inheriting prim's namespace. Editing the class relationship must fan out to
+/// the inheriting prim's memo (a referenced site's edit restales the translated
+/// targets), not just the class's own.
+#[test]
+fn target_edit_fans_out_to_dependent() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/Class")?;
+    stage.define_prim("/Class/Local")?;
+    stage.define_prim("/Class/Other")?;
+    stage
+        .prim("/Class")
+        .create_relationship("r")?
+        .set_targets([sdf::path("/Class/Local")?])?;
+    stage.define_prim("/Inst")?.set_metadata(
+        sdf::FieldKey::InheritPaths.as_str(),
+        sdf::Value::PathListOp(sdf::PathListOp::prepended([sdf::path("/Class")?])),
+    )?;
+    stage.define_prim("/Inst/Local")?;
+    stage.define_prim("/Inst/Other")?;
+
+    // First query memoizes the inherited relationship's translated targets.
+    assert_eq!(
+        stage.relationship("/Inst.r").targets()?,
+        vec![sdf::path("/Inst/Local")?],
+        "the inherited target translates into the instance namespace",
+    );
+
+    stage
+        .relationship("/Class.r")
+        .set_targets([sdf::path("/Class/Other")?])?;
+    assert_eq!(
+        stage.relationship("/Inst.r").targets()?,
+        vec![sdf::path("/Inst/Other")?],
+        "editing the class relationship restales the inheriting prim's memo",
+    );
+    Ok(())
+}
+
+/// Removing the relationship spec that authored the memoized targets must drop
+/// the memo so the next query recomposes. The removal carries only
+/// `REMOVE_PROPERTY`, so the producer surfaces the removed `targetPaths` to route
+/// it through `did_change_targets`; without that the stale `[/B]` would persist.
+#[test]
+fn target_spec_removal_drops_memo() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.define_prim("/B")?;
+    stage
+        .prim("/A")
+        .create_relationship("r")?
+        .set_targets([sdf::path("/B")?])?;
+
+    // Populate the memo.
+    assert_eq!(stage.relationship("/A.r").targets()?, vec![sdf::path("/B")?]);
+
+    assert!(stage.remove_property("/A.r")?);
+    assert_eq!(
+        stage.relationship("/A.r").targets()?,
+        Vec::<sdf::Path>::new(),
+        "the removed relationship's memoized targets must not persist",
+    );
+    Ok(())
+}
+
+/// A relationship-target value edit is a changed-info edit on the property, not a
+/// whole-prim resync: the change notice's `resynced` must not name the owning
+/// prim, while `changed_info_only` names the edited relationship.
+#[test]
+fn target_edit_is_info_only_not_resync() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.define_prim("/B")?;
+    stage.define_prim("/C")?;
+    stage
+        .prim("/A")
+        .create_relationship("r")?
+        .set_targets([sdf::path("/B")?])?;
+
+    let resynced: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let (resynced, info) = (resynced.clone(), info.clone());
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            resynced.borrow_mut().extend(oc.resynced.iter().cloned());
+            info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+        })
+    };
+    stage.relationship("/A.r").set_targets([sdf::path("/C")?])?;
+
+    assert!(
+        !resynced.borrow().contains(&sdf::path("/A")?),
+        "a target value edit must not resync the owning prim"
+    );
+    assert!(
+        info.borrow().contains(&sdf::path("/A.r")?),
+        "the edited relationship is reported as changed-info"
+    );
+    Ok(())
+}
+
+/// Removing an attribute is a structural removal, not a changed-info edit: the
+/// removed property must not appear in `changed_info_only`, where a consumer
+/// reading its value would find it gone.
+#[test]
+fn attr_removal_not_info_only() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.create_attribute("/P.size", "double")?;
+
+    let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let info = info.clone();
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+        })
+    };
+    assert!(stage.remove_property("/P.size")?);
+
+    assert!(
+        !info.borrow().contains(&sdf::path("/P.size")?),
+        "a removed attribute must not be reported as a changed-info edit"
+    );
+    Ok(())
+}
+
+/// Removing a relationship that had authored targets surfaces its `targetPaths`
+/// for memo invalidation, but that internal signal must not surface the gone
+/// property as a changed-info edit — the removal is structural, not info-only.
+#[test]
+fn rel_removal_not_info_only() -> Result<()> {
+    let stage = in_memory_stage()?;
+    stage.define_prim("/A")?;
+    stage.define_prim("/B")?;
+    stage
+        .prim("/A")
+        .create_relationship("r")?
+        .set_targets([sdf::path("/B")?])?;
+
+    let info: Rc<RefCell<Vec<sdf::Path>>> = Rc::new(RefCell::new(Vec::new()));
+    let _token = {
+        let info = info.clone();
+        stage.add_sink(move |_stage: &Stage, oc: &CommittedChange<'_>| {
+            info.borrow_mut().extend(oc.changed_info_only.iter().cloned());
+        })
+    };
+    assert!(stage.remove_property("/A.r")?);
+
+    assert!(
+        !info.borrow().contains(&sdf::path("/A.r")?),
+        "a removed relationship with targets must not be reported as a changed-info edit"
+    );
+    Ok(())
+}
+
+/// A connection authored in a class that targets an instance of that class is
+/// dropped per `_TargetInClassAndTargetsInstance` — a decision that composes the
+/// target prim to read its instance status. The resolved list must not be served
+/// from a stale memo after the target prim's instance status changes. `Owner` and
+/// `Target` are top-level siblings, so editing `Target` does not fan out to drop
+/// `Owner`'s index (their only common ancestor is the pseudo-root); the memo
+/// itself must recognize it read cross-prim instance state and resolve live.
+#[test]
+fn instance_target_memo_not_stale() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\n\nclass \"Class\"\n{\n    double x\n    add double x.connect = [</Target.y>]\n    double y\n}\n\n\
+         def \"Owner\" (\n    inherits = </Class>\n)\n{\n}\n\ndef \"Target\" (\n    inherits = </Class>\n)\n{\n}\n",
+    )?;
+    let attr = "/Owner.x";
+    let target = sdf::path("/Target")?;
+    let drop_inherit = || sdf::Value::PathListOp(sdf::PathListOp::explicit(Vec::<sdf::Path>::new()));
+
+    // Stage A: query first (populating any memo). `Target` is an instance of
+    // `Class`, so the class connection to it is dropped. Then drop `Target`'s
+    // inherit so it is no longer an instance, and re-query.
+    let a = Stage::open(root.to_str().unwrap())?;
+    let before = a.attribute(attr).connections()?;
+    a.prim(target.clone())
+        .set_metadata(sdf::FieldKey::InheritPaths.as_str(), drop_inherit())?;
+    let after_cached = a.attribute(attr).connections()?;
+
+    // Stage B: apply the same edit before any query, so its result is composed
+    // from scratch with no memo in play.
+    let b = Stage::open(root.to_str().unwrap())?;
+    b.prim(target)
+        .set_metadata(sdf::FieldKey::InheritPaths.as_str(), drop_inherit())?;
+    let fresh = b.attribute(attr).connections()?;
+
+    assert_eq!(after_cached, fresh, "the cached path must agree with a fresh compose");
+    assert_ne!(
+        before, after_cached,
+        "the edit must change the result (guards against a vacuous test)"
+    );
+    Ok(())
+}
+
 // --- Adapted from in-module tests: value resolution, existence, authoring ---
 
 /// A direct arc to a `permission = private` site is retained as a

@@ -188,30 +188,11 @@ impl Relationship {
     /// Borrow the relationship spec at `self.path` on the edit target's
     /// layer, apply `f`, and return `self` for chaining. The layer records
     /// whatever fields `f` writes, setting `CHANGE_RELATIONSHIP_TARGETS` when
-    /// the write touches `targetPaths`.
+    /// the write touches `targetPaths`. That flag is what routes the edit to
+    /// `pcp::Changes::classify_property_entry`, which drops the affected prims'
+    /// memoized resolved targets (the owner and each dependent that reads the
+    /// site through an arc) so the next query recomposes them.
     /// Returns `InvalidPath` if no relationship spec exists at the path.
-    //
-    // The change-list entry is recorded at the relationship's property
-    // path, which `pcp::Changes::did_change` currently skips (no consumer
-    // for relationship-target invalidation). The producer side is in place
-    // (the proxy emits the flag and `info_changed`) for when a consumer lands.
-    //
-    // TODO: wire the consumer. When `IndexCache` starts memoizing per-attribute
-    // composed values or per-relationship resolved-target lists:
-    //   1. Add a `classify_property_entry` branch in `pcp/change.rs`
-    //      mirroring `classify_prim_entry`, gated on
-    //      `path.is_property_path()`. Inspect
-    //      `entry.flags & CHANGE_RELATIONSHIP_TARGETS` and the
-    //      `TargetPaths` / `ConnectionPaths` keys in `info_changed`.
-    //   2. Decide tier: relationship/connection target list changes
-    //      are conceptually tier-3 (spec-stack refresh) — they don't
-    //      reshape the prim graph but they do invalidate composed
-    //      target resolution. They need a new set keyed by property
-    //      path (e.g. `did_change_targets`); `did_change_specs` already
-    //      carries inert prim spec rescans, keyed by `(layer, prim path)`.
-    //   3. Extend `Changes::apply` to consume the new set by either
-    //      dropping the owner's resolved-target cache or refreshing it
-    //      in place, once such a cache exists.
     fn edit<F>(self, f: F) -> Result<Self, StageAuthoringError>
     where
         F: FnOnce(&mut sdf::RelationshipSpecMut<'_>),

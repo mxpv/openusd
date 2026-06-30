@@ -1807,7 +1807,7 @@ impl Stage {
         let change = mutate(&mut graph)?;
         // The mutation already rebuilt the graph's sublayer stacks, relocates, and
         // cycle diagnostics; only the cache needs work.
-        cache.invalidate_layers(&graph, &change.affected);
+        cache.invalidate_layers(&change.affected);
         Some(change.changed)
     }
 
@@ -2526,8 +2526,7 @@ impl Stage {
             // composed against its stack; drop their cached indices so they
             // recompose with the relocates applied.
             if !relocated.is_empty() {
-                let graph = self.layers.borrow();
-                self.cache.borrow_mut().invalidate_layers(&graph, &relocated);
+                self.cache.borrow_mut().invalidate_layers(&relocated);
             }
         }
         // Mint each demand's layer stack now that the edges are wired. The layer
@@ -3863,14 +3862,13 @@ def "T" {
         Ok(())
     }
 
-    /// Pins the resolved-members prong of the cache's mute fanout. A prim whose
-    /// only opinion lives in a sublayer of the root composes into a single local
-    /// node on the stage Root layer stack, whose frozen `representative` is the
-    /// strongest session layer. Muting that sublayer fans out to `{sublayer,
-    /// root}` — not the session layer — so the representative is not in the
-    /// affected set; the index is dropped only because the node's resolved
-    /// members still list the (surviving) root layer. A regression to a
-    /// representative-only check would leave this index stale.
+    /// A prim whose only opinion lives in a sublayer of the root composes into a
+    /// single local node on the stage Root layer stack, which the reverse
+    /// `layer → indices` map registers under every member layer the node spans
+    /// (`session`, `root`, and the `child` sublayer). Muting `child` fans out to
+    /// `{child, root}`, so the index is found through its `child` registration
+    /// even though the stack's strongest member is the unaffected session layer.
+    /// Registering only the stack's strongest member would leave this index stale.
     #[test]
     fn mute_sublayer_drops_root_stack_index() -> Result<()> {
         let session = sdf::Layer::new_in_memory("session.usda");
@@ -3884,7 +3882,7 @@ def "T" {
         });
 
         // session at index 0, root + its `child` sublayer after: /P's Root node
-        // spans [session, root, child], so its representative is the session layer.
+        // spans [session, root, child].
         let stage = Stage::builder().make_stage(vec![session, root, child], 1, Vec::new());
         let p = sdf::path("/P")?;
         assert!(stage.prim(p.clone()).is_valid()?);
@@ -3893,7 +3891,7 @@ def "T" {
         stage.mute_layer("child.usda");
         assert!(
             !stage.is_indexed(&p),
-            "muting the root sublayer holding /P's opinion drops the cached index via the members prong"
+            "muting the root sublayer holding /P's opinion drops the cached index"
         );
         Ok(())
     }

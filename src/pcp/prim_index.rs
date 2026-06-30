@@ -69,6 +69,48 @@ pub(crate) struct PrimEntry {
     /// replaced wholesale on each rebuild so they always reflect the current
     /// composition.
     pub errors: Vec<Error>,
+    /// Lazily-memoized resolved property targets — cached composed query output,
+    /// not authored data — keyed by property kind and suffix. Filled on the first
+    /// [`relationship_targets`] / [`connection_paths`] query for a property whose
+    /// prim composes in place and whose resolution is a pure function of this
+    /// prim's own opinions, and dropped with the entry; a `targetPaths` /
+    /// `connectionPaths` edit clears it through
+    /// [`did_change_targets`](super::change::CacheChanges). Instance proxies, the
+    /// deleted-paths walk, and a resolution that consults cross-prim instance
+    /// state resolve live and are never cached.
+    ///
+    /// [`relationship_targets`]: super::index_cache::IndexCache::relationship_targets
+    /// [`connection_paths`]: super::index_cache::IndexCache::connection_paths
+    pub resolved_targets: HashMap<TargetMemoKey, TargetMemo>,
+}
+
+/// Which path-list-op field a [`TargetMemo`] resolved. Narrower than
+/// [`FieldKey`] so the memo map admits only the two fields that carry targets,
+/// not arbitrary fields like `timeSamples`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum PropertyTargetKind {
+    /// A relationship's `targetPaths`.
+    Relationship,
+    /// An attribute's `connectionPaths`.
+    Connection,
+}
+
+/// Key into a prim's [`resolved_targets`](PrimEntry::resolved_targets) memo: the
+/// property kind plus its suffix within the prim (e.g. `.binding`), so a
+/// relationship and a same-named connection never share an entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TargetMemoKey {
+    pub kind: PropertyTargetKind,
+    pub property_suffix: String,
+}
+
+/// One property's memoized resolved-target list plus the recoverable errors its
+/// resolution surfaced, re-surfaced on a cache hit. See
+/// [`resolved_targets`](PrimEntry::resolved_targets).
+#[derive(Clone)]
+pub(crate) struct TargetMemo {
+    pub targets: Vec<Path>,
+    pub errors: Vec<Error>,
 }
 
 /// Outcome of [`PrimIndex::refresh_has_specs_at`]: what the spec-tier rescan
@@ -1019,6 +1061,7 @@ pub(crate) mod tests {
                         index: index.clone(),
                         context: CompositionContext::default(),
                         errors: Vec::new(),
+                        resolved_targets: HashMap::new(),
                     },
                 );
                 last = Some(index);

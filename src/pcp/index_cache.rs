@@ -27,7 +27,9 @@ use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
 use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
-use super::prim_index::{AncestorArc, CompositionContext, Demand, PrimIndex};
+use super::prim_index::{
+    AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
+};
 use super::prim_resolve::InvalidTargetKind;
 use super::relocates::{apply_child_relocates, chain_through_relocates, effective_relocates};
 use super::{Error, LayerId, MapFunction, VariantFallbackMap};
@@ -105,9 +107,22 @@ pub struct IndexCache {
     /// index invalidation so they never go stale across an edit; they are
     /// recomputed on the next query.
     //
-    // TODO: repeated queries on the same conflicting property re-append within a
-    // session (no intervening edit) and duplicate. Settle this by computing the
-    // conflicts once at index build and having queries read them.
+    // A memoizable target query's invalid-target errors are memoized with its
+    // resolved targets (see
+    // [`PrimEntry::resolved_targets`](super::prim_index::PrimEntry)) and
+    // re-surfaced here, deduplicated, on a cache hit, so repeated reads of those
+    // properties no longer duplicate them. A non-memoizable target read (an
+    // instance proxy, the deleted-paths walk, or a resolution that read cross-prim
+    // instance state) still appends fresh each call.
+    //
+    // TODO: the `property_stack` inconsistent-property-type conflicts are still
+    // recomputed and re-appended on each call, so repeated stacks on the same
+    // conflicting property duplicate within a session. Memoizing them on
+    // `PrimEntry` like the targets would fix it, but the conflict set depends on
+    // the prim's property specs, so it would need a property-add/remove
+    // invalidation branch in `classify_property_entry`; computing them eagerly at
+    // index build instead would add per-property work to every prim's build (a
+    // cost on Caldera-class stages). Deferred until a profile justifies one.
     query_errors: Vec<Error>,
     /// Paths whose [`ensure_index`](Self::ensure_index) call is still on the
     /// stack. Pre-caching an inherit/specialize target (and that target's own
@@ -137,6 +152,14 @@ pub struct IndexCache {
     /// [`register_prototype`](Self::register_prototype)). A cached view must not
     /// rely on this counter alone for paths that may be empty pending such
     /// materialization.
+    ///
+    /// A single stage-wide counter is deliberately coarse: every edit rebuilds
+    /// every cached value view, even unaffected ones. A per-prim revision would
+    /// let an unrelated prim's view survive, but value-only edits skip change
+    /// classification today (no producer says which prim's value moved), so a
+    /// per-prim bump would risk a stale read where this coarse counter is always
+    /// safe. Refine only with a value-edit classifier and a profile showing the
+    /// blanket rebuild dominates.
     ///
     /// [`Stage::attribute_query`]: crate::usd::Stage::attribute_query
     revision: u64,
@@ -783,6 +806,16 @@ impl IndexCache {
         self.query_errors.clear();
     }
 
+    /// Drops the resolved-target memo of each prim in `prims`, for a
+    /// `targetPaths` / `connectionPaths` edit that leaves the graph intact (so the
+    /// index survives) but restales the composed targets the memo cached. See
+    /// [`CacheChanges::did_change_targets`](super::change::CacheChanges).
+    pub(super) fn clear_target_memos<'p>(&mut self, prims: impl IntoIterator<Item = &'p Path>) {
+        for prim in prims {
+            self.store.clear_target_memo(prim);
+        }
+    }
+
     /// Invalidates the cache after a layer-set change restructures only some
     /// prims: advances the composition revision (so cached value views rebuild)
     /// and drops just the cached indices that read one of the `affected` layers,
@@ -793,22 +826,23 @@ impl IndexCache {
     /// layer-stack state is rebuilt by the mutation first, so the cache is all that
     /// remains. Drops exactly the cached indices whose composition reads an
     /// `affected` layer, leaving the rest warm.
-    pub(crate) fn invalidate_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
+    pub(crate) fn invalidate_layers(&mut self, affected: &HashSet<LayerId>) {
         self.bump_revision();
-        self.drop_indices_touching_layers(graph, affected);
+        self.drop_indices_touching_layers(affected);
     }
 
     /// Drop every cached prim index whose composition reads one of the `affected`
-    /// layers (per [`IndexStore::indices_touching_layers`]) — together with its
-    /// namespace descendants and any prototype the drops touch — leaving indices
-    /// that read none of them cached. Muting/unmuting or editing a layer can only
-    /// restructure prims that compose against a layer stack containing it (C++
-    /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
-    fn drop_indices_touching_layers(&mut self, graph: &LayerGraph, affected: &HashSet<LayerId>) {
+    /// layers (per [`Dependencies::indices_for_layers`](super::dependencies::Dependencies::indices_for_layers))
+    /// — together with its namespace descendants and any prototype the drops touch —
+    /// leaving indices that read none of them cached. Muting/unmuting or editing a
+    /// layer can only restructure prims that compose against a layer stack
+    /// containing it (C++ `PcpChanges` layer-stack fanout), so the rest of the
+    /// cache stays warm.
+    fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
         if affected.is_empty() {
             return;
         }
-        let victims = self.store.indices_touching_layers(graph, affected);
+        let victims = self.store.dependencies().indices_for_layers(affected);
         // Evict prototypes whose instances or roots are among the victims, as the
         // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
         self.invalidate_prototypes(&victims);
@@ -1218,13 +1252,44 @@ impl IndexCache {
             None => prim.clone(),
         };
         self.ensure_index(graph, &resolved_prim)?;
+
+        // A property whose prim composes in place (no instance redirect), read by
+        // the non-deleted walk, resolves into its own namespace, so its targets
+        // can memoize on the prim's own entry. Instance proxies map results back
+        // per instance and the deleted-paths walk is rare, so both resolve live.
+        // Whether the result is actually cacheable also turns on it not reading
+        // cross-prim instance state, decided once `compute_instance_targets` runs.
+        let is_connection = matches!(field, FieldKey::ConnectionPaths);
+        let memo_candidate = !deleted && anchor.is_none();
+        let memo_key = memo_candidate.then(|| TargetMemoKey {
+            kind: if is_connection {
+                PropertyTargetKind::Connection
+            } else {
+                PropertyTargetKind::Relationship
+            },
+            property_suffix: prop_suffix.clone(),
+        });
+        if let Some(key) = &memo_key {
+            if let Some(hit) = self.store.target_memo(&resolved_prim, key) {
+                let TargetMemo { targets, errors } = hit.clone();
+                // Re-surface the cached errors: an unrelated index invalidation may
+                // have cleared `query_errors` since, so push any it now lacks.
+                for error in errors {
+                    if !self.query_errors.contains(&error) {
+                        self.query_errors.push(error);
+                    }
+                }
+                return Ok(targets);
+            }
+        }
+
         // A connection/relationship target authored in a class that translates but
         // names a different instance of that class is dropped from that class
         // node's contribution (C++ `_TargetInClassAndTargetsInstance`). The cache
         // precomputes the cross-prim instance set; the per-node target walk
         // consults it so a valid stronger opinion for the same path survives.
-        let instance_targets = if deleted {
-            HashSet::new()
+        let (instance_targets, read_cross_prim) = if deleted {
+            (HashSet::new(), false)
         } else {
             self.compute_instance_targets(graph, &resolved_prim, field, &prop_suffix)?
         };
@@ -1252,9 +1317,9 @@ impl IndexCache {
         // Targets dropped during composition are reported in authored order, the
         // `invalid` list already honoring list-op composition (a target shadowed
         // by a stronger explicit, or retracted by a delete, is not reported).
-        let is_connection = matches!(field, FieldKey::ConnectionPaths);
+        let mut errs: Vec<Error> = Vec::new();
         for inv in invalid {
-            self.query_errors.push(match inv.kind {
+            errs.push(match inv.kind {
                 InvalidTargetKind::External => Error::InvalidExternalTargetPath {
                     is_connection,
                     target: inv.target,
@@ -1283,6 +1348,20 @@ impl IndexCache {
                 }
             }
         }
+        // Cache the in-place result for repeat queries, the errors travelling with
+        // it so a later cache hit can re-surface them. A resolution that read
+        // cross-prim instance state is excluded: a target prim's later
+        // instance-status change is not tracked by this property's invalidation,
+        // so it must resolve live. The deleted walk and instance proxies (no
+        // `memo_key`) just append to the transient channel.
+        if let Some(key) = memo_key.filter(|_| !read_cross_prim) {
+            let memo = TargetMemo {
+                targets: targets.clone(),
+                errors: errs.clone(),
+            };
+            self.store.set_target_memo(&resolved_prim, key, memo);
+        }
+        self.query_errors.append(&mut errs);
         Ok(targets)
     }
 
@@ -1296,13 +1375,19 @@ impl IndexCache {
     /// dropping/reporting are left to `resolve_path_list_op_validated`, which
     /// consults this set per node contribution. A target inside the class itself
     /// (`connectionPathInsideInheritedClass`) is never an instance target.
+    ///
+    /// Returns the set paired with whether any candidate was gathered — i.e.
+    /// whether the resolution read cross-prim instance state by composing target
+    /// prims. The target memo is unsafe in that case (a target prim's later
+    /// instance-status change is not tracked by the property's own
+    /// `did_change_targets`), so the caller skips memoization when it is `true`.
     fn compute_instance_targets(
         &mut self,
         graph: &LayerGraph,
         resolved_prim: &Path,
         field: FieldKey,
         prop_suffix: &str,
-    ) -> Result<HashSet<(Path, Path)>> {
+    ) -> Result<(HashSet<(Path, Path)>, bool)> {
         // Phase 1: gather candidates that translate, releasing the index borrow
         // before the cross-prim composition in phase 2.
         let mut candidates: Vec<InstanceCandidate> = Vec::new();
@@ -1354,6 +1439,9 @@ impl IndexCache {
         }
 
         // Phase 2: compose each target prim for the cross-prim inherit check.
+        // A non-empty candidate set means the result read another prim's instance
+        // status, so the caller must not memoize it.
+        let read_cross_prim = !candidates.is_empty();
         let mut instance_targets: HashSet<(Path, Path)> = HashSet::new();
         for c in candidates {
             let target_prim = c.translated.prim_path();
@@ -1362,7 +1450,7 @@ impl IndexCache {
                 instance_targets.insert((c.target, c.property));
             }
         }
-        Ok(instance_targets)
+        Ok((instance_targets, read_cross_prim))
     }
 
     /// Composes a relationship's target paths together with the paths its

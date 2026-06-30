@@ -250,10 +250,20 @@ impl Payload {
             .entries()
             .iter()
             .filter(|(_, e)| {
-                !e.info_changed.is_empty()
-                    || e.flags.intersects(
-                        sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
-                    )
+                // A property removal is a structural change, not an info-only edit.
+                // A removed relationship/connection surfaces its torn-down
+                // `targetPaths` / `connectionPaths` for memo invalidation; that
+                // signal must not also report the now-gone property as if its value
+                // merely changed. A replacement (removed and re-created in one edit)
+                // keeps the property, so it stays an info change.
+                let removed = e.flags.contains(sdf::ChangeFlags::REMOVE_PROPERTY)
+                    && !e.flags.contains(sdf::ChangeFlags::ADD_PROPERTY);
+                !removed
+                    && (!e.info_changed.is_empty()
+                        || e.flags.intersects(
+                            sdf::ChangeFlags::CHANGE_RELATIONSHIP_TARGETS
+                                | sdf::ChangeFlags::CHANGE_ATTRIBUTE_CONNECTION,
+                        ))
             })
             .filter_map(|(p, _)| match mapping {
                 Some(m) => m.map_source_to_target(p),

@@ -3362,6 +3362,7 @@ mod tests {
                 index: root_index,
                 context: CompositionContext::default(),
                 errors: Vec::new(),
+                resolved_targets: Default::default(),
             },
         );
         let child = Indexer::new(&s, &ctx, &cached, ambient)

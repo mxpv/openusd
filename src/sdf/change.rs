@@ -279,16 +279,23 @@ fn field_changed(base: &dyn AbstractData, path: &Path, field: &str, value: &Valu
 }
 
 /// Record the removal of the spec currently at `path` in `data` into `entry`:
-/// OR in its removal flag and, for a prim, surface its authored fields (except
-/// the auto-stamped `specifier`) so a structural removal — an `over` that
-/// carried `references`, `active`, … — reaches the classifier with the same
-/// `info_changed` signal the matching add carries. A property removal carries
-/// only its flag, whose field signal the classifier ignores.
+/// OR in its removal flag and surface the authored fields the classifier needs to
+/// see torn down, so a structural removal reaches it with the same `info_changed`
+/// signal the matching add carries.
+///
+/// A prim removal surfaces every authored field (except the auto-stamped
+/// `specifier`) — an `over` that carried `references` / `active` must reach the
+/// significant-tier classifier. A property removal surfaces only a torn-down
+/// `targetPaths` / `connectionPaths`, which restales the composed targets a query
+/// memoized; an attribute's value fields are not info changes on removal, so
+/// surfacing them would misreport the removal as a changed-info edit on a property
+/// that no longer exists. Scaffolding specs (variant, pseudo-root) carry no removal
+/// flag and `remove_flag` filters them out before the field walk.
 //
-// TODO(perf): `list_fields` allocates a `Vec<String>` and clones every field
-// name on the `Data` backend, and `note_field` re-interns each survivor; a
-// borrowing field-name iterator on `AbstractData` would drop the Vec and the
-// clones (the token intern stays, since the backend keys are `String`).
+// TODO(perf): the prim path's `list_fields` allocates a `Vec<String>` and clones
+// every field name on the `Data` backend, and `note_field` re-interns each
+// survivor; a borrowing field-name iterator on `AbstractData` would drop the Vec
+// and the clones (the token intern stays, since the backend keys are `String`).
 fn note_removal(entry: &mut ChangeEntry, data: &dyn AbstractData, path: &Path) {
     let Some(flag) = remove_flag(data, path) else {
         return;
@@ -300,6 +307,12 @@ fn note_removal(entry: &mut ChangeEntry, data: &dyn AbstractData, path: &Path) {
                 if field != FieldKey::Specifier.as_str() {
                     note_field(entry, &field);
                 }
+            }
+        }
+    } else {
+        for field in [FieldKey::TargetPaths.as_str(), FieldKey::ConnectionPaths.as_str()] {
+            if data.has_field(path, field) {
+                note_field(entry, field);
             }
         }
     }
@@ -512,6 +525,26 @@ mod tests {
         assert!(entry.flags.contains(ChangeFlags::REMOVE_INERT_PRIM));
         assert!(entry.info_changed.iter().any(|t| references(t)));
         assert!(!entry.info_changed.iter().any(|t| specifier(t)));
+    }
+
+    /// Erasing a relationship spec surfaces its `targetPaths` (and the
+    /// relationship-target shape flag), so removing the strongest opinion
+    /// restales the composed targets a query memoized — symmetric with the add.
+    #[test]
+    fn erased_relationship_records_targets() {
+        let mut base = Data::new();
+        base.create_spec(p("/P.rel"), SpecType::Relationship);
+        base.set_field(
+            &p("/P.rel"),
+            FieldKey::TargetPaths.as_str(),
+            Value::PathListOp(PathListOp::default()),
+        );
+
+        let cl = derive(base, |c| c.erase_spec(&p("/P.rel")));
+        let entry = &cl.entries()[0].1;
+        assert!(entry.flags.contains(ChangeFlags::REMOVE_PROPERTY));
+        assert!(entry.flags.contains(ChangeFlags::CHANGE_RELATIONSHIP_TARGETS));
+        assert!(entry.info_changed.iter().any(|t| t == FieldKey::TargetPaths.as_str()));
     }
 
     /// Replacing an existing `over` (which carried a composition arc) by
