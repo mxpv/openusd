@@ -57,6 +57,26 @@ pub fn compose_over(base: &mut HashMap<String, sdf::Value>, overlay: &HashMap<St
     base.extend(overlay.iter().map(|(k, v)| (k.clone(), v.clone())));
 }
 
+/// Composes the `expressionVariables` authored across `layers`, given strongest
+/// first, the strongest opinion winning. Reads each layer's own dictionary and
+/// overlays them weakest-first (so the strongest is applied last, per
+/// [`compose_over`]) — the composed set both a layer stack's own sublayer
+/// expansion and an arc-inherited context resolve `${VAR}` against (C++
+/// `PcpExpressionVariables`).
+pub fn compose_layer_variables<'a, I>(strongest_first: I) -> HashMap<String, sdf::Value>
+where
+    I: IntoIterator<Item = &'a dyn sdf::AbstractData>,
+    I::IntoIter: DoubleEndedIterator,
+{
+    let mut vars = HashMap::new();
+    for data in strongest_first.into_iter().rev() {
+        if let Ok(dict) = read_expression_variables(data) {
+            compose_over(&mut vars, &dict);
+        }
+    }
+    vars
+}
+
 /// Evaluates an expression-valued asset path against `vars`, or returns the path
 /// unchanged when it is not a backtick expression. The expression must evaluate
 /// to a string (C++ `Pcp` resolves variable expressions in reference/payload

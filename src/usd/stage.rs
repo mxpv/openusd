@@ -1815,7 +1815,18 @@ impl Stage {
         let mut cache = self.cache.borrow_mut();
         let change = mutate(&mut graph)?;
         // The mutation already rebuilt the graph's sublayer stacks, relocates, and
-        // cycle diagnostics; only the cache needs work.
+        // cycle diagnostics; only the cache needs work. Removing a session variable
+        // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
+        // already-interned layer out of the stack.
+        //
+        // Runtime session-variable changes that newly *select* an unopened root
+        // `${VAR}` sublayer — a mute exposing the root's own variable, or a session
+        // `expressionVariables` edit (which reaches the cache through the change
+        // pipeline, not here) — do not load it: they resolve root sublayers only
+        // against already-interned layers. The open-time builder path loads the
+        // initial selection (see `StageBuilder::session_expression_variables`);
+        // reloading a newly-selected root sublayer at runtime would need an on-demand
+        // sublayer open through the graph, left as remaining work.
         cache.invalidate_layers(&change.affected);
         Some(change.changed)
     }
@@ -2747,7 +2758,13 @@ impl StageBuilder {
     /// so they hold the strongest opinions.
     pub fn open(self, root_path: &str) -> Result<Stage> {
         let session = self.collect_optional_session_layers()?;
-        let root = self.collect_layers(root_path)?;
+        // Seed the root collection with the session layers' composed expression
+        // variables (muted ones excluded): the session is part of the root layer
+        // stack, so a `${VAR}` root sublayer the session resolves must be loaded
+        // here — composition later resolves it against the same variables but can
+        // only intern a layer this collection opened.
+        let session_vars = self.session_expression_variables(root_path, &session.layers);
+        let root = self.collect_layers(root_path, &session_vars)?;
         let session_layer_count = session.layers.len();
         let layers = session.layers.into_iter().chain(root.layers).collect();
         let errors = session.errors.into_iter().chain(root.errors).collect();
@@ -2790,13 +2807,15 @@ impl StageBuilder {
     /// targets are never demanded. A missing sublayer is recorded as an
     /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error
     /// rather than aborting the open.
-    fn collect_layers(&self, path: &str) -> Result<CollectedLayers> {
+    fn collect_layers(&self, path: &str, ancestor_expr_vars: &HashMap<String, sdf::Value>) -> Result<CollectedLayers> {
         let errors = RefCell::new(Vec::new());
-        // The root stack has no referrer, so no inherited expression variables.
+        // `ancestor_expr_vars` are the expression variables the enclosing context
+        // contributes: the session layers' composed set for the root stack, empty
+        // for the session stack itself (nothing sublayers it).
         let layers = self.registry.open_stack(
             path,
             None,
-            &HashMap::new(),
+            ancestor_expr_vars,
             false,
             &|error| {
                 errors.borrow_mut().push(error.into());
@@ -2813,9 +2832,74 @@ impl StageBuilder {
     /// Collect the configured session layer (and its dependencies), if any.
     fn collect_optional_session_layers(&self) -> Result<CollectedLayers> {
         match self.session_layer.as_deref() {
-            Some(p) => self.collect_layers(p),
+            Some(p) => self.collect_layers(p, &HashMap::new()),
             None => Ok(CollectedLayers::default()),
         }
+    }
+
+    /// The composed expression variables of the *effective* session stack — the
+    /// collected session layers minus any muted layer and the whole subtree it
+    /// sublayers. A muted session opinion must not select the root's `${VAR}`
+    /// sublayers, matching the graph's muted-aware resolution once the stage is
+    /// built (the graph would otherwise re-resolve the sublayer to one this
+    /// collection never opened). Pruning uses the shared
+    /// [`muted_subtree`](pcp::muted_subtree) rule the graph applies over its
+    /// resolved edges, walked here over the collected layers' authored sublayer
+    /// paths so the two agree on the effective stack. Mutes and sublayer paths are
+    /// canonicalized against the root / their layer the way the interned
+    /// identifiers were, so any spelling of a muted layer is excluded. Expression-
+    /// valued session sublayers are evaluated with the variables inherited from
+    /// their session ancestors.
+    fn session_expression_variables(
+        &self,
+        root_path: &str,
+        session_layers: &[sdf::Layer],
+    ) -> HashMap<String, sdf::Value> {
+        if self.muted.is_empty() {
+            return sdf::expr::compose_layer_variables(session_layers.iter().map(|l| l.data()));
+        }
+        let root_anchor = self
+            .registry
+            .resolve_layer(&self.registry.create_identifier(root_path, None));
+        let muted: HashSet<String> = self
+            .muted
+            .iter()
+            .map(|m| match root_anchor.as_ref() {
+                Some(a) => self.registry.create_identifier(m, Some(a)),
+                None => m.clone(),
+            })
+            .collect();
+        let mut scope = HashSet::new();
+        for layer in session_layers {
+            scope.insert(layer.identifier().to_string());
+        }
+        let mut contexts: HashMap<String, HashMap<String, sdf::Value>> = HashMap::new();
+        let mut children: HashMap<String, Vec<String>> = HashMap::new();
+        for layer in session_layers {
+            let inherited = contexts.get(layer.identifier()).cloned().unwrap_or_default();
+            let mut vars = sdf::expr::read_expression_variables(layer.data())
+                .map(|vars| vars.into_owned())
+                .unwrap_or_default();
+            sdf::expr::compose_over(&mut vars, &inherited);
+            let layer_children: Vec<String> = sdf::LayerRegistry::sublayer_paths(layer.data())
+                .iter()
+                .filter_map(|sub| sdf::expr::evaluate_asset_path(sub, &vars).ok())
+                .map(|sub| self.registry.create_identifier_anchored(&sub, layer.real_path()))
+                .collect();
+            for child in &layer_children {
+                contexts.entry(child.clone()).or_insert_with(|| vars.clone());
+            }
+            children.insert(layer.identifier().to_string(), layer_children);
+        }
+        let pruned = pcp::muted_subtree(&scope, scope.iter().filter(|id| muted.contains(*id)).cloned(), |id| {
+            children.get(id).cloned().unwrap_or_default()
+        });
+        sdf::expr::compose_layer_variables(
+            session_layers
+                .iter()
+                .filter(|l| !pruned.contains(l.identifier()))
+                .map(|l| l.data()),
+        )
     }
 
     /// Assemble a [`Stage`] from already-collected layers. Shared
@@ -4130,6 +4214,41 @@ def "T" {
             stage.attribute("/A.x").get::<f64>()?,
             Some(2.0),
             "editing WHICH re-expands the sublayer to b.usda and recomposes the cached index"
+        );
+        Ok(())
+    }
+
+    /// A `${VAR}` sublayer in the root layer resolves against an expression
+    /// variable authored on the *session* layer: the session is part of the root
+    /// layer stack, so its variables seed the root's sublayer expansion — the same
+    /// composition a `${VAR}` reference already gets.
+    #[test]
+    fn session_var_resolves_sublayer() -> Result<()> {
+        let mut session = sdf::Layer::new_in_memory("session.usda");
+        edit_layer(&mut session, |e| {
+            e.pseudo_root_mut()
+                .unwrap()
+                .set_expression_variables(HashMap::from([("WHICH".to_string(), sdf::Value::String("a".into()))]));
+        });
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${WHICH}.usda"`"#]);
+        });
+        let stage = Stage::builder().make_stage(
+            vec![
+                session,
+                root,
+                opinion_layer("a.usda", 1.0)?,
+                opinion_layer("b.usda", 2.0)?,
+            ],
+            1,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            stage.attribute("/A.x").get::<f64>()?,
+            Some(1.0),
+            "the root sublayer expression resolves against the session layer's WHICH variable"
         );
         Ok(())
     }

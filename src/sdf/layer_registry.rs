@@ -156,7 +156,7 @@ impl LayerRegistry {
     /// `.usd` claimant keeps the identity default, so which one is picked does
     /// not change the real path; a future `.usd` format with a non-identity
     /// `resolve_layer` would need the content sniff here too.
-    fn resolve_layer(&self, identifier: &str) -> Option<ar::ResolvedPath> {
+    pub(crate) fn resolve_layer(&self, identifier: &str) -> Option<ar::ResolvedPath> {
         let resolved = self.resolver.resolve(identifier)?;
         match Self::find_by_extension(&resolved.extension()) {
             Some(format) => format.resolve_layer(self.resolver.as_ref(), &resolved),
@@ -408,7 +408,7 @@ impl LayerRegistry {
     }
 
     /// A layer's `subLayers` asset paths (empty when it declares none).
-    fn sublayer_paths(data: &dyn sdf::AbstractData) -> Vec<String> {
+    pub(crate) fn sublayer_paths(data: &dyn sdf::AbstractData) -> Vec<String> {
         sdf::PseudoRootSpecRef::get(data)
             .and_then(|root| root.sublayers())
             .unwrap_or_default()

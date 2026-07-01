@@ -1012,6 +1012,133 @@ fn open_with_session() -> Result<Stage> {
     Stage::builder().session_layer(&session).open(&root)
 }
 
+/// A `${VAR}` sublayer in the root layer resolves against an expression variable
+/// authored only on the session layer, and the named layer is loaded from disk:
+/// the session is part of the root layer stack, so its variables seed the root's
+/// sublayer collection, not just an already-interned lookup.
+#[test]
+fn session_var_loads_sublayer() -> Result<()> {
+    let root = fixture_path("session_expr_sublayer/root.usda");
+    let session = fixture_path("session_expr_sublayer/session.usda");
+    let stage = Stage::builder().session_layer(&session).open(&root)?;
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        Some(1.0),
+        "the session WHICH variable loads and resolves the root's expression sublayer"
+    );
+    Ok(())
+}
+
+/// Muting a session layer at open time prunes its whole sublayer subtree from the
+/// variables that drive root `${VAR}` sublayer collection, not just the exact
+/// layer: `strong.usda` (muted) sublayers `vars.usda` (WHICH="b"), `weak.usda`
+/// authors WHICH="a", so muting `strong` must compose WHICH="a" and open a.usda —
+/// the weaker opinion's sublayer — not the muted subtree's b.usda.
+#[test]
+fn muted_session_collects_sublayer() -> Result<()> {
+    let root = fixture_path("session_expr_mute/root.usda");
+    let session = fixture_path("session_expr_mute/session.usda");
+    let stage = Stage::builder()
+        .session_layer(&session)
+        .mute([fixture_path("session_expr_mute/strong.usda")])
+        .open(&root)?;
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        Some(1.0),
+        "muting the stronger session opinion composes the weaker's root sublayer (a.usda)"
+    );
+    Ok(())
+}
+
+/// A muted session subtree is pruned after resolving its expression-valued
+/// sublayer paths with the session stack variables. The descendant `vars.usda`
+/// must not contribute `WHICH=b` after `strong.usda` is muted.
+#[test]
+fn muted_session_expr_subtree() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let session = dir.path().join("session.usda");
+    let strong = dir.path().join("strong.usda");
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n")?;
+    std::fs::write(
+        &session,
+        "#usda 1.0\n(\n    expressionVariables = {\n        string CHILD = \"vars\"\n    }\n    subLayers = [@strong.usda@, @weak.usda@]\n)\n",
+    )?;
+    std::fs::write(&strong, "#usda 1.0\n(\n    subLayers = [@`\"${CHILD}.usda\"`@]\n)\n")?;
+    std::fs::write(
+        dir.path().join("vars.usda"),
+        "#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"b\"\n    }\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("weak.usda"),
+        "#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"a\"\n    }\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("a.usda"),
+        "#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("b.usda"),
+        "#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n",
+    )?;
+
+    let stage = Stage::builder()
+        .session_layer(session.to_str().expect("utf-8 temp path"))
+        .mute([strong.to_str().expect("utf-8 temp path")])
+        .open(root.to_str().expect("utf-8 temp path"))?;
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        Some(1.0),
+        "the muted expression subtree's WHICH=b does not select b.usda"
+    );
+    Ok(())
+}
+
+/// Open-time muted session paths are anchored against the resolved root layer,
+/// not the bare package path. A packaged root whose default layer is
+/// `dir/root.usda` therefore mutes `dir/strong.usda` for a relative
+/// `mute("strong.usda")` request.
+#[test]
+fn packaged_root_mute_anchor() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let package = dir.path().join("package.usdz");
+    {
+        let mut writer = ArchiveWriter::create(&package)?;
+        writer.add_layer(
+            "dir/root.usda",
+            b"#usda 1.0\n(\n    subLayers = [@`\"${WHICH}.usda\"`@]\n)\n",
+        )?;
+        writer.add_layer(
+            "dir/session.usda",
+            b"#usda 1.0\n(\n    subLayers = [@strong.usda@, @weak.usda@]\n)\n",
+        )?;
+        writer.add_layer(
+            "dir/strong.usda",
+            b"#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"b\"\n    }\n)\n",
+        )?;
+        writer.add_layer(
+            "dir/weak.usda",
+            b"#usda 1.0\n(\n    expressionVariables = {\n        string WHICH = \"a\"\n    }\n)\n",
+        )?;
+        writer.add_layer("dir/a.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 1\n}\n")?;
+        writer.add_layer("dir/b.usda", b"#usda 1.0\ndef \"A\" {\n    custom double x = 2\n}\n")?;
+        writer.finish()?;
+    }
+
+    let package = package.to_string_lossy();
+    let session = format!("{package}[dir/session.usda]");
+    let stage = Stage::builder()
+        .session_layer(session)
+        .mute(["strong.usda"])
+        .open(&package)?;
+    assert_eq!(
+        stage.attribute("/A.x").get::<f64>()?,
+        Some(1.0),
+        "mute(\"strong.usda\") is anchored relative to the packaged root layer"
+    );
+    Ok(())
+}
+
 /// A stage opened without a session layer should report no session layer.
 #[test]
 fn no_session_layer_by_default() -> Result<()> {

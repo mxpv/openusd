@@ -1567,14 +1567,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// Reads the `expressionVariables` authored by a layer stack's own layers,
     /// composing them across the stack with the strongest member winning.
     fn layer_stack_expr_vars(&self, ambient: LayerStackId) -> HashMap<String, Value> {
-        let mut vars = HashMap::new();
-        // Members are strongest-first; apply weakest-first so the strongest wins.
-        for &(layer, _) in self.inputs.stack.layer_stack(ambient).iter().rev() {
-            if let Ok(dict) = expr::read_expression_variables(self.inputs.stack.layer(layer).data()) {
-                expr::compose_over(&mut vars, &dict);
-            }
-        }
-        vars
+        expr::compose_layer_variables(
+            self.inputs
+                .stack
+                .layer_stack(ambient)
+                .iter()
+                .map(|&(layer, _)| self.inputs.stack.layer(layer).data()),
+        )
     }
 
     /// Composes the class-based arcs (inherits or specializes) authored at

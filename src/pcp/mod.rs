@@ -298,7 +298,7 @@ use crate::sdf::{self, Path, Value};
 
 pub(crate) use change::{Changes, LayerStackChanges};
 pub(crate) use index_cache::{AttributeValueSource, IndexCache};
-pub(crate) use layer_graph::{LayerGraph, MuteChange};
+pub(crate) use layer_graph::{muted_subtree, LayerGraph, MuteChange};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::LayerStackId;
 pub use mapping::MapFunction;
