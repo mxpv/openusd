@@ -123,12 +123,15 @@
 //!      `active`) and by non-inert prim adds/removes.
 //!    - Prim — local rebuild only, descendants survive. Currently collapsed
 //!      into significant; the field exists for a future finer-grained split.
-//!    - Spec — graph is fine, only the spec stack changed. No-op while the
-//!      cache doesn't memoize the stacks; reserved for the future split.
+//!    - Spec — graph topology is fine, only a spec stack changed. An inert spec
+//!      add/remove rescans `has_specs` in place over the memoized per-node spec
+//!      stack and keeps the index.
 //!
-//!    Layer-stack-tier flags (sublayers, sublayer offsets, `layerRelocates`,
-//!    `defaultPrim`) cause the whole stack to be marked significant — every
-//!    cached index is dropped because composition topology may have shifted.
+//!    Layer-stack-tier flags (`subLayers`, sublayer offsets,
+//!    `timeCodesPerSecond`, `expressionVariables`, `layerRelocates`,
+//!    `defaultPrim`) recompose the affected layer stacks and drop only the
+//!    indices that read them (`IndexCache::invalidate_layers`), not the whole
+//!    cache.
 //!
 //! 3. [`Changes::apply`] surgically removes the affected entries from the
 //!    cache. Indices rebuild lazily on next access.
@@ -140,9 +143,11 @@
 //! ancestors of the changed site, since an arc at `/Foo` makes `/Foo/Bar`'s
 //! composition transitively dependent on `/Foo`.
 //!
-//! Property-tier authoring (attribute values, time samples, relationship
-//! targets) never invalidates the prim graph: those queries read live
-//! layer data on every call.
+//! Property-tier authoring (attribute values, time samples) never invalidates
+//! the prim graph: those queries read live layer data on every call. A
+//! `targetPaths`/`connectionPaths` edit likewise leaves the graph intact,
+//! clearing only the per-property resolved-target memo (keyed by path and
+//! target kind) so resolved targets recompute on next read.
 //!
 //! Layer muting ([`Stage::mute_layer`](crate::usd::Stage::mute_layer) /
 //! [`unmute_layer`](crate::usd::Stage::unmute_layer)) recomposes incrementally
@@ -234,13 +239,14 @@
 //!   already composed during indexing. Storing the composed set on the index
 //!   (or each node) would remove the duplicate walk and the risk of the two
 //!   diverging.
-//! - Intra-instance shared-sublayer context: building a contextual stack's
+//! - Contextual-stack shared-sublayer context: building a contextual stack's
 //!   members (`LayerGraph::build_stack_members` → `compose_edges`) gates its walk
-//!   on a per-`LayerId` `visited` set, so within one instance a sublayer reached
-//!   through two different sublayer ancestries keeps the first ancestry's
-//!   expression-variable context. Per-context fidelity holds *across* arcs (each
-//!   gets its own instance) but not for a sublayer diamond *within* a single
-//!   instance; a per-`(layer, context)` edge walk would close it.
+//!   on a per-`LayerId` `visited` set, so a sublayer reached through two different
+//!   sublayer ancestries within one contextual stack keeps the first ancestry's
+//!   expression-variable context. Per-context fidelity holds *across* arcs — each
+//!   reference/payload target, and the session-seeded root stack, gets its own
+//!   instance — but not for a sublayer diamond *within* a single contextual stack;
+//!   a per-`(layer, context)` edge walk would close it.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
@@ -272,6 +278,15 @@
 //!   suppress it. A reference/payload target is reached only at query time, after
 //!   the muted set is seeded, so a muted one is recognized at the demand point and
 //!   reported [`Error::MutedAssetPath`].
+//! - Runtime session-selected root sublayers: a session `expressionVariables`
+//!   edit, or a mute that exposes the root layer's own variable, can newly select
+//!   a root `${VAR}` sublayer the initial session variables never opened. Runtime
+//!   session-variable changes resolve root sublayers only against already-interned
+//!   layers (`Stage::apply_mute`), so a newly-selected layer is not loaded — the
+//!   open-time builder path (`StageBuilder::session_expression_variables`) loads
+//!   the initial selection, and a mute that *removes* a variable drops the sublayer
+//!   it selected. Loading a newly-selected one at runtime needs an on-demand
+//!   sublayer open through the graph.
 //!
 //! See <https://openusd.org/release/glossary.html#livrps-strength-ordering>
 
