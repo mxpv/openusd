@@ -424,6 +424,16 @@ pub(crate) struct PrimIndexGraph {
     /// layer-muting drop). This serves the recomposition fanout; the skipped arc is
     /// separately surfaced as an [`Error::MutedAssetPath`](super::Error::MutedAssetPath).
     pub(crate) muted_external_targets: Vec<LayerId>,
+    /// Canonical identifiers of reference/payload targets a composition arc
+    /// resolved to but skipped because the target was muted *before it was ever
+    /// loaded* — the target has no interned [`LayerId`], so
+    /// [`muted_external_targets`](Self::muted_external_targets) cannot record it.
+    /// The identifier is the one the muted set matched (C++ `Pcp_MutedLayers`), so
+    /// unmuting that same canonical identifier fans the invalidation back to this
+    /// index even though its arc grafted no node and its target was never interned.
+    /// Like `muted_external_targets`, the skipped arc is separately surfaced as an
+    /// [`Error::MutedAssetPath`](super::Error::MutedAssetPath).
+    pub(crate) muted_unloaded_targets: Vec<String>,
 }
 
 impl PrimIndexGraph {

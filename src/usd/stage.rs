@@ -789,9 +789,41 @@ impl Stage {
     /// cache's per-prim build errors. Prim indices are built lazily, so the
     /// per-prim half is a snapshot of errors discovered by stage queries
     /// performed so far.
+    ///
+    /// A muted branch's missing/unreadable sublayer, which the loader recorded raw,
+    /// is filtered out here against the current composed state — the referring layer
+    /// contributes nothing, or the sublayer itself is muted — so muting suppresses
+    /// the diagnostic and unmuting restores it, without the one-shot error ever
+    /// being discarded.
     pub fn composition_errors(&self) -> Vec<pcp::Error> {
-        let mut errors = self.layers().errors();
-        errors.extend(self.cache().composition_errors());
+        // Drain pending edits once, then take both borrows directly: routing through
+        // the `layers()`/`cache()` accessors would each re-run `process_pending`, and
+        // holding the graph borrow across the second run risks a re-entrant
+        // borrow-mut if a sink re-queues an edit during notification.
+        self.process_pending();
+        let graph = self.layers.borrow();
+        let mut errors = graph.errors();
+        let cache_errors = self.cache.borrow().composition_errors();
+        // Only a muted stage suppresses anything, and only sublayer diagnostics; skip
+        // building the effective-layer set when there is nothing to filter.
+        if !graph.has_muted_layers() || !cache_errors.iter().any(is_sublayer_error) {
+            errors.extend(cache_errors);
+            return errors;
+        }
+        // The effectively-composed layers: every composed stack's members (the root
+        // stack and each interned reference/payload target stack), which muting has
+        // pruned muted subtrees from. This is a pure function of the muted set and
+        // the graph, so a diagnostic's visibility is deterministic and does not
+        // flicker with cache warmth. A still-interned target whose only arc became
+        // muted keeps its diagnostic — a deliberate conservative over-report (see the
+        // pcp "Muted sublayer diagnostics" remaining-work note), chosen over hiding a
+        // valid error because an unrelated invalidation evicted the proving index.
+        let effective = graph.effective_layers();
+        errors.extend(
+            cache_errors
+                .into_iter()
+                .filter(|error| graph.sublayer_error_contributes(error, &effective)),
+        );
         errors
     }
 
@@ -1817,7 +1849,10 @@ impl Stage {
         // The mutation already rebuilt the graph's sublayer stacks, relocates, and
         // cycle diagnostics; only the cache needs work. Removing a session variable
         // drops the root `${VAR}` sublayer it selected — the graph re-resolves the
-        // already-interned layer out of the stack.
+        // already-interned layer out of the stack. Dropping the affected indices by
+        // both the toggled layer's fanout and its canonical identifier reaches a
+        // referrer that skipped this target while it was muted-and-never-loaded, so
+        // unmuting recomposes it and the load barrier finally opens the target.
         //
         // Runtime session-variable changes that newly *select* an unopened root
         // `${VAR}` sublayer — a mute exposing the root's own variable, or a session
@@ -1827,7 +1862,7 @@ impl Stage {
         // initial selection (see `StageBuilder::session_expression_variables`);
         // reloading a newly-selected root sublayer at runtime would need an on-demand
         // sublayer open through the graph, left as remaining work.
-        cache.invalidate_layers(&change.affected);
+        cache.invalidate_muting(&change.affected, &change.changed);
         Some(change.changed)
     }
 
@@ -2630,6 +2665,15 @@ struct CollectedLayers {
     errors: Vec<pcp::Error>,
 }
 
+/// Whether a composition error is a sublayer load diagnostic — the only kind
+/// [`Stage::composition_errors`] filters against the muted-aware effective set.
+fn is_sublayer_error(error: &pcp::Error) -> bool {
+    matches!(
+        error,
+        pcp::Error::UnresolvedSublayer { .. } | pcp::Error::MalformedSublayer { .. }
+    )
+}
+
 impl StageBuilder {
     fn new() -> Self {
         Self {
@@ -2806,7 +2850,9 @@ impl StageBuilder {
     /// mask prunes them naturally: a culled prim is never composed, so its arc
     /// targets are never demanded. A missing sublayer is recorded as an
     /// [`UnresolvedSublayer`](pcp::Error::UnresolvedSublayer) collection error
-    /// rather than aborting the open.
+    /// rather than aborting the open; one under a muted branch is filtered out
+    /// later, once the muted-aware graph exists (see
+    /// [`StageBuilder::make_stage`](Self::make_stage)).
     fn collect_layers(&self, path: &str, ancestor_expr_vars: &HashMap<String, sdf::Value>) -> Result<CollectedLayers> {
         let errors = RefCell::new(Vec::new());
         // `ancestor_expr_vars` are the expression variables the enclosing context
@@ -2837,6 +2883,29 @@ impl StageBuilder {
         }
     }
 
+    /// The builder's requested mutes, canonicalized against the root layer the way
+    /// the graph's muted set is (C++ `Pcp_MutedLayers::_GetCanonicalLayerId`): with
+    /// a resolvable root anchor each spelling is resolved to the identifier its
+    /// layer interns under, so any spelling of one layer collapses to one entry; an
+    /// in-memory or anonymous root has no anchor, so the spelling passes through.
+    /// Lets collection test a sublayer's interned identifier for muting before the
+    /// graph exists. Empty when nothing is muted.
+    fn canonical_muted_set(&self, root_path: &str) -> HashSet<String> {
+        if self.muted.is_empty() {
+            return HashSet::new();
+        }
+        let root_anchor = self
+            .registry
+            .resolve_layer(&self.registry.create_identifier(root_path, None));
+        self.muted
+            .iter()
+            .map(|m| match root_anchor.as_ref() {
+                Some(a) => self.registry.create_identifier(m, Some(a)),
+                None => m.clone(),
+            })
+            .collect()
+    }
+
     /// The composed expression variables of the *effective* session stack — the
     /// collected session layers minus any muted layer and the whole subtree it
     /// sublayers. A muted session opinion must not select the root's `${VAR}`
@@ -2858,17 +2927,7 @@ impl StageBuilder {
         if self.muted.is_empty() {
             return sdf::expr::compose_layer_variables(session_layers.iter().map(|l| l.data()));
         }
-        let root_anchor = self
-            .registry
-            .resolve_layer(&self.registry.create_identifier(root_path, None));
-        let muted: HashSet<String> = self
-            .muted
-            .iter()
-            .map(|m| match root_anchor.as_ref() {
-                Some(a) => self.registry.create_identifier(m, Some(a)),
-                None => m.clone(),
-            })
-            .collect();
+        let muted = self.canonical_muted_set(root_path);
         let mut scope = HashSet::new();
         for layer in session_layers {
             scope.insert(layer.identifier().to_string());
@@ -2973,10 +3032,10 @@ impl StageBuilder {
             // Seed the graph's muted set (it drops any root-layer request and
             // re-resolves identifiers on each later rebuild). The cache is still
             // empty (composition is lazy), so no cache invalidation is needed yet.
-            // TODO: a missing sublayer under a muted layer was already recorded as
-            // an `UnresolvedSublayer` collection error before this seeding, so
-            // `composition_errors` still reports a muted branch. Apply the muted
-            // set during collection to suppress those.
+            // The raw collection diagnostics stay as the loader recorded them; the
+            // muted ones are filtered out at report time (`Stage::composition_errors`)
+            // against the current composed state, so an unmute restores a diagnostic
+            // a muted branch had hidden.
             stage.layers.borrow_mut().set_muted_identifiers(self.muted);
         }
         stage

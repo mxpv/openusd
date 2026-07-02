@@ -108,6 +108,21 @@ fn fwd_targets(stage: &Stage, rel: &sdf::Path) -> Result<Vec<sdf::Path>> {
     stage.relationship(rel).forwarded_targets()
 }
 
+/// Number of `UnresolvedSublayer` collection diagnostics the stage reports for
+/// `asset_path` — the assertion the muted-diagnostic tests share.
+fn unresolved_sublayer_count(stage: &Stage, asset_path: &str) -> usize {
+    stage
+        .composition_errors()
+        .iter()
+        .filter(|e| matches!(e, pcp::Error::UnresolvedSublayer { asset_path: a, .. } if a == asset_path))
+        .count()
+}
+
+/// Whether the stage reports an `UnresolvedSublayer` for `asset_path`.
+fn reports_unresolved_sublayer(stage: &Stage, asset_path: &str) -> bool {
+    unresolved_sublayer_count(stage, asset_path) > 0
+}
+
 // --- Basic stage opening (vendor/usd-wg-assets) ---
 
 #[test]
@@ -128,6 +143,276 @@ fn missing_sublayer_retained() -> Result<()> {
         } if asset_path == "missing.usda" && introduced_by.ends_with("root.usda")
     )));
     assert!(stage.prim("/Root").is_valid()?);
+    Ok(())
+}
+
+/// A missing sublayer under a muted branch raises no diagnostic: the muted layer
+/// and its whole subtree contribute nothing to composition, so its absent
+/// descendants are not stage errors. The same missing sublayer that surfaces as
+/// `UnresolvedSublayer` without the mute is filtered out with it.
+#[test]
+fn muted_branch_suppresses_missing() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let muted = dir.path().join("muted.usda");
+    // `root` sublayers `muted`, which in turn sublayers a file that does not exist.
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@muted.usda@]\n)\n")?;
+    std::fs::write(&muted, "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n")?;
+    let root_path = root.to_str().unwrap();
+
+    // Without muting, the missing sublayer under `muted` is reported.
+    let plain = Stage::open(root_path)?;
+    assert!(
+        reports_unresolved_sublayer(&plain, "missing.usda"),
+        "an unmuted missing sublayer must be reported, got {:?}",
+        plain.composition_errors()
+    );
+
+    // Muting `muted.usda` prunes its subtree, so its missing sublayer is silent.
+    let muted_stage = Stage::builder().mute(["muted.usda"]).open(root_path)?;
+    assert!(
+        !reports_unresolved_sublayer(&muted_stage, "missing.usda"),
+        "a missing sublayer under a muted branch must raise no diagnostic, got {:?}",
+        muted_stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// Muting a layer that is itself a missing sublayer suppresses its
+/// `UnresolvedSublayer` diagnostic — a muted layer contributes nothing whether it
+/// resolves or not, so its absence is not reported.
+#[test]
+fn muted_missing_sublayer_suppressed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    std::fs::write(&root, "#usda 1.0\n(\n    subLayers = [@gone.usda@]\n)\n")?;
+    let root_path = root.to_str().unwrap();
+
+    let plain = Stage::open(root_path)?;
+    assert!(
+        reports_unresolved_sublayer(&plain, "gone.usda"),
+        "an unmuted missing sublayer is reported"
+    );
+
+    let muted = Stage::builder().mute(["gone.usda"]).open(root_path)?;
+    assert!(
+        !reports_unresolved_sublayer(&muted, "gone.usda"),
+        "muting the missing sublayer suppresses its diagnostic, got {:?}",
+        muted.composition_errors()
+    );
+    Ok(())
+}
+
+/// A missing sublayer reached through both a muted and an unmuted branch of one
+/// stack is still reported. The muted branch is declared (and loaded) first, but
+/// the diagnostic decision is made from the graph's reachability, not the load
+/// order, so the unmuted branch that genuinely needs it keeps its
+/// `UnresolvedSublayer`.
+#[test]
+fn muted_diamond_keeps_active() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // `root` sublayers `muted` (declared first, so walked first) then `active`;
+    // both sublayer the same missing layer.
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@muted.usda@, @active.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("muted.usda"),
+        "#usda 1.0\n(\n    subLayers = [@shared_missing.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("active.usda"),
+        "#usda 1.0\n(\n    subLayers = [@shared_missing.usda@]\n)\n",
+    )?;
+    let root_path = dir.path().join("root.usda");
+    let root_path = root_path.to_str().unwrap();
+
+    // With `muted.usda` muted, its reference to the missing layer is suppressed,
+    // but `active.usda` still contributes it, so the diagnostic must survive.
+    let stage = Stage::builder().mute(["muted.usda"]).open(root_path)?;
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "shared_missing.usda"),
+        1,
+        "the unmuted branch's missing sublayer must be reported exactly once, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A *readable, shared* layer reached through both a muted and an unmuted branch
+/// keeps the diagnostics for its own missing descendants. `shared` loads once
+/// (deduplicated by identity), and its missing sublayer is reported because
+/// `shared` is reachable through the unmuted `active` branch, regardless of which
+/// branch reaches it first.
+#[test]
+fn muted_diamond_keeps_descendant() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // Both `muted` (walked first) and `active` sublayer the same readable `shared`
+    // layer, which in turn sublayers a missing one.
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@muted.usda@, @active.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("muted.usda"),
+        "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("active.usda"),
+        "#usda 1.0\n(\n    subLayers = [@shared.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("shared.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n",
+    )?;
+    let root_path = dir.path().join("root.usda");
+    let root_path = root_path.to_str().unwrap();
+
+    let stage = Stage::builder().mute(["muted.usda"]).open(root_path)?;
+    assert!(
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the shared layer is reachable through the unmuted branch, so its missing sublayer must be reported, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// Muting a branch suppresses its missing-sublayer diagnostic and unmuting
+/// restores it. The loader records the raw diagnostic once; filtering happens at
+/// report time against the current composed state, so the one-shot error is never
+/// discarded and reappears when the branch rejoins composition.
+#[test]
+fn unmute_restores_diagnostic() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@muted.usda@]\n)\n",
+    )?;
+    std::fs::write(
+        dir.path().join("muted.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n)\n",
+    )?;
+    let root_path = dir.path().join("root.usda");
+    let root_path = root_path.to_str().unwrap();
+
+    let stage = Stage::builder().mute(["muted.usda"]).open(root_path)?;
+    assert!(
+        !reports_unresolved_sublayer(&stage, "missing.usda"),
+        "while muted the missing sublayer must be silent, got {:?}",
+        stage.composition_errors()
+    );
+
+    stage.unmute_layer("muted.usda");
+    assert!(
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "unmuting the branch must restore its missing-sublayer diagnostic, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// `composition_errors()` does not flicker with cache warmth: a reference
+/// target's missing-sublayer diagnostic stays reported after an unrelated mute
+/// evicts the prim index that first reached the target. The effective set is the
+/// composed stacks, not the currently-cached indices, so an eviction cannot hide a
+/// valid diagnostic. (Muting the arc's own authoring layer likewise keeps the
+/// diagnostic — a deliberate conservative over-report; see the pcp "Muted sublayer
+/// diagnostics" remaining-work note.)
+#[test]
+fn muted_diagnostic_survives_eviction() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    // `/A` references `target` (which has a missing sublayer); the unrelated
+    // sublayer `s` also contributes an opinion to `/A`, so muting `s` evicts `/A`'s
+    // index without touching the `/A -> target` arc authored in the root.
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@s.usda@]\n)\ndef \"A\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("s.usda"),
+        "#usda 1.0\nover \"A\" {\n    custom int x = 1\n}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("target.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"T\"\n)\ndef \"T\" {}\n",
+    )?;
+    let root_path = dir.path().join("root.usda");
+    let root_path = root_path.to_str().unwrap();
+
+    let stage = Stage::open(root_path)?;
+    let _ = child_names(&stage, "/A")?;
+    assert!(
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the reached target's missing sublayer is reported"
+    );
+
+    // Muting the unrelated `s` evicts `/A`'s cached index; the diagnostic must not
+    // vanish with the eviction.
+    stage.mute_layer("s.usda");
+    assert!(
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "an unrelated mute evicting the cached index must not hide the diagnostic, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// Muting a reference target that has already loaded suppresses the target's own
+/// missing-sublayer diagnostic: the muted target root resolves to an empty stack,
+/// so it drops out of the composed-stack effective set and no longer counts as an
+/// effective referrer.
+#[test]
+fn mute_loaded_target_suppresses() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\ndef \"A\" (\n    references = @target.usda@\n) {}\n",
+    )?;
+    std::fs::write(
+        dir.path().join("target.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@]\n    defaultPrim = \"T\"\n)\ndef \"T\" {}\n",
+    )?;
+    let root_path = dir.path().join("root.usda");
+    let root_path = root_path.to_str().unwrap();
+
+    let stage = Stage::open(root_path)?;
+    // Composing `/A` loads the target and records its missing sublayer.
+    let _ = child_names(&stage, "/A")?;
+    assert!(
+        reports_unresolved_sublayer(&stage, "missing.usda"),
+        "the loaded target's missing sublayer is reported"
+    );
+
+    stage.mute_layer("target.usda");
+    // Recompose `/A` so it records the now-muted target as an external target.
+    let _ = child_names(&stage, "/A")?;
+    assert!(
+        !reports_unresolved_sublayer(&stage, "missing.usda"),
+        "muting the target suppresses its own sublayer diagnostic, got {:?}",
+        stage.composition_errors()
+    );
+    Ok(())
+}
+
+/// A layer that authors the same missing sublayer twice reports it once. The
+/// loader deduplicates failures per referrer, so a duplicate `subLayers` entry
+/// does not double the diagnostic — while a genuinely separate referrer still
+/// reports its own (see `muted_diamond_keeps_active`).
+#[test]
+fn duplicate_missing_reported_once() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(
+        dir.path().join("root.usda"),
+        "#usda 1.0\n(\n    subLayers = [@missing.usda@, @missing.usda@]\n)\n",
+    )?;
+    let stage = Stage::open(dir.path().join("root.usda").to_str().unwrap())?;
+    assert_eq!(
+        unresolved_sublayer_count(&stage, "missing.usda"),
+        1,
+        "a duplicate missing sublayer is reported once, got {:?}",
+        stage.composition_errors()
+    );
     Ok(())
 }
 
@@ -1788,6 +2073,45 @@ fn muted_reference_target_not_opened() -> Result<()> {
     assert_eq!(
         muted, 1,
         "a muted reference target must surface exactly one MutedAssetPath diagnostic, got {errors:?}"
+    );
+    Ok(())
+}
+
+/// Unmuting a reference target that was muted *before it ever loaded* recomposes
+/// the referrer: the arc was skipped at the demand point (the target never
+/// interned, so the layer-keyed mute fanout cannot find the referrer), and the
+/// unmute fans out by the target's canonical identifier instead — dropping the
+/// stale index so the load barrier finally opens the target on the next query.
+#[test]
+fn unmute_unloaded_reference_recomposes() -> Result<()> {
+    let path = composition_path("references/reference_same_folder.usda");
+    let target = composition_path("references/_stage.usda");
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let muted_id = ar::DefaultResolver::new().create_identifier(&target, None);
+    let stage = Stage::builder()
+        .resolver(RecordingResolver::new(opened.clone()))
+        .mute([muted_id.clone()])
+        .open(&path)?;
+
+    // While muted, the reference is skipped and its target is never opened, so
+    // `/World` composes with no referenced children.
+    assert_eq!(child_names(&stage, "/World")?, Vec::<String>::new());
+    assert!(
+        !opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        "a muted reference target must never be opened"
+    );
+
+    // Unmuting the never-loaded target must recompose `/World`: the load barrier
+    // opens the target on demand and the reference brings in its children.
+    stage.unmute_layer(&muted_id);
+    assert_eq!(
+        child_names(&stage, "/World")?,
+        vec!["Cube"],
+        "unmuting a never-loaded reference target recomposes the referrer"
+    );
+    assert!(
+        opened.borrow().iter().any(|p| p.contains("_stage.usda")),
+        "unmuting must let the load barrier open the now-unmuted target"
     );
     Ok(())
 }

@@ -211,6 +211,17 @@ impl PrimIndex {
         &self.graph.muted_external_targets
     }
 
+    /// Canonical identifiers of reference/payload targets this prim's composition
+    /// resolved to but skipped because they were muted before ever loading. Their
+    /// targets never interned, so — unlike
+    /// [`muted_external_targets`](Self::muted_external_targets) — there is no
+    /// [`LayerId`] to fan an unmute out by; the change machinery keys the fanout on
+    /// these identifiers instead (see
+    /// [`PrimIndexGraph::muted_unloaded_targets`](super::prim_graph::PrimIndexGraph)).
+    pub(crate) fn muted_unloaded_targets(&self) -> &[String] {
+        &self.graph.muted_unloaded_targets
+    }
+
     /// Iterates the spec stack's live contributing sites — those whose node is
     /// neither inert nor culled, the same structural filter
     /// [`nodes`](Self::nodes) applies — each paired with its resolved node. The

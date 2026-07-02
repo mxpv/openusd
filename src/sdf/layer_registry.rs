@@ -217,6 +217,15 @@ impl LayerRegistry {
     /// overlay the root's own `expressionVariables` — the ancestor, closer to the
     /// composed root, wins — and thread down the sublayer stack to evaluate its
     /// expression-valued `subLayers` paths.
+    ///
+    /// This is a pure loader: it reports every load failure raw (a missing or
+    /// unreadable sublayer, at whatever site reaches it) and knows nothing of
+    /// muting. Whether such a failure is a stage diagnostic depends on composition
+    /// reachability — a failure under a muted branch contributes nothing — which the
+    /// composition layer decides once the muted-aware graph exists (see
+    /// [`StageBuilder::make_stage`](crate::usd::Stage)). Keeping the muted policy out
+    /// of the load walk avoids attributing a diagnostic to whichever branch happened
+    /// to reach a shared layer first.
     pub(crate) fn open_stack(
         &self,
         asset_path: &str,
@@ -337,6 +346,13 @@ impl LayerRegistry {
             layers.push(sdf::Layer::new_resolved(identifier.clone(), &resolved, data));
         }
 
+        // Failed sublayer identifiers already reported for *this* layer, so a layer
+        // that authors the same missing/unreadable sublayer twice reports it once.
+        // Kept per referrer (not shared with the pass-wide `visited`) so a failure
+        // suppressed here never hides the same sublayer's diagnostic at another,
+        // active referrer.
+        let mut failed: HashSet<String> = HashSet::new();
+
         // Sublayers (and references) reached from inside a `.usdz` resolve
         // in-package: a package root is anchored to its first layer, so this
         // layer's `resolved` is already package-relative and its sublayer paths
@@ -344,15 +360,19 @@ impl LayerRegistry {
         for sub_path in sub_paths {
             // Evaluate the (possibly expression-valued) sublayer path. An
             // unevaluable expression drops only this sublayer — like an unresolved
-            // or unreadable one — rather than failing the whole stack open.
+            // or unreadable one — rather than failing the whole stack open. It has no
+            // resolved identifier to key on, so it deduplicates per referrer by its
+            // authored path, keeping the three load-failure branches consistent.
             let sub_asset = match expr::evaluate_asset_path(&sub_path, &expr_vars) {
                 Ok(evaluated) => evaluated,
                 Err(reason) => {
-                    on_error(Error::UnreadableAsset {
-                        asset_path: sub_path,
-                        referencing_layer: identifier.clone(),
-                        reason: format!("{reason:#}"),
-                    })?;
+                    if failed.insert(sub_path.clone()) {
+                        on_error(Error::UnreadableAsset {
+                            asset_path: sub_path,
+                            referencing_layer: identifier.clone(),
+                            reason: format!("{reason:#}"),
+                        })?;
+                    }
                     continue;
                 }
             };
@@ -361,24 +381,29 @@ impl LayerRegistry {
             // A sublayer already opened this pass is skipped. One already in the
             // graph is skipped too — except in a reload pass, where it is re-walked
             // to reach the `${VAR}` sublayers the new context now resolves below it
-            // (it is not re-emitted; see the push above). An empty/degenerate
-            // identifier falls through to the resolve below as `UnresolvedAsset`.
-            if visited.contains(&sub_id) || (already_present(&sub_id) && !reload) {
+            // (it is not re-emitted; see the push above). A failure this layer
+            // already reported is skipped too. An empty/degenerate identifier falls
+            // through to the resolve below as `UnresolvedAsset`.
+            if visited.contains(&sub_id) || failed.contains(&sub_id) || (already_present(&sub_id) && !reload) {
                 continue;
             }
-            // Resolve the sublayer; a missing one is routed to `on_error`.
+            // Resolve the sublayer; a missing one is a raw load failure reported at
+            // this referencing site. It is a leaf (no subtree to walk), so it is not
+            // added to the pass-wide `visited`: each referencing layer records its own
+            // edge, so a shared missing layer reached from several layers is reported
+            // once per referrer and the composition layer can suppress by referrer.
             let Some(sub_resolved) = self.resolve_layer(&sub_id) else {
                 on_error(Error::UnresolvedAsset {
                     asset_path: sub_asset,
                     referencing_layer: identifier.clone(),
                 })?;
-                visited.insert(sub_id);
+                failed.insert(sub_id);
                 continue;
             };
-            visited.insert(sub_id.clone());
-            // Read the sublayer; a resolved-but-unreadable one is routed to
-            // `on_error` and skipped, dropping only it (the root's read failure
-            // propagated from `open_stack`).
+            // Read the sublayer; a resolved-but-unreadable one is a raw load failure
+            // like a missing one — reported at this referencing site and, being a
+            // leaf, left out of `visited` (dropping only this layer; the root's read
+            // failure propagated from `open_stack`).
             let sub_data = match self.read(&sub_resolved) {
                 Ok(data) => data,
                 Err(reason) => {
@@ -387,9 +412,13 @@ impl LayerRegistry {
                         referencing_layer: identifier.clone(),
                         reason: format!("{reason:#}"),
                     })?;
+                    failed.insert(sub_id);
                     continue;
                 }
             };
+            // A readable layer is interned and its subtree walked once; claim it in
+            // `visited` before recursing so a diamond or cycle does not re-emit it.
+            visited.insert(sub_id.clone());
 
             self.open_sublayers(
                 sub_id,

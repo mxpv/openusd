@@ -837,22 +837,45 @@ impl IndexCache {
         self.drop_indices_touching_layers(affected);
     }
 
+    /// Invalidates the cache after a layer-muting toggle of the layer with
+    /// canonical identifier `canonical`: advances the revision, then drops the
+    /// cached indices the toggle can restructure (see
+    /// [`Dependencies::indices_for_mute_toggle`](super::dependencies::Dependencies::indices_for_mute_toggle))
+    /// — those reading one of the `affected` layers, plus those that only skipped
+    /// the target and recorded `canonical` because it interned no reachable layer.
+    /// Unmuting such a target drops the referrer's stale index so it recomposes and
+    /// the load barrier finally opens the now-unmuted target.
+    pub(crate) fn invalidate_muting(&mut self, affected: &HashSet<LayerId>, canonical: &str) {
+        self.bump_revision();
+        let victims = self.store.dependencies().indices_for_mute_toggle(affected, canonical);
+        self.drop_index_victims(&victims);
+    }
+
     /// Drop every cached prim index whose composition reads one of the `affected`
     /// layers (per [`Dependencies::indices_for_layers`](super::dependencies::Dependencies::indices_for_layers))
     /// — together with its namespace descendants and any prototype the drops touch —
-    /// leaving indices that read none of them cached. Muting/unmuting or editing a
-    /// layer can only restructure prims that compose against a layer stack
-    /// containing it (C++ `PcpChanges` layer-stack fanout), so the rest of the
-    /// cache stays warm.
+    /// leaving indices that read none of them cached. Editing a layer can only
+    /// restructure prims that compose against a layer stack containing it (C++
+    /// `PcpChanges` layer-stack fanout), so the rest of the cache stays warm.
     fn drop_indices_touching_layers(&mut self, affected: &HashSet<LayerId>) {
         if affected.is_empty() {
             return;
         }
         let victims = self.store.dependencies().indices_for_layers(affected);
+        self.drop_index_victims(&victims);
+    }
+
+    /// Drops each victim prim index and the prototypes its drop touches — the tail
+    /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers)
+    /// and [`invalidate_muting`](Self::invalidate_muting).
+    fn drop_index_victims(&mut self, victims: &[Path]) {
+        if victims.is_empty() {
+            return;
+        }
         // Evict prototypes whose instances or roots are among the victims, as the
         // prim-tier path in [`Changes::apply`](super::change::Changes::apply) does.
-        self.invalidate_prototypes(&victims);
-        for path in &victims {
+        self.invalidate_prototypes(victims);
+        for path in victims {
             self.drop_index_subtree(path);
         }
     }

@@ -229,6 +229,18 @@ impl LayerStackRegistry {
         self.instances.get(id.idx()).map(|inst| &inst.member_set)
     }
 
+    /// Every layer that is a member of some composed stack — the root stack and
+    /// each interned reference/payload target stack. Muting rebuilds every stack
+    /// with its muted subtrees pruned (a fully muted target root resolves to an
+    /// empty stack), so this is the effectively-present layer set and carries no
+    /// muted layer. Independent of which prim indices are cached.
+    pub(crate) fn member_layers(&self) -> HashSet<LayerId> {
+        self.instances
+            .iter()
+            .flat_map(|inst| inst.member_set.iter().copied())
+            .collect()
+    }
+
     /// Whether the stack is the stage root stack.
     pub(crate) fn is_root(&self, id: LayerStackId) -> bool {
         matches!(self.instances[id.idx()].key, LayerStackKey::Root)

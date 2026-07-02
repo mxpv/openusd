@@ -250,16 +250,25 @@
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
-//! - Unmuting a never-loaded target: a reference/payload to a layer muted before
-//!   it ever loaded is skipped at the demand point ([`Error::MutedAssetPath`])
-//!   without interning the target or recording a recomposition trace, so
-//!   `LayerGraph::mute_fanout` — which looks the canonical identifier up among the
-//!   interned layers only — yields an empty fanout, and the referrer's cached
-//!   index keeps its now-stale `MutedAssetPath` and unresolved arc. A loaded
-//!   target (whose muted root empties the sublayer stack) instead records
-//!   `muted_external_targets` and recomposes correctly. Fanning the unmute out by
-//!   canonical identifier to the indices that recorded a `MutedAssetPath` for it
-//!   would close it.
+//! - Muted sublayer diagnostics: the loader (`LayerRegistry::open_stack`) reports
+//!   every missing/unreadable sublayer raw, unaware of muting; the stage reports
+//!   only those a muted-aware check finds contributing
+//!   (`LayerGraph::sublayer_error_contributes` over `effective_layers`, the members
+//!   of every composed stack) and applies it at report time
+//!   (`Stage::composition_errors`). The raw diagnostics are never discarded, and the
+//!   effective set is a pure function of the muted set and the composed stacks — not
+//!   of which prim indices are cached — so a diagnostic's visibility is
+//!   deterministic: muting a branch suppresses it and unmuting restores it, for both
+//!   the root layer stack and reference/payload target stacks, and it never flickers
+//!   as the cache warms.
+//!   Remaining — precise target-diagnostic liveness: a reference/payload target
+//!   whose only arc becomes muted (the arc's authoring opinion is muted, but the
+//!   target root itself is not) stays interned with a non-empty stack, so its own
+//!   missing-sublayer diagnostic keeps reporting even though no unmuted arc reaches
+//!   it — a conservative over-report. Resolving it precisely means attaching
+//!   collection diagnostics to composition sites / stack instances so their
+//!   visibility tracks index lifetime and recomposition, rather than deriving it
+//!   from the composed-stack set.
 //! - Masked cold prototype queries: a query on a `/__Prototype_N` path under a
 //!   non-default population mask resolves to empty until an instance sharing
 //!   that prototype has been composed (which registers the prototype). The
@@ -270,14 +279,6 @@
 //!   through an instance (`Prim::prototype`, or any instance-proxy query) first
 //!   registers it, after which masked prototype-content queries (including those
 //!   behind a lazily-loaded payload) resolve correctly.
-//! - Open-time muted-sublayer collection diagnostics:
-//!   `StageBuilder::mute(...).open(...)` seeds the muted set after collection, so
-//!   a missing sublayer under a muted layer still surfaces as an
-//!   `UnresolvedSublayer` collection error. Applying the muted set during
-//!   collection and checking it before the unresolved-sublayer error would
-//!   suppress it. A reference/payload target is reached only at query time, after
-//!   the muted set is seeded, so a muted one is recognized at the demand point and
-//!   reported [`Error::MutedAssetPath`].
 //! - Runtime session-selected root sublayers: a session `expressionVariables`
 //!   edit, or a mute that exposes the root layer's own variable, can newly select
 //!   a root `${VAR}` sublayer the initial session variables never opened. Runtime

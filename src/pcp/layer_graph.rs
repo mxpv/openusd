@@ -1656,19 +1656,62 @@ impl LayerGraph {
         !self.muted_identifiers.is_empty()
     }
 
-    /// Whether the reference/payload target `asset_path`, anchored against
-    /// `anchor` (the layer that authored the arc), names a muted layer — matched
-    /// by the canonical identifier it would be interned under (C++
-    /// `Pcp_MutedLayers::IsLayerMuted`, anchored against the containing layer; see
+    /// The muted-set identifier matched by the reference/payload target
+    /// `asset_path`, anchored against `anchor` (the layer that authored the arc),
+    /// or `None` when it names no muted layer. Matched by the canonical identifier
+    /// the target would be interned under (C++ `Pcp_MutedLayers::IsLayerMuted`,
+    /// anchored against the containing layer; see
     /// [`Indexer::arc_target_muted`](super::prim_indexer)). Unlike
     /// [`is_muted`](Self::is_muted), this matches before the layer is interned, so
-    /// the on-demand loader can recognize a muted target and skip opening it.
-    pub(crate) fn is_asset_muted(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> bool {
+    /// the on-demand loader can recognize a muted target and skip opening it, and
+    /// the returned identifier is the muted-set entry an unmute toggles, so a
+    /// not-yet-loaded target can record it as its unmute-fanout trace.
+    pub(crate) fn muted_asset_id(&self, asset_path: &str, anchor: Option<&ResolvedPath>) -> Option<String> {
         if self.muted_identifiers.is_empty() {
-            return false;
+            return None;
         }
-        self.muted_identifiers
-            .contains(&self.canonical_muted_id(asset_path, anchor))
+        let canonical = self.canonical_muted_id(asset_path, anchor);
+        self.muted_identifiers.contains(&canonical).then_some(canonical)
+    }
+
+    /// The layers of every composed stack — the effectively-present set the stage
+    /// filters muted collection diagnostics against (see
+    /// [`sublayer_error_contributes`](Self::sublayer_error_contributes)). Read from
+    /// the composed stacks (muting has pruned their muted subtrees), so it is a pure
+    /// function of the muted set and the graph, independent of which prim indices
+    /// are cached — a diagnostic's visibility does not change as the cache warms.
+    pub(crate) fn effective_layers(&self) -> HashSet<LayerId> {
+        self.stacks.member_layers()
+    }
+
+    /// Whether a collection diagnostic still contributes to composition once muting
+    /// is applied, so the stage keeps it (the loader reports every load failure raw,
+    /// unaware of muting). A non-sublayer error always survives. A missing or
+    /// unreadable sublayer survives only when its referencing layer is `effective`
+    /// (a member of some composed stack) and the sublayer it names is not itself
+    /// muted; otherwise muting prunes it and the raw diagnostic is spurious. The
+    /// `effective` set is a pure function of the muted set and the graph, so the
+    /// decision is deterministic across queries and independent of load order.
+    pub(crate) fn sublayer_error_contributes(&self, error: &Error, effective: &HashSet<LayerId>) -> bool {
+        let (asset_path, introduced_by) = match error {
+            Error::UnresolvedSublayer {
+                asset_path,
+                introduced_by,
+            }
+            | Error::MalformedSublayer {
+                asset_path,
+                introduced_by,
+                ..
+            } => (asset_path, introduced_by),
+            _ => return true,
+        };
+        let Some(referrer) = self.id_of(introduced_by) else {
+            return true;
+        };
+        effective.contains(&referrer)
+            && self
+                .muted_asset_id(asset_path, self.anchor_location(Some(referrer)).as_ref())
+                .is_none()
     }
 
     /// The muted layer identifiers, sorted for a deterministic result.

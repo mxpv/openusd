@@ -37,20 +37,33 @@ pub(super) struct Dependencies {
     /// findable when a spec is first authored at its path on a layer its graph
     /// does not yet touch; one entry per prim covers that prim on every layer.
     by_path: HashSet<Path>,
-    /// Reverse `layer → prim-index-paths` map for layer-set invalidation. An
-    /// index registers under every layer its composition touched — any
-    /// dependency node's own layer or a member of that node's resolved layer
-    /// stack — plus each layer it skipped as a muted external reference/payload
-    /// target. A mute/unmute or a
+    /// Reverse `layer → prim-index-paths` map over the layers each index's
+    /// composition actually reaches — any dependency node's own layer or a member
+    /// of that node's resolved layer stack (including the self-Root edge, which
+    /// `per_layer` skips, since the local prim reads its own root layer stack). A
     /// `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables` edit
-    /// collects its victims as a union of lookups over the changed layers
-    /// ([`indices_for_layers`](Self::indices_for_layers)). Unlike `per_layer`,
-    /// this registers the self-Root edge too, since the local prim reads its own
-    /// root layer stack and a layer-set change must reach it.
+    /// or a mute/unmute collects its victims as a union of lookups over the changed
+    /// layers ([`indices_for_layers`](Self::indices_for_layers)). A muted
+    /// reference/payload target — reached by nothing — is kept out and tracked by
+    /// canonical identifier in [`by_muted_canonical`](Self::by_muted_canonical).
     by_layer: HashMap<LayerId, HashSet<Path>>,
     /// The layers `prim_index_path` registered under in `by_layer`, for O(1)
     /// retraction on removal.
     by_prim_layers: HashMap<Path, HashSet<LayerId>>,
+    /// Reverse `canonical muted identifier → prim-index-paths` map: which indices
+    /// depend on a reference/payload target's *mute state* without reaching it
+    /// through a live site. Two cases resolve to one key here — a target muted
+    /// before it ever loaded (never interned, so keyed by the canonical identifier
+    /// the mute matched), and one muted after loading (its stack emptied, grafting
+    /// no node, so keyed by the interned target root's identifier, which equals that
+    /// same canonical). Unmuting a target fans back to these indices
+    /// ([`indices_for_mute_toggle`](Self::indices_for_mute_toggle)); muting a
+    /// still-loaded target reaches its referrer through `by_layer` (the pre-mute
+    /// reach) instead.
+    by_muted_canonical: HashMap<String, HashSet<Path>>,
+    /// The canonical identifiers `prim_index_path` registered under in
+    /// `by_muted_canonical`, for O(1) retraction on removal.
+    by_prim_muted: HashMap<Path, HashSet<String>>,
 }
 
 impl Dependencies {
@@ -99,16 +112,40 @@ impl Dependencies {
                     .push(prim_index_path.clone());
             }
         }
-        // An arc that resolved to a muted reference/payload target grafted no
-        // node, so the index has no site to find it by; register the skipped
-        // target layers directly so unmuting one still reaches the index.
-        layers.extend(index.muted_external_targets().iter().copied());
         for &layer in &layers {
             self.by_layer.entry(layer).or_default().insert(prim_index_path.clone());
         }
 
+        // A reference/payload target this index depends on the mute state of but has
+        // no live site for: one muted before loading (never interned — its canonical
+        // identifier is in `muted_unloaded_targets`), or one muted after loading (its
+        // stack emptied, so it grafted no node — the interned target root, whose
+        // identifier is that same canonical). Register both by canonical identifier
+        // so unmuting the target fans back here, without counting it as reached.
+        let muted: HashSet<String> = index
+            .muted_unloaded_targets()
+            .iter()
+            .cloned()
+            .chain(
+                index
+                    .muted_external_targets()
+                    .iter()
+                    .map(|&t| graph.identifier(t).to_string()),
+            )
+            .collect();
+        for canonical in &muted {
+            self.by_muted_canonical
+                .entry(canonical.clone())
+                .or_default()
+                .insert(prim_index_path.clone());
+        }
+
         self.by_prim.insert(prim_index_path.clone(), registered);
         self.by_prim_layers.insert(prim_index_path.clone(), layers);
+        // The common unmuted index depends on no muted target, so skip an empty entry.
+        if !muted.is_empty() {
+            self.by_prim_muted.insert(prim_index_path.clone(), muted);
+        }
 
         // Register the prim's own path once, independent of layer. Without
         // this, cached misses (empty `PrimIndex`) and self-Root-only indices
@@ -132,6 +169,17 @@ impl Dependencies {
                     set.remove(prim_index_path);
                     if set.is_empty() {
                         self.by_layer.remove(&li);
+                    }
+                }
+            }
+        }
+        // Retract the `muted canonical identifier → index` registrations.
+        if let Some(canonicals) = self.by_prim_muted.remove(prim_index_path) {
+            for canonical in canonicals {
+                if let Some(set) = self.by_muted_canonical.get_mut(&canonical) {
+                    set.remove(prim_index_path);
+                    if set.is_empty() {
+                        self.by_muted_canonical.remove(&canonical);
                     }
                 }
             }
@@ -212,11 +260,25 @@ impl Dependencies {
     /// Prim indices to invalidate for a change to any layer in `affected` — the
     /// deduplicated union of the `by_layer` registrations. The victim set for a
     /// mute/unmute or a `subLayers`/offset/relocate/`timeCodesPerSecond`/`expressionVariables`
-    /// edit (C++ `PcpChanges` layer-stack fanout). Each registered index reads a layer
-    /// stack containing one of `affected` (or skipped one as a muted target), so
-    /// it is exactly one the change can restructure.
+    /// edit (C++ `PcpChanges` layer-stack fanout). Each registered index reads a
+    /// layer stack containing one of `affected`, so it is exactly one the change can
+    /// restructure. A referrer that only *skipped* a muted target reaches it through
+    /// [`indices_for_mute_toggle`](Self::indices_for_mute_toggle) instead.
     pub(super) fn indices_for_layers(&self, affected: &HashSet<LayerId>) -> Vec<Path> {
         Self::dedup_paths(affected.iter().filter_map(|layer| self.by_layer.get(layer)).flatten())
+    }
+
+    /// Prim indices to invalidate when the layer with canonical identifier
+    /// `canonical` toggles muted state and its stack members shift by `affected`
+    /// (from [`mute_fanout`](super::LayerGraph::mute_fanout)): the indices that read
+    /// one of `affected` through `by_layer` (a still-loaded target reached before
+    /// the toggle), plus those that only *skipped* the target and recorded it in
+    /// `by_muted_canonical` (muted before loading, or after its stack emptied).
+    /// Deduplicated in one pass over both streams.
+    pub(super) fn indices_for_mute_toggle(&self, affected: &HashSet<LayerId>, canonical: &str) -> Vec<Path> {
+        let by_layer = affected.iter().filter_map(|layer| self.by_layer.get(layer)).flatten();
+        let by_canonical = self.by_muted_canonical.get(canonical).into_iter().flatten();
+        Self::dedup_paths(by_layer.chain(by_canonical))
     }
 
     /// Prim indices that observe exactly `path`, independent of layer.
