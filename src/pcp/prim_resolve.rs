@@ -47,9 +47,9 @@ struct Opinion<'a> {
 }
 
 /// A live contributing spec site: a [`SpecSite`](super::prim_graph::SpecSite)
-/// whose node still contributes opinions (inert, culled, and permission-denied
-/// nodes filtered out), paired with the path to query in the contributing layer.
-/// The shared output of [`PrimIndex::contributing_sites`], so
+/// whose node still contributes opinions (inert and culled nodes filtered
+/// out), paired with the path to query in the contributing layer. The shared
+/// output of [`PrimIndex::contributing_sites`], so
 /// [`opinions`](PrimIndex::opinions) and
 /// [`strongest_opinion`](PrimIndex::strongest_opinion) apply the same node
 /// filter and query-path resolution and cannot drift.
@@ -404,31 +404,21 @@ impl PrimIndex {
     }
 
     /// Iterates the live contributing spec sites in strength order, strongest
-    /// first — each [`live_spec_sites`](Self::live_spec_sites) entry that also
-    /// passes value resolution's permission filter, paired with its query path.
-    /// The shared filter and query-path resolution behind both
+    /// first — each [`live_spec_sites`](Self::live_spec_sites) entry paired with
+    /// its query path. The shared query-path resolution behind both
     /// [`opinions`](Self::opinions) and [`strongest_opinion`](Self::strongest_opinion),
-    /// so the two cannot drift. Beyond the structural skip `live_spec_sites`
-    /// already applies, this also drops a permission-denied node (a direct arc to
-    /// a private site, spec 10.3.3), which stays visible to introspection.
+    /// so the two cannot drift.
     fn contributing_sites<'a>(
         &'a self,
         prop_suffix: Option<&'a str>,
     ) -> impl Iterator<Item = Result<ContributingSite<'a>>> + 'a {
-        self.live_spec_sites().filter_map(move |(site, node)| {
-            if node.is_permission_denied() {
-                return None;
-            }
-            let query_path = match Self::query_path(node, prop_suffix) {
-                Ok(path) => path,
-                Err(err) => return Some(Err(err)),
-            };
-            Some(Ok(ContributingSite {
+        self.live_spec_sites().map(move |(site, node)| {
+            Ok(ContributingSite {
                 node,
                 layer: site.layer,
                 offset: site.offset,
-                query_path,
-            }))
+                query_path: Self::query_path(node, prop_suffix)?,
+            })
         })
     }
 

@@ -49,7 +49,7 @@
 //! | `layer_stack` | `PcpLayerStack` identity | Composed-stack identity ([`LayerStackId`]) and the registry of context-keyed instances (`LayerStackRegistry`): a [`LayerId`] names a physical layer, a [`LayerStackId`] a composed view under a context, so a `${VAR}` sublayer reached through two contexts resolves independently. |
 //! | `index_cache` | `PcpCache` | Lazily-built composition cache (`IndexCache`). Main interface for [`Stage`](crate::usd::Stage). Borrows the `layer_graph` per query. |
 //! | `instancing` | `Pcp` instancing | Scene-graph instancing (spec 11.3.3): the `PrototypeRegistry` object (owned by `IndexCache`) plus the composition glue (`is_instance`, the `effective_path` redirection that maps an instance proxy's subtree onto the shared `/__Prototype_N` namespace) as a second `IndexCache` impl. |
-//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`, arc-to-private-site permission denials. |
+//! | [`Error`] | `PcpErrorBase` | Composition errors: arc cycles, unresolved layers, missing/invalid `defaultPrim`. |
 //! | `prim_index` | `PcpPrimIndex` | Per-prim composition support: the [`PrimIndex`] type with its build entry points (`build_with_cache` / `build_with_cache_in`) and the [`CompositionContext`](prim_index::CompositionContext) that flows parent-to-child. |
 //! | `compose_site` | `PcpComposeSite` | Site field composition: the list-op primitives (`compose_references_in`, `collect_payloads_in`, `compose_arc_list_in`) the `prim_indexer` drives to read a node's arc fields across its layer stack, plus the asset-path anchoring and time-codes retiming they fold in. |
 //! | `prim_indexer` | `Pcp_PrimIndexer` | Task-queue composition engine (`Indexer`): grows the graph node-by-node by draining a priority task queue. The sole composition path. |
@@ -185,13 +185,14 @@
 //!
 //! # Permissions (`permission = private`)
 //!
-//! A *direct* arc (a reference/inherit/payload/specialize authored at the prim)
-//! to a private target is denied: every node reached through it is marked
-//! [`NodeFlags::PERMISSION_DENIED`] so it stops contributing to value resolution
-//! while staying visible structurally, and the denial is reported as
-//! [`Error::ArcPermissionDenied`] (C++ `_AddArc` + `_InertSubtree`). The denied
-//! target paths flow down the `CompositionContext` so descendant prims composed
-//! separately (where the arc is *extended*, not authored) are inerted too.
+//! `permission` is `sdf`-level metadata only ([`sdf::Permission`]); composition
+//! and value resolution never read it. C++'s own arc-, prim-, and
+//! target-permission enforcement (`_AddArc`'s privacy check, `_EnforcePermissions`,
+//! `_TargetIsPermitted`) is compiled out for `Usd`-mode `PcpCache`s — the mode
+//! `UsdStage`, and therefore this crate, always uses — so a real stage never
+//! denies an arc or filters a target on `permission`. This is a deliberate
+//! parity choice, not a gap: editing `permission` is an ordinary metadata change
+//! with no composition effect.
 //!
 //! # Ordered prim children
 //!
@@ -213,11 +214,6 @@
 //!
 //! # Remaining work
 //!
-//! - Connection / relationship-target permission validity: a target pointing at a
-//!   site that is private relative to where the target is authored must be dropped
-//!   (C++ `_EnforcePermissions` plus connection/target validation). Needs a
-//!   value-resolution surface for target validity; `NodeFlags::PERMISSION_PRIVATE`
-//!   / `RESTRICTED` are reserved for it.
 //! - Cross-prim parallelism: `IndexCache::ensure_index` composes prims serially.
 //!   Each build is a pure function of `&LayerGraph`, the parent context, and the
 //!   cached indices (`TODO(rayon)`), but the shared `indices` map that
@@ -522,20 +518,6 @@ pub enum Error {
         site_path: Path,
         /// The parse or evaluation failure.
         message: String,
-    },
-
-    /// A direct composition arc (a reference/inherit/payload/specialize
-    /// authored at the prim) targets a site whose composed permission is
-    /// `private` (spec 10.3.3). C++ records `PcpErrorArcPermissionDenied`; the
-    /// arc is reported but the node is retained, so this is recoverable.
-    #[error("{arc:?} arc at {site_path} targets private site {target_path}")]
-    ArcPermissionDenied {
-        /// The prim where the arc is authored.
-        site_path: Path,
-        /// The composition arc type.
-        arc: ArcType,
-        /// The private site the arc targets.
-        target_path: Path,
     },
 
     /// A composition arc (inherit/specialize/reference/payload/relocate) targets

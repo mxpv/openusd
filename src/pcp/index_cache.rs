@@ -26,7 +26,7 @@ use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
-use super::prim_graph::{ArcType, Node, NodeFlags, NodeId};
+use super::prim_graph::ArcType;
 use super::prim_index::{
     AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
 };
@@ -997,7 +997,7 @@ impl IndexCache {
             return Ok(None);
         };
         Ok(index.nodes().find_map(|node| {
-            (matches(node.arc) && node.has_specs() && !node.is_permission_denied()).then(|| {
+            (matches(node.arc) && node.has_specs()).then(|| {
                 // The layer stack the node composes in, captured so the edit target
                 // authors into it exactly rather than re-inferring it from layer
                 // membership: `None` for the stage root stack, else the target root
@@ -1424,7 +1424,7 @@ impl IndexCache {
         {
             let index = self.cached(resolved_prim);
             for node in index.nodes() {
-                if node.arc != ArcType::Inherit || !node.has_specs() || node.is_permission_denied() {
+                if node.arc != ArcType::Inherit || !node.has_specs() {
                     continue;
                 }
                 let class_path = node.path_at_introduction();
@@ -1931,54 +1931,6 @@ impl IndexCache {
         }
     }
 
-    /// Returns the `(node, error)` pair for each direct composition arc on
-    /// `path` whose target site is `permission = private` (spec 10.3.3).
-    ///
-    /// A direct arc is a reference/inherit/payload/specialize authored at this
-    /// prim — its node sits at the prim's own namespace depth and is not an
-    /// implied class. Mirroring C++ `_AddArc` + `_InertSubtree`, the caller
-    /// surfaces the error and marks the node's subtree
-    /// [`PERMISSION_DENIED`](NodeFlags::PERMISSION_DENIED), so the arc stops
-    /// contributing to value resolution while staying visible structurally
-    /// (`nodes`, `has_spec`, child names are unchanged).
-    fn detect_arc_permissions(&self, graph: &LayerGraph, path: &Path, index: &PrimIndex) -> Vec<(NodeId, Error)> {
-        let depth = path.prim_element_count() as u16;
-        let mut denials = Vec::new();
-        for (id, node) in index.nodes_with_ids() {
-            let is_direct_arc = matches!(
-                node.arc,
-                ArcType::Inherit | ArcType::Specialize | ArcType::Reference | ArcType::Payload
-            ) && node.namespace_depth() == depth
-                && !node.flags().contains(NodeFlags::IMPLIED_CLASS);
-            if is_direct_arc && self.target_is_private(graph, node) {
-                denials.push((
-                    id,
-                    Error::ArcPermissionDenied {
-                        site_path: path.clone(),
-                        arc: node.arc,
-                        target_path: node.path.clone(),
-                    },
-                ));
-            }
-        }
-        denials
-    }
-
-    /// Returns `true` when the strongest `permission` opinion at a direct arc's
-    /// target site (read across the node's contributing layers) is `private`.
-    fn target_is_private(&self, graph: &LayerGraph, node: &Node) -> bool {
-        for &(layer, _) in graph.layer_stack(node.layer_stack_id()).iter() {
-            if let Ok(Some(value)) = graph
-                .layer(layer)
-                .data()
-                .try_field(&node.path, FieldKey::Permission.as_str())
-            {
-                return matches!(value.as_ref(), Value::Permission(sdf::Permission::Private));
-            }
-        }
-        false
-    }
-
     // ------------------------------------------------------------------
     // Core composition
     // ------------------------------------------------------------------
@@ -2078,10 +2030,9 @@ impl IndexCache {
                 _ => {}
             }
         }
-        // `build_errors` accumulates every error for this prim (the build errors
-        // above plus the permission denials below) and is carried into the prim's
-        // cache entry at the end, replacing any prior entry, so a rebuild never
-        // duplicates and a fixed prim drops its stale errors.
+        // `build_errors` accumulates every error for this prim and is carried
+        // into the prim's cache entry at the end, replacing any prior entry, so
+        // a rebuild never duplicates and a fixed prim drops its stale errors.
 
         // Inside an instance, local opinions on descendants are discarded
         // (spec 11.3.3): the subtree is composed purely from the arcs the
@@ -2089,24 +2040,6 @@ impl IndexCache {
         // marks the local root site inert for any prim whose parent context is
         // `within_instance`, so the local arcs are never followed — rather than
         // pruned afterwards, which would leave the nodes those local arcs spawned.
-
-        // Arc permissions (spec 10.3.3, C++ `_AddArc` + `_InertSubtree`). A
-        // direct arc to a `permission = private` site is reported and its target
-        // path recorded; an ancestor's denied targets arrive on `parent_ctx`.
-        // Every node reached through a denied arc — its grafted subtree here, or
-        // the same arc extended to this descendant prim — is then inerted: it
-        // stays visible structurally but contributes no opinions to value
-        // resolution. This runs before deriving instance state below so a
-        // private target's `instanceable`/arc opinions are already inert.
-        let mut denied_prefixes = parent_ctx.denied_prefixes.clone();
-        for (node_id, error) in self.detect_arc_permissions(graph, path, &index) {
-            let target = index.node(node_id).path.clone();
-            if !denied_prefixes.contains(&target) {
-                denied_prefixes.push(target);
-            }
-            build_errors.push(error);
-        }
-        index.mark_permission_denied_under(&denied_prefixes);
 
         // Inside an instance, the ancestral references the instance prim is
         // nested under contribute opinions at the instance's own namespace that
@@ -2123,9 +2056,9 @@ impl IndexCache {
         // This prim is an instance when its composition declares
         // `instanceable = true` and carries an arc; its descendants then
         // inherit `within_instance`. A nested instance therefore re-arms the
-        // flag for its own subtree. Computed from the freshly built index (after
-        // permission inerting, so it agrees with a later `Prim::is_instance`)
-        // to avoid re-entering `ensure_index` for `path`.
+        // flag for its own subtree. Computed from the freshly built index so it
+        // agrees with a later `Prim::is_instance`, avoiding re-entering
+        // `ensure_index` for `path`.
         let is_instance = index.has_composition_arc()
             && matches!(
                 index.resolve_field(FieldKey::Instanceable.as_str(), graph, None)?,
@@ -2141,7 +2074,6 @@ impl IndexCache {
         } else {
             parent_ctx.instance_depth
         };
-        child_context.denied_prefixes = denied_prefixes;
         self.cache_index(graph, path, index, child_context, build_errors);
         // Report inconsistent property types once per prim composition (C++
         // `PcpErrorInconsistentPropertyType`); a later property-stack query
@@ -2412,141 +2344,6 @@ def "A" (
         assert_eq!(
             children.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
             ["c", "b", "a", "d"]
-        );
-        Ok(())
-    }
-
-    /// A direct inherit to a `permission = private` class is reported as a
-    /// non-fatal `ArcPermissionDenied` (spec 10.3.3), while the private class
-    /// stays in the prim stack — C++ keeps the node and only records the error.
-    /// Ground truth: `ErrorPermissionDenied_root` (`/Model` inherits the
-    /// private `/_PrivateClass`).
-    #[test]
-    fn inherit_private_class_reports_arc() -> Result<()> {
-        let root = format!(
-            "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
-             ErrorPermissionDenied_root/usda/root.usd",
-            manifest_dir()
-        );
-        let (graph, mut cache) = collected_stack(&root);
-        let model = sdf::path("/Model")?;
-        let private = sdf::path("/_PrivateClass")?;
-        cache.ensure_index(&graph, &model)?;
-
-        // Structural visibility is unchanged: the private class still composes
-        // into the prim stack (it is inerted for value resolution, not removed).
-        assert!(
-            cache.cached(&model).nodes().any(|n| n.path == private),
-            "private inherited class must remain in the prim stack"
-        );
-
-        // The direct inherit-to-private arc is queued for the stage to surface.
-        let pending = cache.take_composition_errors();
-        assert!(
-            pending.iter().any(|e| matches!(
-                e,
-                Error::ArcPermissionDenied { site_path, arc, target_path }
-                    if *site_path == model && *arc == ArcType::Inherit && *target_path == private
-            )),
-            "expected ArcPermissionDenied for /Model -> /_PrivateClass, got {pending:?}"
-        );
-        Ok(())
-    }
-
-    /// A direct inherit to a private class is inerted (C++ `_InertSubtree`): the
-    /// inherited opinion is dropped from value resolution, yet the class stays
-    /// in the prim stack and `has_spec`. A public inherit is the control.
-    #[test]
-    fn private_inherit_inerts_opinions() -> Result<()> {
-        let root = format!("{}/fixtures/permission_private_inherit/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
-
-        // Control: a public inherit contributes its opinion.
-        assert_eq!(
-            cache.resolve_field(&graph, &sdf::path("/ViaPublic.attr")?, FieldKey::Default.as_str())?,
-            Some(Value::Double(1.0)),
-            "public inherited opinion must contribute"
-        );
-
-        // The private inherit is inerted: no opinion reaches value resolution,
-        // but the class node and the property stay structurally present.
-        let via_private = sdf::path("/ViaPrivate")?;
-        let private_class = sdf::path("/PrivateClass")?;
-        assert_eq!(
-            cache.resolve_field(&graph, &sdf::path("/ViaPrivate.attr")?, FieldKey::Default.as_str())?,
-            None,
-            "private inherited opinion must not contribute to value resolution"
-        );
-        assert!(
-            cache.cached(&via_private).nodes().any(|n| n.path == private_class),
-            "private class stays in the prim stack"
-        );
-        assert!(
-            cache.has_spec(&graph, &sdf::path("/ViaPrivate.attr")?)?,
-            "the inherited attr stays structurally present"
-        );
-        Ok(())
-    }
-
-    /// The denial propagates to descendant prims composed separately: a child
-    /// inherited through the private arc (an extended, not direct, arc) is
-    /// inerted too, while the public child's opinion still resolves and the
-    /// child name stays visible.
-    #[test]
-    fn private_inherit_inerts_descendants() -> Result<()> {
-        let root = format!("{}/fixtures/permission_private_inherit/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
-
-        // Control: the public inherited child contributes its opinion.
-        assert_eq!(
-            cache.resolve_field(
-                &graph,
-                &sdf::path("/ViaPublic/Child.cattr")?,
-                FieldKey::Default.as_str()
-            )?,
-            Some(Value::Double(2.0)),
-            "public inherited child opinion must contribute"
-        );
-
-        // The private inherited child is inerted, but stays visible: the child
-        // name is exposed and the property has a spec.
-        assert_eq!(
-            cache.resolve_field(
-                &graph,
-                &sdf::path("/ViaPrivate/Child.cattr")?,
-                FieldKey::Default.as_str()
-            )?,
-            None,
-            "private inherited child opinion must not contribute"
-        );
-        assert!(
-            cache
-                .prim_children(&graph, &sdf::path("/ViaPrivate")?)?
-                .iter()
-                .any(|t| t.as_str() == "Child"),
-            "the inherited child name stays visible"
-        );
-        Ok(())
-    }
-
-    /// A private arc that authors `instanceable = true` is inerted before
-    /// instance state is derived, so the prim is not treated as an instance and
-    /// its local child opinions survive (the descendant subtree is not composed
-    /// as a discarded-local instance subtree).
-    #[test]
-    fn private_instanceable_arc_not_instance() -> Result<()> {
-        let root = format!("{}/fixtures/permission_private_inherit/root.usda", manifest_dir());
-        let (graph, mut cache) = collected_stack(&root);
-
-        let host = sdf::path("/InstHost")?;
-        assert!(
-            !cache.is_instance(&graph, &host)?,
-            "a private (inerted) instanceable arc must not make the prim an instance"
-        );
-        assert_eq!(
-            cache.resolve_field(&graph, &sdf::path("/InstHost/Local.lattr")?, FieldKey::Default.as_str())?,
-            Some(Value::Double(7.0)),
-            "the local child opinion must survive (within_instance not armed)"
         );
         Ok(())
     }

@@ -520,10 +520,10 @@ mod pcp_txt {
     /// invalid payloads) are grouped under an `Errors while composing </Prim>`
     /// section per prim, in first-seen (composition) order; layer-stack errors
     /// (sublayer cycles, invalid authored relocates) follow under a single
-    /// `Errors while computing Layer Stack` section. Other kinds (notably
-    /// `permission = private` denials) fall through the wildcard and are omitted,
-    /// matching the baselines. A new error kind opts in by adding an arm below. When
-    /// any error is rendered, the dump ends with the framework's `ERROR:` footer.
+    /// `Errors while computing Layer Stack` section. Other kinds (e.g.
+    /// `MissingDefaultPrim`) fall through the wildcard and are omitted, matching
+    /// the baselines. A new error kind opts in by adding an arm below. When any
+    /// error is rendered, the dump ends with the framework's `ERROR:` footer.
     pub fn error_trailer(name: &str, errors: &[pcp::Error], base: Option<&Path>, order: &[sdf::Path]) -> String {
         use std::fmt::Write as _;
 

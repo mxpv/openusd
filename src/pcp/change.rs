@@ -373,11 +373,10 @@ impl Changes {
     /// Authoring this field on a prim path forces a graph rebuild.
     ///
     /// Mirrors C++ `Pcp_EntryRequiresPrimIndexChange` (changes.cpp:264-298): the
-    /// composition-arc and instancing opinions, `permission` (a direct arc to a
-    /// `private` site is denied, inerting its subtree — spec 10.3.3), and
-    /// `specifier`, whose def↔over↔class transitions change whether the prim and
-    /// its subtree compose. `active`, `apiSchemas`, and `relocates` are added
-    /// conservatively (see the module-level edit-type → tier table).
+    /// composition-arc and instancing opinions, and `specifier`, whose
+    /// def↔over↔class transitions change whether the prim and its subtree
+    /// compose. `active`, `apiSchemas`, and `relocates` are added conservatively
+    /// (see the module-level edit-type → tier table).
     fn field_promotes_to_significant(field: &str) -> bool {
         field == FieldKey::References.as_str()
             || field == FieldKey::Payload.as_str()
@@ -386,7 +385,6 @@ impl Changes {
             || field == FieldKey::VariantSetNames.as_str()
             || field == FieldKey::VariantSelection.as_str()
             || field == FieldKey::Instanceable.as_str()
-            || field == FieldKey::Permission.as_str()
             || field == FieldKey::Specifier.as_str()
             || field == FieldKey::Active.as_str()
             // `apiSchemas` is composed off the cached prim index
@@ -542,11 +540,12 @@ mod tests {
         assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
     }
 
-    /// A `permission` edit denies (or re-opens) a direct arc to the prim, which
-    /// reshapes every dependent's graph (spec 10.3.3), so it must promote to
-    /// significant — the under-invalidation backstop the C++ classifier shares.
+    /// `permission` is inert metadata for composition (C++ only enforces it for
+    /// legacy non-Usd caches), so editing it resolves live against the bumped
+    /// revision like any other non-composition field — the over-invalidation
+    /// guard mirroring `kind_metadata_drops_nothing`.
     #[test]
-    fn permission_promotes_to_significant() {
+    fn permission_metadata_drops_nothing() {
         let (graph, cache) = empty_cache();
         let mut cl = ChangeList::new();
         cl.entry_mut(&p("/Foo"))
@@ -554,7 +553,8 @@ mod tests {
             .insert(FieldKey::Permission.as_str().into());
         let mut changes = Changes::new();
         changes.did_change(&cache, &[(first_layer(&graph), &cl)]);
-        assert!(changes.cache.did_change_significantly.contains(&p("/Foo")));
+        assert!(changes.cache.did_change_significantly.is_empty());
+        assert!(changes.cache.did_change_specs.is_empty());
     }
 
     /// A non-composition metadata edit (`kind`) on an existing prim resolves

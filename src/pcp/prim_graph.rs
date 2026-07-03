@@ -93,12 +93,6 @@ bitflags! {
         const INERT = 1 << 0;
         /// Hidden from value resolution but retained for change tracking.
         const CULLED = 1 << 1;
-        /// Subtree namespace-restricted by a relocate.
-        const RESTRICTED = 1 << 2;
-        /// Blocked by `permission = private` on a stronger site.
-        const PERMISSION_DENIED = 1 << 3;
-        /// This site is itself `permission = private`.
-        const PERMISSION_PRIVATE = 1 << 4;
         /// Children are prohibited (e.g. an unloaded payload).
         const PROHIBITED_CHILDREN = 1 << 5;
         /// Added by implied inherit/specialize propagation.
@@ -361,14 +355,6 @@ impl Node {
     /// an edit there recomposes the relocated prim.
     pub(crate) fn is_relocate_source(&self) -> bool {
         self.flags.contains(NodeFlags::RELOCATE_SOURCE)
-    }
-
-    /// True when this node is a direct arc to a `permission = private` site, or
-    /// lies in such an arc's subtree (spec 10.3.3). It stays visible
-    /// structurally (`nodes`, `has_spec`, child names) but contributes no
-    /// opinions to value resolution — the C++ `_InertSubtree` behavior.
-    pub(crate) fn is_permission_denied(&self) -> bool {
-        self.flags.contains(NodeFlags::PERMISSION_DENIED)
     }
 }
 

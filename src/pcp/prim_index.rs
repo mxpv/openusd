@@ -225,9 +225,7 @@ impl PrimIndex {
     /// Iterates the spec stack's live contributing sites — those whose node is
     /// neither inert nor culled, the same structural filter
     /// [`nodes`](Self::nodes) applies — each paired with its resolved node. The
-    /// single home for that filter, shared by every spec-stack consumer (value
-    /// resolution adds `!is_permission_denied()`; the `prim_stack` /
-    /// `property_stack` introspection keeps denied sites).
+    /// single home for that filter, shared by every spec-stack consumer.
     pub(crate) fn live_spec_sites(&self) -> impl Iterator<Item = (&SpecSite, &Node)> + '_ {
         self.spec_stack.iter().filter_map(|site| {
             let node = self.node(site.node);
@@ -274,24 +272,6 @@ impl PrimIndex {
     /// every contributing node descends from it.
     pub fn root(&self) -> Option<NodeId> {
         self.graph.root.is_valid().then_some(self.graph.root)
-    }
-
-    /// Marks every node whose path lies under one of `prefixes`
-    /// [`PERMISSION_DENIED`](NodeFlags::PERMISSION_DENIED), so value resolution
-    /// skips their opinions while they stay visible structurally — the C++
-    /// `_InertSubtree` behavior for a direct arc to a `permission = private`
-    /// site (spec 10.3.3). The prefixes are the denied arcs' target paths, so a
-    /// node reached through such an arc (its grafted subtree, an implied-class
-    /// copy, or an arc extended to a descendant prim) is inerted uniformly.
-    pub(crate) fn mark_permission_denied_under(&mut self, prefixes: &[Path]) {
-        if prefixes.is_empty() {
-            return;
-        }
-        for node in &mut self.graph.nodes {
-            if prefixes.iter().any(|prefix| node.path.has_prefix(prefix)) {
-                node.flags |= NodeFlags::PERMISSION_DENIED;
-            }
-        }
     }
 
     /// Recomputes `has_specs` from live layer data for every node sitting at
@@ -379,10 +359,10 @@ impl PrimIndex {
     /// spec-tier change refresh. It walks every strength-ordered node, gated on
     /// [`has_specs`](super::prim_graph::Node::has_specs) — a node with no spec on
     /// any member contributes nothing — and leaves the stack *unfiltered* by the
-    /// inert / culled / permission-denied flags: those are flipped after the
-    /// graph is finalized (an instance-local or permission inerting, often on a
-    /// clone), so a pre-filtered stack would go stale. Consumers apply the live
-    /// flag filter through [`live_spec_sites`](Self::live_spec_sites).
+    /// inert / culled flags: those are flipped after the graph is finalized (an
+    /// instance-local inerting, often on a clone), so a pre-filtered stack would
+    /// go stale. Consumers apply the live flag filter through
+    /// [`live_spec_sites`](Self::live_spec_sites).
     ///
     /// The folded offset is stable across the refresh and across
     /// [`rebase_root`](Self::rebase_root): the spec tier never edits
@@ -755,8 +735,6 @@ impl PrimIndex {
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
             instance_depth: parent_ctx.instance_depth,
-            // Carried forward; the cache appends this prim's own denied targets.
-            denied_prefixes: parent_ctx.denied_prefixes.clone(),
             // A stage-wide policy, propagated unchanged to every descendant.
             load_payloads: parent_ctx.load_payloads,
         }
@@ -818,12 +796,6 @@ pub(crate) struct CompositionContext {
     /// discarded, so the subtree composes only from the arcs the instance brings
     /// in (the instanceable arc and below, plus its implied classes).
     pub instance_depth: Option<u16>,
-    /// Target-namespace paths an ancestor's direct arc to a `permission =
-    /// private` site denied (spec 10.3.3). A node whose path lies under one of
-    /// these prefixes was reached through that denied arc, so the cache marks
-    /// it `PERMISSION_DENIED` even in descendant prims composed separately
-    /// (where the arc is extended, not authored here).
-    pub denied_prefixes: Vec<Path>,
     /// Whether payload arcs are expanded during composition, from the stage's
     /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Propagated unchanged from
     /// the root context to every descendant, a sibling of `variant_fallbacks`.
@@ -839,7 +811,6 @@ impl Default for CompositionContext {
             ancestor_arcs: Vec::new(),
             variant_fallbacks: VariantFallbackMap::new(),
             instance_depth: None,
-            denied_prefixes: Vec::new(),
             // Compose payloads unless the stage opts out (C++ `UsdStage::LoadAll`).
             load_payloads: true,
         }

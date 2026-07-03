@@ -4295,12 +4295,12 @@ fn override_prim() -> Result<()> {
 
 // --- Incremental invalidation: per-field change classification ---
 
-/// Authoring `permission = private` on an inherited class denies the direct arc
-/// (spec 10.3.3), so the dependent prim must recompose and its inherited opinion
-/// stop contributing. Regression guard for the classifier gap that omitted
-/// `permission` from the significant tier, leaving a stale, under-invalidated read.
+/// Authoring `permission = private` on an inherited class is inert metadata:
+/// composition never enforces it (C++'s counterpart is compiled out for
+/// `Usd`-mode caches), so the inherited opinion keeps resolving unchanged and no
+/// recompose is needed.
 #[test]
-fn permission_edit_inerts_opinion() -> Result<()> {
+fn permission_edit_does_not_inert_opinion() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path().join("root.usda");
     std::fs::write(
@@ -4321,8 +4321,8 @@ fn permission_edit_inerts_opinion() -> Result<()> {
 
     assert_eq!(
         stage.attribute("/Inst.attr").get::<sdf::Value>()?,
-        None,
-        "the private arc is inerted, so the inherited opinion no longer resolves",
+        Some(sdf::Value::Double(5.0)),
+        "permission is inert metadata; the inherited opinion still resolves",
     );
     Ok(())
 }
@@ -4602,10 +4602,12 @@ fn instance_target_memo_not_stale() -> Result<()> {
 
 // --- Adapted from in-module tests: value resolution, existence, authoring ---
 
-/// A direct arc to a `permission = private` site is retained as a
-/// composition error while the prim still composes (spec 10.3.3).
+/// A direct arc to a `permission = private` site composes normally:
+/// `permission` is inert metadata for composition (spec 10.3.3), matching C++'s
+/// own arc/target permission enforcement, which is compiled out for `Usd`-mode
+/// caches and therefore never runs for a `UsdStage`.
 #[test]
-fn arc_permission_denied_surfaced() -> Result<()> {
+fn permission_private_inherit_composes_normally() -> Result<()> {
     let path = format!(
         "{}/vendor/core-spec-supplemental-release_dec2025/composition/tests/assets/\
              ErrorPermissionDenied_root/usda/root.usd",
@@ -4613,7 +4615,8 @@ fn arc_permission_denied_surfaced() -> Result<()> {
     );
     let stage = Stage::builder().open(&path)?;
 
-    // Querying /Model composes the private inherit and retains the error.
+    // /Model inherits the private /_PrivateClass; the inherited opinion stays
+    // visible and composing it raises no error.
     assert!(
         stage
             .prim("/Model")
@@ -4623,11 +4626,8 @@ fn arc_permission_denied_surfaced() -> Result<()> {
         "private inherit must stay visible"
     );
     assert!(
-        stage
-            .composition_errors()
-            .iter()
-            .any(|error| matches!(error, pcp::Error::ArcPermissionDenied { .. })),
-        "composition_errors should contain the permission error"
+        stage.composition_errors().is_empty(),
+        "permission = private must not raise a composition error"
     );
 
     Ok(())

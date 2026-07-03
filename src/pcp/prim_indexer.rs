@@ -1170,9 +1170,9 @@ impl<'a, 'f> Indexer<'a, 'f> {
     fn eval_node_relocations(&mut self, node: NodeId) -> BuildResult<()> {
         {
             let n = self.node(node);
-            // C++ `CanContributeSpecs`: not inert/culled/permission-denied. A
-            // spec-less node still relocates, so `has_specs` is not required.
-            if n.is_inert() || n.is_culled() || n.is_permission_denied() {
+            // C++ `CanContributeSpecs`: not inert/culled. A spec-less node still
+            // relocates, so `has_specs` is not required.
+            if n.is_inert() || n.is_culled() {
                 return Ok(());
             }
         }
