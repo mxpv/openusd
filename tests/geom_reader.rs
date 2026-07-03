@@ -225,18 +225,18 @@ fn rotate_xyz_matches_pixar_composition() -> Result<()> {
 #[test]
 fn trs_stack_composes_in_authored_order() -> Result<()> {
     let stage = open()?;
-    // Order is translate → rotateY(90°) → scale(2,2,2). In USD's row-
-    // vector convention, the first op is most local — applied first
-    // to the point. So a vertex at (0, 0, 0) on this prim moves like:
-    //   1. translate to (1, 2, 3)
-    //   2. rotate by 90° about Y around the origin (not the
-    //      translated point): (1, 2, 3) → (3, 2, -1)
-    //   3. scale by 2: → (6, 4, -2)
+    // Order is translate → rotateY(90°) → scale(2,2,2). The *last*
+    // op in xformOpOrder is most local — applied first to the point
+    // — and the first op applies last. So a vertex at (1, 0, 0) on
+    // this prim moves like:
+    //   1. scale by 2: (1, 0, 0) → (2, 0, 0)
+    //   2. rotate by 90° about Y: (2, 0, 0) → (0, 0, -2)
+    //   3. translate by (1, 2, 3): (0, 0, -2) → (1, 2, 1)
     let m = xform(&stage, "/World/TRS")?.local_to_parent_transform(0.0)?;
-    let p = m.transform_point(Vec3f { x: 0.0, y: 0.0, z: 0.0 });
-    assert!((p.x - 6.0).abs() < 1e-4, "x: {}", p.x);
-    assert!((p.y - 4.0).abs() < 1e-4, "y: {}", p.y);
-    assert!((p.z + 2.0).abs() < 1e-4, "z: {}", p.z);
+    let p = m.transform_point(Vec3f { x: 1.0, y: 0.0, z: 0.0 });
+    assert!((p.x - 1.0).abs() < 1e-4, "x: {}", p.x);
+    assert!((p.y - 2.0).abs() < 1e-4, "y: {}", p.y);
+    assert!((p.z - 1.0).abs() < 1e-4, "z: {}", p.z);
     Ok(())
 }
 

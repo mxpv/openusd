@@ -95,8 +95,10 @@ def Xform "World" (
 
     def Xform "TRS"
     {
-        # Standard translate / rotateY / scale stack — applied first
-        # to last per xformOpOrder.
+        # Standard translate / rotateY / scale stack. Per xformOpOrder
+        # semantics, the last-listed op (scale) is most local and is
+        # applied first to a point; the first-listed op (translate) is
+        # applied last.
         double3 xformOp:translate = (1, 2, 3)
         float xformOp:rotateY = 90
         float3 xformOp:scale = (2, 2, 2)

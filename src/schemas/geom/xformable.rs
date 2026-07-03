@@ -31,7 +31,7 @@ const NS_XFORM_OP: &str = "xformOp:";
 /// they chain (`xform.set_translate(t)?.set_rotate_y(d)?`).
 pub trait Xformable: Imageable {
     /// The ordered list of `xformOp:*` attribute names that compose this prim's
-    /// local transform, strongest (most local) first; the sentinels `!invert!`
+    /// local transform, strongest (most local) last; the sentinels `!invert!`
     /// and a leading `!resetXformStack!` are also honoured. C++
     /// `UsdGeomXformable::GetXformOpOrderAttr`.
     ///
@@ -93,10 +93,10 @@ pub trait Xformable: Imageable {
                     i,
                 );
             }
-            // Row-vector convention: the first listed op is most local
-            // (applied first to a point), so the cumulative matrix grows on
-            // the right.
-            m = m * build_op_matrix(self.prim(), op_name, time)?;
+            // Row-vector convention: the last listed op is most local
+            // (applied first to a point), so each new op is prepended,
+            // growing the cumulative matrix on the left.
+            m = build_op_matrix(self.prim(), op_name, time)? * m;
         }
         Ok(m)
     }
@@ -352,6 +352,17 @@ mod tests {
                 "xformOp:scale".to_string(),
             ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn local_to_parent_translate_unrotated() -> Result<()> {
+        let stage = Stage::builder().in_memory("anon.usda")?;
+        let x = Xform::define(&stage, "/X")?
+            .set_translate(gf::vec3d(3.0, 5.0, 7.0))?
+            .set_rotate_z(90.0)?;
+        let m = x.local_to_parent_transform(0.0)?;
+        assert_eq!([m.0[12], m.0[13], m.0[14]], [3.0, 5.0, 7.0]);
         Ok(())
     }
 
