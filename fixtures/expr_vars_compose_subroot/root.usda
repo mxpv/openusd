@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    doc = """Cross-arc expression-variable composition through a sub-root
+    reference target (C++ PcpExpressionVariables).
+
+    The root layer stack overrides TARGET, so mid.usda's own ancestral
+    reference (authored on /Sub, an ancestor of the sub-root reference target
+    /Sub/Prim) must resolve to right.usda, not mid.usda's local
+    TARGET = "wrong.usda". That ancestral reference composes inside the
+    nested sub-build the /Sub/Prim sub-root target spawns, so it must see the
+    outer frame's expression variables rather than stopping at the
+    sub-build's own local root."""
+    expressionVariables = {
+        string TARGET = "right.usda"
+    }
+)
+
+def "Model" (
+    references = @./mid.usda@</Sub/Prim>
+)
+{
+}

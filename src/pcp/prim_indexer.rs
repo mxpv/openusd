@@ -221,6 +221,16 @@ struct Frame<'f> {
     /// introduces, inherited from the arc that spawned it (C++ `_AddArc`'s
     /// `skipDuplicateNodes`). The top-level build has no frame and never skips.
     skip: bool,
+    /// The fully composed expression variables visible at the site where the
+    /// arc that spawned this sub-build was discovered — not this frame's own
+    /// authored variables, but the outer ambient context.
+    /// [`Indexer::composed_expr_vars`] overlays this once its own graph's
+    /// node→root walk is exhausted, so a reference or payload authored on an
+    /// ancestor composed inside this sub-build's own nested recursion still
+    /// sees the outer overrides. This value is already fully resolved
+    /// through any further-outer frames (each nesting level applies the same
+    /// fallback), so one level here suffices for arbitrarily deep nesting.
+    ambient_expr_vars: &'f HashMap<String, Value>,
     /// The next parent frame, or `None` at the top-level build.
     previous: Option<&'f Frame<'f>>,
 }
@@ -769,6 +779,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         skip: bool,
         root_contributes: bool,
         arc: ArcType,
+        ambient_expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<BuildOutput> {
         let requested_layer = self.inputs.stack.layer_stack_root(ambient);
         let frame = Frame {
@@ -778,6 +789,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             arc,
             requested_layer,
             skip,
+            ambient_expr_vars,
             previous: self.frame,
         };
         self.new_sub(ambient, Some(&frame), root_contributes).build(target)
@@ -825,8 +837,11 @@ impl<'a, 'f> Indexer<'a, 'f> {
         map: MapFunction,
         origin: NodeId,
         sibling: u16,
+        ambient_expr_vars: &HashMap<String, Value>,
     ) -> BuildResult<Option<NodeId>> {
-        let Some(sub) = self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc)?) else {
+        let Some(sub) =
+            self.merge_subindex(self.compose_subindex(target, ambient, skip, true, arc, ambient_expr_vars)?)
+        else {
             return Ok(None);
         };
         let Some(grafted) = self.graft_subindex(&sub, parent, arc, map, origin, sibling) else {
@@ -1227,12 +1242,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // the target). Its root is salted-earth inert; opinions and implied
         // classes carried up across the relocate node translate the source
         // namespace to the target.
+        let expr_vars = self.composed_expr_vars(node);
         let Some(sub) = self.merge_subindex(self.compose_subindex(
             &source,
             node_ambient,
             self.frame_skip(),
             false,
             ArcType::Relocate,
+            &expr_vars,
         )?) else {
             return Ok(());
         };
@@ -1544,11 +1561,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// `PrimIndex::composed_expr_vars` is the value-resolution-time twin of this
     /// walk over the finished index; keep the two in sync.
     ///
-    /// TODO(expr-arcs): a reference authored inside a sub-root arc target is
-    /// composed in a nested sub-build whose graph holds only the target's
-    /// subtree, so this walk stops at the sub-build root and misses the outer
-    /// frames' overrides. Thread the variables across the [`Frame`] chain to
-    /// cover that case.
+    /// A sub-root arc target is composed in a nested sub-build whose graph
+    /// holds only the target's own subtree, so the node→root walk stops at
+    /// the sub-build's local root without reaching the outer frames' own
+    /// overrides; once exhausted, the walk falls back to the spawning
+    /// [`Frame`]'s already-resolved ambient, which wins as the closer-to-root
+    /// opinion (recorded on [`Frame::ambient_expr_vars`] when the sub-build
+    /// was spawned).
     ///
     /// TODO(perf): this runs per reference/payload eval task and reads each
     /// boundary layer's `expressionVariables` even when no asset path is an
@@ -1565,6 +1584,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 composed.extend(self.layer_stack_expr_vars(n.layer_stack_id()));
             }
             cur = n.parent;
+        }
+        // This build's own graph is disjoint from the outer frame until
+        // grafted; the frame's ambient is already resolved as of the point the
+        // arc that spawned this sub-build fired, so it overrides anything
+        // found within this subtree.
+        if let Some(frame) = self.frame {
+            expr::compose_over(&mut composed, frame.ambient_expr_vars);
         }
         composed
     }
@@ -1987,6 +2013,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         if skip && self.find_duplicate(stack_id, &var_path) {
             return Ok(());
         }
+        let expr_vars = self.composed_expr_vars(node);
         let grafted = self.compose_and_graft(
             &var_path,
             stack_id,
@@ -1996,6 +2023,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
             map,
             node,
             vt.vset_num,
+            &expr_vars,
         )?;
         if grafted.is_some() {
             self.retry_variant_tasks();
@@ -2163,6 +2191,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root class needs the opinions above it: compose the target as its
         // own ancestral sub-index and graft it under the parent.
         if direct_should && !inherit_path.is_root_prim() {
+            let expr_vars = self.composed_expr_vars(parent);
             let grafted = self.compose_and_graft(
                 &inherit_path,
                 parent_stack,
@@ -2172,6 +2201,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
                 inherit_map,
                 origin,
                 arc_num,
+                &expr_vars,
             )?;
             if implied {
                 if let Some(g) = grafted {
@@ -2494,7 +2524,18 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // A sub-root specialize target needs the opinions above it (C++
         // `includeAncestralOpinions = !IsRootPrimPath`).
         if !src_path.is_root_prim() {
-            return self.compose_and_graft(&src_path, src_stack, true, root, ArcType::Specialize, map, src, sibling);
+            let expr_vars = self.composed_expr_vars(src);
+            return self.compose_and_graft(
+                &src_path,
+                src_stack,
+                true,
+                root,
+                ArcType::Specialize,
+                map,
+                src,
+                sibling,
+                &expr_vars,
+            );
         }
 
         let has_specs = self.stack_has_spec(src_stack, &src_path);
@@ -2748,8 +2789,17 @@ impl<'a, 'f> Indexer<'a, 'f> {
         // `PcpErrorUnresolvedPrimPath`).
         if !source.is_root_prim() {
             let before = self.errors.len();
-            let grafted =
-                self.compose_and_graft(&source, target_stack, self.frame_skip(), parent, arc, map, parent, 0)?;
+            let grafted = self.compose_and_graft(
+                &source,
+                target_stack,
+                self.frame_skip(),
+                parent,
+                arc,
+                map,
+                parent,
+                0,
+                expr_vars,
+            )?;
             // The target is unresolved only when composing it hit a cycle (its own
             // ancestral chain loops back) that left nothing — not when it is merely
             // empty so far (e.g. a variant supplies its opinions later).
@@ -3284,6 +3334,42 @@ mod tests {
                 .iter()
                 .any(|n| n.arc == ArcType::Inherit && n.path.as_str() == "/Scope/C" && n.has_specs()),
             "the sub-root inherit arc to /Scope/C contributes the class opinion"
+        );
+    }
+
+    /// A reference authored on an ancestor of a sub-root reference target is
+    /// composed inside that target's own nested `Indexer` sub-build spawned by
+    /// `compose_and_graft`'s `Frame`; the outer (referencing) layer's `TARGET`
+    /// must win over the target file's own `TARGET`.
+    #[test]
+    fn expr_vars_subroot_frame() {
+        let s = multi_stack(&[
+            (
+                "root.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string TARGET = \"right.usd\"\n    }\n)\ndef \"Model\" (\n    references = @mid.usd@</Sub/Prim>\n) {}\n",
+            ),
+            (
+                "mid.usd",
+                "#usda 1.0\n(\n    expressionVariables = {\n        string TARGET = \"wrong.usd\"\n    }\n)\ndef \"Sub\" (\n    references = @`${TARGET}`@\n) {}\n",
+            ),
+            (
+                "right.usd",
+                "#usda 1.0\n(\n    defaultPrim = \"Right\"\n)\ndef \"Right\" {\n    def \"Prim\" { custom string source = \"right\" }\n}\n",
+            ),
+            (
+                "wrong.usd",
+                "#usda 1.0\n(\n    defaultPrim = \"Wrong\"\n)\ndef \"Wrong\" {\n    def \"Prim\" { custom string source = \"wrong\" }\n}\n",
+            ),
+        ]);
+        let graph =
+            build(&s, "/Model").expect("a sub-root reference whose ancestor authors an expr-var reference is composed");
+        let right_id = s.id_of("right.usd").expect("right.usd present");
+        assert!(
+            graph.iter().any(|n| n.layer_id() == right_id && n.has_specs()),
+            "the outer layer's TARGET=\"right.usd\" must win over mid.usd's own \
+             TARGET=\"wrong.usd\" when Sub's ancestral reference is resolved \
+             inside the nested sub-root build, got {:?}",
+            graph.iter().map(|n| (n.arc, n.path.as_str())).collect::<Vec<_>>()
         );
     }
 

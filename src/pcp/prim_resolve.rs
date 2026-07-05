@@ -486,8 +486,10 @@ impl PrimIndex {
     /// one (C++ `PcpExpressionVariables`).
     ///
     /// Keep this walk in sync with `Indexer::composed_expr_vars`: both must
-    /// agree on which arcs are boundaries and how stacks compose. The
-    /// indexer's `TODO(expr-arcs)` (sub-root frames) applies here too.
+    /// agree on which arcs are boundaries and how stacks compose. By resolve
+    /// time every sub-build has been grafted into one connected arena
+    /// (`Indexer::graft_subindex`), so this plain `node.parent()` walk always
+    /// reaches every boundary.
     pub(crate) fn composed_expr_vars(&self, node: &Node, stack: &LayerGraph) -> HashMap<String, Value> {
         let mut composed = HashMap::new();
         let mut cur = Some(node);

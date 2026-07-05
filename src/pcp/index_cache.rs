@@ -2654,6 +2654,26 @@ def "Scope"
         Ok(())
     }
 
+    /// The sub-root twin of `expr_vars_compose_across_reference`: `/Model`
+    /// references a sub-root target `/Sub/Prim`, so composing it spawns a
+    /// nested ancestral sub-index (`Indexer::compose_and_graft`) for `/Sub`
+    /// and `/Sub/Prim`. `/Sub`'s own reference expression must still resolve
+    /// against the outer (root) layer's `TARGET`, not mid.usda's own local
+    /// value, even though it composes inside that disjoint nested build.
+    #[test]
+    fn expr_vars_subroot_reference() -> Result<()> {
+        let root = format!("{}/fixtures/expr_vars_compose_subroot/root.usda", manifest_dir());
+        let (graph, mut cache) = collected_stack(&root);
+        let interp = |_: &sdf::TimeSampleMap, _: f64| None;
+        assert_eq!(
+            cache.value_at(&graph, &sdf::path("/Model.source")?, 0.0, &interp)?,
+            Some(Value::String("right".to_string())),
+            "the outer layer's TARGET override resolves Sub's ancestral reference to right.usda \
+             even though it composes inside the sub-root target's nested sub-build"
+        );
+        Ok(())
+    }
+
     /// Editing a layer stack's `expressionVariables` re-resolves a `${VAR}`
     /// reference asset path and recomposes the cached index: with `PICK = "a"`
     /// the reference draws a.usda's opinion, and editing it to "b" yields

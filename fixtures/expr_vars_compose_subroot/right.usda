@@ -1,0 +1,12 @@
+#usda 1.0
+(
+    defaultPrim = "Asset"
+)
+
+def "Asset"
+{
+    def "Prim"
+    {
+        custom string source = "right"
+    }
+}
