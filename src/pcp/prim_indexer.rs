@@ -389,7 +389,8 @@ pub(crate) struct BuildOutput {
 
 /// The shared, read-only inputs to a prim build — the same across every nested
 /// sub-build (C++ `PcpPrimIndexInputs` plus the `PcpCache` it reads). All
-/// borrows, so it is `Copy` and threads into a sub-build unchanged.
+/// borrows or `Copy` values, so it is `Copy` and threads into a sub-build
+/// unchanged.
 #[derive(Clone, Copy)]
 struct Inputs<'a> {
     /// The layer stack being composed.
@@ -401,6 +402,10 @@ struct Inputs<'a> {
     /// is read from here to seed this child's graph (C++
     /// `_BuildInitialPrimIndexFromAncestor`).
     cached_indices: &'a sdf::PathTable<PrimEntry>,
+    /// Whether payload arcs are expanded during composition — the per-path
+    /// decision for the site being built (`IndexCache::is_loaded`), not
+    /// something `ctx` carries, since a sibling prim can resolve differently.
+    load_payloads: bool,
 }
 
 /// The site this build composes (C++ `PcpLayerStackSite`): the layer stack the
@@ -479,12 +484,14 @@ impl<'a, 'f> Indexer<'a, 'f> {
         ctx: &'a CompositionContext,
         cached_indices: &'a sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
+        load_payloads: bool,
     ) -> Self {
         Self {
             inputs: Inputs {
                 stack,
                 ctx,
                 cached_indices,
+                load_payloads,
             },
             site: Site {
                 ambient,
@@ -748,7 +755,13 @@ impl<'a, 'f> Indexer<'a, 'f> {
         frame: Option<&'g Frame<'g>>,
         root_contributes: bool,
     ) -> Indexer<'a, 'g> {
-        let mut sub = Indexer::new(self.inputs.stack, self.inputs.ctx, self.inputs.cached_indices, ambient);
+        let mut sub = Indexer::new(
+            self.inputs.stack,
+            self.inputs.ctx,
+            self.inputs.cached_indices,
+            ambient,
+            self.inputs.load_payloads,
+        );
         sub.frame = frame;
         sub.frame_depth = self.frame_depth + 1;
         sub.root_contributes = root_contributes;
@@ -1005,7 +1018,7 @@ impl<'a, 'f> Indexer<'a, 'f> {
     /// [`add_tasks_for_node`](Self::add_tasks_for_node) when an arc is composed.
     fn add_expressed_arc_tasks(&mut self, node: NodeId) {
         self.tasks.push(Task::new(TaskKind::EvalNodeReferences, node));
-        if self.inputs.ctx.load_payloads {
+        if self.inputs.load_payloads {
             self.tasks.push(Task::new(TaskKind::EvalNodePayloads, node));
         }
         self.tasks.push(Task::new(TaskKind::EvalNodeInherits, node));
@@ -3201,7 +3214,7 @@ mod tests {
     fn build(stack: &LayerGraph, prim: &str) -> Option<PrimIndexGraph> {
         let ctx = CompositionContext::default();
         let ambient = stack.root_layer_stack_id();
-        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient)
+        Indexer::new(stack, &ctx, &sdf::PathTable::new(), ambient, true)
             .build(&Path::from(prim))
             .expect("indexer build")
             .graph
@@ -3466,7 +3479,7 @@ mod tests {
                 resolved_targets: Default::default(),
             },
         );
-        let child = Indexer::new(&s, &ctx, &cached, ambient)
+        let child = Indexer::new(&s, &ctx, &cached, ambient, true)
             .build(&Path::from("/Root/Child"))
             .expect("indexer build")
             .graph

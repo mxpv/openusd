@@ -336,17 +336,20 @@ impl Prim {
             .unwrap_or(false))
     }
 
-    /// `true` if the prim is loaded — active, and no ancestor carries an
-    /// unloaded payload. Mirrors C++ `UsdPrim::IsLoaded`.
+    /// `true` if the prim is loaded — active, and no payload-carrying prim at
+    /// or above it (per the stage's runtime load rules) is excluded. Mirrors
+    /// C++ `UsdPrim::IsLoaded`.
     pub fn is_loaded(&self) -> anyhow::Result<bool> {
         if !self.is_active()? {
             return Ok(false);
         }
-        if self.stage.load().load_payloads() {
+        // No rule anywhere means every path resolves loaded (`LoadRules`'
+        // documented default) -- skip the ancestor walk below entirely.
+        if self.stage.cache().load_rules().is_empty() {
             return Ok(true);
         }
         for path in self.path.ancestors_below_root() {
-            if has_payload(&self.stage, &path)? {
+            if has_payload(&self.stage, &path)? && !self.stage.is_path_loaded(&path) {
                 return Ok(false);
             }
         }
@@ -669,7 +672,7 @@ impl Prim {
 
 /// `true` when a non-empty `payload` opinion is composed at `prim` — the
 /// per-prim check behind [`Prim::is_loaded`].
-fn has_payload(stage: &Stage, prim: &sdf::Path) -> anyhow::Result<bool> {
+pub(super) fn has_payload(stage: &Stage, prim: &sdf::Path) -> anyhow::Result<bool> {
     let payload = stage.field::<sdf::Value>(prim, sdf::FieldKey::Payload)?;
     Ok(match payload {
         Some(sdf::Value::Payload(payload)) => payload_has_target(&payload),

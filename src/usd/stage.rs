@@ -39,6 +39,7 @@
 
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
+use std::mem;
 use std::rc::{Rc, Weak};
 
 use anyhow::Result;
@@ -174,11 +175,17 @@ pub enum InitialLoadSet {
     LoadNone,
 }
 
-impl InitialLoadSet {
-    /// Returns `true` when payload arcs should be followed.
-    pub const fn load_payloads(self) -> bool {
-        matches!(self, Self::LoadAll)
-    }
+/// How deeply a [`Stage::load`] call expands payloads. Mirrors C++
+/// `UsdLoadPolicy`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LoadPolicy {
+    /// Load the requested prim, its ancestors, and every descendant payload
+    /// recursively. C++ `UsdLoadWithDescendants`.
+    #[default]
+    WithDescendants,
+    /// Load only the requested prim (and its ancestors); a descendant with
+    /// no rule of its own is excluded. C++ `UsdLoadWithoutDescendants`.
+    WithoutDescendants,
 }
 
 /// Population mask limiting which prim paths are exposed by a [`Stage`].
@@ -1830,6 +1837,232 @@ impl Stage {
         }
     }
 
+    /// Loads `path`'s payload — and its ancestors', if not already loaded —
+    /// per `policy` (C++ `UsdStage::Load`). Loading an already-loaded path is
+    /// legal and simply costs nothing (see [`load_rules`](Self::load_rules)'s
+    /// no-op guarantee). `path` need not currently resolve to a composed
+    /// prim — only an ancestor need exist — since loading a not-yet-visible
+    /// descendant is the common case.
+    ///
+    /// A `path` that normalizes into a `/__Prototype_N` prototype's namespace
+    /// is silently ignored, mirroring [`mute_layer`](Self::mute_layer)'s
+    /// treatment of the root layer: load rules are always authored in
+    /// real-namespace terms, and a rule on a synthetic prototype path would
+    /// never be consulted. No inactive-ancestor validation is performed — an
+    /// inactive subtree never composes regardless of its load rule, so a rule
+    /// authored there is inert but harmless.
+    pub fn load(&self, path: impl Into<sdf::Path>, policy: LoadPolicy) {
+        let Some(path) = self.normalize_load_target(path.into()) else {
+            return;
+        };
+        let victims = self.install_load_rules(|rules| match policy {
+            LoadPolicy::WithDescendants => rules.load_with_descendants(path.clone()),
+            LoadPolicy::WithoutDescendants => rules.load_without_descendants(path.clone()),
+        });
+        self.notify_load_rules_changed(&victims);
+    }
+
+    /// Unloads `path`'s payload and everything beneath it (C++
+    /// `UsdStage::Unload`). Same leniency as [`load`](Self::load) for a
+    /// prototype-namespace path.
+    pub fn unload(&self, path: impl Into<sdf::Path>) {
+        let Some(path) = self.normalize_load_target(path.into()) else {
+            return;
+        };
+        let victims = self.install_load_rules(|rules| rules.unload(path.clone()));
+        self.notify_load_rules_changed(&victims);
+    }
+
+    /// Loads every path in `to_load` (with `policy`) and unloads every path
+    /// in `to_unload`, applying every edit to one clone of the rules and
+    /// recomposing once for the whole batch (C++ `UsdStage::LoadAndUnload`).
+    /// Every `to_unload` path is applied before
+    /// any `to_load` path, matching C++'s own "unloads first, then loads" —
+    /// so a path in both sets ends up loaded, and unloading an ancestor while
+    /// loading one of its descendants in the same call still leaves the
+    /// descendant reachable (the ancestor resolves to
+    /// [`pcp::Rule::Only`](crate::pcp::Rule::Only), not excluded, via
+    /// [`pcp::LoadRules::effective_rule`]'s lookahead).
+    pub fn load_and_unload(
+        &self,
+        to_load: impl IntoIterator<Item = (impl Into<sdf::Path>, LoadPolicy)>,
+        to_unload: impl IntoIterator<Item = impl Into<sdf::Path>>,
+    ) {
+        let to_unload: Vec<sdf::Path> = to_unload
+            .into_iter()
+            .filter_map(|path| self.normalize_load_target(path.into()))
+            .collect();
+        let to_load: Vec<(sdf::Path, LoadPolicy)> = to_load
+            .into_iter()
+            .filter_map(|(path, policy)| self.normalize_load_target(path.into()).map(|path| (path, policy)))
+            .collect();
+        let victims = self.install_load_rules(|rules| {
+            for path in to_unload {
+                rules.unload(path);
+            }
+            for (path, policy) in to_load {
+                match policy {
+                    LoadPolicy::WithDescendants => rules.load_with_descendants(path),
+                    LoadPolicy::WithoutDescendants => rules.load_without_descendants(path),
+                }
+            }
+        });
+        self.notify_load_rules_changed(&victims);
+    }
+
+    /// A clone of the stage's current load rules (C++
+    /// `UsdStage::GetLoadRules`).
+    pub fn load_rules(&self) -> pcp::LoadRules {
+        self.cache().load_rules().clone()
+    }
+
+    /// Replaces the stage's load rules wholesale, recomposing every cached
+    /// index the change could affect (C++ `UsdStage::SetLoadRules`) — the
+    /// same bounded invalidation [`load`](Self::load)/[`unload`](Self::unload)
+    /// use, not a blunt whole-stage drop, since the affected set is already
+    /// provably sufficient (see [`pcp::LoadRules`]'s module documentation).
+    pub fn set_load_rules(&self, rules: pcp::LoadRules) {
+        let victims = self.replace_load_rules(rules);
+        self.notify_load_rules_changed(&victims);
+    }
+
+    /// Every prim below `root` (inclusive) that carries a payload arc, loaded
+    /// or not, excluding inactive prims (C++ `UsdStage::FindLoadable`).
+    ///
+    /// Discovering a payload nested several levels deep requires actually
+    /// reading its target layer — there is no way to know a layer's content
+    /// without loading it — so this call transiently installs
+    /// [`pcp::LoadRules::all`] to make every payload discoverable, walks the
+    /// tree, and then restores the stage's original load rules. Neither swap
+    /// fires [`StageSink::load_rules_changed`], and [`load_rules`](Self::load_rules)
+    /// reads back the original table afterward, so the *rules* are not
+    /// observable — but if `root`'s current rules are not already the
+    /// all-inclusive default, each swap can still evict cached prim indices
+    /// and bump the composition revision (matching whatever `set_load_rules`
+    /// would do for that same transition), which a cached value view keyed
+    /// on the revision will notice.
+    ///
+    /// This also has a real, permanent side effect worth calling out: every
+    /// payload-target layer under `root` is left loaded in the layer
+    /// registry afterward, even though the load *rules* are restored — this
+    /// codebase has no layer-eviction mechanism yet, so there is no way to
+    /// discover a payload's content without leaving its layer resident.
+    /// C++'s own `FindLoadable` equally must traverse (and thus compose)
+    /// every candidate subtree.
+    // TODO(perf): when the stage's current rules are not already
+    // `LoadRules::all()`, the install and the restore each evict the whole
+    // store (the root rule itself changes), so a stage opened with
+    // `InitialLoadSet::LoadNone` pays two full-store recomposes per call. A
+    // scratch cache the walk composes into, left uncommitted, would avoid
+    // this, but is a larger change than this method currently needs.
+    pub fn find_loadable(&self, root: impl Into<sdf::Path>) -> anyhow::Result<Vec<sdf::Path>> {
+        let root = root.into();
+        let _guard = LoadRulesGuard {
+            stage: self,
+            original: self.load_rules(),
+        };
+        self.replace_load_rules(pcp::LoadRules::all());
+        let mut found = Vec::new();
+        self.walk_loadable(&root, &mut found)?;
+        found.sort();
+        found.dedup();
+        Ok(found)
+    }
+
+    /// Every prim currently included by the load rules — i.e. carrying a
+    /// payload arc whose own rule currently resolves loaded (C++
+    /// `UsdStage::GetLoadSet`). Unlike [`load_rules`](Self::load_rules), this
+    /// reports the actual composed state, not the raw authored rules.
+    pub fn load_set(&self) -> anyhow::Result<Vec<sdf::Path>> {
+        Ok(self
+            .find_loadable(sdf::Path::abs_root())?
+            .into_iter()
+            .filter(|path| self.is_path_loaded(path))
+            .collect())
+    }
+
+    /// Collects every active, payload-carrying prim at or below `path` into
+    /// `found` — the walk behind [`find_loadable`](Self::find_loadable). An
+    /// explicit work stack, not native recursion, so a pathologically deep
+    /// prim hierarchy cannot overflow the call stack — matching
+    /// [`traverse`](Self::traverse)'s own approach to the same style of
+    /// whole-tree walk.
+    fn walk_loadable(&self, path: &sdf::Path, found: &mut Vec<sdf::Path>) -> anyhow::Result<()> {
+        let mut stack = vec![path.clone()];
+        while let Some(path) = stack.pop() {
+            let prim = self.prim(path.clone());
+            if !prim.is_active()? {
+                continue;
+            }
+            if super::prim::has_payload(self, &path)? {
+                found.push(path.clone());
+            }
+            for child in prim.children()? {
+                stack.push(child.path().clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Reduces `path` to an absolute prim path (`prim_path` strips a property
+    /// suffix and `strip_all_variant_selections` collapses any variant
+    /// segment — [`pcp::LoadRules`]' table requires genuinely prim-only
+    /// paths), then rejects a path inside a `/__Prototype_N` namespace, where
+    /// load rules are never consulted (see [`pcp::LoadRules`]'s instancing
+    /// notes). A cheap early exit for `load`/`unload`/`load_and_unload` — the
+    /// real enforcement of the same invariant lives in
+    /// `IndexCache::set_load_rules`, the single choke point every mutation
+    /// (including a caller-supplied [`set_load_rules`](Self::set_load_rules)
+    /// table this normalization never sees) passes through.
+    fn normalize_load_target(&self, path: sdf::Path) -> Option<sdf::Path> {
+        let path = sdf::Path::abs_root().make_absolute(&path.prim_path().strip_all_variant_selections());
+        let cache = self.cache();
+        if cache.is_prototype(&path) || cache.is_in_prototype(&path) {
+            return None;
+        }
+        Some(path)
+    }
+
+    /// Applies `edit` to a clone of the stage's current load rules and
+    /// installs the result, returning the bounded set of paths whose cached
+    /// index was dropped (empty for a no-op edit). For `load`/`unload`/
+    /// `load_and_unload`, which build on the existing table.
+    fn install_load_rules(&self, edit: impl FnOnce(&mut pcp::LoadRules)) -> Vec<sdf::Path> {
+        let mut rules = self.cache.borrow().load_rules().clone();
+        edit(&mut rules);
+        self.replace_load_rules(rules)
+    }
+
+    /// Installs `rules` directly in place of the stage's current load rules,
+    /// returning the bounded set of paths whose cached index was dropped. The
+    /// entry point for callers that already hold the exact replacement
+    /// value: [`set_load_rules`](Self::set_load_rules) and the transient
+    /// swaps in [`find_loadable`](Self::find_loadable)/[`LoadRulesGuard`].
+    fn replace_load_rules(&self, rules: pcp::LoadRules) -> Vec<sdf::Path> {
+        // Drain pending edits first so the mutation recomposes against a
+        // current graph and cache, matching `apply_mute`.
+        self.process_pending();
+        self.cache.borrow_mut().set_load_rules(rules)
+    }
+
+    /// Fires [`StageSink::load_rules_changed`] with the resynced paths, after
+    /// the cache borrow is released — skipped entirely when `resynced` is
+    /// empty (a no-op edit invalidated nothing).
+    fn notify_load_rules_changed(&self, resynced: &[sdf::Path]) {
+        if resynced.is_empty() {
+            return;
+        }
+        for sink in self.sinks.borrow().iter() {
+            sink.load_rules_changed(self, resynced);
+        }
+    }
+
+    /// `true` if `path`'s own payload is included by the stage's load rules —
+    /// the per-ancestor check behind [`Prim::is_loaded`](super::Prim::is_loaded).
+    pub(crate) fn is_path_loaded(&self, path: &sdf::Path) -> bool {
+        self.cache().is_loaded(path)
+    }
+
     /// Applies a muted-set mutation to the layer graph and recomposes when it
     /// reports a change, returning the canonical identifier whose muted state
     /// toggled (`None` when the set was unchanged). Unmuting through an alternate
@@ -1884,8 +2117,10 @@ impl Stage {
         self.layers().muted_layers()
     }
 
-    /// Returns the stage's initial payload loading behavior.
-    pub fn load(&self) -> InitialLoadSet {
+    /// Returns the stage's initial payload loading behavior, as requested at
+    /// open time (`StageBuilder::load`). The live, runtime-mutable policy is
+    /// [`load_rules`](Self::load_rules).
+    pub fn initial_load_set(&self) -> InitialLoadSet {
         self.initial_load_set
     }
 
@@ -2645,6 +2880,21 @@ impl Stage {
     }
 }
 
+/// Restores a stage's load rules on drop — the RAII half of
+/// [`Stage::find_loadable`]'s transient `LoadRules::all()` swap, so the
+/// original rules are reinstalled even if the walk between construction and
+/// drop returns early on error.
+struct LoadRulesGuard<'a> {
+    stage: &'a Stage,
+    original: pcp::LoadRules,
+}
+
+impl Drop for LoadRulesGuard<'_> {
+    fn drop(&mut self) {
+        self.stage.replace_load_rules(mem::take(&mut self.original));
+    }
+}
+
 /// Builder for configuring and opening a [`Stage`].
 ///
 /// Created via [`Stage::builder`]. Configures the [`LayerRegistry`] layers load
@@ -2972,7 +3222,10 @@ impl StageBuilder {
         session_layer_count: usize,
         collection_errors: Vec<pcp::Error>,
     ) -> Stage {
-        let load_payloads = self.initial_load_set.load_payloads();
+        let load_rules = match self.initial_load_set {
+            InitialLoadSet::LoadAll => pcp::LoadRules::all(),
+            InitialLoadSet::LoadNone => pcp::LoadRules::none(),
+        };
         // The root layer stack's identity, from the collected inputs: the root is
         // the first non-session layer, the session layer the first of any. The
         // graph below is populated layer by layer, so this is read from the inputs
@@ -2998,7 +3251,7 @@ impl StageBuilder {
             layers: RefCell::new(pcp::LayerGraph::new(self.registry)),
             cache: RefCell::new(pcp::IndexCache::new(
                 self.variant_fallbacks,
-                load_payloads,
+                load_rules,
                 collection_errors,
             )),
             initial_load_set: self.initial_load_set,

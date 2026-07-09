@@ -9,8 +9,8 @@ use std::rc::Rc;
 use anyhow::Result;
 use openusd::ar::Resolver as _;
 use openusd::usd::{
-    CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
-    StagePopulationMask, StageSink,
+    CommittedChange, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
+    StageAuthoringError, StagePopulationMask, StageSink,
 };
 use openusd::usdz::ArchiveWriter;
 use openusd::{ar, gf, pcp, sdf, tf, usd};
@@ -24,6 +24,7 @@ struct RecordingSink {
     after: Option<Box<dyn Fn(&Stage, &CommittedChange<'_>)>>,
     edit_target: Option<Box<dyn Fn(&Stage)>>,
     muting: Option<Box<dyn Fn(&Stage, &str, bool)>>,
+    load_rules: Option<Box<dyn Fn(&Stage, &[sdf::Path])>>,
 }
 
 impl StageSink for RecordingSink {
@@ -40,6 +41,11 @@ impl StageSink for RecordingSink {
     fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool) {
         if let Some(f) = &self.muting {
             f(stage, layer, muted);
+        }
+    }
+    fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
+        if let Some(f) = &self.load_rules {
+            f(stage, resynced);
         }
     }
 }
@@ -2130,7 +2136,7 @@ fn load_none() -> Result<()> {
     assert_eq!(loaded.layer_count(), 2);
 
     let unloaded = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
-    assert_eq!(unloaded.load(), InitialLoadSet::LoadNone);
+    assert_eq!(unloaded.initial_load_set(), InitialLoadSet::LoadNone);
     assert_eq!(unloaded.layer_count(), 1);
     assert!(!unloaded.prim("/World").is_loaded()?);
     assert_eq!(child_names(&unloaded, "/World")?, Vec::<String>::new());
@@ -2138,6 +2144,285 @@ fn load_none() -> Result<()> {
     let mut prims = Vec::new();
     unloaded.traverse(PrimPredicate::DEFAULT, |p| prims.push(p.as_str().to_string()))?;
     assert!(prims.is_empty());
+    Ok(())
+}
+
+/// Runtime `load`/`unload` mutate the effective load state incrementally,
+/// independent of the stage's open-time `InitialLoadSet`.
+#[test]
+fn runtime_load_unload() -> Result<()> {
+    let path = composition_path("payload/payload_same_folder.usda");
+    let stage = Stage::builder().load(InitialLoadSet::LoadNone).open(&path)?;
+    assert!(!stage.prim("/World").is_loaded()?);
+
+    stage.load("/World", LoadPolicy::WithDescendants);
+    assert!(stage.prim("/World").is_loaded()?);
+    assert_eq!(child_names(&stage, "/World")?, vec!["Cube"]);
+
+    stage.unload("/World");
+    assert!(!stage.prim("/World").is_loaded()?);
+    assert_eq!(child_names(&stage, "/World")?, Vec::<String>::new());
+    Ok(())
+}
+
+/// `set_load_rules` installs a caller-built table wholesale, and `load_rules`
+/// reads back exactly what was installed.
+#[test]
+fn set_load_rules_round_trips() -> Result<()> {
+    let path = composition_path("payload/payload_same_folder.usda");
+    let stage = Stage::open(&path)?;
+
+    let mut rules = pcp::LoadRules::all();
+    rules.unload(sdf::path("/World")?);
+    stage.set_load_rules(rules.clone());
+
+    assert_eq!(stage.load_rules(), rules);
+    assert!(!stage.prim("/World").is_loaded()?);
+    Ok(())
+}
+
+/// A redundant `load`/`unload` call — one that resolves to the same load
+/// rules already in effect — fires no [`StageSink::load_rules_changed`]
+/// notification, since nothing was actually invalidated.
+#[test]
+fn load_noop_fires_no_notification() -> Result<()> {
+    let path = composition_path("payload/payload_same_folder.usda");
+    let stage = Stage::open(&path)?;
+    let calls = Rc::new(RefCell::new(0));
+    let _token = {
+        let calls = calls.clone();
+        stage.add_sink(RecordingSink {
+            load_rules: Some(Box::new(move |_stage, _resynced| {
+                *calls.borrow_mut() += 1;
+            })),
+            ..Default::default()
+        })
+    };
+
+    // Already loaded with the default (empty) rules -- a true no-op.
+    stage.load("/World", LoadPolicy::WithDescendants);
+    assert_eq!(
+        *calls.borrow(),
+        0,
+        "already-loaded path with default rules fires nothing"
+    );
+
+    stage.unload("/World");
+    assert_eq!(*calls.borrow(), 1);
+
+    stage.unload("/World");
+    assert_eq!(*calls.borrow(), 1, "repeated unload is a no-op");
+    Ok(())
+}
+
+/// Writes a three-layer payload chain (`root` -> `/World/A` payloads `a.usda`
+/// -> `/World/A/Deep` payloads `deep.usda`) into a fresh temp directory, for
+/// tests exercising nested load-rule interactions.
+fn write_nested_payload_scene(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let root = dir.join("root.usda");
+    let a = dir.join("a.usda");
+    let deep = dir.join("deep.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"A\" (\n        payload = @a.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &a,
+        "#usda 1.0\n(\n    defaultPrim = \"A\"\n)\ndef \"A\" {\n    def \"Deep\" (\n        payload = @deep.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &deep,
+        "#usda 1.0\n(\n    defaultPrim = \"Deep\"\n)\ndef \"Deep\" {\n    custom double x = 42\n}\n",
+    )?;
+    Ok(root)
+}
+
+/// `find_loadable` discovers every payload-carrying prim under `root`, even
+/// one nested behind another payload it must transiently load to see past,
+/// and restores the stage's original (unloaded) state afterward. `load_set`
+/// then reports only what the live rules actually include.
+#[test]
+fn nested_payload_find_loadable_and_load_set() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_nested_payload_scene(dir.path())?;
+    let stage = Stage::builder()
+        .load(InitialLoadSet::LoadNone)
+        .open(root.to_str().unwrap())?;
+
+    assert_eq!(
+        stage.find_loadable("/World")?,
+        vec![sdf::path("/World/A")?, sdf::path("/World/A/Deep")?]
+    );
+    assert!(stage.load_set()?.is_empty(), "load rules still say LoadNone");
+    // The transient discovery swap must not leave the rules changed.
+    assert!(!stage.prim("/World/A").is_loaded()?);
+
+    stage.load("/World/A", LoadPolicy::WithDescendants);
+    assert_eq!(
+        stage.load_set()?,
+        vec![sdf::path("/World/A")?, sdf::path("/World/A/Deep")?]
+    );
+    Ok(())
+}
+
+/// `load_and_unload` applies every unload before any load, so a path in both
+/// sets ends up loaded.
+#[test]
+fn load_and_unload_same_path_prefers_load() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_nested_payload_scene(dir.path())?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+
+    stage.load_and_unload(
+        [(sdf::path("/World/A")?, LoadPolicy::WithDescendants)],
+        [sdf::path("/World/A")?],
+    );
+    assert!(stage.prim("/World/A").is_loaded()?);
+    Ok(())
+}
+
+/// Unloading an ancestor while loading one of its descendants in the same
+/// `load_and_unload` call still leaves the descendant reachable: the
+/// ancestor's own payload reopens just enough to expose it (`Rule::Only` via
+/// `LoadRules::effective_rule`'s lookahead).
+#[test]
+fn load_and_unload_nested_ancestor_descendant() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = write_nested_payload_scene(dir.path())?;
+    let stage = Stage::open(root.to_str().unwrap())?;
+
+    stage.load_and_unload(
+        [(sdf::path("/World/A/Deep")?, LoadPolicy::WithDescendants)],
+        [sdf::path("/World/A")?],
+    );
+    assert!(stage.prim("/World/A").is_loaded()?);
+    assert!(stage.prim("/World/A/Deep").is_loaded()?);
+    assert_eq!(
+        stage
+            .attribute("/World/A/Deep.x")
+            .get_at::<sdf::Value>(usd::TimeCode::new(0.0))?,
+        Some(sdf::Value::Double(42.0))
+    );
+    Ok(())
+}
+
+/// Two instances sharing identical arcs mint one prototype by default; giving
+/// one instance's descendant a different runtime load rule than the other's
+/// splits them into separate prototypes (`InstanceKey` folds in each
+/// instance's own load rules, re-rooted onto its path).
+#[test]
+fn instance_descendant_load_rule_splits_prototype() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let proto = dir.path().join("proto.usda");
+    let heavy = dir.path().join("heavy.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"InstA\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n    def \"InstB\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &proto,
+        "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Heavy\" (\n        payload = @heavy.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &heavy,
+        "#usda 1.0\n(\n    defaultPrim = \"Heavy\"\n)\ndef \"Heavy\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let proto_a = stage.prim("/World/InstA").prototype()?.expect("InstA is an instance");
+    let proto_b = stage.prim("/World/InstB").prototype()?.expect("InstB is an instance");
+    assert_eq!(
+        proto_a, proto_b,
+        "identical composition and load state share a prototype"
+    );
+
+    stage.unload("/World/InstA/Heavy");
+
+    let proto_a = stage.prim("/World/InstA").prototype()?.expect("still an instance");
+    let proto_b = stage.prim("/World/InstB").prototype()?.expect("still an instance");
+    assert_ne!(
+        proto_a, proto_b,
+        "differing load rules on a descendant split the prototype"
+    );
+    Ok(())
+}
+
+/// A caller-supplied `set_load_rules` table naming a synthetic
+/// `/__Prototype_N` path directly is stripped before it is stored: load rules
+/// are only ever meaningful in real-instance-namespace terms (see
+/// `instance_descendant_load_rule_splits_prototype`), and unlike `load`/
+/// `unload`, a raw `set_load_rules` call has no other gate against it.
+#[test]
+fn set_load_rules_strips_prototype_path() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let proto = dir.path().join("proto.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &proto,
+        "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let prototype = stage.prim("/World/Inst").prototype()?.expect("Inst is an instance");
+
+    let mut rules = pcp::LoadRules::all();
+    rules.unload(prototype);
+    stage.set_load_rules(rules);
+
+    assert!(
+        stage.load_rules().is_empty(),
+        "the prototype-rooted rule must never be stored"
+    );
+    Ok(())
+}
+
+/// `Prim::is_loaded` gives the same answer whether reached through an
+/// instance's own path or through the shared prototype's synthetic path —
+/// both route through the prototype's stored relative load rules, not the
+/// global table (which never carries prototype-rooted entries).
+#[test]
+fn is_loaded_through_prototype_path() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("root.usda");
+    let proto = dir.path().join("proto.usda");
+    let heavy = dir.path().join("heavy.usda");
+    std::fs::write(
+        &root,
+        "#usda 1.0\ndef \"World\" {\n    def \"Inst\" (\n        instanceable = true\n        references = @proto.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &proto,
+        "#usda 1.0\n(\n    defaultPrim = \"Proto\"\n)\ndef \"Proto\" {\n    def \"Heavy\" (\n        payload = @heavy.usda@\n    ) {}\n}\n",
+    )?;
+    std::fs::write(
+        &heavy,
+        "#usda 1.0\n(\n    defaultPrim = \"Heavy\"\n)\ndef \"Heavy\" {\n    custom double x = 1\n}\n",
+    )?;
+
+    let stage = Stage::open(root.to_str().unwrap())?;
+    let prototype = stage.prim("/World/Inst").prototype()?.expect("Inst is an instance");
+    let proto_heavy = prototype.append_path("Heavy")?;
+
+    assert!(
+        stage.prim(&proto_heavy).is_loaded()?,
+        "loaded by default before any unload"
+    );
+
+    stage.unload("/World/Inst/Heavy");
+
+    assert!(
+        !stage.prim("/World/Inst/Heavy").is_loaded()?,
+        "unloaded through the instance's own path"
+    );
+    assert!(
+        !stage.prim(&proto_heavy).is_loaded()?,
+        "the prototype's own path must report the same, not the previous unconditional loaded"
+    );
     Ok(())
 }
 

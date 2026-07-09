@@ -26,6 +26,7 @@ use super::dependencies::Dependencies;
 use super::index_store::IndexStore;
 use super::instancing::PrototypeRegistry;
 use super::layer_graph::LayerGraph;
+use super::load_rules::LoadRules;
 use super::prim_graph::ArcType;
 use super::prim_index::{
     AncestorArc, CompositionContext, Demand, PrimIndex, PropertyTargetKind, TargetMemo, TargetMemoKey,
@@ -63,10 +64,12 @@ pub struct IndexCache {
     store: IndexStore,
     /// Variant fallback selections tried when no authored selection exists.
     variant_fallbacks: VariantFallbackMap,
-    /// Whether payload arcs are expanded during composition, from the stage's
-    /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Seeds every root build's
-    /// [`CompositionContext`] (see [`root_parent_context`](Self::root_parent_context)).
-    load_payloads: bool,
+    /// Per-path payload-inclusion policy (C++ `UsdStageLoadRules`), seeded at
+    /// construction from the stage's
+    /// [`InitialLoadSet`](crate::usd::InitialLoadSet) and mutated at runtime
+    /// through [`Self::set_load_rules`]. `IndexCache::build_index` consults it
+    /// per path, via [`Self::is_loaded`].
+    pub(super) load_rules: LoadRules,
     /// Value-clip resolution and its layer cache ([`ClipCache`], spec 12.3.4) —
     /// an independently-owned entity that the clip orchestration methods
     /// ([`resolve_clip_value`](Self::resolve_clip_value) and friends) delegate
@@ -217,13 +220,13 @@ impl IndexCache {
     /// [`LayerGraph`] and are read through [`LayerGraph::errors`].
     pub(crate) fn new(
         variant_fallbacks: VariantFallbackMap,
-        load_payloads: bool,
+        load_rules: LoadRules,
         collection_errors: Vec<Error>,
     ) -> Self {
         Self {
             store: IndexStore::default(),
             variant_fallbacks,
-            load_payloads,
+            load_rules,
             clip_cache: ClipCache::default(),
             prototypes: PrototypeRegistry::default(),
             redirected_prims: HashMap::new(),
@@ -738,11 +741,13 @@ impl IndexCache {
 
     /// The composition context for a namespace-root prim: empty except for the
     /// stage's variant fallbacks. Used to seed the root of an ordinary build and
-    /// of a materialized prototype.
+    /// of a materialized prototype. `load_payloads` is left at its `Default`
+    /// value — [`build_index`](Self::build_index) always overwrites it with a
+    /// per-path decision before the context is ever consumed, so the value
+    /// seeded here is never read.
     pub(super) fn root_parent_context(&self) -> CompositionContext {
         CompositionContext {
             variant_fallbacks: self.variant_fallbacks.clone(),
-            load_payloads: self.load_payloads,
             ..Default::default()
         }
     }
@@ -866,9 +871,10 @@ impl IndexCache {
     }
 
     /// Drops each victim prim index and the prototypes its drop touches — the tail
-    /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers)
-    /// and [`invalidate_muting`](Self::invalidate_muting).
-    fn drop_index_victims(&mut self, victims: &[Path]) {
+    /// shared by [`drop_indices_touching_layers`](Self::drop_indices_touching_layers),
+    /// [`invalidate_muting`](Self::invalidate_muting), and
+    /// [`set_load_rules`](Self::set_load_rules).
+    pub(super) fn drop_index_victims(&mut self, victims: &[Path]) {
         if victims.is_empty() {
             return;
         }
@@ -1995,6 +2001,11 @@ impl IndexCache {
             .and_then(|p| self.store.context_at(&p))
             .cloned()
             .unwrap_or_else(|| self.root_parent_context());
+        // Computed per path, not inherited from the parent context: two
+        // siblings can have different load rules, and a rule authored on an
+        // ancestor doesn't by itself determine this path's own decision (see
+        // `LoadRules::effective_rule`'s lookahead).
+        let load_payloads = self.is_loaded(path);
 
         // TODO(rayon): `build_with_cache` is a pure function of `graph`,
         // `&parent_ctx`, and the store's entries, so sibling prims compose
@@ -2003,7 +2014,7 @@ impl IndexCache {
         // mid-build — parallelizing the driver needs a concurrent map or a
         // topological (targets-first) build order.
         let (mut index, mut build_errors, pending_loads) =
-            match PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries()) {
+            match PrimIndex::build_with_cache(path, graph, &parent_ctx, self.store.entries(), load_payloads) {
                 Ok(result) => result,
                 Err(e) => return Err(e.into()),
             };
@@ -2214,7 +2225,10 @@ mod tests {
         let registry = sdf::LayerRegistry::default();
         let layers = registry.collect_with_arcs(path).expect("collect layers");
         let graph = LayerGraph::from_layers(layers, 0, registry);
-        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
+        (
+            graph,
+            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+        )
     }
 
     /// Parses in-memory USDA text into a single `root.usda` layer.
@@ -2233,7 +2247,10 @@ mod tests {
     /// composition cases that need no on-disk asset.
     fn in_memory_stack(text: &str) -> (LayerGraph, IndexCache) {
         let graph = LayerGraph::from_layers(vec![parse_layer(text)], 0, sdf::LayerRegistry::default());
-        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
+        (
+            graph,
+            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+        )
     }
 
     /// Run `f` as one atomic transaction on `layer` and return the recorded change
@@ -2265,7 +2282,10 @@ mod tests {
         let id = registry.create_identifier(path, None);
         let data = registry.open(path).expect("open root").expect("root resolves");
         let graph = LayerGraph::from_layers(vec![sdf::Layer::new(id, data)], 0, registry);
-        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
+        (
+            graph,
+            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+        )
     }
 
     /// A prim inheriting its own grand-descendant (`/A` inherits `/A/B/C`) is a
@@ -2464,7 +2484,7 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
 
         let child = sdf::path("/A/B")?;
         cache.ensure_index(&graph, &child)?;
@@ -2538,7 +2558,7 @@ def "A" (
         let data = crate::usda::parser::Parser::new(text).parse().expect("parse usda");
         let layer = sdf::Layer::new("root.usda", Box::new(sdf::Data::from_specs(data)));
         let graph = LayerGraph::from_layers(vec![layer], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
 
         let a = sdf::path("/A")?;
         cache.ensure_index(&graph, &a)?;
@@ -2688,7 +2708,7 @@ def "Scope"
         let a = parse_named_layer("a.usda", "#usda 1.0\ndef \"X\" { custom double y = 1 }\n");
         let b = parse_named_layer("b.usda", "#usda 1.0\ndef \"X\" { custom double y = 2 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let root_id = graph.root_id().unwrap();
         let interp = |_: &sdf::TimeSampleMap, _: f64| None;
         let y = sdf::path("/R.y")?;
@@ -2726,7 +2746,7 @@ def "Scope"
         );
         let base = parse_named_layer("base.usda", "#usda 1.0\ndef \"Base\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let base_id = graph.id_of("base.usda").unwrap();
         let local = sdf::path("/Local")?;
         let refp = sdf::path("/Ref")?;
@@ -3270,7 +3290,7 @@ def "Scope"
         let weak = parse_named_layer("weak.usd", "#usda 1.0\ndef \"A\" { custom int x = 1 }\n");
         let mut graph = LayerGraph::from_layers(vec![root, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         // Before the edit only the weak sublayer authors /A.
@@ -3298,7 +3318,7 @@ def "Scope"
             vec![("root.usd".into(), a.clone()), ("weak.usd".into(), a.clone())],
             "the spec-tier refresh adds the new strong site to the prim stack"
         );
-        let mut fresh = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut fresh = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -3322,7 +3342,7 @@ def "Scope"
         let mut graph = LayerGraph::from_layers(vec![root, mid, weak], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
         let mid_id = graph.id_of("mid.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         // Only the weakest sublayer authors /A before the edit.
@@ -3358,7 +3378,7 @@ def "Scope"
             ],
             "the batched spec-tier refresh adds both new strong sites"
         );
-        let mut fresh = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut fresh = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         assert_eq!(
             refreshed,
             fresh.prim_stack(&graph, &a)?,
@@ -3381,7 +3401,7 @@ def "Scope"
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         // The empty target makes /A's reference culled — no composition arc.
@@ -3425,7 +3445,7 @@ def "Scope"
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( inherits = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         // The empty class makes /A's inherit culled — no composition arc.
@@ -3458,7 +3478,7 @@ def "Scope"
         let root = parse_named_layer("root.usd", "#usda 1.0\ndef \"A\" ( specializes = </_class_Foo> ) {}\n");
         let mut graph = LayerGraph::from_layers(vec![root], 0, sdf::LayerRegistry::default());
         let root_id = graph.id_of("root.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         assert!(!cache.has_composition_arc(&graph, &a)?);
@@ -3565,7 +3585,7 @@ def "Scope"
         let base = parse_named_layer("base.usd", "#usda 1.0\ndef \"Other\" {}\n");
         let mut graph = LayerGraph::from_layers(vec![root, base], 0, sdf::LayerRegistry::default());
         let base_id = graph.id_of("base.usd").unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
         let a = sdf::path("/A")?;
 
         // The missing nested target makes /A's reference contribute nothing.
@@ -3603,7 +3623,7 @@ def "Scope"
         let weak = parse_named_layer("weak.usda", "#usda 1.0\ndef \"World\" {\n  def \"Child\" {}\n}\n");
         let mut graph = LayerGraph::from_layers(vec![strong, weak], 0, sdf::LayerRegistry::default());
         let strong_id = graph.root_id().unwrap();
-        let mut cache = IndexCache::new(VariantFallbackMap::new(), true, Vec::new());
+        let mut cache = IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new());
 
         let world = sdf::path("/World")?;
         let has_child = |cache: &mut IndexCache, graph: &LayerGraph| -> Result<bool> {

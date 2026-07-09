@@ -499,7 +499,7 @@ impl Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcp::VariantFallbackMap;
+    use crate::pcp::{LoadRules, VariantFallbackMap};
     use crate::sdf::{ChangeFlags, ChangeList};
 
     fn p(s: &str) -> Path {
@@ -513,7 +513,10 @@ mod tests {
 
     fn empty_cache() -> (LayerGraph, IndexCache) {
         let graph = LayerGraph::from_layers(Vec::new(), 0, sdf::LayerRegistry::default());
-        (graph, IndexCache::new(VariantFallbackMap::new(), true, Vec::new()))
+        (
+            graph,
+            IndexCache::new(VariantFallbackMap::new(), LoadRules::all(), Vec::new()),
+        )
     }
 
     #[test]

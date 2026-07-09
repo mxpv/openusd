@@ -63,6 +63,18 @@ pub trait StageSink {
     fn layer_muting_changed(&self, stage: &Stage, layer: &str, muted: bool) {
         let _ = (stage, layer, muted);
     }
+
+    /// Observe a payload load/unload change (C++ `UsdNotice::ObjectsChanged`
+    /// fired by `Load`/`Unload`/`LoadAndUnload`/`SetLoadRules`, treating every
+    /// reported path as a full resync).
+    ///
+    /// `resynced` is the bounded set of paths
+    /// [`Stage::load`]/[`Stage::unload`]/[`Stage::load_and_unload`]/
+    /// [`Stage::set_load_rules`] used to invalidate the cache — never empty,
+    /// since a no-op edit fires no notification at all.
+    fn load_rules_changed(&self, stage: &Stage, resynced: &[sdf::Path]) {
+        let _ = (stage, resynced);
+    }
 }
 
 /// Where a committed edit originated, which determines the namespace its

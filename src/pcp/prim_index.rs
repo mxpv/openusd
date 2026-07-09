@@ -615,13 +615,18 @@ impl PrimIndex {
     /// the indexer seeds a child from its cached parent.
     #[cfg(test)]
     pub(crate) fn build_with_context(path: &Path, stack: &LayerGraph, ctx: &CompositionContext) -> BuildResult<Self> {
-        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new()).map(|(index, _errors, _pending)| index)
+        Self::build_with_cache(path, stack, ctx, &sdf::PathTable::new(), true).map(|(index, _errors, _pending)| index)
     }
 
     /// Like [`build_with_context`](Self::build_with_context) but with access to
     /// previously-composed prim indices. Cached indices are checked before
     /// building from scratch, ensuring inherit/specialize targets use the
     /// fully-composed result (including ancestor-propagated specs).
+    ///
+    /// `load_payloads` is the per-path payload-inclusion decision for `path`
+    /// itself (`IndexCache::is_loaded`) — a pure function of `path`
+    /// and the stage's `pcp::LoadRules`, not something `ctx` carries, since a
+    /// sibling prim can resolve differently.
     ///
     /// The third tuple element is the [`Demand`]s a reference/payload arc raised
     /// for a target that is not yet loaded; non-empty means the returned index
@@ -632,8 +637,16 @@ impl PrimIndex {
         stack: &LayerGraph,
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
+        load_payloads: bool,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
-        Self::build_with_cache_in(path, stack, ctx, cached_indices, stack.root_layer_stack_id())
+        Self::build_with_cache_in(
+            path,
+            stack,
+            ctx,
+            cached_indices,
+            stack.root_layer_stack_id(),
+            load_payloads,
+        )
     }
 
     /// Builds a prim index whose root `L` site scans the given `ambient` layer
@@ -651,6 +664,7 @@ impl PrimIndex {
         ctx: &CompositionContext,
         cached_indices: &sdf::PathTable<PrimEntry>,
         ambient: LayerStackId,
+        load_payloads: bool,
     ) -> BuildResult<(Self, Vec<Error>, Vec<Demand>)> {
         if ambient == LayerStackId::ROOT {
             if let Some(cached) = cached_indices.get(path) {
@@ -661,7 +675,7 @@ impl PrimIndex {
         // surfaces as `Error::ArcCycle`; an unresolvable arc is recorded in the
         // returned errors and skipped. A `None` graph means an unestablished seed
         // or the runaway nesting backstop, which composes to an empty prim index.
-        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient);
+        let indexer = super::prim_indexer::Indexer::new(stack, ctx, cached_indices, ambient, load_payloads);
         let super::prim_indexer::BuildOutput {
             graph,
             errors,
@@ -735,8 +749,6 @@ impl PrimIndex {
             // Inherited from the parent; the cache additionally sets this when
             // the current prim itself resolves as an instance.
             instance_depth: parent_ctx.instance_depth,
-            // A stage-wide policy, propagated unchanged to every descendant.
-            load_payloads: parent_ctx.load_payloads,
         }
     }
 
@@ -796,12 +808,6 @@ pub(crate) struct CompositionContext {
     /// discarded, so the subtree composes only from the arcs the instance brings
     /// in (the instanceable arc and below, plus its implied classes).
     pub instance_depth: Option<u16>,
-    /// Whether payload arcs are expanded during composition, from the stage's
-    /// [`InitialLoadSet`](crate::usd::InitialLoadSet). Propagated unchanged from
-    /// the root context to every descendant, a sibling of `variant_fallbacks`.
-    /// Defaults to `true` (C++ `UsdStage::LoadAll`); the stage sets `false` for
-    /// `LoadNone`.
-    pub load_payloads: bool,
 }
 
 impl Default for CompositionContext {
@@ -811,8 +817,6 @@ impl Default for CompositionContext {
             ancestor_arcs: Vec::new(),
             variant_fallbacks: VariantFallbackMap::new(),
             instance_depth: None,
-            // Compose payloads unless the stage opts out (C++ `UsdStage::LoadAll`).
-            load_payloads: true,
         }
     }
 }
@@ -1033,8 +1037,8 @@ pub(crate) mod tests {
             let mut last = None;
             let mut pending: Vec<Demand> = Vec::new();
             for ancestor in &chain {
-                let (index, _errors, demands) =
-                    PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache).expect("index build failed");
+                let (index, _errors, demands) = PrimIndex::build_with_cache(ancestor, stack, &parent_ctx, &cache, true)
+                    .expect("index build failed");
                 pending.extend(demands);
                 parent_ctx = index.context_for_children(stack, &parent_ctx);
                 cache.insert(
@@ -1701,6 +1705,7 @@ def "Root" (
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
+            true,
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
@@ -1748,6 +1753,7 @@ def "Outer"
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
+            true,
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::ArcCycle(_))),
@@ -1779,6 +1785,7 @@ def "Prim" (
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
+            true,
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::UnresolvedLayer { .. })),
@@ -1817,6 +1824,7 @@ def "Prim" (
             &stack,
             &CompositionContext::default(),
             &sdf::PathTable::new(),
+            true,
         )?;
         assert!(
             errors.iter().any(|e| matches!(e, Error::MissingDefaultPrim { .. })),

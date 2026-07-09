@@ -25,6 +25,7 @@ use crate::sdf::{Path, PathElement, Value};
 
 use super::index_cache::IndexCache;
 use super::layer_graph::LayerGraph;
+use super::load_rules::LoadRules;
 use super::prim_graph::ArcType;
 use super::prim_index::PrimIndex;
 use super::LayerId;
@@ -76,6 +77,11 @@ struct Prototype {
     canonical: Path,
     /// Every instance sharing this prototype.
     instances: Vec<Path>,
+    /// The canonical instance's load rules, re-rooted onto the instance's own
+    /// path (`LoadRules::make_relative_to`), so a `/__Prototype_N` descendant
+    /// build resolves its own payload-inclusion decision against the
+    /// instance's authored rules (see `IndexCache::scoped_load_rules`).
+    relative_load_rules: LoadRules,
 }
 
 /// Identity of an instance prim's shared composition (spec 11.3.3): the
@@ -94,6 +100,12 @@ pub(super) struct InstanceKey {
     arcs: Vec<InstanceArc>,
     /// The resolved `(variant set, selection)` pairs, in composition order.
     selections: Vec<(String, String)>,
+    /// The instance's load rules, re-rooted onto its own path
+    /// (`LoadRules::make_relative_to`). Two otherwise-identical instances
+    /// with different load rules mint separate prototypes (C++
+    /// `Usd_InstanceKey`), since a shared prototype's descendants must
+    /// resolve one consistent payload-inclusion decision.
+    load_rules: LoadRules,
 }
 
 /// One arc contribution in an [`InstanceKey`]. Floats are stored as bit
@@ -112,6 +124,9 @@ impl PrototypeRegistry {
     /// the instance the first time a key is seen and minting `/__Prototype_N`.
     /// Returns the canonical instance, the prototype path, and whether this call
     /// minted a new prototype (so the caller knows to materialize its index).
+    /// `key.load_rules` is stored as the prototype's relative load rules only
+    /// on the minting call — a cache hit's existing entry is already
+    /// guaranteed identical, since it was part of the matched key.
     fn register(&mut self, key: InstanceKey, instance: &Path) -> (Path, Path, bool) {
         if let Some(root) = self.by_key.get(&key) {
             let root = root.clone();
@@ -126,6 +141,7 @@ impl PrototypeRegistry {
         let index = self.count;
         let path = Path::new(&format!("/__Prototype_{index}")).expect("synthetic prototype path is valid");
         self.count += 1;
+        let relative_load_rules = key.load_rules.clone();
         self.by_key.insert(key, path.clone());
         self.by_root.insert(
             path.clone(),
@@ -133,10 +149,17 @@ impl PrototypeRegistry {
                 index,
                 canonical: instance.clone(),
                 instances: vec![instance.clone()],
+                relative_load_rules,
             },
         );
         self.by_instance.insert(instance.clone(), path.clone());
         (instance.clone(), path, true)
+    }
+
+    /// The canonical instance's load rules, re-rooted onto the instance's own
+    /// path, for the prototype at `prototype`. `None` for an unknown path.
+    fn relative_load_rules(&self, prototype: &Path) -> Option<&LoadRules> {
+        self.by_root.get(prototype).map(|p| &p.relative_load_rules)
     }
 
     /// The canonical instance backing the prototype at `prototype`, or `None`
@@ -180,14 +203,17 @@ impl PrototypeRegistry {
     /// Whether `path` lies within a prototype's namespace — i.e. it has a
     /// `/__Prototype_N` ancestor (spec 11.3.3).
     fn is_in_prototype(&self, path: &Path) -> bool {
-        self.enclosing_root(path.parent()).is_some()
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        self.enclosing_root(Some(&parent)).is_some()
     }
 
     /// Returns the nearest `/__Prototype_N` root at or above `start`, or `None`.
     /// Passing the queried prim starts the walk inclusively; passing its parent
     /// excludes the prim itself.
-    fn enclosing_root(&self, start: Option<Path>) -> Option<Path> {
-        self.by_root.nearest_ancestor(&start?).map(|(root, _)| root.clone())
+    fn enclosing_root(&self, start: Option<&Path>) -> Option<Path> {
+        self.by_root.nearest_ancestor(start?).map(|(root, _)| root.clone())
     }
 
     /// Removes every prototype the change set could have invalidated, returning
@@ -240,8 +266,10 @@ impl PrototypeRegistry {
 /// Each contributing arc's path is stripped of variant selections, and the
 /// resolved selection set is folded into the key explicitly (see
 /// [`InstanceKey`]), so two instances of one reference share a prototype iff
-/// their variant selections also match.
-fn instance_key(index: &PrimIndex, instance_depth: u16) -> InstanceKey {
+/// their variant selections also match. `load_rules` is the instance's load
+/// rules, already re-rooted onto its own path (`LoadRules::make_relative_to`),
+/// so two instances also only share a prototype when their load state agrees.
+fn instance_key(index: &PrimIndex, instance_depth: u16, load_rules: LoadRules) -> InstanceKey {
     let local = index.instance_local_nodes(instance_depth);
     let mut arcs = Vec::new();
     let mut selections = Vec::new();
@@ -263,7 +291,11 @@ fn instance_key(index: &PrimIndex, instance_depth: u16) -> InstanceKey {
             scale_bits: offset.scale.to_bits(),
         });
     }
-    InstanceKey { arcs, selections }
+    InstanceKey {
+        arcs,
+        selections,
+        load_rules,
+    }
 }
 
 impl IndexCache {
@@ -334,7 +366,15 @@ impl IndexCache {
     /// is the cache's job; the dedup is the [`PrototypeRegistry`]'s.
     fn register_prototype(&mut self, graph: &LayerGraph, instance: &Path) -> Result<(Path, Path)> {
         self.ensure_index(graph, instance)?;
-        let key = instance_key(self.cached(instance), instance.prim_element_count() as u16);
+        let relative_load_rules = {
+            let (rules, relative_instance) = self.scoped_load_rules(instance);
+            rules.make_relative_to(&relative_instance)
+        };
+        let key = instance_key(
+            self.cached(instance),
+            instance.prim_element_count() as u16,
+            relative_load_rules,
+        );
         let (canonical, prototype, minted) = self.prototypes.register(key, instance);
         // Materialize the prototype's index only when this call minted it. Before
         // it existed, a query on the deterministic `/__Prototype_N` namespace
@@ -439,7 +479,16 @@ impl IndexCache {
     /// namespace (spec 11.3.3). Used to gate prototype content against the
     /// population mask through its instances.
     pub(crate) fn prototype_root_of(&self, path: &Path) -> Option<Path> {
-        self.prototypes.enclosing_root(Some(path.clone()))
+        self.prototypes.enclosing_root(Some(path))
+    }
+
+    /// The canonical instance's load rules, re-rooted onto the instance's own
+    /// path, for the prototype at `root`. `None` when `root` is not a
+    /// registered prototype. Used by `IndexCache::scoped_load_rules` to
+    /// resolve a `/__Prototype_N` descendant's payload-inclusion decision
+    /// against the rules that governed its seeding instance.
+    pub(super) fn relative_load_rules_of(&self, root: &Path) -> Option<&LoadRules> {
+        self.prototypes.relative_load_rules(root)
     }
 
     /// The instances sharing the prototype at `root`, borrowed in registration
@@ -601,6 +650,7 @@ mod tests {
         InstanceKey {
             arcs: Vec::new(),
             selections: vec![(tag.to_string(), tag.to_string())],
+            load_rules: LoadRules::default(),
         }
     }
 

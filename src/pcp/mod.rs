@@ -57,6 +57,7 @@
 //! | `prim_resolve` | — | Value resolution over a composed [`PrimIndex`]: the per-field strength-ordered opinion walk (spec section 12). |
 //! | `mapping` | `PcpMapFunction` | Namespace mapping between composition arcs — each [`Node`] carries `map_to_parent` and `map_to_root`. |
 //! | [`VariantFallbackMap`] | `PcpVariantFallbackMap` | Maps variant set names to ordered fallback selections, used when no selection is authored. |
+//! | `load_rules` | `UsdStageLoadRules` | Per-path payload-inclusion policy ([`LoadRules`]/[`Rule`]): nearest-ancestor-with-lookahead rule resolution, plus the `IndexCache` glue that turns a rule change into per-build payload-expansion decisions and bounded cache invalidation. |
 //! | `relocates` | — | Stateless relocate free functions (effective relocates, transitive chaining, child-name folding). Layer-authored pairs and stack-effective queries are read from `LayerGraph`; all data is passed through parameters. |
 //! | `dependencies` | `Pcp_Dependencies` | Reverse `(LayerId, site) → prim-index paths` map (`Dependencies`) driving surgical change fanout. |
 //!
@@ -298,6 +299,7 @@ mod index_store;
 pub(crate) mod instancing;
 pub(crate) mod layer_graph;
 pub(crate) mod layer_stack;
+pub(crate) mod load_rules;
 mod mapping;
 pub(crate) mod prim_graph;
 pub(crate) mod prim_index;
@@ -313,6 +315,7 @@ pub(crate) use index_cache::{AttributeValueSource, IndexCache};
 pub(crate) use layer_graph::{muted_subtree, LayerGraph, MuteChange};
 pub use layer_graph::{LayerId, LayerStackIdentifier};
 pub(crate) use layer_stack::LayerStackId;
+pub use load_rules::{LoadRules, Rule};
 pub use mapping::MapFunction;
 pub use prim_graph::{ArcType, Node, NodeFlags, NodeId};
 pub(crate) use prim_index::Demand;

@@ -33,8 +33,8 @@ pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
 pub use sink::{CommittedChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
-    EditContext, EditTarget, EditTargetArc, InitialLoadSet, PrimPredicate, PrimStatus, Stage, StageAuthoringError,
-    StageBuilder, StagePopulationMask, WeakStage,
+    EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
+    StageAuthoringError, StageBuilder, StagePopulationMask, WeakStage,
 };
 pub use timecode::TimeCode;
 
