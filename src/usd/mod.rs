@@ -5,6 +5,7 @@
 //! `Usd*` surface under `openusd::usd`.
 
 mod attribute;
+mod capture;
 mod clips;
 mod collection;
 mod connections;
@@ -19,6 +20,7 @@ mod stage;
 mod timecode;
 
 pub use attribute::{Attribute, AttributeQuery};
+pub use capture::{ReplayStage, UndoStage};
 pub use clips::ClipsAPI;
 pub use collection::{
     apply_collection, collections_on, compute_included_paths, is_collection_api_path, Collection, ExpansionRule,
@@ -31,7 +33,7 @@ pub use interp::InterpolationType;
 pub use prim::{Prim, PrimIndexRef, VariantSets};
 pub use relationship::Relationship;
 pub use schema::{SchemaBase, SchemaKind};
-pub use sink::{CommittedChange, Provenance, StageSink, StageSinkId};
+pub use sink::{CommittedChange, PendingChange, Provenance, StageSink, StageSinkId};
 pub use stage::{
     EditContext, EditTarget, EditTargetArc, InitialLoadSet, LoadPolicy, PrimPredicate, PrimStatus, Stage,
     StageAuthoringError, StageBuilder, StagePopulationMask, WeakStage,

@@ -289,12 +289,15 @@ impl NamespaceEditor {
     /// edit into it is not assumed to itself be atomic or recoverable.
     ///
     /// When the batch touches more than one layer, the single
-    /// [`CommittedChange`](super::CommittedChange) delivered to sinks merges the
-    /// per-layer change records and attributes them to the strongest edited
-    /// layer. Composed-path reporting is exact, but a sink that reads the raw
-    /// change list per layer — notably [`Stage::extract_diff`](super::Stage::extract_diff) —
-    /// cannot recover which layer each record landed in, so diff replication of a
-    /// multi-layer namespace edit is not supported yet.
+    /// [`CommittedChange`](super::CommittedChange) delivered to
+    /// [`after_commit`](super::StageSink::after_commit) merges the per-layer
+    /// change records and attributes them to the strongest edited layer.
+    /// Composed-path reporting is exact, but a sink that reads the merged change
+    /// list — notably [`ReplayStage`](super::ReplayStage) — cannot recover which
+    /// layer each record landed in, so forward-diff replication of a multi-layer
+    /// namespace edit is not supported yet. (An [`UndoStage`](super::UndoStage)
+    /// captures per layer at [`before_commit`](super::StageSink::before_commit),
+    /// so it is unaffected.)
     pub fn apply(&mut self) -> Result<(), NamespaceEditError> {
         self.execute(true)?;
         self.edits.clear();

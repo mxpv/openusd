@@ -1,20 +1,27 @@
-//! Edit replication between stages: extract a stage edit as a transferable
-//! diff and replay it on a mirror.
+//! Transferable edits: a stage edit captured as a value diff and replayed on a
+//! stage.
 //!
-//! A [`StageSink`](super::StageSink) installed on a [`Stage`] observes every
-//! committed edit as a [`CommittedChange`](super::CommittedChange);
-//! [`Stage::extract_diff`] turns one into a [`Diff`] — an ordered list of
-//! [`Edit`] operations (a spec created with its fields, a field set or erased, a
-//! spec removed) plus the namespace mapping of the edit target the edit was
-//! authored through. Everything in it is plain value data, so a diff can cross a
-//! process or machine boundary and be rebuilt on the other side.
+//! A [`Diff`] is an ordered list of [`Edit`] operations (a spec created with its
+//! fields, a field set or erased, a spec removed) plus the namespace mapping of
+//! the edit target the edit was authored through. Everything in it is plain
+//! value data, so a diff can cross a process or machine boundary and be rebuilt
+//! on the other side.
+//!
+//! A diff is produced by observing a [`Stage`]'s commits:
+//! [`ReplayStage`](super::ReplayStage) records the forward diff of each
+//! committed edit — its new authored values — for replay or cross-stage
+//! mirroring, and [`UndoStage`](super::UndoStage) records the inverse — the
+//! old values, for undo. Both are [`StageSink`](super::StageSink) clients; the
+//! derivation of a forward or inverse diff from a committed edit lives here
+//! ([`forward_diff`], [`inverse_diff`]).
 //!
 //! [`Stage::apply_diff`] is the consume half. [`ApplyMode`] names the two
 //! replication flavors:
 //!
 //! - [`ExactLayer`](ApplyMode::ExactLayer) replays the operations
 //!   verbatim, at their recorded layer-namespace paths, onto an explicitly
-//!   named layer of the consuming stage — the same-asset mirror.
+//!   named layer of the consuming stage — the same-asset mirror. Undo/redo
+//!   replays a recorded diff back onto the layer it came from this way.
 //! - [`CurrentEditTarget`](ApplyMode::CurrentEditTarget) retargets the
 //!   edit semantically: each operation path is lifted to composed stage
 //!   namespace through the diff's own mapping, then mapped into the consuming
@@ -25,27 +32,17 @@
 //! # Example
 //!
 //! ```
-//! use std::cell::RefCell;
-//! use std::rc::Rc;
-//!
-//! use openusd::usd::{ApplyMode, CommittedChange, Stage};
+//! use openusd::usd::{ApplyMode, ReplayStage, Stage};
 //!
 //! # fn main() -> anyhow::Result<()> {
-//! // Producer: capture every committed edit as a transferable diff.
-//! let producer = Stage::builder().in_memory("producer.usda")?;
-//! let diffs = Rc::new(RefCell::new(Vec::new()));
-//! {
-//!     let diffs = diffs.clone();
-//!     producer.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
-//!         diffs.borrow_mut().push(stage.extract_diff(change).expect("extract diff"));
-//!     });
-//! }
+//! // Producer: record every committed edit as a transferable diff.
+//! let producer = ReplayStage::from(Stage::builder().in_memory("producer.usda")?);
 //! producer.define_prim("/World")?.set_type_name("Xform")?;
 //!
-//! // Consumer: replay each diff through its own edit target.
+//! // Consumer: replay each recorded diff through its own edit target.
 //! let mirror = Stage::builder().in_memory("mirror.usda")?;
-//! for diff in diffs.borrow().iter() {
-//!     mirror.apply_diff(diff, ApplyMode::CurrentEditTarget)?;
+//! for diff in producer.diff() {
+//!     mirror.apply_diff(&diff, ApplyMode::CurrentEditTarget)?;
 //! }
 //! assert_eq!(mirror.prim("/World").type_name()?.as_deref(), Some("Xform"));
 //! # Ok(())
@@ -57,16 +54,18 @@ use anyhow::Result;
 
 use crate::{pcp, sdf, tf};
 
-use super::sink::CommittedChange;
+use super::sink::{CommittedChange, PendingChange};
 use super::stage::{EditTarget, Stage, StageAuthoringError};
 
-/// A transferable diff of one stage edit, produced by [`Stage::extract_diff`]
-/// and replayed by [`Stage::apply_diff`].
+/// A transferable diff of one stage edit, produced by a diff recorder
+/// ([`ReplayStage`](super::ReplayStage), [`UndoStage`](super::UndoStage)) and
+/// replayed by [`Stage::apply_diff`].
 ///
 /// `edits` is the operation list describing the edit — paths, field names, and
 /// field values inline — and `mapping` ties the operation paths back to
 /// composed stage namespace. Everything is plain value data with nothing
 /// process-local.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diff {
     /// The operations describing the edit, in the change record's order. This
     /// is what a replay interprets: only paths listed here are authored at
@@ -182,103 +181,193 @@ pub enum ApplyMode<'a> {
     CurrentEditTarget,
 }
 
-impl Stage {
-    /// Extract a transferable diff for the edit described by `change`.
-    ///
-    /// Turns each entry of
-    /// [`change.change_list`](CommittedChange::change_list) into [`Edit`]
-    /// operations, reading the authored values out of the originating layer.
-    /// Call it synchronously from a sink's
-    /// [`after_commit`](super::StageSink::after_commit): the event borrows the
-    /// transient change record and the layer keeps mutating afterward.
-    ///
-    /// List-valued field edits (reference / target / apiSchema removals
-    /// included) ride along as their authored list-op values.
-    ///
-    /// A spec whose change entry records only child-name bookkeeping — the
-    /// `primChildren` / `propertyChildren` / variant-chain registration a
-    /// descendant edit stamps on its ancestors — yields no edit: its own
-    /// opinions did not change, and the descendant's spec re-registers itself
-    /// on replay. Only specs the edit genuinely touched land in the edit list.
-    ///
-    /// The diff is in the originating layer's namespace: for an edit authored
-    /// through an arc or variant edit target the operations carry the arc
-    /// source layer's paths (e.g. a `{set=sel}` variant segment), not the
-    /// composed stage paths. [`Diff::mapping`] carries that edit target's
-    /// namespace mapping so [`apply_diff`](Self::apply_diff) can lift the
-    /// paths back to stage namespace when replaying through a different
-    /// target; the composed stage paths the edit touched are reported
-    /// separately on [`CommittedChange`] (`resynced` / `changed_info_only`).
-    pub fn extract_diff(&self, objects: &CommittedChange<'_>) -> Result<Diff> {
-        let mut edits = Vec::new();
-        let layers = self.layers();
-        let layer_id = layers
-            .id_of(objects.layer_identifier)
-            .ok_or_else(|| anyhow::anyhow!("change notice references a layer no longer in the stage"))?;
-        let src = layers.layer(layer_id).data();
-        for (path, entry) in objects.change_list.entries() {
-            // A spec's presence in `src` is the source of truth: one still there
-            // (added, modified, or removed-then-re-added within the edit) is
-            // captured with its current authored state; one gone with a removal
-            // flag is a whole-spec removal.
-            if let Some(spec_type) = src.spec_type(path) {
-                // An entry that only records child-name bookkeeping marks an
-                // ancestor of a descendant edit; capturing the spec would only
-                // restate its unchanged opinions.
-                if entry.is_child_bookkeeping() {
-                    continue;
+/// Derive the forward diffs of the committed edit `objects` — the operations
+/// that reproduce it — by reading the new authored values out of each edited
+/// layer. Used by [`ReplayStage`](super::ReplayStage) from
+/// [`StageSink::after_commit`](super::StageSink::after_commit), where the layers
+/// hold the committed state.
+///
+/// One [`Diff`] per edited layer ([`layer_changes`](CommittedChange::layer_changes)):
+/// a multi-layer transaction (a batch or namespace edit) records one change list
+/// per layer, and each yields its own diff read from that layer's data, so a spec
+/// authored only in a weaker layer is captured from the right layer rather than
+/// looked up in — and dropped by — the strongest one. A layer no longer in the
+/// stage is skipped.
+///
+/// Each diff is in its layer's namespace: for an edit authored through an arc or
+/// variant edit target the operations carry the arc source layer's paths (e.g. a
+/// `{set=sel}` variant segment), not the composed stage paths. [`Diff::mapping`]
+/// carries that edit target's namespace mapping so [`Stage::apply_diff`] can lift
+/// the paths back to stage namespace when replaying through a different target.
+pub(super) fn forward_diff(stage: &Stage, objects: &CommittedChange<'_>) -> Result<Vec<Diff>> {
+    let mapping = objects.provenance.mapping();
+    let layers = stage.layers();
+    let mut diffs = Vec::new();
+    for (layer_identifier, change_list) in objects.layer_changes {
+        let Some(layer_id) = layers.id_of(layer_identifier) else {
+            continue;
+        };
+        let edits = forward_edits(layers.layer(layer_id).data(), change_list)?;
+        if !edits.is_empty() {
+            diffs.push(Diff {
+                edits,
+                mapping: mapping.cloned(),
+            });
+        }
+    }
+    Ok(diffs)
+}
+
+/// The forward edits for one layer: the operations reproducing every
+/// genuinely-touched spec, read from `src` (the committed layer data).
+///
+/// Turns each entry of `change_list` into [`Edit`] operations. List-valued field
+/// edits (reference / target / apiSchema removals included) ride along as their
+/// authored list-op values.
+///
+/// A spec whose change entry records only child-name bookkeeping — the
+/// `primChildren` / `propertyChildren` / variant-chain registration a descendant
+/// edit stamps on its ancestors — yields no edit: its own opinions did not
+/// change, and the descendant's spec re-registers itself on replay. Only specs
+/// the edit genuinely touched land in the edit list.
+fn forward_edits(src: &dyn sdf::AbstractData, change_list: &sdf::ChangeList) -> Result<Vec<Edit>> {
+    let mut edits = Vec::new();
+    for (path, entry) in change_list.entries() {
+        // A spec's presence in `src` is the source of truth: one still there
+        // (added, modified, or removed-then-re-added within the edit) is
+        // captured with its current authored state; one gone with a removal
+        // flag is a whole-spec removal.
+        if let Some(spec_type) = src.spec_type(path) {
+            // An entry that only records child-name bookkeeping marks an
+            // ancestor of a descendant edit; capturing the spec would only
+            // restate its unchanged opinions.
+            if entry.is_child_bookkeeping() {
+                continue;
+            }
+            // A spec the edit created is owned by the edit wholesale, so its
+            // whole authored state is captured; a pre-existing one is owned only
+            // at its touched fields — each either set (still authored) or erased
+            // (absent). Child-name lists are namespace bookkeeping the
+            // destination rebuilds, never captured.
+            if entry.flags.intersects(sdf::ChangeFlags::ADD) {
+                edits.push(spec_create_edit(src, path, spec_type)?);
+            } else {
+                for field in entry.authored_fields() {
+                    edits.push(field_op(src, path, spec_type, field)?);
                 }
-                // A spec the edit created is owned by the edit wholesale, so
-                // its whole authored state is captured; a pre-existing one is
-                // owned only at its touched fields — each either set (still
-                // authored) or erased (absent). Child-name lists are namespace
-                // bookkeeping the destination rebuilds, never captured.
-                if entry.flags.intersects(sdf::ChangeFlags::ADD) {
-                    let mut fields = Vec::new();
-                    for field in src.list_fields(path).unwrap_or_default() {
-                        if sdf::is_children_field(&field) {
-                            continue;
-                        }
-                        if let Some(value) = src.try_field(path, &field)? {
-                            fields.push(FieldValue {
-                                value: value.into_owned(),
-                                field: tf::Token::from(field),
-                            });
-                        }
-                    }
-                    edits.push(Edit::Create {
-                        path: path.clone(),
-                        spec_type,
-                        fields,
-                    });
-                } else {
-                    for field in entry.authored_fields() {
-                        edits.push(match src.try_field(path, field.as_str())? {
-                            Some(value) => Edit::SetField {
-                                path: path.clone(),
-                                spec_type,
-                                field: field.clone(),
-                                value: value.into_owned(),
-                            },
-                            None => Edit::EraseField {
-                                path: path.clone(),
-                                field: field.clone(),
-                            },
-                        });
-                    }
-                }
-            } else if entry.flags.intersects(sdf::ChangeFlags::REMOVE) {
-                edits.push(Edit::RemoveSpec { path: path.clone() });
+            }
+        } else if entry.flags.intersects(sdf::ChangeFlags::REMOVE) {
+            edits.push(Edit::RemoveSpec { path: path.clone() });
+        }
+    }
+    Ok(edits)
+}
+
+/// Derive the inverse of the staged edit `change` — the diff that, replayed onto
+/// the same layer, restores it to the state its [`base`](PendingChange::base)
+/// holds. Used by [`UndoStage`](super::UndoStage) from
+/// [`StageSink::before_commit`](super::StageSink::before_commit), the one moment
+/// the pre-edit values are still readable.
+///
+/// The undo counterpart of [`forward_diff`]: where the forward diff captures the
+/// edit's new values, this reads the old values off the pre-edit base. A field
+/// the edit set inverts to its base value (or an erase when the base lacked it);
+/// a spec the edit created inverts to a removal; a spec the edit removed or
+/// replaced inverts to a re-creation of its whole base state.
+///
+/// Returns the inverse edits for one layer, ordered by path; a read error
+/// propagates (like [`forward_diff`]) rather than silently dropping a spec or
+/// field, so a partial — and therefore unsafe — inverse is never recorded. The
+/// caller attaches the transaction's mapping once (all its layers share one).
+pub(super) fn inverse_diff(change: &PendingChange<'_>) -> Result<Vec<Edit>> {
+    let base = change.base;
+    let mut edits = Vec::new();
+    for (path, entry) in change.change_list.entries() {
+        if entry.is_child_bookkeeping() {
+            continue;
+        }
+        let base_type = base.spec_type(path);
+        if entry.flags.intersects(sdf::ChangeFlags::ADD) {
+            // The edit created (or replaced) the spec here: restore the base
+            // spec wholesale when one existed, else remove the fresh creation.
+            match base_type {
+                Some(spec_type) => edits.push(spec_create_edit(base, path, spec_type)?),
+                None => edits.push(Edit::RemoveSpec { path: path.clone() }),
+            }
+        } else if entry.flags.intersects(sdf::ChangeFlags::REMOVE) {
+            // The edit removed the spec: re-create it from its base state.
+            if let Some(spec_type) = base_type {
+                edits.push(spec_create_edit(base, path, spec_type)?);
+            }
+        } else if let Some(spec_type) = base_type {
+            // Field-level edits on a surviving spec: restore each touched field
+            // to its base value, or erase it when the base did not hold it.
+            for field in entry.authored_fields() {
+                edits.push(field_op(base, path, spec_type, field)?);
             }
         }
-        Ok(Diff {
-            edits,
-            mapping: objects.provenance.mapping().cloned(),
-        })
     }
+    // Order by path so a re-created ancestor precedes its descendants, and a
+    // removed ancestor is removed before them; operations on one spec keep their
+    // recorded order (the sort is stable). Removals still apply after the
+    // authoring operations through [`apply_edits_verbatim`]'s partition.
+    edits.sort_by(|a, b| a.path().cmp(b.path()));
+    Ok(edits)
+}
 
+/// An [`Edit::Create`] capturing the whole authored state of the spec at `path`
+/// in `data` — every field except the child-name lists, with its value. The
+/// building block both directions use to reproduce (`forward_diff`, reading the
+/// committed layer) or restore (`inverse_diff`, reading the pre-edit base) a spec
+/// wholesale.
+fn spec_create_edit(data: &dyn sdf::AbstractData, path: &sdf::Path, spec_type: sdf::SpecType) -> Result<Edit> {
+    let mut fields = Vec::new();
+    for field in data.list_fields(path).unwrap_or_default() {
+        if sdf::is_children_field(&field) {
+            continue;
+        }
+        if let Some(value) = data.try_field(path, &field)? {
+            fields.push(FieldValue {
+                field: tf::Token::from(field),
+                value: value.into_owned(),
+            });
+        }
+    }
+    Ok(Edit::Create {
+        path: path.clone(),
+        spec_type,
+        fields,
+    })
+}
+
+/// The [`Edit`] restoring or reproducing one authored `field` of the spec at
+/// `path`: a [`SetField`](Edit::SetField) with the value `data` holds, or an
+/// [`EraseField`](Edit::EraseField) when `data` does not hold it. Shared by both
+/// diff directions over their respective `data` (committed layer or pre-edit base).
+fn field_op(
+    data: &dyn sdf::AbstractData,
+    path: &sdf::Path,
+    spec_type: sdf::SpecType,
+    field: &tf::Token,
+) -> Result<Edit> {
+    Ok(match data.try_field(path, field.as_str())? {
+        Some(value) => Edit::SetField {
+            path: path.clone(),
+            spec_type,
+            field: field.clone(),
+            value: value.into_owned(),
+        },
+        None => Edit::EraseField {
+            path: path.clone(),
+            field: field.clone(),
+        },
+    })
+}
+
+impl Stage {
     /// Replay a [`Diff`] onto this stage in one transaction, the consume
-    /// half of [`extract_diff`](Self::extract_diff): each [`Edit`] is
+    /// half of the diff producers ([`ReplayStage`](super::ReplayStage) and
+    /// [`UndoStage`](super::UndoStage)): each [`Edit`] is
     /// interpreted — creations and set fields authoring their recorded values,
     /// removals and erasures applied destructively. The whole
     /// replay drains as a single edit, delivering one
@@ -321,7 +410,7 @@ impl Stage {
                 // variant-produced diff resyncs `/Prim/child`, not
                 // `/Prim{set=sel}child`.
                 self.author_on_layer(layer_id, diff.mapping.as_ref(), |layer| {
-                    apply_diff_verbatim(layer, diff)
+                    apply_edits_verbatim(layer, &diff.edits)
                 })
             }
             ApplyMode::CurrentEditTarget => {
@@ -336,21 +425,22 @@ impl Stage {
     }
 }
 
-/// Apply a [`Diff`]'s operations to `layer` verbatim, at their recorded
-/// layer-namespace paths. The mutating core of the
-/// [`ApplyMode::ExactLayer`] replay.
+/// Apply `edits` to `layer` verbatim, at their recorded layer-namespace paths.
+/// The mutating core of the [`ApplyMode::ExactLayer`] replay, and the primitive
+/// [`UndoStage`](super::UndoStage) replays a transaction's per-layer edits
+/// through inside one [`batch_edit`](Stage::batch_edit)-style transaction.
 ///
 /// Removals apply after the authoring operations, the same ordering the
-/// translated replay uses; an extracted edit never authors and removes the
+/// translated replay uses; a captured edit never authors and removes the
 /// same path (the change record collapses per path), so the partition
-/// preserves an extracted diff's semantics.
-fn apply_diff_verbatim(layer: &mut sdf::LayerEdit<'_>, diff: &Diff) -> Result<(), sdf::AuthoringError> {
-    for edit in &diff.edits {
+/// preserves the diff's semantics.
+pub(super) fn apply_edits_verbatim(layer: &mut sdf::LayerEdit<'_>, edits: &[Edit]) -> Result<(), sdf::AuthoringError> {
+    for edit in edits {
         if !matches!(edit, Edit::RemoveSpec { .. }) {
             apply_edit(layer, edit.path(), edit, &sdf::Value::clone)?;
         }
     }
-    for edit in &diff.edits {
+    for edit in edits {
         if matches!(edit, Edit::RemoveSpec { .. }) {
             apply_edit(layer, edit.path(), edit, &sdf::Value::clone)?;
         }
@@ -653,12 +743,12 @@ mod tests {
         format!("{}/fixtures/{relative}", env!("CARGO_MANIFEST_DIR"))
     }
 
-    /// `extract_diff` turns a whole-spec removal into a `RemoveSpec` operation.
+    /// `forward_diff` turns a whole-spec removal into a `RemoveSpec` operation.
     /// Driven with a synthetic committed change to unit-test the routing in
     /// isolation; the end-to-end `remove_prim` / `apply_diff` path is covered
     /// below.
     #[test]
-    fn extract_diff_removal() -> Result<()> {
+    fn forward_removal() -> Result<()> {
         let stage = in_memory_stage()?;
         stage.define_prim("/World")?;
         stage.create_attribute("/World.size", "double")?;
@@ -670,23 +760,27 @@ mod tests {
         let mut change_list = sdf::ChangeList::new();
         change_list.entry_mut(&size).flags |= sdf::ChangeFlags::REMOVE_PROPERTY;
         let provenance = Provenance::LocalStack;
+        let layer_changes = [(root.clone(), change_list.clone())];
         let change = CommittedChange {
             resynced: &[],
             changed_info_only: std::slice::from_ref(&size),
             layer_identifier: &root,
             change_list: &change_list,
+            layer_changes: &layer_changes,
             provenance: &provenance,
+            generation: 0,
         };
-        let diff = stage.extract_diff(&change)?;
-        assert_eq!(diff.edits, vec![Edit::RemoveSpec { path: size.clone() }]);
+        let diffs = forward_diff(&stage, &change)?;
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].edits, vec![Edit::RemoveSpec { path: size.clone() }]);
         Ok(())
     }
 
-    /// `extract_diff` called from a sink captures the authored value inline:
-    /// setting an attribute default yields a `SetField` operation carrying it —
-    /// the source half of mirroring an edit.
+    /// `forward_diff` from a sink captures the authored value inline: setting an
+    /// attribute default yields a `SetField` operation carrying it — the source
+    /// half of mirroring an edit.
     #[test]
-    fn extract_diff_set_value() -> Result<()> {
+    fn forward_set_value() -> Result<()> {
         let stage = in_memory_stage()?;
         stage.define_prim("/World")?;
         let attr = stage.create_attribute("/World.size", "double")?;
@@ -695,8 +789,8 @@ mod tests {
             let value = value.clone();
             let size = sdf::Path::new("/World.size")?;
             stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
-                let diff = stage.extract_diff(change).expect("extract diff");
-                value.replace(diff.edits.iter().find_map(|e| match e {
+                let diffs = forward_diff(stage, change).expect("forward diff");
+                value.replace(diffs.iter().flat_map(|d| &d.edits).find_map(|e| match e {
                     Edit::SetField { path, field, value, .. }
                         if *path == size && field == sdf::FieldKey::Default.as_str() =>
                     {
@@ -715,7 +809,7 @@ mod tests {
     /// diff reports it as an `EraseField` operation so a mirror can drop its
     /// stale opinion.
     #[test]
-    fn extract_diff_field_erasure() -> Result<()> {
+    fn forward_field_erasure() -> Result<()> {
         let stage = in_memory_stage()?;
         stage.define_prim("/World")?;
         stage.create_attribute("/World.target", "double")?;
@@ -726,12 +820,14 @@ mod tests {
         let _id = {
             let erased = erased.clone();
             stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
-                let diff = stage.extract_diff(change).expect("extract diff");
+                let diffs = forward_diff(stage, change).expect("forward diff");
                 let size = sdf::Path::new("/World.size").unwrap();
-                erased.borrow_mut().extend(diff.edits.iter().filter_map(|e| match e {
-                    Edit::EraseField { path, field } if *path == size => Some(field.as_str().to_string()),
-                    _ => None,
-                }));
+                erased
+                    .borrow_mut()
+                    .extend(diffs.iter().flat_map(|d| &d.edits).filter_map(|e| match e {
+                        Edit::EraseField { path, field } if *path == size => Some(field.as_str().to_string()),
+                        _ => None,
+                    }));
             })
         };
         attr.clear_connections()?;
@@ -739,9 +835,10 @@ mod tests {
         Ok(())
     }
 
-    /// Install a sink on `stage` that extracts a [`Diff`] from every committed
-    /// edit, collecting them for a mirror to replay. The sink stays installed for
-    /// the stage's lifetime (the returned [`StageSinkId`](super::StageSinkId) is unused).
+    /// Install a sink on `stage` that derives a forward [`Diff`] from every
+    /// committed edit, collecting them for a mirror to replay. The sink stays
+    /// installed for the stage's lifetime (the returned
+    /// [`StageSinkId`](super::StageSinkId) is unused).
     fn capture_diffs(stage: &Stage) -> Rc<RefCell<Vec<Diff>>> {
         let diffs: Rc<RefCell<Vec<Diff>>> = Rc::new(RefCell::new(Vec::new()));
         {
@@ -749,7 +846,7 @@ mod tests {
             stage.add_sink(move |stage: &Stage, change: &CommittedChange<'_>| {
                 diffs
                     .borrow_mut()
-                    .push(stage.extract_diff(change).expect("extract diff"));
+                    .extend(forward_diff(stage, change).expect("forward diff"));
             });
         }
         diffs
@@ -757,7 +854,7 @@ mod tests {
 
     /// Replaying every diff a listener captures from stage A onto stage B
     /// reconstructs A's edited subtree — the round trip through
-    /// `extract_diff` / `apply_diff`.
+    /// `forward_diff` / `apply_diff`.
     #[test]
     fn apply_diff_roundtrip() -> Result<()> {
         let a = in_memory_stage()?;

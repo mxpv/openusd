@@ -54,6 +54,29 @@ pub trait StageSink {
         let _ = (stage, change);
     }
 
+    /// Inspect a staged edit to one of the stage's layers before it commits,
+    /// while the layer's pristine pre-edit values are still readable.
+    ///
+    /// The stage-tier counterpart to [`sdf::LayerSink::before_commit`], fired
+    /// once per edited layer inside the layer's commit seam. It carries the
+    /// layer's [`base`](PendingChange::base) — the values as they stood before
+    /// this transaction — which is what lets a sink derive an inverse (undo)
+    /// record here; after the commit drains, those values are gone. Every
+    /// `before_commit` of one atomic transaction fires (in phase order, before
+    /// any [`after_commit`](Self::after_commit)) sharing one
+    /// [`generation`](PendingChange::generation); a transaction that a later
+    /// veto or a panic rolls back fires no `after_commit`, so a sink keys its
+    /// per-transaction scratch on the generation to discard the orphaned
+    /// captures when the next transaction opens.
+    ///
+    /// The layer graph is mid-edit for the duration, so a `before_commit` sink
+    /// must derive only from the values `change` carries — it must not re-enter
+    /// authoring or read composed state on `stage`. Unlike
+    /// [`sdf::LayerSink::before_commit`] this cannot veto: it observes.
+    fn before_commit(&self, stage: &Stage, change: &PendingChange<'_>) {
+        let _ = (stage, change);
+    }
+
     /// Observe an edit-target change (C++ `UsdNotice::StageEditTargetChanged`).
     fn edit_target_changed(&self, stage: &Stage) {
         let _ = stage;
@@ -152,11 +175,26 @@ pub struct CommittedChange<'a> {
     /// [`changed_info_only`](Self::changed_info_only) paths;
     /// [`changed_fields`](Self::changed_fields) bridges the two).
     pub change_list: &'a sdf::ChangeList,
+    /// The raw change record per edited layer — each layer's canonical identifier
+    /// and the change index keyed in that layer's own namespace. A transaction
+    /// that edits several layers (a batch or namespace edit) lists each; the
+    /// merged [`change_list`](Self::change_list) is their union attributed to the
+    /// strongest layer, which loses which layer authored what. Read per entry to
+    /// derive a faithful per-layer diff.
+    pub layer_changes: &'a [(String, sdf::ChangeList)],
     /// Where this edit originated, which determines the namespace
     /// [`resynced`](Self::resynced) and
     /// [`changed_info_only`](Self::changed_info_only) are reported in (see
     /// [`Provenance`]).
     pub provenance: &'a Provenance,
+    /// The id of the atomic transaction this change is for, matching the
+    /// [`generation`](PendingChange::generation) its layers carried at
+    /// [`before_commit`](StageSink::before_commit). Each committed transaction
+    /// delivers its own `after_commit`, so a sink can correlate a transaction's
+    /// pre-commit and post-commit events by it — e.g. an
+    /// [`UndoStage`](super::UndoStage) pairs the two to seal one transaction's
+    /// captured inverses.
+    pub generation: u64,
 }
 
 impl CommittedChange<'_> {
@@ -184,6 +222,42 @@ impl CommittedChange<'_> {
     }
 }
 
+/// A staged, not-yet-committed edit to one of the stage's layers, handed to
+/// [`StageSink::before_commit`] — the stage-tier view of one layer's
+/// [`sdf::PendingLayerChange`].
+///
+/// A borrowed view valid only for the callback. It carries the layer's pre-edit
+/// [`base`](Self::base) and the derived [`change_list`](Self::change_list); a
+/// sink pairs them to derive the inverse of the edit (the old value of each
+/// touched field, the whole state of each removed spec) without committing.
+pub struct PendingChange<'a> {
+    /// Canonical identifier of the layer being edited — the
+    /// [`ApplyMode::ExactLayer`](super::ApplyMode::ExactLayer) key for replaying
+    /// a derived diff back onto this same layer.
+    pub layer_identifier: &'a str,
+    /// The layer's values as they stood before this transaction (the overlay's
+    /// base). Reading a field here yields its pre-edit value; a field or spec
+    /// absent here was created by this edit.
+    pub base: &'a dyn sdf::AbstractData,
+    /// The change index derived for this layer's staged edit, keyed in the
+    /// layer's own namespace — which specs and fields the edit touched.
+    pub change_list: &'a sdf::ChangeList,
+    /// The edit target's namespace mapping (layer namespace to composed stage
+    /// namespace), or `None` for a local or identity-mapped edit whose paths are
+    /// already stage paths. Carried onto a derived [`Diff`](super::Diff) so a
+    /// later replay reports composed notice paths.
+    pub mapping: Option<&'a pcp::MapFunction>,
+    /// The id of the atomic transaction this edit belongs to: shared by every
+    /// layer the transaction edits, distinct from the next transaction's, and
+    /// monotonically increasing. It equals the
+    /// [`generation`](CommittedChange::generation) the matching
+    /// [`after_commit`](StageSink::after_commit) carries, so a sink can group a
+    /// transaction's per-layer pre-commit events and correlate them with its
+    /// commit — e.g. an [`UndoStage`](super::UndoStage) buffers per-layer inverses
+    /// by it and seals them when the commit arrives.
+    pub generation: u64,
+}
+
 /// A bare closure is a [`StageSink`] that only observes committed edits — the
 /// ergonomic "just watch changes" case, installed straight through
 /// [`Stage::add_sink`](super::Stage::add_sink) with no wrapper type. `Fn` (not
@@ -207,6 +281,7 @@ pub(super) struct Payload {
     resynced: Vec<sdf::Path>,
     changed_info_only: Vec<sdf::Path>,
     change_list: sdf::ChangeList,
+    layer_changes: Vec<(String, sdf::ChangeList)>,
 }
 
 impl Payload {
@@ -220,8 +295,15 @@ impl Payload {
     /// [`resynced`](CommittedChange::resynced) is the union of the significant and
     /// prim-tier composed paths; [`changed_info_only`](CommittedChange::changed_info_only)
     /// is every other edited path that authored a field value or edited
-    /// relationship/connection targets.
-    pub(super) fn new(changes: &pcp::Changes, scratch: &sdf::ChangeList, provenance: &Provenance) -> Self {
+    /// relationship/connection targets. `scratch` is the merged change list;
+    /// `layer_changes` is the per-layer split retained for
+    /// [`layer_changes`](CommittedChange::layer_changes).
+    pub(super) fn new(
+        changes: &pcp::Changes,
+        scratch: &sdf::ChangeList,
+        layer_changes: Vec<(String, sdf::ChangeList)>,
+        provenance: &Provenance,
+    ) -> Self {
         let mapping = provenance.mapping();
         // `resynced_paths` mixes composed dependency paths (already stage
         // namespace) with the literal authored path, which under an arc or
@@ -290,6 +372,7 @@ impl Payload {
             resynced,
             changed_info_only,
             change_list: scratch.clone(),
+            layer_changes,
         }
     }
 
@@ -298,13 +381,16 @@ impl Payload {
         &'a self,
         layer_identifier: &'a str,
         provenance: &'a Provenance,
+        generation: u64,
     ) -> CommittedChange<'a> {
         CommittedChange {
             resynced: &self.resynced,
             changed_info_only: &self.changed_info_only,
             layer_identifier,
             change_list: &self.change_list,
+            layer_changes: &self.layer_changes,
             provenance,
+            generation,
         }
     }
 }

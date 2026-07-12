@@ -67,6 +67,12 @@ const ANONYMOUS_PREFIX: &str = "anon:";
 /// in the process never collide.
 static ANONYMOUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Monotonic source of transaction ids stamped onto every [`edit_layers`] group
+/// (see [`PendingLayerChange::generation`]). Process-global so an observer can
+/// tell one atomic transaction's commits from the next regardless of which layer
+/// or stage they land on.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// A single loaded layer in the composition.
 pub struct Layer {
     /// Resolved, canonical identifier for this layer.
@@ -210,10 +216,11 @@ impl Layer {
 
     /// Refill this layer's change record from the staged overlay against the
     /// still-pristine base, and offer it to each sink's
-    /// [`before_commit`](LayerSink::before_commit) while the overlay is intact. A
-    /// sink's rejection leaves the overlay staged for the caller to roll back. Does
-    /// not touch the backend.
-    fn prepare_commit(&mut self) -> Result<(), sink::Error> {
+    /// [`before_commit`](LayerSink::before_commit) while the overlay is intact,
+    /// tagged with the enclosing transaction's `generation`. A sink's rejection
+    /// leaves the overlay staged for the caller to roll back. Does not touch the
+    /// backend.
+    fn prepare_commit(&mut self, generation: u64) -> Result<(), sink::Error> {
         self.changes.update(&self.data);
         if !self.changes.is_empty() && !self.sinks.is_empty() {
             let change = PendingLayerChange {
@@ -221,6 +228,7 @@ impl Layer {
                 base: &**self.data.base(),
                 overlay: self.data.overlay(),
                 change_list: &self.changes,
+                generation,
             };
             self.sinks.iter().try_for_each(|sink| sink.before_commit(&change))?;
         }
@@ -455,6 +463,11 @@ pub struct PendingLayerChange<'a> {
     /// needs to retain it past the callback clones it ([`ChangeList`] is
     /// [`Clone`]).
     pub change_list: &'a ChangeList,
+    /// The id of the atomic transaction ([`edit_layers`] group) this commit
+    /// belongs to: one id shared by every layer the transaction commits, distinct
+    /// from the next transaction's, and monotonically increasing. An observer
+    /// keys per-transaction state on it (see [`crate::usd::UndoStage`]).
+    pub generation: u64,
 }
 
 /// Identity, persistence, and typed-view lookups. Spec authoring lives on the
@@ -835,10 +848,13 @@ pub(crate) fn edit_layers<E: From<sink::Error>>(
         // `edits` drops at the block end, releasing the per-layer borrows for the
         // commit phase below.
     }
+    // One id for the whole atomic group, so an observer sees every layer this
+    // transaction commits under a single transaction id.
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     // Phase 1: refill each layer's record and offer it to that layer's
     // `before_commit`; a veto aborts before any layer commits.
     for layer in guard.layers.iter_mut() {
-        layer.prepare_commit()?;
+        layer.prepare_commit(generation)?;
     }
     // Phase 2: every layer accepted, so drain each overlay into its backend. Commit
     // all layers before notifying any, so the whole group's data lands even if a

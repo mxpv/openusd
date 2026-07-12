@@ -49,7 +49,7 @@ use crate::tf::Token;
 use crate::{ar, pcp, sdf};
 
 use super::interp::{self, InterpolationType};
-use super::sink::{Payload, Provenance, StageSink, StageSinkId};
+use super::sink::{Payload, PendingChange, Provenance, StageSink, StageSinkId};
 
 bitflags! {
     /// Resolved stage-level status bits for a prim.
@@ -641,6 +641,11 @@ impl From<sdf::EditError> for StageAuthoringError {
     }
 }
 
+/// One committed layer edit queued in [`StageInner::pending`]: the transaction id
+/// it committed under (for grouping the drain), the edited layer, its change
+/// record, and the [`Provenance`] staged for it (`None` for a direct edit).
+type PendingEdit = (u64, pcp::LayerId, sdf::ChangeList, Option<Provenance>);
+
 /// Shared state behind a [`Stage`] handle.
 ///
 /// Owns the loaded layer stack and the composed-scene state. Composition
@@ -686,7 +691,9 @@ pub struct StageInner {
     sinks: RefCell<sdf::sink::Set<dyn StageSink>>,
     /// Layer edits recorded by each layer's aggregator sink (installed by
     /// [`add_layer`](Stage::add_layer)), awaiting composed processing by
-    /// [`process_pending`](Stage::process_pending). Each entry carries its
+    /// [`process_pending`](Stage::process_pending). Each entry carries the
+    /// transaction id it committed under (so the drain groups a transaction's
+    /// layers together, from [`current_generation`](Self::current_generation)) and its
     /// [`Provenance`], or `None` when no stage authoring method staged one — a
     /// direct [`layer_mut`](Stage::layer_mut) edit, resolved against local-layer
     /// membership when the queue drains.
@@ -711,12 +718,21 @@ pub struct StageInner {
     ///   borrow held; the callback can't tell, so it records uniformly and the
     ///   recompose happens on the next composed read (drain-on-read). Stage-routed
     ///   and raw layer edits flow through the identical path.
-    pending: RefCell<Vec<(pcp::LayerId, sdf::ChangeList, Option<Provenance>)>>,
+    pending: RefCell<Vec<PendingEdit>>,
     /// The [`Provenance`] a stage authoring method publishes for the commit
     /// currently underway, read by the aggregator as it records into
     /// [`pending`](Self::pending). `None` for a direct edit, which the drain
     /// resolves from local-layer membership.
     edit_provenance: RefCell<Option<Provenance>>,
+    /// The transaction id of the layer commit currently draining, cached from its
+    /// [`PendingLayerChange`](sdf::PendingLayerChange) by the aggregator's
+    /// `before_commit` so the matching `after_commit`
+    /// ([`record_pending`](Stage::record_pending)) can stamp it onto the queued
+    /// edit, which [`process_pending`](Stage::process_pending) then groups by. The
+    /// id is minted once per atomic transaction by `sdf::edit_layers`, so a
+    /// stage-authored batch and a direct [`layer_mut`](Stage::layer_mut) edit are
+    /// each one transaction without the stage tracking any boundary of its own.
+    current_generation: Cell<u64>,
 }
 
 /// A composed USD stage.
@@ -763,6 +779,38 @@ struct ClearEditProvenance<'a>(&'a RefCell<Option<Provenance>>);
 impl Drop for ClearEditProvenance<'_> {
     fn drop(&mut self) {
         self.0.take();
+    }
+}
+
+/// The [`sdf::LayerSink`] a [`Stage`] installs on every layer it owns (through
+/// [`add_layer`](Stage::add_layer)) to bridge the low tier of the change
+/// pipeline to the high tier: it records each commit into
+/// [`pending`](StageInner::pending) for a composed recompose, and forwards the
+/// staged pre-commit edit to the stage's [`StageSink`]s. It holds a
+/// [`WeakStage`] so it forms no reference cycle (the stage owns the layer, which
+/// owns this sink).
+struct StageAggregator {
+    stage: WeakStage,
+    layer_id: pcp::LayerId,
+}
+
+impl sdf::LayerSink for StageAggregator {
+    fn before_commit(&self, change: &sdf::PendingLayerChange<'_>) -> Result<(), sdf::sink::Error> {
+        if let Some(stage) = self.stage.upgrade() {
+            // Cache this transaction's id (minted by `sdf::edit_layers`) for the
+            // matching `after_commit`'s `record_pending` to read; `before_commit`
+            // fires for a layer before its `after_commit`, and every layer of a
+            // transaction shares one id, so the cache is correct for each.
+            stage.current_generation.set(change.generation);
+            stage.forward_before_commit(change);
+        }
+        Ok(())
+    }
+
+    fn after_commit(&self, _layer: &str, changes: &sdf::ChangeList) {
+        if let Some(stage) = self.stage.upgrade() {
+            stage.record_pending(self.layer_id, changes.clone());
+        }
     }
 }
 
@@ -1495,18 +1543,45 @@ impl Stage {
     /// [`WeakStage`], so it does not form a reference cycle (the stage owns the
     /// layer, which owns the sink).
     fn add_layer(&self, layer: sdf::Layer) -> (pcp::LayerId, bool) {
-        let stage = self.downgrade();
         let mut layers = self.layers.borrow_mut();
         let (id, fresh) = layers.ensure_layer(layer);
         if fresh {
             let node = layers.get_mut(id).expect("just-interned layer is live");
-            node.layer.add_sink(move |_: &str, changes: &sdf::ChangeList| {
-                if let Some(stage) = stage.upgrade() {
-                    stage.record_pending(id, changes.clone());
-                }
+            node.layer.add_sink(StageAggregator {
+                stage: self.downgrade(),
+                layer_id: id,
             });
         }
         (id, fresh)
+    }
+
+    /// Fan out a layer's staged pre-commit edit to the installed
+    /// [`StageSink`]s' [`before_commit`](StageSink::before_commit), bridging one
+    /// [`sdf::PendingLayerChange`] to the stage-tier [`PendingChange`]. Called by
+    /// the [`StageAggregator`] from inside the layer's commit seam, while the
+    /// layer graph is borrowed for the edit — so it reads only
+    /// [`sinks`](StageInner::sinks) and [`edit_provenance`](StageInner::edit_provenance),
+    /// never the graph or cache. A no-op when no sink is installed.
+    fn forward_before_commit(&self, change: &sdf::PendingLayerChange<'_>) {
+        let sinks = self.sinks.borrow();
+        if sinks.is_empty() {
+            return;
+        }
+        // Borrow the provenance's mapping into the event rather than cloning it: a
+        // `before_commit` sink observes and must not re-enter authoring (which is
+        // what would re-borrow `edit_provenance`), so holding the borrow across the
+        // fan-out is safe and avoids a per-commit `MapFunction` clone.
+        let provenance = self.edit_provenance.borrow();
+        let pending = PendingChange {
+            layer_identifier: change.layer_identifier,
+            base: change.base,
+            change_list: change.change_list,
+            mapping: provenance.as_ref().and_then(|p| p.mapping()),
+            generation: change.generation,
+        };
+        for sink in sinks.iter() {
+            sink.before_commit(self, &pending);
+        }
     }
 
     /// Record a committed layer edit for [`process_pending`](Self::process_pending),
@@ -1518,7 +1593,9 @@ impl Stage {
     /// [`pending`](StageInner::pending) cell rather than recomposing inline.
     pub(super) fn record_pending(&self, layer_id: pcp::LayerId, changes: sdf::ChangeList) {
         let provenance = self.edit_provenance.take();
-        self.pending.borrow_mut().push((layer_id, changes, provenance));
+        self.pending
+            .borrow_mut()
+            .push((self.current_generation.get(), layer_id, changes, provenance));
     }
 
     /// Drain the layer edits recorded by the aggregators and drive one composition
@@ -1542,48 +1619,51 @@ impl Stage {
         if self.layers.borrow_mut().clear_failed_loads() {
             self.cache.borrow_mut().drop_load_failed_indices();
         }
-        // A single edit carries its own provenance: a staged one verbatim, or an
-        // unstaged edit (`None`) resolved to `LocalStack` or `DirectLayerEdit` by
-        // whether the edited layer is in the local layer stack — a linear scan of
-        // the (small) root stack, run only for that case. A batch records many,
-        // all from one transaction sharing one published provenance carried by the
-        // first committed layer's record: a mapped relocate batch authors every
-        // stack layer in the target's namespace, so that `EditTarget` provenance
-        // translates the merged change's paths, while a local-stack batch stages
-        // none and reports `LocalStack` (its layers share the stage namespace).
-        // Several distinct provenances are only reachable by interleaving a raw
-        // layer edit with a targeted one; there the dependency-derived composed
-        // paths stay correct and only the literal-path translation drops.
-        let provenance = if drained.len() == 1 {
-            let id = drained[0].0;
-            drained[0].2.take().unwrap_or_else(|| {
-                if self
+        // Entries committed under one transaction id are contiguous — a
+        // transaction's layers record together, and the id increases across
+        // transactions — so grouping by adjacent equal id carves the queue into
+        // per-transaction groups. Each group applies as its own composed change,
+        // so unrelated edits (a direct `layer_mut` commit sitting pending when the
+        // next stage edit lands) stay separate rather than merging into one event.
+        for group in drained.chunk_by_mut(|a, b| a.0 == b.0) {
+            let generation = group[0].0;
+            let provenance = self.resolve_group_provenance(group);
+            let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
+                group.iter().map(|(_, id, changes, _)| (*id, changes)).collect();
+            self.apply_change_sets(generation, &edits, &provenance);
+        }
+    }
+
+    /// The [`Provenance`] for one transaction's group of recorded edits. A staged
+    /// provenance (published by a stage authoring method) rides the first layer
+    /// the transaction committed; an unstaged direct edit resolves from
+    /// local-layer membership — [`Provenance::LocalStack`] when the edited layer
+    /// is in the root layer stack (its paths are stage paths), else
+    /// [`Provenance::DirectLayerEdit`]. A multi-layer group with no staged
+    /// provenance is a local-stack batch (its layers share the stage namespace).
+    fn resolve_group_provenance(&self, group: &mut [PendingEdit]) -> Provenance {
+        if let Some(provenance) = group.iter_mut().find_map(|(_, _, _, provenance)| provenance.take()) {
+            return provenance;
+        }
+        match group {
+            [(_, id, _, _)]
+                if !self
                     .layers
                     .borrow()
                     .root_layer_stack()
                     .iter()
-                    .any(|&(lid, _)| lid == id)
-                {
-                    Provenance::LocalStack
-                } else {
-                    Provenance::DirectLayerEdit
-                }
-            })
-        } else {
-            drained
-                .iter_mut()
-                .find_map(|(_, _, provenance)| provenance.take())
-                .unwrap_or(Provenance::LocalStack)
-        };
-        let edits: Vec<(pcp::LayerId, &sdf::ChangeList)> =
-            drained.iter().map(|(id, changes, _)| (*id, changes)).collect();
-        self.apply_change_sets(&edits, &provenance);
+                    .any(|&(lid, _)| lid == *id) =>
+            {
+                Provenance::DirectLayerEdit
+            }
+            _ => Provenance::LocalStack,
+        }
     }
 
-    /// Classify a batch of committed [`sdf::ChangeList`]s — one per edited layer
-    /// — through a single [`pcp::Changes`] cycle and apply the resulting cache
-    /// invalidation, delivering one [`CommittedChange`](super::CommittedChange)
-    /// for the whole batch to the installed sinks.
+    /// Classify one transaction's committed [`sdf::ChangeList`]s — one per edited
+    /// layer — through a single [`pcp::Changes`] cycle and apply the resulting
+    /// cache invalidation, delivering one [`CommittedChange`](super::CommittedChange)
+    /// (tagged with the transaction `generation`) to the installed sinks.
     ///
     /// [`pcp::Changes::did_change`] takes the per-layer split because
     /// classification is layer-relative; the event instead reports the merged
@@ -1591,7 +1671,7 @@ impl Stage {
     /// records' layer-namespace paths reach stage namespace — a batched namespace
     /// edit is [`Provenance::LocalStack`], the local layer stack sharing the
     /// stage's namespace.
-    fn apply_change_sets(&self, edits: &[(pcp::LayerId, &sdf::ChangeList)], provenance: &Provenance) {
+    fn apply_change_sets(&self, generation: u64, edits: &[(pcp::LayerId, &sdf::ChangeList)], provenance: &Provenance) {
         let mut pcp_changes = pcp::Changes::new();
         {
             let cache = self.cache.borrow();
@@ -1599,21 +1679,21 @@ impl Stage {
         }
         // Snapshot the after-commit payload before `apply` consumes
         // `pcp_changes`, and only when a sink is installed — the no-sink path
-        // stays allocation-free. The per-layer records merge into one list for
-        // the event, which reads paths in the (here identical) stage namespace.
-        //
-        // TODO(namespace-edit): merging discards per-layer provenance — the event
-        // carries one layer identifier (the strongest edited layer), so a sink
-        // reading the raw change list per layer mis-attributes records that
-        // landed in a sublayer. Carrying the per-layer records on the event (or
-        // one event per layer) would let a multi-layer namespace edit replicate
-        // faithfully.
+        // stays allocation-free. The event carries both the merged change list
+        // (the union, keyed to the strongest layer) and the per-layer records
+        // ([`layer_changes`]), so a sink deriving a per-layer diff reads each
+        // layer's own record rather than mis-reading a sublayer's change against
+        // the strongest layer's data.
         let payload = (!self.sinks.borrow().is_empty()).then(|| {
+            let layer_changes: Vec<(String, sdf::ChangeList)> = edits
+                .iter()
+                .map(|(id, changes)| (self.layer_identifier(*id).unwrap_or_default(), (*changes).clone()))
+                .collect();
             let mut merged = sdf::ChangeList::new();
             for (_, changes) in edits {
                 merged.merge_from(changes);
             }
-            Payload::new(&pcp_changes, &merged, provenance)
+            Payload::new(&pcp_changes, &merged, layer_changes, provenance)
         });
         {
             let mut graph = self.layers.borrow_mut();
@@ -1626,7 +1706,7 @@ impl Stage {
                 .first()
                 .and_then(|(id, _)| self.layer_identifier(*id))
                 .unwrap_or_default();
-            let change = payload.committed_change(&layer_identifier, provenance);
+            let change = payload.committed_change(&layer_identifier, provenance, generation);
             for sink in self.sinks.borrow().iter() {
                 sink.after_commit(self, &change);
             }
@@ -3262,6 +3342,7 @@ impl StageBuilder {
             sinks: RefCell::default(),
             pending: RefCell::new(Vec::new()),
             edit_provenance: RefCell::new(None),
+            current_generation: Cell::new(0),
         }));
         // Add every collected layer through the one join seam, so each gets its
         // change aggregator as it joins; then wire the sublayer DAG from the
@@ -3292,6 +3373,15 @@ impl StageBuilder {
             stage.layers.borrow_mut().set_muted_identifiers(self.muted);
         }
         stage
+    }
+}
+
+#[cfg(test)]
+impl Stage {
+    /// The number of installed [`StageSink`]s, for tests asserting a wrapper's
+    /// recording sink is installed and later removed.
+    pub(crate) fn sink_count(&self) -> usize {
+        self.sinks.borrow().iter().count()
     }
 }
 
@@ -4764,6 +4854,37 @@ def "T" {
         assert!(changed);
         assert!(stage.prim(sdf::path("/FromRoot")?).is_valid()?);
         assert!(stage.prim(sdf::path("/FromWeak")?).is_valid()?);
+        Ok(())
+    }
+
+    /// A `ReplayStage` records a multi-layer `batch_edit` as one forward diff per
+    /// layer, reading each layer's own change against its own data — so a spec
+    /// authored only in the weaker layer is captured, not masked by the strongest
+    /// layer holding no such spec.
+    #[test]
+    fn replay_multi_layer_batch() -> Result<()> {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["weak.usda"]);
+        });
+        let stage = Stage::builder().make_stage(vec![root, opinion_layer("weak.usda", 1.0)?], 0, Vec::new());
+        let recorder = crate::usd::ReplayStage::from(stage);
+        recorder.batch_edit(&["root.usda", "weak.usda"], |edits| {
+            sdf::PrimSpec::new(edits[0].data_mut(), "/FromRoot", sdf::Specifier::Def, "")?;
+            sdf::PrimSpec::new(edits[1].data_mut(), "/FromWeak", sdf::Specifier::Def, "")?;
+            Ok(())
+        })?;
+
+        let paths: Vec<sdf::Path> = recorder
+            .diff()
+            .iter()
+            .flat_map(|d| d.edits.iter().map(|e| e.path().clone()))
+            .collect();
+        assert!(paths.contains(&sdf::path("/FromRoot")?));
+        assert!(
+            paths.contains(&sdf::path("/FromWeak")?),
+            "the sublayer's edit is captured"
+        );
         Ok(())
     }
 
