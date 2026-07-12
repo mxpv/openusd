@@ -26,6 +26,11 @@ use super::{Error, InvalidRelocateReason, LayerId, RelocateConflictReason};
 /// Per-layer authored relocates, keyed by layer id.
 pub(crate) type LayerRelocates = HashMap<LayerId, RelocateList>;
 
+/// A structurally valid authored relocate with its layer provenance: `(source,
+/// target, layer id, layer identifier)`. The identifier string is carried
+/// alongside the id for conflict diagnostics.
+type AuthoredRelocate = (Path, Path, LayerId, String);
+
 /// Whether an authored relocate occurrence contributes to Pcp's composed
 /// relocate map for one layer stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +191,7 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
     let mut errors = Vec::new();
     // Collect every structurally valid authored relocate, recording its layer.
     // Conflict diagnostics are computed over the layer-stack scopes below.
-    let mut all: Vec<(Path, Path, LayerId, String)> = Vec::new();
+    let mut all: Vec<AuthoredRelocate> = Vec::new();
     for &id in graph.all_ids() {
         // A muted layer contributes nothing, including its authored relocates and
         // their diagnostics.
@@ -239,25 +244,41 @@ pub(crate) fn validate_layer_relocates(graph: &LayerGraph) -> (LayerRelocates, V
     (out, errors)
 }
 
-/// Detects cross-relocate conflicts over the layer stack's structurally valid
-/// relocates (C++ `Pcp_ComputeRelocationsForLayerStackWorkspace`'s conflict
-/// validation), pushing an error for each conflict. Each scope lists indices in
-/// authored strength order. Grouped same-target errors come first
-/// (target-sorted), then the pairwise conflicts sorted by `(source, reason,
-/// conflict source)`. Conflict and duplicate-source dropping happen when
-/// composing a specific layer stack; the layer cache keeps the structurally
-/// valid authored pairs.
-fn detect_relocate_conflicts(all: &[(Path, Path, LayerId, String)], scopes: &[Vec<usize>], errors: &mut Vec<Error>) {
-    // TODO: Diagnostics currently group raw authored occurrences, so weaker
-    // duplicate-source relocates can make active stack-effective relocates look
-    // conflicting. Filter each scope through the duplicate-source
-    // classification used by `analyze_relocate_occurrences` before same-target
-    // and pairwise conflict reporting.
+/// Detects cross-relocate conflicts over each layer stack's effective relocates
+/// (C++ `Pcp_ComputeRelocationsForLayerStackWorkspace`'s conflict validation),
+/// pushing an error for each conflict. Each scope lists indices in authored
+/// strength order and is first reduced to its effective occurrences — only the
+/// strongest occurrence of a given source contributes to composition, so weaker
+/// duplicate-source occurrences are dropped before conflict reporting. Grouped
+/// same-target errors come first (target-sorted), then the pairwise conflicts
+/// sorted by `(source, reason, conflict source)`. Conflict and duplicate-source
+/// dropping happen when composing a specific layer stack; the layer cache keeps
+/// the structurally valid authored pairs.
+fn detect_relocate_conflicts(all: &[AuthoredRelocate], scopes: &[Vec<usize>], errors: &mut Vec<Error>) {
+    // Conflicts are reported over each stack's effective relocates. Only the
+    // strongest occurrence of a given source contributes to composition, so a
+    // weaker duplicate-source occurrence must not appear as a conflict
+    // participant against a survivor. Drop those with the shared
+    // `duplicate_source_mask` rule — every `all` entry is structurally valid, so
+    // each is eligible — leaving the survivors whose same-target and pairwise
+    // conflicts are the errors reported below.
+    let scopes: Vec<Vec<usize>> = scopes
+        .iter()
+        .map(|scope| {
+            let duplicate = duplicate_source_mask(scope.iter().map(|&idx| (true, &all[idx].0)));
+            scope
+                .iter()
+                .copied()
+                .zip(duplicate)
+                .filter_map(|(idx, is_duplicate)| (!is_duplicate).then_some(idx))
+                .collect()
+        })
+        .collect();
 
     // Multiple sources moving to the same target: all of them are invalid.
     let mut same_target_errors: Vec<(Path, Vec<usize>)> = Vec::new();
     let mut seen_same_target: HashSet<(Path, Vec<usize>)> = HashSet::new();
-    for scope in scopes {
+    for scope in &scopes {
         let mut by_target: BTreeMap<Path, Vec<usize>> = BTreeMap::new();
         for &idx in scope {
             let target = &all[idx].1;
@@ -288,7 +309,7 @@ fn detect_relocate_conflicts(all: &[(Path, Path, LayerId, String)], scopes: &[Ve
     // (not a query hot path) and n is small, but a group-by-source/prefix index
     // would make it near-linear if a stack ever authors many relocates.
     let mut pairwise: Vec<(usize, usize, RelocateConflictReason)> = Vec::new();
-    for scope in scopes {
+    for scope in &scopes {
         for &i in scope {
             for &j in scope {
                 if i == j {
@@ -401,6 +422,19 @@ fn relocate_pair_conflicts(sa: &Path, ta: &Path, sb: &Path, tb: &Path) -> Vec<Re
     reasons
 }
 
+/// Flags each source that duplicates an earlier eligible one, in iteration
+/// (strength) order — the single definition of the rule that keeps only the
+/// strongest occurrence of a given source in a layer stack's effective
+/// relocates. Each item is `(eligible, source)`; an ineligible occurrence (a
+/// structurally invalid pair) is never flagged and does not reserve its source
+/// for the entries after it.
+fn duplicate_source_mask<'a>(sources: impl Iterator<Item = (bool, &'a Path)>) -> Vec<bool> {
+    let mut seen: HashSet<&Path> = HashSet::new();
+    sources
+        .map(|(eligible, source)| eligible && !seen.insert(source))
+        .collect()
+}
+
 /// Analyze authored relocate occurrences in one layer stack, in strength order.
 ///
 /// Mirrors Pcp extraction in stages: structurally invalid pairs drop first;
@@ -423,12 +457,14 @@ pub(crate) fn analyze_relocate_occurrences(pairs: &[(Path, Path)]) -> Vec<Reloca
         })
         .collect();
 
-    let mut seen_sources: HashSet<&Path> = HashSet::new();
-    for (i, (source, _)) in pairs.iter().enumerate() {
-        if !status[i].is_active() {
-            continue;
-        }
-        if !seen_sources.insert(source) {
+    let duplicate = duplicate_source_mask(
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (source, _))| (status[i].is_active(), source)),
+    );
+    for (i, is_duplicate) in duplicate.into_iter().enumerate() {
+        if is_duplicate {
             status[i] = RelocateOccurrence::DroppedDuplicateSource;
         }
     }
@@ -707,6 +743,45 @@ mod tests {
                 RelocateOccurrence::Active,
             ]
         );
+    }
+
+    /// Builds a `detect_relocate_conflicts` input from `(source, target)` strs,
+    /// all authored in a single layer, as one conflict scope in strength order.
+    fn conflict_scope(pairs: &[(&str, &str)]) -> (Vec<AuthoredRelocate>, Vec<Vec<usize>>) {
+        let layer = LayerId::from_raw(0);
+        let all: Vec<AuthoredRelocate> = pairs
+            .iter()
+            .map(|(s, t)| (Path::from(*s), Path::from(*t), layer, "root.usda".to_string()))
+            .collect();
+        let scope = (0..all.len()).collect();
+        (all, vec![scope])
+    }
+
+    /// A weaker duplicate-source occurrence never contributes to the layer
+    /// stack's effective relocates, so it cannot make a surviving relocate look
+    /// conflicting: `/W/A -> /W/D` loses to the stronger `/W/A -> /W/C` and must
+    /// not raise a target-is-source conflict against `/W/D -> /W/E`.
+    #[test]
+    fn duplicate_source_not_conflict() {
+        let (all, scopes) = conflict_scope(&[("/W/A", "/W/C"), ("/W/A", "/W/D"), ("/W/D", "/W/E")]);
+        let mut errors = Vec::new();
+        detect_relocate_conflicts(&all, &scopes, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "dropped duplicate source must not conflict: {errors:?}"
+        );
+    }
+
+    /// The surviving (strongest) occurrence keeps the conflict its winner
+    /// genuinely has: dropping the weaker `/W/A -> /W/C` leaves `/W/A -> /W/D`,
+    /// whose target is the source of `/W/D -> /W/E`, so both directions report.
+    #[test]
+    fn survivor_conflict_reported() {
+        let (all, scopes) = conflict_scope(&[("/W/A", "/W/D"), ("/W/A", "/W/C"), ("/W/D", "/W/E")]);
+        let mut errors = Vec::new();
+        detect_relocate_conflicts(&all, &scopes, &mut errors);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| matches!(e, Error::ConflictingRelocation { .. })));
     }
 
     /// A relocate is invalid when its source and target are nested within one
