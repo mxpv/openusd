@@ -37,7 +37,7 @@ use crate::sdf::expr;
 use crate::sdf::schema::FieldKey;
 use crate::sdf::{self, LayerOffset, Path, RelocateList, Value};
 
-use super::layer_stack::{LayerStackId, LayerStackRegistry};
+use super::layer_stack::{ExprVarId, ExprVarInterner, LayerStackId, LayerStackRegistry};
 use super::mapping::MapFunction;
 use super::relocates::{analyze_relocate_occurrences, chain_through_relocates, validate_layer_relocates};
 use super::{effective_time_codes_per_second, Error};
@@ -96,17 +96,39 @@ type SublayerEdges = Vec<(LayerId, LayerOffset)>;
 /// threading it to a layer's children does not copy the dictionary.
 type SharedExprVars = Rc<HashMap<String, Value>>;
 
+/// A node of the contextual sublayer walk: a layer paired with the interned
+/// expression-variable context it is reached under. The same layer under two
+/// ancestries with different contexts is two distinct nodes, so a sublayer diamond
+/// resolves each ancestry's `${VAR}` sublayers independently. The [`ExprVarId`] is
+/// minted by that walk's transient interner and is meaningful only against its edge
+/// map ([`compose_contextual_edges`](LayerGraph::compose_contextual_edges)).
+type CtxKey = (LayerId, ExprVarId);
+
+/// A contextual node's resolved sublayer edges: each child [`CtxKey`] paired with
+/// the effective offset for that hop (the [`CtxKey`] counterpart of
+/// [`SublayerEdges`]).
+type CtxEdges = Vec<(CtxKey, LayerOffset)>;
+
 /// A single layer in the [`LayerGraph`].
 pub(crate) struct LayerNode {
     /// The loaded layer (identifier + backing data + authoring surface).
     pub layer: sdf::Layer,
     /// This layer's [`SublayerEdges`], resolved with no context inherited across a
     /// reference/payload arc (the layer's own `expressionVariables` still apply).
-    /// Shared by every plain stack that includes this layer; a contextual stack
-    /// re-resolves its own transient edges instead (see
+    /// Shared by every stack with no expression sublayer, where the members are
+    /// context-independent; a stack with an expression sublayer re-resolves its own
+    /// transient per-`(layer, context)` edges instead (see
     /// [`build_stack_members`](LayerGraph::build_stack_members)), so these are not
     /// duplicated per stack instance.
     pub children: SublayerEdges,
+    /// Whether this layer authors at least one expression-valued (`${VAR}`)
+    /// `subLayers` entry — a purely local property of its own `subLayers`, not its
+    /// composed subtree. Recomputed by
+    /// [`build_sublayer_edges`](LayerGraph::build_sublayer_edges), it lets
+    /// [`has_expr_sublayer`](LayerGraph::has_expr_sublayer) decide whether a stack's
+    /// members depend on the expression-variable context by reading a bool per
+    /// member rather than re-decoding `subLayers`.
+    pub has_expr_sublayer: bool,
     /// The structurally valid authored `layerRelocates` pairs `(source, target)`
     /// in this layer's own namespace. Stack queries apply duplicate-source and
     /// conflict rules for the ambient layer stack. Empty when the layer authors
@@ -116,12 +138,13 @@ pub(crate) struct LayerNode {
 
 impl LayerNode {
     /// A node wrapping `layer`, with no edges and no relocates. The sublayer
-    /// edges and relocates are filled in by
+    /// edges, expression-sublayer flag, and relocates are filled in by
     /// [`LayerGraph::recompute_sublayers`].
     fn new(layer: sdf::Layer) -> Self {
         Self {
             layer,
             children: Vec::new(),
+            has_expr_sublayer: false,
             relocates: Vec::new(),
         }
     }
@@ -172,6 +195,13 @@ pub(crate) struct LayerGraph {
     /// Whether any node keeps structurally valid authored relocates. The indexer
     /// reads this to gate its relocate passes without rescanning.
     has_relocates: bool,
+    /// Whether any node authors an expression-valued (`${VAR}`) `subLayers` entry.
+    /// A false value lets [`has_expr_sublayer`](Self::has_expr_sublayer) short-circuit
+    /// to `false` for the overwhelmingly common stage with no expression sublayers,
+    /// so [`build_stack_members`](Self::build_stack_members) never scans a stack for
+    /// them. Recomputed with the per-node flags by
+    /// [`build_sublayer_edges`](Self::build_sublayer_edges).
+    any_expr_sublayer: bool,
     /// Sublayer-cycle diagnostics reachable from the root layer, replaced wholesale
     /// by [`build_sublayer_edges`](Self::build_sublayer_edges) on every edge
     /// rebuild so a fixed cycle stops being reported and a recompute never
@@ -243,17 +273,25 @@ pub(crate) enum ExternalStack {
     Demand,
 }
 
-/// Which kind of layer stack a reference/payload to a target composes against,
-/// the one place the plain-vs-contextual policy lives (see
-/// [`LayerGraph::classify_stack`]).
+/// How a reference/payload to a target is keyed in the registry — the one place
+/// the per-context-instance policy lives (see [`LayerGraph::classify_stack`]).
+/// This is an instance-identity decision, not a member-walk one: an empty-seed
+/// [`Plain`](StackKind::Plain) stack whose subtree authors a `${VAR}` sublayer
+/// still expands through the contextual walk (see
+/// [`needs_contextual_walk`](LayerGraph::needs_contextual_walk)); it just does not
+/// need a distinct instance per inherited context.
 #[derive(Clone, Copy)]
 enum StackKind {
     /// The stage root stack (the root layer reached with no session layers).
     Root,
-    /// The plain sublayer stack, resolved with no inherited context.
+    /// No distinct per-context instance is needed: the arc carries no variables, or
+    /// none the target's sublayers resolve, so every context reuses one instance
+    /// keyed by the empty seed. Its members may still be a contextual expansion of
+    /// the target's own subtree.
     Plain,
     /// A context-keyed stack: the target has a `${VAR}` sublayer and the arc
-    /// carries variables that can change its resolution.
+    /// carries variables that can change its resolution, so each context gets its
+    /// own instance.
     Contextual,
 }
 
@@ -278,6 +316,7 @@ impl LayerGraph {
             muted_identifiers: HashSet::new(),
             muted: HashSet::new(),
             has_relocates: false,
+            any_expr_sublayer: false,
             cycle_errors: Vec::new(),
             relocate_errors: Vec::new(),
             registry,
@@ -350,6 +389,9 @@ impl LayerGraph {
     /// edges changed, unioned with `edited`) so the caller can scope cache eviction
     /// to the same stacks the re-resolution touched; `None` for a full pass.
     fn build_sublayer_edges(&mut self, edited: Option<&HashSet<LayerId>>) -> Option<HashSet<LayerId>> {
+        // Refresh the expression-sublayer flags first, so the stack rebuild below
+        // reads them through `has_expr_sublayer` for its plain-vs-contextual gate.
+        self.recompute_expr_sublayer_flags();
         // Edges are resolved into a side buffer so the immutable `compose_edges`
         // borrow does not clash with the per-node mutation that applies them.
         let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::with_capacity(self.nodes.len());
@@ -421,14 +463,22 @@ impl LayerGraph {
         affected
     }
 
-    /// Resolves the subtree rooted at `id` into edges against `ancestor` (the
-    /// expression variables inherited from the layers that sublayer it, or the
-    /// demand seed at an external root; `None` is the empty context), threading
-    /// each layer's own variables overlaid on its ancestor down into its children.
-    /// Each layer's edges are built once — `visited` gates re-entry, so a shared
-    /// sublayer keeps the strongest ancestry's context and a sublayer cycle
-    /// terminates (the edge is still recorded for [`detect_cycles`](Self::detect_cycles)).
-    /// Resolved edges are pushed to `all_edges`; the caller applies them.
+    /// Resolves the subtree rooted at `id` into the shared, context-free
+    /// [`LayerNode::children`] edges against `ancestor` (the expression variables
+    /// inherited from the layers that sublayer it; `None` is the empty context),
+    /// threading each layer's own variables overlaid on its ancestor down into its
+    /// children. Each layer's edges are built once — `visited` gates re-entry on the
+    /// physical [`LayerId`], so a shared sublayer keeps the strongest ancestry's
+    /// context and a sublayer cycle terminates (the edge is still recorded for
+    /// [`detect_cycles`](Self::detect_cycles)). Resolved edges are pushed to
+    /// `all_edges`; the caller applies them.
+    ///
+    /// This is the shared build every plain (no-expression-sublayer) stack reuses;
+    /// a stack with an expression sublayer instead re-resolves its subtree per
+    /// `(layer, context)` in
+    /// [`compose_contextual_edges`](Self::compose_contextual_edges), where a sublayer
+    /// diamond resolves under each ancestry's context rather than collapsing to the
+    /// strongest.
     ///
     /// The depth-first walk runs on an explicit stack rather than the native call
     /// stack, so a deep single-sublayer chain composes without overflowing it
@@ -607,32 +657,48 @@ impl LayerGraph {
     fn recompute_cycle_errors(&mut self) {
         let mut errors = Vec::new();
         if let Some(root) = self.root {
-            let mut ancestors = HashSet::new();
+            let mut ancestors: HashSet<LayerId> = HashSet::new();
             let pruned = self.muted_session_subtree();
             let session_vars = self.session_expression_variables(&pruned);
-            // The root's `${VAR}` sublayers resolve against the session variables,
-            // so when any are authored, detect cycles over those seed-resolved edges:
-            // the context-free shared edges omit a session-only sublayer, so a cycle
-            // back through it — a session variable pointing a root sublayer at the root
-            // or an ancestor — would otherwise go unreported. With no session
-            // variables the shared `children` are the root's edges.
+            // Detect cycles over the same edges the root stack's members are built
+            // from (`needs_contextual_walk`): the context-free shared edges omit a
+            // context-only sublayer, so a cycle back through it — a variable pointing
+            // a root sublayer at the root or an ancestor — would otherwise go
+            // unreported. Otherwise the shared `children` are the root's edges.
             //
             // TODO(perf): a stage with session expression variables recomputes the
             // muted subtree, the session variables, and the root's seed edges here
             // after `rebuild_sublayer_stacks` already computed them for the members;
             // threading all three through both would remove the duplication for that
             // (uncommon) case.
-            let seed = (!session_vars.is_empty()).then(|| self.compose_contextual_edges(root, &session_vars));
-            let nodes = &self.nodes;
-            self.detect_cycles(
-                root,
-                |id| match &seed {
-                    Some(edges) => edges.get(&id).map_or(&[][..], |e| e.as_slice()),
-                    None => nodes.get(&id).map_or(&[][..], |n| n.children.as_slice()),
-                },
-                &mut ancestors,
-                &mut errors,
-            );
+            if self.needs_contextual_walk(root, &session_vars) {
+                let (edges, root_ctx) = self.compose_contextual_edges(root, &session_vars);
+                self.detect_cycles(
+                    (root, root_ctx),
+                    |k: CtxKey| k.0,
+                    |k| edges.get(&k).map_or(&[][..], |e| e.as_slice()),
+                    &mut ancestors,
+                    &mut errors,
+                );
+            } else {
+                let nodes = &self.nodes;
+                self.detect_cycles(
+                    root,
+                    |id| id,
+                    |id| nodes.get(&id).map_or(&[][..], |n| n.children.as_slice()),
+                    &mut ancestors,
+                    &mut errors,
+                );
+            }
+            // A sublayer diamond can reach the same cycle under two contexts; report
+            // each physical `(root_layer, seen_layer)` pair once.
+            let mut seen = HashSet::new();
+            errors.retain(|error| match error {
+                Error::SublayerCycle { root_layer, seen_layer } => {
+                    seen.insert((root_layer.clone(), seen_layer.clone()))
+                }
+                _ => true,
+            });
         }
         self.cycle_errors = errors;
     }
@@ -749,42 +815,53 @@ impl LayerGraph {
     /// explicit work stack so a deep chain does not overflow the native stack; an
     /// `Exit` frame pops the layer back out of the `ancestors` path after its
     /// subtree.
-    fn detect_cycles<'e>(
+    ///
+    /// `children_of` supplies a walk node's edges — the shared
+    /// [`LayerNode::children`] (`K = LayerId`) or a contextual stack's
+    /// context-resolved edges (`K = `[`CtxKey`]) — and `layer_of` projects a node
+    /// to its physical layer. The `ancestors` path is keyed by physical [`LayerId`]
+    /// so a layer re-entering its own ancestry is one cycle regardless of the
+    /// expression-variable context it drifted into, and a sublayer diamond re-scans
+    /// off-path rather than looking like a cycle.
+    fn detect_cycles<'e, K: Copy + Eq + Hash + 'e>(
         &self,
-        id: LayerId,
-        children_of: impl Fn(LayerId) -> &'e [(LayerId, LayerOffset)],
+        root: K,
+        layer_of: impl Fn(K) -> LayerId,
+        children_of: impl Fn(K) -> &'e [(K, LayerOffset)],
         ancestors: &mut HashSet<LayerId>,
         errors: &mut Vec<Error>,
     ) {
-        enum Step {
-            Enter(LayerId),
-            Exit(LayerId),
+        enum Step<K> {
+            Enter(K),
+            Exit(K),
         }
-        let mut work = vec![Step::Enter(id)];
+        let mut work = vec![Step::Enter(root)];
         while let Some(step) = work.pop() {
-            let id = match step {
-                Step::Exit(id) => {
-                    ancestors.remove(&id);
+            let node = match step {
+                Step::Exit(node) => {
+                    ancestors.remove(&layer_of(node));
                     continue;
                 }
-                Step::Enter(id) => id,
+                Step::Enter(node) => node,
             };
-            ancestors.insert(id);
-            work.push(Step::Exit(id));
+            let layer = layer_of(node);
+            ancestors.insert(layer);
+            work.push(Step::Exit(node));
             // Iterate forward to record cycle errors in declared order, gathering
             // the non-cycle children; they are pushed reversed so they pop in
             // declared order.
             let mut to_visit = Vec::new();
-            for &(child, _) in children_of(id) {
+            for &(child, _) in children_of(node) {
+                let child_layer = layer_of(child);
                 // A muted child is pruned from every stack, so a cycle through it
                 // never composes and is not reported.
-                if self.is_muted(child) {
+                if self.is_muted(child_layer) {
                     continue;
                 }
-                if ancestors.contains(&child) {
+                if ancestors.contains(&child_layer) {
                     errors.push(Error::SublayerCycle {
-                        root_layer: self.nodes[&id].layer.identifier().to_string(),
-                        seen_layer: self.nodes[&child].layer.identifier().to_string(),
+                        root_layer: self.nodes[&layer].layer.identifier().to_string(),
+                        seen_layer: self.nodes[&child_layer].layer.identifier().to_string(),
                     });
                     continue;
                 }
@@ -974,85 +1051,221 @@ impl LayerGraph {
         self.intern_external(root, vars).0
     }
 
-    /// Whether any layer in `root`'s plain sublayer stack authors an
+    /// Whether any layer in `root`'s plain sublayer subtree authors an
     /// expression-valued `${VAR}` `subLayers` entry — the only sublayer whose
     /// resolution depends on the expression-variable context inherited across a
     /// reference/payload arc. Composition reads this to decide whether a
-    /// variable-carrying arc to `root` needs a context-keyed instance at all; a
-    /// target with none resolves identically under any context, so it stays on the
-    /// plain stack. The whole stack is scanned so an expression sublayer nested
-    /// below the target root — under a literal sublayer — is still caught.
+    /// variable-carrying arc to `root` needs a context-keyed instance at all, and
+    /// [`build_stack_members`](Self::build_stack_members) to gate a stack onto the
+    /// context-free `collect_plain` fast path. The whole subtree is scanned so an
+    /// expression sublayer nested below the target root — under a literal sublayer —
+    /// is still caught.
+    ///
+    /// The walk reads the current [`LayerNode::children`] rather than a registry
+    /// stack's interned members: those members can predate the edit driving a stack
+    /// rebuild (they are replaced only after every stack is recomposed), so scanning
+    /// them would miss a freshly added expression branch and wrongly gate the stack
+    /// onto `collect_plain`. The children (and the per-node flags) are already
+    /// rebuilt by [`build_sublayer_edges`](Self::build_sublayer_edges) before the
+    /// rebuild reads this. Muted layers (and any subtree reached only through them)
+    /// are skipped, matching the composed members: an expression sublayer that mutes
+    /// out contributes nothing, so a target that only reaches one stays
+    /// [`Plain`](StackKind::Plain) and shares its instance rather than minting one
+    /// per context. [`any_expr_sublayer`](Self::any_expr_sublayer) short-circuits the
+    /// common stage with no expression sublayer at all to `O(1)`.
+    //
+    // TODO(perf): this runs a fresh subtree walk (allocating a work stack + visited
+    // set) per empty-seed stack rebuilt in `rebuild_sublayer_stacks` once any layer
+    // authors an expression sublayer. A transitive per-node "subtree authors one"
+    // flag computed with the local flags would make it an `O(1)` field read.
     pub(crate) fn has_expr_sublayer(&self, root: LayerId) -> bool {
-        let root_path = Path::abs_root();
-        self.sublayer_stack(root).iter().any(|&(layer, _)| {
-            let Ok(subs) = self.nodes[&layer]
-                .layer
-                .data()
-                .get_field(&root_path, FieldKey::SubLayers.as_str())
-            else {
-                return false;
-            };
-            matches!(&*subs, Value::StringVec(subs) if subs.iter().any(|p| expr::is_expression(p)))
-        })
+        if !self.any_expr_sublayer {
+            return false;
+        }
+        let mut work = vec![root];
+        let mut visited = HashSet::new();
+        while let Some(id) = work.pop() {
+            if self.is_muted(id) || !visited.insert(id) {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&id) else { continue };
+            if node.has_expr_sublayer {
+                return true;
+            }
+            work.extend(node.children.iter().map(|&(child, _)| child));
+        }
+        false
     }
 
-    /// The single composer for every stack's members: resolves `root`'s subtree and
-    /// composes offsets, pruning muted layers, with the plain and contextual paths
-    /// sharing [`collect_sublayers`].
+    /// Whether the stack rooted at `root` under inherited context `vars` takes the
+    /// per-`(layer, context)` contextual walk rather than the shared context-free
+    /// `collect_plain` path: it does when the arc carries variables, or when a layer
+    /// in the subtree authors a `${VAR}` sublayer whose resolution the context can
+    /// change. [`build_stack_members`](Self::build_stack_members) and
+    /// [`recompute_cycle_errors`](Self::recompute_cycle_errors) share this so their
+    /// walk selection cannot drift.
+    fn needs_contextual_walk(&self, root: LayerId, vars: &HashMap<String, Value>) -> bool {
+        !vars.is_empty() || self.has_expr_sublayer(root)
+    }
+
+    /// Recomputes the exact [`LayerNode::has_expr_sublayer`] flags and their
+    /// graph-level union [`any_expr_sublayer`](Self::any_expr_sublayer) from each
+    /// layer's own `subLayers`. Run on every edge rebuild so an edit that adds or
+    /// removes the last expression `subLayers` entry is reflected exactly.
+    //
+    // TODO(perf): this re-decodes each layer's `subLayers`, which `resolve_edges`
+    // already decodes (and already runs `is_expression` over) in the same
+    // `build_sublayer_edges` pass. Returning the flag from `resolve_edges` and
+    // folding it in as `children` are applied would drop this second decode.
+    fn recompute_expr_sublayer_flags(&mut self) {
+        let root_path = Path::abs_root();
+        let mut any = false;
+        for node in self.nodes.values_mut() {
+            let has = matches!(
+                node.layer.data().get_field(&root_path, FieldKey::SubLayers.as_str()),
+                Ok(subs) if matches!(&*subs, Value::StringVec(paths) if paths.iter().any(|p| expr::is_expression(p)))
+            );
+            node.has_expr_sublayer = has;
+            any |= has;
+        }
+        self.any_expr_sublayer = any;
+    }
+
+    /// The cached composer for a rebuild: the [`stack_members_uncached`] policy with
+    /// the graph's shared sublayer-resolution cache threaded through, so a
+    /// `subLayers` edit only re-canonicalizes paths it has not seen before. Read-only
+    /// queries call [`stack_members_uncached`] directly with a scratch cache
+    /// ([`sublayer_stack`]).
     ///
-    /// A plain stack (`seed_vars` empty) walks the shared [`LayerNode::children`] —
-    /// the no-inherited-context edges every plain stack shares, resolved once per
-    /// `subLayers` edit. A contextual stack re-resolves the subtree's edges under
-    /// the inherited context into a transient map (so a `${VAR}` sublayer resolves
-    /// against the arc's variables) and walks that; those edges are not stored — a
-    /// per-instance edge map is unnecessary, since only context-dependent layers
-    /// differ and they are recomputed cheaply here.
-    ///
-    /// Limitation: the contextual edge walk ([`compose_edges`]) gates on a
-    /// per-[`LayerId`] `visited` set, so a sublayer reached through two different
-    /// ancestries *within one contextual stack* keeps the first ancestry's context
-    /// (recorded in [`mod`](super)'s remaining-work notes).
+    /// [`stack_members_uncached`]: Self::stack_members_uncached
+    /// [`sublayer_stack`]: Self::sublayer_stack
     fn build_stack_members(
         &mut self,
         root: LayerId,
         seed_vars: &HashMap<String, Value>,
     ) -> Vec<(LayerId, LayerOffset)> {
-        if seed_vars.is_empty() {
+        let mut resolution = mem::take(&mut self.sublayer_resolution);
+        let members = self.stack_members_uncached(root, seed_vars, &mut resolution);
+        self.sublayer_resolution = resolution;
+        members
+    }
+
+    /// The single member-expansion policy for every "stack rooted at `root` under
+    /// `seed_vars`" query, cached ([`build_stack_members`](Self::build_stack_members))
+    /// or on demand ([`sublayer_stack`](Self::sublayer_stack)): resolves `root`'s
+    /// subtree and composes offsets, pruning muted layers, sharing
+    /// [`collect_sublayers`].
+    ///
+    /// A stack that [needs no contextual walk](Self::needs_contextual_walk) — an
+    /// empty seed and no expression sublayer — walks the shared
+    /// [`LayerNode::children`], the no-inherited-context edges every plain stack
+    /// shares, resolved once per `subLayers` edit. Otherwise it re-resolves the
+    /// subtree's edges under the composed context
+    /// ([`compose_contextual_edges_with`](Self::compose_contextual_edges_with)) keyed
+    /// by `(layer, context)` and walks that transient map, so a `${VAR}` sublayer
+    /// resolves against the inherited and layer-own variables and a sublayer diamond
+    /// resolves under each ancestry's context independently. `resolution` memoizes
+    /// sublayer path canonicalization — the graph's cache on a rebuild, a scratch map
+    /// on a read query.
+    fn stack_members_uncached(
+        &self,
+        root: LayerId,
+        seed_vars: &HashMap<String, Value>,
+        resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+    ) -> Vec<(LayerId, LayerOffset)> {
+        if !self.needs_contextual_walk(root, seed_vars) {
             return self.collect_plain(root);
         }
-        let edges = self.compose_contextual_edges(root, seed_vars);
+        let (edges, root_ctx) = self.compose_contextual_edges_with(root, seed_vars, resolution);
         let muted = &self.muted;
         let mut members = Vec::new();
         let mut ancestors = HashSet::new();
         collect_sublayers(
-            root,
+            (root, root_ctx),
             LayerOffset::IDENTITY,
             &mut members,
             &mut ancestors,
+            |k: CtxKey| k.0,
             |id| muted.contains(&id),
-            |id| edges.get(&id).map_or(&[][..], |e| e.as_slice()),
+            |k| edges.get(&k).map_or(&[][..], |e| e.as_slice()),
         );
         members
     }
 
-    /// Composes the sublayer edges of the subtree rooted at `root` against
-    /// `seed_vars` — an inherited expression-variable context (a reference/payload
-    /// arc's, or the session's for the root stack) — into a per-stack edge map.
-    /// Unlike the shared [`LayerNode::children`], these edges are context-specific:
-    /// the same layer resolves its `${VAR}` sublayers differently under a different
-    /// seed, so a contextual stack keeps its own map, composed with a fresh visited
-    /// set rather than reusing the shared context-free edges.
+    /// The cached [`compose_contextual_edges_with`](Self::compose_contextual_edges_with)
+    /// for a rebuild, threading the graph's shared sublayer-resolution cache through.
     fn compose_contextual_edges(
         &mut self,
         root: LayerId,
         seed_vars: &HashMap<String, Value>,
-    ) -> HashMap<LayerId, SublayerEdges> {
+    ) -> (HashMap<CtxKey, CtxEdges>, ExprVarId) {
         let mut resolution = mem::take(&mut self.sublayer_resolution);
-        let mut all_edges: Vec<(LayerId, SublayerEdges)> = Vec::new();
-        let mut visited: HashSet<LayerId> = HashSet::new();
-        self.compose_edges(root, Some(seed_vars), &mut visited, &mut all_edges, &mut resolution);
+        let result = self.compose_contextual_edges_with(root, seed_vars, &mut resolution);
         self.sublayer_resolution = resolution;
-        all_edges.into_iter().collect()
+        result
+    }
+
+    /// Composes the sublayer edges of the subtree rooted at `root` against
+    /// `seed_vars` — an inherited expression-variable context (a reference/payload
+    /// arc's, or the session's for the root stack) — into a per-stack edge map keyed
+    /// by [`CtxKey`], returned with the root's interned context (the walk's start
+    /// node). Unlike the shared [`LayerNode::children`], these edges are
+    /// context-specific: a layer resolves its `${VAR}` sublayers differently under a
+    /// different context, and a layer reached through two ancestries is two `(layer,
+    /// context)` nodes, so a sublayer diamond resolves each ancestry independently.
+    /// `resolution` memoizes sublayer path canonicalization across the walk (and, on
+    /// a rebuild, across rebuilds).
+    fn compose_contextual_edges_with(
+        &self,
+        root: LayerId,
+        seed_vars: &HashMap<String, Value>,
+        resolution: &mut HashMap<LayerId, HashMap<String, String>>,
+    ) -> (HashMap<CtxKey, CtxEdges>, ExprVarId) {
+        let mut interner = ExprVarInterner::default();
+        let root_ctx = interner.intern(seed_vars);
+        let mut edges: HashMap<CtxKey, CtxEdges> = HashMap::new();
+        // The walk may reach one layer under several contexts, so it memoizes on
+        // `(layer, context)`. That set is finite — a context is an interned overlay
+        // drawn from the finitely many authored dictionaries and `compose_over` only
+        // grows one to a fixpoint — so the walk terminates. A physical sublayer
+        // cycle is not the edge builder's concern; `collect_sublayers` /
+        // `detect_cycles` prune it later by physical `LayerId`.
+        //
+        // TODO(perf): a stacked diamond lattice whose levels author conflicting
+        // variables can reach `O(layers x distinct-contexts)` nodes, which
+        // `collect_sublayers` then re-expands. Real stacks have a handful of
+        // expression sublayers, so this stays a documented worst case rather than a
+        // silent cap; a memo keyed by the composed subtree would bound it.
+        let mut visited: HashSet<CtxKey> = HashSet::new();
+        let mut stack: Vec<(LayerId, ExprVarId, SharedExprVars)> = vec![(root, root_ctx, Rc::new(seed_vars.clone()))];
+        while let Some((id, ctx, ancestor)) = stack.pop() {
+            if !visited.insert((id, ctx)) {
+                continue;
+            }
+            let (raw, combined) = self.resolve_edges(id, Some(&*ancestor), resolution);
+            // The context threaded into the children: this layer's own variables
+            // overlaid (`combined`), or the inherited `ancestor` when it authors none.
+            let (child_ctx, child_vars): (ExprVarId, SharedExprVars) = match combined {
+                Some(combined) => {
+                    let combined = Rc::new(combined);
+                    (interner.intern(&combined), combined)
+                }
+                None => (ctx, ancestor),
+            };
+            // Every child inherits this node's threaded context; push them reversed
+            // so they pop in declared order, and record the edges keyed by the child
+            // node `(child, child_ctx)` for the member walk.
+            for &(child, _) in raw.iter().rev() {
+                stack.push((child, child_ctx, child_vars.clone()));
+            }
+            edges.insert(
+                (id, ctx),
+                raw.iter()
+                    .map(|&(child, offset)| ((child, child_ctx), offset))
+                    .collect(),
+            );
+        }
+        (edges, root_ctx)
     }
 
     /// Composes the expression variables authored across the session layer stack,
@@ -1081,9 +1294,9 @@ impl LayerGraph {
 
     /// The plain (no-inherited-context) members of the stack rooted at `root`,
     /// composing offsets and pruning muted layers over the shared
-    /// [`LayerNode::children`]. Shared by [`sublayer_stack`](Self::sublayer_stack)'s
-    /// on-demand branch and [`build_stack_members`](Self::build_stack_members)'s
-    /// empty-context branch.
+    /// [`LayerNode::children`]. The fast path
+    /// [`stack_members_uncached`](Self::stack_members_uncached) takes when the stack
+    /// [needs no contextual walk](Self::needs_contextual_walk).
     fn collect_plain(&self, root: LayerId) -> Vec<(LayerId, LayerOffset)> {
         let muted = &self.muted;
         let nodes = &self.nodes;
@@ -1094,6 +1307,7 @@ impl LayerGraph {
             LayerOffset::IDENTITY,
             &mut members,
             &mut ancestors,
+            |id| id,
             |id| muted.contains(&id),
             |id| nodes.get(&id).map_or(&[][..], |n| n.children.as_slice()),
         );
@@ -1187,9 +1401,16 @@ impl LayerGraph {
     /// expression-variable context (the layer's own `expressionVariables` still
     /// apply), the depth-first pre-order walk with offsets composed through nested
     /// sublayers. A layer that sublayers itself transitively is a cycle and is
-    /// skipped; an off-path duplicate is expanded again. Reads the registry's plain
-    /// instance when one is interned, else composes on demand for an internal scan
-    /// ([`has_expr_sublayer`](Self::has_expr_sublayer)). Empty for an unknown layer.
+    /// skipped; an off-path duplicate is expanded again. Empty for an unknown layer.
+    ///
+    /// The empty-seed query goes through the same expansion policy as a rebuilt
+    /// stack ([`stack_members_uncached`](Self::stack_members_uncached)): it reads the
+    /// registry's interned plain instance when one exists, and otherwise composes on
+    /// demand with a scratch resolution cache — so a sublayer diamond whose shared
+    /// layer resolves `${VAR}` differently per arm expands per ancestry here exactly
+    /// as it does in the interned members. Because the seed is empty, a variable a
+    /// layer inherits only from a parent that sublayers it is not in scope — those
+    /// members appear in the parent's stack, not in the layer's own.
     pub(crate) fn sublayer_stack(&self, root_layer: LayerId) -> Cow<'_, [(LayerId, LayerOffset)]> {
         if let Some(id) = self.stacks.lookup_target(root_layer, self.stacks.empty_seed()) {
             return Cow::Borrowed(self.stacks.members(id));
@@ -1197,7 +1418,8 @@ impl LayerGraph {
         if !self.nodes.contains_key(&root_layer) {
             return Cow::Borrowed(&[]);
         }
-        Cow::Owned(self.collect_plain(root_layer))
+        let mut resolution = HashMap::new();
+        Cow::Owned(self.stack_members_uncached(root_layer, &HashMap::new(), &mut resolution))
     }
 
     /// The stage's root layer stack (registry instance 0): session layers (identity
@@ -1827,43 +2049,51 @@ pub(crate) fn muted_subtree<T: Clone + Eq + Hash>(
 
 /// Depth-first pre-order walk of a sublayer subtree, composing each hop's offset
 /// and pruning muted layers, the shared traversal behind every composed stack.
-/// `children_of` supplies a layer's resolved sublayer edges — the shared
-/// [`LayerNode::children`] for a plain stack, or the context-resolved edges for a
-/// contextual one — so both build paths stay locked together. Runs on an explicit
-/// work stack so a deep chain does not overflow the native stack; an `Exit` frame
-/// pops the layer back out of the `ancestors` path after its subtree. A layer that
-/// sublayers itself transitively is a cycle and is skipped; an off-path duplicate
-/// is expanded again.
-fn collect_sublayers<'a>(
-    root: LayerId,
+/// `children_of` supplies a walk node's resolved sublayer edges — the shared
+/// [`LayerNode::children`] for a plain stack (`K = LayerId`), or the
+/// context-resolved edges for a contextual one (`K = (LayerId, ExprVarId)`, a
+/// [`CtxKey`]) — so both build paths stay locked together. `layer_of` projects a
+/// node to its physical layer for muting and for the emitted members. Runs on an
+/// explicit work stack so a deep chain does not overflow the native stack; an
+/// `Exit` frame pops the layer back out of the `ancestors` path after its subtree.
+///
+/// The `ancestors` on-path set is keyed by physical [`LayerId`], never by `K`: a
+/// layer that sublayers itself transitively is a cycle and is skipped whatever
+/// expression-variable context it drifted into on the way; an off-path duplicate
+/// (a sublayer diamond) is expanded again, so each ancestry's context resolves its
+/// own `${VAR}` sublayers.
+fn collect_sublayers<'a, K: Copy + Eq + Hash + 'a>(
+    root: K,
     effective: LayerOffset,
-    stack: &mut Vec<(LayerId, LayerOffset)>,
+    members: &mut Vec<(LayerId, LayerOffset)>,
     ancestors: &mut HashSet<LayerId>,
+    layer_of: impl Fn(K) -> LayerId,
     is_muted: impl Fn(LayerId) -> bool,
-    children_of: impl Fn(LayerId) -> &'a [(LayerId, LayerOffset)],
+    children_of: impl Fn(K) -> &'a [(K, LayerOffset)],
 ) {
-    enum Step {
-        Enter(LayerId, LayerOffset),
-        Exit(LayerId),
+    enum Step<K> {
+        Enter(K, LayerOffset),
+        Exit(K),
     }
     let mut work = vec![Step::Enter(root, effective)];
     while let Some(step) = work.pop() {
-        let (id, effective) = match step {
-            Step::Exit(id) => {
-                ancestors.remove(&id);
+        let (node, effective) = match step {
+            Step::Exit(node) => {
+                ancestors.remove(&layer_of(node));
                 continue;
             }
-            Step::Enter(id, effective) => (id, effective),
+            Step::Enter(node, effective) => (node, effective),
         };
+        let layer = layer_of(node);
         // A muted layer contributes nothing: skip it and its whole subtree.
-        if is_muted(id) {
+        if is_muted(layer) {
             continue;
         }
-        stack.push((id, effective));
-        ancestors.insert(id);
-        work.push(Step::Exit(id));
-        for &(child, edge_offset) in children_of(id).iter().rev() {
-            if !ancestors.contains(&child) {
+        members.push((layer, effective));
+        ancestors.insert(layer);
+        work.push(Step::Exit(node));
+        for &(child, edge_offset) in children_of(node).iter().rev() {
+            if !ancestors.contains(&layer_of(child)) {
                 work.push(Step::Enter(child, effective.concatenate(&edge_offset)));
             }
         }
@@ -2121,12 +2351,11 @@ mod tests {
         );
     }
 
-    /// The same intermediate-variable threading holds in an orphan subtree (one
-    /// the root does not sublayer, reached only by the final fallback pass) even
-    /// when the child `b` is interned before its parent `a`. Walking the orphan
-    /// forest from its root `a` — rather than from each layer in collection order —
-    /// composes `b` with `a`'s `V` in scope, so `b`'s `${V}` edge to `leaf` forms;
-    /// composing `b` standalone first (collection order alone) would drop it.
+    /// In an orphan subtree (one the root does not sublayer) whose own root `a`
+    /// authors `V` and sublayers `b`, `a`'s stack threads `a`'s `V` into `b` so
+    /// `b`'s `${V}` sublayer resolves to `leaf` — and it does so regardless of `b`
+    /// being interned before `a`. `b`'s own stack, queried with no inherited context,
+    /// does not resolve `${V}`: that variable lives on `a`, which sublayers `b`.
     #[test]
     fn orphan_subtree_threads_intermediate_vars() {
         let root = sdf::Layer::new_in_memory("root.usda");
@@ -2144,12 +2373,19 @@ mod tests {
         // `root` sublayers none of them, so `a`/`b`/`leaf` are an orphan subtree;
         // `b` precedes `a` in collection order.
         let graph = LayerGraph::from_layers(vec![root, b, a, leaf], 0, sdf::LayerRegistry::default());
+        let a_id = graph.id_of("a.usda").unwrap();
         let b_id = graph.id_of("b.usda").unwrap();
         let leaf_id = graph.id_of("leaf.usda").unwrap();
-        let ids: Vec<LayerId> = graph.sublayer_stack(b_id).iter().map(|&(id, _)| id).collect();
+
+        let a_stack: Vec<LayerId> = graph.sublayer_stack(a_id).iter().map(|&(id, _)| id).collect();
         assert!(
-            ids.contains(&leaf_id),
-            "`b`'s ${{V}} sublayer resolves against `a`'s variable even as an orphan interned before `a`",
+            a_stack.contains(&leaf_id),
+            "`a`'s stack threads `a`'s `V` into `b`, so `b`'s ${{V}} resolves to `leaf`: {a_stack:?}",
+        );
+        let b_stack: Vec<LayerId> = graph.sublayer_stack(b_id).iter().map(|&(id, _)| id).collect();
+        assert!(
+            !b_stack.contains(&leaf_id),
+            "`b`'s own stack has no inherited context, so its ${{V}} stays unresolved: {b_stack:?}",
         );
     }
 
@@ -2285,6 +2521,254 @@ mod tests {
         assert!(
             members(ib).contains(&b) && !members(ib).contains(&a),
             "V=b resolves b.usda"
+        );
+    }
+
+    /// A target whose only expression sublayer is muted stays `Plain`: the muted
+    /// layer contributes nothing, so an arc reaching the target under different
+    /// contexts shares one instance instead of minting a redundant context-keyed one.
+    #[test]
+    fn muted_expr_sublayer_plain() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["muted_expr.usda"]);
+        });
+        let mut muted_expr = sdf::Layer::new_in_memory("muted_expr.usda");
+        edit_layer(&mut muted_expr, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+
+        let mut graph = LayerGraph::from_layers(vec![root, target, muted_expr], 0, sdf::LayerRegistry::default());
+        graph.mute_layer("muted_expr.usda".to_string());
+        let target = graph.id_of("target.usda").unwrap();
+
+        let va = HashMap::from([("V".to_string(), Value::String("a".to_string()))]);
+        let vb = HashMap::from([("V".to_string(), Value::String("b".to_string()))]);
+        let (ExternalStack::Ready(ia), ExternalStack::Ready(ib)) = (
+            graph.external_stack_id(target, &va),
+            graph.external_stack_id(target, &vb),
+        ) else {
+            panic!("a muted-expression target resolves to a ready plain instance, not a per-context demand");
+        };
+        assert_eq!(
+            ia, ib,
+            "a muted expression sublayer keeps the target on one shared plain instance"
+        );
+    }
+
+    /// The arms of a sublayer diamond: `x_arm` and `y_arm` each author a distinct
+    /// `V` and sublayer `shared`, whose `${V}` sublayer therefore resolves to a
+    /// different leaf down each arm. Add these under a root that sublayers
+    /// `[x_arm.usda, y_arm.usda]`.
+    fn diamond_arms() -> Vec<sdf::Layer> {
+        let mut x_arm = sdf::Layer::new_in_memory("x_arm.usda");
+        set_expr_var(&mut x_arm, "V", "x_leaf");
+        edit_layer(&mut x_arm, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["shared.usda"]);
+        });
+        let mut y_arm = sdf::Layer::new_in_memory("y_arm.usda");
+        set_expr_var(&mut y_arm, "V", "y_leaf");
+        edit_layer(&mut y_arm, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["shared.usda"]);
+        });
+        let mut shared = sdf::Layer::new_in_memory("shared.usda");
+        edit_layer(&mut shared, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${V}.usda"`"#]);
+        });
+        let x_leaf = sdf::Layer::new_in_memory("x_leaf.usda");
+        let y_leaf = sdf::Layer::new_in_memory("y_leaf.usda");
+        vec![x_arm, y_arm, shared, x_leaf, y_leaf]
+    }
+
+    /// A sublayer diamond whose two ancestries author conflicting `${V}` values
+    /// resolves the shared layer's expression sublayer under each context, so both
+    /// subtrees compose into the members.
+    #[test]
+    fn diamond_sublayer_resolves_per_ancestry() {
+        // The stage root is the diamond root, so the root stack (empty seed but with
+        // an expression sublayer) takes the contextual walk.
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["x_arm.usda", "y_arm.usda"]);
+        });
+        let mut layers = vec![root];
+        layers.extend(diamond_arms());
+        let graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let x_leaf = graph.id_of("x_leaf.usda").unwrap();
+        let y_leaf = graph.id_of("y_leaf.usda").unwrap();
+
+        let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&x_leaf),
+            "the x ancestry resolves ${{V}} = x_leaf: {ids:?}"
+        );
+        assert!(
+            ids.contains(&y_leaf),
+            "the y ancestry resolves ${{V}} = y_leaf under its own context: {ids:?}",
+        );
+
+        // The public `sublayer_stack` query for the same root agrees with the
+        // composed `root_layer_stack`: its on-demand fallback shares the contextual
+        // expansion, so `Stage::sub_layers` and relocate scopes see both ancestries
+        // rather than the collapsed context-free edges.
+        let root_id = graph.root_id().unwrap();
+        let queried: Vec<LayerId> = graph.sublayer_stack(root_id).iter().map(|&(id, _)| id).collect();
+        assert_eq!(queried, ids, "sublayer_stack matches the composed root stack");
+
+        // The arc-seeded contextual path: a diamond rooted at a non-root DAG target,
+        // interned under an unrelated seed variable — which forces a `Contextual`
+        // instance without shadowing `V` — expands the diamond per ancestry too.
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut hub = sdf::Layer::new_in_memory("hub.usda");
+        edit_layer(&mut hub, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["x_arm.usda", "y_arm.usda"]);
+        });
+        let mut layers = vec![root, hub];
+        layers.extend(diamond_arms());
+        let mut graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let hub = graph.id_of("hub.usda").unwrap();
+        let x_leaf = graph.id_of("x_leaf.usda").unwrap();
+        let y_leaf = graph.id_of("y_leaf.usda").unwrap();
+
+        let seed = HashMap::from([("OTHER".to_string(), Value::String("z".to_string()))]);
+        graph.intern_external(hub, &seed);
+        let ExternalStack::Ready(id) = graph.external_stack_id(hub, &seed) else {
+            panic!("the contextual instance should be ready after interning");
+        };
+        let ids: Vec<LayerId> = graph.layer_stack(id).iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&x_leaf) && ids.contains(&y_leaf),
+            "the arc-seeded contextual stack expands the diamond per ancestry: {ids:?}",
+        );
+    }
+
+    /// A physical sublayer cycle whose expression-variable context drifts each hop
+    /// is still pruned and reported by layer identity, not chased to the context
+    /// fixpoint. `a` sublayers `b`, `b`'s `${W}` sublayer resolves back to `a`, and
+    /// `a`/`b` author distinct variables so the composed context changes each pass.
+    #[test]
+    fn cycle_under_context_drift() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["a.usda"]);
+        });
+        // `W = a` makes `b`'s `${W}` sublayer resolve back to `a.usda`.
+        let mut a = sdf::Layer::new_in_memory("a.usda");
+        set_expr_var(&mut a, "W", "a");
+        edit_layer(&mut a, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["b.usda"]);
+        });
+        // A distinct variable, so each traversal of the cycle grows the context.
+        let mut b = sdf::Layer::new_in_memory("b.usda");
+        set_expr_var(&mut b, "X", "b");
+        edit_layer(&mut b, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers([r#"`"${W}.usda"`"#]);
+        });
+
+        let graph = LayerGraph::from_layers(vec![root, a, b], 0, sdf::LayerRegistry::default());
+        let a_id = graph.id_of("a.usda").unwrap();
+        let b_id = graph.id_of("b.usda").unwrap();
+
+        let cycles = graph
+            .errors()
+            .iter()
+            .filter(|e| matches!(e, Error::SublayerCycle { .. }))
+            .count();
+        assert_eq!(
+            cycles,
+            1,
+            "the a<->b cycle is reported once, not per drifted context: {:?}",
+            graph.errors()
+        );
+
+        let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert_eq!(
+            ids.iter().filter(|&&id| id == a_id).count(),
+            1,
+            "a composes once: {ids:?}"
+        );
+        assert_eq!(
+            ids.iter().filter(|&&id| id == b_id).count(),
+            1,
+            "b composes once: {ids:?}"
+        );
+    }
+
+    /// Editing a diamond arm's `expressionVariables` after the stack is built
+    /// re-resolves that ancestry's `${V}` sublayer: the edited layer lands in the
+    /// scoped `edited` set, and it is a member of the root stack, so the scoped
+    /// rebuild re-composes the diamond.
+    #[test]
+    fn edit_arm_var_rebuilds_stack() {
+        let mut root = sdf::Layer::new_in_memory("root.usda");
+        edit_layer(&mut root, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["x_arm.usda", "y_arm.usda"]);
+        });
+        let mut layers = vec![root];
+        layers.extend(diamond_arms());
+        layers.push(sdf::Layer::new_in_memory("x_leaf2.usda"));
+        let mut graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let x_arm = graph.id_of("x_arm.usda").unwrap();
+        let x_leaf = graph.id_of("x_leaf.usda").unwrap();
+        let x_leaf2 = graph.id_of("x_leaf2.usda").unwrap();
+
+        let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&x_leaf) && !ids.contains(&x_leaf2),
+            "x_arm's V starts at x_leaf: {ids:?}"
+        );
+
+        set_expr_var(&mut graph.nodes.get_mut(&x_arm).unwrap().layer, "V", "x_leaf2");
+        graph.recompute_sublayers(Some(&HashSet::from([x_arm])));
+
+        let ids: Vec<LayerId> = graph.root_layer_stack().iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&x_leaf2) && !ids.contains(&x_leaf),
+            "the edit to x_arm's V re-resolves the x ancestry to x_leaf2: {ids:?}",
+        );
+    }
+
+    /// An already-interned plain target stack, rebuilt after an edit that adds a new
+    /// literal branch reaching an expression sublayer, expands the freshly reachable
+    /// diamond. `has_expr_sublayer` gates on the current `children`, so the newly
+    /// reachable expression layer routes the rebuilt stack onto the per-`(layer,
+    /// context)` walk.
+    #[test]
+    fn plain_target_rebuild_new_branch() {
+        let root = sdf::Layer::new_in_memory("root.usda");
+        let mut target = sdf::Layer::new_in_memory("target.usda");
+        edit_layer(&mut target, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["base.usda"]);
+        });
+        let base = sdf::Layer::new_in_memory("base.usda");
+        let mut layers = vec![root, target, base];
+        layers.extend(diamond_arms());
+        let mut graph = LayerGraph::from_layers(layers, 0, sdf::LayerRegistry::default());
+        let target_id = graph.id_of("target.usda").unwrap();
+        let base_id = graph.id_of("base.usda").unwrap();
+        let x_leaf = graph.id_of("x_leaf.usda").unwrap();
+        let y_leaf = graph.id_of("y_leaf.usda").unwrap();
+
+        // `target` is a DAG root, so its plain stack is interned; its subtree has no
+        // expression sublayer yet.
+        let ids: Vec<LayerId> = graph.sublayer_stack(target_id).iter().map(|&(id, _)| id).collect();
+        assert!(
+            !ids.contains(&x_leaf) && !ids.contains(&y_leaf),
+            "no diamond reachable yet: {ids:?}"
+        );
+
+        // Add the diamond under `base` (a literal branch) and rebuild with `base`
+        // edited: it is a member of the interned target stack, so that stack rebuilds.
+        edit_layer(&mut graph.nodes.get_mut(&base_id).unwrap().layer, |e| {
+            e.pseudo_root_mut().unwrap().set_sublayers(["x_arm.usda", "y_arm.usda"]);
+        });
+        graph.recompute_sublayers(Some(&HashSet::from([base_id])));
+
+        let ids: Vec<LayerId> = graph.sublayer_stack(target_id).iter().map(|&(id, _)| id).collect();
+        assert!(
+            ids.contains(&x_leaf) && ids.contains(&y_leaf),
+            "the rebuilt plain target expands the newly reachable diamond per ancestry: {ids:?}",
         );
     }
 

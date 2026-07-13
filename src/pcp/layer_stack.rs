@@ -52,17 +52,77 @@ impl LayerStackId {
     }
 }
 
-/// Index of an interned expression-variable seed (a canonicalized, name-sorted
-/// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a seed cannot key a
+/// Index of an interned expression-variable context (a canonicalized, name-sorted
+/// `(name, value)` list). [`Value`] is not `Eq`/`Hash`, so a context cannot key a
 /// hash map directly; interning it to this `Copy` handle lets a stack be keyed by
-/// `(root, seed)`. The empty seed (no inherited context) is interned once at
-/// construction; plain reference/payload stacks key on it.
+/// `(root, seed)` and lets the contextual sublayer walk key its edges by
+/// `(layer, context)`.
+///
+/// An `ExprVarId` is meaningful only within the [`ExprVarInterner`] that minted it.
+/// The registry holds one persistent interner for stack seeds; each contextual
+/// sublayer walk uses its own transient one. Each numbers independently from 0, so
+/// ids from different interners are not comparable — a walk id must never be stored
+/// in or compared against a [`LayerStackKey::Target`] seed. They stay separate by
+/// construction: a walk id never leaves `compose_contextual_edges_with`, and a seed
+/// id is only ever produced by the registry.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) struct ExprSeedId(u32);
+pub(crate) struct ExprVarId(u32);
 
-impl ExprSeedId {
+impl ExprVarId {
     fn idx(self) -> usize {
         self.0 as usize
+    }
+}
+
+/// Interns expression-variable contexts to [`ExprVarId`]s, deduplicating by
+/// structural equality so two equal contexts share one id. [`Value`] is not
+/// `Eq`/`Hash`, so the dedup is a linear scan comparing the canonicalized,
+/// name-sorted forms with [`value_eq`]. The registry holds one to key stacks by
+/// their seed; a fresh one per contextual sublayer walk keys `(layer, context)`
+/// edges. The context count is tiny (bounded by the variable-authoring layers), so
+/// the linear scan is not a concern.
+// TODO(perf): a hash-indexed table would drop the linear `value_eq` scan if a
+// pathological stack ever interns many distinct contexts.
+#[derive(Default)]
+pub(crate) struct ExprVarInterner {
+    contexts: Vec<Vec<(String, Value)>>,
+}
+
+impl ExprVarInterner {
+    /// Interns `vars`, returning the existing id of an equal context or minting a
+    /// fresh one.
+    pub(crate) fn intern(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
+        let canon = canonical_seed(vars);
+        if let Some(id) = self.find_canonical(&canon) {
+            return id;
+        }
+        let id = ExprVarId(self.contexts.len() as u32);
+        self.contexts.push(canon);
+        id
+    }
+
+    /// The interned id of `vars`, if it has been interned (read-only twin of
+    /// [`intern`](Self::intern)).
+    pub(crate) fn find(&self, vars: &HashMap<String, Value>) -> Option<ExprVarId> {
+        self.find_canonical(&canonical_seed(vars))
+    }
+
+    /// Reconstructs an interned context as a variable map.
+    pub(crate) fn vars(&self, id: ExprVarId) -> HashMap<String, Value> {
+        self.contexts[id.idx()].iter().cloned().collect()
+    }
+
+    fn find_canonical(&self, canon: &[(String, Value)]) -> Option<ExprVarId> {
+        self.contexts
+            .iter()
+            .position(|context| {
+                context.len() == canon.len()
+                    && context
+                        .iter()
+                        .zip(canon)
+                        .all(|((cn, cv), (n, v))| cn == n && value_eq(cv, v))
+            })
+            .map(|i| ExprVarId(i as u32))
     }
 }
 
@@ -75,7 +135,7 @@ enum LayerStackKey {
     /// the inherited expression-variable context `seed` (the empty seed for a plain
     /// stack). The same target reached through two contexts gets one instance each,
     /// so its `${VAR}` sublayers resolve independently.
-    Target { root: LayerId, seed: ExprSeedId },
+    Target { root: LayerId, seed: ExprVarId },
 }
 
 /// One composed layer stack: its identity ([`LayerStackKey`]) and resolved
@@ -106,72 +166,53 @@ struct LayerStackInstance {
 pub(crate) struct LayerStackRegistry {
     instances: Vec<LayerStackInstance>,
     by_key: HashMap<LayerStackKey, LayerStackId>,
-    /// Interned seeds, indexed by [`ExprSeedId`]; each is a canonicalized,
-    /// name-sorted `(name, value)` list deduplicated by structural equality.
-    expr_seeds: Vec<Vec<(String, Value)>>,
+    /// The interned stack seeds, keyed by [`ExprVarId`].
+    seeds: ExprVarInterner,
     /// The interned empty context, the seed of every plain (no-inherited-context)
     /// stack.
-    empty_seed: ExprSeedId,
+    empty_seed: ExprVarId,
 }
 
 impl Default for LayerStackRegistry {
     fn default() -> Self {
         // Intern the empty seed as id 0 so plain stacks have a stable key before any
         // variable context is seen.
+        let mut seeds = ExprVarInterner::default();
+        let empty_seed = seeds.intern(&HashMap::new());
         Self {
             instances: Vec::new(),
             by_key: HashMap::new(),
-            expr_seeds: vec![Vec::new()],
-            empty_seed: ExprSeedId(0),
+            seeds,
+            empty_seed,
         }
     }
 }
 
 impl LayerStackRegistry {
     /// The seed of a plain (no-inherited-context) stack.
-    pub(crate) fn empty_seed(&self) -> ExprSeedId {
+    pub(crate) fn empty_seed(&self) -> ExprVarId {
         self.empty_seed
     }
 
-    /// Interns `vars` to its [`ExprSeedId`], canonicalizing to a name-sorted list
-    /// and deduplicating by structural equality.
-    pub(crate) fn intern_expr_seed(&mut self, vars: &HashMap<String, Value>) -> ExprSeedId {
-        let canon = canonical_seed(vars);
-        if let Some(id) = self.find_canonical_seed(&canon) {
-            return id;
-        }
-        let id = ExprSeedId(self.expr_seeds.len() as u32);
-        self.expr_seeds.push(canon);
-        id
+    /// Interns `vars` to its stack-seed [`ExprVarId`].
+    pub(crate) fn intern_expr_seed(&mut self, vars: &HashMap<String, Value>) -> ExprVarId {
+        self.seeds.intern(vars)
     }
 
     /// The interned id of `vars`, if it has been interned (read-only twin of
     /// [`intern_expr_seed`](Self::intern_expr_seed)).
-    pub(crate) fn find_expr_seed(&self, vars: &HashMap<String, Value>) -> Option<ExprSeedId> {
-        self.find_canonical_seed(&canonical_seed(vars))
-    }
-
-    fn find_canonical_seed(&self, canon: &[(String, Value)]) -> Option<ExprSeedId> {
-        self.expr_seeds
-            .iter()
-            .position(|seed| {
-                seed.len() == canon.len()
-                    && seed
-                        .iter()
-                        .zip(canon)
-                        .all(|((sn, sv), (cn, cv))| sn == cn && value_eq(sv, cv))
-            })
-            .map(|i| ExprSeedId(i as u32))
+    pub(crate) fn find_expr_seed(&self, vars: &HashMap<String, Value>) -> Option<ExprVarId> {
+        self.seeds.find(vars)
     }
 
     /// Reconstructs an interned seed as a variable map, for re-resolving an
     /// instance's members on a stack rebuild.
-    pub(crate) fn seed_vars(&self, seed: ExprSeedId) -> HashMap<String, Value> {
-        self.expr_seeds[seed.idx()].iter().cloned().collect()
+    pub(crate) fn seed_vars(&self, seed: ExprVarId) -> HashMap<String, Value> {
+        self.seeds.vars(seed)
     }
 
     /// The target stack for `(root, seed)`, if one has been interned.
-    pub(crate) fn lookup_target(&self, root: LayerId, seed: ExprSeedId) -> Option<LayerStackId> {
+    pub(crate) fn lookup_target(&self, root: LayerId, seed: ExprVarId) -> Option<LayerStackId> {
         self.by_key.get(&LayerStackKey::Target { root, seed }).copied()
     }
 
@@ -201,7 +242,7 @@ impl LayerStackRegistry {
     pub(crate) fn intern_target(
         &mut self,
         root: LayerId,
-        seed: ExprSeedId,
+        seed: ExprVarId,
         members: Vec<(LayerId, LayerOffset)>,
     ) -> LayerStackId {
         let key = LayerStackKey::Target { root, seed };
@@ -302,7 +343,7 @@ impl LayerStackRegistry {
 }
 
 /// Canonicalizes an expression-variable context to a name-sorted `(name, value)`
-/// list, the interning form for an [`ExprSeedId`]. Sorting makes the form
+/// list, the interning form for an [`ExprVarId`]. Sorting makes the form
 /// independent of the source `HashMap`'s iteration order, so two equal contexts
 /// canonicalize identically and intern to one id.
 fn canonical_seed(vars: &HashMap<String, Value>) -> Vec<(String, Value)> {

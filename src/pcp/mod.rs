@@ -236,14 +236,6 @@
 //!   already composed during indexing. Storing the composed set on the index
 //!   (or each node) would remove the duplicate walk and the risk of the two
 //!   diverging.
-//! - Contextual-stack shared-sublayer context: building a contextual stack's
-//!   members (`LayerGraph::build_stack_members` → `compose_edges`) gates its walk
-//!   on a per-`LayerId` `visited` set, so a sublayer reached through two different
-//!   sublayer ancestries within one contextual stack keeps the first ancestry's
-//!   expression-variable context. Per-context fidelity holds *across* arcs — each
-//!   reference/payload target, and the session-seeded root stack, gets its own
-//!   instance — but not for a sublayer diamond *within* a single contextual stack;
-//!   a per-`(layer, context)` edge walk would close it.
 //! - Releasing a muted layer's memory: `LayerGraph` keeps a muted layer's node
 //!   interned so unmute is a rebuild; C++ drops its references. The node and its
 //!   backing data are retained for the life of the graph.
